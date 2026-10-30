@@ -26,6 +26,8 @@ const SORT: &str = "Tells the coordinator which need a change or an answer.";
 const NO_CHECKS: &str = "none entered · rebases and comment sorting work; a conflict or a failed check goes to the coordinator";
 const OWNER_PLACEHOLDER: &str = "An owner, or owner/name for one fork";
 const BASE_HINT: &str = "Changes the base used for tickets and publishing. Existing branches and worktrees are not rebased.";
+const PROTECT_PLACEHOLDER: &str = "branch or pattern, such as hotfix/*";
+const ONLY_YOU_MERGE: &str = "Only you merge into these.";
 
 /// A repository's checks command being edited on its row, with the limit chosen so far.
 pub(super) struct ChecksEdit {
@@ -39,6 +41,14 @@ pub(super) struct BaseEdit {
     error: Option<String>,
     /// The base a save sent and is waiting for; only the reply to it applies here.
     pending: Option<String>,
+}
+
+/// A repository's protected branches opened under its row, with the branches on `origin` the
+/// host listed and why it refused the last entry.
+pub(super) struct ProtectedEdit {
+    repository_id: String,
+    origin: Option<Vec<String>>,
+    error: Option<String>,
 }
 
 /// One of the PR keeper's triggers: its tick box beside its name and what it does.
@@ -64,6 +74,8 @@ pub(super) struct RepositoriesPage {
     checks_edit: Option<ChecksEdit>,
     base_input: Entity<InputState>,
     base_edit: Option<BaseEdit>,
+    protected_input: Entity<InputState>,
+    protected_edit: Option<ProtectedEdit>,
     /// The owner being added to those allowed to have PRs opened without asking.
     owner_input: Entity<InputState>,
     /// The saved review levels, which the keeper's review level picks from.
@@ -109,7 +121,17 @@ impl RepositoriesPage {
             }
         })
         .detach();
+        let protected_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(PROTECT_PLACEHOLDER));
+        cx.subscribe_in(&protected_input, window, |v, _, event, w, c| {
+            if let InputEvent::PressEnter { .. } = event {
+                v.add_protected(w, c)
+            }
+        })
+        .detach();
         Self {
+            protected_input,
+            protected_edit: None,
             verifiers,
             bridge,
             shared: Shared::default(),
@@ -592,6 +614,7 @@ impl RepositoriesPage {
         let kept = kept_label(repository, &snapshot.allowed_owners, &snapshot.keeper);
         let checks = self.checks_field(repository, kept == Some("kept"), p, cx);
         let base_editor = self.base_editor(repository, p, cx);
+        let protected = self.protected_block(repository, &snapshot.allowed_owners, p, cx);
         let edit_id = id.clone();
         let row = div()
                     .flex()
@@ -680,7 +703,230 @@ impl RepositoriesPage {
             .child(row)
             .children(base_editor)
             .child(checks.pl(px(28.)))
+            .child(protected.ml(px(28.)))
             .child(chips.pl(px(28.)).pt_1())
+    }
+
+    /// The repository's protected branches: one line naming them until opened, then a row each,
+    /// a field to add one and the merge method GitHub would be asked for.
+    fn protected_block(
+        &self,
+        repository: &Repository,
+        allowed: &[String],
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let id = repository.id.clone();
+        let Some(edit) = (self.protected_edit.as_ref()).filter(|e| e.repository_id == id) else {
+            return div()
+                .mt_1()
+                .flex()
+                .items_start()
+                .gap_1()
+                .text_size(px(font::DETAIL))
+                .text_color(p.subtle)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(protected_summary(repository, allowed)),
+                )
+                .child(
+                    button(SharedString::from(format!("open-protected-{id}")))
+                        .ghost()
+                        .xsmall()
+                        .label("Edit…")
+                        .on_click(cx.listener(move |v, _, w, c| v.open_protected(&id, w, c))),
+                );
+        };
+        let protected = ProtectedBranches::of(repository);
+        let line = |d: Div| {
+            d.flex()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py(px(6.))
+                .border_t_1()
+                .border_color(p.edge.opacity(edge::LIGHT))
+                .text_size(px(font::SMALL))
+        };
+        let pattern = |text: String| {
+            div()
+                .min_w(px(110.))
+                .font_family(".SystemMonoFont")
+                .text_size(px(font::CAPTION))
+                .text_color(p.text)
+                .child(text)
+        };
+        let why = |text: String| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(font::DETAIL))
+                .text_color(p.subtle)
+                .child(text)
+        };
+        let mut block = div()
+            .mt_2()
+            .flex()
+            .flex_col()
+            .rounded_lg()
+            .border_1()
+            .border_color(p.edge.opacity(edge::CARD))
+            .bg(p.base)
+            .on_action(cx.listener(|v, _: &Escape, _, c| {
+                v.protected_edit = None;
+                c.notify();
+                c.stop_propagation();
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Protected branches"),
+                    )
+                    .child(
+                        hint(merging_hint(repository, allowed), p)
+                            .flex_1()
+                            .min_w_0(),
+                    )
+                    .child(pill("This Mac only", p.subtle))
+                    .child(
+                        button("close-protected")
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("close"))
+                            .tooltip("Close")
+                            .on_click(cx.listener(|v, _, _, c| {
+                                v.protected_edit = None;
+                                c.notify();
+                            })),
+                    ),
+            );
+        for row in protected.rows() {
+            let mark = match row.protection {
+                Protection::Always { .. } => Some("lock"),
+                Protection::GitHub { .. } => Some("github"),
+                Protection::Entry => None,
+            };
+            let reason = match row.protection {
+                Protection::Entry => entry_matches(&row.branches, edit.origin.as_deref()),
+                _ => row.reason(),
+            };
+            let remove = (row.protection == Protection::Entry).then(|| {
+                let id = id.clone();
+                let entry = row.branches.clone();
+                ui::gated(
+                    button(SharedString::from(format!("unprotect-{entry}")))
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("close"))
+                        .tooltip(format!("Remove {entry}")),
+                    &self.shared.host,
+                )
+                .on_click(cx.listener(move |v, _, w, c| v.remove_protected(&id, &entry, w, c)))
+            });
+            block = block.child(
+                line(div())
+                    .children(mark.map(|mark| icon(mark).size(px(12.)).text_color(p.subtle)))
+                    .child(pattern(row.branches))
+                    .child(why(reason))
+                    .children(remove),
+            );
+        }
+        block = block.child(
+            line(div())
+                .flex_wrap()
+                .child(
+                    Input::new(&self.protected_input)
+                        .xsmall()
+                        .flex_1()
+                        .min_w_0(),
+                )
+                .child(
+                    ui::gated(
+                        button("add-protected").ghost().xsmall().label("Add"),
+                        &self.shared.host,
+                    )
+                    .on_click(cx.listener(|v, _, w, c| v.add_protected(w, c))),
+                ),
+        );
+        if let Some(error) = &edit.error {
+            block = block.child(hint(error.clone(), p).text_color(p.red).px_3().pb_1());
+        }
+        block.child(
+            line(div())
+                .pb_2()
+                .text_size(px(font::DETAIL))
+                .text_color(p.subtle)
+                .child(method_line(repository)),
+        )
+    }
+
+    /// Opens one repository's protected branches, closing any other, and asks the host which
+    /// branches `origin` has for the patterns to match.
+    fn open_protected(&mut self, repository_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.protected_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.protected_edit = Some(ProtectedEdit {
+            repository_id: repository_id.to_owned(),
+            origin: None,
+            error: None,
+        });
+        let command = Command::OriginBranches {
+            repository_id: repository_id.to_owned(),
+        };
+        self.request(command, window, cx);
+        cx.notify();
+    }
+
+    fn saved_entries(&self, repository_id: &str) -> Vec<String> {
+        (self.shared.snapshot().into_iter())
+            .flat_map(|s| &s.repositories)
+            .find(|r| r.id == repository_id)
+            .map(|r| r.protected_branches.clone())
+            .unwrap_or_default()
+    }
+
+    /// Adds the entry as typed; the host refuses one it cannot read, with the reason.
+    fn add_protected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shared.host.changes_refused().is_some() {
+            return;
+        }
+        let Some(edit) = &self.protected_edit else {
+            return;
+        };
+        let repository_id = edit.repository_id.clone();
+        let mut entries = self.saved_entries(&repository_id);
+        entries.push(self.protected_input.read(cx).value().trim().to_owned());
+        let command = Command::SetProtectedBranches {
+            repository_id,
+            entries,
+        };
+        self.request(command, window, cx);
+    }
+
+    fn remove_protected(
+        &mut self,
+        repository_id: &str,
+        entry: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut entries = self.saved_entries(repository_id);
+        entries.retain(|e| e != entry);
+        let command = Command::SetProtectedBranches {
+            repository_id: repository_id.to_owned(),
+            entries,
+        };
+        self.request(command, window, cx);
     }
 
     /// The owners the human allows to have pull requests opened without asking: one chip per
@@ -1468,6 +1714,90 @@ fn checks_summary(checks: Option<&RepositoryChecks>, kept: bool) -> (Option<Stri
 }
 
 /// Why a base was not saved, and the base that stands.
+/// Why Wiffletree merges nothing in the repository, when it doesn't.
+fn merges_nothing(repository: &Repository, allowed: &[String]) -> Option<String> {
+    Some(match Merging::of(repository, allowed) {
+        Merging::IntoUnprotected => return None,
+        Merging::EveryBranchProtected => {
+            "A GitHub ruleset protects all branches, so Wiffletree can merge nothing here while it applies".into()
+        }
+        Merging::NotAllowed => match owner_entry(repository) {
+            _ if origin_branch(&repository.base).is_none() => {
+                "Wiffletree merges nothing here, because its base is not on origin".into()
+            }
+            Some(entry) => {
+                format!("Wiffletree merges nothing here, because {entry} is not an allowed owner")
+            }
+            None => "Wiffletree merges nothing here until GitHub answers for it".into(),
+        },
+    })
+}
+
+/// The closed block's one line: the protected branches, and why nothing merges here if so.
+fn protected_summary(repository: &Repository, allowed: &[String]) -> String {
+    let mut names: Vec<String> = vec![];
+    for row in ProtectedBranches::of(repository).rows() {
+        if !names.contains(&row.branches) {
+            names.push(row.branches);
+        }
+    }
+    let names = match names.is_empty() {
+        true => "Protected: none yet".to_owned(),
+        false => format!("Protected: {}", names.join(", ")),
+    };
+    match merges_nothing(repository, allowed) {
+        Some(why) => format!("{names} · {why}."),
+        None => names,
+    }
+}
+
+/// The opened block's heading line.
+fn merging_hint(repository: &Repository, allowed: &[String]) -> String {
+    match merges_nothing(repository, allowed) {
+        Some(why) => format!("{ONLY_YOU_MERGE} {why}."),
+        None => ONLY_YOU_MERGE.into(),
+    }
+}
+
+/// An entry's line: the branches on `origin` it matches now, once the host has listed them.
+fn entry_matches(entry: &str, origin: Option<&[String]>) -> String {
+    let Some(origin) = origin else {
+        return "Added by you".into();
+    };
+    let matched: Vec<&str> = (origin.iter())
+        .filter(|branch| branch_matches(entry, branch))
+        .map(String::as_str)
+        .collect();
+    match matched.is_empty() {
+        true => "Added by you · no branch on origin matches yet".into(),
+        false => format!("Added by you · on origin now: {}", matched.join(", ")),
+    }
+}
+
+/// What GitHub says protects branches here, and the method the next merge would use.
+fn method_line(repository: &Repository) -> String {
+    let protected = ProtectedBranches::of(repository);
+    let github = match protected.github_read() {
+        false if repository.github.is_none() => "Not on GitHub",
+        false => "GitHub could not be read, so its rulesets are not shown",
+        true if protected
+            .rows()
+            .iter()
+            .any(|r| matches!(r.protection, Protection::GitHub { .. })) =>
+        {
+            "Rows with the GitHub mark are read from GitHub daily"
+        }
+        true => "GitHub reports no rulesets here",
+    };
+    match next_merge_method(repository) {
+        Some(method) => format!(
+            "{github} · a merge would use {}, the first of squash, merge commit and rebase that GitHub allows here",
+            method.label()
+        ),
+        None => format!("{github} · GitHub has not said which merge methods it allows"),
+    }
+}
+
 fn refused_base(error: &str, saved: Option<&str>) -> String {
     match saved {
         Some(saved) => format!("{error}. The base is still {saved}."),
@@ -1568,6 +1898,30 @@ impl Requests for RepositoriesPage {
             }
             return;
         }
+        // Only the block still open on that repository takes a reply about it.
+        let protected_edit = match &command {
+            Command::OriginBranches { repository_id }
+            | Command::SetProtectedBranches { repository_id, .. } => {
+                (self.protected_edit.as_mut()).filter(|e| e.repository_id == *repository_id)
+            }
+            _ => None,
+        };
+        if let Some(edit) = protected_edit {
+            match (&command, reply) {
+                (Command::OriginBranches { .. }, Ok(branches)) => {
+                    edit.origin = serde_json::from_value(branches).ok()
+                }
+                (Command::OriginBranches { .. }, Err(_)) => {}
+                (_, Ok(_)) => {
+                    edit.error = None;
+                    self.protected_input
+                        .update(cx, |input, cx| input.set_value("", window, cx));
+                }
+                (_, Err(error)) => edit.error = Some(error),
+            }
+            cx.notify();
+            return;
+        }
         match reply {
             Err(error) => toast_error(error, window, cx),
             Ok(_) if matches!(command, Command::SetRepositoryChecks { .. }) => {
@@ -1603,8 +1957,9 @@ impl Render for RepositoriesPage {
 mod tests {
     use super::{
         BASE_HINT, NEVER, Pick, UNTIL_GITHUB_ANSWERS, WITHOUT_ASKING, checks_summary, confirmed,
-        fixes_are_on, grouped, held_lines, partly_on_hint, pr_check_status, refused_base,
-        repository_counts, suggestion_reason, toggled, with_fixes, with_picks,
+        entry_matches, fixes_are_on, grouped, held_lines, method_line, partly_on_hint,
+        pr_check_status, protected_summary, refused_base, repository_counts, suggestion_reason,
+        toggled, with_fixes, with_picks,
     };
     use crate::ui;
     use workspace_core::*;
@@ -1766,6 +2121,60 @@ mod tests {
                 "public": public, "checked_at": 1}}
         }))
         .unwrap()
+    }
+
+    /// `Vyttle-LLC/wiffletree` as GitHub describes it, with `rulesets` on its branches.
+    fn wiffletree(rulesets: serde_json::Value, entries: &[&str]) -> Repository {
+        let mut repository = on_github("Vyttle-LLC/wiffletree", false, true);
+        let facts = repository.github.as_mut().unwrap().facts.as_mut().unwrap();
+        facts.branches = serde_json::from_value(serde_json::json!({
+            "default_branch": "main", "merge_methods": ["merge", "squash"], "rulesets": rulesets,
+        }))
+        .unwrap();
+        repository.protected_branches = entries.iter().map(|e| e.to_string()).collect();
+        repository
+    }
+
+    #[test]
+    fn the_protected_block_names_the_branches_and_where_nothing_merges() {
+        let allowed = vec!["Vyttle-LLC".to_owned()];
+        let listed = wiffletree(serde_json::json!([]), &["release/*", "demo"]);
+        assert_eq!(
+            protected_summary(&listed, &allowed),
+            "Protected: main, release/*, demo"
+        );
+        assert_eq!(
+            protected_summary(&listed, &[]),
+            "Protected: main, release/*, demo · Wiffletree merges nothing here, because Vyttle-LLC is not an allowed owner."
+        );
+        let everything = serde_json::json!([{"name": "All", "include": ["~ALL"]}]);
+        let all = wiffletree(everything, &[]);
+        assert!(
+            protected_summary(&all, &allowed)
+                .contains("all branches · A GitHub ruleset protects all branches")
+        );
+        assert!(
+            method_line(&listed)
+                .contains("GitHub reports no rulesets here · a merge would use squash")
+        );
+        let unread = wiffletree(serde_json::Value::Null, &[]);
+        assert!(method_line(&unread).starts_with("GitHub could not be read"));
+        assert_eq!(protected_summary(&unread, &allowed), "Protected: main");
+    }
+
+    #[test]
+    fn an_entry_shows_the_branches_on_origin_it_matches_now() {
+        let origin =
+            ["main", "release/2026.10", "release/2026.11", "release/x/y"].map(String::from);
+        assert_eq!(
+            entry_matches("release/*", Some(&origin)),
+            "Added by you · on origin now: release/2026.10, release/2026.11"
+        );
+        assert_eq!(
+            entry_matches("demo", Some(&origin)),
+            "Added by you · no branch on origin matches yet"
+        );
+        assert_eq!(entry_matches("demo", None), "Added by you");
     }
 
     #[test]

@@ -242,11 +242,13 @@ mod tests {
                     parent: fork.then(|| format!("longbridge/{name}")),
                     public,
                     checked_at: 1,
+                    branches: None,
                 }),
                 problem: None,
             }),
             origin_problem: None,
             checks: None,
+            protected_branches: vec![],
         }
     }
     fn unanswered(owner: &str, name: &str) -> Repository {

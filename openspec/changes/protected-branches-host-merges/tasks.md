@@ -1,9 +1,9 @@
 ## 1. Protected branches
 
-- [ ] 1.1 Add `Repository.protected_branches` and a `workspace-core` matcher and validator for exact names and globs (`*`, `**`, `?`, `[...]`), tested with GitHub's own pattern examples and every refusal.
-- [ ] 1.2 Derive the always-protected branches (the GitHub default branch and the base's branch of `origin`), and read `defaultBranchRef` and the repository's rulesets in the daily owners read.
-- [ ] 1.3 Add `Command::SetProtectedBranches`, gated by the app's client credential like `SetOwnerAllowed`; keep the entries out of the settings repository and Spaces.
-- [ ] 1.4 Show protected branches and whether merging is possible in `workspace_context`.
+- [x] 1.1 Add `Repository.protected_branches` and a `workspace-core` matcher and validator for exact names and globs (`*`, `**`, `?`, `[...]`), tested with GitHub's own pattern examples and every refusal.
+- [x] 1.2 Derive the always-protected branches (the GitHub default branch and the base's branch of `origin`), and read `defaultBranchRef` and the repository's rulesets in the daily owners read.
+- [x] 1.3 Add `Command::SetProtectedBranches`, gated by the app's client credential like `SetOwnerAllowed`; keep the entries out of the settings repository and Spaces.
+- [x] 1.4 Show protected branches and whether merging is possible in `workspace_context`.
 
 ## 2. merge_ticket
 
@@ -24,7 +24,7 @@
 
 ## 4. Desktop
 
-- [ ] 4.1 Draw the Protected branches block on each repository row, as in `design/mockups/current/protected-branches.html`.
+- [x] 4.1 Draw the Protected branches block on each repository row, as in `design/mockups/current/protected-branches.html`.
 - [ ] 4.2 Draw the merge approval card in the Inbox.
 - [ ] 4.3 Show "merges when they pass", "merge waits for your approval", "yours to merge" and "merged into … · by Wiffletree" on the PR line, and the host's merge on the Team card.
 - [ ] 4.4 Reword the owners block's and the keeper block's lines about merging.

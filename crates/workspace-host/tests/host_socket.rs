@@ -679,6 +679,58 @@ fn allowing_an_owner_needs_the_apps_credential() {
 }
 
 #[test]
+fn removing_a_protected_branch_needs_the_apps_credential() {
+    let checkout = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let status = process::Command::new("git")
+            .args(args)
+            .current_dir(checkout.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "start",
+    ]);
+    let id = std::cell::OnceCell::new();
+    let fixture = Fixture::new(|host| {
+        let repository = host
+            .add_repository(checkout.path().to_str().unwrap(), "main")
+            .unwrap();
+        host.set_protected_branches(&repository.id, vec!["release/*".into()])
+            .unwrap();
+        id.set(repository.id).unwrap();
+    });
+    let unprotect = |client: &mut Connection| {
+        client.request(
+            PROTOCOL_VERSION,
+            Command::SetProtectedBranches {
+                repository_id: id.get().unwrap().clone(),
+                entries: vec![],
+            },
+        )
+    };
+    let entries =
+        |client: &mut Connection| snapshot(client).repositories[0].protected_branches.clone();
+    let mut agent = fixture.welcomed(None);
+    let refused = unprotect(&mut agent);
+    assert!(refused.error.unwrap().contains("client credential"));
+    assert_eq!(entries(&mut agent), ["release/*"]);
+    let mut app = fixture.welcomed(Some(fixture.credential()));
+    assert_eq!(unprotect(&mut app).error, None);
+    assert!(entries(&mut app).is_empty());
+}
+
+#[test]
 fn space_commands_need_the_apps_credential_and_reads_do_not() {
     let project = std::cell::OnceCell::new();
     let brain = tempfile::tempdir().unwrap();

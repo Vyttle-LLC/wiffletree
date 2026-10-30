@@ -248,6 +248,7 @@ fn main() -> Result<()> {
                 github: None,
                 origin_problem: None,
                 checks: None,
+                protected_branches: vec![],
             };
             tx.execute(
                 "INSERT INTO repositories VALUES (?1,?2,?3)",

@@ -534,6 +534,12 @@ impl Host {
             let allowed = is_allowed(&repository, &settings.allowed_owners);
             entry["publishes_without_asking"] = json!(allowed);
             entry["kept"] = json!(allowed && settings.keeper.is_on());
+            let protected = ProtectedBranches::of(&repository);
+            entry["protected_branches"] = json!({
+                "branches": protected.rows(),
+                "read_from_github": protected.github_read(),
+                "merging": Merging::of(&repository, &settings.allowed_owners),
+            });
             repositories.push(entry);
         }
         let mut context = json!({"self":self.shown(session.clone()),"project":self.project(&session.project_id)?,

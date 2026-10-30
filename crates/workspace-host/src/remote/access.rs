@@ -54,7 +54,8 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::NewProjectDefaults { .. }
         | Command::SuggestRepositorySpace { .. }
         | Command::RepositorySuggestions
-        | Command::SpaceStorage { .. } => Row::Read,
+        | Command::SpaceStorage { .. }
+        | Command::OriginBranches { .. } => Row::Read,
         Command::ResolvePaths { .. } | Command::ReadFile { .. } | Command::ListFolder { .. } => {
             Row::HostPath
         }
@@ -122,6 +123,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::DismissSkillMerge { .. }
         | Command::SetRepositoryChecks { .. }
         | Command::SetRepositoryBase { .. }
+        | Command::SetProtectedBranches { .. }
         | Command::RemoveLeftoverWorktrees { .. }
         | Command::StopProcesses { .. }
         | Command::UploadAttachment { .. } => Row::Change,

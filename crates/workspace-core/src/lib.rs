@@ -18,6 +18,7 @@ pub mod pairing;
 pub mod pricing;
 mod process;
 mod progress;
+mod protected;
 mod publishing;
 mod remote;
 pub mod remote_client;
@@ -40,6 +41,7 @@ pub use models::*;
 pub use owners::*;
 pub use process::*;
 pub use progress::*;
+pub use protected::*;
 pub use publishing::*;
 pub use remote::*;
 pub use selection::*;
@@ -397,6 +399,10 @@ pub struct Repository {
     /// The human's command that runs the repository's checks, for the PR keeper.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checks: Option<RepositoryChecks>,
+    /// The human's protected branches: exact names and patterns. Only the human's client
+    /// changes them, and they stay on this machine.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protected_branches: Vec<String>,
 }
 /// A repository's checks: the human's own shell text, and how long it may run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -449,6 +455,10 @@ pub struct GitHubFacts {
     pub parent: Option<String>,
     pub public: bool,
     pub checked_at: i64,
+    /// Its default branch, merge methods and rulesets; `None` in facts read before they were
+    /// asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branches: Option<GitHubBranches>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -3244,6 +3254,18 @@ pub enum Command {
         repository_id: String,
         base: String,
     },
+    /// Saves a repository's protected branches, refusing a new entry with the reason; answers
+    /// with the `Repository`. Only the human's client sends it: a removed entry is a branch the
+    /// host may then merge into.
+    SetProtectedBranches {
+        repository_id: String,
+        entries: Vec<String>,
+    },
+    /// Read-only: the branches on a repository's `origin`, as last fetched, for the protected
+    /// branches each pattern matches.
+    OriginBranches {
+        repository_id: String,
+    },
     /// Read-only listing of leftover worktrees, answered with `Vec<LeftoverWorktree>`.
     LeftoverWorktrees,
     /// Removes the worktrees of the tickets the human selected from the listing, re-checking
@@ -3379,6 +3401,7 @@ impl Command {
             | Self::SuggestRepositorySpace { .. }
             | Self::RepositorySuggestions
             | Self::SpaceStorage { .. }
+            | Self::OriginBranches { .. }
             | Self::RemoteAccess => true,
             Self::ImportRepositories { .. }
             | Self::RefreshRepositories
@@ -3442,6 +3465,7 @@ impl Command {
             | Self::DismissSkillMerge { .. }
             | Self::SetRepositoryChecks { .. }
             | Self::SetRepositoryBase { .. }
+            | Self::SetProtectedBranches { .. }
             | Self::RemoveLeftoverWorktrees { .. }
             | Self::StopProcesses { .. }
             | Self::StopAgentsAndQuit
@@ -3457,7 +3481,8 @@ impl Command {
     /// Commands only the human should give: on the host socket they need the app's client
     /// credential. They send a message as the human, answer the Inbox, which also approves a
     /// publish, or grant publish or push authority without it: owners whose PRs open without
-    /// asking, the PR keeper's rebases and pushes, and a settings repository the host pushes to.
+    /// asking, the PR keeper's rebases and pushes, the protected branches, whose removed entries
+    /// the host may merge into, and a settings repository the host pushes to.
     /// Spaces are the human's: creating, editing or removing one, setting its brain, moving a
     /// project into one and choosing which repositories it lists, and reading where its storage
     /// is on this Mac. Remote access is the human's too: its state carries the pairing code.
@@ -3469,6 +3494,7 @@ impl Command {
                 | Self::DismissAttention { .. }
                 | Self::SetOwnerAllowed { .. }
                 | Self::SetKeeper { .. }
+                | Self::SetProtectedBranches { .. }
                 | Self::SetUpSettingsRepository { .. }
                 | Self::JoinSettingsRepository { .. }
                 | Self::CreateSpace { .. }

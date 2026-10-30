@@ -324,11 +324,48 @@ fn github_query(repositories: usize) -> String {
         .map(|i| {
             format!(
                 " r{i}: repository(owner: $o{i}, name: $n{i}) {{ nameWithOwner isFork visibility \
-                 parent {{ nameWithOwner }} owner {{ __typename }} }}"
+                 parent {{ nameWithOwner }} owner {{ __typename }} defaultBranchRef {{ name }} \
+                 squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed \
+                 rulesets(first: 100, includeParents: true) {{ nodes {{ name enforcement target \
+                 conditions {{ refName {{ include exclude }} }} }} }} }}"
             )
         })
         .collect();
     format!("query({}) {{{aliases} }}", variables.join(", "))
+}
+
+/// The default branch, merge methods and active branch rulesets in a repository's answer. A
+/// rulesets field GitHub would not fill is `null`, which leaves them unread.
+fn github_branches(node: &Value) -> GitHubBranches {
+    let strings = |list: &Value| -> Vec<String> {
+        (list.as_array().into_iter().flatten())
+            .filter_map(|s| s.as_str().map(str::to_owned))
+            .collect()
+    };
+    let rulesets = node["rulesets"]["nodes"].as_array().map(|nodes| {
+        nodes
+            .iter()
+            .filter(|r| r["enforcement"] == "ACTIVE" && r["target"] == "BRANCH")
+            .map(|r| BranchRuleset {
+                name: r["name"].as_str().unwrap_or_default().to_owned(),
+                include: strings(&r["conditions"]["refName"]["include"]),
+                exclude: strings(&r["conditions"]["refName"]["exclude"]),
+            })
+            .collect()
+    });
+    GitHubBranches {
+        default_branch: node["defaultBranchRef"]["name"].as_str().map(str::to_owned),
+        merge_methods: [
+            ("squashMergeAllowed", MergeMethod::Squash),
+            ("mergeCommitAllowed", MergeMethod::Merge),
+            ("rebaseMergeAllowed", MergeMethod::Rebase),
+        ]
+        .into_iter()
+        .filter(|(field, _)| node[*field] == true)
+        .map(|(_, method)| method)
+        .collect(),
+        rulesets,
+    }
 }
 
 /// GitHub's answers for `(owner, name)` pairs from one read-only request: its facts, or why it
@@ -371,6 +408,7 @@ fn ask_github(
                     parent: node["parent"]["nameWithOwner"].as_str().map(str::to_owned),
                     public: node["visibility"] == "PUBLIC",
                     checked_at: at,
+                    branches: Some(github_branches(node)),
                 }),
                 _ => Err(json["errors"]
                     .as_array()
@@ -410,10 +448,10 @@ pub(crate) fn read_github(
                         facts: None,
                         problem: None,
                     });
-                let fresh = known
-                    .facts
-                    .as_ref()
-                    .is_some_and(|facts| at - facts.checked_at < GITHUB_FACTS_MS);
+                // Facts read before the branches were asked for are read again.
+                let fresh = known.facts.as_ref().is_some_and(|facts| {
+                    at - facts.checked_at < GITHUB_FACTS_MS && facts.branches.is_some()
+                });
                 let pair = (known.owner.clone(), known.name.clone());
                 if !fresh && !stale.contains(&pair) {
                     stale.push(pair);
@@ -552,6 +590,7 @@ impl Host {
                 github: None,
                 origin_problem: None,
                 checks: None,
+                protected_branches: vec![],
             },
         };
         self.db.execute(
@@ -583,6 +622,57 @@ impl Host {
             params![repository.id, encode(&repository)?],
         )?;
         Ok(repository)
+    }
+
+    /// Saves the human's protected branches in their order. Only a new entry is checked, so a
+    /// stored one stays valid when the base or GitHub's default later covers it.
+    pub fn set_protected_branches(&mut self, id: &str, entries: Vec<String>) -> Result<Repository> {
+        ensure!(
+            entries.len() <= 100,
+            "Protect at most 100 branches or patterns"
+        );
+        let known = self.repository(id)?;
+        let remotes = runtime::git_output(Path::new(&known.path), &["remote"])?;
+        let remotes: Vec<String> = remotes.lines().map(str::to_owned).collect();
+        let mut repository = Repository {
+            protected_branches: vec![],
+            ..known.clone()
+        };
+        for entry in entries {
+            text(&entry, 256)?;
+            let refusal = match known.protected_branches.contains(&entry) {
+                true => (repository.protected_branches.contains(&entry))
+                    .then(|| format!("“{entry}” is already on the list")),
+                false => ProtectedBranches::of(&repository).refusal(&entry, &remotes),
+            };
+            if let Some(refusal) = refusal {
+                bail!(refusal);
+            }
+            repository.protected_branches.push(entry);
+        }
+        self.db.execute(
+            "UPDATE repositories SET data=?2 WHERE id=?1",
+            params![repository.id, encode(&repository)?],
+        )?;
+        Ok(repository)
+    }
+
+    /// The branches on the repository's `origin` as last fetched, without its `HEAD`.
+    pub fn origin_branches(&self, id: &str) -> Result<Vec<String>> {
+        let repository = self.repository(id)?;
+        let refs = runtime::git_output(
+            Path::new(&repository.path),
+            &[
+                "for-each-ref",
+                "--format=%(refname:lstrip=3)",
+                "refs/remotes/origin",
+            ],
+        )?;
+        Ok(refs
+            .lines()
+            .filter(|branch| *branch != "HEAD")
+            .map(str::to_owned)
+            .collect())
     }
 
     /// Adds a repository to the workspace and makes sure this project uses it.
@@ -1085,8 +1175,104 @@ mod tests {
             github: reading.repositories[1].github.clone(),
             origin_problem: None,
             checks: None,
+            protected_branches: vec![],
         };
         assert_eq!(owner_entry(&repository).as_deref(), Some("new-org"));
+    }
+
+    #[test]
+    fn the_default_branch_merge_methods_and_active_branch_rulesets_are_read() {
+        let root = tempfile::tempdir().unwrap();
+        let urls = [
+            "git@github.com:Vyttle-LLC/wiffletree.git".to_owned(),
+            "git@github.com:Sage-Social/cortex.git".to_owned(),
+        ];
+        let answers: Answers = |owner, name| {
+            let mut node = private(owner, name)?;
+            node["defaultBranchRef"] = json!({"name": "main"});
+            node["squashMergeAllowed"] = json!(false);
+            node["mergeCommitAllowed"] = json!(true);
+            node["rebaseMergeAllowed"] = json!(true);
+            let refs = |include: &[&str]| json!({"refName": {"include": include, "exclude": []}});
+            // GitHub leaves a field it would not fill `null`, and says why in `errors`.
+            node["rulesets"] = match name {
+                "wiffletree" => json!({"nodes": [
+                    {"name": "Releases", "enforcement": "ACTIVE", "target": "BRANCH",
+                        "conditions": refs(&["refs/heads/release/**"])},
+                    {"name": "Trying", "enforcement": "EVALUATE", "target": "BRANCH",
+                        "conditions": refs(&["~ALL"])},
+                    {"name": "Tags", "enforcement": "ACTIVE", "target": "TAG",
+                        "conditions": refs(&["refs/tags/v*"])},
+                ]}),
+                _ => Value::Null,
+            };
+            Some(node)
+        };
+        let calls = RefCell::new(vec![]);
+        let reading = read_github(&inputs(root.path(), &urls), 1, fake_gh(&calls, answers));
+        let branches = facts(&reading, "r0").unwrap().branches.unwrap();
+        assert_eq!(branches.default_branch.as_deref(), Some("main"));
+        assert_eq!(
+            branches.merge_methods,
+            [MergeMethod::Merge, MergeMethod::Rebase]
+        );
+        let rulesets = branches.rulesets.unwrap();
+        assert_eq!(rulesets.len(), 1, "only active rulesets on branches count");
+        assert_eq!(rulesets[0].include, ["refs/heads/release/**"]);
+        let unread = facts(&reading, "r1").unwrap().branches.unwrap();
+        assert_eq!(unread.rulesets, None);
+    }
+
+    #[test]
+    fn a_protected_branch_is_refused_with_the_reason_and_the_list_keeps_its_order() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path().join("home")).unwrap();
+        let path = committed(home.path(), "app", "main");
+        git(
+            &path,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:Vyttle-LLC/app.git",
+            ],
+        );
+        git(&path, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(
+            &path,
+            &["update-ref", "refs/remotes/origin/release/1", "HEAD"],
+        );
+        let added = host
+            .add_repository(path.to_str().unwrap(), "origin/main")
+            .unwrap();
+        let mut set = |entries: &[&str]| {
+            let entries = entries.iter().map(|e| e.to_string()).collect();
+            host.set_protected_branches(&added.id, entries)
+        };
+        let refused = set(&["origin/main"]).unwrap_err().to_string();
+        assert_eq!(
+            refused,
+            "Name a branch, not a remote branch: “main” is already protected"
+        );
+        assert!(set(&["release/[0-9"]).is_err());
+        assert!(set(&["demo", "demo"]).is_err());
+        let saved = set(&["release/*", "demo"]).unwrap();
+        assert_eq!(saved.protected_branches, ["release/*", "demo"]);
+        // A stored entry is not checked again, so it stays once the base covers it.
+        host.set_repository_base(&added.id, "origin/release/1")
+            .unwrap();
+        let mut set = |entries: &[&str]| {
+            let entries = entries.iter().map(|e| e.to_string()).collect();
+            host.set_protected_branches(&added.id, entries)
+        };
+        assert!(set(&["demo", "release/*"]).is_ok());
+        assert!(set(&["demo", "release/*", "release/1"]).is_err());
+        let refreshed = host.repository(&added.id).unwrap();
+        assert_eq!(refreshed.protected_branches, ["demo", "release/*"]);
+        assert_eq!(
+            host.origin_branches(&added.id).unwrap(),
+            ["main", "release/1"]
+        );
     }
 
     #[test]
@@ -1149,6 +1335,13 @@ mod tests {
         // Nothing stale: no `gh` call, and what was stored stands.
         let fresh = read_github(&inputs, day, |_, _| panic!("nothing is stale"));
         assert_eq!(fresh.repositories, first.repositories);
+        // Facts read before the branches were asked for are read again.
+        let stored = inputs[0].github.as_mut().unwrap().facts.as_mut().unwrap();
+        stored.branches = None;
+        let asked = RefCell::new(vec![]);
+        let again = read_github(&inputs, day, fake_gh(&asked, private));
+        assert!(facts(&again, "r0").unwrap().branches.is_some());
+        assert_eq!(asked.borrow().len(), 1);
         // A day later it is read again.
         let later = read_github(&inputs, 1_000 + day, fake_gh(&calls, private));
         assert_eq!(facts(&later, "r0").unwrap().checked_at, 1_000 + day);
@@ -1325,16 +1518,33 @@ mod tests {
         assert_eq!(entry["github"]["facts"]["fork"], false);
         assert_eq!(entry["github"]["facts"]["public"], false);
         assert_eq!(entry["publishes_without_asking"], false);
+        assert_eq!(entry["protected_branches"]["merging"], "not_allowed");
         host.set_owner_allowed("celadon-theme", true).unwrap();
         assert_eq!(repository(&host)["publishes_without_asking"], true);
+        // The base and the human's entries are protected; merging is possible elsewhere.
+        let id = host.repositories().unwrap()[0].id.clone();
+        host.set_protected_branches(&id, vec!["release/*".into()])
+            .unwrap();
+        let protected = repository(&host)["protected_branches"].clone();
+        assert_eq!(protected["merging"], "into_unprotected");
+        assert_eq!(
+            protected["branches"],
+            json!([
+                {"branches": "main", "kind": "always", "default_branch": false, "base": true},
+                {"branches": "release/*", "kind": "entry"},
+            ])
+        );
         host.set_owner_allowed("celadon-theme", false).unwrap();
         assert_eq!(repository(&host)["publishes_without_asking"], false);
     }
 
     #[test]
-    fn no_agent_tool_changes_the_allowed_list() {
+    fn no_agent_tool_changes_the_allowed_list_or_the_protected_branches() {
         let (_home, mut host, coordinator) = project_on_github();
         host.set_owner_allowed("Sage-Social", true).unwrap();
+        let id = host.repositories().unwrap()[0].id.clone();
+        host.set_protected_branches(&id, vec!["release/*".into()])
+            .unwrap();
         let tools = mcp::tools();
         for tool in tools.as_array().unwrap() {
             let name = tool["name"].as_str().unwrap();
@@ -1348,10 +1558,12 @@ mod tests {
                 &coordinator.id,
                 name,
                 json!({"entry": "celadon-theme", "allowed": true, "owner": "celadon-theme",
-                    "allowed_owners": ["celadon-theme"]}),
+                    "allowed_owners": ["celadon-theme"], "repository_id": id, "entries": []}),
             );
         }
         assert_eq!(host.settings().allowed_owners, ["Sage-Social"]);
+        let entries = host.repository(&id).unwrap().protected_branches;
+        assert_eq!(entries, ["release/*"]);
     }
 
     /// A repository under `root` with one commit on `branch` and no remote.

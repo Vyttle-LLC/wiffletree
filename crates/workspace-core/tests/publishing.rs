@@ -27,6 +27,7 @@ fn a_repository_stored_before_owners_decodes_and_the_new_fields_round_trip() {
                 parent: Some("upstream/app".into()),
                 public: false,
                 checked_at: 7,
+                branches: None,
             }),
             problem: None,
         }),
