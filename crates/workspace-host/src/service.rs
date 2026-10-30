@@ -2621,14 +2621,13 @@ impl Actor {
                 {
                     self.pr_watch.check_now(&ticket.repository_id);
                 }
-                let recorded = self.host.record_merge(*outcome, reply.is_some());
-                let recorded = match recorded {
-                    Ok((status, next)) => {
-                        if let Some(job) = next {
-                            self.run_merge_job(job, None);
-                        }
-                        Ok(status)
+                let recorded = match self.host.record_merge(*outcome, reply.is_some()) {
+                    // The job that sends the merge answers a waiting call in turn.
+                    Ok((_, Some(job))) => {
+                        self.run_merge_job(job, reply);
+                        return true;
                     }
+                    Ok((status, None)) => Ok(status),
                     Err(error) => Err(error),
                 };
                 match reply {

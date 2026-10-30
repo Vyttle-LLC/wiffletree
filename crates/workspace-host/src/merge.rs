@@ -114,11 +114,18 @@ fn decide_and_merge(job: &Job, tools: &Tools) -> Decided {
             "GitHub could not be read, so nothing was merged: {error:#}"
         )),
     };
-    // A waiting request's re-decision sends nothing: the host thread records that a merge may be
-    // sent before the job that sends it starts, so a restart can tell the two apart.
-    let method = match decided {
-        Decided::Ready(method) if job.request.stage == MergeStage::Merging => method,
-        other => return other,
+    // Only a `Merging` request sends, with the method the host thread recorded when an earlier
+    // read found it ready, so a restart can tell a merge that may have been sent, and its method.
+    let method = match (decided, job.request.stage == MergeStage::Merging) {
+        (Decided::Ready(method), true) if job.request.method == Some(method) => method,
+        (Decided::Ready(method), true) => {
+            return Decided::Refused(format!(
+                "GitHub's first allowed merge method is now {}, not {}. Nothing was merged",
+                method.label(),
+                job.request.method.map_or("none", MergeMethod::label)
+            ));
+        }
+        (other, _) => return other,
     };
     if let Err(changed) = recheck_stored(job) {
         return Decided::Refused(format!("{changed:#}. Nothing was merged."));
@@ -393,9 +400,7 @@ fn merge(job: &Job, tools: &Tools, method: MergeMethod) -> Decided {
     match (tools.gh)(gh_folder(job), &args) {
         Ok(answer) if answer.status.success() => Decided::Merged {
             method: Some(method),
-            commit: read_pull_request(job, tools, job.request.number)
-                .ok()
-                .and_then(|pr| pr.merge_commit),
+            commit: merge_commit(job, tools),
         },
         Ok(answer) => Decided::Refused(format!(
             "GitHub refused the merge: {}. Nothing was merged",
@@ -412,12 +417,29 @@ fn merge(job: &Job, tools: &Tools, method: MergeMethod) -> Decided {
     }
 }
 
-/// Whether a merge cut short reached GitHub: merged at the request's head finishes it.
+/// The merge commit GitHub reports for the merged pull request, read a few times since one
+/// failed read would otherwise lose it; `None` when every read failed.
+fn merge_commit(job: &Job, tools: &Tools) -> Option<String> {
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+        if let Ok(pr) = read_pull_request(job, tools, job.request.number)
+            && pr.merge_commit.is_some()
+        {
+            return pr.merge_commit;
+        }
+    }
+    None
+}
+
+/// Whether a merge cut short reached GitHub: merged at the request's head finishes it, with the
+/// method recorded before it was sent.
 fn recover(job: &Job, tools: &Tools) -> Decided {
     let number = job.request.number;
     match read_pull_request(job, tools, number) {
         Ok(pr) if pr.state == PrState::Merged && pr.head == job.request.head => Decided::Merged {
-            method: None,
+            method: job.request.method,
             commit: pr.merge_commit,
         },
         Ok(pr) if pr.state == PrState::Open => Decided::Unfinished,
@@ -526,10 +548,8 @@ impl Host {
             waived: checked.waived,
             needs_approval: checked.needs_approval,
             approved: false,
-            stage: match checked.needs_approval {
-                true => MergeStage::Checking,
-                false => MergeStage::Merging,
-            },
+            method: None,
+            stage: MergeStage::Checking,
         });
         self.save_ticket(&ticket)?;
         self.merge_job(&ticket, &checked.repository)
@@ -615,9 +635,9 @@ impl Host {
 
     fn merge_job(&self, ticket: &Ticket, repository: &Repository) -> Result<Job> {
         let request = ticket.merging.clone().context("No merge request")?;
-        let children = match request.may_merge() {
-            true => self.stacked_children(ticket)?,
-            false => vec![],
+        let children = match request.stage {
+            MergeStage::Merging => self.stacked_children(ticket)?,
+            _ => vec![],
         };
         Ok(Job {
             ticket_id: ticket.id.clone(),
@@ -644,32 +664,34 @@ impl Host {
             .collect())
     }
 
-    /// Records a job's decision, and returns the job that merges when a waiting request is
-    /// ready. With `answering`, the tool call waits for it: a request that ends is its error and
-    /// sends no message. Otherwise the request's caller gets one message when it ends.
+    /// Records a job's decision, and returns the job that sends the merge when a request that
+    /// may merge is ready. With `answering`, the tool call waits for it, through that job too: a
+    /// request that ends is its error and sends no message. Otherwise the request's caller gets
+    /// one message when it ends.
     pub(crate) fn record_merge(
         &mut self,
         outcome: Outcome,
         answering: bool,
     ) -> Result<(Value, Option<Job>)> {
-        if let Some(job) = self.start_waited_merge(&outcome)? {
+        if let Some(job) = self.start_merge(&outcome)? {
             return Ok((json!({"status": "merging"}), Some(job)));
         }
         self.record_decision(outcome, answering)
             .map(|status| (status, None))
     }
 
-    /// For a waiting request whose re-decision found every check holding: records that a merge
-    /// may now be sent, so a restart ends it rather than waiting again, and returns the job that
-    /// checks GitHub once more and sends it.
-    fn start_waited_merge(&mut self, outcome: &Outcome) -> Result<Option<Job>> {
-        let Decided::Ready(_) = outcome.result else {
+    /// For a request that may merge whose read found every check holding: records the method
+    /// and that a merge may now be sent, so a restart finishes or ends it on GitHub's word, and
+    /// returns the job that checks GitHub once more and sends it.
+    fn start_merge(&mut self, outcome: &Outcome) -> Result<Option<Job>> {
+        let Decided::Ready(method) = outcome.result else {
             return Ok(None);
         };
         let mut ticket = self.ticket(&outcome.ticket_id)?;
         let ready = (ticket.merging.clone()).filter(|request| {
             request.id == outcome.request_id
-                && request.stage == MergeStage::Rechecking
+                && matches!(request.stage, MergeStage::Checking | MergeStage::Rechecking)
+                && request.may_merge()
                 && ticket.is_open()
                 && ticket.verification.as_ref().map(|v| v.cycle) == Some(request.cycle)
         });
@@ -677,6 +699,7 @@ impl Host {
             return Ok(None);
         };
         ticket.merging = Some(MergeRequest {
+            method: Some(method),
             stage: MergeStage::Merging,
             ..request
         });
@@ -811,7 +834,8 @@ impl Host {
     }
 
     /// Records the merge the host made, accepts the ticket and tells the caller. The request is
-    /// kept until its message is queued, so a restart in between finishes it again.
+    /// kept until its message is queued, so a restart in between finishes it again, and while
+    /// GitHub has not reported the merge commit, so the next start reads it again.
     fn merged(
         &mut self,
         mut ticket: Ticket,
@@ -822,9 +846,32 @@ impl Host {
         answering: bool,
     ) -> Result<Value> {
         let named = named(&ticket, &request);
-        if let Some(pr) = (ticket.pull_request.as_mut()).filter(|pr| pr.number == request.number)
-            && pr.merged_by_host.is_none()
+        let recorded = (ticket.pull_request.as_mut()).filter(|pr| pr.number == request.number);
+        if let Some(pr) = recorded
+            && pr.merged_by_host.is_some()
         {
+            // Finished before, but for the merge commit, which this read may now have.
+            let Some(commit) = commit.filter(|_| pr.merge_commit.is_none()) else {
+                return Ok(json!({"status": "merged"}));
+            };
+            pr.merge_commit = Some(commit.clone());
+            self.save_ticket(&ticket)?;
+            let notice = format!(
+                "{named} merged into {} as {}; GitHub had not reported its merge commit before.",
+                request.base,
+                short_sha(&commit)
+            );
+            let id = format!("{MERGE_PREFIX}{}:commit", request.id);
+            if let Err(error) = self.send_publish_result(&id, &request.caller, &notice)
+                && !self.message_exists(&id)?
+            {
+                eprintln!("Workspace merge: {error:#}");
+            }
+            let mut ticket = self.ticket(&ticket.id)?;
+            self.drop_merge(&mut ticket)?;
+            return Ok(json!({"status": "merged", "merge_commit": commit}));
+        }
+        if let Some(pr) = (ticket.pull_request.as_mut()).filter(|pr| pr.number == request.number) {
             pr.state = PrState::Merged;
             pr.head = request.head.clone();
             pr.merge_commit = commit.clone();
@@ -874,15 +921,29 @@ impl Host {
             result.push(' ');
             result.push_str(line);
         }
+        if commit.is_none() {
+            result.push_str(
+                " GitHub did not report the merge commit; Wiffletree reads it again when it next starts.",
+            );
+        }
         let status = json!({"status": "merged", "pull_request": request.number,
             "base": request.base, "method": method.map(MergeMethod::label),
             "head": request.head, "merge_commit": commit, "accepted": accepted.is_ok(),
             "result": result});
         let mut ticket = self.ticket(&ticket.id)?;
-        if answering {
-            self.drop_merge(&mut ticket)?;
-        } else {
-            self.end_merge(&mut ticket, &result)?;
+        match (answering, commit.is_some()) {
+            (true, true) => self.drop_merge(&mut ticket)?,
+            (false, true) => self.end_merge(&mut ticket, &result)?,
+            // Kept, as `Merging`, for the next start's read of the merge commit.
+            (true, false) => {}
+            (false, false) => {
+                let id = format!("{MERGE_PREFIX}{}", request.id);
+                if let Err(error) = self.send_publish_result(&id, &request.caller, &result)
+                    && !self.message_exists(&id)?
+                {
+                    return Err(error);
+                }
+            }
         }
         Ok(status)
     }
@@ -969,7 +1030,7 @@ impl Host {
         };
         ticket.merging = Some(MergeRequest {
             approved: true,
-            stage: MergeStage::Merging,
+            stage: MergeStage::Checking,
             ..request
         });
         self.save_ticket(&ticket)?;
@@ -1236,6 +1297,8 @@ mod tests {
         stalls: bool,
         /// `gh pr merge` is stopped at its deadline before GitHub merged.
         times_out: bool,
+        /// How many reads of a merged pull request fail before one succeeds.
+        failing_reads: usize,
         merges: Vec<Vec<String>>,
         edits: Vec<Vec<String>>,
     }
@@ -1270,6 +1333,7 @@ mod tests {
             merge_error: None,
             stalls: false,
             times_out: false,
+            failing_reads: 0,
             merges: vec![],
             edits: vec![],
         }));
@@ -1328,7 +1392,14 @@ mod tests {
                     "github.com/allowed-org/app",
                     "--json",
                     _,
-                ] => ok(gh.prs[&number.parse().unwrap()].to_string()),
+                ] => {
+                    let pr = gh.prs[&number.parse().unwrap()].clone();
+                    if pr["state"] == "MERGED" && gh.failing_reads > 0 {
+                        gh.failing_reads -= 1;
+                        return fail("HTTP 502: Bad Gateway");
+                    }
+                    ok(pr.to_string())
+                }
                 [
                     "pr",
                     "merge",
@@ -1423,11 +1494,21 @@ mod tests {
     }
     /// Runs `job` and records it, then each merge job that follows, as the service does.
     fn settle(f: &mut Fixture, fake: &Fake, job: &Job, answering: bool) -> Result<Value> {
-        let (status, mut next) = f.host.record_merge(run(job, &fake.tools), answering)?;
+        let (mut status, mut next) = f.host.record_merge(run(job, &fake.tools), answering)?;
         while let Some(job) = next {
-            next = f.host.record_merge(run(&job, &fake.tools), false)?.1;
+            (status, next) = f.host.record_merge(run(&job, &fake.tools), answering)?;
         }
         Ok(status)
+    }
+    /// Calls `merge_ticket` and records its first read, which finds it ready: the request is now
+    /// `Merging` with its method, and the returned job sends the merge.
+    fn ready_to_send(f: &mut Fixture, fake: &Fake) -> Job {
+        let job = (f.host)
+            .merge_ticket(&coordinator(f), &f.ticket.clone(), None)
+            .unwrap();
+        let (_, sending) = f.host.record_merge(run(&job, &fake.tools), true).unwrap();
+        assert_eq!(f.ticket().merging.unwrap().stage, MergeStage::Merging);
+        sending.unwrap()
     }
     /// Runs the decisions due after a PR watcher pass, as the service does.
     fn pass(f: &mut Fixture, fake: &Fake) {
@@ -2129,9 +2210,7 @@ mod tests {
     fn a_merge_cut_short_is_finished_or_ended_on_githubs_word() {
         // Stopped after gh pr merge was sent, which GitHub carried out.
         let (mut f, fake) = ready();
-        f.host
-            .merge_ticket(&coordinator(&f), &f.ticket.clone(), None)
-            .unwrap();
+        ready_to_send(&mut f, &fake);
         fake.set(180, "state", json!("MERGED"));
         fake.set(180, "mergeCommit", json!({"oid": MERGE_COMMIT}));
         let mut f = restart(f);
@@ -2142,16 +2221,18 @@ mod tests {
             .unwrap();
         assert_eq!(f.ticket().state, TicketState::Accepted);
         assert!(fake.merges().is_empty(), "nothing is sent again");
+        // The method recorded before the merge was sent survives the restart.
+        let by_host = f.ticket().pull_request.unwrap().merged_by_host.unwrap();
+        assert_eq!(by_host.method, Some(MergeMethod::Squash));
         let told = messages(&f.host);
         assert_eq!(told.len(), 1);
         assert!(told[0].starts_with("Merged PR #180"), "{told:?}");
+        assert!(told[0].contains("with squash"), "{told:?}");
         assert!(f.host.interrupted_merges().unwrap().is_empty());
 
         // Stopped before GitHub merged it.
         let (mut f, fake) = ready();
-        f.host
-            .merge_ticket(&coordinator(&f), &f.ticket.clone(), None)
-            .unwrap();
+        ready_to_send(&mut f, &fake);
         let mut f = restart(f);
         let jobs = f.host.interrupted_merges().unwrap();
         f.host
@@ -2196,11 +2277,9 @@ mod tests {
         ];
         for (reason, change) in revoke {
             let (mut f, fake) = ready();
-            let job = (f.host)
-                .merge_ticket(&coordinator(&f), &f.ticket.clone(), None)
-                .unwrap();
+            let sending = ready_to_send(&mut f, &fake);
             change(&mut f);
-            let error = settle(&mut f, &fake, &job, true).unwrap_err();
+            let error = settle(&mut f, &fake, &sending, true).unwrap_err();
             assert!(format!("{error:#}").contains(reason), "{error:#}");
             assert!(fake.merges().is_empty());
         }
@@ -2245,10 +2324,9 @@ mod tests {
     #[test]
     fn a_restart_after_acceptance_still_finishes_the_merge_with_its_result() {
         let (mut f, fake) = ready();
-        (f.host)
-            .merge_ticket(&coordinator(&f), &f.ticket.clone(), None)
-            .unwrap();
+        ready_to_send(&mut f, &fake);
         fake.set(180, "state", json!("MERGED"));
+        fake.set(180, "mergeCommit", json!({"oid": MERGE_COMMIT}));
         // The host stopped after merged() accepted the ticket, which removed its worktree.
         f.host.accept_ticket(&f.ticket.clone(), None).unwrap();
         assert!(!f.worktree.exists());
@@ -2323,6 +2401,40 @@ mod tests {
         assert!(f.ticket().merging.is_none());
         assert!(messages(&f.host)[0].contains("Call merge_ticket again"));
         assert!(fake.merges().is_empty());
+    }
+
+    #[test]
+    fn a_merge_commit_github_does_not_report_at_once_is_read_again() {
+        // One failed read is retried.
+        let (mut f, fake) = ready();
+        fake.github.lock().unwrap().failing_reads = 1;
+        let merged = merge(&mut f, &fake, None).unwrap();
+        assert_eq!(merged["merge_commit"], MERGE_COMMIT);
+
+        // Every read fails: the request stays, and the next start records the commit.
+        let (mut f, fake) = ready();
+        fake.github.lock().unwrap().failing_reads = 3;
+        let merged = merge(&mut f, &fake, None).unwrap();
+        assert!(merged["merge_commit"].is_null());
+        let result = merged["result"].as_str().unwrap();
+        assert!(
+            result.contains("did not report the merge commit"),
+            "{result}"
+        );
+        assert_eq!(f.ticket().state, TicketState::Accepted);
+        assert_eq!(f.ticket().merging.unwrap().stage, MergeStage::Merging);
+        let mut f = restart(f);
+        let jobs = f.host.interrupted_merges().unwrap();
+        settle(&mut f, &fake, &jobs[0], false).unwrap();
+        let ticket = f.ticket();
+        assert!(ticket.merging.is_none());
+        assert_eq!(
+            ticket.pull_request.unwrap().merge_commit.as_deref(),
+            Some(MERGE_COMMIT)
+        );
+        let told = messages(&f.host);
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(told[0].contains("as 6e1f0c2"), "{told:?}");
     }
 
     #[test]

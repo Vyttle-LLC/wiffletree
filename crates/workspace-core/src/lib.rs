@@ -1981,6 +1981,9 @@ pub struct MergeRequest {
     /// The human approved merging this head.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub approved: bool,
+    /// The method the merge is sent with, recorded once every check held and before it is sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<MergeMethod>,
     pub stage: MergeStage,
 }
 impl MergeRequest {
@@ -1992,14 +1995,13 @@ impl MergeRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum MergeStage {
-    /// GitHub is being read for a request the human has not approved yet; nothing is merged.
+    /// GitHub is being read for a new or just approved request. This read sends no merge.
     Checking,
-    /// GitHub is being read for a request that merges if every check holds: `gh pr merge` may
-    /// have been sent.
+    /// Every check held and the method is recorded: `gh pr merge` may have been sent, so after a
+    /// restart the request is finished or ended on GitHub's word.
     Merging,
     /// GitHub is being read again for a request that waited for its checks. This read sends no
-    /// merge: when it is ready, the request becomes `Merging` before the merge is sent, so after a
-    /// restart it waits again unless GitHub reports it merged.
+    /// merge, so after a restart the request waits again unless GitHub reports it merged.
     Rechecking,
     /// It waits for the pull request's checks to finish, or for GitHub to work out whether it
     /// can be merged.
