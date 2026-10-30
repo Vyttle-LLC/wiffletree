@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Protected branches study</title>
+<!-- Static study for protected branches and host merges into feature branches: no script, no network, simulated data. -->
+<style>
+:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.subtle{color:var(--subtle)}
+.small{font-size:11px}
+.mono{font:11px/1.5 ui-monospace,SFMono-Regular,monospace;overflow-wrap:anywhere}
+.intro{max-width:820px;margin-bottom:24px}
+.intro p{color:var(--subtle);font-size:12px}
+.panel{background:var(--surface);border:1px solid var(--edge);border-radius:14px;padding:16px}
+.caption{margin:10px 2px 0;font-size:11px;color:var(--subtle);max-width:900px}
+.caption b{color:var(--text);font-weight:500}
+.stack{display:grid;gap:26px}
+.two{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:16px;align-items:start}
+.col{display:grid;gap:10px}
+.hint{font-size:12px;color:var(--subtle)}
+.hint.never{margin-top:6px;color:var(--text);font-weight:500}
+.section{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.section .eyebrow{flex:1}
+.pill{flex:none;padding:1px 7px;border-radius:20px;font-size:10.5px;font-weight:500;white-space:nowrap}
+.pill.subtle{color:var(--subtle);background:var(--overlay)}
+.pill.green{color:var(--green);background:color-mix(in srgb,var(--green) 12%,transparent)}
+.pill.focus{color:var(--focus);background:color-mix(in srgb,var(--focus) 12%,transparent)}
+.pill.yellow{color:var(--yellow);background:color-mix(in srgb,var(--yellow) 14%,transparent)}
+.pill.red{color:var(--red);background:color-mix(in srgb,var(--red) 12%,transparent)}
+.new{box-shadow:inset 2px 0 0 var(--accent);padding-left:10px}
+svg.i{width:14px;height:14px;flex:none;color:var(--subtle)}
+.ok{color:var(--green)}.bad{color:var(--red)}.busy{color:var(--focus)}.warn{color:var(--yellow)}
+/* (a) Repositories page, mirroring repositories_view.rs. */
+.repo{display:flex;align-items:flex-start;gap:12px;padding:10px 0;border-bottom:1px solid color-mix(in srgb,var(--edge) 25%,transparent)}
+.repo:last-child{border-bottom:0}
+.repo>svg{width:16px;height:16px;color:var(--subtle);flex:none;margin-top:2px}
+.repo .name{flex:1;min-width:0}
+.repo .name b{font-weight:500}
+.repo .line{margin-top:4px;font-size:11.5px;color:var(--subtle)}
+.counts{text-align:right;font-size:12px;color:var(--subtle)}
+.counts .when{font-size:10.5px;color:var(--muted)}
+.field{display:inline-block;border:1px solid var(--edge);border-radius:7px;padding:1px 8px;background:var(--surface);font-size:12px;color:var(--text)}
+.field.badfield{border-color:var(--red)}
+.protect{margin-top:8px;border:1px solid color-mix(in srgb,var(--edge) 55%,transparent);border-radius:10px;background:var(--base)}
+.protect .head{display:flex;align-items:baseline;gap:8px;padding:9px 12px 4px}
+.protect .head b{font-weight:500;font-size:12.5px}
+.protect .head .hint{flex:1;font-size:11.5px}
+.prow{display:flex;align-items:center;gap:10px;padding:7px 12px;border-top:1px solid color-mix(in srgb,var(--edge) 35%,transparent);font-size:12px}
+.prow .pat{min-width:110px}
+.prow .why{flex:1;min-width:0;color:var(--subtle);font-size:11.5px}
+.prow .x{color:var(--muted);font-size:14px;line-height:1;padding:0 4px}
+.prow svg{width:12px;height:12px;color:var(--muted);flex:none}
+.prow.add{align-items:flex-start;flex-wrap:wrap}
+.err{flex-basis:100%;margin-left:0;font-size:11.5px;color:var(--red)}
+.method{padding:7px 12px 9px;border-top:1px solid color-mix(in srgb,var(--edge) 35%,transparent);font-size:11.5px;color:var(--subtle)}
+.method b{color:var(--text);font-weight:500}
+/* (b) Agents panel and Team panel, mirroring agents_panel.rs and team_view.rs. */
+.tree{display:grid;gap:1px}
+.row{min-height:30px;display:flex;align-items:flex-start;gap:8px;padding:6px 8px 5px;border-radius:6px;font-size:12.5px}
+.row>svg{width:14px;height:14px;flex:none;color:var(--subtle);margin-top:2px}
+.stackline{flex:1;min-width:0}
+.stackline .label{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prline{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--subtle);white-space:nowrap;overflow:hidden}
+.prline svg{width:11px;height:11px;color:currentColor}
+.prline .sep{color:var(--muted)}
+.dot{width:6px;height:6px;border-radius:50%;margin:6px 3px 0 0;flex:none}
+.dot.green{background:var(--green)}.dot.focus{background:var(--focus)}.dot.yellow{background:var(--yellow)}.dot.done{background:var(--muted)}
+.state{margin:0 0 4px 30px;font-size:10.5px;color:var(--muted)}
+.card{border:1px solid color-mix(in srgb,var(--edge) 55%,transparent);background:var(--base);border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:8px}
+.card+.card{margin-top:10px}
+.card-head{display:flex;align-items:flex-start;gap:8px}
+.card-head .t{flex:1;font-weight:500}
+.prbox{border-left:2px solid var(--focus);padding:6px 10px;background:color-mix(in srgb,var(--focus) 6%,transparent);border-radius:0 6px 6px 0;font-size:12px}
+.prbox b{font-weight:500}
+.prbox a{color:var(--focus);text-decoration:none}
+.mergebox{border-left:2px solid var(--accent);padding:6px 10px;background:color-mix(in srgb,var(--accent) 5%,transparent);border-radius:0 6px 6px 0;font-size:12px}
+.mergebox b{font-weight:500}
+.message{border:1px solid var(--edge);border-radius:12px;padding:12px 14px;background:var(--base);font-size:12.5px}
+.message .from{display:flex;align-items:center;gap:7px;margin-bottom:8px;font-size:11px;color:var(--subtle)}
+.message .from b{color:var(--text);font-weight:500}
+.message ul{margin:6px 0;padding-left:18px}
+.refused{border-left:2px solid var(--red);padding:6px 10px;background:color-mix(in srgb,var(--red) 6%,transparent);border-radius:0 6px 6px 0;font-size:12px}
+code{font:11px ui-monospace,monospace;background:var(--overlay);padding:1px 4px;border-radius:4px}
+pre{margin:0;font:10.5px/1.55 ui-monospace,SFMono-Regular,monospace;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere}
+/* (c) Inbox card, mirroring inspector.rs attention_card. */
+.ask{font-size:13.5px;font-weight:500}
+.facts-grid{display:grid;grid-template-columns:96px minmax(0,1fr);gap:4px 10px;font-size:12px;margin:0}
+.facts-grid dt{color:var(--subtle)}
+.facts-grid dd{margin:0}
+.findings{display:grid;gap:6px}
+.findings>div{border-left:2px solid var(--red);padding:2px 0 2px 8px}
+.btn{padding:5px 12px;border-radius:7px;font-size:12px;font-weight:500;border:1px solid transparent;white-space:nowrap}
+.btn.ghost{color:var(--subtle);border-color:var(--edge)}
+.btn.primary{background:var(--focus);color:var(--surface)}
+.actions{display:flex;justify-content:flex-end;gap:8px}
+.notes{max-width:860px;margin-top:26px;font-size:12px;color:var(--subtle)}
+.notes li{margin:5px 0}
+.notes b{color:var(--text);font-weight:500}
+.notes ol{padding-left:18px}
+@media(max-width:980px){.two{grid-template-columns:minmax(0,1fr)}body{padding:16px}.counts{display:none}}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+  <symbol id="github" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-4 1.5-4-2-6-2.5M15 21v-3.5a3 3 0 0 0-.9-2.3c3-.3 6-1.5 6-6.6a5 5 0 0 0-1.4-3.6 4.7 4.7 0 0 0-.1-3.5s-1.1-.3-3.6 1.4a12.5 12.5 0 0 0-6.6 0C5.9 1.2 4.8 1.5 4.8 1.5a4.7 4.7 0 0 0-.1 3.5A5 5 0 0 0 3.3 8.6c0 5.1 3 6.3 6 6.6a3 3 0 0 0-.9 2.3V21"/></symbol>
+  <symbol id="task" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8M13 12h8M13 18h8"/></symbol>
+  <symbol id="pr" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5v7M18 15.5V9a3 3 0 0 0-3-3h-4"/><path d="m13 3.5-2.5 2.5L13 8.5"/></symbol>
+  <symbol id="merge" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="12" r="2.5"/><path d="M6 7.5v9M6 8c0 3 3 4 9.5 4"/></symbol>
+  <symbol id="running" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><circle cx="12" cy="12" r="8" stroke-dasharray="3 4"/></symbol>
+  <symbol id="server" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><path d="M6 7h.01M6 17h.01"/></symbol>
+</svg>
+
+<header class="intro">
+  <div class="eyebrow">Design study · Protected branches</div>
+  <h1>Wiffletree merges into feature branches. Protected branches stay yours.</h1>
+  <p>Static study for a proposed OpenSpec change. Each repository gets a list of protected branches. Its default branch on GitHub and its configured base are always on it. When the coordinator asks, Wiffletree merges a ticket’s pull request itself, but only into a branch that is not protected, only in an allowed owner’s repository, only at the reviewed commit, and only with passing checks and no conflict. Every merge into a protected branch, including the final feature branch into <span class="mono">main</span>, stays the human’s. The study shows (a) the protected-branches block on the Repositories page, (b) tickets and their PR line after Wiffletree merged one, and (c) the Inbox card when the review ended blocked. New parts have a red edge. Sample data is simulated.</p>
+</header>
+
+<div class="stack">
+  <!-- (a) Repositories page -->
+  <section>
+    <div class="panel" aria-label="Repositories page">
+      <div class="section"><div class="eyebrow">Settings · Repositories · In the workspace</div><span class="btn primary">+ Add repositories…</span></div>
+      <p class="hint never" style="margin:0 0 8px">Wiffletree never approves, closes or comments on a pull request, and never merges into a protected branch.</p>
+
+      <div class="repo">
+        <svg><use href="#folder"/></svg>
+        <div class="name"><b>Vyttle-LLC/wiffletree</b> <span class="pill green">without asking</span> <span class="pill focus">kept</span>
+          <div class="mono subtle">~/dev/personal/wiffletree · base origin/main</div>
+          <div class="protect new" aria-label="Protected branches for Vyttle-LLC/wiffletree">
+            <div class="head"><b>Protected branches</b><span class="hint">Only you merge into these. Wiffletree merges a ticket’s pull request into any other branch when the coordinator asks.</span><span class="pill subtle">This Mac only</span></div>
+            <div class="prow"><svg><use href="#lock"/></svg><span class="pat mono">main</span><span class="why">Default branch on GitHub, and this repository’s base · always protected</span></div>
+            <div class="prow"><svg><use href="#github"/></svg><span class="pat mono">release/**</span><span class="why">GitHub ruleset “Releases” · read from GitHub, change it there</span><span class="pill subtle">Example</span></div>
+            <div class="prow"><span class="pat mono">release/*</span><span class="why">Added by you · on origin now: <span class="mono">release/2026.10</span>, <span class="mono">release/2026.11</span></span><span class="x" aria-label="Remove release/*">×</span></div>
+            <div class="prow"><span class="pat mono">demo</span><span class="why">Added by you · no branch on origin matches yet</span><span class="x" aria-label="Remove demo">×</span></div>
+            <div class="prow add"><span class="field mono">branch or pattern, such as hotfix/*</span><span class="btn ghost">Add</span></div>
+            <div class="method">Merges with <b>squash</b>, the first of squash, merge commit and rebase that GitHub allows here · GitHub also allows merge commits</div>
+          </div>
+        </div>
+        <div class="counts">1 project · 6 open tickets · 5 open PRs<div class="when">PRs checked 40 s ago</div></div>
+      </div>
+
+      <div class="repo">
+        <svg><use href="#folder"/></svg>
+        <div class="name"><b>Sage-Social/sagechat-cortex</b> <span class="pill green">without asking</span> <span class="pill subtle">Example</span>
+          <div class="mono subtle">~/dev/sagehaven/sagechat-cortex · base origin/develop</div>
+          <div class="protect new" aria-label="Protected branches for Sage-Social/sagechat-cortex, adding a pattern">
+            <div class="head"><b>Protected branches</b><span class="hint">Adding a pattern, with two mistakes shown.</span><span class="pill subtle">This Mac only</span></div>
+            <div class="prow"><svg><use href="#lock"/></svg><span class="pat mono">main</span><span class="why">Default branch on GitHub · always protected</span></div>
+            <div class="prow"><svg><use href="#lock"/></svg><span class="pat mono">develop</span><span class="why">This repository’s base · always protected while it is the base</span></div>
+            <div class="prow add"><span class="field mono badfield">release/[0-9</span><span class="btn ghost">Add</span>
+              <span class="err">Not a valid pattern: <span class="mono">[</span> is never closed. Use <span class="mono">*</span> for any part of one name, <span class="mono">**</span> across <span class="mono">/</span>, or <span class="mono">[0-9]</span> for one character.</span></div>
+            <div class="prow add"><span class="field mono badfield">origin/main</span><span class="btn ghost">Add</span>
+              <span class="err">Name a branch, not a remote branch: <span class="mono">main</span> is already protected.</span></div>
+            <div class="method">GitHub reports no branch protection or rulesets here · merges with <b>squash</b>, the only method GitHub allows</div>
+          </div>
+        </div>
+        <div class="counts">1 project · 2 open tickets · 1 open PR<div class="when">PRs checked 1 min ago</div></div>
+      </div>
+
+      <div class="repo">
+        <svg><use href="#folder"/></svg>
+        <div class="name"><b>celadon-theme/website</b> <span class="pill yellow">asks first</span>
+          <div class="mono subtle">~/dev/personal/celadon-website · base origin/main</div>
+          <div class="line new">Protected: <span class="mono">main</span> · Wiffletree merges nothing here, because celadon-theme is not an allowed owner. <span class="subtle">Edit…</span></div>
+        </div>
+        <div class="counts">1 project · 1 open ticket · 0 open PRs<div class="when">PRs checked 3 min ago</div></div>
+      </div>
+    </div>
+    <p class="caption"><b>(a)</b> Each repository row gets a <b>Protected branches</b> list, collapsed to one line until opened. The lock rows cannot be removed: the repository’s default branch, which GitHub reports, and its configured base. When the base is changed, the old base stays protected only if it is also the default branch or on your list. Rows with the GitHub mark come from GitHub’s own branch protection and rulesets: Wiffletree reads them and treats them as protected too, but cannot change them. The list accepts exact names and patterns, and shows which branches on <span class="mono">origin</span> a pattern matches now. A pattern that cannot be read, or a name with a remote in front, is refused with the reason. In a repository whose owner is not allowed, Wiffletree merges nothing, so the list there only matters once you allow the owner.</p>
+  </section>
+
+  <!-- (b) Tickets after a host merge -->
+  <section>
+    <div class="two">
+      <div class="col">
+        <div class="panel" aria-label="Agents panel ticket rows">
+          <div class="eyebrow" style="margin-bottom:8px">Agents panel · project “Spaces” · feature branch <span class="mono">feature/spaces</span></div>
+          <nav class="tree">
+            <div class="row new"><svg><use href="#task"/></svg>
+              <div class="stackline"><span class="label">wiffletree · Space storage</span>
+                <div class="prline"><svg><use href="#merge"/></svg>#180<span class="sep">·</span><span class="ok">merged into feature/spaces</span><span class="sep">·</span>by Wiffletree</div></div>
+              <span class="dot done" title="Accepted"></span></div>
+            <p class="state">1 · merged by Wiffletree and accepted</p>
+
+            <div class="row new"><svg><use href="#task"/></svg>
+              <div class="stackline"><span class="label">wiffletree · Space tracker</span>
+                <div class="prline"><svg><use href="#pr"/></svg>#181<span class="sep">·</span>now into feature/spaces<span class="sep">·</span><span class="busy">rebased</span><span class="sep">·</span><svg><use href="#running"/></svg>checks</div></div>
+              <span class="dot green" title="Passed"></span></div>
+            <p class="state">2 · was stacked on #180: moved to its base and rebased</p>
+
+            <div class="row new"><svg><use href="#task"/></svg>
+              <div class="stackline"><span class="label">wiffletree · Project defaults</span>
+                <div class="prline"><svg><use href="#pr"/></svg>#179<span class="sep">·</span><svg><use href="#running"/></svg>checks<span class="sep">·</span><span class="busy">merges when they pass</span></div></div>
+              <span class="dot green" title="Passed"></span></div>
+            <p class="state">3 · the coordinator asked; waiting for checks</p>
+
+            <div class="row new"><svg><use href="#task"/></svg>
+              <div class="stackline"><span class="label">wiffletree · Desktop screens</span>
+                <div class="prline"><svg><use href="#pr"/></svg>#182<span class="sep">·</span><span class="ok">checks ✓</span><span class="sep">·</span><span class="warn">merge waits for your approval</span></div></div>
+              <span class="dot yellow" title="Waived"></span></div>
+            <p class="state">4 · review ended blocked and was waived: see (c)</p>
+
+            <div class="row"><svg><use href="#task"/></svg>
+              <div class="stackline"><span class="label">wiffletree · Spaces into main</span>
+                <div class="prline"><svg><use href="#pr"/></svg>#183<span class="sep">·</span><span class="ok">checks ✓</span><span class="sep">·</span>into main<span class="sep">·</span>yours to merge</div></div>
+              <span class="dot green" title="Passed"></span></div>
+            <p class="state">5 · the feature branch into main: protected, so always the human’s</p>
+          </nav>
+        </div>
+        <p class="caption"><b>(b)</b> The PR line keeps today’s parts. A merge Wiffletree made says so (1), and the ticket is accepted in the same step. A ticket stacked on the merged one moves to the merged pull request’s base, and the PR keeper rebases it (2). A merge asked for while checks run waits for them, and ends without merging if they fail or the head moves (3). A pull request into a protected branch says it is yours (5); Wiffletree refuses <span class="mono">merge_ticket</span> there whoever asks.</p>
+      </div>
+
+      <div class="col">
+        <div class="panel" aria-label="Team panel ticket card after a merge">
+          <div class="eyebrow" style="margin-bottom:8px">Team · Tickets</div>
+          <div class="card">
+            <div class="card-head"><span class="t">wiffletree · Space storage</span><span class="pill subtle">Accepted</span></div>
+            <div class="prbox"><b>PR #180</b> merged into feature/spaces · <a href="#">Open on GitHub</a><br><span class="subtle small">Merge commit e35dbdf · checked 20 s ago</span></div>
+            <div class="mergebox new"><b>Merged by Wiffletree</b> at the coordinator’s request, 2 min ago<br><span class="subtle small">Squash · head 7c41a09, the reviewed commit · checks passed · feature/spaces is not protected · Vyttle-LLC is an allowed owner</span></div>
+            <div class="hint">Verification cycle 1 · Full: passed, 2 of 3 rounds</div>
+          </div>
+        </div>
+        <div class="message" aria-label="Merge result to the coordinator">
+          <div class="from"><svg class="i"><use href="#server"/></svg><b>Wiffletree</b> · to the coordinator · result of merge_ticket</div>
+          <p>Merged PR #180 for ticket “Space storage” into <code>feature/spaces</code> with squash at head <code>7c41a09</code>; merge commit <code>e35dbdf</code>. The ticket is accepted.</p>
+          <ul><li>“Space tracker” was stacked on it. Its PR #181 now targets <code>feature/spaces</code>, and the PR keeper rebased its branch; the change is the same as reviewed, so its review stands.</li></ul>
+        </div>
+        <div class="panel" aria-label="What merge_ticket refuses">
+          <div class="eyebrow" style="margin-bottom:8px">Refused at once · nothing is merged</div>
+          <div class="col">
+            <div class="refused"><span class="mono">main</span> is protected in Vyttle-LLC/wiffletree. Only the human merges into it.</div>
+            <div class="refused"><span class="mono">release/2026.11</span> is protected by GitHub’s ruleset “Releases”. Only the human merges into it.</div>
+            <div class="refused">celadon-theme is not an allowed owner. The human merges in celadon-theme/website.</div>
+            <div class="refused">PR #181’s head <span class="mono">5f2e7a0</span> is not the reviewed commit <span class="mono">c81f04d</span> or the same change. Verify again.</div>
+            <div class="refused">PR #177’s checks failed. Fix them and publish again.</div>
+            <div class="refused">PR #178 conflicts with <span class="mono">feature/spaces</span>. Resolve it and publish again.</div>
+            <div class="refused">Only the project coordinator can merge a ticket.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- (c) Inbox approval after a blocked review -->
+  <section>
+    <div class="two">
+      <div class="panel" aria-label="Inbox approval for a merge after a blocked review">
+        <div class="eyebrow" style="margin-bottom:8px">Inbox · wiffletree · Desktop screens · the review ended blocked</div>
+        <div class="card new">
+          <div class="card-head"><span class="hint" style="flex:1">Coordinator · Desktop screens</span><span class="pill yellow">Approval</span></div>
+          <div class="ask">Merge PR #182 into feature/spaces although its review ended blocked?</div>
+          <dl class="facts-grid">
+            <dt>Repository</dt><dd>Vyttle-LLC/wiffletree · <b>public</b> · Vyttle-LLC is an allowed owner</dd>
+            <dt>Branches</dt><dd><span class="mono">wiffletree/desktop-screens</span> → <span class="mono">feature/spaces</span> · not protected</dd>
+            <dt>Method</dt><dd>Squash · head <span class="mono">c81f04d</span>, the reviewed commit · checks passed · no conflict</dd>
+            <dt>Review</dt><dd><span class="bad">Cycle 2 ended blocked</span> at <span class="mono">c81f04d</span>, after 3 of 3 rounds · Tests passed, Correctness failed, Regressions passed</dd>
+            <dt>Waiver</dt><dd>“F4 only affects a project switch the feature branch does not reach yet; the follow-up ticket fixes it.” · the coordinator</dd>
+            <dt>Open findings</dt><dd><div class="findings">
+              <div><b>F4</b> · blocking · Correctness · <span class="mono">crates/workspace-desktop/src/spaces_view.rs:212</span><br>The Space list keeps the previous project’s selection after switching projects.</div>
+            </div></dd>
+          </dl>
+          <div class="hint small">Wiffletree asks because the review did not pass, even though the coordinator waived it and the owner is allowed. Approving merges this head only. If the head moves, the checks fail or the base becomes protected before the merge, nothing is merged.</div>
+          <div class="actions"><span class="btn ghost">Deny</span><span class="btn primary">Merge</span></div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="panel" aria-label="What the coordinator gets back">
+          <div class="eyebrow" style="margin-bottom:6px">What the coordinator gets back · merge_ticket</div>
+<pre>{
+  "status": "waiting_for_human",
+  "pull_request": 182,
+  "base": "feature/spaces",
+  "reason": "the latest review ended blocked",
+  "next": "Finish your turn. Wiffletree merges if the
+           human approves and messages you the result."
+}</pre>
+        </div>
+        <div class="message" aria-label="Result after a denial">
+          <div class="from"><svg class="i"><use href="#server"/></svg><b>Wiffletree</b> · to the coordinator, if you deny</div>
+          <p>The human denied merging PR #182 into <code>feature/spaces</code>. Nothing was merged. Fix F4 and verify again, or ask the human.</p>
+        </div>
+      </div>
+    </div>
+    <p class="caption"><b>(c)</b> A waiver lets the coordinator accept and publish a blocked review without asking. A merge is harder to take back, so after a blocked review it always asks you, in every repository, with the waiver’s reason and the findings still open. The other conditions cannot be approved away: a protected base, an owner you have not allowed, a head that is not the reviewed one, failed checks or a conflict are refused before any card is raised.</p>
+  </section>
+</div>
+
+<ul class="notes">
+  <li><b>Recommendations for the open questions</b>, for the proposal to settle:
+    <ol>
+      <li><b>Merge method:</b> follow GitHub. Use the first method the repository allows, in the order squash, merge commit, rebase, and always pass <span class="mono">--match-head-commit</span> with the reviewed head. No per-repository setting until one is needed.</li>
+      <li><b>Where the list lives:</b> on this Mac, beside the allowed owners, the base and the checks command. It is not synced through the settings repository, so another machine cannot loosen it.</li>
+      <li><b>GitHub’s protection:</b> yes, as an extra guard. At each merge Wiffletree reads whether GitHub protects the base branch or a ruleset applies to it. A branch GitHub protects is protected here too. If GitHub cannot be read, nothing is merged.</li>
+      <li><b>The ticket after a merge:</b> Wiffletree accepts it in the same step, because <span class="mono">merge_ticket</span> already checks everything <span class="mono">accept_ticket</span> does. A merge you make on GitHub keeps today’s flow: the coordinator is told and accepts.</li>
+      <li><b>Stacked tickets:</b> when a ticket merges, each open ticket stacked on it takes its base. Wiffletree changes that pull request’s base on GitHub to the same branch, and the PR keeper rebases its branch where the repository is kept. A rebase that leaves the change as reviewed keeps the review; otherwise the coordinator is told. Wiffletree does not delete the merged branch.</li>
+    </ol>
+  </li>
+  <li><b>Unchanged:</b> Wiffletree does not create feature branches on GitHub (you do), and it never approves, closes or comments on a pull request. The PR keeper never merges; only <span class="mono">merge_ticket</span> does, and only the coordinator calls it.</li>
+  <li><b>What this does not stop.</b> GitHub does not protect <span class="mono">main</span> in the Sage-Social repositories, and an agent’s shell runs with your credentials, so a shell can still run <span class="mono">gh pr merge</span>. This change makes Wiffletree’s own merge the only one the instructions permit, and checks every use of it.</li>
+  <li>The ruleset row, the Sage-Social repository and its <span class="mono">develop</span> base are examples, marked “Example”. Ticket names and PR numbers are drawn from this repository’s recent history and are sample data.</li>
+  <li>This is a static design study, not the GPUI implementation.</li>
+</ul>
+</body>
+</html>
