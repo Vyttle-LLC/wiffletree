@@ -20,6 +20,7 @@ mod hosts;
 mod inbox;
 mod inspector;
 mod leftovers;
+mod live_work;
 mod memory_view;
 mod menu_bar;
 mod models;
@@ -593,7 +594,7 @@ impl Workspace {
         })
         .detach();
     }
-    /// Step changes go to the transcript, for its activity card, and to the Files panel, each
+    /// Step changes go to the transcript, for its live work, and to the Files panel, each
     /// only when they concern a session it shows.
     fn watch_steps(&self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(changes) = self.bridge.step_changes() else {

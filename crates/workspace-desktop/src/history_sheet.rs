@@ -2,11 +2,11 @@
 //! paragraph followed by the steps that came after it, updating live while the turn runs.
 use super::*;
 use activity::{
-    RunActivity, STEP_PACE, StepFetch, line_counts, paced_reply, state_glyph, step_row,
+    LinkedNarration, RunActivity, STEP_PACE, StepFetch, line_counts, paced_reply, state_glyph,
+    step_row,
 };
-use file_links::Linked;
 use gpui_component::ActiveTheme;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 use ui::icon;
 use wording::{clock, counted, duration};
 
@@ -21,8 +21,7 @@ pub(super) struct HistorySheet {
     toggled: BTreeSet<String>,
     /// Where the session's relative file references resolve.
     link_bases: Arc<[PathBuf]>,
-    /// Each narration step's text with its file references linked, by step id.
-    narration: HashMap<String, Linked>,
+    narration: LinkedNarration,
 }
 
 impl HistorySheet {
@@ -41,7 +40,7 @@ impl HistorySheet {
             list: ListState::new(0, ListAlignment::Bottom, px(200.)),
             toggled: BTreeSet::new(),
             link_bases,
-            narration: HashMap::new(),
+            narration: LinkedNarration::default(),
         }
     }
 
@@ -97,16 +96,7 @@ impl HistorySheet {
                         *id == step.id && *revision == step.revision
                     })
                     .count();
-                // Narration is linked here, as it arrives, so drawing it asks the host nothing.
-                for step in &self.run.steps[unchanged..] {
-                    if step.kind == StepKind::Narration {
-                        let id = format!("{}-{}", step.run_id, step.id);
-                        let text = step.detail.as_deref().unwrap_or(&step.title);
-                        let linked = Linked::new(&id, text, self.link_bases.clone(), &self.bridge);
-                        self.narration.insert(step.id.clone(), linked);
-                    }
-                }
-                file_links::link_when_resolved(self.narration.values(), &self.bridge, cx);
+                (self.narration).update(&self.run.steps, &self.link_bases, &self.bridge, cx);
                 let (shown, rows) = (self.list.item_count(), self.run.steps.len());
                 if unchanged < rows || shown != rows {
                     self.list.splice(unchanged..shown, rows - unchanged);
@@ -162,7 +152,7 @@ impl HistorySheet {
                 .w_full()
                 .pt_3()
                 .pb_1()
-                .children(self.narration.get(&step.id).map(Linked::view))
+                .children(self.narration.view(&step.id))
                 .into_any_element(),
             StepKind::Thinking => div()
                 .w_full()
@@ -223,7 +213,7 @@ impl HistorySheet {
 }
 
 /// A step's bounded output, with a note when part of it was dropped.
-fn detail(step: &Step, p: Palette) -> Div {
+pub(super) fn detail(step: &Step, p: Palette) -> Div {
     let omitted = (step.omitted > 0).then(|| {
         if step.kind.is_action() {
             format!("Earlier output omitted ({} bytes)", step.omitted)
@@ -270,10 +260,31 @@ fn diffs(step: &Step, p: Palette) -> Div {
         .flex()
         .flex_col()
         .gap_2()
-        .children(step.diffs.iter().map(|diff| file_diff(diff, named, p)))
+        .children(
+            step.diffs
+                .iter()
+                .map(|diff| file_diff(diff, named, None, p)),
+        )
 }
 
-fn file_diff(diff: &FileDiff, named: bool, p: Palette) -> Div {
+/// How many of each hunk's lines fit in the first `limit` lines of the file's diff, and how
+/// many kept lines that leaves out.
+pub(super) fn clipped(hunks: &[DiffHunk], limit: usize) -> (Vec<usize>, usize) {
+    let mut room = limit;
+    let shown = (hunks.iter())
+        .map(|hunk| {
+            let shown = hunk.lines.len().min(room);
+            room -= shown;
+            shown
+        })
+        .collect();
+    let kept: usize = hunks.iter().map(|h| h.lines.len()).sum();
+    (shown, kept.saturating_sub(limit))
+}
+
+/// One file's diff. With a `limit`, only its first lines; the lines not kept are noted only
+/// once every kept line is shown.
+pub(super) fn file_diff(diff: &FileDiff, named: bool, limit: Option<usize>, p: Palette) -> Div {
     let header = |text: String, first: bool| {
         div()
             .px_2()
@@ -284,7 +295,9 @@ fn file_diff(diff: &FileDiff, named: bool, p: Palette) -> Div {
             })
             .child(text)
     };
-    let more = (diff.omitted_lines > 0).then(|| counted(diff.omitted_lines as usize, "more line"));
+    let (shown, hidden) = clipped(&diff.hunks, limit.unwrap_or(usize::MAX));
+    let more = (diff.omitted_lines > 0 && hidden == 0)
+        .then(|| counted(diff.omitted_lines as usize, "more line"));
     div()
         .rounded_md()
         .overflow_hidden()
@@ -305,14 +318,20 @@ fn file_diff(diff: &FileDiff, named: bool, p: Palette) -> Div {
                     .child(line_counts((diff.added, diff.removed), p)),
             )
         })
-        .children(diff.hunks.iter().enumerate().flat_map(|(index, hunk)| {
-            let title = if diff.created {
-                "new file".to_owned()
-            } else {
-                format!("@@ line {}", hunk.new_start)
-            };
-            std::iter::once(header(title, index == 0 && !named)).chain(hunk_lines(hunk, p))
-        }))
+        .children(
+            (diff.hunks.iter().zip(shown))
+                .filter(|(_, lines)| *lines > 0)
+                .enumerate()
+                .flat_map(|(index, (hunk, lines))| {
+                    let title = if diff.created {
+                        "new file".to_owned()
+                    } else {
+                        format!("@@ line {}", hunk.new_start)
+                    };
+                    std::iter::once(header(title, index == 0 && !named))
+                        .chain(hunk_lines(hunk, p).take(lines))
+                }),
+        )
         .when_some(more, |d, more| {
             d.child(
                 div()

@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<title>Live work in the conversation — static study</title>
+<style>
+  :root {
+    --base:#1A262D; --surface:#22373E; --overlay:#2A434A; --text:#F3F2ED; --subtle:#AFBFBC;
+    --muted:#829B99; --edge:#496063; --accent:#E6977E; --focus:#86C1BC; --green:#A0CBB0;
+    --red:#FFA6B8; --yellow:#E4C17A; --blue:#9AC4D8;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:#121c21; color:var(--text); font:13px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif; }
+  main { max-width:1180px; margin:0 auto; padding:28px 32px 60px; display:flex; flex-direction:column; gap:22px; }
+  .study { background:var(--overlay); border-radius:8px; padding:12px 14px; color:var(--subtle); }
+  .study b { color:var(--text); }
+  h1 { font-size:18px; font-weight:600; margin:0; }
+  .section { font-size:11px; letter-spacing:.08em; color:var(--subtle); font-weight:600; margin-bottom:8px; }
+  .row { display:flex; gap:22px; align-items:flex-start; flex-wrap:wrap; }
+  .pane { flex:1; min-width:520px; background:var(--base); border:1px solid var(--edge); border-radius:10px; padding:18px 18px 14px; display:flex; flex-direction:column; gap:10px; }
+  .side { width:300px; flex:none; display:flex; flex-direction:column; gap:12px; }
+  .note { border-left:3px solid var(--accent); padding:8px 10px; background:var(--surface); border-radius:0 6px 6px 0; color:var(--subtle); font-size:12.5px; }
+  .note b { color:var(--text); }
+  .new { outline:1px dashed var(--accent); outline-offset:4px; border-radius:6px; }
+  .new-tag { display:inline-block; font-size:10px; font-weight:600; color:var(--accent); border:1px solid var(--accent); border-radius:4px; padding:0 4px; margin-left:6px; vertical-align:1px; }
+
+  .msg { display:flex; gap:10px; }
+  .avatar { width:28px; height:28px; border-radius:8px; background:var(--overlay); flex:none; display:flex; align-items:center; justify-content:center; font-size:12px; color:var(--accent); }
+  .bubble { background:var(--surface); border-radius:10px; padding:8px 12px; }
+  .human { justify-content:flex-end; }
+  .human .bubble { background:var(--overlay); max-width:70%; }
+  .fold { margin-left:38px; color:var(--subtle); font-size:12px; display:flex; gap:6px; align-items:center; }
+  .chev { color:var(--muted); font-size:10px; width:10px; display:inline-block; }
+
+  .work { margin-left:38px; display:flex; flex-direction:column; gap:8px; border-left:2px solid var(--edge); padding-left:12px; }
+  .say { color:var(--text); }
+  .quiet { color:var(--muted); font-size:12px; display:flex; gap:6px; align-items:center; }
+  .quiet .kinds span + span::before { content:" · "; }
+  .cmd { display:flex; gap:8px; align-items:center; font-size:12px; }
+  .cmd code { font:11.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--surface); padding:2px 6px; border-radius:4px; color:var(--text); }
+  .ok { color:var(--green); } .bad { color:var(--red); } .run { color:var(--accent); }
+  .tag { font-size:11px; color:var(--subtle); }
+  .tag.bad { color:var(--red); }
+
+  .diff { background:var(--surface); border:1px solid var(--edge); border-radius:8px; overflow:hidden; }
+  .diff .head { display:flex; gap:8px; align-items:center; padding:6px 10px; font-size:12px; border-bottom:1px solid var(--edge); }
+  .diff .head .path { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; }
+  .diff .head .counts { margin-left:auto; font-size:11.5px; }
+  .add { color:var(--green); } .del { color:var(--red); }
+  .diff pre { margin:0; font:11.5px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .diff pre div { padding:0 10px; white-space:pre; overflow:hidden; text-overflow:ellipsis; }
+  .diff pre .hunk { color:var(--muted); background:var(--overlay); }
+  .diff pre .a { background:color-mix(in srgb, var(--green) 14%, var(--surface)); }
+  .diff pre .d { background:color-mix(in srgb, var(--red) 12%, var(--surface)); }
+  .diff .more { padding:4px 10px; font-size:11.5px; color:var(--subtle); border-top:1px solid var(--edge); }
+
+  .expanded { margin-left:16px; display:flex; flex-direction:column; gap:2px; font-size:12px; color:var(--subtle); }
+  .expanded div { display:flex; gap:8px; }
+
+  .status { margin-top:4px; display:flex; align-items:center; gap:8px; background:var(--surface); border:1px solid var(--edge); border-radius:12px; padding:7px 12px; font-size:12px; }
+  .status b { font-size:12.5px; }
+  .status .now { color:var(--subtle); flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .spin { color:var(--accent); }
+  .composer { border:1px solid var(--edge); border-radius:12px; padding:10px 12px; color:var(--muted); background:var(--surface); }
+
+  .summary { margin-left:38px; color:var(--subtle); font-size:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .chip { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; background:var(--surface); border:1px solid var(--edge); border-radius:5px; padding:0 6px; }
+
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th, td { text-align:left; padding:5px 6px; border-bottom:1px solid var(--edge); vertical-align:top; }
+  th { color:var(--subtle); font-weight:500; }
+</style>
+</head>
+<body>
+<main>
+  <div class="study">
+    <b>Static study, agent conversation.</b> New parts are outlined in rust. Today a working agent shows only a fixed card with its last line and three latest steps, and its narration and diffs live in the history sheet. Here the live turn's work flows into the conversation itself, and can be collapsed to one line: what the agent says and every file it changes stay visible, and only the quiet steps (reads, searches, thinking, plan updates, workspace and other tool calls) fold into one line per run. Sample content is invented; nothing here is wired to an agent.
+  </div>
+
+  <h1>Implementer · wiffletree: protected branches</h1>
+
+  <div class="row">
+    <div>
+      <div class="section">A · WHILE THE AGENT WORKS</div>
+      <div class="pane">
+        <div class="msg human"><div class="bubble">Tighten the "already protected" message and simplify the dedupe in rows().</div></div>
+
+        <div class="work new">
+          <div class="quiet"><span class="chev">▸</span><span class="kinds"><span>Read 4 files</span><span>searched 2 times</span><span>1 workspace call</span></span></div>
+          <div class="say">The "already protected" message lowercases "GitHub"; tightening that.</div>
+          <div class="quiet"><span class="chev">▸</span><span class="kinds"><span>Read protected.rs</span></span></div>
+          <div class="diff">
+            <div class="head"><span class="ok">✓</span><span>✎</span><span class="path">crates/workspace-core/src/protected.rs</span><span class="counts"><span class="add">+7</span> <span class="del">−13</span></span></div>
+            <pre>
+<div class="hunk">@@ line 240</div>
+<div>          if self.listed(entry) {</div>
+<div>              return Some(format!("“{entry}” is already on the list"));</div>
+<div>          }</div>
+<div class="d">-         if self.always(entry) {</div>
+<div class="d">-             return Some(format!("“{entry}” is already protected: {}", {</div>
+<div class="d">-                 row.reason().to_lowercase()</div>
+<div class="a">+         let why = match (self.default_branch == Some(entry), self.base == Some(entry)) {</div>
+<div class="a">+             (true, true) =&gt; "it is the default branch on GitHub and this repository’s base",</div>
+<div class="a">+             (true, false) =&gt; "it is the default branch on GitHub",</div></pre>
+            <div class="more">▾ 12 more lines</div>
+          </div>
+          <div class="say">Simplifying the dedupe in <code>rows()</code>.</div>
+          <div class="diff">
+            <div class="head"><span class="ok">✓</span><span>✎</span><span class="path">crates/workspace-core/src/protected.rs</span><span class="counts"><span class="add">+7</span> <span class="del">−15</span></span></div>
+            <pre>
+<div class="hunk">@@ line 159</div>
+<div>      pub fn rows(&amp;self) -&gt; Vec&lt;ProtectedRow&gt; {</div>
+<div class="d">-         let mut rows: Vec&lt;ProtectedRow&gt; = [self.default_branch, self.base]</div>
+<div class="d">-             .into_iter()</div>
+<div class="d">-             .flatten()</div>
+<div class="a">+         let names: BTreeSet&lt;&amp;str&gt; = [self.default_branch, self.base].into_iter().flatten().collect();</div></pre>
+            <div class="more">▾ 18 more lines</div>
+          </div>
+          <div class="cmd"><span class="bad">✕</span><code>cargo test -p workspace-core protected</code><span class="tag bad">exit 101</span><span class="chev">▸</span></div>
+          <div class="say">One assertion still expected the old wording; updating the test.</div>
+          <div class="quiet"><span class="chev">▾</span><span class="kinds"><span>Read 2 files</span><span>searched 1 time</span></span></div>
+          <div class="expanded">
+            <div><span class="ok">✓</span>Read crates/workspace-core/tests/protected.rs</div>
+            <div><span class="ok">✓</span>Search “already protected”</div>
+            <div><span class="ok">✓</span>Read crates/workspace-core/src/protected.rs</div>
+          </div>
+          <div class="diff">
+            <div class="head"><span class="ok">✓</span><span>✎</span><span class="path">crates/workspace-core/tests/protected.rs</span><span class="counts"><span class="add">+1</span> <span class="del">−1</span></span></div>
+            <pre>
+<div class="hunk">@@ line 88</div>
+<div class="d">-     assert_eq!(why, "“main” is already protected: default branch on github");</div>
+<div class="a">+     assert_eq!(why, "“main” is already protected: it is the default branch on GitHub");</div></pre>
+          </div>
+          <div class="say">The full workspace test run is going again in the background, this time with a two-hour limit.</div>
+          <div class="cmd"><span class="run">◌</span><code>cargo nextest run --workspace</code><span class="tag">running · 4:12</span></div>
+        </div>
+
+        <div class="status new"><span class="spin">◌</span><b>Working</b><span class="tag">· 64:27 · 174 steps · 3 files changed</span><span class="now">cargo nextest run --workspace</span><span class="chev">▾</span></div>
+        <div class="composer">Give this agent a direct instruction…</div>
+      </div>
+    </div>
+
+    <div class="side">
+      <div class="note"><b>Visible.</b> The agent's narration in full, every file edit with its diff open (first 10 lines, then “N more lines”), and each shell command as one line with its result. A failed command is red; a running one shows its elapsed time. Output opens on click.</div>
+      <div class="note"><b>Folded.</b> Reads, searches, thinking, plan updates and workspace or other tool calls. Each unbroken run of them becomes one muted line such as “Read 4 files · searched 2 times”, which opens in place. A failed quiet step stays visible and red.</div>
+      <div class="note"><b>Status line.</b> The fixed card shrinks to one line at the bottom: elapsed time, steps, files changed and the step running now. It stays put while the work above it grows.</div>
+      <div class="note"><b>Scrolling.</b> The conversation follows new work only while you are at the bottom. Scrolled up, it stays where you are and the status line offers “Jump to latest”.</div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div>
+      <div class="section">B · LIVE WORK COLLAPSED</div>
+      <div class="pane">
+        <div class="msg human"><div class="bubble">Tighten the "already protected" message and simplify the dedupe in rows().</div></div>
+        <div class="status new"><span class="spin">◌</span><b>Working</b><span class="tag">· 64:27 · 174 steps · 3 files changed</span><span class="now">The full workspace test run is going again in the background…</span><span class="chev">▸</span></div>
+        <div class="composer">Give this agent a direct instruction…</div>
+      </div>
+    </div>
+    <div class="side">
+      <div class="note"><b>Collapsible.</b> The chevron on the status line hides the live work, leaving only the line with the agent's latest narration. The choice is a client preference, as minimizing is today, so it applies to every agent and survives relaunch.</div>
+      <div class="note"><b>Finished turns unchanged.</b> When the turn ends, the live work is replaced by today's “Worked 1h 6m · 181 steps” line above the reply, which still opens the history sheet.</div>
+    </div>
+  </div>
+
+  <div>
+    <div class="section">WHAT EACH STEP KIND DOES</div>
+    <table>
+      <tr><th>Step kind</th><th>While working</th><th>Detail</th></tr>
+      <tr><td>Narration</td><td>Shown in full</td><td>File references stay links</td></tr>
+      <tr><td>File edit</td><td>Shown, diff open</td><td>First 10 lines, “N more lines” up to the stored 40</td></tr>
+      <tr><td>Command</td><td>Shown, one line</td><td>Output on click; failed is red</td></tr>
+      <tr><td>Read, Search</td><td>Folded</td><td>Counted in the run's line</td></tr>
+      <tr><td>Thinking, Plan, Tool</td><td>Folded</td><td>Counted in the run's line; failed ones shown</td></tr>
+    </table>
+  </div>
+</main>
+</body>
+</html>

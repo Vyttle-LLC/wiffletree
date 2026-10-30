@@ -94,34 +94,11 @@ The host SHALL persist each step when it starts and when it changes state, so a 
 - **WHEN** a command produces more output than the detail bound
 - **THEN** the step keeps the most recent output and indicates that earlier output was omitted
 
-### Requirement: Live activity card
-While the selected session is working, the conversation SHALL show one activity card after the last message. The card's headline SHALL be the latest narration line, which replaces the previous one as new narration arrives. Beneath it, the card SHALL show the three most recent non-narration steps with their state, newest last. It SHALL also show the elapsed time and the step count. The card SHALL keep a fixed height in each state, so that updates do not move the transcript. The user SHALL be able to minimize the card to a single line that shows the elapsed time, the step count and the current step, and to restore it. The choice SHALL apply to later turns and sessions, and SHALL persist across app launches. The elapsed-time refresh SHALL run only while a visible session is working.
-
-#### Scenario: Agent narrates and runs a command
-- **WHEN** the selected agent writes "Now checking which tests fail" and then starts `pytest`
-- **THEN** the card's headline shows that narration, and `pytest` appears as the newest running step
-
-#### Scenario: Steady layout
-- **WHEN** steps arrive while the user reads earlier messages
-- **THEN** the transcript's scroll position and the card's height do not change
-
-#### Scenario: Minimize and restore
-- **WHEN** the user minimizes the card, selects another working agent, and then restores the card
-- **THEN** the other agent's card also appears minimized and still updates its current step, and restoring shows the narration headline and recent steps again
-
-#### Scenario: Open history from the minimized line
-- **WHEN** the user activates the minimized line
-- **THEN** the turn history sheet opens
-
-#### Scenario: Idle app
-- **WHEN** no visible session is working
-- **THEN** no activity timer runs
-
 ### Requirement: Turn history sheet
-Activating the activity card or a finished turn's summary SHALL open a sheet over the right side of the window, without resizing the conversation. The sheet SHALL show that turn's full history in order, with each narration paragraph followed by the steps that came after it. Each step SHALL show its kind, title and state, and SHALL expand to show its bounded detail. While the turn is running, the sheet SHALL update live. It SHALL keep the reader's scroll position when they have scrolled up, and follow new steps otherwise. Escape or clicking outside the sheet SHALL close it, and the composer draft SHALL be kept.
+Activating the status line or a finished turn's summary SHALL open a sheet over the right side of the window, without resizing the conversation. The sheet SHALL show that turn's full history in order, with each narration paragraph followed by the steps that came after it. Each step SHALL show its kind, title and state, and SHALL expand to show its bounded detail. While the turn is running, the sheet SHALL update live. It SHALL keep the reader's scroll position when they have scrolled up, and follow new steps otherwise. Escape or clicking outside the sheet SHALL close it, and the composer draft SHALL be kept.
 
 #### Scenario: Inspect a running turn
-- **WHEN** the user clicks the activity card while the agent is running tests
+- **WHEN** the user clicks the status line while the agent is running tests
 - **THEN** the sheet opens with the turn's history so far and shows new steps as they arrive
 
 #### Scenario: Expand command output
@@ -133,7 +110,7 @@ Activating the activity card or a finished turn's summary SHALL open a sheet ove
 - **THEN** the scroll position is kept
 
 ### Requirement: Finished turn summary
-When a turn ends, its activity card SHALL be replaced by a one-line summary placed directly above the turn's reply. The summary SHALL show the duration and step count, and failed or interrupted steps if there were any. Earlier turns SHALL show the same summary after a restart, using stored steps.
+When a turn ends, its live work and status line SHALL be replaced by a one-line summary placed directly above the turn's reply. The summary SHALL show the duration and step count, and failed or interrupted steps if there were any. Earlier turns SHALL show the same summary after a restart, using stored steps.
 
 #### Scenario: Review a past turn
 - **WHEN** the user clicks "Worked 9m 12s · 23 steps" on an earlier reply
@@ -181,3 +158,32 @@ A compaction that succeeds SHALL add one entry to the agent's conversation readi
 #### Scenario: After a restart
 - **WHEN** the host restarts after a compaction succeeded
 - **THEN** the conversation still shows its line at the same place
+
+### Requirement: Live work in the conversation
+While the selected session is working, its conversation SHALL show the current turn's work after the last message, in turn order. Narration SHALL be shown in full, with its file references linked. A file edit SHALL be shown with its diff open: a header with its path and lines added and removed, the first 10 diff lines, and a toggle naming how many more kept lines there are, which shows them all; lines past those kept SHALL be noted as today once every kept line is shown. A command SHALL be one line with its title, state and note, or its running time while it runs; a failed command SHALL be red, and its output SHALL open on click. Each unbroken run of read, search, thinking, plan and tool steps SHALL fold into one muted line counting them by kind, such as "Read 4 files · searched 2 times · 1 tool call", which SHALL open in place to the run's steps. A failed step of those kinds SHALL NOT fold: it SHALL break its run and show on its own, red. The live work SHALL be drawn through the transcript's list, so that a run of 2,000 steps does not block the interface, and a page of new steps SHALL measure again only the rows that changed.
+
+A status line SHALL sit between the transcript and the composer while the session works, at a fixed height, showing that it is working, the elapsed time, the step count, the number of files changed and the current step. Activating it SHALL open the turn's history. Its chevron SHALL collapse the live work, leaving only the status line, which then shows the latest narration; the choice SHALL apply to later turns and sessions and SHALL persist across app launches. The conversation SHALL follow new work only while the reader is at the bottom; scrolled up, it SHALL keep the reader's place, and the status line SHALL offer "Jump to latest". The elapsed-time refresh SHALL run only while a visible session is working.
+
+#### Scenario: Agent narrates, edits and runs a command
+- **WHEN** the selected agent writes "Tightening the message", edits `protected.rs` with a 22-line diff and then runs `cargo test`, which fails with exit 101
+- **THEN** the conversation shows the narration, the edit with its first 10 diff lines and "12 more lines", and a red `cargo test` line noting exit 101, in that order
+
+#### Scenario: Quiet steps fold per run
+- **WHEN** the agent reads four files, searches twice, narrates, and then reads one more file
+- **THEN** one line reads "Read 4 files · searched 2 times" before the narration, and a second line follows it for the later read
+
+#### Scenario: A failed quiet step stays visible
+- **WHEN** a search fails between two reads
+- **THEN** each read folds on its own and the failed search shows between them, red
+
+#### Scenario: Reading while streaming
+- **WHEN** steps arrive while the user reads earlier messages
+- **THEN** the transcript's scroll position and the status line's height do not change, and the status line offers "Jump to latest"
+
+#### Scenario: Collapse and restore
+- **WHEN** the user collapses the live work, selects another working agent, and then restores it
+- **THEN** the other agent shows only its status line, with its latest narration, and restoring shows its live work again
+
+#### Scenario: Idle app
+- **WHEN** no visible session is working
+- **THEN** no activity timer runs
