@@ -2171,8 +2171,9 @@ mod tests {
         let coordinator = host.sessions().unwrap().remove(0);
         for tool in mcp::tools().as_array().unwrap() {
             let name = tool["name"].as_str().unwrap();
+            // `merge_ticket` merges a pull request, not a skill; it is still called below.
             for word in ["merge", "undo", "dismiss", "skill", "wording"] {
-                assert!(!name.contains(word), "{name}");
+                assert!(name == "merge_ticket" || !name.contains(word), "{name}");
             }
             let args = json!({"skill": "coordinating", "entry": merge_entry, "text": "Agent's",
                 "wordings": ["stock"]});

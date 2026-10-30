@@ -1115,7 +1115,7 @@ impl Host {
         self.save_ticket(ticket)
     }
 
-    fn is_unanswered(&self, attention: &str) -> Result<bool> {
+    pub(crate) fn is_unanswered(&self, attention: &str) -> Result<bool> {
         Ok(self
             .db
             .query_row(
@@ -1495,6 +1495,7 @@ pub(crate) mod tests {
             unresolved_threads: 0,
             comments: CommentCursors::default(),
             merge_commit: None,
+            merged_by_host: None,
         };
         let mut ticket = f.ticket();
         ticket.pull_request = Some(pr.clone());

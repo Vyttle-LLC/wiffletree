@@ -117,6 +117,12 @@ pub fn tools() -> Value {
             vec!["ticket_id"]
         ),
         tool(
+            "merge_ticket",
+            "Project coordinator only: merge the ticket's open pull request on GitHub, which accepts the ticket in the same step. The workspace runs the merge itself, with the first method GitHub allows of squash, merge commit and rebase, pinned to the checked head; you never merge from your shell. It refuses, merging nothing, when the pull request's base is protected, as protected_branches in workspace_context shows (only the human merges there, whoever asks), when the repository does not publish without asking, when acceptance would be refused, when the head is not the commit Wiffletree pushed after the review, or when GitHub reports a conflict, failed checks or cannot be read. While checks run it waits and merges when they pass. After a blocked review, with or without waived, or over commits no review checked, it waits for the human's approval in their inbox. waived is the one-line acceptance waiver, as for accept_ticket. Each open pull request of a ticket stacked on this one is retargeted to the merged pull request's base. Returns merged, waiting_for_checks, waiting_for_human or the refusal; a waiting request's result arrives later as a message from Wiffletree, so finish your turn.",
+            json!({"ticket_id":string,"waived":string}),
+            vec!["ticket_id"]
+        ),
+        tool(
             "close_ticket",
             "Coordinator: close a ticket that needs no more work, such as a finished review, once its findings are recorded. Archives its agents and removes its worktree; conversations and branch are kept. Refuses while the worktree has uncommitted or untracked files or an agent has not reported; an agent that reported and is still finishing its turn delays only the removal.",
             json!({"ticket_id":string}),

@@ -13,8 +13,8 @@ pub(crate) enum Base {
         /// The parent ticket's branch.
         branch: String,
         parent: String,
-        /// The host has pushed the parent's branch to GitHub.
-        pushed: bool,
+        /// The commit the host last pushed to the parent's branch on GitHub.
+        pushed: Option<String>,
         /// The parent's pull request has merged.
         merged: bool,
     },
@@ -27,7 +27,7 @@ impl Base {
                 repository: effective_base(parent, repository),
                 branch: parent.branch.clone(),
                 parent: parent.title.clone(),
-                pushed: parent.pushed.is_some(),
+                pushed: parent.pushed.clone(),
                 merged: parent
                     .pull_request
                     .as_ref()
@@ -44,14 +44,40 @@ impl Base {
             Self::Stacked { branch, .. } => branch,
         }
     }
-    /// Whether two commits carry the same patch against the measured ref. A stacked ticket's
-    /// patch is its own changes alone, so a rebase of the whole stack needs a new review.
+    /// Whether two commits carry the same patch, each measured against the ref it was built on.
+    /// A stacked ticket's patch is its own changes alone, so a rebase of the whole stack needs a
+    /// new review.
     pub(crate) fn same_patch(&self, worktree: &Path, one: &str, other: &str) -> Result<bool> {
-        let base = self.measured();
         Ok(
-            worktrees::patch_id(worktree, base, one)?
-                == worktrees::patch_id(worktree, base, other)?,
+            worktrees::patch_id(worktree, self.built_on(worktree, one), one)?
+                == worktrees::patch_id(worktree, self.built_on(worktree, other), other)?,
         )
+    }
+    /// The measured ref, except for a commit rebased off its parent's merged pull request: that
+    /// one no longer holds the parent's last pushed head, and is measured against the parent's
+    /// base, which now holds the parent's changes.
+    fn built_on(&self, worktree: &Path, commit: &str) -> &str {
+        match self {
+            Self::Stacked {
+                repository,
+                pushed: Some(parent_head),
+                merged: true,
+                ..
+            } if !publish::is_ancestor(worktree, parent_head, commit) => repository,
+            _ => self.measured(),
+        }
+    }
+    /// The parent's last pushed head, once the parent's pull request merged: a rebase of the
+    /// child replays only the commits after it.
+    pub(crate) fn merged_parent_head(&self) -> Option<&str> {
+        match self {
+            Self::Stacked {
+                pushed: Some(head),
+                merged: true,
+                ..
+            } => Some(head),
+            _ => None,
+        }
     }
     /// The branch on origin the pull request opens into: the parent's branch once the host has
     /// pushed it, or the parent's base after the parent's pull request merged.
@@ -65,7 +91,7 @@ impl Base {
                 ..
             } => {
                 ensure!(
-                    *pushed,
+                    pushed.is_some(),
                     "This ticket is stacked on \"{parent}\", whose branch {branch} is not on GitHub yet. Publish that ticket first, then publish this one; nothing was pushed."
                 );
                 return Ok(branch.clone());
@@ -429,5 +455,66 @@ mod tests {
         fs::write(worktree.join("a.txt"), "one\n").unwrap();
         git(worktree, &["commit", "-q", "-am", "revert the fix"]);
         assert!(f.host.check_verified_head(&child, &head, None).is_err());
+    }
+
+    #[test]
+    fn a_child_rebased_off_its_squash_merged_parent_keeps_its_review() {
+        let mut f = fixture();
+        let mut parent = f.ticket();
+        parent.pushed = Some(f.head());
+        f.host.save_ticket(&parent).unwrap();
+        let child = reviewed_child(&mut f);
+        let worktree = Path::new(&child.worktree);
+        let reviewed = git(worktree, &["rev-parse", "HEAD"]);
+        // The host squash-merged the parent into main.
+        git(
+            &f.repository,
+            &["checkout", "-q", "-b", "squash", "origin/main"],
+        );
+        fs::write(f.repository.join("a.txt"), "one\n").unwrap();
+        fs::write(f.repository.join("b.txt"), "two\n").unwrap();
+        git(&f.repository, &["add", "."]);
+        git(
+            &f.repository,
+            &["commit", "-q", "-m", "Fix contrast (#180)"],
+        );
+        let squashed = git(&f.repository, &["rev-parse", "HEAD"]);
+        git(
+            &f.repository,
+            &["update-ref", "refs/remotes/origin/main", &squashed],
+        );
+        git(&f.repository, &["checkout", "-q", "main"]);
+        let mut merged = crate::publish::tests::watch_open_pr(&mut f, 180);
+        merged.state = PrState::Merged;
+        let mut parent = f.ticket();
+        parent.pull_request = Some(merged);
+        f.host.save_ticket(&parent).unwrap();
+
+        let base = f.host.ticket_base(&child).unwrap();
+        assert_eq!(base.merged_parent_head(), parent.pushed.as_deref());
+        let job = crate::keeper::Job {
+            ticket_id: child.id.clone(),
+            repository: f.repository.clone(),
+            upstream: base.merged_parent_head().map(Into::into),
+            base,
+            pr_base: "origin/main".into(),
+            base_commit: squashed.clone(),
+            head: reviewed.clone(),
+            verified: reviewed.clone(),
+            checkout: f.home.path().join("keeper-checkout"),
+            checks: None,
+            tries: false,
+        };
+        let outcome = crate::keeper::rebase(&job, |_, _| Ok(true));
+        let crate::keeper::Rebased::Same(rebased) = outcome.result else {
+            panic!("the rebase is not the same change");
+        };
+        // Only the child's own commit was replayed onto the squash.
+        assert_eq!(
+            git(worktree, &["rev-parse", &format!("{rebased}^")]),
+            squashed
+        );
+        git(worktree, &["reset", "-q", "--hard", &rebased]);
+        f.host.check_verified_head(&child, &reviewed, None).unwrap();
     }
 }

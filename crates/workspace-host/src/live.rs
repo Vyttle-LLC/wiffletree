@@ -389,6 +389,14 @@ impl Host {
         if ticket.state == TicketState::Accepted {
             return Ok(ticket);
         }
+        let accepted = self.acceptance(&ticket, waived)?;
+        ticket.waiver = accepted.waiver;
+        ticket.waived_commits = accepted.waived_commits;
+        self.finish_ticket(ticket, TicketState::Accepted, "ticket_accepted")
+    }
+    /// The checks of `accept_ticket` short of removing the worktree, and the waiver it would
+    /// record.
+    pub(crate) fn acceptance(&self, ticket: &Ticket, waived: Option<&str>) -> Result<Accepted> {
         ensure!(ticket.is_open(), "Ticket is already {}", ticket.state);
         if let Some(cycle) = ticket.running_cycle() {
             bail!(
@@ -400,7 +408,7 @@ impl Host {
             "Start verification with verify_ticket; acceptance needs the commit it verified",
         )?;
         let waived = waived.map(one_line_reason).transpose()?;
-        let unreviewed_waiver = self.unreviewed_waiver(&ticket, waived);
+        let unreviewed_waiver = self.unreviewed_waiver(ticket, waived);
         match (verification.outcome, waived) {
             (VerificationOutcome::Passed, None) | (VerificationOutcome::Blocked, Some(_)) => {}
             (VerificationOutcome::Passed, Some(_)) if unreviewed_waiver.is_some() => {}
@@ -413,9 +421,9 @@ impl Host {
                 verification.cycle
             ),
         }
-        ensure_findings_settled(&ticket, verification, "accepting")?;
+        ensure_findings_settled(ticket, verification, "accepting")?;
         let verified = verification.verified_commit().context("No round")?;
-        let waived_commits = self.check_verified_head(&ticket, verified, unreviewed_waiver)?;
+        let waived_commits = self.check_verified_head(ticket, verified, unreviewed_waiver)?;
         ensure!(
             verification.outcome == VerificationOutcome::Blocked
                 || waived.is_none()
@@ -428,9 +436,10 @@ impl Host {
             waived.is_some() || waived_commits.is_empty(),
             "The branch has commits no review checked; accept with waived naming each by its short SHA"
         );
-        ticket.waiver = waived.map(Into::into);
-        ticket.waived_commits = waived_commits;
-        self.finish_ticket(ticket, TicketState::Accepted, "ticket_accepted")
+        Ok(Accepted {
+            waiver: waived.map(Into::into),
+            waived_commits,
+        })
     }
     /// HEAD is the verified commit, or has the same patch id against the ticket's base, as
     /// after a squash or a clean rebase, or, with a waiver `unreviewed_waiver` allows at the
@@ -468,6 +477,7 @@ impl Host {
         let finished = self.with_worktrees_removed(&[ticket.clone()], |host| {
             // Before its caller is archived, so the caller still gets the request's one message.
             host.withdraw_request(&mut ticket, &format!("the ticket was {state}"))?;
+            host.withdraw_merge(&mut ticket, &format!("the ticket was {state}"))?;
             for agent in host.ticket_agents(&ticket.id)? {
                 host.set_archived(&agent.id, true)?;
             }
@@ -1112,6 +1122,13 @@ pub(crate) fn ensure_findings_settled(
         untriaged.join(", ")
     );
     Ok(())
+}
+
+/// What accepting a ticket records: the waiver, and the commits no review checked that it
+/// covers.
+pub(crate) struct Accepted {
+    pub waiver: Option<String>,
+    pub waived_commits: Vec<String>,
 }
 
 /// `Host::check_verified_head` for a caller that has the ticket's base without the store,

@@ -426,6 +426,26 @@ fn spawn_publish_step(sender: Sender<Event>, job: publish::Job, tools: publish::
         |_, outcome| Event::Published(outcome),
     );
 }
+/// `reply` is the `merge_ticket` call waiting for the job's answer, when there is one.
+fn spawn_merge_job(
+    sender: Sender<Event>,
+    job: merge::Job,
+    tools: publish::Tools,
+    reply: Option<Reply>,
+) {
+    spawn_job(
+        sender,
+        (job, reply),
+        move |(job, _)| merge::run(job, &tools),
+        |(job, _)| merge::Outcome {
+            ticket_id: job.ticket_id.clone(),
+            request_id: job.request.id.clone(),
+            result: merge::Decided::Refused("the merge job stopped unexpectedly".into()),
+            children: vec![],
+        },
+        |(_, reply), outcome| Event::Merged(Box::new(outcome), reply),
+    );
+}
 fn spawn_sync_pass(sender: Sender<Event>, pass: sync::Pass, tools: publish::Tools) {
     spawn_job(
         sender,
@@ -635,6 +655,9 @@ enum Event {
     GhLogin(Option<String>),
     /// A publish step finished on its own thread.
     Published(publish::Outcome),
+    /// A merge decision finished on its own thread, with the `merge_ticket` call waiting for
+    /// it, if one is.
+    Merged(Box<merge::Outcome>, Option<Reply>),
     /// A PR keeper rebase finished on its own thread.
     Kept(keeper::Outcome),
     /// A PR keeper fetch of GitHub's branch finished on its own thread.
@@ -1035,6 +1058,13 @@ impl Service {
                     vec![]
                 }) {
                     actor.run_creation(creation, None);
+                }
+                // A merge running when the host stopped is finished or ended on GitHub's word.
+                match actor.host.interrupted_merges() {
+                    Ok(jobs) => jobs
+                        .into_iter()
+                        .for_each(|job| actor.run_merge_job(job, None)),
+                    Err(error) => eprintln!("Recover merges: {error:#}"),
                 }
                 // Timers that came due while the host was stopped fire now.
                 if let Err(e) = actor.schedule() {
@@ -1559,6 +1589,7 @@ impl Actor {
                         | "accept_ticket"
                         | "close_ticket"
                         | "publish_ticket"
+                        | "merge_ticket"
                         | "triage_findings"
                 ) =>
             {
@@ -1570,6 +1601,7 @@ impl Actor {
                 .as_str()
                 .is_some_and(|id| reservations.blocks_session(&self.host, id)),
             Event::Kept(outcome) => reservations.contains(&outcome.ticket_id),
+            Event::Merged(outcome, _) => reservations.contains(&outcome.ticket_id),
             Event::Gated(outcome) => reservations.contains(&outcome.ticket_id),
             Event::Reproduced(outcome) => reservations.contains(&outcome.ticket_id),
             Event::Fetched(outcome) => reservations.contains(&outcome.ticket_id),
@@ -2219,6 +2251,11 @@ impl Actor {
                                 json!({"behavior":"deny","message":answer})
                             };
                             let _ = permission.reply.try_send(Ok(decision));
+                        } else if attention.is_merge() {
+                            // As for a publish, the request's own result is its one message.
+                            if let Some(job) = self.host.answer_merge(id, answer == "approved")? {
+                                self.run_merge_job(job, None);
+                            }
                         } else if attention.is_publish() {
                             // The request's own result is its caller's one message, so the
                             // answer is not sent on as other Inbox answers are.
@@ -2290,6 +2327,15 @@ impl Actor {
                                 args["base"].as_str(),
                                 reply.clone(),
                             )?;
+                            return Ok(None);
+                        }
+                        "merge_ticket" => {
+                            only_arguments("merge_ticket", &args, &["ticket_id", "waived"])?;
+                            let ticket = args["ticket_id"].as_str().context("Missing ticket_id")?;
+                            let job =
+                                self.host
+                                    .merge_ticket(&id, ticket, args["waived"].as_str())?;
+                            self.run_merge_job(job, Some(reply.clone()));
                             return Ok(None);
                         }
                         "publish_ticket" => {
@@ -2412,6 +2458,13 @@ impl Actor {
                         eprintln!("Workspace PR watch: {e:#}");
                         false
                     });
+                // Each waiting merge is decided again on what this pass recorded.
+                match self.host.merges_due(&repository) {
+                    Ok(jobs) => jobs
+                        .into_iter()
+                        .for_each(|job| self.run_merge_job(job, None)),
+                    Err(e) => eprintln!("Workspace merge: {e:#}"),
+                }
                 self.keep_pull_requests(&repository, at) || recorded
             }
             Event::Kept(outcome) => {
@@ -2556,6 +2609,23 @@ impl Actor {
                     match self.host.record_published(outcome) {
                         Ok(next) => self.run_publish_step(next),
                         Err(error) => eprintln!("Workspace publish: {error:#}"),
+                    }
+                }
+                true
+            }
+            Event::Merged(outcome, reply) => {
+                if let Ok(ticket) = self.host.ticket(&outcome.ticket_id) {
+                    self.pr_watch.check_now(&ticket.repository_id);
+                }
+                let recorded = self.host.record_merge(*outcome, reply.is_some());
+                match reply {
+                    Some(reply) => {
+                        let _ = reply.try_send(recorded.map_err(|error| format!("{error:#}")));
+                    }
+                    None => {
+                        if let Err(error) = recorded {
+                            eprintln!("Workspace merge: {error:#}");
+                        }
                     }
                 }
                 true
@@ -3218,6 +3288,19 @@ impl Actor {
                     .session_runtime(id)
                     .is_ok_and(|r| r.ticket_id.as_deref() == Some(ticket_id))
             })
+    }
+    fn run_merge_job(&mut self, job: merge::Job, reply: Option<Reply>) {
+        if self.stopping {
+            // The next start finishes or ends the stored request.
+            if let Some(reply) = reply {
+                let _ = reply.try_send(Err(
+                    "Wiffletree is stopping; the merge request is decided when it starts again"
+                        .into(),
+                ));
+            }
+            return;
+        }
+        spawn_merge_job(self.sender.clone(), job, self.publish_tools.clone(), reply);
     }
     fn run_publish_step(&mut self, step: Option<publish::Job>) {
         if self.stopping {
@@ -4818,6 +4901,7 @@ mod tests {
                 unresolved_threads: 0,
                 comments: CommentCursors::default(),
                 merge_commit: None,
+                merged_by_host: None,
             });
             host.save_ticket(&ticket).unwrap();
             finished.push(ticket);

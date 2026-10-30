@@ -159,13 +159,35 @@ impl<'a> ProtectedBranches<'a> {
         self.rulesets.unwrap_or_default()
     }
     pub fn protects(&self, branch: &str) -> bool {
-        self.always(branch)
-            || self
-                .entries
-                .iter()
-                .any(|entry| branch_matches(entry, branch))
-            || (self.rulesets().iter()).any(|r| r.applies(branch, self.default_branch))
-            || (self.protection_rules().iter()).any(|rule| branch_matches(rule, branch))
+        self.why(branch).is_some()
+    }
+    /// What protects the branch, such as "the GitHub ruleset “Releases” protects it"; `None`
+    /// when nothing does.
+    pub fn why(&self, branch: &str) -> Option<String> {
+        if self.default_branch == Some(branch) {
+            return Some("it is the default branch on GitHub".into());
+        }
+        if self.base == Some(branch) {
+            return Some("it is this repository’s base".into());
+        }
+        if let Some(entry) = (self.entries.iter()).find(|entry| branch_matches(entry, branch)) {
+            return Some(format!("the protected branches entry “{entry}” matches it"));
+        }
+        if let Some(ruleset) =
+            (self.rulesets().iter()).find(|r| r.applies(branch, self.default_branch))
+        {
+            return Some(format!("the GitHub ruleset “{}” protects it", ruleset.name));
+        }
+        (self.protection_rules().iter())
+            .find(|rule| branch_matches(rule, branch))
+            .map(|rule| format!("the GitHub branch protection rule “{rule}” protects it"))
+    }
+    /// The same branches, with the default branch GitHub reports now.
+    pub fn with_default_branch(self, default_branch: Option<&'a str>) -> Self {
+        Self {
+            default_branch,
+            ..self
+        }
     }
     /// A ruleset, a branch protection rule or an entry protects every branch, so the host can
     /// merge nothing in the repository.

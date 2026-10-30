@@ -18,6 +18,7 @@ pub mod live;
 pub mod login_env;
 pub mod mcp;
 mod memory;
+mod merge;
 mod order;
 mod overlaps;
 mod policies;
@@ -225,6 +226,7 @@ fn ensure_unreserved(operation: &str) -> Result<()> {
         TURN_COUNT,
         LEFTOVER_PROCESS,
         PUBLISH_PREFIX,
+        MERGE_PREFIX,
         PERMISSION_PREFIX,
     ] {
         ensure!(
@@ -356,6 +358,7 @@ impl Host {
         host.clear_uploads()?;
         host.recover()?;
         host.end_interrupted_publishes()?;
+        host.end_interrupted_merges()?;
         host.end_keeper_work()?;
         host.migrate_opus_defaults()?;
         host.migrate_model_selection()?;
@@ -1125,9 +1128,9 @@ impl Host {
     ) -> Result<Message> {
         self.queue(id, sender, recipient, body, &[], &[], Delivery::PastCap)
     }
-    /// Queues the one result of an accepted publish request past the recipient cap: each
-    /// request sends exactly one, and a refused one would leave its caller waiting for a result
-    /// that never comes.
+    /// Queues the one result of an accepted publish or merge request past the recipient cap:
+    /// each request sends exactly one, and a refused one would leave its caller waiting for a
+    /// result that never comes.
     pub(crate) fn send_publish_result(
         &mut self,
         id: &str,
