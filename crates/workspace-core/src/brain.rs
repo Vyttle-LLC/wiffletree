@@ -36,10 +36,24 @@ pub struct Brain {
     /// auto-merge waits while any is missing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_checks: Vec<String>,
+    /// The checks `main` requires, as the last pass read them; only these decide a batch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_checks: Vec<String>,
     /// The legacy pointer `~/.config/claude-second-brain` names the human's clone of this brain,
     /// whose safety-net must open pull requests instead of pushing to `main`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub legacy_pointer: bool,
+    /// The most recent batch PR here, however long ago it was opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_pull_request: Option<BrainLastPullRequest>,
+}
+
+/// A brain's most recent batch pull request and the stage its batch reached.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrainLastPullRequest {
+    pub number: u64,
+    pub kind: BrainBatchKind,
+    pub stage: BrainStage,
 }
 
 /// Why the host stopped writing to a brain. It never resets, stashes or overwrites; the human

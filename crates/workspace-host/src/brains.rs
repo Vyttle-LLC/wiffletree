@@ -272,6 +272,8 @@ pub(crate) struct Passed {
     config: Option<BrainConfigReading>,
     /// The gate checks `main` does not require, when the pass could write and read them.
     missing_checks: Option<Vec<String>>,
+    /// The checks `main` requires, read alongside them.
+    required_checks: Option<Vec<String>>,
     problem: Option<String>,
     work: Vec<Work>,
 }
@@ -290,6 +292,7 @@ pub(crate) fn pass(mut pass: Pass, tools: &Tools) -> Passed {
         held: None,
         config: None,
         missing_checks: None,
+        required_checks: None,
         problem: None,
         work: vec![],
     };
@@ -361,6 +364,7 @@ fn run_pass(pass: &mut Pass, passed: &mut Passed, tools: &Tools) -> Result<()> {
         .map(|check| check.to_string())
         .collect();
     passed.missing_checks = Some(missing.clone());
+    passed.required_checks = Some(required.clone());
     let gate = Gate {
         required: &required,
         missing: &missing,
@@ -972,6 +976,7 @@ impl Host {
                     local.notes.push(format!(
                         "Its brain folder {path} has no GitHub origin, so this Space has no brain now. Name a brain repository in the Space's settings."
                     ));
+                    local.brain_without_origin = Some(path);
                 }
             }
             self.db.execute(
@@ -1028,7 +1033,9 @@ impl Host {
                 held: None,
                 config: BrainConfigReading::Unread,
                 missing_checks: vec![],
+                required_checks: vec![],
                 legacy_pointer: false,
+                last_pull_request: None,
             };
             self.db.execute(
                 "INSERT INTO brains(repository,data) VALUES (?1,?2)",
@@ -1038,12 +1045,12 @@ impl Host {
         Ok(())
     }
 
-    /// Every registered brain, with the Spaces that name it and its checkout.
+    /// Every registered brain, with the Spaces that name it, its checkout and its last PR.
     pub fn brains(&self) -> Result<Vec<Brain>> {
         self.refresh_brain_registry()?;
         let stored: Vec<Brain> = self.list_data("SELECT data FROM brains ORDER BY rowid", [])?;
         let named = self.named_brains()?;
-        Ok(stored
+        stored
             .into_iter()
             .map(|mut brain| {
                 brain.spaces = (named.iter())
@@ -1052,9 +1059,29 @@ impl Host {
                     .unwrap_or_default();
                 let checkout = repos::clone_folder(&self.home, &brain.repository);
                 brain.checkout = checkout.to_string_lossy().into_owned();
-                brain
+                brain.last_pull_request = self.last_pull_request(&brain.repository)?;
+                Ok(brain)
             })
-            .collect())
+            .collect()
+    }
+
+    /// The brain's most recently opened batch PR, merged or not, however old.
+    fn last_pull_request(&self, repository: &str) -> Result<Option<BrainLastPullRequest>> {
+        let last: Option<BrainBatch> = self
+            .db
+            .query_row(
+                "SELECT data FROM brain_batches WHERE repository=?1 AND json_extract(data,'$.pull_request') IS NOT NULL ORDER BY json_extract(data,'$.pull_request.number') DESC LIMIT 1",
+                [repository],
+                |r| decode(r, 0),
+            )
+            .optional()?;
+        Ok(last.and_then(|batch| {
+            Some(BrainLastPullRequest {
+                number: batch.pull_request?.number,
+                kind: batch.kind,
+                stage: batch.stage,
+            })
+        }))
     }
 
     pub fn brain(&self, repository: &str) -> Result<Brain> {
@@ -1687,6 +1714,9 @@ impl Host {
         if let Some(missing) = passed.missing_checks {
             brain.missing_checks = missing;
         }
+        if let Some(required) = passed.required_checks {
+            brain.required_checks = required;
+        }
         self.save_brain(&brain)?;
         let checkout = PathBuf::from(&brain.checkout);
         let mut merged = false;
@@ -2227,6 +2257,11 @@ mod tests {
         let without = host.space(&notes_space).unwrap();
         assert_eq!(without.space.brain, None);
         assert!(without.local.notes[0].contains("has no GitHub origin"));
+        let left = without.local.brain_without_origin.unwrap();
+        assert!(
+            left.ends_with("notes"),
+            "the Brains page names the folder: {left}"
+        );
         let brains = host.brains().unwrap();
         assert_eq!(brains.len(), 1);
         assert_eq!(brains[0].repository, "Vyttle-LLC/vyttle-docs");
@@ -2523,6 +2558,23 @@ mod tests {
         assert!(checkout.join(&batch.files[0]).exists());
         let pushes = github.assert_pushes_are_batch_branches_only();
         assert_eq!(pushes, 1);
+        // Two days on, the batch leaves the page but stays the brain's last PR.
+        host.db
+            .execute(
+                "UPDATE brain_batches SET data=json_set(data,'$.updated_at',?2) WHERE id=?1",
+                params![batch.id, now() - 2 * SHOWN_AFTER_MERGE_MS],
+            )
+            .unwrap();
+        let page = host.brains_page().unwrap();
+        assert!(page.batches.is_empty());
+        assert_eq!(
+            page.brains[0].last_pull_request,
+            Some(BrainLastPullRequest {
+                number: 214,
+                kind: BrainBatchKind::Log,
+                stage: BrainStage::Merged,
+            })
+        );
         let error = host
             .amend_brain_batch(&batch.id, &BrainAmendment::Discard, &tools.git)
             .unwrap_err();
@@ -3183,7 +3235,12 @@ mod tests {
                 missing: missing.clone()
             })
         );
-        assert_eq!(host.brain(REPO).unwrap().missing_checks, missing);
+        let brain = host.brain(REPO).unwrap();
+        assert_eq!(brain.missing_checks, missing);
+        assert!(
+            !brain.required_checks.contains(&missing[0]) && brain.required_checks.len() == 6,
+            "the page lists only what main requires"
+        );
         assert!(
             github.gh_calls("pr").iter().all(|c| c[1] != "merge"),
             "no auto-merge"

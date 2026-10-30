@@ -27,13 +27,11 @@ const AFTER_SYNC: std::time::Duration = std::time::Duration::from_secs(5);
 /// What the human is in the middle of on the page.
 #[derive(Clone, PartialEq, Eq)]
 enum Editing {
-    /// Confirming the push grant for a brain.
     Grant(String),
     /// Confirming forgetting a brain no Space names any longer.
     Forget(String),
     /// Naming another host, by id, as a brain's compiler.
     Compiler(String),
-    /// Confirming the discard of a batch.
     Discard(String),
     /// Giving the reason a reported line is not sensitive.
     NotSensitive {
@@ -49,7 +47,6 @@ pub(super) struct BrainsPage {
     shared: Shared,
     read: Option<Result<Listing, String>>,
     asked_at: i64,
-    /// The batch whose checks are shown.
     open_batch: Option<String>,
     editing: Option<Editing>,
     host_id: Entity<InputState>,
@@ -158,6 +155,23 @@ impl BrainsPage {
                 .on_click(cx.listener(|v, _, w, c| v.sync_now(w, c))),
             ),
         );
+        if let Some(snapshot) = self.shared.snapshot() {
+            for (id, name, folder) in without_origin(&snapshot.spaces, &snapshot.space_locals) {
+                body = body.child(
+                    banner(p.yellow)
+                        .child(div().flex_1().child(without_origin_line(&name, &folder)))
+                        .child(
+                            button(SharedString::from(format!("without-origin-{}", id.0)))
+                                .link()
+                                .xsmall()
+                                .label("Space settings")
+                                .on_click(cx.listener(move |_, _, _, c| {
+                                    c.emit(Intent::OpenSpace(id.clone()))
+                                })),
+                        ),
+                );
+            }
+        }
         if listing.brains.is_empty() {
             return body.child(
                 empty_state("brain", "No brains yet", IN_SPACES, p).child(
@@ -177,7 +191,10 @@ impl BrainsPage {
             return body.child(hint("No batch is on its way to main.", p));
         }
         for batch in &listing.batches {
-            body = body.child(self.gate_row(batch, p, cx));
+            let required = (listing.brains.iter())
+                .find(|b| b.repository.eq_ignore_ascii_case(&batch.repository))
+                .map_or(&[][..], |b| &b.required_checks);
+            body = body.child(self.gate_row(batch, required, p, cx));
         }
         body
     }
@@ -251,13 +268,13 @@ impl BrainsPage {
                 "Checkout",
                 mono(brain.checkout.clone(), p).into_any_element(),
             ))
-            .child(fact("Last PR", text(last_pr(&batches))))
+            .child(fact("Last PR", text(last_pr(brain, &batches))))
             .child(fact(
                 "Compiles on",
                 text(compiler_line(&brain.config, listing.this_host.as_ref())),
             ))
             .child(fact("Next compile", text(next_compile(&brain.config))))
-            .child(fact("Last compile", text(last_compile(&batches))));
+            .child(fact("Last compile", text(LAST_COMPILE.into())));
         for (warning, tone) in warnings(brain, &batches) {
             card = card.child(banner(tone.color(p)).child(warning));
         }
@@ -446,7 +463,13 @@ impl BrainsPage {
         actions
     }
 
-    fn gate_row(&self, batch: &BrainBatch, p: Palette, cx: &mut Context<Self>) -> Div {
+    fn gate_row(
+        &self,
+        batch: &BrainBatch,
+        required: &[String],
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let id = batch.id.clone();
         let open = self.open_batch.as_ref() == Some(&batch.id);
         let failed = batch.stage == BrainStage::Failed;
@@ -484,7 +507,7 @@ impl BrainsPage {
                         .text_right()
                         .text_size(px(font::SMALL))
                         .text_color(if failed { p.red } else { p.subtle })
-                        .child(batch_note(batch)),
+                        .child(batch_note(batch, required)),
                 ),
         );
         if let (true, BrainSource::Project(project)) = (failed, &batch.source)
@@ -504,7 +527,7 @@ impl BrainsPage {
             );
         }
         if open {
-            row = row.child(self.checks(batch, p, cx));
+            row = row.child(self.checks(batch, required, p, cx));
         }
         row
     }
@@ -531,14 +554,21 @@ impl BrainsPage {
             .map(|s| s.id.clone())
     }
 
-    /// The batch's checks, the files and lines its failed checks reported with what the human can
-    /// do about each, and Discard.
-    fn checks(&self, batch: &BrainBatch, p: Palette, cx: &mut Context<Self>) -> Div {
+    /// The batch's required checks, the files and lines its failed checks reported with what the
+    /// human can do about each, and Discard.
+    fn checks(
+        &self,
+        batch: &BrainBatch,
+        required: &[String],
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let mut list = div().flex().flex_col().gap_1().pt_1();
-        if batch.checks.is_empty() {
+        let checks = required_checks(batch, required);
+        if checks.is_empty() {
             list = list.child(hint(no_checks_yet(batch), p));
         }
-        for check in &batch.checks {
+        for check in checks {
             let (glyph, color) = match check.conclusion {
                 BrainCheckConclusion::Success => ("circle-check", p.green),
                 BrainCheckConclusion::Failure => ("circle-x", p.red),
@@ -822,7 +852,6 @@ impl Tone {
     }
 }
 
-/// The two editors mark the same reported line.
 fn same_line(a: &Editing, b: &Editing) -> bool {
     match (a, b) {
         (
@@ -893,26 +922,40 @@ fn next_compile(config: &BrainConfigReading) -> String {
     }
 }
 
-fn last_compile(batches: &[&BrainBatch]) -> String {
-    (batches.iter().rev())
-        .find(|b| b.kind == BrainBatchKind::Compile && b.stage == BrainStage::Merged)
-        .map_or_else(
-            || "None in the last day".into(),
-            |b| format!("{} · {}", b.title, age(b.updated_at).to_lowercase()),
-        )
+/// Each Space the upgrade left with no brain, because its brain folder has no GitHub `origin`,
+/// while it still names none: its id, its name and the folder.
+fn without_origin(
+    spaces: &[Space],
+    locals: &BTreeMap<SpaceId, SpaceLocal>,
+) -> Vec<(SpaceId, String, String)> {
+    (spaces.iter())
+        .filter(|space| space.brain.is_none())
+        .filter_map(|space| {
+            let folder = locals.get(&space.id)?.brain_without_origin.clone()?;
+            Some((space.id.clone(), space.name.clone(), folder))
+        })
+        .collect()
 }
 
-fn last_pr(batches: &[&BrainBatch]) -> String {
+fn without_origin_line(space: &str, folder: &str) -> String {
+    format!(
+        "The {space} Space has no brain: its brain folder {folder} has no GitHub origin, so the upgrade could not make it a brain repository. Name a brain repository in the Space's settings."
+    )
+}
+
+/// No compile run is recorded until `brain-compile` adds them.
+const LAST_COMPILE: &str = "None yet · this release does not compile brains";
+
+/// The brain's most recent PR, however old, and how many of its batches are still in the gate.
+fn last_pr(brain: &Brain, batches: &[&BrainBatch]) -> String {
     let in_gate = batches.iter().filter(|b| !b.is_finished()).count();
-    let last = (batches.iter().rev()).find_map(|b| {
-        b.pull_request.as_ref().map(|pr| {
-            format!(
-                "#{} {} · {}",
-                pr.number,
-                kind_label(b.kind).to_lowercase(),
-                stage_label(b)
-            )
-        })
+    let last = (brain.last_pull_request.as_ref()).map(|pr| {
+        format!(
+            "#{} {} · {}",
+            pr.number,
+            kind_label(pr.kind).to_lowercase(),
+            stage_label(pr.stage)
+        )
     });
     match (last, in_gate) {
         (None, 0) => "None yet".into(),
@@ -1072,8 +1115,8 @@ fn stepper(batch: &BrainBatch, p: Palette) -> Div {
     row
 }
 
-fn stage_label(batch: &BrainBatch) -> &'static str {
-    match batch.stage {
+fn stage_label(stage: BrainStage) -> &'static str {
+    match stage {
         BrainStage::Queued => "queued",
         BrainStage::PrOpen => "open",
         BrainStage::Checks => "checks running",
@@ -1085,7 +1128,7 @@ fn stage_label(batch: &BrainBatch) -> &'static str {
 }
 
 /// The gate row's note: what stops the batch, or where it is. It names checks, never their text.
-fn batch_note(batch: &BrainBatch) -> String {
+fn batch_note(batch: &BrainBatch, required: &[String]) -> String {
     match &batch.problem {
         Some(BrainProblem::ChecksFailed { checks }) => {
             format!("{} failed · auto-merge paused", checks.join(", "))
@@ -1106,10 +1149,11 @@ fn batch_note(batch: &BrainBatch) -> String {
             BrainStage::Queued => "Waits to be pushed".into(),
             BrainStage::PrOpen => "PR open".into(),
             BrainStage::Checks => {
-                let passed = (batch.checks.iter())
+                let checks = required_checks(batch, required);
+                let passed = (checks.iter())
                     .filter(|c| c.conclusion == BrainCheckConclusion::Success)
                     .count();
-                format!("Checks running · {passed} of {} passed", batch.checks.len())
+                format!("Checks running · {passed} of {} passed", checks.len())
             }
             BrainStage::AutoMerging => "All checks passed · auto-merging".into(),
             BrainStage::Merged => format!("Merged {}", age(batch.updated_at).to_lowercase()),
@@ -1119,10 +1163,17 @@ fn batch_note(batch: &BrainBatch) -> String {
     }
 }
 
+/// The batch's checks that `main` requires, which alone decide it, as the host's watch judges.
+fn required_checks<'a>(batch: &'a BrainBatch, required: &[String]) -> Vec<&'a BrainCheck> {
+    (batch.checks.iter())
+        .filter(|check| required.contains(&check.name))
+        .collect()
+}
+
 fn no_checks_yet(batch: &BrainBatch) -> &'static str {
     match batch.pull_request {
         None => "No checks until its PR opens.",
-        Some(_) => "GitHub has reported no checks yet.",
+        Some(_) => "GitHub has reported none of the checks main requires yet.",
     }
 }
 
@@ -1139,9 +1190,11 @@ fn discard_line(batch: &BrainBatch) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Tone, author, batch_note, compiler_line, grant_lines, last_pr, steps, sync_state, warnings,
+        LAST_COMPILE, Tone, author, batch_note, compiler_line, grant_lines, last_pr,
+        required_checks, steps, sync_state, warnings, without_origin, without_origin_line,
     };
     use crate::ui;
+    use std::collections::BTreeMap;
     use workspace_core::*;
 
     fn brain() -> Brain {
@@ -1157,7 +1210,9 @@ mod tests {
             held: None,
             config: BrainConfigReading::Missing,
             missing_checks: vec![],
+            required_checks: vec![],
             legacy_pointer: false,
+            last_pull_request: None,
         }
     }
     fn batch(stage: BrainStage, problem: Option<BrainProblem>) -> BrainBatch {
@@ -1300,31 +1355,119 @@ mod tests {
             }),
         );
         assert_eq!(
-            batch_note(&failed),
+            batch_note(&failed, &[]),
             "sensitive-info failed · auto-merge paused"
         );
         let review = batch(BrainStage::PrOpen, Some(BrainProblem::AwaitingReview));
-        assert_eq!(batch_note(&review), "Waits for your review on GitHub");
+        assert_eq!(batch_note(&review, &[]), "Waits for your review on GitHub");
         let refused = batch(
             BrainStage::Failed,
             Some(BrainProblem::PushRefused {
                 reason: "remote: secret 555".into(),
             }),
         );
-        assert!(!batch_note(&refused).contains("555"));
+        assert!(!batch_note(&refused, &[]).contains("555"));
         assert_eq!(author(&failed), Some("mhohlios"));
     }
 
     #[test]
-    fn the_last_pr_counts_the_batches_still_in_the_gate() {
-        let merged = batch(BrainStage::Merged, None);
+    fn a_selected_batch_lists_and_counts_only_the_checks_main_requires() {
+        let check = |name: &str, conclusion| BrainCheck {
+            name: name.into(),
+            conclusion,
+            annotations: vec![],
+        };
+        let mut running = batch(BrainStage::Checks, None);
+        running.checks = vec![
+            check("secret-scan", BrainCheckConclusion::Success),
+            check("sensitive-info", BrainCheckConclusion::Pending),
+            check("summary-comment", BrainCheckConclusion::Failure),
+        ];
+        let required = ["secret-scan".to_owned(), "sensitive-info".to_owned()];
+        let listed: Vec<&str> = (required_checks(&running, &required).into_iter())
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(listed, ["secret-scan", "sensitive-info"]);
+        assert_eq!(
+            batch_note(&running, &required),
+            "Checks running · 1 of 2 passed"
+        );
+        assert!(required_checks(&running, &[]).is_empty());
+    }
+
+    #[test]
+    fn the_last_pr_is_the_brains_latest_however_old_with_the_batches_still_in_the_gate() {
+        let mut merged_long_ago = brain();
+        merged_long_ago.last_pull_request = Some(BrainLastPullRequest {
+            number: 212,
+            kind: BrainBatchKind::Compile,
+            stage: BrainStage::Merged,
+        });
+        // No batch is on the page any longer, yet the last PR is still named.
+        assert_eq!(last_pr(&merged_long_ago, &[]), "#212 compile run · merged");
         let open = batch(BrainStage::Checks, None);
         assert_eq!(
-            last_pr(&[&merged, &open]),
-            "#214 log batch · checks running · 1 in the gate"
+            last_pr(&merged_long_ago, &[&open]),
+            "#212 compile run · merged · 1 in the gate"
         );
-        assert_eq!(last_pr(&[]), "None yet");
+        assert_eq!(last_pr(&brain(), &[]), "None yet");
         let queued = batch(BrainStage::Queued, None);
-        assert_eq!(last_pr(&[&queued, &queued]), "2 batches in the gate");
+        assert_eq!(
+            last_pr(&brain(), &[&queued, &queued]),
+            "2 batches in the gate"
+        );
+        assert!(LAST_COMPILE.starts_with("None yet"));
+    }
+
+    #[test]
+    fn a_space_whose_brain_folder_has_no_github_origin_is_explained_until_it_names_a_brain() {
+        let space = |name: &str, brain: Option<SpaceBrain>| Space {
+            id: SpaceId(name.to_lowercase()),
+            name: name.into(),
+            description: String::new(),
+            instructions: String::new(),
+            brain,
+            storage: SpaceStorage {
+                repository: StorageRepository::Local { id: "l".into() },
+                folder: name.to_lowercase(),
+            },
+            repositories: vec![],
+            models: SpaceModels::default(),
+            sources: vec![],
+            extra: Extra::new(),
+        };
+        let left = SpaceLocal {
+            brain_without_origin: Some("/Users/m/notes".into()),
+            ..SpaceLocal::default()
+        };
+        let named = SpaceBrain {
+            repository: BrainRepository::GitHub {
+                owner: "Vyttle-LLC".into(),
+                name: "vyttle-docs".into(),
+                extra: Extra::new(),
+            },
+            folder: "second-brain".into(),
+            extra: Extra::new(),
+        };
+        let spaces = [space("Notes", None), space("Vyttle", Some(named))];
+        let locals = BTreeMap::from([
+            (SpaceId("notes".into()), left.clone()),
+            (SpaceId("vyttle".into()), left),
+        ]);
+        let shown = without_origin(&spaces, &locals);
+        assert_eq!(
+            shown,
+            [(
+                SpaceId("notes".into()),
+                "Notes".into(),
+                "/Users/m/notes".into()
+            )],
+            "a Space that names a brain since is not explained"
+        );
+        let line = without_origin_line("Notes", "/Users/m/notes");
+        assert!(
+            line.contains("/Users/m/notes has no GitHub origin")
+                && line.contains("Space's settings")
+        );
     }
 }
