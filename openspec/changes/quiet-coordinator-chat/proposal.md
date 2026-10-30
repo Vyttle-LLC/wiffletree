@@ -25,6 +25,6 @@ The human approved the v2 mockup (`ui/mockups.html`) with one refinement: the pi
 - `workspace-core`: `Message::update` (`ReplyUpdate`), `Message::from_human`, `MessageKind::trouble`.
 - `workspace-host`: new `updates.rs` (facts, comparison, baseline table, `reply_update` column), the turn end in `service.rs`, `set_plan`'s `news` field in `service.rs` and `mcp.rs`, the message-revision trigger.
 - `workspace-desktop`: `transcript.rs` placements and rows, a new `ticket_table.rs` pinned in `conversation.rs`, the `collapse_ticket_table` preference.
-- Skills: Coordinating v4 → v5, coordinator core v7 → v8, communication contract v10 → v11.
+- Skills: Coordinating v4 → v5 and coordinator core v7 → v8, with the fixtures that track the stock versions. The communication contract is unchanged: the news mark is display only and coordinator-specific, so the coordinator contract documents it.
 - `docs/PRD.md`: Live work folding paragraph, the Tickets inspector line and the coordinator section.
 - Older stores load unchanged: existing messages have no update and show as before.

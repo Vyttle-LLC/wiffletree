@@ -68,6 +68,7 @@ fn the_tool_list_offers_ticket_tools_and_no_repository_coordinator_tools() {
     assert!(schema("accept_ticket")["properties"]["waived"].is_object());
     let plan = schema("set_plan");
     assert_eq!(plan["required"], serde_json::json!(["items"]));
+    assert_eq!(plan["properties"]["news"]["type"], "boolean");
     let items = &plan["properties"]["items"];
     assert_eq!(items["maxItems"], workspace_core::MAX_PLAN_ITEMS);
     assert_eq!(
@@ -252,7 +253,13 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = core(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator core — v7"));
+    assert!(coordinator.contains("Project coordinator core — v8"));
+    // A background reply the records show unchanged folds; news keeps it full.
+    assert!(
+        coordinator
+            .contains("when its records show nothing changed since your last reply shown in full")
+    );
+    assert!(coordinator.contains("call set_plan with news: true in that turn so it stays full"));
     // A limit failure retries by itself; the coordinator is not asked to resume it.
     assert!(coordinator.contains("usage limit needs nothing from you"));
     // Noted findings need no decision, and one is pulled into a fix with fix_now.
@@ -324,8 +331,12 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
 #[test]
 fn coordinating_at_stock_states_the_stop_rule_and_when_to_ask_the_human() {
     let coordinator = provider::skill(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Coordinating — v4"));
+    assert!(coordinator.contains("Coordinating — v5"));
     for phrase in [
+        // Routine updates are short; the pinned table carries live status.
+        "A routine update, such as letting a check-in continue or acknowledging a report, says what is new since your last update in one or two sentences and repeats nothing already said",
+        "The table pinned above your chat already shows each ticket's live status and PR",
+        "Only when you tell the human a ticket or the project is finished, accepted, published or ready for them, or when they ask for status, end with a short table",
         "Spend review in proportion to risk",
         "the verifiers by focus, with a model only where the workspace records one",
         "\"Reviewed with Wiffletree: <N> full reviews and <M> re-checks, <R> rounds (<verifier focuses>)\"",

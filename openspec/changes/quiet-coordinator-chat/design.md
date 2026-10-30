@@ -44,6 +44,9 @@ Trouble is any input that a folded run would count in red: a failed or blocked r
 ### The pinned table
 `ticket_table.rs` draws it between the header and the transcript, for the selected coordinator only. Rows come from `tickets_owned_by`: in progress means open and not `planned`, or with an open PR; accepted and closed count as done. Status is the Tickets inspector's state wording, with "· round N" while a cycle runs; the PR column reads "#N open", "#N merged" or "#N closed", linked to the PR, and "Not published" otherwise. The done line opens to the same rows. The collapse choice is `collapse_ticket_table` in `desktop-preferences.json`. The table redraws when the conversation does on a new snapshot; it adds no fetch.
 
+### Instructions
+Coordinating v5 adds the routine-update paragraph and limits the per-ticket table to finished, accepted, published or ready tickets and to status requests. The coordinator core v8 says what folds and how to mark news. The communication contract stays at v10: its `set_plan` paragraph is still true for every role, and the mark concerns only coordinators.
+
 ## Risks / Trade-offs
 
 - [A coordinator writes something important in an unchanged turn] → it can mark news, the reply stays one click away, and nothing is hidden from the record or agents.

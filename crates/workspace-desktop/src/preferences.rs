@@ -17,6 +17,9 @@ pub(crate) struct Preferences {
     /// Show a working agent's activity as one line instead of the full card.
     #[serde(default)]
     pub minimize_activity: bool,
+    /// Show the coordinator's pinned ticket table as its title line only.
+    #[serde(default)]
+    pub collapse_ticket_table: bool,
     #[serde(default, deserialize_with = "appearance_or_system")]
     pub appearance: Appearance,
     /// Show projects whose names share a first word under one group row.
@@ -36,6 +39,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             minimize_activity: false,
+            collapse_ticket_table: false,
             appearance: Appearance::default(),
             group_projects: true,
             paired_hosts: vec![],
@@ -83,10 +87,13 @@ mod tests {
     fn choices_survive_a_relaunch_and_bad_files_fall_back() {
         let home = tempfile::tempdir().unwrap();
         assert!(!Preferences::load(home.path()).minimize_activity);
+        assert!(!Preferences::load(home.path()).collapse_ticket_table);
         let mut preferences = Preferences::load(home.path());
         preferences.minimize_activity = true;
+        preferences.collapse_ticket_table = true;
         preferences.save().unwrap();
         assert!(Preferences::load(home.path()).minimize_activity);
+        assert!(Preferences::load(home.path()).collapse_ticket_table);
         std::fs::write(home.path().join("desktop-preferences.json"), "not json").unwrap();
         assert!(!Preferences::load(home.path()).minimize_activity);
     }

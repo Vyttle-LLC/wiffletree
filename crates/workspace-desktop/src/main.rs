@@ -43,6 +43,7 @@ mod staging;
 mod team_view;
 #[cfg(test)]
 mod test_support;
+mod ticket_table;
 mod transcript;
 mod tree;
 mod ui;
@@ -1017,6 +1018,13 @@ fn set_group_projects(grouped: bool, cx: &mut App) {
 /// Shows a working agent's activity as one line, or as the full card.
 fn set_minimize_activity(minimized: bool, cx: &mut App) {
     change_preferences(cx, |preferences| preferences.minimize_activity = minimized);
+}
+
+/// Shows the coordinator's pinned ticket table as its title line only, or in full.
+fn set_collapse_ticket_table(collapsed: bool, cx: &mut App) {
+    change_preferences(cx, |preferences| {
+        preferences.collapse_ticket_table = collapsed
+    });
 }
 
 /// Finds Wiffletree on other Macs on this network while `on`; turning it off stops browsing and
