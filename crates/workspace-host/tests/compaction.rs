@@ -2069,7 +2069,9 @@ fn a_quit_stops_a_codex_compaction_and_the_next_start_delivers_the_waiting_messa
 }
 
 /// Kills the process with this id when dropped, so a failed test leaves nothing running.
+#[cfg(target_os = "macos")]
 struct Kill(i32);
+#[cfg(target_os = "macos")]
 impl Drop for Kill {
     fn drop(&mut self) {
         unsafe {
@@ -2078,6 +2080,7 @@ impl Drop for Kill {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn what_a_codex_compactions_server_starts_is_recorded_spared_by_a_pause_and_stopped_at_a_quit() {
     let mut world = World::codex();
@@ -2125,6 +2128,7 @@ fn what_a_codex_compactions_server_starts_is_recorded_spared_by_a_pause_and_stop
     assert_eq!(recorded(&world, helper), Some(Some("quit".into())));
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn a_helper_given_an_earlier_groups_id_is_recorded_as_the_compactions_and_spared() {
     let mut world = World::codex();

@@ -75,8 +75,14 @@ mod tests {
         for descriptor in pipes.iter().flatten() {
             unsafe { libc::close(*descriptor) };
         }
-        // `ls` holds the standard three and the two it opens to read `/dev/fd`.
+        // `ls` holds the standard three and those it opens to read `/dev/fd`, two on macOS and
+        // one on Linux.
         let held = String::from_utf8(output.unwrap().stdout).unwrap();
-        assert_eq!(held, "0\n1\n2\n3\n4\n");
+        let own = if cfg!(target_os = "macos") {
+            "0\n1\n2\n3\n4\n"
+        } else {
+            "0\n1\n2\n3\n"
+        };
+        assert_eq!(held, own);
     }
 }

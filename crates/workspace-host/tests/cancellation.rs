@@ -78,6 +78,8 @@ fn every_way_a_turn_ends_stops_its_whole_process_group_promptly() {
     let groups = scratch.path().join("groups");
     let main = {
         let mut host = Host::open_set_up(home.path()).unwrap();
+        host.set_workspaces_dir(home.path().join("workspaces").to_str().unwrap())
+            .unwrap();
         host.create_project("Process groups").unwrap();
         host.sessions().unwrap().remove(0)
     };

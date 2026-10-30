@@ -51,6 +51,8 @@ fn coordinators_run_scheduled_checks_themselves_and_post_each_result() {
     common::git(&repo, &["commit", "-q", "--allow-empty", "-m", "Initial"]);
     let monitored = {
         let mut host = Host::open_set_up(home.path()).unwrap();
+        host.set_workspaces_dir(home.path().join("workspaces").to_str().unwrap())
+            .unwrap();
         host.create_project("Monitor").unwrap()
     };
     // SAFETY: this binary has one test and owns its provider environment.
