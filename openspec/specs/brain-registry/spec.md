@@ -1,7 +1,7 @@
 # brain-registry Specification
 
 ## Purpose
-TBD - created by archiving change brain-registry-sync. Update Purpose after archive.
+The brain registry is how Wiffletree knows and writes the brains its Spaces name: each Mac registers every brain once, reads its shared settings from `wiffletree-brain.json` on `main`, keeps its own checkout as the only writer, and sends every change as a batch branch whose pull request auto-merges once the brain gate's required checks pass, with problems shown on the writing project's Inbox or the Brains page.
 
 ## Requirements
 

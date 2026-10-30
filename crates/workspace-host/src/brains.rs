@@ -823,6 +823,7 @@ fn item_prompt(batch: &BrainBatch, problem: &BrainProblem) -> String {
             missing.join(", "),
             if missing.len() == 1 { "" } else { "s" }
         ),
+        // Unreached: Set up batches come from the Brains page, which shows the wait itself.
         BrainProblem::AwaitingReview => format!(
             "{about} waits for your review: CODEOWNERS covers the brain gate's files, so it does not auto-merge. Review and merge it on GitHub; the host sees the merge at its next pass."
         ),
@@ -1101,7 +1102,6 @@ impl Host {
         Ok(())
     }
 
-    /// The folder the legacy pointer names, when it names one.
     fn legacy_pointer_target(&self) -> Option<PathBuf> {
         let named = fs::read_to_string(&self.legacy_pointer).ok()?;
         let named = named.trim();
