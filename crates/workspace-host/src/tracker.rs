@@ -5,7 +5,7 @@
 //! text is untrusted and may hold personal data: nothing here logs it, and commit messages name
 //! issues by ID only.
 use crate::*;
-use repos::Record;
+use repos::{Content, Record};
 use serde::Deserialize;
 use storage::TRACKER;
 
@@ -190,6 +190,22 @@ pub(crate) fn issue_of(path: &str) -> Option<IssueId> {
     IssueId::parse(rest.split('/').next()?).ok()
 }
 
+/// Whether an issue's folder holds any file; one a pulled deletion emptied is no issue.
+fn holds_files(folder: &Path) -> bool {
+    storage::files_under(folder).is_ok_and(|files| !files.is_empty())
+}
+
+/// Removes the folders under `issues/` that `path`'s deletion left empty, its issue's too.
+pub(crate) fn remove_emptied(clone: &Path, path: &str) {
+    let issues = clone.join(ISSUES);
+    let mut folder = clone.join(path);
+    while folder.pop() && folder.starts_with(&issues) && folder != issues {
+        if fs::remove_dir(&folder).is_err() {
+            break;
+        }
+    }
+}
+
 /// A comment's file name: its time with dashes for colons, then the author's login, and `-2`,
 /// `-3` while one of that name exists with other content.
 fn comment_file(folder: &Path, at: &str, login: &str, content: &[u8]) -> String {
@@ -210,7 +226,7 @@ pub(crate) struct Store {
     pub(crate) prefix: String,
 }
 impl Store {
-    /// The IDs of the issue folders with this tracker's prefix.
+    /// The IDs of the issue folders with this tracker's prefix that hold a file.
     pub(crate) fn ids(&self) -> Vec<IssueId> {
         let mut ids: Vec<IssueId> = (fs::read_dir(self.folder.join(ISSUES)).into_iter())
             .flatten()
@@ -218,10 +234,13 @@ impl Store {
                 let name = entry.ok()?.file_name().into_string().ok()?;
                 IssueId::parse(&name).ok()
             })
-            .filter(|id| id.prefix() == self.prefix)
+            .filter(|id| id.prefix() == self.prefix && self.exists(id))
             .collect();
         ids.sort();
         ids
+    }
+    pub(crate) fn exists(&self, id: &IssueId) -> bool {
+        holds_files(&self.folder.join(issue_folder(id)))
     }
     fn read(&self, path: &str) -> Option<Vec<u8>> {
         fs::read(self.folder.join(path)).ok()
@@ -267,7 +286,7 @@ impl Store {
     /// shown raw with the problem, never rewritten.
     pub(crate) fn record(&self, id: &IssueId, tracker: &str) -> Result<IssueRecord> {
         let folder = self.folder.join(issue_folder(id));
-        ensure!(folder.is_dir(), "{id} is not in this tracker");
+        ensure!(self.exists(id), "{id} is not in this tracker");
         let (issue, raw, problem) = match self.issue(id) {
             Ok(issue) => (Some(issue), None, None),
             Err(error) => {
@@ -465,7 +484,7 @@ impl Host {
             folder: self.storage_folder(storage),
             prefix: id.prefix().to_owned(),
         };
-        match store.folder.join(issue_folder(id)).is_dir() {
+        match store.exists(id) {
             true => index_listing(&self.db, &store.listing(id, &key))?,
             false => {
                 self.db.execute(
@@ -723,14 +742,20 @@ impl Host {
                 clone.join(issue_folder(temporary)),
                 clone.join(issue_folder(number)),
             );
-            let mut touched = vec![];
+            let relative = |file: &Path| -> Result<String> {
+                let path = file.strip_prefix(&clone)?.to_str();
+                Ok(path.context("A path is not UTF-8")?.to_owned())
+            };
+            // Each file moved or rewritten: its path and content before, and where it is now.
+            let mut touched: Vec<(String, Vec<u8>, PathBuf)> = vec![];
             if from.exists() {
                 for file in storage::files_under(&from)? {
                     let moved = to.join(file.strip_prefix(&from)?);
                     if !moved.exists() {
+                        let before = fs::read(&file)?;
                         fs::create_dir_all(moved.parent().context("A file is in a folder")?)?;
                         fs::rename(&file, &moved)?;
-                        touched.push(moved);
+                        touched.push((relative(&file)?, before, moved));
                     }
                 }
                 fs::remove_dir_all(&from)?;
@@ -743,15 +768,26 @@ impl Host {
                 let rewritten = issues_sync::replace_id(&text, &old, &new);
                 if rewritten != text {
                     shared::write_atomically(&file, rewritten.as_bytes())?;
-                    touched.push(file);
+                    if !touched.iter().any(|(_, _, now)| now == &file) {
+                        touched.push((relative(&file)?, text.into_bytes(), file));
+                    }
                 }
             }
-            for file in touched {
-                let path = file
-                    .strip_prefix(&clone)?
-                    .to_str()
-                    .context("A path is not UTF-8")?;
-                Record::wrote(&self.db, &key, path, Some(&fs::read(&file)?))?;
+            // Only a file that held what the host wrote or synced is the host's write now; one
+            // changed outside Wiffletree stays unrecorded and is paused again.
+            for (was, before, now) in touched {
+                let recorded: Option<(Content, Content)> = self
+                    .db
+                    .query_row(
+                        "SELECT synced,written FROM sync_record WHERE repository=?1 AND path=?2",
+                        params![key, was],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                let (synced, written) = recorded.unwrap_or_default();
+                if [synced, written].contains(&Some(before)) {
+                    Record::wrote(&self.db, &key, &relative(&now)?, Some(&fs::read(&now)?))?;
+                }
             }
             self.db.execute(
                 "DELETE FROM sync_record WHERE repository=?1 AND path LIKE ?2",

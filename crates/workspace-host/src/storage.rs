@@ -409,6 +409,9 @@ pub(crate) struct Found {
     failed_roots: Vec<String>,
     /// The new issues the commit numbered: each temporary ID and its number.
     pub(crate) numbered: Vec<(IssueId, IssueId)>,
+    /// The new issues GitHub already held, as this Mac pushed them before: each temporary ID
+    /// and the number it has there.
+    pub(crate) adopted: Vec<(IssueId, IssueId)>,
 }
 
 /// A rule set comparing whole files under `roots` with the version last synced, as the settings
@@ -567,6 +570,7 @@ impl RuleSets {
         found.failed.extend(issues.failed);
         found.failed_roots.extend(issues.failed_roots);
         found.numbered = issues.numbered;
+        found.adopted = issues.adopted;
         found
             .committed
             .retain(|(path, _)| !held.iter().any(|h| &h.path == path));
@@ -1304,7 +1308,10 @@ impl Host {
             }
             match &there {
                 Some(content) => shared::write_atomically(&clone.join(&path), content)?,
-                None => drop(fs::remove_file(clone.join(&path))),
+                None => {
+                    drop(fs::remove_file(clone.join(&path)));
+                    tracker::remove_emptied(&clone, &path);
+                }
             }
             pulled.push((path, there));
         }
@@ -1360,6 +1367,7 @@ impl Host {
         if pushed {
             self.apply_numbers(storage, &found.numbered)?;
         }
+        self.apply_numbers(storage, &found.adopted)?;
         Ok(())
     }
     /// Takes a pulled `space.yaml` of a Space on this Mac, or the tracker's config, into the

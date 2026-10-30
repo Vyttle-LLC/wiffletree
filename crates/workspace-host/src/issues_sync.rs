@@ -42,6 +42,8 @@ pub(crate) struct IssueRules {
     prefix: Option<String>,
     /// The clone and GitHub's head, as `compare` saw them.
     compared: Option<(PathBuf, String)>,
+    /// The committed files outside a new issue's folder whose content names its number.
+    references: Vec<(String, Vec<IssueId>)>,
 }
 impl IssueRules {
     pub(crate) fn new(input: &Input) -> Self {
@@ -50,12 +52,14 @@ impl IssueRules {
             files: WholeFiles::new(input, roots, "Issues".into()),
             prefix: input.prefix.clone(),
             compared: None,
+            references: vec![],
         }
     }
     /// Numbers this Mac's new issues on top of GitHub's head: each takes one more than the
     /// highest number its history has had, unless GitHub already holds it, as when this Mac
-    /// pushed it and stopped before renaming it here. Rewrites each temporary ID in the paths
-    /// and content committed.
+    /// pushed it and stopped before renaming it here; that one is adopted, renamed here
+    /// whether or not the pass pushes. Rewrites each temporary ID in the paths and content
+    /// committed.
     fn number(&mut self) -> Result<()> {
         let (Some(prefix), Some((clone, remote))) = (&self.prefix, &self.compared) else {
             return Ok(());
@@ -75,7 +79,7 @@ impl IssueRules {
             path.ends_with("/issue.md") && !synced.contains_key(path)
         })?;
         let mut next = tracker::highest_number(clone, remote, prefix)?;
-        let mut numbered = vec![];
+        let (mut numbered, mut adopted) = (vec![], vec![]);
         for id in temporary {
             let mine = (committed.iter())
                 .find(|(path, _)| *path == format!("{}/issue.md", issue_folder(&id)))
@@ -89,30 +93,43 @@ impl IssueRules {
                 );
                 (renamed.as_bytes() == theirs.as_slice()).then_some(there)
             });
-            let number = already.unwrap_or_else(|| {
-                next += 1;
-                IssueId::Numbered {
-                    prefix: prefix.clone(),
-                    number: next,
+            match already {
+                Some(there) => adopted.push((id, there)),
+                None => {
+                    next += 1;
+                    let number = IssueId::Numbered {
+                        prefix: prefix.clone(),
+                        number: next,
+                    };
+                    numbered.push((id, number));
                 }
-            });
-            numbered.push((id, number));
+            }
         }
         for (path, content) in committed.iter_mut() {
-            for (old, new) in &numbered {
+            let mut named = vec![];
+            for (old, new) in numbered.iter().chain(&adopted) {
+                let own = path.starts_with(&format!("{}/", issue_folder(old)));
                 let (old, new) = (old.to_string(), new.to_string());
                 *path = replace_id(path, &old, &new);
                 if let Some(bytes) = content
                     && let Ok(text) = std::str::from_utf8(bytes)
                 {
-                    *bytes = replace_id(text, &old, &new).into_bytes();
+                    let rewritten = replace_id(text, &old, &new);
+                    if !own && rewritten != text {
+                        named.push(IssueId::parse(&new)?);
+                    }
+                    *bytes = rewritten.into_bytes();
                 }
+            }
+            if !named.is_empty() {
+                self.references.push((path.clone(), named));
             }
         }
         // A new issue GitHub already holds needs no commit of what is the same there.
         let there = repos::files_at(clone, remote, &|path| path.starts_with("issues/"))?;
         committed.retain(|(path, content)| there.get(path) != content.as_ref());
         self.files.found.numbered = numbered;
+        self.files.found.adopted = adopted;
         Ok(())
     }
     /// The commit's message: each issue and what changed in it, by ID only.
@@ -171,23 +188,33 @@ impl RuleSet for IssueRules {
     fn failed(&mut self, error: anyhow::Error) {
         self.files.failed(error);
     }
-    /// A new issue whose `issue.md` a scan holds stays wholly on this Mac, unnumbered.
+    /// A new issue whose `issue.md` a scan holds stays wholly on this Mac, unnumbered, and so
+    /// does every file that would name its number.
     fn also_held(&self, held: &[scan::Held]) -> Vec<scan::Held> {
         let found = &self.files.found;
-        let mut also = vec![];
+        let mut also: Vec<scan::Held> = vec![];
         for (_, number) in &found.numbered {
             let file = format!("{}/issue.md", issue_folder(number));
             let Some(cause) = held.iter().find(|held| held.path == file) else {
                 continue;
             };
             let folder = format!("{}/", issue_folder(number));
+            let names = |path: &String| {
+                (self.references.iter()).any(|(named, ids)| named == path && ids.contains(number))
+            };
             for (path, _) in &found.committed {
-                if path.starts_with(&folder) && !held.iter().any(|h| &h.path == path) {
+                let (own, naming) = (path.starts_with(&folder), names(path));
+                let listed = held.iter().chain(&also).any(|h| &h.path == path);
+                if (own || naming) && !listed {
+                    let reason = match own {
+                        true => "its issue’s issue.md is held",
+                        false => "it names a new issue that is held",
+                    };
                     also.push(scan::Held {
                         path: path.clone(),
                         check: cause.check.clone(),
                         rule: None,
-                        reason: Some("its issue’s issue.md is held".into()),
+                        reason: Some(reason.into()),
                     });
                 }
             }
@@ -551,6 +578,118 @@ mod tests {
         host.db.execute_batch(include_str!("issues.sql")).unwrap();
         host.rebuild_issue_index().unwrap();
         assert_eq!(host.list_issues(None).unwrap(), before);
+    }
+
+    #[test]
+    fn an_issue_pushed_by_a_pass_that_never_finished_is_adopted_not_filed_again() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let (_home, mut host, sage) = sage_here(&github);
+        let filed = file(&mut host, &sage, "Watch app drops replies", "");
+        // The push reaches GitHub; the host stops before the pass is finished here.
+        let key = repos::key(NAME);
+        let pass = host.storage_pass(&key).unwrap().unwrap();
+        storage::pass(pass, &github.tools()).unwrap();
+        let commits = github.log("%H").len();
+        sync(&mut host, &github).unwrap();
+        sync(&mut host, &github).unwrap();
+        assert_eq!(github.log("%H").len(), commits, "nothing is filed again");
+        assert_eq!(listed(&host, &sage), ["SAGE-1"]);
+        assert!(!clone_of(&host).join(issue_folder(&filed.id)).exists());
+        assert_eq!(host.issue_trackers().unwrap()[1].waiting, 0);
+    }
+
+    #[test]
+    fn a_file_a_shell_put_in_a_new_issue_stays_paused_after_it_is_numbered() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let (_home, mut host, sage) = sage_here(&github);
+        let filed = file(&mut host, &sage, "Watch app drops replies", "");
+        let comments = clone_of(&host)
+            .join(issue_folder(&filed.id))
+            .join("comments");
+        fs::create_dir_all(&comments).unwrap();
+        fs::write(
+            comments.join("x.md"),
+            "---\nauthor: agent\ncreated: now\n---\nHi\n",
+        )
+        .unwrap();
+        sync(&mut host, &github).unwrap();
+        sync(&mut host, &github).unwrap();
+        assert!(github.show("issues/SAGE-1/issue.md").is_some());
+        assert!(github.show("issues/SAGE-1/comments/x.md").is_none());
+        let paused = host.read_issue(&id("SAGE-1")).unwrap().paused;
+        assert_eq!(paused.len(), 1, "{paused:?}");
+        assert_eq!(paused[0].path, "issues/SAGE-1/comments/x.md");
+    }
+
+    #[test]
+    fn a_shell_edit_naming_a_new_issue_stays_paused_when_the_id_is_rewritten() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        github.commit("issues/SAGE-1/issue.md", theirs("SAGE-1"));
+        let (_home, mut host, sage) = sage_here(&github);
+        let filed = file(&mut host, &sage, "Watch app drops replies", "");
+        let edited = clone_of(&host).join("issues/SAGE-1/issue.md");
+        let text = fs::read_to_string(&edited).unwrap();
+        let shell = format!("{text}Outside shell edit, see {}.\n", filed.id);
+        fs::write(&edited, shell).unwrap();
+        sync(&mut host, &github).unwrap();
+        sync(&mut host, &github).unwrap();
+        assert!(github.show("issues/SAGE-2/issue.md").is_some());
+        let there = github.show("issues/SAGE-1/issue.md").unwrap();
+        assert!(!there.contains("Outside shell edit"), "{there}");
+        let paused = host.read_issue(&id("SAGE-1")).unwrap().paused;
+        assert_eq!(paused.len(), 1, "{paused:?}");
+    }
+
+    #[test]
+    fn an_issue_naming_a_held_new_issue_waits_with_it() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        github.commit("issues/SAGE-1/issue.md", theirs("SAGE-1"));
+        let (_home, mut host, sage) = sage_here(&github);
+        let phone = "Call the parent at (415) 555-0134 tonight.";
+        let filed = file(&mut host, &sage, "Watch app drops replies", phone);
+        let mut first = host.read_issue(&id("SAGE-1")).unwrap().issue.unwrap();
+        first.related.push(filed.id.to_string());
+        host.edit_issue(first).unwrap();
+        sync(&mut host, &github).unwrap();
+        let there = github.show("issues/SAGE-1/issue.md").unwrap();
+        assert!(!there.contains("SAGE-2"), "{there}");
+        let held: Vec<String> = (host.held_notes().unwrap().into_iter())
+            .map(|note| match note {
+                WorkspaceNote::Held(held) => held.path,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert!(
+            held.contains(&"issues/SAGE-1/issue.md".to_owned()),
+            "{held:?}"
+        );
+        let here = host.read_issue(&id("SAGE-1")).unwrap().issue.unwrap();
+        assert_eq!(here.related, ["CEL-148".to_owned(), filed.id.to_string()]);
+    }
+
+    #[test]
+    fn an_issue_a_teammate_deleted_is_no_longer_listed_or_counted() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        github.commit("issues/SAGE-1/issue.md", theirs("SAGE-1"));
+        github.commit("issues/SAGE-2/issue.md", theirs("SAGE-2"));
+        github.commit(
+            "issues/SAGE-2/comments/a-pshah.md",
+            "---\nauthor: pshah\ncreated: now\n---\nHi\n",
+        );
+        let (_home, mut host, sage) = sage_here(&github);
+        assert_eq!(listed(&host, &sage), ["SAGE-1", "SAGE-2"]);
+        delete_on(&github.bare, "issues/SAGE-2");
+        sync(&mut host, &github).unwrap();
+        assert_eq!(listed(&host, &sage), ["SAGE-1"]);
+        assert!(!clone_of(&host).join("issues/SAGE-2").exists());
+        assert_eq!(host.issue_trackers().unwrap()[1].issues, 1);
+        host.rebuild_issue_index().unwrap();
+        assert_eq!(listed(&host, &sage), ["SAGE-1"]);
     }
 
     #[test]
