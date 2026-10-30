@@ -2510,9 +2510,11 @@ impl Actor {
                     }
                 }
             }
+            // The upgrade's suggestions can name Personal now, so clients read them again.
             Event::GhLogin(login) => {
+                let found = login.is_some();
                 self.host.record_gh_login(login);
-                false
+                found
             }
             Event::GitHub(reading) => {
                 self.github_reading = false;

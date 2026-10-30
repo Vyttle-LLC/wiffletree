@@ -46,8 +46,8 @@ pub(super) struct SpacesPage {
     bridge: Bridge,
     shared: Shared,
     shown: Option<Shown>,
-    /// The Space whose definition the form holds.
-    loaded: Option<SpaceId>,
+    /// The definition the form was filled from, and the form as it read then.
+    loaded: Option<(Space, Space)>,
     name: Entity<InputState>,
     description: Entity<TextareaState>,
     instructions: Entity<TextareaState>,
@@ -66,6 +66,9 @@ pub(super) struct SpacesPage {
     storage: Option<(SpaceId, Result<StorageStatus, String>)>,
     storage_asked_at: i64,
     joining: Option<Joining>,
+    /// The repository New was asked to store the Space in, as named, and who can read it,
+    /// shown before anything is written.
+    checked: Option<(String, StorageCheck)>,
     /// A request is waiting for the host.
     busy: bool,
     error: Option<String>,
@@ -105,6 +108,7 @@ impl SpacesPage {
             storage: None,
             storage_asked_at: 0,
             joining: None,
+            checked: None,
             busy: false,
             error: None,
             refused_by: None,
@@ -146,18 +150,27 @@ impl SpacesPage {
         }
     }
 
-    /// Fills the form from the shown Space when it is another than the form holds.
+    /// Fills the form from the shown Space when it is another than the form holds, or when its
+    /// definition changed, by a chip or another Mac, and the form holds no edit.
     fn load_shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(space) = self.shown_space().cloned() else {
             return;
         };
-        if self.loaded.as_ref() == Some(&space.id) {
+        if let Some((from, _)) = &self.loaded
+            && from.id == space.id
+            && (*from == space || self.edits(cx))
+        {
             return;
         }
         self.load(&space, window, cx);
     }
+    /// The form holds an edit the human has not saved.
+    fn edits(&self, cx: &App) -> bool {
+        self.loaded
+            .as_ref()
+            .is_some_and(|(from, read)| self.edited(from, cx).as_ref() != Ok(read))
+    }
     fn load(&mut self, space: &Space, window: &mut Window, cx: &mut Context<Self>) {
-        self.loaded = Some(space.id.clone());
         self.repositories = space.repositories.clone();
         self.models = space.models.clone();
         self.editing_prefix = false;
@@ -174,6 +187,8 @@ impl SpacesPage {
         ] {
             state.update(cx, |input, cx| input.set_value(value, window, cx));
         }
+        let read = self.edited(space, cx).unwrap_or_else(|_| space.clone());
+        self.loaded = Some((space.clone(), read));
     }
 
     fn show(&mut self, shown: Shown, window: &mut Window, cx: &mut Context<Self>) {
@@ -183,6 +198,7 @@ impl SpacesPage {
         if matches!(shown, Shown::New | Shown::FromRepository) {
             self.loaded = None;
             self.joining = None;
+            self.checked = None;
             self.on_github = false;
             for input in [&self.name, &self.storage_input, &self.prefix_input] {
                 input.update(cx, |input, cx| input.set_value("", window, cx));
@@ -238,12 +254,15 @@ impl SpacesPage {
         })
     }
 
+    /// Saves the form's edits over the Space as it is now, so a field the form did not change
+    /// keeps what a chip or another Mac wrote meanwhile.
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(space) = self.shown_space().cloned() else {
+        let (Some(latest), Some((from, read))) = (self.shown_space().cloned(), self.loaded.clone())
+        else {
             return;
         };
-        let edited = match self.edited(&space, cx) {
-            Ok(edited) => edited,
+        let edited = match self.edited(&from, cx) {
+            Ok(form) => merged(&read, &form, &latest),
             Err(error) => {
                 self.error = Some(error);
                 return cx.notify();
@@ -394,6 +413,10 @@ impl SpacesPage {
             self.error = Some("Name the GitHub repository to store the Space in".into());
             return cx.notify();
         }
+        if self.on_github && self.checked_for(&storage).is_none() {
+            self.error = Some("Check the repository first, to see who can read it".into());
+            return cx.notify();
+        }
         let prefix = self.prefix_input.read(cx).value().trim().to_owned();
         let ask = ask::create_space(
             name,
@@ -411,6 +434,38 @@ impl SpacesPage {
                 Err(error) => view.error = Some(error),
             }
         });
+        cx.notify();
+    }
+
+    /// What checking `repository`, as named, found, once New has checked it.
+    fn checked_for(&self, repository: &str) -> Option<&StorageCheck> {
+        (self.checked.as_ref())
+            .filter(|(named, _)| named == repository)
+            .map(|(_, check)| check)
+    }
+
+    /// Checks New's GitHub repository, writing nothing, so the form says who can read it
+    /// before Create Space writes anything.
+    fn check_new_storage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let repository = self.storage_input.read(cx).value().trim().to_owned();
+        if repository.is_empty() {
+            return;
+        }
+        self.busy = true;
+        self.error = None;
+        let asked = repository.clone();
+        self.ask(
+            ask::check_storage_repository(repository),
+            window,
+            cx,
+            move |view, check, _, _| {
+                view.busy = false;
+                match check {
+                    Ok(check) => view.checked = Some((asked, check)),
+                    Err(error) => view.error = Some(error),
+                }
+            },
+        );
         cx.notify();
     }
 
@@ -1066,7 +1121,28 @@ impl SpacesPage {
                                     })),
                             ),
                     )
-                    .when(self.on_github, |d| d.child(Input::new(&self.storage_input).small())),
+                    .when(self.on_github, |d| {
+                        let named = self.storage_input.read(cx).value().trim().to_owned();
+                        d.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(Input::new(&self.storage_input).small().flex_1().min_w_0())
+                                .child(
+                                    ui::gated(
+                                        button("check-new-storage").label("Check").disabled(self.busy),
+                                        &self.shared.host,
+                                    )
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.check_new_storage(window, cx)
+                                    })),
+                                ),
+                        )
+                        .children(self.checked_for(&named).map(|check| {
+                            hint(new_storage_line(check), p).text_color(p.yellow)
+                        }))
+                    }),
                 Some(
                     if self.on_github {
                         "A private repository. Its issues and its Spaces’ instructions are shared with everyone who can read it."
@@ -1277,6 +1353,40 @@ enum ModelFor {
 
 const REMOVE_SPACE: &str = "Its storage and brain repositories stay as they are. Its archived projects move to Personal. A Space with an open project, or the last Space, can’t be removed.";
 const PREFIX_RULE: &str = "2 to 5 capitals, used by no other storage repository on this Mac.";
+
+/// Who can read the repository New will store the Space in, and its tracker, said before
+/// anything is written.
+fn new_storage_line(check: &StorageCheck) -> String {
+    let repository = &check.repository.name;
+    let tracker = match &check.prefix {
+        Some(prefix) => format!(" It is already a tracker; the Space shares its prefix {prefix}."),
+        None => String::new(),
+    };
+    format!(
+        "{} They can read this Space and its issues, and anyone who can push to it can change its instructions.{tracker}",
+        readers_sentence(check.repository.readers, repository)
+    )
+}
+
+/// `latest` with each field the form changed from `read`, how it read when filled, set to
+/// the form's value.
+fn merged(read: &Space, form: &Space, latest: &Space) -> Space {
+    fn pick<T: Clone + PartialEq>(read: &T, form: &T, latest: &T) -> T {
+        match form == read {
+            true => latest.clone(),
+            false => form.clone(),
+        }
+    }
+    Space {
+        name: pick(&read.name, &form.name, &latest.name),
+        description: pick(&read.description, &form.description, &latest.description),
+        instructions: pick(&read.instructions, &form.instructions, &latest.instructions),
+        repositories: pick(&read.repositories, &form.repositories, &latest.repositories),
+        models: pick(&read.models, &form.models, &latest.models),
+        sources: pick(&read.sources, &form.sources, &latest.sources),
+        ..latest.clone()
+    }
+}
 
 /// A labelled field of a Space's form, with its caption under it.
 fn row(label: &'static str, field: impl IntoElement, caption: Option<String>, p: Palette) -> Div {
@@ -1643,9 +1753,9 @@ impl Render for SpacesPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        Joining, brain_label, format_sources, issues_line, join_choices, join_refused_by,
-        parse_sources, prefix_question, readers_line, repository_line, shared_with, storage_banner,
-        sync_line,
+        Joining, brain_label, format_sources, issues_line, join_choices, join_refused_by, merged,
+        new_storage_line, parse_sources, prefix_question, readers_line, repository_line,
+        shared_with, storage_banner, sync_line,
     };
     use workspace_core::*;
 
@@ -1869,5 +1979,54 @@ mod tests {
             ..SpaceLocal::default()
         };
         assert_eq!(brain_label(&personal, Some(&local)), "/Users/m/dev/brain");
+    }
+
+    #[test]
+    fn saving_keeps_what_a_chip_or_another_mac_changed_in_fields_the_form_left_alone() {
+        let read = sage();
+        let mut latest = read.clone();
+        latest.repositories = vec!["Sage-Social/api".into()];
+        latest.description = "Pulled from a teammate".into();
+        let mut form = read.clone();
+        form.instructions = "Treat production as read-only.".into();
+        let saved = merged(&read, &form, &latest);
+        assert_eq!(
+            saved.repositories,
+            ["Sage-Social/api"],
+            "the chip's edit stays"
+        );
+        assert_eq!(saved.description, "Pulled from a teammate");
+        assert_eq!(saved.instructions, "Treat production as read-only.");
+        form.repositories = vec![];
+        latest.repositories = vec!["Sage-Social/api".into(), "Sage-Social/web".into()];
+        let mut read = read;
+        read.repositories = vec!["Sage-Social/api".into()];
+        assert!(
+            merged(&read, &form, &latest).repositories.is_empty(),
+            "a list the form changed is saved as the form has it"
+        );
+    }
+
+    #[test]
+    fn a_new_shared_space_says_who_can_read_its_repository_before_it_is_written() {
+        let check = StorageCheck {
+            repository: SettingsRepository {
+                name: "Sage-Social/wiffletree-storage".into(),
+                push_url: "u".into(),
+                branch: "main".into(),
+                readers: Readers::EveryMember,
+            },
+            organization: true,
+            spaces: vec![],
+            prefix: Some("SAGE".into()),
+        };
+        let line = new_storage_line(&check);
+        assert!(
+            line.starts_with(
+                "Every member of Sage-Social can read Sage-Social/wiffletree-storage."
+            )
+        );
+        assert!(line.contains("anyone who can push to it can change its instructions"));
+        assert!(line.ends_with("shares its prefix SAGE."));
     }
 }

@@ -68,10 +68,10 @@ pub(super) struct RepositoriesPage {
     owner_input: Entity<InputState>,
     /// The saved review levels, which the keeper's review level picks from.
     verifiers: Entity<verifiers::VerifierEditor>,
-    /// The upgrade's suggested Spaces with the human's picks, until confirmed; asked for at the
-    /// page's first open.
+    /// The upgrade's suggested Spaces with the human's picks, until confirmed; asked for again
+    /// while the page shows, as GitHub names and the `gh` login arrive after start.
     suggestions: Vec<(RepositorySuggestion, Pick)>,
-    suggestions_asked: bool,
+    suggestions_asking: bool,
     /// The workspace repositories known since the first snapshot; one that arrives later is
     /// being added, and is suggested a Space once its GitHub name is known.
     seen: Option<BTreeSet<String>>,
@@ -80,7 +80,7 @@ pub(super) struct RepositoriesPage {
 }
 
 /// The Space chosen for a repository: one of them, Personal before it exists, or none.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Pick {
     Space(SpaceId),
     NewPersonal,
@@ -121,7 +121,7 @@ impl RepositoriesPage {
             base_edit: None,
             owner_input: cx.new(|cx| InputState::new(window, cx).placeholder(OWNER_PLACEHOLDER)),
             suggestions: vec![],
-            suggestions_asked: false,
+            suggestions_asking: false,
             seen: None,
             arriving: BTreeSet::new(),
             adding: vec![],
@@ -138,32 +138,26 @@ impl RepositoriesPage {
             self.arriving.clear();
             self.adding.clear();
             self.suggestions.clear();
-            self.suggestions_asked = false;
         }
         self.shared = shared;
         if moved {
             self.notice_added(window, cx);
         }
-        if opened && !self.suggestions_asked {
-            self.suggestions_asked = true;
+        let shown = self.shared.page == Page::Repositories;
+        if (opened || (moved && shown)) && !self.suggestions_asking {
+            self.suggestions_asking = true;
             self.ask(
                 ask::repository_suggestions(),
                 window,
                 cx,
-                |view, suggestions, window, cx| match suggestions {
-                    Ok(suggestions) => {
-                        view.suggestions = (suggestions.into_iter())
-                            .map(|s| {
-                                let pick = match &s.space {
-                                    Some(SuggestedSpace::Space(id)) => Pick::Space(id.clone()),
-                                    Some(SuggestedSpace::NewPersonal) => Pick::NewPersonal,
-                                    None => Pick::NoSpace,
-                                };
-                                (s, pick)
-                            })
-                            .collect()
+                |view, suggestions, window, cx| {
+                    view.suggestions_asking = false;
+                    match suggestions {
+                        Ok(suggestions) => {
+                            view.suggestions = with_picks(&view.suggestions, suggestions)
+                        }
+                        Err(error) => toast_error(error, window, cx),
                     }
-                    Err(error) => toast_error(error, window, cx),
                 },
             );
         }
@@ -1326,6 +1320,33 @@ fn toggled(member: &[SpaceId], space: &SpaceId) -> Vec<SpaceId> {
     }
 }
 
+/// The pick the host's suggestion makes.
+fn suggested_pick(suggestion: &RepositorySuggestion) -> Pick {
+    match &suggestion.space {
+        Some(SuggestedSpace::Space(id)) => Pick::Space(id.clone()),
+        Some(SuggestedSpace::NewPersonal) => Pick::NewPersonal,
+        None => Pick::NoSpace,
+    }
+}
+
+/// The host's latest suggestions, each picked as suggested unless the human picked otherwise
+/// for that repository before.
+fn with_picks(
+    before: &[(RepositorySuggestion, Pick)],
+    latest: Vec<RepositorySuggestion>,
+) -> Vec<(RepositorySuggestion, Pick)> {
+    (latest.into_iter())
+        .map(|suggestion| {
+            let chosen = (before.iter())
+                .find(|(old, _)| old.repository_id == suggestion.repository_id)
+                .filter(|(old, pick)| *pick != suggested_pick(old))
+                .map(|(_, pick)| pick.clone());
+            let pick = chosen.unwrap_or_else(|| suggested_pick(&suggestion));
+            (suggestion, pick)
+        })
+        .collect()
+}
+
 /// The upgrade's suggestions as the human picked them, to confirm.
 fn confirmed(suggestions: &[(RepositorySuggestion, Pick)]) -> Vec<RepositorySpaces> {
     (suggestions.iter())
@@ -1571,7 +1592,7 @@ mod tests {
     use super::{
         BASE_HINT, NEVER, Pick, UNTIL_GITHUB_ANSWERS, WITHOUT_ASKING, checks_summary, confirmed,
         fixes_are_on, grouped, held_lines, partly_on_hint, pr_check_status, refused_base,
-        repository_counts, suggestion_reason, toggled, with_fixes,
+        repository_counts, suggestion_reason, toggled, with_fixes, with_picks,
     };
     use crate::ui;
     use workspace_core::*;
@@ -1978,6 +1999,38 @@ mod tests {
         assert_eq!(
             suggestion_reason(&spaces, None, "octo"),
             "No Space lists a repository owned by octo, so none is suggested."
+        );
+    }
+
+    #[test]
+    fn suggestions_asked_again_follow_the_host_but_keep_the_humans_picks() {
+        let suggestion = |id: &str, space| RepositorySuggestion {
+            repository_id: id.into(),
+            repository: format!("o/{id}"),
+            space,
+        };
+        let sage = SpaceId("sage".into());
+        let before = [
+            (suggestion("dotfiles", None), Pick::NoSpace),
+            (suggestion("api", None), Pick::Space(sage.clone())),
+        ];
+        let latest = vec![
+            suggestion("dotfiles", Some(SuggestedSpace::NewPersonal)),
+            suggestion("api", Some(SuggestedSpace::NewPersonal)),
+            suggestion("web", Some(SuggestedSpace::Space(sage.clone()))),
+        ];
+        let picks: Vec<Pick> = with_picks(&before, latest)
+            .into_iter()
+            .map(|(_, p)| p)
+            .collect();
+        assert_eq!(
+            picks,
+            [
+                Pick::NewPersonal,
+                Pick::Space(sage.clone()),
+                Pick::Space(sage)
+            ],
+            "the login's Personal arrives, and the human's pick for api stays"
         );
     }
 }
