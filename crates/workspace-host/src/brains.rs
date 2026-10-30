@@ -860,6 +860,9 @@ fn required_checks(tools: &Tools, home: &Path, repository: &str) -> Result<Vec<S
             );
         }
     }
+    // Protection and rulesets may require the same check; it counts once.
+    required.sort_unstable();
+    required.dedup();
     Ok(required)
 }
 
@@ -2013,13 +2016,18 @@ mod tests {
                     "head": {"sha": head},
                 }));
             }
+            // Main requires each check three ways at once, as protection and a ruleset may.
+            let required = self.required.lock().unwrap().clone();
+            let contexts: Vec<Value> = (required.iter())
+                .map(|name| json!({"context": name}))
+                .collect();
             if rest == "branches/main" {
-                let required = self.required.lock().unwrap().clone();
                 return Some(json!({"name": "main", "protected": true,
-                    "protection": {"required_status_checks": {"contexts": required}}}));
+                    "protection": {"required_status_checks": {"contexts": required, "checks": contexts}}}));
             }
             if rest == "rules/branches/main" {
-                return Some(json!([]));
+                return Some(json!([{"type": "required_status_checks",
+                    "parameters": {"required_status_checks": contexts}}]));
             }
             if rest.starts_with("commits/") {
                 return Some(self.check_runs.lock().unwrap().clone());
