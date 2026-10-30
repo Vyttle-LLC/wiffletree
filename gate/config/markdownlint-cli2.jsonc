@@ -1,0 +1,20 @@
+// markdownlint-cli2 configuration for the brain gate (gate/checks/markdown_lint.py),
+// tuned to the brain format. Every brain lints with this file alone.
+{
+  "config": {
+    "default": true,
+    // Log entries and notes are prose with long lines.
+    "MD013": false,
+    // Log entries put their field list directly under the heading.
+    "MD022": { "lines_above": 1, "lines_below": -1 },
+    "MD032": false,
+    // Bare URLs and addresses are normal in logs.
+    "MD034": false,
+    // Log entries start at `##` after frontmatter that has no title.
+    "MD041": false
+  },
+  "globs": ["**/*.md"],
+  "ignores": ["node_modules/**"],
+  // Resolved beside this file; it keeps the files' text out of the output.
+  "outputFormatters": [["./markdownlint-formatter.cjs"]]
+}

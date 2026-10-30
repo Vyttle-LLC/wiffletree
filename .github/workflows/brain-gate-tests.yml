@@ -1,0 +1,32 @@
+# Runs the brain gate's fixture tests, through the action's own gate-tests mode,
+# on every change under gate/. A gate release is tagged only from a commit where
+# they pass; see gate/README.md.
+name: Brain gate tests
+
+on:
+  pull_request:
+    paths:
+      - 'gate/**'
+      - '.github/workflows/brain-gate-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'gate/**'
+      - '.github/workflows/brain-gate-tests.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: brain-gate-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate-tests:
+    name: gate-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./gate
+        with:
+          check: gate-tests

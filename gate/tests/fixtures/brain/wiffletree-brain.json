@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "brain_dir": "second-brain",
+  "gate": {
+    "version": "brain-gate-v1.0.0",
+    "max_entry_body_chars": 2000,
+    "legacy_log_edits_allowed": true,
+    "allowed_email_domains": ["example.org", "example.net"],
+    "allowlist": "brain-gate-allowlist.toml"
+  }
+}

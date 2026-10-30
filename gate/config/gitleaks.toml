@@ -1,0 +1,7 @@
+# The brain gate's gitleaks config (gate/checks/secret_scan.py). It uses
+# gitleaks' default rules; a brain's own `.gitleaks.toml` extends it. It exempts
+# nothing: the gate's fixtures are exempt only when the gate scans its own
+# repository, which secret_scan.py adds.
+
+[extend]
+useDefault = true
