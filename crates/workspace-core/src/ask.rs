@@ -258,6 +258,12 @@ pub fn move_issue(id: IssueId, state: IssueState) -> Ask<Issue> {
 pub fn mark_issue_read(id: IssueId) -> Ask<()> {
     Ask::new(Command::MarkIssueRead { id })
 }
+pub fn follow_issue(id: IssueId, follow: bool) -> Ask<()> {
+    Ask::new(Command::FollowIssue { id, follow })
+}
+pub fn issue_people(space_id: SpaceId) -> Ask<Vec<IssuePerson>> {
+    Ask::new(Command::IssuePeople { space_id })
+}
 pub fn issue_project_defaults(id: IssueId, space_id: Option<SpaceId>) -> Ask<IssueProjectDefaults> {
     Ask::new(Command::IssueProjectDefaults { id, space_id })
 }

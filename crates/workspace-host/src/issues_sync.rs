@@ -35,6 +35,180 @@ pub(crate) fn replace_id(text: &str, old: &str, new: &str) -> String {
     out
 }
 
+/// The part of `issue.md` that is its body; every other part is a front matter field by key.
+pub(crate) const DESCRIPTION: &str = "description";
+
+/// A file both sides changed, merged: what this Mac keeps, what it pushes, and each part that
+/// paused with the other side's value as written. `None` for a file that is not merged so: one
+/// not changed on both sides without a paused part, or one whose versions do not all parse,
+/// which pauses whole.
+pub(crate) type MergedFile = (Vec<u8>, Vec<u8>, Vec<(String, Option<String>)>);
+
+pub(crate) fn merge_file(
+    path: &str,
+    base: Option<&[u8]>,
+    mine: &[u8],
+    theirs: &[u8],
+    paused: &BTreeMap<String, Vec<String>>,
+) -> Option<MergedFile> {
+    let both = base != Some(mine) && base != Some(theirs);
+    if path.ends_with("/issue.md") && (both || paused.contains_key(path)) {
+        let paused = paused.get(path).map_or(&[][..], Vec::as_slice);
+        return merge_issue(base, mine, theirs, paused).ok();
+    }
+    if path.ends_with("/events.jsonl") && both {
+        let union = union_events(mine, theirs);
+        return Some((union.clone(), union, vec![]));
+    }
+    None
+}
+
+/// `issue.md`'s parts: each front matter field by key, and the description.
+fn parts(content: &[u8]) -> Result<BTreeMap<String, serde_yaml::Value>> {
+    let (front, description) = tracker::issue_parts(content)?;
+    let mut parts = BTreeMap::new();
+    for (key, value) in front {
+        let key = key.as_str().context("A front matter key is not text")?;
+        ensure!(
+            key != DESCRIPTION,
+            "The front matter has a description field"
+        );
+        parts.insert(key.to_owned(), value);
+    }
+    parts.insert(DESCRIPTION.into(), serde_yaml::Value::String(description));
+    Ok(parts)
+}
+
+/// A part's value as written: the description's text, or a field's YAML.
+pub(crate) fn part_text(part: &str, value: &serde_yaml::Value) -> String {
+    match (part, value) {
+        (DESCRIPTION, serde_yaml::Value::String(text)) => text.clone(),
+        _ => (serde_yaml::to_string(value).unwrap_or_default().trim_end()).to_owned(),
+    }
+}
+
+/// The value `part_text` wrote.
+pub(crate) fn part_value(part: &str, text: &str) -> Result<serde_yaml::Value> {
+    Ok(match part {
+        DESCRIPTION => serde_yaml::Value::String(text.to_owned()),
+        _ => serde_yaml::from_str(text)?,
+    })
+}
+
+/// The part `part` of `issue.md`, as written; `None` when it has none.
+pub(crate) fn issue_part(content: &[u8], part: &str) -> Result<Option<String>> {
+    Ok(parts(content)?
+        .get(part)
+        .map(|value| part_text(part, value)))
+}
+
+/// `issue.md` with `part` set to `value`, or removed for `None`.
+pub(crate) fn with_part(content: &[u8], part: &str, value: Option<&str>) -> Result<Vec<u8>> {
+    let mut parts = parts(content)?;
+    match value {
+        Some(text) => parts.insert(part.to_owned(), part_value(part, text)?),
+        None => parts.remove(part),
+    };
+    render(&parts)
+}
+
+fn render(parts: &BTreeMap<String, serde_yaml::Value>) -> Result<Vec<u8>> {
+    let mut front = serde_yaml::Mapping::new();
+    for (key, value) in parts.iter().filter(|(key, _)| *key != DESCRIPTION) {
+        front.insert(serde_yaml::Value::String(key.clone()), value.clone());
+    }
+    let description = parts.get(DESCRIPTION).and_then(|d| d.as_str());
+    tracker::issue_from_parts(&front, description.unwrap_or_default())
+}
+
+/// Merges `issue.md` three-way, one part at a time: a part changed on one side takes that
+/// side's value; one changed on both sides to different values, or `paused` before and still
+/// different, keeps this Mac's value here and pushes the other side's. A file is written anew
+/// only where its parts changed, so an untouched one keeps its bytes.
+pub(crate) fn merge_issue(
+    base: Option<&[u8]>,
+    mine: &[u8],
+    theirs: &[u8],
+    paused: &[String],
+) -> Result<MergedFile> {
+    let base = base.map(parts).transpose()?.unwrap_or_default();
+    let (m, t) = (parts(mine)?, parts(theirs)?);
+    let names: std::collections::BTreeSet<&String> =
+        (base.keys()).chain(m.keys()).chain(t.keys()).collect();
+    let (mut here, mut pushed, mut held) = (BTreeMap::new(), BTreeMap::new(), vec![]);
+    for name in names {
+        let (b, mv, tv) = (base.get(name), m.get(name), t.get(name));
+        let (kept, push) = if mv == tv {
+            (mv, tv)
+        } else if paused.contains(name) || (mv != b && tv != b) {
+            held.push((name.clone(), tv.map(|value| part_text(name, value))));
+            (mv, tv)
+        } else if mv == b {
+            (tv, tv)
+        } else {
+            (mv, mv)
+        };
+        if let Some(kept) = kept {
+            here.insert(name.clone(), kept.clone());
+        }
+        if let Some(push) = push {
+            pushed.insert(name.clone(), push.clone());
+        }
+    }
+    let as_written =
+        |merged: &BTreeMap<String, serde_yaml::Value>, side, bytes: &[u8]| match merged == side {
+            true => Ok(bytes.to_vec()),
+            false => render(merged),
+        };
+    Ok((
+        as_written(&here, &m, mine)?,
+        as_written(&pushed, &t, theirs)?,
+        held,
+    ))
+}
+
+/// `events.jsonl` as the union of both sides' lines, each once, ordered by their `at`; a line
+/// that does not parse keeps its place among those before it.
+pub(crate) fn union_events(mine: &[u8], theirs: &[u8]) -> Vec<u8> {
+    let (mine, theirs) = (
+        String::from_utf8_lossy(mine),
+        String::from_utf8_lossy(theirs),
+    );
+    let mut lines: Vec<&str> = vec![];
+    for line in mine.lines().chain(theirs.lines()) {
+        if !line.trim().is_empty() && !lines.contains(&line) {
+            lines.push(line);
+        }
+    }
+    let mut at = String::new();
+    let mut keyed: Vec<(String, &str)> = (lines.into_iter())
+        .map(|line| {
+            if let Ok(event) = serde_json::from_str::<IssueEvent>(line) {
+                at = event.at;
+            }
+            (at.clone(), line)
+        })
+        .collect();
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out = String::new();
+    for (_, line) in keyed {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.into_bytes()
+}
+
+/// Who last changed `path` on GitHub's head `remote`: its commit's author.
+pub(crate) fn last_author(clone: &Path, remote: &str, path: &str) -> String {
+    let literal = format!(":(literal){path}");
+    let args = ["log", "-1", "--format=%an", remote, "--", &literal];
+    let author = runtime::git_output(clone, &args).unwrap_or_default();
+    match author.trim() {
+        "" => "a teammate".into(),
+        author => author.to_owned(),
+    }
+}
+
 /// The issue rule set for one pass.
 pub(crate) struct IssueRules {
     pub(crate) files: WholeFiles,
@@ -856,6 +1030,230 @@ mod tests {
         drop(host);
         let again = Host::open_set_up(home.path()).unwrap();
         assert_eq!(again.last_filed_space().unwrap(), Some(personal.id));
+    }
+
+    /// A teammate's edit of `path` on GitHub, replacing `from` with `to`.
+    fn teammate_edits(github: &Arc<GitHub>, path: &str, from: &str, to: &str) {
+        let text = github.show(path).unwrap();
+        assert!(text.contains(from), "{text}");
+        github.commit(path, text.replace(from, to));
+    }
+
+    /// Sage on this Mac with SAGE-1 pulled, as the teammate pushed it.
+    fn sage_with_an_issue() -> (TempDir, Arc<GitHub>, TempDir, Host) {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        github.commit("issues/SAGE-1/issue.md", theirs("SAGE-1"));
+        let (home, host, _) = sage_here(&github);
+        (folder, github, home, host)
+    }
+
+    fn issue_notes(host: &Host) -> Vec<IssueNote> {
+        (host.workspace_notes(&[]).unwrap().into_iter())
+            .filter_map(|note| match note {
+                WorkspaceNote::Issue(note) => Some(note),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const ISSUE: &str = "issues/SAGE-1/issue.md";
+
+    #[test]
+    fn two_people_changing_different_fields_both_reach_both_macs_and_nothing_pauses() {
+        let (_folder, github, _home, mut host) = sage_with_an_issue();
+        let mut mine = host.read_issue(&id("SAGE-1")).unwrap().issue.unwrap();
+        mine.assignee = Some("jlin".into());
+        host.edit_issue(mine).unwrap();
+        teammate_edits(&github, ISSUE, "priority: high", "priority: urgent");
+        sync(&mut host, &github).unwrap();
+        let there = github.show(ISSUE).unwrap();
+        assert!(
+            there.contains("priority: urgent\nassignee: jlin\n"),
+            "{there}"
+        );
+        let here = host.read_issue(&id("SAGE-1")).unwrap();
+        let issue = here.issue.unwrap();
+        assert_eq!(
+            (issue.priority, issue.assignee.as_deref()),
+            (Priority::Urgent, Some("jlin"))
+        );
+        assert!(here.paused.is_empty() && issue_notes(&host).is_empty());
+        assert_eq!(host.issue_trackers().unwrap()[1].waiting, 0);
+    }
+
+    #[test]
+    fn the_same_field_changed_on_both_sides_pauses_alone_and_keep_mine_pushes_it() {
+        let (_folder, github, _home, mut host) = sage_with_an_issue();
+        let mut mine = host.read_issue(&id("SAGE-1")).unwrap().issue.unwrap();
+        mine.priority = Priority::Low;
+        host.edit_issue(mine).unwrap();
+        teammate_edits(&github, ISSUE, "priority: high", "priority: urgent");
+        teammate_edits(&github, ISSUE, "title: Theme", "title: Gallery");
+        sync(&mut host, &github).unwrap();
+        let there = github.show(ISSUE).unwrap();
+        assert!(there.contains("priority: urgent"), "theirs stays: {there}");
+        let issue = host.read_issue(&id("SAGE-1")).unwrap().issue.unwrap();
+        assert_eq!(issue.priority, Priority::Low, "this Mac keeps its own");
+        assert!(issue.title.starts_with("Gallery"), "the rest is taken");
+        let notes = issue_notes(&host);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(notes[0].text, "Paused: you and F both changed the priority");
+        let paused = notes[0].paused.clone().unwrap();
+        assert_eq!(paused.path, "issues/SAGE-1/issue.md#priority");
+        let lines = host.compare_paused(Some(NAME), &paused.path).unwrap();
+        assert_eq!(
+            lines,
+            [
+                skills::Line::Removed("low".into()),
+                skills::Line::Added("urgent".into())
+            ]
+        );
+        // Still paused, a later pass pushes nothing of it.
+        sync(&mut host, &github).unwrap();
+        assert!(github.show(ISSUE).unwrap().contains("priority: urgent"));
+        host.settle_paused(Some(NAME), &paused.path, Settle::KeepThisMachines)
+            .unwrap();
+        sync(&mut host, &github).unwrap();
+        let there = github.show(ISSUE).unwrap();
+        assert!(
+            there.contains("title: Gallery") && there.contains("priority: low"),
+            "{there}"
+        );
+        assert!(issue_notes(&host).is_empty());
+        assert_eq!(host.issue_trackers().unwrap()[1].paused, 0);
+    }
+
+    #[test]
+    fn both_changing_the_description_keeps_this_macs_until_use_theirs_takes_the_other() {
+        let (_folder, github, _home, mut host) = sage_with_an_issue();
+        let mut mine = host.read_issue(&id("SAGE-1")).unwrap().issue.unwrap();
+        mine.description = "Mine: previews are 1x.".into();
+        host.edit_issue(mine).unwrap();
+        teammate_edits(
+            &github,
+            ISSUE,
+            "Screenshots are scaled at 1x.",
+            "Theirs: gallery at 1x.",
+        );
+        teammate_edits(&github, ISSUE, "- bug", "- bug\n- design");
+        sync(&mut host, &github).unwrap();
+        let issue = host.read_issue(&id("SAGE-1")).unwrap().issue.unwrap();
+        assert_eq!(issue.description, "Mine: previews are 1x.");
+        assert_eq!(issue.labels, ["bug", "design"]);
+        let there = github.show(ISSUE).unwrap();
+        assert!(!there.contains("Mine:"), "never pushed: {there}");
+        let path = "issues/SAGE-1/issue.md#description";
+        host.settle_paused(Some(NAME), path, Settle::UseTheOthers)
+            .unwrap();
+        let issue = host.read_issue(&id("SAGE-1")).unwrap().issue.unwrap();
+        assert!(issue.description.starts_with("Theirs: gallery at 1x."));
+        let commits = github.log("%H").len();
+        sync(&mut host, &github).unwrap();
+        assert_eq!(github.log("%H").len(), commits, "nothing to push");
+        assert!(issue_notes(&host).is_empty());
+    }
+
+    #[test]
+    fn a_pause_closes_when_both_versions_become_equal_and_a_newer_one_replaces_theirs() {
+        let (_folder, github, _home, mut host) = sage_with_an_issue();
+        let mut mine = host.read_issue(&id("SAGE-1")).unwrap().issue.unwrap();
+        mine.priority = Priority::Low;
+        host.edit_issue(mine).unwrap();
+        teammate_edits(&github, ISSUE, "priority: high", "priority: urgent");
+        sync(&mut host, &github).unwrap();
+        teammate_edits(&github, ISSUE, "priority: urgent", "priority: medium");
+        sync(&mut host, &github).unwrap();
+        let path = "issues/SAGE-1/issue.md#priority";
+        let lines = host.compare_paused(Some(NAME), path).unwrap();
+        assert!(
+            lines.contains(&skills::Line::Added("medium".into())),
+            "{lines:?}"
+        );
+        teammate_edits(&github, ISSUE, "priority: medium", "priority: low");
+        sync(&mut host, &github).unwrap();
+        assert!(issue_notes(&host).is_empty(), "equal now");
+    }
+
+    #[test]
+    fn comments_and_events_from_both_sides_at_once_all_arrive_in_time_order() {
+        let (_folder, github, _home, mut host) = sage_with_an_issue();
+        sync(&mut host, &github).unwrap();
+        host.comment_on_issue(&id("SAGE-1"), "Seen on two watches.")
+            .unwrap();
+        host.move_issue(&id("SAGE-1"), IssueState::Todo).unwrap();
+        github.commit(
+            "issues/SAGE-1/comments/2026-10-30T09-00-00Z-pshah.md",
+            "---\nauthor: pshah\ncreated: 2026-10-30T09:00:00Z\n---\nRepro'd too.\n",
+        );
+        let early = r#"{"at":"2026-01-01T00:00:00Z","by":"pshah","kind":"priority","from":"high","to":"high"}"#;
+        github.commit("issues/SAGE-1/events.jsonl", format!("{early}\n"));
+        sync(&mut host, &github).unwrap();
+        let record = host.read_issue(&id("SAGE-1")).unwrap();
+        assert_eq!(record.comments.len(), 2);
+        assert!(record.paused.is_empty());
+        let notes: Vec<(IssueNoteKind, String)> = (issue_notes(&host).into_iter())
+            .map(|note| (note.kind, note.text))
+            .collect();
+        let followed = "pshah commented on an issue you follow".to_owned();
+        assert_eq!(
+            notes,
+            [(IssueNoteKind::Commented, followed)],
+            "nothing paused"
+        );
+        let events = github.show("issues/SAGE-1/events.jsonl").unwrap();
+        let lines: Vec<&str> = events.lines().collect();
+        assert_eq!(lines.len(), 2, "{events}");
+        assert_eq!(lines[0], early, "ordered by time");
+        assert_eq!(record.events.len(), 2);
+    }
+
+    #[test]
+    fn a_merge_that_meets_an_outside_edit_pauses_the_file_whole_and_pushes_nothing() {
+        let (_folder, github, _home, mut host) = sage_with_an_issue();
+        teammate_edits(&github, ISSUE, "priority: high", "priority: urgent");
+        let file = clone_of(&host).join(ISSUE);
+        let shell = fs::read_to_string(&file)
+            .unwrap()
+            .replace("assignee: pshah", "assignee: agent");
+        fs::write(&file, &shell).unwrap();
+        let commits = github.log("%H").len();
+        sync(&mut host, &github).unwrap();
+        assert_eq!(github.log("%H").len(), commits);
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            shell,
+            "kept, not merged"
+        );
+        let notes = issue_notes(&host);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(
+            notes[0].text,
+            "The issue was changed outside Wiffletree on this Mac"
+        );
+        assert_eq!(
+            notes[0].paused.as_ref().unwrap().paused,
+            Paused::OutsideWiffletree
+        );
+    }
+
+    #[test]
+    fn a_merged_issue_that_fails_a_scan_is_held_and_its_number_never_pushed() {
+        let (_folder, github, _home, mut host) = sage_with_an_issue();
+        let mut mine = host.read_issue(&id("SAGE-1")).unwrap().issue.unwrap();
+        mine.description = "Call the parent at (415) 555-0134 tonight.".into();
+        host.edit_issue(mine).unwrap();
+        teammate_edits(&github, ISSUE, "priority: high", "priority: urgent");
+        sync(&mut host, &github).unwrap();
+        let there = github.show(ISSUE).unwrap();
+        assert!(!there.contains("555-0134"), "{there}");
+        let issue = host.read_issue(&id("SAGE-1")).unwrap().issue.unwrap();
+        assert_eq!(issue.priority, Priority::Urgent, "theirs taken here");
+        assert!(issue.description.contains("555-0134"), "mine kept here");
+        let held = host.held_notes().unwrap();
+        assert_eq!(held.len(), 1, "{held:?}");
+        sync(&mut host, &github).unwrap();
+        assert!(!github.show(ISSUE).unwrap().contains("555-0134"));
     }
 
     #[test]

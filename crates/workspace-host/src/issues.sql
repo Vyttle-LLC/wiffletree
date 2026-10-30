@@ -6,8 +6,9 @@
 -- from the files when `issue_index_format` is missing or holds another format. `stamp` is the
 -- issue folder's file names, sizes and times, so a change on disk is found without reading the
 -- files; `version` is a digest of their content, for unread marks; `text` is the ID, title,
--- description and comments in lower case, for search.
-CREATE TABLE IF NOT EXISTS issue_index (storage TEXT NOT NULL, id TEXT NOT NULL, state TEXT, data TEXT NOT NULL, stamp TEXT NOT NULL, version TEXT NOT NULL, text TEXT NOT NULL, PRIMARY KEY(storage, id));
+-- description and comments in lower case, for search; `people` is the logins the issue names as
+-- author, assignee, commenter or in an event, a JSON array, for the assignee picker.
+CREATE TABLE IF NOT EXISTS issue_index (storage TEXT NOT NULL, id TEXT NOT NULL, state TEXT, data TEXT NOT NULL, stamp TEXT NOT NULL, version TEXT NOT NULL, text TEXT NOT NULL, people TEXT NOT NULL, PRIMARY KEY(storage, id));
 CREATE TABLE IF NOT EXISTS issue_index_format (format INTEGER NOT NULL);
 -- The `version` of each issue as the human last opened it on this Mac, or as the host last
 -- wrote it for the human. An issue whose version differs is unread. Never written to a tracker.
@@ -26,7 +27,20 @@ CREATE TABLE IF NOT EXISTS issue_derived (storage TEXT NOT NULL, id TEXT NOT NUL
 -- outside Wiffletree, as a JSON array, and what they did for the commit message. They are
 -- written once the file is settled.
 CREATE TABLE IF NOT EXISTS issue_pending (storage TEXT NOT NULL, id TEXT NOT NULL, events TEXT NOT NULL, did TEXT NOT NULL, PRIMARY KEY(storage, id));
--- The parts of an issue paused by the per-field merge, a front matter field or the description,
--- with the remote's value they compare against. Whole files pause in `sync_paused` until that
--- merge exists.
-CREATE TABLE IF NOT EXISTS issue_paused_parts (storage TEXT NOT NULL, id TEXT NOT NULL, part TEXT NOT NULL, theirs TEXT, PRIMARY KEY(storage, id, part));
+-- The parts of an `issue.md` paused by the per-part merge, a front matter field or the
+-- description, keyed like `sync_paused` by the sync record's key and the file's path: the other
+-- side's value as written, which they compare against, and who last changed the file there. A
+-- whole file still pauses in `sync_paused`. The table before this merge was never written.
+DROP TABLE IF EXISTS issue_paused_parts;
+CREATE TABLE IF NOT EXISTS issue_parts (repository TEXT NOT NULL, path TEXT NOT NULL, part TEXT NOT NULL, theirs TEXT, by TEXT NOT NULL, PRIMARY KEY(repository, path, part));
+-- The human's choice to follow an issue (1) or not (0) on this Mac. Without one, they follow
+-- the issues they filed, are assigned or commented on.
+CREATE TABLE IF NOT EXISTS issue_follows (storage TEXT NOT NULL, id TEXT NOT NULL, follow INTEGER NOT NULL, PRIMARY KEY(storage, id));
+-- The Inbox's news of issues, as `IssueNote` JSON, each once by `key`, until the human opens
+-- the issue.
+CREATE TABLE IF NOT EXISTS issue_notes (storage TEXT NOT NULL, id TEXT NOT NULL, key TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(storage, id, key));
+-- A GitHub tracker's collaborators where GitHub let this Mac read them, and when they were read.
+CREATE TABLE IF NOT EXISTS issue_collaborators (storage TEXT NOT NULL, login TEXT NOT NULL, PRIMARY KEY(storage, login));
+CREATE TABLE IF NOT EXISTS issue_collaborators_read (storage TEXT PRIMARY KEY, at INTEGER NOT NULL);
+-- The name on each login's GitHub profile, `NULL` for none, and when it was read.
+CREATE TABLE IF NOT EXISTS issue_profiles (login TEXT PRIMARY KEY, name TEXT, at INTEGER NOT NULL);

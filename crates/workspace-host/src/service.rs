@@ -395,9 +395,9 @@ fn spawn_gh_login_read(sender: Sender<Event>, tools: publish::Tools, home: PathB
     spawn_job(
         sender,
         (),
-        move |_| spaces::gh_login(&tools, &home),
-        |_| None,
-        |(), login| Event::GhLogin(login),
+        move |_| spaces::gh_account(&tools, &home),
+        |_| spaces::GhAccount::Unknown,
+        |(), account| Event::GhLogin(account),
     );
 }
 fn spawn_github_read(
@@ -662,8 +662,11 @@ enum Event {
     /// A read of the repositories' GitHub facts finished on its own thread; `None` when it
     /// panicked, and what is stored then stands.
     GitHub(Option<repositories::GitHubReading>),
-    /// The human's `gh` login, read on its own thread for the upgrade's Space suggestions.
-    GhLogin(Option<String>),
+    /// The human's `gh` account, read on its own thread for the upgrade's Space suggestions and
+    /// the human's tracker writes.
+    GhLogin(spaces::GhAccount),
+    /// A tracker's collaborators and the profile names of its people, read on their own thread.
+    IssuePeople(issue_inbox::PeopleRead),
     /// A publish step finished on its own thread.
     Published(publish::Outcome),
     /// A merge decision finished on its own thread, with the `merge_ticket` call waiting for
@@ -900,6 +903,9 @@ struct Actor {
     pr_tickets_due_at: i64,
     /// A read of the repositories' GitHub facts has not reported yet.
     github_reading: bool,
+    /// When `gh`'s account file last changed as this host saw it, so a change of account reads
+    /// the human's login again.
+    gh_account_seen: Option<std::time::SystemTime>,
     /// `gh` as every GitHub read runs it, and Git as publish steps run it.
     publish_tools: publish::Tools,
     /// The settings repository's pace, with the cadence of every rule set it holds: settings,
@@ -1057,6 +1063,7 @@ impl Service {
                     pr_tickets_stale: true,
                     pr_tickets_due_at: 0,
                     github_reading: false,
+                    gh_account_seen: spaces::gh_account_stamp(),
                     publish_tools: publish::Tools::default(),
                     sync_pace: repos::Pace::every(&[sync::CADENCE_MS]),
                     storage_paces: Default::default(),
@@ -1592,6 +1599,7 @@ impl Actor {
         }
         self.refresh_overlaps(now());
         self.refresh_pull_requests(now(), dirty);
+        self.watch_gh_account();
         // Storage first, as a write to a Space stored in the settings clone makes its pass due.
         let storing = self.refresh_storage_sync(now());
         let syncing = self.refresh_settings_sync(now()) || storing;
@@ -1925,6 +1933,17 @@ impl Actor {
         }
     }
 
+    /// Reads the human's login again once `gh`'s account file changed, as signing in, out or to
+    /// another account does, so tracker writes use the account `gh` has now.
+    fn watch_gh_account(&mut self) {
+        let stamp = spaces::gh_account_stamp();
+        if stamp != self.gh_account_seen {
+            self.gh_account_seen = stamp;
+            let (tools, home) = (self.publish_tools.clone(), self.host.home.clone());
+            spawn_gh_login_read(self.sender.clone(), tools, home);
+        }
+    }
+
     /// Checks each base of a repository with open tickets at most every five minutes, after any
     /// event, so reading `workspace_context` refreshes a stale cache. Fetching and comparing
     /// branches can take seconds, so Git runs on its own thread, one check per base at a time, and
@@ -2132,6 +2151,11 @@ impl Actor {
                     .map_err(|e| format!("{e:#}"));
                 let added = result.is_ok();
                 let _ = reply.try_send(result);
+                // The login the human writes the chosen or joined tracker's issues as.
+                if added {
+                    let (tools, home) = (self.publish_tools.clone(), self.host.home.clone());
+                    spawn_gh_login_read(self.sender.clone(), tools, home);
+                }
                 added
             }
             Event::Synced(passed) => {
@@ -2220,6 +2244,22 @@ impl Actor {
                     }
                 }
                 let read = command.is_read();
+                // A tracker write refused for want of a login reads it again, so signing gh in
+                // is all the human's next try needs.
+                let writes_issues = matches!(
+                    command,
+                    Command::CreateIssue { .. }
+                        | Command::EditIssue { .. }
+                        | Command::Comment { .. }
+                        | Command::MoveIssue { .. }
+                        | Command::StartProjectFromIssue { .. }
+                        | Command::LinkIssue { .. }
+                        | Command::SettlePausedFile { .. }
+                );
+                if writes_issues && self.host.gh_login.is_none() {
+                    let (tools, home) = (self.publish_tools.clone(), self.host.home.clone());
+                    spawn_gh_login_read(self.sender.clone(), tools, home);
+                }
                 let result = (|| -> Result<Value> {
                     // Sessions this command stops on the human's behalf.
                     let mut human_stops = Vec::new();
@@ -2275,6 +2315,23 @@ impl Actor {
                         Command::Issues { space_id, .. } => {
                             if self.host.refresh_issues_of(space_id.as_ref())? {
                                 self.state_changed();
+                            }
+                            self.host.execute(command.clone())?
+                        }
+                        // Answered from what is kept, which a read off this thread renews
+                        // for the next ask once it is an hour old.
+                        Command::IssuePeople { space_id } => {
+                            if let Some(read) = self.host.people_to_read(space_id, now())? {
+                                let (sender, tools) =
+                                    (self.sender.clone(), self.publish_tools.clone());
+                                let home = self.host.home.clone();
+                                spawn_job(
+                                    sender,
+                                    read,
+                                    move |read| issue_inbox::read_people(read, &tools, &home),
+                                    |read| read.clone(),
+                                    |_, read| Event::IssuePeople(read),
+                                );
                             }
                             self.host.execute(command.clone())?
                         }
@@ -2687,10 +2744,16 @@ impl Actor {
                 }
             }
             // The upgrade's suggestions can name Personal now, so clients read them again.
-            Event::GhLogin(login) => {
-                let found = login.is_some();
-                self.host.record_gh_login(login);
-                found
+            Event::GhLogin(account) => {
+                let before = self.host.gh_login.clone();
+                self.host.record_gh_account(account);
+                self.host.gh_login != before
+            }
+            Event::IssuePeople(read) => {
+                self.host.record_issue_people(read).unwrap_or_else(|e| {
+                    eprintln!("Issue people: {e:#}");
+                });
+                false
             }
             Event::GitHub(reading) => {
                 self.github_reading = false;
@@ -4782,6 +4845,8 @@ mod tests {
             pr_tickets_stale: true,
             pr_tickets_due_at: 0,
             github_reading: false,
+            // As found, so a test's events never read the real `gh` account.
+            gh_account_seen: spaces::gh_account_stamp(),
             publish_tools: publish::Tools::default(),
             sync_pace: repos::Pace::every(&[sync::CADENCE_MS]),
             storage_paces: Default::default(),

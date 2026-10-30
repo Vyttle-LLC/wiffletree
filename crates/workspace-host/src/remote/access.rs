@@ -65,7 +65,8 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::OriginBranches { .. }
         | Command::Issues { .. }
         | Command::Issue { .. }
-        | Command::IssueProjectDefaults { .. } => Row::Read,
+        | Command::IssueProjectDefaults { .. }
+        | Command::IssuePeople { .. } => Row::Read,
         Command::ResolvePaths { .. } | Command::ReadFile { .. } | Command::ListFolder { .. } => {
             Row::HostPath
         }
@@ -126,6 +127,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::StartProjectFromIssue { .. }
         | Command::LinkIssue { .. }
         | Command::UnlinkIssue { .. }
+        | Command::FollowIssue { .. }
         | Command::SetWorkspacesDir { .. }
         | Command::SetVerification { .. }
         | Command::SetBuildsAtOnce { .. }

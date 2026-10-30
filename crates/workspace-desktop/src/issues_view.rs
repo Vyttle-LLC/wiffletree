@@ -172,6 +172,11 @@ impl IssuesPage {
         self.trackers.iter().find_map(|t| t.login.clone())
     }
 
+    /// Opens an issue from the Inbox, marking it read, which settles its news there.
+    pub(super) fn show_issue(&mut self, id: IssueId, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_issue(id, true, window, cx);
+    }
+
     fn open_issue(
         &mut self,
         id: IssueId,

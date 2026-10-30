@@ -390,6 +390,19 @@ pub(crate) struct Input {
     synced: BTreeMap<String, Content>,
     written: BTreeMap<String, Content>,
     two_machines: Vec<String>,
+    /// The paused parts of each `issue.md`, by its path.
+    pub(crate) parts: BTreeMap<String, Vec<String>>,
+}
+
+/// A part of an `issue.md` both sides changed to different values, which this Mac keeps and
+/// does not push: a front matter field, or the description.
+pub(crate) struct PausedPart {
+    pub(crate) path: String,
+    pub(crate) part: String,
+    /// The other side's value as written, `None` when it has none.
+    pub(crate) theirs: Option<String>,
+    /// Who last changed the file on GitHub.
+    pub(crate) by: String,
 }
 
 /// The files of a storage repository's paths a pass found, for the host thread to write and
@@ -412,6 +425,12 @@ pub(crate) struct Found {
     /// The new issues GitHub already held, as this Mac pushed them before: each temporary ID
     /// and the number it has there.
     pub(crate) adopted: Vec<(IssueId, IssueId)>,
+    /// Each file merged with GitHub's: this machine's content as read, what it keeps here, and
+    /// GitHub's, which is what it last synced unless the merge is pushed.
+    merged: Vec<(String, Content, Vec<u8>, Content)>,
+    /// The `issue.md` files whose parts were merged, and the parts that paused.
+    parts_compared: Vec<String>,
+    parts: Vec<PausedPart>,
 }
 
 /// A rule set comparing whole files under `roots` with the version last synced, as the settings
@@ -423,6 +442,9 @@ pub(crate) struct WholeFiles {
     pub(crate) synced: BTreeMap<String, Content>,
     written: BTreeMap<String, Content>,
     two_machines: Vec<String>,
+    /// For issues: the paused parts of each `issue.md`, which its files merge by part and
+    /// `events.jsonl` by line instead of pausing whole.
+    pub(crate) parts: Option<BTreeMap<String, Vec<String>>>,
     pub(crate) found: Found,
 }
 impl WholeFiles {
@@ -442,6 +464,7 @@ impl WholeFiles {
                 .collect(),
             roots,
             subject,
+            parts: None,
             found: Found::default(),
         }
     }
@@ -484,6 +507,12 @@ impl RuleSet for WholeFiles {
         for path in paths {
             let base = self.synced.get(path).cloned().flatten();
             let (mine, theirs) = (here.get(path).cloned(), there.get(path).cloned());
+            let written = self.written.get(path).cloned().flatten();
+            let outside = mine != base && mine != written;
+            // An issue file changed outside Wiffletree pauses whole, its parts as they were.
+            if self.parts.is_some() && path.ends_with("/issue.md") && !outside {
+                self.found.parts_compared.push(path.clone());
+            }
             let found = &mut self.found;
             if mine == theirs {
                 if mine != base {
@@ -491,12 +520,39 @@ impl RuleSet for WholeFiles {
                 }
                 continue;
             }
-            let written = self.written.get(path).cloned().flatten();
+            if let (Some(parts), Some(m), Some(t)) = (&self.parts, &mine, &theirs)
+                && !outside
+                && let Some((here, pushed, paused)) =
+                    issues_sync::merge_file(path, base.as_deref(), m, t, parts)
+            {
+                let by = match paused.is_empty() {
+                    true => String::new(),
+                    false => issues_sync::last_author(clone, remote, path),
+                };
+                for (part, theirs) in paused {
+                    let path = path.clone();
+                    let by = by.clone();
+                    found.parts.push(PausedPart {
+                        path,
+                        part,
+                        theirs,
+                        by,
+                    });
+                }
+                if &pushed != t {
+                    found.committed.push((path.clone(), Some(pushed.clone())));
+                }
+                match &here == t && &pushed == t {
+                    true => found.pulled.push((path.clone(), mine, theirs)),
+                    false => found.merged.push((path.clone(), mine, here, theirs)),
+                }
+                continue;
+            }
             let refused = (theirs != base)
                 .then(|| theirs.as_deref().and_then(|c| check(path, c).err()))
                 .flatten();
             let machine = || "another machine".to_owned();
-            let why = if mine != base && mine != written {
+            let why = if outside {
                 Some(Paused::OutsideWiffletree)
             } else if let Some(error) = refused {
                 Some(Paused::CannotBeRead {
@@ -550,7 +606,8 @@ impl RuleSets {
         let names: Vec<&str> = input.names.values().map(String::as_str).collect();
         let subject = format!("{}: changed the Space", names.join(", "));
         let spaces = WholeFiles::new(&input, roots, subject);
-        let issues = IssueRules::new(&input);
+        let mut issues = IssueRules::new(&input);
+        issues.files.parts = Some(input.parts.clone());
         let mut rule_sets = Self { spaces, issues };
         rule_sets.spaces.found.key = input.key;
         rule_sets
@@ -569,6 +626,9 @@ impl RuleSets {
         found.paused.extend(issues.paused);
         found.failed.extend(issues.failed);
         found.failed_roots.extend(issues.failed_roots);
+        found.merged = issues.merged;
+        found.parts_compared = issues.parts_compared;
+        found.parts = issues.parts;
         found.numbered = issues.numbered;
         found.adopted = issues.adopted;
         found
@@ -1196,6 +1256,13 @@ impl Host {
         )?)
         .query_map([key], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
+        let mut parts: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut rows =
+            (self.db).prepare("SELECT path,part FROM issue_parts WHERE repository=?1")?;
+        for row in rows.query_map([key], |r| Ok((r.get(0)?, r.get(1)?)))? {
+            let (path, part): (String, String) = row?;
+            parts.entry(path).or_default().push(part);
+        }
         Ok(Some(Input {
             key: key.to_owned(),
             names,
@@ -1203,6 +1270,7 @@ impl Host {
             synced: record.synced,
             written: record.written,
             two_machines,
+            parts,
         }))
     }
     /// The GitHub storage repositories that sync on their own, being no settings repository,
@@ -1298,8 +1366,23 @@ impl Host {
         };
         let storage = &record.space.storage.repository;
         let clone = self.storage_folder(storage);
+        let touched = (found.pulled.iter().map(|(path, ..)| path))
+            .chain(found.merged.iter().map(|(path, ..)| path));
+        let before = self.issues_before(storage, touched);
         let mut pulled = vec![];
         let mut paused = found.paused;
+        // Merged with GitHub's: each written here, unless the host wrote it meanwhile, and
+        // recorded as last synced in GitHub's version, so this Mac's own part changes push.
+        let mut merged = vec![];
+        for (path, here, kept, there) in found.merged {
+            if fs::read(clone.join(&path)).ok() != here {
+                continue;
+            }
+            if here.as_ref() != Some(&kept) {
+                shared::write_atomically(&clone.join(&path), &kept)?;
+            }
+            merged.push((path, kept, there));
+        }
         for (path, here, there) in found.pulled {
             if fs::read(clone.join(&path)).ok() != here {
                 continue;
@@ -1327,6 +1410,24 @@ impl Host {
         // A rule set whose compare failed keeps its notes until a pass compares it again.
         let ours = |path: &str| scan::scanned(path) && !under(&found.failed_roots, path);
         let tx = self.db.unchecked_transaction()?;
+        for (path, kept, there) in &merged {
+            tx.execute(
+                "INSERT INTO sync_record(repository,path,synced,written) VALUES (?1,?2,?3,?4) ON CONFLICT(repository,path) DO UPDATE SET synced=excluded.synced, written=excluded.written",
+                params![key, path, there, kept],
+            )?;
+        }
+        for path in &found.parts_compared {
+            tx.execute(
+                "DELETE FROM issue_parts WHERE repository=?1 AND path=?2",
+                params![key, path],
+            )?;
+        }
+        for part in &found.parts {
+            tx.execute(
+                "INSERT OR REPLACE INTO issue_parts(repository,path,part,theirs,by) VALUES (?1,?2,?3,?4,?5)",
+                params![key, part.path, part.part, part.theirs, part.by],
+            )?;
+        }
         for (rows, written) in [(&pulled, "excluded.written"), (&synced, "written")] {
             for (path, content) in rows {
                 tx.execute(
@@ -1371,6 +1472,12 @@ impl Host {
         for (path, content) in pulled {
             self.take_pulled(storage, &path, content.as_deref())?;
         }
+        for (path, ..) in &merged {
+            if let Some(id) = tracker::issue_of(path) {
+                self.reindex_issue(storage, &id)?;
+            }
+        }
+        self.note_issue_news(storage, before);
         if pushed {
             self.apply_numbers(storage, &found.numbered)?;
         }

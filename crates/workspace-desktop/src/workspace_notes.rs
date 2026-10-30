@@ -117,9 +117,15 @@ fn short(machine: &str) -> &str {
     .map_or(machine, |(_, rest)| rest)
 }
 
-/// The choices a note offers, the main one last.
+/// The choices a note offers, the main one last. An issue's file or part was changed by a
+/// teammate, not by another of the human's Macs.
 fn choices(note: &PausedSetting) -> Vec<(Settle, String, bool)> {
+    let issue = note.repository.is_some() && note.path.starts_with("issues/");
     match &note.paused {
+        Paused::TwoMachines { .. } if issue => vec![
+            (Settle::UseTheOthers, "Use theirs".into(), false),
+            (Settle::KeepThisMachines, "Keep mine".into(), true),
+        ],
         Paused::TwoMachines { machine } => vec![
             (
                 Settle::UseTheOthers,
@@ -248,8 +254,10 @@ pub(crate) fn kept_note(note: &PausedSetting, compared: &Compared) -> Option<Str
         return None;
     }
     let history = match note.setting.split_once(" · ") {
-        Some((skill, _)) => format!(" and in {skill}’s history"),
-        None => String::new(),
+        Some((skill, _)) if !note.path.starts_with("issues/") => {
+            format!(" and in {skill}’s history")
+        }
+        _ => String::new(),
     };
     Some(format!(
         "The version you don’t keep stays in the repository’s history{history}."
@@ -312,6 +320,15 @@ mod tests {
             [(Settle::KeepThisMachines, "Keep this Mac’s".into())]
         );
         assert_eq!(short("Build box"), "Build box");
+        let part = PausedSetting {
+            path: "issues/CEL-148/issue.md#description".into(),
+            repository: Some("celadon-theme/storage".into()),
+            ..note(Paused::TwoMachines {
+                machine: "Tomás".into(),
+            })
+        };
+        let labels: Vec<String> = (choices(&part).into_iter()).map(|(_, l, _)| l).collect();
+        assert_eq!(labels, ["Use theirs", "Keep mine"]);
     }
 
     #[test]

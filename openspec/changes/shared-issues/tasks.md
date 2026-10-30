@@ -32,10 +32,10 @@ Moved to `assistant-spaces-jobs-boards` stage 6 (decided by Michael, 2026-10-29)
 
 ## 5. Multi-user: identity, assignment, Inbox and field-level conflicts
 
-- [ ] 5.1 `workspace-host`: read the login from `gh api user` when a Space's storage is chosen or joined and when `gh`'s account changes; refuse writes without one. Assignee candidates from the tracker and, where readable, the repository's collaborators; display names from profiles.
-- [ ] 5.2 `workspace-host`: three-way merge per front matter field and description in `issues_sync.rs`, union merge of `events.jsonl`, comment pauses; paused parts in `issues.sql`; Keep mine, Use theirs and Compare. Verify two people changing different fields, the same field, the description, and comments at once.
-- [ ] 5.3 `workspace-host`: follows and Inbox entries (assigned, mentioned, followed comments, urgent in my repositories, automatic moves, paused and outside-edited files), settled once for all projects.
-- [ ] 5.4 `workspace-desktop`: issue entries under an "Issues" label at the top of every project's Inbox in `inbox.rs`, with Compare and the settle buttons from `workspace_notes.rs`; Assign to me and the assignee picker; Follow on the issue page.
+- [x] 5.1 `workspace-host`: read the login from `gh api user` when a Space's storage is chosen or joined and when `gh`'s account changes; refuse writes without one. Assignee candidates from the tracker and, where readable, the repository's collaborators; display names from profiles.
+- [x] 5.2 `workspace-host`: three-way merge per front matter field and description in `issues_sync.rs`, union merge of `events.jsonl`, comment pauses; paused parts in `issues.sql`; Keep mine, Use theirs and Compare. Verify two people changing different fields, the same field, the description, and comments at once.
+- [x] 5.3 `workspace-host`: follows and Inbox entries (assigned, mentioned, followed comments, urgent in my repositories, automatic moves, paused and outside-edited files), settled once for all projects.
+- [x] 5.4 `workspace-desktop`: issue entries under an "Issues" label at the top of every project's Inbox in `inbox.rs`, with Compare and the settle buttons from `workspace_notes.rs`; Assign to me and the assignee picker; Follow on the issue page.
 
 ## 6. Linear import
 

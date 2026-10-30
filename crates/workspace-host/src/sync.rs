@@ -1265,6 +1265,8 @@ impl Host {
         .collect::<rusqlite::Result<_>>()?;
         let settings = self.settings_key().unwrap_or_default();
         let mut notes = BTreeMap::new();
+        // An issue's paused file is an issue note, under Issues.
+        let rows = (rows.into_iter()).filter(|(_, path, _)| !path.starts_with("issues/"));
         for (key, path, why) in rows {
             let path = unit(&path).to_owned();
             let paused: Paused = serde_json::from_str(&why)?;
@@ -1312,13 +1314,14 @@ impl Host {
         });
         let questions = (skills.iter()).filter_map(|state| state.question.clone());
         let notes = notes.into_iter().map(WorkspaceNote::Paused);
-        Ok(notes
+        Ok((self.issue_notes()?.into_iter())
+            .chain(notes)
             .chain(self.held_notes()?)
             .chain(questions.map(WorkspaceNote::SkillQuestion))
             .collect())
     }
     /// A repository as `owner/name`, by its record key.
-    fn stored_repository_name(&self, key: &str) -> Result<String> {
+    pub(crate) fn stored_repository_name(&self, key: &str) -> Result<String> {
         let stored: Option<String> = (self.db)
             .query_row(
                 "SELECT data FROM storage_repositories WHERE key=?1",
@@ -1389,6 +1392,9 @@ impl Host {
     }
     /// This machine's version beside the other, line by line, as a note's Compare shows them.
     pub(crate) fn compare_paused(&self, repository: Option<&str>, path: &str) -> Result<Vec<Line>> {
+        if let Some(name) = repository.filter(|_| path.contains('#')) {
+            return self.compare_part(name, path);
+        }
         let (key, shared) = self.paused_in(repository);
         let (paused, files) = self.paused_unit(&key, path)?;
         // A skill's agents get its rewrite, or else its rules; `base.md` is never theirs to read.
@@ -1417,6 +1423,9 @@ impl Host {
         path: &str,
         settle: Settle,
     ) -> Result<()> {
+        if let Some(name) = repository.filter(|_| path.contains('#')) {
+            return self.settle_part(name, path, settle);
+        }
         let (key, shared) = self.paused_in(repository);
         let (paused, mut rows) = self.paused_unit(&key, path)?;
         let offered = match paused {

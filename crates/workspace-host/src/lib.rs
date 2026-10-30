@@ -14,6 +14,7 @@ mod files;
 mod flatten;
 mod github_access;
 pub mod host_files;
+mod issue_inbox;
 mod issue_work;
 mod issues_sync;
 mod keeper;
@@ -2030,6 +2031,13 @@ impl Host {
                 ticket_id,
             } => {
                 serde_json::to_value(self.unlink_issue(&id, &project_id, ticket_id.as_deref())?)?
+            }
+            Command::FollowIssue { id, follow } => {
+                self.follow_issue(&id, follow)?;
+                Value::Null
+            }
+            Command::IssuePeople { space_id } => {
+                serde_json::to_value(self.issue_people(&space_id)?)?
             }
             Command::SyncNow => {
                 self.sync_now(&publish::Tools::default())?;

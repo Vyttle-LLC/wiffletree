@@ -40,6 +40,8 @@ pub(super) struct IssueView {
     composer: Entity<TextareaState>,
     /// The human's `gh` login, which writes need.
     login: Option<String>,
+    /// Who the assignee picker offers, once the host answered.
+    people: Vec<IssuePerson>,
     /// A change is waiting for the host.
     busy: bool,
 }
@@ -68,6 +70,11 @@ impl IssueView {
         .detach();
         let login =
             (shared.snapshot()).and_then(|s| s.issue_trackers.iter().find_map(|t| t.login.clone()));
+        let space = (shared.snapshot()).and_then(|s| {
+            (s.issue_trackers.iter())
+                .find(|t| t.prefix.as_deref() == Some(id.prefix()))
+                .map(|t| t.space_id.clone())
+        });
         let mut view = Self {
             bridge,
             host: shared.host.clone(),
@@ -76,9 +83,21 @@ impl IssueView {
             record: None,
             composer,
             login,
+            people: vec![],
             busy: false,
         };
         view.load(window, cx);
+        if let Some(space) = space {
+            view.ask(
+                ask::issue_people(space),
+                window,
+                cx,
+                |view, people, _, cx| {
+                    view.people = people.unwrap_or_default();
+                    cx.notify();
+                },
+            );
+        }
         if unread {
             view.ask(
                 ask::mark_issue_read(view.id.clone()),
@@ -215,6 +234,23 @@ impl IssueView {
                 });
             },
         );
+        let assignee = picker(
+            "issue-assignee",
+            match &issue.assignee {
+                Some(login) => person_label(&self.people, login),
+                None => "Nobody".into(),
+            },
+            assignee_options(&self.people, issue.assignee.as_deref()),
+            Some(issue.assignee.clone()),
+            {
+                let weak = cx.weak_entity();
+                move |assignee, window, cx| {
+                    let _ = weak.update(cx, |view, cx| {
+                        view.edit(|issue| issue.assignee = assignee, window, cx)
+                    });
+                }
+            },
+        );
         let mine = self.login.is_some() && issue.assignee == self.login;
         let assign = self.login.clone().map(|login| {
             let label = if mine { "Unassign" } else { "Assign to me" };
@@ -245,10 +281,11 @@ impl IssueView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(issue.assignee.clone().unwrap_or_else(|| "Nobody".into()))
+                    .child(assignee)
                     .children(assign),
                 p,
             ))
+            .child(prop("Inbox", self.follow_button(cx), p))
             .when(!issue.labels.is_empty(), |d| {
                 d.child(prop(
                     "Labels",
@@ -267,6 +304,21 @@ impl IssueView {
             .when(!related.is_empty(), |d| {
                 d.child(prop("Related", self.related_links(related, p, cx), p))
             })
+    }
+
+    /// Follow, or Following to stop: whether the issue's new comments reach the Inbox.
+    fn follow_button(&self, cx: &mut Context<Self>) -> Button {
+        let following = matches!(&self.record, Some(Ok(record)) if record.following);
+        let label = if following { "Following" } else { "Follow" };
+        let button =
+            (button("issue-follow").xsmall().ghost().label(label)).tooltip(match following {
+                true => "New comments reach your Inbox. Click to stop.",
+                false => "Get new comments in your Inbox.",
+            });
+        ui::gated(button, &self.host).on_click(cx.listener(move |view, _, window, cx| {
+            let ask = ask::follow_issue(view.id.clone(), !following);
+            view.change(ask, window, cx, |_, _, _| {});
+        }))
     }
 
     fn related_links(
@@ -419,6 +471,33 @@ impl IssueView {
                     ),
             )
     }
+}
+
+/// A login as the picker names it: "Priya Shah (pshah)" once the profile's name is known.
+fn person_label(people: &[IssuePerson], login: &str) -> String {
+    let person = people.iter().find(|p| p.login.eq_ignore_ascii_case(login));
+    match person.and_then(|person| person.name.as_deref()) {
+        Some(name) => format!("{name} ({login})"),
+        None => login.to_owned(),
+    }
+}
+
+/// Nobody, then each person the host offers, and the current assignee when the host does not
+/// name them.
+fn assignee_options(
+    people: &[IssuePerson],
+    current: Option<&str>,
+) -> Vec<(Option<String>, SharedString)> {
+    let mut options = vec![(None, "Nobody".into())];
+    let listed = |login: &str| people.iter().any(|p| p.login.eq_ignore_ascii_case(login));
+    if let Some(current) = current.filter(|current| !listed(current)) {
+        options.push((Some(current.to_owned()), current.to_owned().into()));
+    }
+    for person in people {
+        let label = person_label(people, &person.login);
+        options.push((Some(person.login.clone()), label.into()));
+    }
+    options
 }
 
 fn prop(label: &'static str, value: impl IntoElement, p: Palette) -> Div {
@@ -785,9 +864,40 @@ impl Requests for IssueView {
 
 #[cfg(test)]
 mod tests {
-    use super::{Entry, LinkedProject, Work, event_text, references, related, timeline, work};
+    use super::{
+        Entry, LinkedProject, Work, assignee_options, event_text, references, related, timeline,
+        work,
+    };
     use serde_json::json;
     use workspace_core::*;
+
+    #[test]
+    fn the_assignee_picker_names_people_by_profile_and_keeps_an_assignee_it_does_not_list() {
+        let people = [
+            IssuePerson {
+                login: "jlin".into(),
+                name: None,
+            },
+            IssuePerson {
+                login: "pshah".into(),
+                name: Some("Priya Shah".into()),
+            },
+        ];
+        let labels: Vec<(Option<String>, String)> = (assignee_options(&people, Some("okim")))
+            .into_iter()
+            .map(|(login, label)| (login, label.to_string()))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                (None, "Nobody".into()),
+                (Some("okim".into()), "okim".into()),
+                (Some("jlin".into()), "jlin".into()),
+                (Some("pshah".into()), "Priya Shah (pshah)".into()),
+            ]
+        );
+        assert_eq!(assignee_options(&people, Some("PShah")).len(), 3);
+    }
 
     fn issue() -> Issue {
         Issue {
@@ -842,6 +952,7 @@ mod tests {
             )],
             paused: vec![],
             links: vec![],
+            following: false,
         };
         let entries = timeline(&issue, &record);
         assert_eq!(
@@ -929,6 +1040,7 @@ mod tests {
             events,
             paused: vec![],
             links,
+            following: false,
         }
     }
 

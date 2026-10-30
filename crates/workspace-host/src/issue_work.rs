@@ -297,6 +297,9 @@ impl Host {
             files.push((events_file(id), content));
             let (id, did) = (id.clone(), did.join(", "));
             self.write_issue_files(space, Write { id, files, did })?;
+            if issue.state != current.state {
+                self.note_moved(&storage, &issue, &events, at)?;
+            }
         }
         self.db.execute(
             "DELETE FROM issue_pending WHERE storage=?1 AND id=?2",
@@ -654,7 +657,7 @@ fn project_name(issue: &Issue) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::pr_watch::tests::{found, host_with_ticket, open_pr};
     use crate::storage::tests::{sage, shared_storage, space_named};
@@ -679,7 +682,7 @@ mod tests {
 
     /// Adds a clone of the GitHub repository `identity` to the workspace, named as a GitHub
     /// read names it.
-    fn clone_here(host: &mut Host, folder: &Path, identity: &str) -> Repository {
+    pub(crate) fn clone_here(host: &mut Host, folder: &Path, identity: &str) -> Repository {
         fs::create_dir_all(folder).unwrap();
         git(folder, &["init", "-q", "-b", "main"]);
         git(folder, &["commit", "-q", "--allow-empty", "-m", "First"]);
@@ -933,6 +936,22 @@ mod tests {
         record(&mut host, pr(PrState::Open));
         assert_eq!(state(&host, &issue.id), IssueState::InReview);
         let url = open_pr(MergeState::Clean).url;
+        let moved: Vec<String> = (host.issue_notes().unwrap().into_iter())
+            .filter_map(|note| match note {
+                WorkspaceNote::Issue(note) if note.kind == IssueNoteKind::Moved => Some(note.text),
+                _ => None,
+            })
+            .collect();
+        let number = url.rsplit('/').next().unwrap();
+        assert!(
+            moved.contains(&format!("Moved to In review: PR #{number} opened")),
+            "{moved:?}"
+        );
+        host.mark_issue_read(&issue.id).unwrap();
+        assert!(
+            host.issue_notes().unwrap().is_empty(),
+            "settled by opening it"
+        );
         assert_eq!(
             events(&host, &issue.id, "pr")[0],
             *json!({"url":url,"status":"open"}).as_object().unwrap()
@@ -1120,6 +1139,7 @@ mod tests {
             events: vec![],
             paused: vec![],
             links: vec![],
+            following: false,
         };
         let message = start_message(&record);
         assert!(message.len() <= MAX_TEXT_BYTES);

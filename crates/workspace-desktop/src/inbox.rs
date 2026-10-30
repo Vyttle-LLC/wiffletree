@@ -6,6 +6,9 @@ use gpui_component::button::ButtonVariants;
 use std::collections::HashMap;
 use ui::{card, hint, mono, pill};
 
+/// Opens the issue an Inbox note names.
+pub(super) type OpenIssue = Rc<dyn Fn(&mut Window, &mut App)>;
+
 pub(super) struct Inbox {
     bridge: Bridge,
     shared: Shared,
@@ -336,6 +339,70 @@ impl Inbox {
             )
             .children(
                 workspace_notes::kept_note(note, compared)
+                    .map(|kept| hint(kept, p).text_size(px(font::CAPTION))),
+            )
+    }
+    /// An issue note: the issue's ID, what happened and a second line; Open for news, which
+    /// `open` acts on, or Compare and the choices that settle a paused file or part. Issue text
+    /// is shown as plain text.
+    pub(super) fn issue_card(
+        &self,
+        note: &IssueNote,
+        open: OpenIssue,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let row = div()
+            .flex()
+            .items_start()
+            .gap_2()
+            .child(mono(note.id.to_string(), p).flex_none())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(font::TEXT))
+                    .line_height(relative(1.5))
+                    .child(note.text.clone()),
+            );
+        let detail = (!note.detail.is_empty()).then(|| hint(note.detail.clone(), p));
+        let Some(paused) = &note.paused else {
+            let id = SharedString::from(format!("issue-note-open-{}-{}", note.id, note.at));
+            let open = button(id)
+                .link()
+                .label("Open")
+                .on_click(move |_, window, cx| open(window, cx));
+            return card(p).child(row.child(open)).children(detail);
+        };
+        let view = cx.entity().downgrade();
+        let on: workspace_notes::OnNote = Rc::new(move |path, action, window, cx| {
+            let _ = view.update(cx, |view, cx| view.note_action(path, action, window, cx));
+        });
+        let compared = &self.compared;
+        card(p)
+            .bg(p.surface)
+            .border_color(p.yellow.opacity(0.55))
+            .child(row)
+            .children(detail)
+            .children(workspace_notes::comparison(paused, compared, p))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(div().flex_1().flex().child(workspace_notes::compare_link(
+                        paused,
+                        "Compare",
+                        "Hide comparison",
+                        compared,
+                        &on,
+                    )))
+                    .children(workspace_notes::settle_buttons(paused, &on)),
+            )
+            .children(
+                workspace_notes::kept_note(paused, compared)
                     .map(|kept| hint(kept, p).text_size(px(font::CAPTION))),
             )
     }

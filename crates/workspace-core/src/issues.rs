@@ -1,6 +1,6 @@
 //! Shared issues (OpenSpec change `shared-issues`): records of ideas, bugs and requests kept in a
 //! Space's storage repository, its tracker. An issue is not a ticket: tickets stay local.
-use crate::{Extra, Paused, SpaceId, SpaceRepositories};
+use crate::{Extra, Paused, PausedSetting, SpaceId, SpaceRepositories};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
@@ -258,6 +258,56 @@ pub struct IssueRecord {
     /// Its links to this Mac's projects and tickets.
     #[serde(default)]
     pub links: Vec<IssueLink>,
+    /// The human follows it on this Mac: they filed it, are assigned it, commented on it or
+    /// chose to follow it, and have not chosen to stop.
+    #[serde(default)]
+    pub following: bool,
+}
+
+/// Why an issue is in the Inbox.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueNoteKind {
+    Assigned,
+    Mentioned,
+    /// A new comment on an issue the human follows.
+    Commented,
+    /// A new Urgent issue naming a repository on this Mac's Repositories page.
+    Urgent,
+    /// A linked issue moved with its work on this Mac.
+    Moved,
+    /// A file or part paused by sync; `paused` settles it.
+    Paused,
+}
+
+/// An issue in every project's Inbox, settled once for all: news closes when the human opens
+/// the issue, and a paused file or part when the human settles it or both versions agree.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueNote {
+    /// Its storage repository, as `StorageRepository::key`.
+    pub tracker: String,
+    pub id: IssueId,
+    pub kind: IssueNoteKind,
+    /// What happened, such as "Priya commented on your issue".
+    pub text: String,
+    /// A second line, such as the comment's first line or the repository.
+    #[serde(default)]
+    pub detail: String,
+    /// RFC 3339, in UTC.
+    #[serde(default)]
+    pub at: String,
+    /// For a paused file or part: the note Compare and the settle buttons act on.
+    #[serde(default)]
+    pub paused: Option<PausedSetting>,
+}
+
+/// Someone an issue can be assigned to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssuePerson {
+    pub login: String,
+    /// Their GitHub profile's name, when read.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// A link between an issue and a project on this Mac, or one of its tickets. Links stay on this

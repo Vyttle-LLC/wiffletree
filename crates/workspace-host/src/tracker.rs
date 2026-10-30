@@ -15,7 +15,7 @@ use storage::TRACKER;
 
 pub(crate) const ISSUES: &str = "issues";
 /// Raised when the index's layout changes, so it is rebuilt from the files.
-const INDEX_FORMAT: i64 = 2;
+const INDEX_FORMAT: i64 = 3;
 const FENCE: &str = "---\n";
 
 /// `issue.md`'s front matter, in the order it is written, so an unchanged field makes no diff.
@@ -128,6 +128,23 @@ fn parse_issue(content: &[u8]) -> Result<Issue> {
         description: body.trim_end().to_owned(),
         extra: front.extra,
     })
+}
+
+/// `issue.md`'s front matter, each field as written, and its description: the parts sync merges
+/// one at a time.
+pub(crate) fn issue_parts(content: &[u8]) -> Result<(serde_yaml::Mapping, String)> {
+    let (front, body) = split_front(content)?;
+    let front: serde_yaml::Mapping =
+        serde_yaml::from_str(front).context("The front matter is not valid")?;
+    // Read as an issue too, so a part merge never writes one that would not parse.
+    parse_issue(content)?;
+    Ok((front, body.trim_end().to_owned()))
+}
+
+/// `issue.md` from its parts, in the fixed field order.
+pub(crate) fn issue_from_parts(front: &serde_yaml::Mapping, description: &str) -> Result<Vec<u8>> {
+    let front: IssueFront = serde_yaml::from_value(serde_yaml::Value::Mapping(front.clone()))?;
+    with_front(&front, description)
 }
 
 fn comment_md(comment: &Comment) -> Result<Vec<u8>> {
@@ -305,11 +322,21 @@ impl Store {
             None => text.extend(record.raw.clone()),
         }
         text.extend(record.comments.iter().map(|comment| comment.body.clone()));
+        let mut people: Vec<String> = (record.issue.iter())
+            .flat_map(|issue| [Some(issue.author.clone()), issue.assignee.clone()])
+            .flatten()
+            .chain(record.comments.iter().map(|comment| comment.author.clone()))
+            .chain(record.events.iter().map(|event| event.by.clone()))
+            .filter(|login| !login.is_empty())
+            .collect();
+        people.sort();
+        people.dedup();
         Ok(Indexed {
             listing: listing(&record),
             stamp,
             version,
             text: text.join("\n").to_lowercase(),
+            people,
         })
     }
     /// The issue with its comments in time order and its events. A file that does not parse is
@@ -348,6 +375,7 @@ impl Store {
             events,
             paused: vec![],
             links: vec![],
+            following: false,
         })
     }
 }
@@ -358,6 +386,7 @@ pub(crate) struct Indexed {
     stamp: String,
     version: String,
     text: String,
+    people: Vec<String>,
 }
 
 /// The list's line for an issue; one whose `issue.md` does not parse has its problem and no
@@ -468,7 +497,7 @@ impl Host {
         bail!("No tracker on this Mac has the prefix {prefix}")
     }
     /// Each Space with a tracker, one per storage repository, with its tracker's config.
-    fn trackers(&self) -> Result<Vec<(Space, TrackerConfig)>> {
+    pub(crate) fn trackers(&self) -> Result<Vec<(Space, TrackerConfig)>> {
         let mut trackers: Vec<(Space, TrackerConfig)> = vec![];
         for record in self.spaces()? {
             let storage = &record.space.storage.repository;
@@ -662,11 +691,13 @@ impl Host {
         Ok(listed)
     }
     /// Marks the issue read on this Mac as its files are now. Nothing is written to its tracker.
+    /// Its news in the Inbox is settled too, for every project at once.
     pub fn mark_issue_read(&self, id: &IssueId) -> Result<()> {
         let (space, _) = self.tracker_for(id.prefix())?;
         let storage = &space.storage.repository;
         self.reindex_issue(storage, id)?;
-        self.mark_read(&storage.key(), id)
+        self.mark_read(&storage.key(), id)?;
+        self.settle_issue_news(&storage.key(), id)
     }
     fn mark_read(&self, storage: &str, id: &IssueId) -> Result<()> {
         self.db.execute(
@@ -706,6 +737,7 @@ impl Host {
         };
         let mut record = store.record(id, &storage.key())?;
         record.links = self.issue_links(&storage.key(), id)?;
+        record.following = self.is_following(&storage.key(), &record)?;
         if let StorageRepository::GitHub { .. } = storage {
             let under = format!("{}/%", issue_folder(id));
             record.paused = (self.db.prepare(
@@ -722,6 +754,18 @@ impl Host {
                 })
             })
             .collect::<Result<_>>()?;
+            // Each paused part, as `issue.md#part`.
+            let parts = (self.db.prepare(
+                "SELECT path||'#'||part,by FROM issue_parts WHERE repository=?1 AND path LIKE ?2 ORDER BY part",
+            )?)
+            .query_map(params![repos::key(&storage.key()), under], |r| {
+                Ok(PausedIssueFile {
+                    path: r.get(0)?,
+                    why: Paused::TwoMachines { machine: r.get(1)? },
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+            record.paused.extend(parts);
         }
         Ok(record)
     }
@@ -1104,7 +1148,7 @@ impl Host {
                 true => (0, 0),
                 false => (
                     count("sync_record", " AND written IS NOT synced")?,
-                    count("sync_paused", "")?,
+                    count("sync_paused", "")? + count("issue_parts", "")?,
                 ),
             };
             let (synced_at, error) = match local {
@@ -1136,7 +1180,7 @@ fn index(db: &Connection, indexed: &Indexed) -> Result<()> {
         .state
         .map(|state| json!(state).as_str().map(str::to_owned));
     db.execute(
-        "INSERT OR REPLACE INTO issue_index(storage,id,state,data,stamp,version,text) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        "INSERT OR REPLACE INTO issue_index(storage,id,state,data,stamp,version,text,people) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
         params![
             listing.tracker,
             listing.id.to_string(),
@@ -1145,6 +1189,7 @@ fn index(db: &Connection, indexed: &Indexed) -> Result<()> {
             indexed.stamp,
             indexed.version,
             indexed.text,
+            encode(&indexed.people)?,
         ],
     )?;
     Ok(())

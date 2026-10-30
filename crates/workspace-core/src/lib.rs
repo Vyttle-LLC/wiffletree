@@ -1020,10 +1020,11 @@ fn file_list(files: &[String]) -> String {
     list
 }
 impl Snapshot {
-    /// The workspace notes about settings sync paused.
+    /// The workspace notes about a file sync paused, a paused issue file or part included.
     pub fn paused_settings(&self) -> impl Iterator<Item = &PausedSetting> {
         self.workspace_notes.iter().filter_map(|note| match note {
             WorkspaceNote::Paused(setting) => Some(setting),
+            WorkspaceNote::Issue(note) => note.paused.as_ref(),
             WorkspaceNote::SkillQuestion(_) | WorkspaceNote::Held(_) => None,
         })
     }
@@ -1191,6 +1192,8 @@ pub enum WorkspaceNote {
     SkillQuestion(SkillQuestion),
     /// A file held back from a push because a scan failed or could not run.
     Held(HeldFile),
+    /// An issue the human should look at, listed under Issues at the top of every Inbox.
+    Issue(IssueNote),
 }
 /// A file of a storage repository that is not pushed until a scan passes it. Names the check and
 /// its rule, never what matched.
@@ -3292,6 +3295,18 @@ pub enum Command {
         #[serde(default)]
         ticket_id: Option<String>,
     },
+    /// Follows an issue on this Mac, or stops following it, so its comments reach the Inbox or
+    /// not; nothing is written to its tracker.
+    FollowIssue {
+        id: IssueId,
+        follow: bool,
+    },
+    /// Read-only: who an issue in the Space's tracker can be assigned to, as `IssuePerson`s:
+    /// the logins seen in the tracker and the storage repository's collaborators where GitHub
+    /// lets this Mac read them, with their profiles' names where read.
+    IssuePeople {
+        space_id: SpaceId,
+    },
     /// Replaces a Space's definition; its id and storage stay as they are.
     UpdateSpace {
         space: Box<Space>,
@@ -3759,6 +3774,7 @@ impl Command {
             | Self::Issues { .. }
             | Self::Issue { .. }
             | Self::IssueProjectDefaults { .. }
+            | Self::IssuePeople { .. }
             | Self::RemoteAccess => true,
             Self::ImportRepositories { .. }
             | Self::RefreshRepositories
@@ -3815,6 +3831,7 @@ impl Command {
             | Self::StartProjectFromIssue { .. }
             | Self::LinkIssue { .. }
             | Self::UnlinkIssue { .. }
+            | Self::FollowIssue { .. }
             | Self::SetWorkspacesDir { .. }
             | Self::SetVerification { .. }
             | Self::SetBuildsAtOnce { .. }
@@ -3860,8 +3877,9 @@ impl Command {
     /// project into one and choosing which repositories it lists, and reading where its storage
     /// is on this Mac. So are brains: the push grant, forgetting one, Set up, the compiler,
     /// amending a batch, Send now and the legacy import, and fixing or releasing a held entry.
-    /// Every write to a tracker is the human's; reading issues is not. Remote access is the
-    /// human's too: its state carries the pairing code.
+    /// Every write to a tracker is the human's, settling a paused issue file and following an issue
+    /// too; reading issues is not. Remote access is the human's too: its state carries the pairing
+    /// code.
     pub fn is_human_only(&self) -> bool {
         matches!(
             self,
@@ -3890,6 +3908,7 @@ impl Command {
                 | Self::StartProjectFromIssue { .. }
                 | Self::LinkIssue { .. }
                 | Self::UnlinkIssue { .. }
+                | Self::FollowIssue { .. }
                 | Self::SetSpaceBrain { .. }
                 | Self::SpaceStorage { .. }
                 | Self::ConfirmBrain { .. }
@@ -3907,6 +3926,10 @@ impl Command {
                 | Self::CancelPairing
                 | Self::SetDeviceLevel { .. }
                 | Self::RemoveDevice { .. }
+        ) || matches!(
+            self,
+            // Settling a paused issue file writes to its tracker.
+            Self::SettlePausedFile { repository: Some(_), path, .. } if path.starts_with("issues/")
         )
     }
     /// Remote access, pairing and devices, which only the host itself may read or change.

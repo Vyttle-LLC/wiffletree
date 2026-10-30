@@ -209,6 +209,8 @@ pub(super) enum Intent {
     OpenPage(Page),
     /// Opens the Issues page filtered to a Space, or to every Space.
     OpenIssues(Option<SpaceId>),
+    /// Opens one issue on the Issues page, which marks it read and settles its Inbox news.
+    OpenIssue(IssueId),
     ShowPanel(Panel),
     TogglePanel(Panel),
     ClosePanel,

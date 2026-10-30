@@ -438,6 +438,10 @@ impl Workspace {
                 });
                 self.open_page(Page::Issues, window, cx);
             }
+            Intent::OpenIssue(id) => {
+                (self.issues).update(cx, |issues, cx| issues.show_issue(id.clone(), window, cx));
+                self.open_page(Page::Issues, window, cx);
+            }
             Intent::ShowPanel(panel) => self.show_panel(*panel, window, cx),
             Intent::TogglePanel(panel) => self.toggle_panel(*panel, window, cx),
             Intent::ClosePanel => self.shared.panel = None,

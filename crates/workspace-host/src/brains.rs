@@ -412,7 +412,7 @@ fn run_pass(pass: &mut Pass, passed: &mut Passed, tools: &Tools) -> Result<()> {
     let writing = pass.granted && held.is_none();
     // Set up names the human as the code owner, and batch branches carry their login.
     if passed.login.is_none() {
-        passed.login = spaces::gh_login(tools, &pass.home);
+        passed.login = spaces::gh_account(tools, &pass.home).login();
     }
     passed.held = Some(held);
     passed.head = Some(fetched.clone());
@@ -522,7 +522,7 @@ fn publish_batch(
         Some(login) => login.clone(),
         None => login
             .insert(
-                spaces::gh_login(tools, home)
+                (spaces::gh_account(tools, home).login())
                     .context("gh is not signed in to GitHub. Run gh auth login, then Sync now.")?,
             )
             .clone(),
@@ -1769,7 +1769,9 @@ impl Host {
         else {
             return Ok(false);
         };
-        self.record_gh_login(passed.login);
+        if let Some(login) = passed.login {
+            self.record_gh_account(spaces::GhAccount::SignedIn(login));
+        }
         brain.push_url = passed.push_url.or(brain.push_url);
         brain.problem = passed.problem;
         if let Some(head) = passed.head {
