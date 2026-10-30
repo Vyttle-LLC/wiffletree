@@ -1,19 +1,21 @@
-//! A working agent's live activity: the steps of its current run, fetched as they change and
-//! shown as a fixed-height card after the transcript.
+//! A working agent's live activity: the steps of its current run, fetched as they change, the
+//! pieces that draw them, and the status line under the transcript.
 use super::*;
-use gpui_component::button::ButtonVariants;
-use std::time::{Duration, Instant};
+use file_links::Linked;
+use gpui_component::{button::ButtonVariants, text::TextView};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use ui::{Spinner, icon, mono};
 use wording::{clock, counted, duration};
 
 /// Step fetches start no closer together than this, about 30 a second.
 pub(super) const STEP_PACE: Duration = Duration::from_millis(33);
-/// The card and its minimized line keep fixed heights, so streaming never moves the transcript.
-const CARD_HEIGHT: f32 = 128.;
-const LINE_HEIGHT: f32 = 40.;
+/// The status line keeps a fixed height, so streaming never moves the transcript.
+const STATUS_HEIGHT: f32 = 36.;
 const STEP_ROW: f32 = 22.;
-/// Recent actions shown under the headline.
-const RECENT: usize = 3;
 
 /// One session's latest run, as this client has seen it.
 #[derive(Clone, Debug, Default)]
@@ -56,40 +58,86 @@ impl RunActivity {
         self.steps.sort_by_key(|s| s.seq);
         changed
     }
-    /// What the card shows; nothing from a previous run while the next one starts.
-    pub(crate) fn card(&self) -> Card {
+    /// What the status line shows; nothing from a previous run while the next one starts.
+    pub(crate) fn status(&self) -> LiveStatus {
         if !self.running {
-            return Card::default();
+            return LiveStatus::default();
         }
-        let actions: Vec<&Step> = self.steps.iter().filter(|s| s.kind.is_action()).collect();
-        Card {
+        let files: BTreeSet<&str> = (self.steps.iter())
+            .filter(|s| s.kind == StepKind::FileEdit)
+            .flat_map(|s| match s.diffs.as_slice() {
+                [] => s.paths.iter().map(String::as_str).collect::<Vec<_>>(),
+                diffs => diffs.iter().map(|d| d.path.as_str()).collect(),
+            })
+            .collect();
+        LiveStatus {
             run_id: self.run_id.clone(),
             started_at: self.started_at,
-            actions: actions.len(),
+            actions: self.steps.iter().filter(|s| s.kind.is_action()).count(),
+            files: files.len(),
             headline: self
                 .steps
                 .iter()
                 .rev()
                 .find(|s| s.kind == StepKind::Narration)
                 .map(|s| s.title.clone()),
-            recent: actions[actions.len().saturating_sub(RECENT)..]
-                .iter()
-                .map(|s| (*s).clone())
-                .collect(),
             current: self.steps.last().cloned(),
         }
     }
 }
 
-/// The few values the activity card draws, copied out once per frame.
+/// The few values the status line draws, copied out once per frame.
 #[derive(Clone, Debug, Default)]
-pub(super) struct Card {
+pub(super) struct LiveStatus {
     run_id: Option<String>,
     started_at: Option<i64>,
     actions: usize,
+    /// Files the run's edits changed, each counted once.
+    files: usize,
     headline: Option<String>,
-    recent: Vec<Step>,
     current: Option<Step>,
+}
+
+/// Each narration step's text with its file references linked, made as the step arrives or
+/// changes, so drawing it asks the host nothing.
+#[derive(Default)]
+pub(super) struct LinkedNarration {
+    run_id: Option<String>,
+    /// By step id, with the revision it was linked at.
+    linked: HashMap<String, (u64, Linked)>,
+}
+impl LinkedNarration {
+    pub(crate) fn update<V: 'static>(
+        &mut self,
+        steps: &[Step],
+        bases: &Arc<[PathBuf]>,
+        bridge: &Bridge,
+        cx: &mut Context<V>,
+    ) {
+        let run_id = steps.first().map(|s| s.run_id.clone());
+        if run_id != self.run_id {
+            self.linked.clear();
+            self.run_id = run_id;
+        }
+        for step in steps.iter().filter(|s| s.kind == StepKind::Narration) {
+            if self
+                .linked
+                .get(&step.id)
+                .is_some_and(|(at, _)| *at == step.revision)
+            {
+                continue;
+            }
+            let id = format!("{}-{}", step.run_id, step.id);
+            let text = step.detail.as_deref().unwrap_or(&step.title);
+            let linked = Linked::new(&id, text, bases.clone(), bridge);
+            self.linked.insert(step.id.clone(), (step.revision, linked));
+        }
+        file_links::link_when_resolved(self.linked.values().map(|(_, l)| l), bridge, cx);
+    }
+
+    pub(crate) fn view(&self, step_id: &str) -> Option<TextView> {
+        self.linked.get(step_id).map(|(_, linked)| linked.view())
+    }
 }
 
 /// At most one step request is in flight; changes during it trigger one more.
@@ -182,9 +230,21 @@ pub(super) fn line_counts((added, removed): (u32, u32), p: Palette) -> Div {
 
 /// A one-line step: state, kind, title and its note, or "running". An edit shows its counts.
 pub(super) fn step_row(step: &Step, p: Palette) -> Div {
+    step_line(step, "running".into(), false, p)
+}
+
+/// A step as the live conversation shows it: a running one with how long it has run, a failed
+/// one in red.
+pub(super) fn live_step_row(step: &Step, p: Palette) -> Div {
+    let running = format!("running · {}", clock(Some(step.started_at)));
+    step_line(step, running, step.state == StepState::Failed, p)
+}
+
+/// `red` draws the title and note in the failure color.
+fn step_line(step: &Step, running: String, red: bool, p: Palette) -> Div {
     let counts = edit_counts(step).filter(|_| step.state != StepState::Running);
     let note = if step.state == StepState::Running {
-        Some("running".to_owned())
+        Some(running)
     } else {
         step.note.clone().filter(|_| counts.is_none())
     };
@@ -212,7 +272,7 @@ pub(super) fn step_row(step: &Step, p: Palette) -> Div {
         .child(
             mono(step.title.clone(), p)
                 .flex_1()
-                .text_color(p.text)
+                .text_color(if red { p.red } else { p.text })
                 .whitespace_nowrap(),
         )
         .when_some(note, |d, note| {
@@ -220,16 +280,17 @@ pub(super) fn step_row(step: &Step, p: Palette) -> Div {
                 div()
                     .flex_none()
                     .text_size(px(font::META))
-                    .text_color(p.subtle)
+                    .text_color(if red { p.red } else { p.subtle })
                     .child(note),
             )
         })
         .when_some(counts, |d, counts| d.child(line_counts(counts, p)))
 }
 
-/// The minimized card's step: an edit names its file with a pencil and its counts, anything
-/// else shows its title.
-fn current_step(step: Option<&Step>, p: Palette) -> Div {
+/// What the status line says is happening: collapsed, the latest narration, since nothing above
+/// shows it; otherwise the current step. An edit names its file with a pencil and its counts,
+/// anything else shows its title.
+fn happening_now(status: &LiveStatus, collapsed: bool, p: Palette) -> Div {
     let line = div()
         .flex_1()
         .min_w_0()
@@ -237,10 +298,19 @@ fn current_step(step: Option<&Step>, p: Palette) -> Div {
         .items_center()
         .gap_1()
         .text_size(px(font::SMALL))
+        .text_color(p.subtle)
         .whitespace_nowrap()
         .child("·");
-    match step {
-        Some(step) if step.kind == StepKind::FileEdit => line
+    let step = status.current.as_ref();
+    match (status.headline.as_ref().filter(|_| collapsed), step) {
+        (Some(headline), _) => line.child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_ellipsis()
+                .child(headline.clone()),
+        ),
+        (None, Some(step)) if step.kind == StepKind::FileEdit => line
             .child(
                 icon(kind_icon(step.kind))
                     .size(px(13.))
@@ -255,7 +325,7 @@ fn current_step(step: Option<&Step>, p: Palette) -> Div {
             .when_some(edit_counts(step), |d, counts| {
                 d.child(line_counts(counts, p))
             }),
-        _ => line.child(
+        (None, _) => line.child(
             div()
                 .flex_1()
                 .min_w_0()
@@ -303,45 +373,74 @@ pub(super) fn turn_summary(
         })
 }
 
-/// The row after the transcript while the selected agent works.
-pub(super) fn activity_row(
-    card: &Card,
-    minimized: bool,
+/// The line under the transcript while the selected agent works, in place of its live work
+/// when that is collapsed. It opens the turn's history; a reader scrolled up can jump back.
+pub(super) fn status_line(
+    status: &LiveStatus,
+    collapsed: bool,
+    following: bool,
     p: Palette,
     view: WeakEntity<transcript::Transcript>,
 ) -> Stateful<Div> {
-    let stats = format!(
+    let mut stats = format!(
         "· {} · {}",
-        clock(card.started_at),
-        counted(card.actions, "step")
+        clock(status.started_at),
+        counted(status.actions, "step")
     );
+    if status.files > 0 {
+        stats += &format!(" · {} changed", counted(status.files, "file"));
+    }
+    let jump = (!following).then(|| {
+        let view = view.clone();
+        button("live-jump")
+            .ghost()
+            .xsmall()
+            .label("Jump to latest")
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                let _ = view.update(cx, |view, cx| view.jump_to_latest(cx));
+            })
+    });
     let toggle = {
         let view = view.clone();
         button("activity-toggle")
             .ghost()
             .xsmall()
             .icon(
-                icon(if minimized {
-                    "chevron-down"
+                icon(if collapsed {
+                    "chevron-right"
                 } else {
-                    "chevron-up"
+                    "chevron-down"
                 })
                 .size(px(14.)),
             )
-            .tooltip(if minimized {
-                "Show live activity"
+            .tooltip(if collapsed {
+                "Show live work"
             } else {
-                "Minimize live activity"
+                "Collapse live work"
             })
             .on_click(move |_, _, cx| {
                 cx.stop_propagation();
                 let _ = view.update(cx, |view, cx| view.toggle_activity(cx));
             })
     };
-    let header = div()
-        .h(px(24.))
+    let run_id = status.run_id.clone();
+    div()
+        .id("activity-status")
+        .cursor_pointer()
+        .on_click(move |_, window, cx| {
+            if let Some(run_id) = run_id.clone() {
+                let _ = view.update(cx, |view, cx| view.open_history(run_id, window, cx));
+            }
+        })
         .w_full()
-        .min_w_0()
+        .h(px(STATUS_HEIGHT))
+        .overflow_hidden()
+        .px_3()
+        .rounded_xl()
+        .border_1()
+        .border_color(p.edge.opacity(edge::SOFT))
+        .bg(p.surface)
         .flex()
         .items_center()
         .gap_2()
@@ -360,59 +459,9 @@ pub(super) fn activity_row(
                 .text_color(p.subtle)
                 .child(stats),
         )
-        .when(minimized, |d| {
-            d.child(current_step(card.current.as_ref(), p))
-        })
-        .when(!minimized, |d| {
-            d.child(div().flex_1()).child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .text_size(px(font::DETAIL))
-                    .text_color(p.subtle)
-                    .child("View all")
-                    .child(icon("chevron-right").size(px(12.))),
-            )
-        })
-        .child(toggle);
-    let body = div()
-        .w_full()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .child(
-            div()
-                .h(px(22.))
-                .mt_1()
-                .text_size(px(font::TEXT))
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .child(card.headline.clone().unwrap_or_else(|| "Starting…".into())),
-        )
-        .children(card.recent.iter().map(|step| step_row(step, p)));
-    let run_id = card.run_id.clone();
-    div()
-        .id("activity-card")
-        .cursor_pointer()
-        .on_click(move |_, window, cx| {
-            if let Some(run_id) = run_id.clone() {
-                let _ = view.update(cx, |view, cx| view.open_history(run_id, window, cx));
-            }
-        })
-        .w_full()
-        .h(px(if minimized { LINE_HEIGHT } else { CARD_HEIGHT }))
-        .overflow_hidden()
-        .px_3()
-        .py(px(7.))
-        .rounded_xl()
-        .border_1()
-        .border_color(p.edge.opacity(edge::SOFT))
-        .bg(p.surface)
-        .flex()
-        .flex_col()
-        .child(header)
-        .when(!minimized, |d| d.child(body))
+        .child(happening_now(status, collapsed, p))
+        .children(jump)
+        .child(toggle)
 }
 
 #[cfg(test)]
@@ -508,23 +557,24 @@ mod tests {
     }
 
     #[test]
-    fn the_card_shows_the_latest_narration_and_three_latest_actions() {
+    fn the_status_counts_actions_and_each_changed_file_once() {
         let mut activity = RunActivity::new("session");
         let mut steps = vec![step("first", 0, StepKind::Narration, 1)];
-        steps.extend((1..=5).map(|n| step(&format!("cmd{n}"), n, StepKind::Command, n as u64 + 1)));
-        steps.push(step("latest", 6, StepKind::Narration, 7));
+        steps.extend((1..=3).map(|n| step(&format!("cmd{n}"), n, StepKind::Command, n as u64 + 1)));
+        let edit = |id: &str, seq, path: &str| {
+            let mut edit = step(id, seq, StepKind::FileEdit, seq as u64 + 1);
+            edit.paths = vec![path.into()];
+            edit
+        };
+        steps.push(edit("e1", 4, "a.rs"));
+        steps.push(edit("e2", 5, "b.rs"));
+        steps.push(edit("e3", 6, "a.rs"));
+        steps.push(step("latest", 7, StepKind::Narration, 8));
         activity.merge(page("a", steps));
-        let card = activity.card();
-        assert_eq!(card.headline.as_deref(), Some("latest"));
-        assert_eq!(card.actions, 5);
-        assert_eq!(
-            card.recent
-                .iter()
-                .map(|s| s.id.as_str())
-                .collect::<Vec<_>>(),
-            ["cmd3", "cmd4", "cmd5"]
-        );
+        let status = activity.status();
+        assert_eq!(status.headline.as_deref(), Some("latest"));
+        assert_eq!((status.actions, status.files), (6, 2));
         activity.running = false;
-        assert_eq!(activity.card().actions, 0);
+        assert_eq!(activity.status().actions, 0);
     }
 }

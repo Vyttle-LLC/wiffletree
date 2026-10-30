@@ -329,7 +329,7 @@ impl Settings {
                         set_minimize_activity(*on, cx);
                         cx.refresh_windows();
                     }),
-                "Show a working agent's activity as one line",
+                "Collapse a working agent's live work to its status line",
             ))
             .child(hint(
                 "The same choices as the sidebar's and the transcript's own toggles.",
