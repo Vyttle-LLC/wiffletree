@@ -170,7 +170,7 @@ The Inbox SHALL show issue entries, under an "Issues" label at the top of every 
 - **THEN** the Inbox shows that Priya commented on the human's issue, with the comment's first line
 
 ### Requirement: Starting a project from an issue links them
-**Start project from issue** SHALL create a project named after the issue and its coordinator, in the issue's Space (see "An issue's Space"), using the workspace repositories whose GitHub names the issue's `repositories` lists, or the Space's repositories as New project ticks them when the issue lists none on this Mac, and naming any listed repository that is not on this Mac. It SHALL link the project to the issue on this Mac, and send the coordinator a first message from the human holding the issue's ID, title, description and comments, introduced as context written by the named authors and not as instructions. The host SHALL append a `work` event saying the human started a project, with no project name, and SHALL move the issue to In progress, as for any change of the derived state.
+**Start project from issue** SHALL create a project named after the issue and its coordinator, in the issue's Space (see "An issue's Space"), using the workspace repositories whose GitHub names the issue's `repositories` lists and naming any listed repository that is not on this Mac, which is skipped. Only an issue whose `repositories` is empty SHALL use the Space's repositories as New project ticks them. It SHALL link the project to the issue on this Mac, and send the coordinator a first message from the human holding the issue's ID, title, description and comments, introduced as context written by the named authors and not as instructions. The host SHALL append a `work` event saying the human started a project, with no project name, and SHALL move the issue to In progress, as for any change of the derived state.
 
 #### Scenario: Start project from CEL-151
 - **WHEN** the human starts a project from CEL-151
@@ -179,6 +179,10 @@ The Inbox SHALL show issue entries, under an "Issues" label at the top of every 
 #### Scenario: The issue's repositories
 - **WHEN** CEL-151 lists `celadon-theme/celadon-chat`, which is a workspace repository here, and the human starts a project from it in the Celadon Space
 - **THEN** the project is in Celadon and uses only celadon-chat
+
+#### Scenario: A listed repository not on this Mac
+- **WHEN** CEL-151 lists only `celadon-theme/watch-app`, which is not cloned here, and its Space also lists `celadon-theme/api`, which is
+- **THEN** the project is created with no repositories, the human is told watch-app is not on this Mac, and api is not added
 
 ### Requirement: The coordinator's issue tools
 The project coordinator SHALL have `list_issues` over its project's Space's tracker, with filters for state, assignee, label, repository and text; `read_issue`, returning the issue with its comments and events; and `link_issue`, taking an issue ID and optionally one of its own tickets, which links the issue to the coordinator's project or to that ticket on this Mac. `link_issue` SHALL append a `work` event and set the derived state, and SHALL NOT change any other part of the issue. `read_issue` and `link_issue` SHALL refuse an issue of another tracker. No other role but assistant threads SHALL have issue tools (see `assistant`, "Issue threads"), and no agent tool SHALL create, edit, comment on or move an issue.

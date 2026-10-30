@@ -40,7 +40,7 @@ Michael approved #163's mockup and the reconciliation plan. Each decision is spe
 Each is the smallest choice that keeps the decisions above consistent; the coordinator should list them for Michael.
 
 1. **A repository has one role on a Mac: brain, or storage and settings.** A brain changes only through gated PRs, while storage and settings push their default branch directly; one clone cannot follow both. Setting a brain to a repository that is a storage or settings repository on this Mac, or the reverse, is refused, naming the other use. This also keeps `<owner>-<name>` unique under `repos/`. A storage repository may also be the settings repository, as #163 already allowed.
-2. **Without a settings repository, the shared folder stays `<data folder>/shared/`.** It is a plain folder, not a clone. Choosing a settings repository makes its clone under `repos/` the shared folder; the settings repository's backup and join rules are unchanged.
+2. **Without a settings repository, the shared folder stays `<data folder>/shared/`.** It is a plain folder, not a clone. Setting up or joining a settings repository makes its clone under `repos/` the shared folder and moves `<data folder>/shared/` to `backups/`, as joining already did. Stop syncing copies the settings files back to `<data folder>/shared/` and keeps using them there, while the clone keeps syncing its Space and issue files when it is also storage. `spaces` restates the settings repository's set-up, join and stop requirements to say so.
 3. **The prefix is chosen with the storage.** A new storage repository, local or on GitHub, gets `wiffletree-issues.yaml` in its first commit. The Space form proposes a prefix from the Space's name (its first letters, 2 to 5 capitals) and the human may change it. Prefixes are unique among the storage repositories on this Mac. A prefix can change only while its tracker has no issue. A storage repository joined without a tracker config offers Set up issues, which asks for a prefix and commits the config.
 4. **One commit per rule set.** The engine commits each rule set's changes separately (settings, a Space, issues, a board), so every commit touches only one rule set's paths and the settings repository's "a commit holds changes only to `wiffletree.json`, `settings/` and `skills/`" stays true. A repository is fetched at the shortest cadence of the rule sets it holds: every minute once it holds a tracker.
 5. **Sessions outside projects have an owner, not a hidden project.** `SessionOwner` is `Project`, `Space` or `Brain`. Messages and the usage ledger key on the owner, so usage reports can show "Assistant · Sage" or "Brain compile · sagehaven-docs" without a project record the sidebar must hide.
@@ -83,7 +83,7 @@ The brain is not a rule set: brain-registry-sync's checkout fast-forwards `main`
 
 ### 3. Sessions outside projects
 
-A session's owner is a project, a Space or a brain. A session owned by a Space or a brain has no parent session, ticket or worktree and is never offered the coordination tools. This change only adds the owner type and its checks; it admits no role. The deltas that admit roles are ordered below.
+A session's owner is a project, a Space or a brain. A session owned by a Space or a brain has no parent session or ticket and is never offered the coordination tools. A Space-owned session has no worktree; a brain-owned one works only in a worktree of its brain's host checkout, as brain compile needs. This change only adds the owner type and its checks; it admits no role. The deltas that admit roles are ordered below.
 
 ### 4. New projects
 
@@ -102,6 +102,7 @@ Archive order, which decides who restates a requirement that several changes mod
 | project-memory "Safe Markdown export" | 1 `spaces` (Space's brain) → 2 `brain-log-capture` (removed) |
 | settings-repository "Shared settings and settings that stay on this machine" | 1 `spaces` → 2 `assistant-spaces-jobs-boards` (assistant name, router threshold) |
 | settings-repository "Shared settings live in one folder on every machine" | 1 `spaces` (clone root) → 2 `assistant-spaces-jobs-boards` (`settings/assistant.json`) |
+| settings-repository "The human chooses the settings repository on each machine", "A second machine joins", "Stopping sync" | 1 `spaces` (the shared folder moves to and from the clone under `repos/`) |
 | host-process "Human-only commands need the app's credential" | 1 `spaces` (Space commands) → 2 `shared-issues` (issue writes, proposals) |
 | skills "Instructions are a fixed core and a skill" | 1 `shared-issues` (untrusted issue text) → 2 `assistant-spaces-jobs-boards` (Assisting, Space instructions, issue threads) |
 | model-routing "Who runs what" | 1 `assistant-spaces-jobs-boards` (Assistant, Router, Job) → 2 `brain-compile` (Brain compiler) |
