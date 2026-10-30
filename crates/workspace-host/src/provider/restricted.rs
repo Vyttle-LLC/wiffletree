@@ -129,14 +129,26 @@ impl ThreadLaunch {
         Ok(())
     }
     /// Refuses a Codex tool call on an MCP server the thread was not given.
+    /// Codex reports no tools or MCP servers when a run starts, so each MCP call is checked as
+    /// it is made: one to a server or a tool the thread was not given stops the run.
     pub(crate) fn check_codex_item(&self, item: &Value) -> Result<()> {
         if item["type"] != "mcp_tool_call" {
             return Ok(());
         }
         let server = item["server"].as_str().unwrap_or_default();
+        let tool = item["tool"].as_str().unwrap_or_default();
         ensure!(
             self.servers_given().contains(server),
             "Stopped: the run called an MCP server its Space's sources do not list ({server})"
+        );
+        let given = match server {
+            "agent_workspace" => THREAD_TOOLS.contains(&tool),
+            _ => (self.mcp_sources())
+                .any(|(source, tools)| source == server && tools.iter().any(|t| t == tool)),
+        };
+        ensure!(
+            given,
+            "Stopped: the run called a tool it was not given ({server} {tool})"
         );
         Ok(())
     }
@@ -368,11 +380,33 @@ mod tests {
     }
 
     #[test]
-    fn a_codex_call_to_an_unlisted_server_is_refused() {
-        let launch = launch(vec![]);
-        let call = |server: &str| json!({"type":"mcp_tool_call","server":server,"tool":"x"});
-        launch.check_codex_item(&call("agent_workspace")).unwrap();
-        assert!(launch.check_codex_item(&call("linear")).is_err());
+    fn a_codex_call_to_an_unlisted_server_or_tool_is_refused() {
+        let launch = launch(vec![linear()]);
+        let call =
+            |server: &str, tool: &str| json!({"type":"mcp_tool_call","server":server,"tool":tool});
+        launch
+            .check_codex_item(&call("agent_workspace", "save_output"))
+            .unwrap();
+        launch
+            .check_codex_item(&call("linear", "list_issues"))
+            .unwrap();
+        assert!(
+            launch
+                .check_codex_item(&call("github", "list_issues"))
+                .is_err()
+        );
+        assert!(
+            launch
+                .check_codex_item(&call("linear", "create_issue"))
+                .is_err()
+        );
+        let refused = launch.check_codex_item(&call("agent_workspace", "create_ticket"));
+        assert!(
+            refused
+                .unwrap_err()
+                .to_string()
+                .contains("(agent_workspace create_ticket)")
+        );
         launch
             .check_codex_item(&json!({"type":"command_execution"}))
             .unwrap();

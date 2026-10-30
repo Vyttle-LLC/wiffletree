@@ -429,13 +429,13 @@ Threads are the one kind of turn, besides comment sorting, that does not run in 
 - **Claude**: `--permission-mode dontAsk`, `--setting-sources ""`, so no user, project or scratch settings file can allow more, `--tools` limited to `Read`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, `Write` and `Edit`, plus `Bash` only for a CLI source, and `--allowedTools` with writes only under `//<scratch>/**`, the thread tools, each source's MCP tools and `Bash(<prefix>:*)` per CLI prefix. `--strict-mcp-config` loads only the thread's workspace server (`workspace-host thread-mcp`) and its Space's MCP sources, from `~/.claude.json`.
 - **Codex**: `exec --sandbox workspace-write --cd <scratch>` with `--ignore-user-config` and `--ignore-rules`, approvals `never`, shell network off, `exclude_slash_tmp` and `exclude_tmpdir_env_var` true, no writable roots, `web_search="live"`, the features that act outside the sandbox or start agents turned off, and only the workspace server and the Space's MCP sources, from `config.toml`, each limited with `enabled_tools`.
 
-The host reads what a run reports: Claude's `init` must list no MCP server, tool or permission mode it was not given, and a Codex MCP call must name a given server; otherwise the turn stops, and the thread shows why. `tests/assistant.rs` checks the launch and the stop with a fake provider. `tests/thread_authority.rs` runs the real CLIs and needs both signed in, so it is ignored by default:
+The host reads what a run reports: Claude's `init` must list no MCP server, tool or permission mode it was not given, and the turn stops otherwise, with the reason in the thread. Codex reports no tools or MCP servers when a run starts, so for Codex the host checks every MCP call as it is made and stops the run at a server or tool it was not given, and it refuses project configuration from the scratch folder: with no user configuration and no command rules loaded, a `.codex/` folder or `AGENTS.md` a thread leaves there cannot widen its next turn. `tests/assistant.rs` checks the launch and both stops with a fake provider. `tests/thread_authority.rs` runs the real CLIs and needs both signed in, so it is ignored by default:
 
 ```sh
 cargo nextest run -p workspace-host --test thread_authority --run-ignored only
 ```
 
-It checks that Claude denies a shell commit in a repository and a write outside the scratch folder and allows one in it, and that Codex refuses writes to a repository, `/tmp` and `$TMPDIR` and allows one in the scratch folder. It passed on October 30, 2026, with Claude Code 2.1.310 and codex-cli 0.160.0.
+It checks that Claude denies a shell commit in a repository and a write outside the scratch folder and allows one in it, that Codex refuses writes to a repository, `/tmp` and `$TMPDIR` and allows one in the scratch folder, and that a resumed Codex turn keeps its sandbox and starts no server named by a `.codex/config.toml`, `.codex/rules/` file or `AGENTS.md` in the scratch folder. Codex's own sandbox already refuses a thread's write to `.codex/`, so the test places those files itself. It passed on October 30, 2026, with Claude Code 2.1.310 and codex-cli 0.160.0.
 
 ## Current limits
 

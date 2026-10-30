@@ -206,6 +206,60 @@ fn a_thread_runs_restricted_in_its_scratch_folder_and_saves_outputs_there_only()
 }
 
 #[test]
+fn a_codex_call_to_a_server_or_tool_it_was_not_given_stops_the_run_and_says_so() {
+    let _environment = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
+    let fixture = fixture();
+    let service = service(&fixture);
+    let codex = ModelProfile {
+        provider: Provider::Codex,
+        model: "gpt-6.1-sol".into(),
+        effort: "medium".into(),
+    };
+    let calls = [
+        ("c1", "call agent_workspace save_output", None),
+        (
+            "c2",
+            "call github list_issues",
+            Some("an MCP server its Space's sources do not list (github)"),
+        ),
+        (
+            "c3",
+            "call agent_workspace create_ticket",
+            Some("a tool it was not given (agent_workspace create_ticket)"),
+        ),
+    ];
+    for (id, body, _) in calls {
+        let start = Command::StartThread {
+            id: id.into(),
+            space_id: fixture.sage.clone(),
+            body: body.into(),
+            attachments: vec![],
+            profile: Some(codex.clone()),
+        };
+        request(&service, start);
+    }
+    until_changed(&service, Instant::now() + Duration::from_secs(60), |s| {
+        calls.iter().all(|(id, _, _)| {
+            tab(s, id).is_some_and(|t| !matches!(t.status, Status::Working | Status::Ready))
+                || replies(&service, id).iter().any(|m| m.sender.is_some())
+        })
+    });
+    for (id, _, stopped) in calls {
+        let shown = replies(&service, id);
+        match stopped {
+            Some(why) => assert!(
+                shown.iter().any(|m| m.body.contains(why)),
+                "{id}: {shown:?}"
+            ),
+            None => assert!(
+                shown.iter().any(|m| m.body == "Called it"),
+                "{id}: {shown:?}"
+            ),
+        }
+    }
+}
+
+#[test]
 fn a_run_offered_an_unlisted_mcp_server_is_stopped_and_says_so() {
     let _environment = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
     let fixture = fixture();

@@ -24,6 +24,10 @@ pub(super) fn assistant_name(snapshot: Option<&Snapshot>) -> String {
         _ => DEFAULT_NAME.into(),
     }
 }
+/// What the empty composer says, by the assistant's name, as "Ask Dot…".
+fn composer_placeholder(name: &str) -> String {
+    format!("Ask {name}…")
+}
 /// Whether any thread is in a turn, for the sidebar row's working mark.
 pub(super) fn any_working(tabs: &[ThreadTab]) -> bool {
     tabs.iter().any(|tab| tab.status == Status::Working)
@@ -65,6 +69,13 @@ fn is_notice(message: &Message) -> bool {
     ["error:", "start-error:", "stopped:"]
         .iter()
         .any(|prefix| message.id.starts_with(prefix))
+}
+
+/// A search the box asked for. Its reply shows only while the box still asks for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SearchAsked {
+    query: String,
+    space: Option<SpaceId>,
 }
 
 /// A tab being dragged to a new place in the strip.
@@ -118,6 +129,8 @@ pub(super) struct AssistantPage {
     renaming: bool,
     brief: Option<BriefForm>,
     sending: bool,
+    /// The assistant's name the composer's placeholder uses.
+    named: String,
 }
 impl EventEmitter<Intent> for AssistantPage {}
 impl AssistantPage {
@@ -125,7 +138,7 @@ impl AssistantPage {
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(2, 9)
-                .placeholder("Ask anything…")
+                .placeholder(composer_placeholder(DEFAULT_NAME))
         });
         cx.subscribe(&composer, |_, _, event, cx| {
             if matches!(event, InputEvent::Change) {
@@ -165,6 +178,7 @@ impl AssistantPage {
             renaming: false,
             brief: None,
             sending: false,
+            named: DEFAULT_NAME.into(),
         }
     }
     fn tabs(&self) -> &[ThreadTab] {
@@ -196,6 +210,14 @@ impl AssistantPage {
     pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
         let shown = shared.page == Page::Assistant;
         self.shared = shared;
+        let name = assistant_name(self.shared.snapshot());
+        if name != self.named {
+            let placeholder = composer_placeholder(&name);
+            self.composer.update(cx, |input, cx| {
+                input.set_placeholder(placeholder, window, cx)
+            });
+            self.named = name;
+        }
         if self.open.is_some() && self.open_tab().is_none() {
             self.open = self.tabs().first().map(|tab| tab.thread.id.clone());
         }
@@ -323,16 +345,23 @@ impl AssistantPage {
             }
         });
     }
+    /// What the search box asks for now: its query and the Space it is limited to.
+    fn search_asked(&self, cx: &App) -> SearchAsked {
+        SearchAsked {
+            query: self.search.read(cx).value().trim().to_string(),
+            space: self.search_space.clone(),
+        }
+    }
     fn run_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let query = self.search.read(cx).value().trim().to_string();
-        if query.is_empty() {
+        let asked = self.search_asked(cx);
+        if asked.query.is_empty() {
             self.hits = None;
             return cx.notify();
         }
-        let ask = ask::search_threads(query.clone(), self.search_space.clone());
+        let ask = ask::search_threads(asked.query.clone(), asked.space.clone());
         self.ask(ask, window, cx, move |view, hits, window, cx| {
-            // A later query's answer wins.
-            if view.search.read(cx).value().trim() != query {
+            // A reply for a query or Space no longer asked for is dropped; the later one wins.
+            if view.search_asked(cx) != asked {
                 return;
             }
             match hits {
@@ -945,6 +974,22 @@ impl AssistantPage {
             )
     }
 
+    /// The model a new thread in `space` starts on, as the host picks it with nothing chosen.
+    fn new_thread_model(&self, space: Option<&SpaceId>) -> Option<ModelProfile> {
+        let snapshot = self.shared.snapshot()?;
+        let id = space?;
+        let default = (snapshot.spaces.iter())
+            .find(|s| &s.id == id)?
+            .models
+            .threads
+            .as_ref();
+        spaces_view::thread_model(
+            default,
+            snapshot.space_locals.get(id),
+            &self.shared.detection,
+            snapshot.model_selection.row(&Job::Assistant),
+        )
+    }
     fn composer_box(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let tab = self.open_tab();
         if let Some(project) = tab.and_then(|t| t.thread.project_id.as_deref()) {
@@ -961,9 +1006,17 @@ impl AssistantPage {
         let chip_name = (spaces.iter())
             .find(|s| Some(&s.id) == space.as_ref())
             .map_or("No Space".into(), |s| s.name.clone());
-        let model = tab
-            .and_then(|t| t.profile.as_ref())
-            .map_or("Who runs what".into(), ModelProfile::short);
+        // A thread shows its own model; a new tab what its thread would start on.
+        let model = match tab {
+            Some(tab) => tab.profile.clone(),
+            None => self.new_thread_model(space.as_ref()),
+        };
+        let model = div()
+            .px_2()
+            .rounded(px(7.))
+            .border_1()
+            .border_color(p.edge)
+            .child(model.map_or("Who runs what".into(), |m| m.short()));
         let chip = button("composer-space")
             .xsmall()
             .when_some(space.clone(), |b, id| {
@@ -1105,7 +1158,10 @@ impl Render for AssistantPage {
 
 #[cfg(test)]
 mod tests {
-    use super::{after_closing, any_working, assistant_name, chosen_line, reordered, saved_line};
+    use super::{
+        SearchAsked, after_closing, any_working, assistant_name, chosen_line, composer_placeholder,
+        reordered, saved_line,
+    };
     use workspace_core::assistant::ThreadTab;
     use workspace_core::{Chooser, Selection, Snapshot, SpaceId, Status};
 
@@ -1172,6 +1228,26 @@ mod tests {
         assert_eq!(reordered(&order, "a", "c"), ["b", "c", "a"]);
         assert_eq!(reordered(&order, "a", "b"), ["b", "a", "c"]);
         assert_eq!(reordered(&order, "b", "missing"), ["a", "c", "b"]);
+    }
+
+    #[test]
+    fn the_composer_asks_by_the_assistants_name() {
+        assert_eq!(composer_placeholder("Dot"), "Ask Dot…");
+        assert_eq!(composer_placeholder("Assistant"), "Ask Assistant…");
+    }
+
+    #[test]
+    fn a_late_search_reply_for_another_space_or_query_is_dropped() {
+        let asked = |query: &str, space: Option<&str>| SearchAsked {
+            query: query.into(),
+            space: space.map(|s| SpaceId(s.into())),
+        };
+        // Sage was asked for, then the box moved to Personal before Sage's reply came.
+        let now = asked("dentist", Some("personal"));
+        assert_ne!(asked("dentist", Some("sage")), now);
+        assert_ne!(asked("dentist", None), now);
+        assert_ne!(asked("dent", Some("personal")), now);
+        assert_eq!(asked("dentist", Some("personal")), now);
     }
 
     #[test]

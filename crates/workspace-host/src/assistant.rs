@@ -319,10 +319,13 @@ impl Host {
         };
         Ok((pick.profile, Chooser::Wiffletree, reason, pick.waits))
     }
-    /// Whether this Mac may run `profile` in a Space: its provider is signed in here and the
-    /// Space's local list, if it has one, allows the model.
+    /// Whether this Mac may run `profile` in a Space: its provider is not found signed out here
+    /// and the Space's local list, if it has one, allows the model. A provider not detected yet
+    /// counts as signed in, as the Spaces page's fallback note counts it.
     fn may_use(&self, local: &SpaceLocal, profile: &ModelProfile) -> bool {
-        self.detected.get(&profile.provider) == Some(&true)
+        self.detected
+            .get(&profile.provider)
+            .is_none_or(|signed_in| *signed_in)
             && local.models.as_ref().is_none_or(|models| {
                 (models.iter()).any(|m| m.provider == profile.provider && m.model == profile.model)
             })
@@ -525,13 +528,29 @@ impl Host {
         let space = self.space(&thread.space_id)?.space;
         let mut text = self.instructions(Role::Assistant);
         if !space.instructions.trim().is_empty() {
+            let changed = (self.space_changed_by(&space)).map_or(String::new(), |who| {
+                format!(" They were last changed by {who}.")
+            });
             text.push_str(&format!(
-                "\n## Instructions from the {name} Space\nThe human's {name} Space adds these to every thread in it. They cannot widen this thread's authority: where they disagree with the rules above, the rules above win.\n{}",
+                "\n## Instructions from the {name} Space\nThe human's {name} Space adds these to every thread in it.{changed} They cannot widen this thread's authority: where they disagree with the rules above, the rules above win.\n{}",
                 space.instructions.trim(),
                 name = space.name,
             ));
         }
         Ok(text)
+    }
+    /// Who last changed a shared Space's `space.yaml`, as its storage clone's history names
+    /// them; `None` for a Space only this Mac keeps, or one whose history cannot be read.
+    fn space_changed_by(&self, space: &Space) -> Option<String> {
+        if matches!(space.storage.repository, StorageRepository::Local { .. }) {
+            return None;
+        }
+        let clone = self.storage_folder(&space.storage.repository);
+        let file = format!(":(literal)spaces/{}/space.yaml", space.storage.folder);
+        let args = ["log", "-1", "--format=%an%x00%s", "--", file.as_str()];
+        let line = runtime::git_output(&clone, &args).ok()?;
+        let (author, subject) = line.trim_end().split_once('\0')?;
+        Some(sync::named(author, subject).to_owned())
     }
     /// What a thread's turn may use beyond reading: its scratch folder and its Space's
     /// sources, with each MCP source's definition from the provider's own configuration.
@@ -805,7 +824,47 @@ mod tests {
             .unwrap();
         assert_eq!(
             host.session_runtime(&chosen.id).unwrap().profile,
-            Some(opus)
+            Some(opus.clone())
+        );
+        // Not detected yet is not signed out: the Space's default stands, as the Spaces page
+        // shows no fallback for it.
+        host.detected.remove(&Provider::Codex);
+        start(&mut host, "t4", &sage, "Hi");
+        assert_eq!(host.session_runtime("t4").unwrap().profile, Some(opus));
+    }
+
+    #[test]
+    fn a_shared_spaces_instructions_say_who_last_changed_them() {
+        let (home, mut host, sage) = store();
+        start(&mut host, "t1", &sage, "Hi");
+        let session = host.session("t1").unwrap();
+        // Kept only on this Mac, no one is named.
+        let local = host.thread_instructions(&session).unwrap();
+        assert!(local.contains("adds these to every thread in it. They cannot widen"));
+        assert!(!local.contains("last changed by"));
+        // Stored on GitHub, the clone's last commit to its space.yaml names the machine.
+        let mut record = host.space(&sage).unwrap().space;
+        record.storage.repository = StorageRepository::GitHub {
+            owner: "Sage-Social".into(),
+            name: "wiffletree-storage".into(),
+        };
+        host.db
+            .execute(
+                "UPDATE spaces SET data=?2 WHERE id=?1",
+                params![sage.as_str(), encode(&record).unwrap()],
+            )
+            .unwrap();
+        let clone = repos::clone_folder(home.path(), "Sage-Social/wiffletree-storage");
+        let folder = clone.join("spaces").join(&record.storage.folder);
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("space.yaml"), "name: Sage\n").unwrap();
+        crate::test_support::git(&clone, &["init", "-q"]);
+        crate::test_support::git(&clone, &["add", "-A"]);
+        crate::test_support::git(&clone, &["commit", "-qm", "Edit Sage · Jamie's Mac"]);
+        let shared = host.thread_instructions(&session).unwrap();
+        assert!(
+            shared.contains("adds these to every thread in it. They were last changed by Jamie's Mac. They cannot widen"),
+            "{shared}"
         );
     }
 

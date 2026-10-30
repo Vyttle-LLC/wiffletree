@@ -1606,16 +1606,10 @@ fn fallback_note(
     row: Option<&JobRow>,
 ) -> Option<String> {
     let model = model?.profile();
-    let signed_in = |p: Provider| detection.get(&p).is_none_or(ProviderStatus::usable);
-    let allowed = (local.and_then(|l| l.models.as_ref())).is_none_or(|models| {
-        models
-            .iter()
-            .any(|m| m.provider == model.provider && m.model == model.model)
-    });
-    if signed_in(model.provider) && allowed {
+    if may_run(&model, local, detection) {
         return None;
     }
-    let fallback = row.and_then(|row| row.main.choices().find(|p| signed_in(p.provider)));
+    let fallback = row_choice(row, detection);
     Some(match fallback {
         Some(fallback) => format!(
             "{} is not available here; {which} use {}.",
@@ -1627,6 +1621,41 @@ fn fallback_note(
             model.short()
         ),
     })
+}
+
+/// Whether this Mac may run a Space's default model: its provider is not found signed out here
+/// and this Mac's list for the Space, if it has one, allows it. A provider not detected yet
+/// counts as signed in, as the host counts it.
+fn may_run(model: &ModelProfile, local: Option<&SpaceLocal>, detection: &Detection) -> bool {
+    let allowed = (local.and_then(|l| l.models.as_ref())).is_none_or(|models| {
+        models
+            .iter()
+            .any(|m| m.provider == model.provider && m.model == model.model)
+    });
+    detection
+        .get(&model.provider)
+        .is_none_or(ProviderStatus::usable)
+        && allowed
+}
+/// The Assistant row's first choice this Mac can run.
+fn row_choice<'a>(row: Option<&'a JobRow>, detection: &Detection) -> Option<&'a ModelProfile> {
+    row?.main.choices().find(|p| {
+        detection
+            .get(&p.provider)
+            .is_none_or(ProviderStatus::usable)
+    })
+}
+/// The model a new thread in a Space starts on when the user picks none: the Space's default
+/// for threads when this Mac may run it, else the Assistant row's first choice it can run.
+pub(super) fn thread_model(
+    model: Option<&SpaceModel>,
+    local: Option<&SpaceLocal>,
+    detection: &Detection,
+    row: Option<&JobRow>,
+) -> Option<ModelProfile> {
+    let default = model.map(SpaceModel::profile);
+    (default.filter(|d| may_run(d, local, detection)))
+        .or_else(|| row_choice(row, detection).cloned())
 }
 
 pub(super) fn space_mark(color: Hsla) -> Div {
@@ -1952,6 +1981,7 @@ mod tests {
         Joining, brain_after_choosing, brain_label, fallback_note, format_sources, holds_draft,
         issues_line, join_choices, join_refused_by, merged, new_storage_line, parse_sources,
         prefix_question, readers_line, repository_line, shared_with, storage_banner, sync_line,
+        thread_model,
     };
     use workspace_core::*;
 
@@ -2049,6 +2079,30 @@ mod tests {
             )
             .unwrap(),
             "Opus · high is not available here; threads use Sonnet · medium."
+        );
+        // A new tab's model chip says the same: the default where it runs, else the row.
+        let sonnet = profile(Provider::Claude, "sonnet", "medium");
+        let started =
+            |model, local, detection: &Detection| thread_model(model, local, detection, Some(&row));
+        assert_eq!(started(Some(&opus), None, &both), Some(opus.profile()));
+        assert_eq!(started(None, None, &both), Some(sonnet.clone()));
+        assert_eq!(
+            started(Some(&opus), Some(&only_sonnet), &both),
+            Some(sonnet.clone())
+        );
+        assert_eq!(
+            started(Some(&opus), None, &no_claude),
+            Some(profile(Provider::Codex, "gpt-6.1-sol", "medium"))
+        );
+        // Not detected yet counts as signed in, as the host counts it.
+        let undetected = Detection::new();
+        assert_eq!(
+            fallback_note("jobs", Some(&opus), None, &undetected, Some(&row)),
+            None
+        );
+        assert_eq!(
+            started(Some(&opus), None, &undetected),
+            Some(opus.profile())
         );
     }
 

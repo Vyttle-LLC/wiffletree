@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""A Claude double for assistant threads. Only used via WORKSPACE_CLAUDE_BIN in tests.
+"""A Claude and Codex double for assistant threads. Only used via WORKSPACE_*_BIN in tests.
 
-Each turn appends its arguments, working folder and prompt to `turns.jsonl` in
+Each Claude turn appends its arguments, working folder and prompt to `turns.jsonl` in
 WORKSPACE_TEST_THREAD_DIR. It lists the tools its workspace server offers, then follows the
 prompt: "save <file> as <title>" writes the file in the working folder and saves it with
 save_output; "offer github" reports an MCP server no source lists. It replies with the prompt's
-first line."""
+first line. A Codex turn, `exec`, reports no inventory at its start, as Codex does: it calls
+the tool the prompt names, as "call <server> <tool>", then replies."""
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,19 @@ if args[:2] == ['auth', 'status']:
 if args[:2] == ['login', 'status']:
     # Codex prints its sign-in status on stderr.
     print('Logged in using ChatGPT', file=sys.stderr)
+    sys.exit(0)
+if args[:1] == ['exec']:
+    prompt = sys.stdin.read()
+    _, server, tool = prompt.split()[:3]
+    for value in [
+        {'type': 'thread.started', 'thread_id': str(uuid.uuid4())},
+        {'type': 'turn.started'},
+        {'type': 'item.started', 'item': {'id': 'item_0', 'type': 'mcp_tool_call', 'server': server,
+                                          'tool': tool, 'status': 'in_progress'}},
+        {'type': 'item.completed', 'item': {'id': 'item_1', 'type': 'agent_message', 'text': 'Called it'}},
+        {'type': 'turn.completed', 'usage': {'input_tokens': 10, 'output_tokens': 5}},
+    ]:
+        print(json.dumps(value), flush=True)
     sys.exit(0)
 if '--mcp-config' not in args:
     sys.exit(0)

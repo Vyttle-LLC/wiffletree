@@ -45,7 +45,7 @@ A thread SHALL run in its own scratch folder at `<data folder>/assistant/threads
 - **THEN** the file is written in the thread's scratch folder
 
 ### Requirement: The provider enforces thread authority
-Threads and job runs SHALL NOT start in the providers' YOLO mode. A Claude thread SHALL start with a permission mode that denies, without asking, every tool not allowed; the allowed tools SHALL be reading, file search, web search and fetch, writing and editing only under the scratch folder, the thread's workspace tools, and for each source in use its listed MCP tools and shell commands. A Codex thread SHALL start in the workspace-write sandbox rooted at the scratch folder, with no other writable root and with `sandbox_workspace_write.exclude_slash_tmp` and `sandbox_workspace_write.exclude_tmpdir_env_var` both true, so that its shell can write only the scratch folder and the device files Codex's sandbox always allows, such as `/dev/null`; it SHALL run with approvals never asked, shell network off and web search on, and with MCP servers limited to the listed tools. The host SHALL read the tools and MCP servers a run reports at its start, and SHALL stop the run, saying why, when it reports any it was not given.
+Threads and job runs SHALL NOT start in the providers' YOLO mode. A Claude thread SHALL start with a permission mode that denies, without asking, every tool not allowed; the allowed tools SHALL be reading, file search, web search and fetch, writing and editing only under the scratch folder, the thread's workspace tools, and for each source in use its listed MCP tools and shell commands. A Codex thread SHALL start in the workspace-write sandbox rooted at the scratch folder, with no other writable root and with `sandbox_workspace_write.exclude_slash_tmp` and `sandbox_workspace_write.exclude_tmpdir_env_var` both true, so that its shell can write only the scratch folder and the device files Codex's sandbox always allows, such as `/dev/null`; it SHALL run with approvals never asked, shell network off and web search on, and with MCP servers limited to the listed tools. The host SHALL read the tools and MCP servers a run reports at its start, and SHALL stop the run, saying why, when it reports any it was not given. Codex reports no tools or MCP servers at a run's start, so for Codex the host SHALL check every MCP call as it is made and stop the run, saying why, at a call to a server or tool it was not given; and a Codex thread SHALL run with no user configuration and no project configuration or command rules read from its scratch folder, so that nothing a thread writes there can widen a later turn.
 
 #### Scenario: A shell write on Claude
 - **WHEN** a Claude thread tries `Bash(git commit -am wip)` in a repository
@@ -62,6 +62,14 @@ Threads and job runs SHALL NOT start in the providers' YOLO mode. A Claude threa
 #### Scenario: An unexpected tool
 - **WHEN** a thread's run reports at its start an MCP server that its Space's sources do not list
 - **THEN** the host stops the run and the thread shows that an unlisted MCP server was offered
+
+#### Scenario: An unexpected call on Codex
+- **WHEN** a Codex thread calls an MCP server or tool it was not given
+- **THEN** the host stops the run at that call and the thread shows which server or tool it was
+
+#### Scenario: Project files in scratch on Codex
+- **WHEN** a Codex thread's turn leaves `.codex/config.toml` with a looser sandbox and another MCP server, `.codex/rules/` and `AGENTS.md` in its scratch folder
+- **THEN** its next turn runs in the same sandbox with the same servers, and the server written there never starts
 
 ### Requirement: Topics are filed in their Space's brain
 The user SHALL NOT have to choose where to file anything. Each thread SHALL belong to one Space, and its log entries SHALL go to that Space's brain as per-entry files under `logs/assistant/YYYY/MM/`, with `repo: assistant`, written through `log_work` and reaching `main` through a gated batch PR (see `project-memory` in `brain-log-capture`), with the thread's id and Space kept in the host store. When a message starts a new topic, the router (see assistant-router) SHALL send it to the thread and Space it belongs to, asking the user when unsure. A thread in a Space with no brain SHALL add no log entries and SHALL say so when asked to remember something.

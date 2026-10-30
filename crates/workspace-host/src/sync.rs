@@ -489,7 +489,7 @@ fn unit(path: &str) -> &str {
 }
 
 /// The machine a commit names after its " · ", or else its author.
-fn named<'a>(author: &'a str, subject: &'a str) -> &'a str {
+pub(crate) fn named<'a>(author: &'a str, subject: &'a str) -> &'a str {
     subject
         .rsplit_once(" · ")
         .map_or(author, |(_, machine)| machine)
