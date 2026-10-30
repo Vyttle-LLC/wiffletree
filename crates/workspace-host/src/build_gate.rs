@@ -411,6 +411,7 @@ fn subcommand(args: &[String]) -> Option<&str> {
     None
 }
 
+/// A running process; one that has ended is none, a zombie included.
 struct Process {
     parent: u32,
     name: String,
@@ -438,7 +439,8 @@ fn process(pid: u32) -> Option<Process> {
             size,
         )
     };
-    if read != size {
+    // `SZOMB`: a zombie has ended, though its parent has not collected it yet.
+    if read != size || info.pbi_status == 5 {
         return None;
     }
     // SAFETY: the kernel ends each name with a NUL inside its array.
@@ -490,6 +492,10 @@ fn process(pid: u32) -> Option<Process> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let (head, tail) = stat.rsplit_once(')')?;
     let fields: Vec<&str> = tail.split_whitespace().collect();
+    // A zombie has ended, though its parent has not collected it yet.
+    if matches!(fields.first(), Some(&("Z" | "X"))) {
+        return None;
+    }
     Some(Process {
         parent: fields.get(1)?.parse().ok()?,
         name: head.split_once('(')?.1.to_owned(),

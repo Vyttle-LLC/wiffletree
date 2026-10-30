@@ -162,6 +162,21 @@ fn a_slot_frees_when_its_build_is_killed() {
     assert!(finish(second).status.success());
 }
 
+#[test]
+fn a_build_that_ended_frees_its_slot_before_its_parent_collects_it() {
+    let gate = Gate::new(1);
+    let first = gate.compile("a");
+    gate.wait_for_log("start a");
+    let second = gate.compile("b");
+    gate.wait_for_a_waiter();
+    // The first build ends but stays a zombie: nothing waits for it until the second starts.
+    gate.release("a");
+    gate.wait_for_log("start b");
+    gate.release("b");
+    assert!(finish(first).status.success());
+    assert!(finish(second).status.success());
+}
+
 /// A crate with no dependencies, whose target folder nothing has built yet.
 fn fresh_crate(home: &Path) -> PathBuf {
     let folder = home.join("fresh");
