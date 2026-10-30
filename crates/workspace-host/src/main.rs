@@ -62,7 +62,9 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let data = std::path::PathBuf::from(&args[1]);
-    workspace_host::build_gate::install(&data, &std::env::current_exe()?)?;
+    std::fs::create_dir_all(&data)?;
+    let data = std::fs::canonicalize(&data)?;
+    install_build_gate(&data, &std::env::current_exe()?);
     let service = workspace_host::service::Service::start(data, std::env::current_exe()?)?;
     let mut reader = io::stdin().lock();
     let mut output = io::stdout().lock();
@@ -117,6 +119,13 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Sends agents' builds through the build gate. Without it the host still runs, ungated.
+fn install_build_gate(data: &std::path::Path, binary: &std::path::Path) {
+    if let Err(error) = workspace_host::build_gate::install(data, binary) {
+        eprintln!("Build gate unavailable, so agents' builds are not limited: {error}");
+    }
+}
+
 /// `serve --data-dir <dir> [--child | --app <bundle>]`: the host for clients on its socket. A
 /// child host reads its credential from the first line of standard input and stops when that
 /// closes; otherwise the credential is the data folder's Keychain item, readable by the host and
@@ -145,7 +154,7 @@ fn serve(args: &[String]) -> Result<()> {
     let data = std::fs::canonicalize(&data)?;
     workspace_host::socket::socket_path(&data)?;
     let binary = std::env::current_exe()?;
-    workspace_host::build_gate::install(&data, &binary)?;
+    install_build_gate(&data, &binary);
     let credential = if child {
         workspace_host::socket::read_credential(&mut io::stdin().lock())?
     } else {

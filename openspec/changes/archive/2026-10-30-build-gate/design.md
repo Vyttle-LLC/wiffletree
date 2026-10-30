@@ -5,21 +5,23 @@ The host runs every agent's provider process at nice 10 with Cargo and nextest c
 ## Decisions
 
 ### Gate through build-tool hooks, not PATH
-A shim directory first on PATH loses to `nix develop` and to profiles that prepend a toolchain; `nix develop --command` puts its store paths first. The variables Cargo and Go read to wrap their own tools are kept by both. So the host links `wiffletree-build-gate` to its own binary in a folder without spaces (Cargo splits a runner on whitespace) and gives agents `RUSTC_WRAPPER`, `CARGO_TARGET_<host triple>_RUNNER` and `GOFLAGS=-toolexec=<gate>`. A user who already set one of them keeps theirs, and that tool is not gated. A wrapper set only in a repository's Cargo config is overridden by the variable, which Cargo prefers.
+A shim directory first on PATH loses to `nix develop` and to profiles that prepend a toolchain; `nix develop --command` puts its store paths first. The variables Cargo and Go read to wrap their own tools are kept by both. So the host links `wiffletree-build-gate` to its own binary in `$TMPDIR/wiffletree-<hash of the data folder>/`, a folder without spaces (Go splits its flags on them) that each restart reuses, and gives agents `RUSTC_WRAPPER` and `GOFLAGS=-toolexec=<gate> -exec=<gate>`. A user who already set one of them keeps theirs. No Cargo target runner is set: it would override a repository's own runner and put the gate between `cargo run` and its app.
 
-### What counts as a build
-A rustc or clippy-driver call with `--crate-name`, a binary from a `deps` folder (test and bench binaries, as Cargo and nextest run them), or a Go tool other than its `-V` version query. `cargo run` binaries live outside `deps`, so a running app or server holds no slot once compiled.
+### A slot is held for the build's whole life
+A build is the outermost Cargo, Go or Rust tool among a call's ancestors below the host's process, so the nested Cargo of `cargo clippy`, `cargo nextest`, a build script or a test shares the outer build's slot and cannot deadlock against it. It takes the slot at its first compile: a rustc or clippy-driver call naming a crate, except Cargo's target query, which reads `-` and only prints; or a Go tool other than its `-V` version query; or a Go test binary, which `-exec` hands to the gate. It keeps the slot until that process ends. Test binaries, doctests, `cargo doc`'s rustdoc and Go tests therefore run inside the slot without hooks of their own, and no grace period is needed between compiles. The slot records the process's start time and name, so an ended process, a reused id, or Cargo replaced by its app in `cargo run`, holds nothing. `go run` keeps Go running beside its app, so when `-exec` hands the gate a binary from Go's `exe` folder, the gate gives up that `go` process's slot first.
 
-### A slot belongs to a build, not a call
-Cargo starts many rustc processes per build, and `cargo clippy`, `cargo nextest` and tests can start a nested Cargo. A call's build is the outermost Cargo, Go or Rust tool among its ancestors below the host's process, so nested work shares the outer build's slot and cannot deadlock against it. A build holds its slot while any of its calls runs and for one second after, so the gaps between compiles do not hand the slot away, and loses it at once when its process is gone.
+### The gate becomes the program
+After waiting, or straight away for any other call, the gate executes the program in its own place. Signals and exit statuses reach the program as without the gate, and `kill` of a background build stops it.
 
-### State in lock files
-`<data>/build-gate/` holds one folder per build with a lock file per running call. The system unlocks a file when its holder dies, so a killed build never keeps a slot. A `gate.lock` serialises decisions, and `waiting/<build>` files, by age, give the oldest waiting builds the free slots. The limit is read from `settings.json` on every check, so a change applies to builds already waiting.
+### Where the waiting line goes
+Cargo caches rustc's standard error and replays it on later fresh builds, and Go caches a tool's output. A waiting Cargo build therefore prints its line once on rustc's standard output, which Cargo shows but does not cache; a Go test binary prints it on standard error; a Go compile waits silently.
 
-### The gate never blocks a build
-If the gate cannot keep its state, the call runs ungated. A waiting call whose build has gone away exits.
+### State
+`<data>/build-gate/held/<pid>` names each build holding a slot with its start time and name; `waiting/<pid>` files, by age, give the oldest waiting builds the free slots; `gate.lock` serialises decisions. The limit is read from `settings.json` on every check, so a change applies to builds already waiting. If the gate cannot keep its state, or the host cannot install it, builds run ungated.
 
-## Risks
+## Risks and limits
 
-- Go's first build after the hook appears rebuilds the standard library once, since `-toolexec` is part of Go's cache key.
-- A build script that compiles C code itself is not a gated call; it runs inside its build's slot or between calls.
+- A repository's own `build.rustc-wrapper` such as sccache is overridden for agents, since Cargo prefers the variable; a wrapper set in the host's environment is kept, and rustc then goes ungated.
+- A build that compiles nothing, such as tests re-run on an unchanged tree or `cargo doc` with every dependency already checked, takes no slot.
+- A long-lived Cargo subcommand such as `cargo watch` holds its slot while it runs.
+- Go's first build with `-toolexec` rebuilds the standard library once, since the hook is part of Go's cache key.

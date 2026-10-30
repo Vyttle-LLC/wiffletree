@@ -3,53 +3,59 @@
 //! so two at once took the whole machine.
 //!
 //! Agents reach the gate through hooks the build tools read from the environment, which shell
-//! profiles and `nix develop` keep, unlike an order of PATH: Cargo's `RUSTC_WRAPPER` and test
-//! runner, and Go's `-toolexec`. Each runs this binary as `wiffletree-build-gate <program>
-//! <args…>`. A compile or a test binary waits for a slot, then runs; anything else, such as the
-//! version queries behind `cargo fmt`, `cargo metadata` or `go env`, runs straight away.
+//! profiles and `nix develop` keep, unlike an order of PATH: Cargo's `RUSTC_WRAPPER`, and Go's
+//! `-toolexec` and `-exec`. Each runs this binary as `wiffletree-build-gate <program> <args…>`,
+//! which always ends by executing the program in its place, so signals reach it as before.
 //!
 //! A slot belongs to a build: the outermost Cargo or Go process the call runs under, so the
-//! nested Cargo of `cargo clippy` or `cargo nextest`, or one a test starts, shares its slot. A
-//! build holds it while any of its compiles or test binaries runs and for a moment after, and
-//! loses it when it exits. Waiting builds take free slots oldest first. The state is a folder of
-//! lock files that the system unlocks when a holder dies, so a killed build never keeps a slot.
+//! nested Cargo of `cargo clippy` or `cargo nextest`, or one a test starts, shares it. A build
+//! takes its slot at its first compile, or at a Go test binary, and holds it until that process
+//! ends, so its test binaries, doctests and docs run inside it. `cargo run` replaces Cargo with
+//! the app and `go run` hands its app to the gate, so a running app holds no slot. Waiting builds
+//! take free slots oldest first.
 use std::{
     ffi::OsString,
     fs::{self, File},
-    io,
-    os::unix::{fs::symlink, process::ExitStatusExt},
+    io::{self, Write},
+    os::unix::{fs::symlink, process::CommandExt},
     path::{Path, PathBuf},
     process::Command,
     sync::OnceLock,
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 /// The name the hooks run this binary by.
-pub const GATE_NAME: &str = "wiffletree-build-gate";
+const GATE_NAME: &str = "wiffletree-build-gate";
 /// The data folder whose `settings.json` holds "Builds at once" and that keeps the slot state.
 const DATA_DIR: &str = "WIFFLETREE_BUILD_GATE";
 /// The host's process: an owner is looked for only below it.
 const ROOT: &str = "WIFFLETREE_BUILD_GATE_ROOT";
 const STATE: &str = "build-gate";
-/// How long a build keeps its slot after its last compile or test binary ends, so the gaps
-/// between them do not hand the slot to another build.
-const GRACE: Duration = Duration::from_secs(1);
 const POLL: Duration = Duration::from_millis(200);
 
 /// The environment the host gives its agents, once `install` has run.
 static HOOKS: OnceLock<Vec<(String, OsString)>> = OnceLock::new();
 
-/// Links `GATE_NAME` to `binary` in a folder without spaces, as Cargo's runner and Go's flags
-/// need, and records the hooks agents get. A tool the host's own environment already wraps keeps
-/// its wrapper and is not gated.
+/// Links `GATE_NAME` to `binary` in a temporary folder without spaces, as Go's flags need, one
+/// per data folder so restarts reuse it, and records the hooks agents get. A hook the host's own
+/// environment already sets is the user's and is left alone.
 pub fn install(data: &Path, binary: &Path) -> io::Result<()> {
-    let folder = std::env::temp_dir().join(format!("wiffletree-{}", std::process::id()));
+    let folder = std::env::temp_dir().join(format!("wiffletree-{:016x}", fnv(data)));
     fs::create_dir_all(&folder)?;
     let gate = folder.join(GATE_NAME);
-    let _ = fs::remove_file(&gate);
-    symlink(binary, &gate)?;
+    let staged = folder.join(format!(".{GATE_NAME}-{}", std::process::id()));
+    let _ = fs::remove_file(&staged);
+    symlink(binary, &staged)?;
+    fs::rename(&staged, &gate)?;
     let _ = HOOKS.set(hooks(data, &gate, |name| std::env::var_os(name)));
     Ok(())
+}
+
+/// A stable name for a path, so each data folder keeps one gate folder.
+fn fnv(path: &Path) -> u64 {
+    (path.as_os_str().as_encoded_bytes().iter()).fold(0xcbf2_9ce4_8422_2325, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// The variables that send `data`'s agents' builds through `gate`; `host` reads the host's own.
@@ -62,40 +68,80 @@ fn hooks(
         (DATA_DIR.to_owned(), data.into()),
         (ROOT.to_owned(), std::process::id().to_string().into()),
     ];
-    for name in ["RUSTC_WRAPPER".to_owned(), runner_variable()] {
-        if host(&name).is_none() {
-            hooks.push((name, gate.into()));
+    if host("RUSTC_WRAPPER").is_none() {
+        hooks.push(("RUSTC_WRAPPER".to_owned(), gate.into()));
+    }
+    let mut flags = host("GOFLAGS").unwrap_or_default();
+    let before = flags.len();
+    for flag in ["-toolexec", "-exec"] {
+        if !flags.to_string_lossy().contains(&format!("{flag}=")) {
+            if !flags.is_empty() {
+                flags.push(" ");
+            }
+            flags.push(format!("{flag}="));
+            flags.push(gate);
         }
     }
-    let flags = host("GOFLAGS").unwrap_or_default();
-    if !flags.to_string_lossy().contains("-toolexec") {
-        let mut flags = flags;
-        if !flags.is_empty() {
-            flags.push(" ");
-        }
-        flags.push("-toolexec=");
-        flags.push(gate);
+    if flags.len() != before {
         hooks.push(("GOFLAGS".to_owned(), flags));
     }
     hooks
 }
 
-/// `CARGO_TARGET_<host triple>_RUNNER`, which Cargo and nextest run test binaries through.
-fn runner_variable() -> String {
-    let arch = std::env::consts::ARCH;
-    let triple = match std::env::consts::OS {
-        "macos" => format!("{arch}-apple-darwin"),
-        os => format!("{arch}-unknown-{os}-gnu"),
-    };
-    format!(
-        "CARGO_TARGET_{}_RUNNER",
-        triple.to_uppercase().replace('-', "_")
-    )
-}
-
 /// The hooks for an agent's environment; none when the host installed no gate.
 pub(crate) fn agent_env() -> &'static [(String, OsString)] {
     HOOKS.get().map_or(&[], Vec::as_slice)
+}
+
+/// What a call through the gate is.
+#[derive(Debug, PartialEq)]
+enum Call {
+    /// rustc or clippy-driver compiling a crate; it says it waits on standard output, which
+    /// Cargo shows and, unlike rustc's errors, does not replay from its cache.
+    Compile,
+    /// A Go compiler, linker or vet run. It waits silently: Go caches and replays a tool's
+    /// output.
+    GoTool,
+    /// A Go test binary.
+    GoTest,
+    /// The program `go run` built; its build gives up its slot.
+    GoRun,
+    /// Anything else, such as the version and target queries behind `cargo tree` and `go env`.
+    Other,
+}
+
+fn classify(program: &Path, args: &[OsString]) -> Call {
+    let arg = |test: fn(&str) -> bool| args.iter().any(|a| test(&a.to_string_lossy()));
+    let folder = |path: &Path| {
+        path.parent()
+            .and_then(Path::file_name)
+            .map(|n| n.to_owned())
+    };
+    let name = program.file_name().unwrap_or_default().to_string_lossy();
+    if arg(|a| a == "--crate-name") {
+        // Cargo's target query reads its input from standard input and only prints.
+        return match arg(|a| a == "-" || a.starts_with("--print")) {
+            true => Call::Other,
+            false => Call::Compile,
+        };
+    }
+    if program
+        .parent()
+        .and_then(folder)
+        .is_some_and(|n| n == "tool")
+    {
+        return match arg(|a| a.starts_with("-V")) {
+            true => Call::Other,
+            false => Call::GoTool,
+        };
+    }
+    if name.ends_with(".test") {
+        return Call::GoTest;
+    }
+    if folder(program).is_some_and(|n| n == "exe") {
+        return Call::GoRun;
+    }
+    Call::Other
 }
 
 /// Runs the gate when this binary was started by `GATE_NAME`, and never returns then.
@@ -110,61 +156,28 @@ pub fn run_if_called() {
         std::process::exit(2);
     };
     let args: Vec<OsString> = args.collect();
-    // The gate never stops a build: one it cannot keep track of runs ungated.
-    let lease = match std::env::var_os(DATA_DIR) {
-        Some(data) if is_build(Path::new(&program), &args) => wait_for_slot(Path::new(&data)).ok(),
-        _ => None,
-    };
-    let status = Command::new(&program).args(&args).status();
-    if let Some(lease) = lease {
-        lease.release();
+    if let Some(data) = std::env::var_os(DATA_DIR) {
+        let data = Path::new(&data);
+        // The gate never stops a build: one it cannot keep track of runs ungated.
+        let _ = match classify(Path::new(&program), &args) {
+            Call::Compile => claim(data, &mut io::stdout()),
+            Call::GoTest => claim(data, &mut io::stderr()),
+            Call::GoTool => claim(data, &mut io::sink()),
+            Call::GoRun => release(data),
+            Call::Other => Ok(()),
+        };
     }
-    match status {
-        Ok(status) => exit_like(status),
-        Err(error) => {
-            eprintln!(
-                "{GATE_NAME}: cannot run {}: {error}",
-                program.to_string_lossy()
-            );
-            std::process::exit(127);
-        }
-    }
-}
-
-/// Whether a call compiles or runs tests: a rustc or clippy-driver call naming a crate, a test
-/// or bench binary from a `deps` folder, or a Go tool other than its version query. Cargo runs
-/// `cargo run` binaries from elsewhere, so a running app holds no slot.
-fn is_build(program: &Path, args: &[OsString]) -> bool {
-    let parent = |path: &Path| {
-        path.parent()
-            .and_then(Path::file_name)
-            .map(|n| n.to_owned())
-    };
-    let folder = parent(program);
-    let go_tool = program
-        .parent()
-        .and_then(parent)
-        .is_some_and(|n| n == "tool");
-    args.iter().any(|a| a == "--crate-name")
-        || folder.is_some_and(|n| n == "deps")
-        || (go_tool && !args.iter().any(|a| a.to_string_lossy().starts_with("-V")))
-}
-
-/// Exits as the program did; one ended by a signal ends by the same signal.
-fn exit_like(status: std::process::ExitStatus) -> ! {
-    if let Some(signal) = status.signal() {
-        // SAFETY: resetting a handler and raising a signal are plain system calls.
-        unsafe {
-            libc::signal(signal, libc::SIG_DFL);
-            libc::raise(signal);
-        }
-    }
-    std::process::exit(status.code().unwrap_or(1))
+    let error = Command::new(&program).args(&args).exec();
+    eprintln!(
+        "{GATE_NAME}: cannot run {}: {error}",
+        program.to_string_lossy()
+    );
+    std::process::exit(127);
 }
 
 /// "Builds at once" from `data`'s `settings.json`, read on every check so a change applies to
 /// builds already waiting.
-pub(crate) fn limit(data: &Path) -> usize {
+fn limit(data: &Path) -> usize {
     fs::read(data.join(crate::settings::FILE))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
@@ -173,54 +186,95 @@ pub(crate) fn limit(data: &Path) -> usize {
         .clamp(1, workspace_core::MAX_BUILDS_AT_ONCE)
 }
 
-/// A compile or test binary running in its build's slot.
-struct Lease {
-    _file: File,
-    owner: PathBuf,
+/// The slot state, with its folders made, locked against other calls while it lives.
+struct State {
+    folder: PathBuf,
+    _lock: File,
 }
-impl Lease {
-    /// Marks when the build last used its slot, before unlocking, so the slot never looks free
-    /// in between.
-    fn release(self) {
-        let _ = File::create(self.owner.join("released"));
+impl State {
+    fn open(data: &Path) -> io::Result<Self> {
+        let folder = data.join(STATE);
+        for part in ["held", "waiting"] {
+            fs::create_dir_all(folder.join(part))?;
+        }
+        let lock = File::create(folder.join("gate.lock"))?;
+        lock.lock()?;
+        Ok(State {
+            folder,
+            _lock: lock,
+        })
+    }
+    fn held(&self, build: u32) -> PathBuf {
+        self.folder.join("held").join(build.to_string())
+    }
+    fn waiting(&self, build: u32) -> PathBuf {
+        self.folder.join("waiting").join(build.to_string())
+    }
+    /// The builds holding a slot. Clears those whose process ended or became something else,
+    /// as `cargo run` becomes its app.
+    fn holders(&self) -> io::Result<Vec<u32>> {
+        let mut holders = vec![];
+        for (build, path) in entries(&self.folder.join("held"))? {
+            match fs::read_to_string(&path) {
+                Ok(identity) if process(build).is_some_and(|p| p.identity() == identity) => {
+                    holders.push(build)
+                }
+                _ => fs::remove_file(path)?,
+            }
+        }
+        Ok(holders)
+    }
+    /// The builds waiting for a slot, oldest first. Clears those that are gone.
+    fn waiters(&self) -> io::Result<Vec<u32>> {
+        let mut waiting = vec![];
+        for (build, path) in entries(&self.folder.join("waiting"))? {
+            match process(build) {
+                Some(_) => waiting.push((fs::metadata(&path)?.modified()?, build)),
+                None => fs::remove_file(path)?,
+            }
+        }
+        waiting.sort();
+        Ok(waiting.into_iter().map(|(_, build)| build).collect())
     }
 }
 
-/// Waits until this call's build holds a slot. Says once per build that it waits.
-fn wait_for_slot(data: &Path) -> io::Result<Lease> {
-    let state = data.join(STATE);
-    fs::create_dir_all(state.join("waiting"))?;
-    let owner = owner();
+/// The files in `folder` named by a process id.
+fn entries(folder: &Path) -> io::Result<Vec<(u32, PathBuf)>> {
+    let mut entries = vec![];
+    for entry in fs::read_dir(folder)? {
+        let path = entry?.path();
+        if let Some(build) = path.file_name().and_then(|n| n.to_str()?.parse().ok()) {
+            entries.push((build, path));
+        }
+    }
+    Ok(entries)
+}
+
+/// Waits until this call's build holds a slot, saying once on `say` that it waits.
+fn claim(data: &Path, say: &mut impl Write) -> io::Result<()> {
+    let build = owner();
+    let identity = process(build).map(|p| p.identity()).unwrap_or_default();
     let parent = std::os::unix::process::parent_id();
-    let waiting = state.join("waiting").join(owner.to_string());
-    // Only the build's first call to wait says so.
-    let mut first = false;
     let mut told = false;
     loop {
-        let gate = File::create(state.join("gate.lock"))?;
-        gate.lock()?;
-        let active = active_builds(&state)?;
-        let free = limit(data).saturating_sub(active.len());
-        let holds = active.contains(&owner);
-        if !holds && !waiting.exists() {
-            File::create_new(&waiting)?;
-            first = true;
+        let state = State::open(data)?;
+        let holders = state.holders()?;
+        if holders.contains(&build) {
+            return Ok(());
         }
-        let rank = waiters(&state)?.iter().position(|&w| w == owner);
-        if holds || rank.is_some_and(|rank| rank < free) {
+        let waiting = state.waiting(build);
+        // Only the build's first call to wait says so.
+        let first = !waiting.exists() && File::create_new(&waiting).is_ok();
+        let free = limit(data).saturating_sub(holders.len());
+        let rank = state.waiters()?.iter().position(|&w| w == build);
+        if rank.is_some_and(|rank| rank < free) {
+            fs::write(state.held(build), &identity)?;
             let _ = fs::remove_file(&waiting);
-            let folder = state.join(owner.to_string());
-            fs::create_dir_all(&folder)?;
-            let file = File::create(folder.join(format!("lease-{}", std::process::id())))?;
-            file.try_lock().map_err(io::Error::other)?;
-            return Ok(Lease {
-                _file: file,
-                owner: folder,
-            });
+            return Ok(());
         }
-        drop(gate);
+        drop(state);
         if first && !told {
-            eprintln!("Waiting for a build slot ({} in use)", active.len());
+            let _ = writeln!(say, "Waiting for a build slot ({} in use)", holders.len());
             told = true;
         }
         std::thread::sleep(POLL);
@@ -231,71 +285,14 @@ fn wait_for_slot(data: &Path) -> io::Result<Lease> {
     }
 }
 
-/// The builds holding a slot. Clears what dead builds and finished calls left behind.
-fn active_builds(state: &Path) -> io::Result<Vec<u32>> {
-    let mut active = vec![];
-    for entry in fs::read_dir(state)? {
-        let path = entry?.path();
-        let Some(owner) = path
-            .file_name()
-            .and_then(|n| n.to_str()?.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        if !alive(owner) {
-            let _ = fs::remove_dir_all(&path);
-            continue;
-        }
-        let recent = fs::metadata(path.join("released"))
-            .and_then(|m| m.modified())
-            .is_ok_and(|at| SystemTime::now().duration_since(at).unwrap_or_default() < GRACE);
-        let mut running = false;
-        for lease in fs::read_dir(&path)? {
-            let lease = lease?.path();
-            if !lease
-                .file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with("lease-"))
-            {
-                continue;
-            }
-            match File::open(&lease)?.try_lock() {
-                Ok(()) => fs::remove_file(&lease)?,
-                Err(_) => running = true,
-            }
-        }
-        if running || recent {
-            active.push(owner);
-        }
+/// Gives up the slot of the `go run` that built this app, so the running app holds none.
+fn release(data: &Path) -> io::Result<()> {
+    let build = owner();
+    if build == std::os::unix::process::parent_id() {
+        let state = State::open(data)?;
+        let _ = fs::remove_file(state.held(build));
     }
-    Ok(active)
-}
-
-/// The builds waiting for a slot, oldest first. Clears dead ones.
-fn waiters(state: &Path) -> io::Result<Vec<u32>> {
-    let mut waiting = vec![];
-    for entry in fs::read_dir(state.join("waiting"))? {
-        let entry = entry?;
-        let Some(owner) = entry
-            .file_name()
-            .to_str()
-            .and_then(|n| n.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        if !alive(owner) {
-            let _ = fs::remove_file(entry.path());
-            continue;
-        }
-        waiting.push((entry.metadata()?.modified()?, owner));
-    }
-    waiting.sort();
-    Ok(waiting.into_iter().map(|(_, owner)| owner).collect())
-}
-
-fn alive(pid: u32) -> bool {
-    // SAFETY: signal 0 only checks that the process exists.
-    let found = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
-    found || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    Ok(())
 }
 
 /// The build a call belongs to: the outermost Cargo, Go or Rust tool among its ancestors below
@@ -308,13 +305,13 @@ fn owner() -> u32 {
         if pid <= 1 || Some(pid) == root {
             break;
         }
-        let Some((parent, name)) = process(pid) else {
+        let Some(process) = process(pid) else {
             break;
         };
-        if is_build_tool(&name) {
+        if is_build_tool(&process.name) {
             owner = pid;
         }
-        pid = parent;
+        pid = process.parent;
     }
     owner
 }
@@ -327,9 +324,21 @@ fn is_build_tool(name: &str) -> bool {
         || name.starts_with("cargo-")
 }
 
-/// A process's parent and name.
+struct Process {
+    parent: u32,
+    name: String,
+    /// When it started, which with its name tells it from a later process given its id.
+    started: u64,
+}
+impl Process {
+    fn identity(&self) -> String {
+        format!("{} {}", self.started, self.name)
+    }
+}
+
 #[cfg(target_os = "macos")]
-fn process(pid: u32) -> Option<(u32, String)> {
+fn process(pid: u32) -> Option<Process> {
+    // SAFETY: an all-zero `proc_bsdinfo` is a valid value.
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
     // SAFETY: `info` is a writable buffer of `size` bytes.
@@ -345,24 +354,31 @@ fn process(pid: u32) -> Option<(u32, String)> {
     if read != size {
         return None;
     }
-    // SAFETY: the kernel ends the name with a NUL inside the array.
-    let name = unsafe { std::ffi::CStr::from_ptr(info.pbi_name.as_ptr()) };
-    let name = match name.is_empty() {
-        // SAFETY: as above, for the shorter name.
-        true => unsafe { std::ffi::CStr::from_ptr(info.pbi_comm.as_ptr()) },
-        false => name,
+    // SAFETY: the kernel ends each name with a NUL inside its array.
+    let (name, short) = unsafe {
+        (
+            std::ffi::CStr::from_ptr(info.pbi_name.as_ptr()),
+            std::ffi::CStr::from_ptr(info.pbi_comm.as_ptr()),
+        )
     };
-    Some((info.pbi_ppid, name.to_string_lossy().into_owned()))
+    let name = if name.is_empty() { short } else { name };
+    Some(Process {
+        parent: info.pbi_ppid,
+        name: name.to_string_lossy().into_owned(),
+        started: info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec,
+    })
 }
 
-/// A process's parent and name.
 #[cfg(not(target_os = "macos"))]
-fn process(pid: u32) -> Option<(u32, String)> {
+fn process(pid: u32) -> Option<Process> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let (head, tail) = stat.rsplit_once(')')?;
-    let name = head.split_once('(')?.1.to_owned();
-    let parent = tail.split_whitespace().nth(1)?.parse().ok()?;
-    Some((parent, name))
+    let fields: Vec<&str> = tail.split_whitespace().collect();
+    Some(Process {
+        parent: fields.get(1)?.parse().ok()?,
+        name: head.split_once('(')?.1.to_owned(),
+        started: fields.get(19)?.parse().ok()?,
+    })
 }
 
 #[cfg(test)]
@@ -374,20 +390,22 @@ mod tests {
     }
 
     #[test]
-    fn only_compiles_and_test_binaries_are_builds() {
+    fn only_compiles_and_go_test_binaries_take_a_slot() {
         let rustc = Path::new("/toolchain/bin/rustc");
-        assert!(is_build(
-            rustc,
-            &args(&["--crate-name", "core", "src/lib.rs"])
-        ));
-        // Cargo's version and target queries, as `cargo fmt`, `metadata` and `tree` make.
-        assert!(!is_build(rustc, &args(&["-vV"])));
-        assert!(!is_build(rustc, &args(&["-", "--print=cfg"])));
-        assert!(is_build(Path::new("/w/target/debug/deps/core-1a2b"), &[]));
-        assert!(!is_build(Path::new("/w/target/debug/app"), &[]));
-        let compile = Path::new("/go/pkg/tool/darwin_arm64/compile");
-        assert!(is_build(compile, &args(&["-o", "x.a", "a.go"])));
-        assert!(!is_build(compile, &args(&["-V=full"])));
+        let compile = args(&["--crate-name", "core", "--edition=2024", "src/lib.rs"]);
+        assert_eq!(classify(rustc, &compile), Call::Compile);
+        // Cargo's version and target queries, as `cargo tree` makes them on a cold target.
+        assert_eq!(classify(rustc, &args(&["-vV"])), Call::Other);
+        let query = "- --crate-name ___ --print=file-names --crate-type bin --print=cfg";
+        let query: Vec<&str> = query.split(' ').collect();
+        assert_eq!(classify(rustc, &args(&query)), Call::Other);
+        let tool = Path::new("/go/pkg/tool/darwin_arm64/compile");
+        assert_eq!(classify(tool, &args(&["-o", "x.a", "a.go"])), Call::GoTool);
+        assert_eq!(classify(tool, &args(&["-V=full"])), Call::Other);
+        let work = Path::new("/tmp/go-build1/b001");
+        assert_eq!(classify(&work.join("fmt.test"), &[]), Call::GoTest);
+        assert_eq!(classify(&work.join("exe/server"), &[]), Call::GoRun);
+        assert_eq!(classify(Path::new("/w/target/debug/app"), &[]), Call::Other);
     }
 
     #[test]
@@ -411,35 +429,43 @@ mod tests {
     fn agents_get_every_hook_the_host_does_not_set_itself() {
         let data = Path::new("/data");
         let gate = Path::new("/tmp/w/wiffletree-build-gate");
-        let fresh = hooks(data, gate, |_| None);
         let value = |hooks: &[(String, OsString)], name: &str| {
             hooks
                 .iter()
                 .find(|(n, _)| n == name)
                 .map(|(_, v)| v.clone())
         };
+        let fresh = hooks(data, gate, |_| None);
         assert_eq!(value(&fresh, "RUSTC_WRAPPER"), Some(gate.into()));
-        assert_eq!(value(&fresh, &runner_variable()), Some(gate.into()));
-        assert_eq!(
-            value(&fresh, "GOFLAGS"),
-            Some("-toolexec=/tmp/w/wiffletree-build-gate".into())
-        );
+        let go = "-toolexec=/tmp/w/wiffletree-build-gate -exec=/tmp/w/wiffletree-build-gate";
+        assert_eq!(value(&fresh, "GOFLAGS"), Some(go.into()));
         assert_eq!(value(&fresh, DATA_DIR), Some("/data".into()));
-        // An existing wrapper or toolexec is the user's; other Go flags are kept.
+        assert!(
+            fresh
+                .iter()
+                .all(|(name, _)| !name.starts_with("CARGO_TARGET_"))
+        );
+        // An existing wrapper or Go hook is the user's; other Go flags are kept.
         let wrapped = hooks(data, gate, |name| match name {
             "RUSTC_WRAPPER" => Some("sccache".into()),
-            "GOFLAGS" => Some("-mod=mod".into()),
+            "GOFLAGS" => Some("-mod=mod -exec=mine".into()),
             _ => None,
         });
         assert_eq!(value(&wrapped, "RUSTC_WRAPPER"), None);
         assert_eq!(
             value(&wrapped, "GOFLAGS"),
-            Some("-mod=mod -toolexec=/tmp/w/wiffletree-build-gate".into())
+            Some("-mod=mod -exec=mine -toolexec=/tmp/w/wiffletree-build-gate".into())
         );
-        let toolexec = hooks(data, gate, |name| {
-            (name == "GOFLAGS").then(|| "-toolexec=mine".into())
+        let both = hooks(data, gate, |name| {
+            (name == "GOFLAGS").then(|| "-toolexec=a -exec=b".into())
         });
-        assert_eq!(value(&toolexec, "GOFLAGS"), None);
+        assert_eq!(value(&both, "GOFLAGS"), None);
+    }
+
+    #[test]
+    fn each_data_folder_keeps_one_gate_folder() {
+        assert_eq!(fnv(Path::new("/a")), fnv(Path::new("/a")));
+        assert_ne!(fnv(Path::new("/a")), fnv(Path::new("/b")));
     }
 
     #[test]

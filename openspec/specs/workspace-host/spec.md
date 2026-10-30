@@ -945,7 +945,7 @@ The `workspace_context` of a coordinator that created projects with `create_proj
 - **THEN** it has no `created_projects`
 
 ### Requirement: Builds take turns across the host
-The host SHALL let at most "Builds at once" builds compile or run tests at a time across every agent it runs, whatever the agent's project or role. It SHALL give each provider process `RUSTC_WRAPPER`, `CARGO_TARGET_<host triple>_RUNNER` and `GOFLAGS` with `-toolexec`, each naming the build gate, unless the host's own environment already sets that hook. The gate SHALL hold a call that compiles (a rustc or clippy-driver call naming a crate, or a Go tool other than its `-V` query) or runs a test or bench binary from a `deps` folder until the call's build holds a slot, and SHALL run every other call at once. A call's build SHALL be the outermost Cargo, Go or Rust tool among its ancestors below the host, so nested Cargo shares its slot. A build SHALL hold its slot while any of its calls runs and for one second after, and SHALL lose it when its process ends. Waiting builds SHALL take free slots oldest first, and a waiting build SHALL print "Waiting for a build slot (N in use)" to standard error once. When the gate cannot keep its state, the call SHALL run ungated.
+The host SHALL let at most "Builds at once" builds compile or run tests at a time across every agent it runs, whatever the agent's project or role. It SHALL give each provider process `RUSTC_WRAPPER` and `GOFLAGS` with `-toolexec` and `-exec`, each naming the build gate, unless the host's own environment already sets that hook; it SHALL NOT set a Cargo target runner, so a repository's own runner keeps working. A call's build SHALL be the outermost Cargo, Go or Rust tool among its ancestors below the host, so nested Cargo shares its slot. A build SHALL take a slot at its first compile (a rustc or clippy-driver call naming a crate that does not read standard input or only print, or a Go tool other than its `-V` query) or Go test binary, waiting until one is free, and SHALL hold it until that process ends or becomes another program, so its test binaries, doctests and docs run inside it. `cargo run` SHALL leave no slot held by its running app, and neither SHALL `go run`. Every other call SHALL run at once. The gate SHALL end by executing the program in its own place, so signals reach the program. Waiting builds SHALL take free slots oldest first. A waiting Cargo build SHALL print "Waiting for a build slot (N in use)" once on rustc's standard output, which Cargo shows without replaying it from its cache, and a waiting Go test SHALL print it on standard error; a Go compile SHALL wait silently, since Go replays a tool's cached output. When the gate cannot keep its state, or the host cannot install it, builds SHALL run ungated. A repository's own `build.rustc-wrapper`, such as sccache, SHALL be overridden for agents; a build that compiles nothing, such as tests re-run on an unchanged tree, SHALL take no slot.
 
 #### Scenario: One build at once
 - **WHEN** "Builds at once" is 1 and two agents in different projects each start a Cargo build
@@ -956,8 +956,20 @@ The host SHALL let at most "Builds at once" builds compile or run tests at a tim
 - **THEN** both compile at the same time and neither says it waits
 
 #### Scenario: Not a build
-- **WHEN** a build holds the only slot and another agent runs `cargo fmt`, `cargo metadata` or `go version`
+- **WHEN** a build holds the only slot and another agent runs `cargo fmt`, `cargo metadata`, `cargo tree` on a fresh target folder or `go version`
 - **THEN** it runs at once
+
+#### Scenario: A Go test
+- **WHEN** a `go test` holds the only slot and its tests run for minutes after the last compile
+- **THEN** another build waits until the `go test` ends
+
+#### Scenario: A running app
+- **WHEN** an agent's `cargo run` app is running, another build starts, and later the agent kills the `cargo run` process
+- **THEN** the build does not wait, and the kill stops the app
+
+#### Scenario: A repository's own runner
+- **WHEN** a repository's `.cargo/config.toml` sets a target runner
+- **THEN** `cargo run` and `cargo test` use it as without the gate
 
 #### Scenario: Nix shell
 - **WHEN** an agent runs `nix develop --command cargo test`, whose shell puts the Nix toolchain first on PATH
