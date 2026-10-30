@@ -821,7 +821,8 @@ struct Actor {
     github_reading: bool,
     /// `gh` as every GitHub read runs it, and Git as publish steps run it.
     publish_tools: publish::Tools,
-    sync_pace: sync::Pace,
+    /// The settings repository's pace, whose only rule set is settings.
+    sync_pace: repos::Pace,
     /// The listener for paired devices, open while remote access is on.
     remote: remote::Remote,
     /// The count of things that need the human, as last sent.
@@ -970,7 +971,7 @@ impl Service {
                     pr_tickets_due_at: 0,
                     github_reading: false,
                     publish_tools: publish::Tools::default(),
-                    sync_pace: sync::Pace::default(),
+                    sync_pace: repos::Pace::every(&[sync::CADENCE_MS]),
                     remote: remote::Remote::new(remote, requests),
                     attention: None,
                 };
@@ -4285,7 +4286,7 @@ mod tests {
             pr_tickets_due_at: 0,
             github_reading: false,
             publish_tools: publish::Tools::default(),
-            sync_pace: sync::Pace::default(),
+            sync_pace: repos::Pace::every(&[sync::CADENCE_MS]),
             remote: remote::Remote::new(remote::Options::default(), requests),
             attention: None,
         };

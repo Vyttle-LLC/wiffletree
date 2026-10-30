@@ -9,6 +9,7 @@ mod diffs;
 pub mod events;
 mod files;
 mod flatten;
+mod github_access;
 pub mod host_files;
 mod keeper;
 pub mod keychain;
@@ -26,6 +27,7 @@ mod progress;
 pub mod provider;
 mod publish;
 pub mod remote;
+mod repos;
 mod repositories;
 mod revisions;
 pub mod runtime;
@@ -323,6 +325,8 @@ impl Host {
             detected: Default::default(),
             uploads: Default::default(),
         };
+        // Before anything reads or writes a shared setting, so the shared folder is in place.
+        host.move_settings_clone()?;
         host.clear_uploads()?;
         host.recover()?;
         host.end_interrupted_publishes()?;

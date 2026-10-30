@@ -1,5 +1,6 @@
-//! The settings shared with every machine, one file each in `<data folder>/shared/`, with the
-//! skills beside them. A missing file means that setting's default.
+//! The settings shared with every machine, one file each in the shared folder, with the skills
+//! beside them: the settings repository's clone under `<data folder>/repos/` when one is chosen,
+//! and `<data folder>/shared/` otherwise. A missing file means that setting's default.
 use crate::*;
 use serde::Deserialize;
 use serde_json::Map;
@@ -15,6 +16,23 @@ pub(crate) const GUIDE: &str = "settings/model-guide.md";
 pub(crate) const CHECK_INS: &str = "settings/check-ins.json";
 pub(crate) const KEEPER: &str = "settings/pr-keeper.json";
 pub(crate) const MODELS: &str = "settings/models.json";
+
+/// The settings repository chosen on the machine whose data folder is `home`, as its host
+/// settings record it.
+pub(crate) fn chosen(home: &Path) -> Option<SettingsRepository> {
+    let saved = fs::read(home.join(settings::FILE)).ok()?;
+    serde_json::from_slice::<HostSettings>(&saved)
+        .ok()?
+        .settings_repository
+}
+
+/// The shared folder of the data folder `home`.
+pub(crate) fn folder(home: &Path) -> PathBuf {
+    match chosen(home) {
+        Some(repository) => repos::clone_folder(home, &repository.name),
+        None => home.join(FOLDER),
+    }
+}
 
 /// The switch threshold as `settings/models.json` holds it.
 #[derive(Serialize, Deserialize)]
@@ -189,7 +207,7 @@ impl SharedStore<'_> {
     }
     /// The shared folder of the data folder `home`.
     pub(crate) fn of(home: &Path) -> Self {
-        Self::at(home.join(FOLDER))
+        Self::at(folder(home))
     }
     /// Whether the folder names its format, as a set-up settings repository does.
     pub(crate) fn holds_settings(&self) -> bool {
@@ -291,6 +309,9 @@ impl SharedStore<'_> {
     }
 }
 impl Host {
+    pub(crate) fn shared_folder(&self) -> PathBuf {
+        folder(&self.home)
+    }
     pub(crate) fn shared(&self) -> SharedStore<'_> {
         SharedStore {
             recorder: Some(self.recorder()),
@@ -300,7 +321,7 @@ impl Host {
     pub(crate) fn recorder(&self) -> Recorder<'_> {
         Recorder {
             db: &self.db,
-            root: self.home.join(FOLDER),
+            root: self.shared_folder(),
             wrote: &self.shared_written,
             writes: &self.shared_writes,
         }

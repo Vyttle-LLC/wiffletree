@@ -2,7 +2,7 @@
 //! the readable folder layout they choose for new work.
 use crate::*;
 
-const FILE: &str = "settings.json";
+pub(crate) const FILE: &str = "settings.json";
 /// The fields `settings.json` held before the shared folder. They stay there, unread and unwritten.
 const MOVED_FIELDS: [&str; 4] = [
     "verification",
