@@ -53,7 +53,7 @@ use std::{
 use workspace_host::service::Service;
 
 pub fn git_output(path: &Path, args: &[&str]) -> std::process::Output {
-    std::process::Command::new("git")
+    let output = std::process::Command::new("git")
         .current_dir(path)
         .args([
             "-c",
@@ -63,7 +63,28 @@ pub fn git_output(path: &Path, args: &[&str]) -> std::process::Output {
         ])
         .args(args)
         .output()
-        .unwrap()
+        .unwrap();
+    if let Some(repository) = created(path, args).filter(|_| output.status.success()) {
+        without_background_maintenance(&repository);
+    }
+    output
+}
+
+/// The repository `git init` or `git clone` made in `path`: the folder its last argument names,
+/// or `path` itself when that argument is an option or its value.
+fn created(path: &Path, args: &[&str]) -> Option<PathBuf> {
+    if !matches!(args.first(), Some(&("init" | "clone"))) {
+        return None;
+    }
+    let named = path.join(args.last().unwrap());
+    Some(if named.is_dir() { named } else { path.into() })
+}
+
+/// Keeps Git from repacking a test repository in the background, as it may after any commit or
+/// push. The repack deletes loose objects that a local clone of the repository may be copying.
+fn without_background_maintenance(repository: &Path) {
+    git(repository, &["config", "maintenance.auto", "false"]);
+    git(repository, &["config", "gc.auto", "0"]);
 }
 
 pub fn git(path: &Path, args: &[&str]) -> String {

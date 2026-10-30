@@ -37,27 +37,8 @@ fn a_live_project_resumes_after_a_restart_except_for_the_session_it_interrupted(
     let scratch = tempfile::tempdir().unwrap();
     let repo = scratch.path().join("repo");
     std::fs::create_dir(&repo).unwrap();
-    for args in [
-        &["init", "-q"][..],
-        &[
-            "-c",
-            "user.name=T",
-            "-c",
-            "user.email=t@example.invalid",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "Initial",
-        ],
-    ] {
-        let git = std::process::Command::new("git")
-            .current_dir(&repo)
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(git.success());
-    }
+    common::git(&repo, &["init", "-q"]);
+    common::git(&repo, &["commit", "-q", "--allow-empty", "-m", "Initial"]);
     let every =
         |label: &str| json!({"label":label,"prompt":format!("JUST_REPLY {label}"),"every":"30m"});
 

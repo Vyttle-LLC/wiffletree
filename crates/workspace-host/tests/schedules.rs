@@ -1,3 +1,4 @@
+mod common;
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 use workspace_core::*;
@@ -129,27 +130,11 @@ fn a_timer_keeps_its_cadence_across_restarts_and_folds_missed_slots_into_one_lat
 fn only_coordinators_schedule_within_limits_and_stopped_timers_never_fire() {
     let home = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
-    for args in [
-        &["init", "-q"][..],
-        &[
-            "-c",
-            "user.name=T",
-            "-c",
-            "user.email=t@example.invalid",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "Initial",
-        ],
-    ] {
-        let git = std::process::Command::new("git")
-            .current_dir(repo.path())
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(git.success());
-    }
+    common::git(repo.path(), &["init", "-q"]);
+    common::git(
+        repo.path(),
+        &["commit", "-q", "--allow-empty", "-m", "Initial"],
+    );
     let (mut host, root) = project(&home);
     let repository = host
         .attach_repository(&root.project_id, repo.path().to_str().unwrap(), "HEAD")

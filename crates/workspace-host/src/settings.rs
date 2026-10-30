@@ -617,19 +617,12 @@ mod tests {
         let (home, mut host) = rebasing();
         let repository = home.path().join("app");
         fs::create_dir_all(&repository).unwrap();
-        let git = |args: &[&str]| runtime::git_output(&repository, args).unwrap();
-        git(&["init", "-q", "-b", "main"]);
-        git(&[
-            "-c",
-            "user.name=F",
-            "-c",
-            "user.email=f@example.invalid",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "start",
-        ]);
+        let git = crate::test_support::git;
+        git(&repository, &["init", "-q", "-b", "main"]);
+        git(
+            &repository,
+            &["commit", "-q", "--allow-empty", "-m", "start"],
+        );
         let added = host
             .add_repository(repository.to_str().unwrap(), "main")
             .unwrap();

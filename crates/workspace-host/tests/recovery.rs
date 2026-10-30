@@ -1,3 +1,4 @@
+mod common;
 use workspace_core::*;
 use workspace_host::Host;
 
@@ -245,32 +246,10 @@ fn model_settings_and_versioned_commands_survive_restart() {
 
 #[test]
 fn repository_coordinators_cannot_be_created_and_workers_keep_ownership() {
-    use std::process::Command;
     let directory = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
-    for args in [
-        vec!["init", "-q"],
-        vec![
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "fixture",
-        ],
-    ] {
-        assert!(
-            Command::new("git")
-                .arg("-C")
-                .arg(repo.path())
-                .args(args)
-                .status()
-                .unwrap()
-                .success()
-        );
-    }
+    common::git(repo.path(), &["init", "-q"]);
+    common::git(repo.path(), &["commit", "--allow-empty", "-qm", "fixture"]);
     let mut host = Host::open_set_up(directory.path()).unwrap();
     let (project, root) = project(&mut host, "Hierarchy");
     let repository = host

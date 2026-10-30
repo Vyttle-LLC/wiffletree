@@ -686,22 +686,9 @@ mod model_tests {
     #[test]
     fn a_failing_push_gives_gits_error_and_a_hanging_one_is_killed_at_its_deadline() {
         let folder = tempfile::tempdir().unwrap();
-        let git = |args: &[&str]| {
-            let answer = git_answer(folder.path(), args).unwrap();
-            assert!(answer.status.success(), "{}", answer.error);
-        };
+        let git = |args: &[&str]| crate::test_support::git(folder.path(), args);
         git(&["init", "-q", "-b", "main"]);
-        git(&[
-            "-c",
-            "user.name=F",
-            "-c",
-            "user.email=f@example.invalid",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "start",
-        ]);
+        git(&["commit", "-q", "--allow-empty", "-m", "start"]);
         let missing = folder.path().join("no-such-remote.git");
         let args = ["push", missing.to_str().unwrap(), "HEAD:refs/heads/main"];
         let failed = git_push(folder.path(), &args).unwrap();

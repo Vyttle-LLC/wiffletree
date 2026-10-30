@@ -3824,6 +3824,7 @@ impl Actor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::git;
 
     #[test]
     fn slow_keeper_ancestry_does_not_block_reads_and_polling_coalesces() {
@@ -4235,29 +4236,8 @@ mod tests {
     /// A git repository at `path` with one empty commit on `main`.
     fn init_repository(path: &Path) {
         fs::create_dir_all(path).unwrap();
-        for args in [
-            vec!["init", "-q", "-b", "main"],
-            vec![
-                "-c",
-                "user.name=F",
-                "-c",
-                "user.email=f@example.invalid",
-                "commit",
-                "-q",
-                "--allow-empty",
-                "-m",
-                "F",
-            ],
-        ] {
-            assert!(
-                std::process::Command::new("git")
-                    .current_dir(path)
-                    .args(args)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-        }
+        git(path, &["init", "-q", "-b", "main"]);
+        git(path, &["commit", "-q", "--allow-empty", "-m", "F"]);
     }
 
     /// A ticket "Toolbar" in a fresh repository, owned by its project's coordinator.
@@ -6075,25 +6055,8 @@ mod tests {
         let parent = host.sessions().unwrap().remove(0).id;
         let repo = home.path().join("repo");
         fs::create_dir(&repo).unwrap();
-        let git = |args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .current_dir(&repo)
-                .args(args)
-                .output()
-                .unwrap();
-            assert!(output.status.success());
-        };
-        git(&["init"]);
-        git(&[
-            "-c",
-            "user.name=T",
-            "-c",
-            "user.email=t@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "Initial",
-        ]);
+        git(&repo, &["init"]);
+        git(&repo, &["commit", "--allow-empty", "-m", "Initial"]);
         let repo = host
             .attach_repository(&project.id, repo.to_str().unwrap(), "HEAD")
             .unwrap();
