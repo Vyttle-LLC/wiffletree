@@ -20,7 +20,7 @@ impl Drop for Process {
 }
 
 /// How nice every provider process runs, so agents' builds and tests yield to the desktop.
-const AGENT_NICENESS: libc::c_int = 10;
+pub(crate) const AGENT_NICENESS: libc::c_int = 10;
 
 /// The variables that cap Cargo's build jobs and nextest's test threads, which agents' builds
 /// and tests read, so they leave cores free for the human's own work.
