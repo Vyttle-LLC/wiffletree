@@ -70,11 +70,7 @@ impl IssueView {
         .detach();
         let login =
             (shared.snapshot()).and_then(|s| s.issue_trackers.iter().find_map(|t| t.login.clone()));
-        let space = (shared.snapshot()).and_then(|s| {
-            (s.issue_trackers.iter())
-                .find(|t| t.prefix.as_deref() == Some(id.prefix()))
-                .map(|t| t.space_id.clone())
-        });
+        let space = tracker_space(shared, &id);
         let mut view = Self {
             bridge,
             host: shared.host.clone(),
@@ -87,17 +83,7 @@ impl IssueView {
             busy: false,
         };
         view.load(window, cx);
-        if let Some(space) = space {
-            view.ask(
-                ask::issue_people(space),
-                window,
-                cx,
-                |view, people, _, cx| {
-                    view.people = people.unwrap_or_default();
-                    cx.notify();
-                },
-            );
-        }
+        view.load_people(space, cx);
         if unread {
             view.ask(
                 ask::mark_issue_read(view.id.clone()),
@@ -120,8 +106,26 @@ impl IssueView {
         );
         if changed {
             self.index = shared.index.clone();
+            // The host signals a change once a read of GitHub found more people or names.
+            self.load_people(tracker_space(shared, &self.id), cx);
             cx.notify();
         }
+    }
+    /// Asks who the assignee picker offers for the issue's tracker, in `space`.
+    fn load_people(&mut self, space: Option<SpaceId>, cx: &mut Context<Self>) {
+        let Some(people) = space.and_then(|space| self.bridge.ask(ask::issue_people(space)).ok())
+        else {
+            return;
+        };
+        cx.spawn(async move |view, cx| {
+            if let Ok(people) = people.await {
+                let _ = view.update(cx, |view, cx| {
+                    view.people = people;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
     /// Reads the issue again after its tracker changed, such as when a pass pulled a teammate's
     /// change, and marks what it holds now read: the human is looking at it.
@@ -471,6 +475,13 @@ impl IssueView {
                     ),
             )
     }
+}
+
+/// A Space whose tracker holds the issue, which the people the picker offers are asked by.
+fn tracker_space(shared: &Shared, id: &IssueId) -> Option<SpaceId> {
+    (shared.snapshot()?.issue_trackers.iter())
+        .find(|t| t.prefix.as_deref() == Some(id.prefix()))
+        .map(|t| t.space_id.clone())
 }
 
 /// A login as the picker names it: "Priya Shah (pshah)" once the profile's name is known.

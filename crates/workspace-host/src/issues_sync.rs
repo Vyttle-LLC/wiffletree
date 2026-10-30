@@ -1257,6 +1257,47 @@ mod tests {
     }
 
     #[test]
+    fn a_merge_pushed_while_the_human_edits_the_issue_is_merged_again_and_reverts_nothing() {
+        let (_folder, github, _home, mut host) = sage_with_an_issue();
+        let mut mine = host.read_issue(&id("SAGE-1")).unwrap().issue.unwrap();
+        mine.priority = Priority::Low;
+        host.edit_issue(mine).unwrap();
+        teammate_edits(&github, ISSUE, "title: Theme", "title: Gallery");
+        // The pass merges and pushes off the host thread; meanwhile the human assigns it.
+        let key = repos::key(NAME);
+        let pass = host.storage_pass(&key).unwrap().unwrap();
+        let passed = storage::pass(pass, &github.tools());
+        let mut mine = host.read_issue(&id("SAGE-1")).unwrap().issue.unwrap();
+        mine.assignee = Some("jlin".into());
+        host.edit_issue(mine).unwrap();
+        host.finish_storage_pass(&key, passed).unwrap();
+        assert!(github.show(ISSUE).unwrap().contains("title: Gallery"));
+        sync(&mut host, &github).unwrap();
+        let there = github.show(ISSUE).unwrap();
+        assert!(there.contains("title: Gallery"), "not reverted: {there}");
+        assert!(there.contains("priority: low\nassignee: jlin\n"), "{there}");
+        let issue = host.read_issue(&id("SAGE-1")).unwrap().issue.unwrap();
+        assert!(issue.title.starts_with("Gallery"));
+        assert!(issue_notes(&host).is_empty());
+    }
+
+    #[test]
+    fn a_choice_not_to_follow_a_new_issue_holds_once_it_is_numbered() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let (_home, mut host, sage) = sage_here(&github);
+        let filed = file(&mut host, &sage, "Watch app drops replies", "");
+        assert!(
+            host.read_issue(&filed.id).unwrap().following,
+            "filed by the human"
+        );
+        host.follow_issue(&filed.id, false).unwrap();
+        sync(&mut host, &github).unwrap();
+        let numbered = host.read_issue(&id("SAGE-1")).unwrap();
+        assert!(!numbered.following);
+    }
+
+    #[test]
     fn a_temporary_id_is_rewritten_only_where_it_is_a_whole_word() {
         let text = "SAGE-new-abcd, XSAGE-new-abcd and SAGE-new-abcde";
         assert_eq!(

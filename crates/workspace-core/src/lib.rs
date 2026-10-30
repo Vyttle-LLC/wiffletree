@@ -3928,8 +3928,9 @@ impl Command {
                 | Self::RemoveDevice { .. }
         ) || matches!(
             self,
-            // Settling a paused issue file writes to its tracker.
-            Self::SettlePausedFile { repository: Some(_), path, .. } if path.starts_with("issues/")
+            // Settling a paused issue file writes to its tracker, whichever repository names it:
+            // a tracker can be the settings repository too.
+            Self::SettlePausedFile { path, .. } if path.starts_with("issues/")
         )
     }
     /// Remote access, pairing and devices, which only the host itself may read or change.

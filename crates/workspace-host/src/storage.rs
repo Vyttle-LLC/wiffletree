@@ -935,8 +935,8 @@ impl Host {
                 shared::write_atomically(&folder.join(TRACKER), &content)?;
                 let message = format!("Renamed the issue prefix {} to {prefix}", current.prefix);
                 commit_local(&folder, &[TRACKER, ISSUES], &message)?;
-                // The issues' links and derived states follow them to their new IDs.
-                for table in ["issue_links", "issue_derived"] {
+                // The issues' links, derived states and follows follow them to their new IDs.
+                for table in ["issue_links", "issue_derived", "issue_follows"] {
                     self.db.execute(
                         &format!("UPDATE {table} SET id=?3||substr(id,length(?2)+1) WHERE storage=?1 AND substr(id,1,length(?2)+1)=?2||'-'"),
                         params![storage, current.prefix, prefix],
@@ -1373,9 +1373,12 @@ impl Host {
         let mut paused = found.paused;
         // Merged with GitHub's: each written here, unless the host wrote it meanwhile, and
         // recorded as last synced in GitHub's version, so this Mac's own part changes push.
-        let mut merged = vec![];
+        // One the host wrote meanwhile keeps the record it had, even if its merge was pushed:
+        // the merge's parts from GitHub never reached it, so the next pass merges again.
+        let (mut merged, mut skipped) = (vec![], vec![]);
         for (path, here, kept, there) in found.merged {
             if fs::read(clone.join(&path)).ok() != here {
+                skipped.push(path);
                 continue;
             }
             if here.as_ref() != Some(&kept) {
@@ -1406,7 +1409,9 @@ impl Host {
             pulled.push((path, there));
         }
         let mut synced = found.alike;
-        synced.extend(found.committed.into_iter().filter(|_| pushed));
+        synced.extend(
+            (found.committed.into_iter()).filter(|(path, _)| pushed && !skipped.contains(path)),
+        );
         // A rule set whose compare failed keeps its notes until a pass compares it again.
         let ours = |path: &str| scan::scanned(path) && !under(&found.failed_roots, path);
         let tx = self.db.unchecked_transaction()?;

@@ -470,6 +470,18 @@ fn every_tracker_write_is_the_humans_and_reading_issues_is_not() {
         !sync.is_human_only() && !sync.is_read(),
         "it pushes only what the human wrote"
     );
+    // Settling an issue file writes to its tracker, whichever repository names it; the settings
+    // repository, `None`, can be a tracker too.
+    for repository in [None, Some("o/storage".to_owned())] {
+        let settle = |path: &str| Command::SettlePausedFile {
+            path: path.into(),
+            settle: Settle::SyncThisVersion,
+            repository: repository.clone(),
+        };
+        assert!(settle("issues/SAGE-1/issue.md").is_human_only());
+        assert!(settle("issues/SAGE-1/issue.md#priority").is_human_only());
+        assert!(!settle("settings/review.md").is_human_only());
+    }
 }
 
 #[test]

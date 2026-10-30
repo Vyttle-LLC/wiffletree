@@ -305,8 +305,15 @@ impl CreationForm {
         cx.spawn(async move |this, cx| {
             let defaults = defaults.await;
             let _ = this.update(cx, |form, cx| {
+                // A reply for a Space the human has since left is stale.
+                let picked = form.choices.read(cx).selected_value().cloned();
                 match defaults {
-                    Ok(defaults) => form.take_issue_defaults(defaults),
+                    Ok(defaults)
+                        if picked.as_deref() == Some(defaults.repositories.space_id.as_str()) =>
+                    {
+                        form.take_issue_defaults(defaults)
+                    }
+                    Ok(_) => {}
                     Err(error) => form.error = error,
                 }
                 cx.notify();

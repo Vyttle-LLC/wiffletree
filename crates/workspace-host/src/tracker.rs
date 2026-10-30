@@ -1102,7 +1102,12 @@ impl Host {
                 "DELETE FROM sync_record WHERE repository=?1 AND path LIKE ?2",
                 params![key, format!("{}/%", issue_folder(temporary))],
             )?;
-            for table in ["issue_links", "issue_derived", "issue_pending"] {
+            for table in [
+                "issue_links",
+                "issue_derived",
+                "issue_pending",
+                "issue_follows",
+            ] {
                 self.db.execute(
                     &format!("UPDATE {table} SET id=?3 WHERE storage=?1 AND id=?2"),
                     params![storage.key(), old, new],

@@ -2749,12 +2749,14 @@ impl Actor {
                 self.host.record_gh_account(account);
                 self.host.gh_login != before
             }
-            Event::IssuePeople(read) => {
-                self.host.record_issue_people(read).unwrap_or_else(|e| {
+            // A state change, so an open issue asks again and its picker lists who was found.
+            Event::IssuePeople(read) => self.host.record_issue_people(read).map_or_else(
+                |e| {
                     eprintln!("Issue people: {e:#}");
-                });
-                false
-            }
+                    false
+                },
+                |()| true,
+            ),
             Event::GitHub(reading) => {
                 self.github_reading = false;
                 reading.is_some_and(|reading| {
