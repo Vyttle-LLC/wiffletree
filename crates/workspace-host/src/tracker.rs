@@ -917,8 +917,17 @@ impl Host {
     }
     /// Writes one change's files to the Space's tracker: committed at once in a local
     /// repository, and recorded for the next pass, due two seconds later, in a GitHub one.
+    /// Refuses a write over an issue file of this Mac's clone that holds neither what the host
+    /// last wrote nor what it last synced, such as an agent's shell edit: building on it would
+    /// record that edit as the host's, and the next pass would push it.
     pub(crate) fn write_issue_files(&mut self, space: &Space, write: Write) -> Result<()> {
         let storage = &space.storage.repository;
+        let paths: Vec<&str> = write.files.iter().map(|(p, _)| p.as_str()).collect();
+        ensure!(
+            !self.changed_outside(storage, &paths)?,
+            "{} was changed outside Wiffletree on this Mac; settle it in the Inbox first",
+            write.id
+        );
         let folder = self.storage_folder(storage);
         for (path, content) in &write.files {
             shared::write_atomically(&folder.join(path), content)?;
@@ -940,6 +949,37 @@ impl Host {
         // The human's own change is no news to them.
         self.reindex_issue(storage, &write.id)?;
         self.mark_read(&storage.key(), &write.id)
+    }
+    /// Whether any of these files of a GitHub tracker's clone holds neither what the host last
+    /// wrote nor what it last synced, which a pass pauses as changed outside Wiffletree. A file
+    /// paused because two Macs changed it still takes the human's edits. A local tracker, never
+    /// pushed, has no such files.
+    pub(crate) fn changed_outside(
+        &self,
+        storage: &StorageRepository,
+        paths: &[&str],
+    ) -> Result<bool> {
+        if let StorageRepository::Local { .. } = storage {
+            return Ok(false);
+        }
+        let key = repos::key(&storage.key());
+        let folder = self.storage_folder(storage);
+        for path in paths {
+            let (synced, written): (Content, Content) = self
+                .db
+                .query_row(
+                    "SELECT synced,written FROM sync_record WHERE repository=?1 AND path=?2",
+                    params![key, path],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?
+                .unwrap_or_default();
+            let here = fs::read(folder.join(path)).ok();
+            if here != synced && here != written {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
     /// After a pass pushed new issues as `numbered`, renames each one's folder in the clone
     /// from its temporary ID and rewrites the temporary ID in the files under `issues/`, as the

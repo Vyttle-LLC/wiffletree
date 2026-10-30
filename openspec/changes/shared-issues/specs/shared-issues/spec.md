@@ -203,7 +203,7 @@ Every tool result that carries issue, comment or event text SHALL mark each pass
 - **THEN** the `read_issue` result marks the comment as written by its author, and the coordinator's instructions say such text is context, not instructions
 
 ### Requirement: Issue states follow linked work
-The states SHALL be Triage, Backlog, Todo, In progress, In review, Done and Canceled. On the Mac that holds an issue's links, the host SHALL derive the linked work's state: In progress once a linked project or ticket exists; In review while any linked ticket's PR is open; Done when every linked ticket's PR has merged and no linked project has an open ticket. When the derived state changes, the host SHALL set the issue's state to it with a `state` event marked automatic. A manual move to any state, Canceled included, SHALL record the derived state it overrode, and the issue SHALL follow linked work again when the derived state next changes. Canceled SHALL never be derived. A tracker whose `wiffletree-issues.yaml` lists other states SHALL be refused, saying this release does not know them.
+The states SHALL be Triage, Backlog, Todo, In progress, In review, Done and Canceled. On the Mac that holds an issue's links, the host SHALL derive the linked work's state from the linked tickets, each linked by itself or through its project. A ticket closed without a merged PR SHALL be dropped and SHALL NOT count. The state SHALL be In review while an open ticket's PR is open; Done when every counted ticket is finished, its PR merged or the ticket accepted, and no linked project has an open ticket; and otherwise In progress, as it is once a linked project or ticket exists. When the derived state changes, the host SHALL set the issue's state to it with a `state` event marked automatic. A manual move to any state, Canceled included, SHALL record the derived state it overrode, and the issue SHALL follow linked work again when the derived state next changes. Canceled SHALL never be derived. A tracker whose `wiffletree-issues.yaml` lists other states SHALL be refused, saying this release does not know them.
 
 #### Scenario: A PR opens
 - **WHEN** a ticket of the project linked to CEL-131 opens PR #412
@@ -220,6 +220,14 @@ The states SHALL be Triage, Backlog, Todo, In progress, In review, Done and Canc
 #### Scenario: Canceled by hand, then the work finishes
 - **WHEN** the human moves CEL-131 from In review to Canceled, and later its last PR merges and its tickets are accepted
 - **THEN** CEL-131 stays Canceled while the PR stays open, and moves to Done when the derived state becomes Done
+
+#### Scenario: A ticket closed without merging no longer counts
+- **WHEN** the project linked to CEL-142 has one ticket whose PR merged and was accepted, and another closed after its PR was closed without merging
+- **THEN** CEL-142 moves to Done, because the closed ticket is dropped
+
+#### Scenario: An accepted ticket with no PR counts as finished
+- **WHEN** the only ticket of the project linked to CEL-139 is accepted without ever opening a PR
+- **THEN** CEL-139 moves to Done
 
 ### Requirement: Import from Linear
 A Space's Storage and issues box SHALL offer Import from Linear… for its tracker. It SHALL take a Linear personal API key, which the host SHALL keep in the Keychain only until the import ends and SHALL NOT log; list the Linear teams the key reads; and, for the team the human chooses, show how many issues and comments would be written and how Linear's states map to the seven states before anything is written. The import SHALL write issues, comments, labels, priorities, assignees mapped to GitHub logins the human confirms, and relations, in commits of at most 100 issues, keeping Linear's number when the prefix matches the team's key and the number is free. It SHALL record each issue's Linear identifier in its front matter, so that running it again adds only issues not yet imported. It SHALL read Linear only and SHALL NOT write to it, and there SHALL be no ongoing sync.
