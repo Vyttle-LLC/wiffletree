@@ -1,96 +1,25 @@
 //! The settings repository: checking a candidate, setting one up from this machine, joining one
-//! set up elsewhere, and the one push sync makes. Git and `gh` run through `Tools`, off the
-//! host's command thread; only putting a prepared clone in place runs on it.
+//! set up elsewhere, and the settings rule set its clone's sync engine runs (see `repos`). Git
+//! and `gh` run through `Tools`, off the host's command thread; only putting a prepared clone in
+//! place runs on it.
 use crate::shared::SharedStore;
 use crate::skills::{Change, Line, SkillStore};
 use crate::*;
+use github_access::{candidates, first_readable, gh_protocol, private_repository, run, run_at};
 use publish::{GitTool, Tools};
+use repos::{Content, Record, Remote, RuleSet};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
-/// The only paths a sync commit may change, as decision 2 lays them out.
+/// The only paths a settings commit may change, as decision 2 lays them out.
 const SHARED_PATHS: [&str; 3] = ["wiffletree.json", "settings", "skills"];
+
+/// How often the settings repository is fetched.
+pub(crate) const CADENCE_MS: i64 = 300_000;
 
 fn is_shared(path: &str) -> bool {
     path == SHARED_PATHS[0] || path.starts_with("settings/") || path.starts_with("skills/")
-}
-
-/// GitHub's owner and name, and the URLs to try reaching it by, in order: the URL named, or for
-/// `owner/name` the URL of gh's Git `protocol` first and then the other's.
-fn candidates(input: &str, protocol: &str) -> Result<(String, String, Vec<String>)> {
-    let input = input.trim();
-    let named = input.contains(':');
-    let url = match named {
-        true => input.to_owned(),
-        false => format!("https://github.com/{input}.git"),
-    };
-    let (owner, name) = pr_watch::github_repository(&url)
-        .context("Name a repository on github.com as owner/name or by its URL")?;
-    let ssh = format!("git@github.com:{owner}/{name}.git");
-    let urls = match (named, protocol) {
-        (true, _) => vec![url],
-        (false, "ssh") => vec![ssh, url],
-        (false, _) => vec![url, ssh],
-    };
-    Ok((owner, name, urls))
-}
-
-/// The Git protocol gh uses for github.com: `ssh`, or `https`, gh's default.
-fn gh_protocol(tools: &Tools, home: &Path) -> String {
-    let args = [
-        "config",
-        "get",
-        "git_protocol",
-        "-h",
-        repositories::GITHUB_HOST,
-    ];
-    match (tools.gh)(home, &args) {
-        Ok(answer) if answer.status.success() => answer.output.trim().to_owned(),
-        _ => "https".into(),
-    }
-}
-
-/// Git options that give Git gh's GitHub login for one command over HTTPS, in place of any
-/// credential helper Git has, so no token is stored or named on a command line.
-fn gh_login(url: &str) -> &'static [&'static str] {
-    match url.starts_with("https://github.com/") {
-        true => &[
-            "-c",
-            "credential.https://github.com.helper=",
-            "-c",
-            "credential.https://github.com.helper=!gh auth git-credential",
-        ],
-        false => &[],
-    }
-}
-
-/// Runs Git through `git`, refusing a failed command with Git's reason.
-fn run(git: &GitTool, path: &Path, args: &[&str]) -> Result<String> {
-    let answer = git(path, args)?;
-    ensure!(
-        answer.status.success(),
-        "git {} failed{}",
-        publish::subcommand(args),
-        answer.reason()
-    );
-    Ok(answer.output)
-}
-
-/// `run` for a command that reaches the repository at `url`: over HTTPS with gh's login.
-fn run_at(git: &GitTool, path: &Path, url: &str, args: &[&str]) -> Result<String> {
-    run(git, path, &[gh_login(url), args].concat())
-}
-
-fn gh_json(tools: &Tools, home: &Path, endpoint: &str) -> Result<Value> {
-    let args = ["api", "--hostname", repositories::GITHUB_HOST, endpoint];
-    let answer = (tools.gh)(home, &args)?;
-    ensure!(
-        answer.status.success(),
-        "GitHub could not be read: {}",
-        answer.error
-    );
-    Ok(serde_json::from_str(&answer.output)?)
 }
 
 /// Removes the staging clones a host that stopped while preparing one left in the data folder.
@@ -125,71 +54,18 @@ fn read_machine_name() -> String {
         .unwrap_or_else(|| "Unnamed machine".into())
 }
 
-/// The branch's head at `url`, or `None` while the repository has no commit on it. Reading it
-/// is how this machine's access is checked.
-fn remote_head(path: &Path, url: &str, branch: &str, git: &GitTool) -> Result<Option<String>> {
-    let reference = format!("refs/heads/{branch}");
-    let heads = run_at(git, path, url, &["ls-remote", url, &reference])?;
-    Ok(heads.split_whitespace().next().map(str::to_owned))
-}
-
-/// The first of `urls` this machine can read `branch` at, with the branch's head there, or
-/// every URL tried and why it could not be read.
-fn first_readable(
-    path: &Path,
-    urls: Vec<String>,
-    branch: &str,
-    git: &GitTool,
-) -> Result<(String, Option<String>)> {
-    let mut reasons = vec![];
-    for url in urls {
-        match remote_head(path, &url, branch, git) {
-            Ok(head) => return Ok((url, head)),
-            Err(error) => reasons.push(format!("{url}: {error:#}")),
-        }
-    }
-    bail!(
-        "This machine cannot read the repository. Tried {}. Add an SSH key to GitHub, sign gh in with gh auth login, or check that the repository exists and is yours to read.",
-        reasons.join("; tried ")
-    )
-}
-
 /// What GitHub and Git say about the repository, with a clone of its branch in a new folder of
 /// the data folder that is removed when dropped.
 fn read(home: &Path, input: &str, tools: &Tools) -> Result<(SettingsRepositoryCheck, TempDir)> {
     let (owner, name, urls) = candidates(input, &gh_protocol(tools, home))?;
-    let facts = gh_json(tools, home, &format!("repos/{owner}/{name}"))?;
-    ensure!(
-        facts["private"] == true,
-        "Choose a private repository. Your skills and settings would be public."
-    );
-    let organization = facts["owner"]["type"] == "Organization";
-    let readers = match organization {
-        _ if facts["visibility"] == "internal" => Readers::EnterpriseMembers,
-        false => Readers::Invited,
-        // GitHub reports an organization's base permission only to some of its members.
-        true => match gh_json(tools, home, &format!("orgs/{owner}"))
-            .ok()
-            .and_then(|org| {
-                org["default_repository_permission"]
-                    .as_str()
-                    .map(str::to_owned)
-            })
-            .as_deref()
-        {
-            None => Readers::MaybeMembers,
-            Some("none") => Readers::Invited,
-            Some(_) => Readers::EveryMember,
-        },
-    };
-    let field = |key: &str| facts[key].as_str().map(str::to_owned);
-    let branch = field("default_branch").context("GitHub named no default branch")?;
-    let (push_url, head) = first_readable(home, urls, &branch, &tools.git)?;
+    let private = private_repository(tools, home, &owner, &name)?;
+    let organization = private.organization;
+    let (push_url, head) = first_readable(home, urls, &private.default_branch, &tools.git)?;
     let repository = SettingsRepository {
-        name: field("full_name").context("GitHub named no repository")?,
+        name: private.name,
         push_url,
-        branch,
-        readers,
+        branch: private.default_branch,
+        readers: private.readers,
     };
     let staging = tempfile::Builder::new()
         .prefix("shared-staging-")
@@ -204,6 +80,7 @@ fn read(home: &Path, input: &str, tools: &Tools) -> Result<(SettingsRepositoryCh
     }
     clone.extend([repository.push_url.as_str(), into]);
     run_at(&tools.git, home, &repository.push_url, &clone)?;
+    repos::name_origin(staging.path(), &repository.name)?;
     if head.is_none() {
         let branch = format!("refs/heads/{}", repository.branch);
         run(
@@ -370,6 +247,51 @@ fn copy_tree(from: &Path, to: &Path, kept: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+/// Removes the file or folder at `path`, if any, without following a link.
+fn remove_path(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path)?,
+        Ok(_) => fs::remove_file(path)?,
+        Err(_) => {}
+    }
+    Ok(())
+}
+
+/// How a prepared clone was put in place.
+#[derive(PartialEq)]
+enum Placed {
+    Moved,
+    Reused,
+}
+
+/// Puts a prepared `staging` clone where the repository's `clone` lives: by moving it there, or,
+/// when the repository already has a clone, by bringing that clone to the staging clone's
+/// commit, with the settings files as the staging clone holds them and the files of no rule set
+/// as that commit holds them.
+fn place_clone(staging: &Path, clone: &Path) -> Result<Placed> {
+    if !clone.exists() {
+        fs::create_dir_all(clone.parent().context("A clone is in a folder")?)?;
+        fs::rename(staging, clone)?;
+        return Ok(Placed::Moved);
+    }
+    let from = staging
+        .to_str()
+        .context("The data folder's path is not UTF-8")?;
+    runtime::git_output(clone, &["fetch", "--quiet", "--no-tags", from, "HEAD"])?;
+    let head = runtime::git_output(clone, &["rev-parse", "FETCH_HEAD"])?;
+    let previous = runtime::git_output(clone, &["rev-parse", "HEAD"])?;
+    let (head, previous) = (head.trim(), previous.trim());
+    repos::take_other_files(clone, previous, head, &is_shared)?;
+    runtime::git_output(clone, &["reset", "--quiet", head])?;
+    for path in SHARED_PATHS {
+        remove_path(&clone.join(path))?;
+        if fs::symlink_metadata(staging.join(path)).is_ok() {
+            copy_tree(&staging.join(path), &clone.join(path), None)?;
+        }
+    }
+    Ok(Placed::Reused)
+}
+
 /// Puts this machine's shared paths in the clone. Replacing removes the clone's first; setting
 /// up keeps every file there and refuses to overwrite one.
 fn put_this_machines(clone: &Path, mine: &Path, replace: bool) -> Result<()> {
@@ -461,123 +383,21 @@ fn commit(clone: &Path, paths: &[String], message: &str, git: &GitTool) -> Resul
         clone,
         &[&["add", "--all", "--"], &literal[..]].concat(),
     )?;
-    commit_staged(clone, message, git)
-}
-
-/// Commits what is staged, with the human's Git identity; `false` when nothing is.
-fn commit_staged(clone: &Path, message: &str, git: &GitTool) -> Result<bool> {
-    let identity = ["user.name", "user.email"].map(|key| run(git, clone, &["config", key]));
-    ensure!(
-        identity
-            .iter()
-            .all(|value| value.as_ref().is_ok_and(|v| !v.trim().is_empty())),
-        "Git has no name and email set. Set user.name and user.email with git config --global, then try again."
-    );
-    if runtime::git_answer(clone, &["diff", "--cached", "--quiet"])?
-        .status
-        .success()
-    {
-        return Ok(false);
-    }
-    run(git, clone, &["commit", "--quiet", "-m", message])?;
-    Ok(true)
+    repos::commit_staged(clone, message, git)
 }
 
 /// Pushes the clone's HEAD to the recorded branch at the recorded push URL, with no tags or
-/// submodules and never forced: only a commit on top of the branch's head on GitHub, whose
-/// commits change nothing outside the shared paths.
+/// submodules and never forced: only commits on top of the branch's head on GitHub that change
+/// nothing outside the shared paths.
 pub(crate) fn push(clone: &Path, repository: &SettingsRepository, git: &GitTool) -> Result<()> {
-    let head = runtime::git_output(clone, &["rev-parse", "HEAD"])?
-        .trim()
-        .to_owned();
-    let remote = remote_head(clone, &repository.push_url, &repository.branch, git)
-        .context("This machine cannot read the repository")?;
-    let range = match remote {
-        Some(remote) => {
-            ensure!(
-                publish::is_ancestor(clone, &remote, &head),
-                "{} moved on GitHub since this machine read it",
-                repository.branch
-            );
-            format!("{remote}..{head}")
-        }
-        None => head.clone(),
-    };
-    let args = [
-        "log",
-        "--format=",
-        "--name-only",
-        "--no-renames",
-        "-m",
-        "-z",
-        &range,
-    ];
-    let changed = runtime::git_output(clone, &args)?;
-    if let Some(outside) = changed
-        .split('\0')
-        .find(|path| !path.is_empty() && !is_shared(path))
-    {
-        bail!(
-            "Sync changes only wiffletree.json, settings/ and skills/, and a commit changes {outside}"
-        );
-    }
-    let refspec = format!("{head}:refs/heads/{}", repository.branch);
-    let args = ["push", "--no-follow-tags", "--recurse-submodules=no"];
-    let url = repository.push_url.as_str();
-    run_at(git, clone, url, &[&args[..], &[url, &refspec]].concat())?;
-    Ok(())
+    let only_settings = |path: &str| is_shared(path).then_some(0);
+    repos::push(clone, &remote(repository), &only_settings, git)
 }
 
-/// Five minutes between passes, backing off to thirty while GitHub cannot be reached, and a
-/// push five seconds after the last shared write, so a burst of saves is one commit.
-const PULL_MS: i64 = 300_000;
-const MAX_BACKOFF_MS: i64 = 1_800_000;
-const PUSH_DELAY_MS: i64 = 5_000;
-
-/// When sync's next pass is due. One runs at a time.
-#[derive(Default)]
-pub(crate) struct Pace {
-    pull_at: i64,
-    push_at: Option<i64>,
-    running: bool,
-    /// Sync now was chosen while a pass ran.
-    again: bool,
-    failures: u32,
-}
-impl Pace {
-    /// While GitHub cannot be reached, a save waits for the next try.
-    pub(crate) fn wrote(&mut self, at: i64) {
-        self.push_at = Some(at + PUSH_DELAY_MS);
-    }
-    pub(crate) fn sync_now(&mut self) {
-        self.pull_at = 0;
-        self.again = self.running;
-    }
-    /// Marks a pass running when one is due at `at` and none runs.
-    pub(crate) fn start(&mut self, at: i64) -> bool {
-        let due = self.next_due().is_some_and(|due| due <= at);
-        if due {
-            self.running = true;
-            self.push_at = None;
-        }
-        due
-    }
-    /// `reached`: the pass read GitHub's head.
-    pub(crate) fn finish(&mut self, at: i64, reached: bool) {
-        self.running = false;
-        self.failures = if reached { 0 } else { self.failures + 1 };
-        let wait = PULL_MS << self.failures.min(3);
-        self.pull_at = match std::mem::take(&mut self.again) {
-            true => at,
-            false => at + wait.min(MAX_BACKOFF_MS),
-        };
-    }
-    pub(crate) fn running(&self) -> bool {
-        self.running
-    }
-    pub(crate) fn next_due(&self) -> Option<i64> {
-        let push = self.push_at.filter(|_| self.failures == 0);
-        (!self.running).then(|| push.map_or(self.pull_at, |push| push.min(self.pull_at)))
+fn remote(repository: &SettingsRepository) -> Remote<'_> {
+    Remote {
+        url: &repository.push_url,
+        branch: &repository.branch,
     }
 }
 
@@ -611,9 +431,6 @@ impl std::fmt::Display for Stopped {
     }
 }
 impl std::error::Error for Stopped {}
-
-/// A file's content, `None` for no file.
-type Content = Option<Vec<u8>>;
 
 /// A pass's input from the host thread: the clone, its repository, sync's record, and the
 /// host's writes, counted at `since`.
@@ -677,68 +494,7 @@ fn files_here(clone: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
 
 /// GitHub's synced files at `commit`, read whole.
 fn files_at(clone: &Path, commit: &str) -> Result<BTreeMap<String, Vec<u8>>> {
-    let listing = runtime::git_output(clone, &["ls-tree", "-r", "-z", commit])?;
-    let mut blobs = vec![];
-    for entry in listing.split('\0').filter(|entry| !entry.is_empty()) {
-        let (kind, path) = entry
-            .split_once('\t')
-            .context("Git listed an entry with no path")?;
-        if is_synced(path) {
-            let mut kind = kind.split(' ');
-            ensure!(
-                matches!(kind.next(), Some("100644" | "100755")),
-                "The repository's {path} is not a plain file, which sync never takes"
-            );
-            blobs.push((
-                path.to_owned(),
-                kind.nth(1).context("Git listed no object")?,
-            ));
-        }
-    }
-    let ids: String = blobs.iter().map(|(_, id)| format!("{id}\n")).collect();
-    let batch = runtime::git_bytes(clone, &["cat-file", "--batch"], ids.as_bytes())?;
-    let mut rest = batch.as_slice();
-    let mut files = BTreeMap::new();
-    for (path, _) in blobs {
-        let header = rest
-            .iter()
-            .position(|&b| b == b'\n')
-            .context("Git sent no header")?;
-        let size: usize = std::str::from_utf8(&rest[..header])?
-            .rsplit(' ')
-            .next()
-            .unwrap_or_default()
-            .parse()?;
-        let content = rest
-            .get(header + 1..header + 1 + size)
-            .context("Git sent too little")?;
-        files.insert(path, content.to_vec());
-        rest = rest.get(header + size + 2..).unwrap_or_default();
-    }
-    Ok(files)
-}
-
-/// Brings files outside the shared paths to GitHub's `remote`, as they were at `previous`.
-fn take_other_files(clone: &Path, previous: &str, remote: &str) -> Result<()> {
-    let diff = ["diff", "--name-status", "-z", "--no-renames"];
-    let changed = runtime::git_output(clone, &[&diff[..], &[previous, remote]].concat())?;
-    let mut fields = changed.split('\0');
-    let mut taken = vec![];
-    while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
-        match status {
-            _ if is_shared(path) => {}
-            "D" => match fs::remove_file(clone.join(path)) {
-                Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error)?,
-                _ => {}
-            },
-            _ => taken.push(format!(":(literal){path}")),
-        }
-    }
-    if !taken.is_empty() {
-        let taken: Vec<&str> = taken.iter().map(String::as_str).collect();
-        runtime::git_output(clone, &[&["checkout", remote, "--"], &taken[..]].concat())?;
-    }
-    Ok(())
+    repos::files_at(clone, commit, &is_synced)
 }
 
 /// A paused file, with GitHub's content and the content last synced.
@@ -754,23 +510,6 @@ fn unit(path: &str) -> &str {
         }
         _ => path,
     }
-}
-
-/// Stages exactly the content a pass read, so no file written since reaches the commit.
-fn stage(clone: &Path, files: &[(String, Content)]) -> Result<()> {
-    let mut index = vec![];
-    for (path, content) in files {
-        let entry = match content {
-            Some(content) => {
-                let id = runtime::git_bytes(clone, &["hash-object", "-w", "--stdin"], content)?;
-                format!("100644 {}\t{path}\0", String::from_utf8(id)?.trim())
-            }
-            None => format!("0 {}\t{path}\0", "0".repeat(40)),
-        };
-        index.extend(entry.into_bytes());
-    }
-    runtime::git_bytes(clone, &["update-index", "-z", "--index-info"], &index)?;
-    Ok(())
 }
 
 /// The machine a commit names after its " · ", or else its author.
@@ -896,13 +635,131 @@ fn subject(committed: &[(String, Content)]) -> String {
         .join(", ")
 }
 
-/// Fetches the branch, compares each file whole with the version last synced, and commits this
-/// machine's changes on GitHub's head and pushes them. A skill's rules, rewrite and base are
-/// compared as one. What changed on both sides, changed outside Wiffletree, or arrived in a
-/// form this machine refuses is paused and kept here, except a skill whose only change here is
-/// this machine's own automatic merge, which takes GitHub's version. What the host wrote while
-/// the pass ran is left for the next one. Files to pull are returned for the host thread to
-/// write.
+/// The settings rule set: `wiffletree.json`, `settings/` and `skills/`, each file compared whole
+/// with the version last synced. A skill's rules, rewrite and base are compared as one. What
+/// changed on both sides, changed outside Wiffletree, or arrived in a form this machine refuses
+/// is paused and kept here, except a skill whose only change here is this machine's own
+/// automatic merge, which takes GitHub's version. What the host wrote while the pass ran is left
+/// for the next one.
+struct Settings {
+    synced: BTreeMap<String, Content>,
+    written: BTreeMap<String, Content>,
+    two_machines: Vec<String>,
+    writes: shared::SharedWrites,
+    since: u64,
+    passed: Passed,
+    /// Why a file this Mac would refuse was not committed.
+    refused: Option<String>,
+}
+impl RuleSet for Settings {
+    fn claims(&self, path: &str) -> bool {
+        is_shared(path)
+    }
+    fn compare(&mut self, clone: &Path, remote: &str) -> Result<()> {
+        let (synced, written) = (&self.synced, &self.written);
+        let (two_machines, passed) = (&self.two_machines, &mut self.passed);
+        let (here, there) = (files_here(clone)?, files_at(clone, remote)?);
+        if let Some(format) = there.get(shared::FORMAT) {
+            match shared::format(format) {
+                Ok(1) => {}
+                Ok(_) => Err(Stopped(
+                    "This repository was written by a newer Wiffletree. Update to keep syncing."
+                        .into(),
+                ))?,
+                Err(error) => Err(Stopped(format!(
+                    "The repository's wiffletree.json can't be read: {error:#}. Sync waits until it is fixed on GitHub."
+                )))?,
+            }
+        }
+        passed.remote = remote.to_owned();
+        let mut units: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
+        for path in synced.keys().chain(here.keys()).chain(there.keys()) {
+            let paths = units.entry(unit(path)).or_default();
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        let version =
+            |map: &BTreeMap<String, Content>, path: &String| map.get(path).cloned().flatten();
+        for (unit, paths) in units {
+            let files: Vec<_> = (paths.iter())
+                .map(|&path| {
+                    let (base, mine) = (version(synced, path), here.get(path).cloned());
+                    (path, base, mine, there.get(path).cloned())
+                })
+                .collect();
+            let outside = (files.iter())
+                .any(|(path, base, mine, _)| mine != base && *mine != version(written, path));
+            let refused = (files.iter())
+                .filter(|(_, base, _, theirs)| theirs != base)
+                .find_map(|(path, _, _, theirs)| shared::check(path, theirs.as_ref()?).err());
+            let changed_here = went_back_here(unit, &here, synced)
+                || files.iter().any(|(_, base, mine, _)| mine != base);
+            let changed_there = files.iter().any(|(_, base, _, theirs)| theirs != base);
+            let was_paused = paths.iter().any(|path| two_machines.contains(path));
+            // GitHub's version supersedes a merge of the version both last synced.
+            let own_merge = changed_there && only_own_merges(unit, &here, synced);
+            let paused = match () {
+                _ if files.iter().all(|(_, _, mine, theirs)| mine == theirs) => None,
+                _ if outside => Some(Paused::OutsideWiffletree),
+                _ => match refused {
+                    Some(reason) => Some(Paused::CannotBeRead {
+                        machine: changed_by(clone, remote, &paths),
+                        reason: format!("{reason:#}"),
+                    }),
+                    None if changed_here && changed_there && !own_merge || was_paused => {
+                        Some(Paused::TwoMachines {
+                            machine: changed_by(clone, remote, &paths),
+                        })
+                    }
+                    None => None,
+                },
+            };
+            for (path, base, mine, theirs) in files {
+                let path = path.clone();
+                match &paused {
+                    Some(why) => passed.paused.push((path, why.clone(), theirs)),
+                    None if mine == theirs && mine != base => passed.alike.push((path, mine)),
+                    None if mine == theirs => {}
+                    None if mine == base || own_merge => passed.pulled.push((path, mine, theirs)),
+                    None => passed.committed.push((path, mine)),
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Run once the clone is at GitHub's head: leaves what the host wrote meanwhile for the next
+    /// pass, and holds back a file this Mac would refuse.
+    fn commit(&mut self) -> Option<(Vec<(String, Content)>, String)> {
+        let passed = &mut self.passed;
+        {
+            let writes = shared::lock(&self.writes);
+            let read = |path: &String| !writes.touched(path, self.since);
+            passed.pulled.retain(|(path, ..)| read(path));
+            passed.alike.retain(|(path, _)| read(path));
+            passed.committed.retain(|(path, _)| read(path));
+            passed.paused.retain(|(path, ..)| read(path));
+        }
+        let refused = &mut self.refused;
+        passed.committed.retain(|(path, content)| {
+            let Some(Err(error)) = content.as_deref().map(|c| shared::check(path, c)) else {
+                return true;
+            };
+            *refused = Some(format!(
+                "{path} was not pushed: this Mac would refuse it: {error:#}"
+            ));
+            false
+        });
+        if passed.committed.is_empty() {
+            return None;
+        }
+        let message = format!("{} · {}", subject(&passed.committed), machine_name());
+        Some((passed.committed.clone(), message))
+    }
+}
+
+/// Runs the settings repository's engine with its one rule set, settings. Files to pull are
+/// returned for the host thread to write.
 pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
     let Pass {
         clone,
@@ -920,134 +777,44 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
     let _running = running
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut passed = Passed {
-        repository,
-        remote: previous.clone(),
-        pushed: None,
-        pulled: vec![],
-        alike: vec![],
-        committed: vec![],
-        paused: vec![],
-        error: None,
+    let mut settings = Settings {
+        synced,
+        written,
+        two_machines,
+        writes,
         since,
+        passed: Passed {
+            repository: repository.clone(),
+            remote: previous.clone(),
+            pushed: None,
+            pulled: vec![],
+            alike: vec![],
+            committed: vec![],
+            paused: vec![],
+            error: None,
+            since,
+        },
+        refused: None,
     };
-    if shared::lock(&writes).touched("", since) {
-        return Ok(passed);
+    if shared::lock(&settings.writes).touched("", since) {
+        return Ok(settings.passed);
     }
-    let repository = &passed.repository;
-    let branch = format!("refs/heads/{}", repository.branch);
-    let fetch = ["fetch", "--quiet", "--no-tags", "--recurse-submodules=no"];
-    let url = repository.push_url.as_str();
-    run_at(
-        &tools.git,
+    let rule_sets: &mut [&mut dyn RuleSet] = &mut [&mut settings];
+    let pushed = repos::pass(
         &clone,
-        url,
-        &[&fetch[..], &[url, &branch]].concat(),
+        remote(&repository),
+        &previous,
+        rule_sets,
+        &tools.git,
     )?;
-    let remote = runtime::git_output(&clone, &["rev-parse", "FETCH_HEAD"])?
-        .trim()
-        .to_owned();
-    let (here, there) = (files_here(&clone)?, files_at(&clone, &remote)?);
-    if let Some(format) = there.get(shared::FORMAT) {
-        match shared::format(format) {
-            Ok(1) => {}
-            Ok(_) => Err(Stopped(
-                "This repository was written by a newer Wiffletree. Update to keep syncing.".into(),
-            ))?,
-            Err(error) => Err(Stopped(format!(
-                "The repository's wiffletree.json can't be read: {error:#}. Sync waits until it is fixed on GitHub."
-            )))?,
-        }
-    }
-    passed.remote = remote.clone();
-    let mut units: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
-    for path in synced.keys().chain(here.keys()).chain(there.keys()) {
-        let paths = units.entry(unit(path)).or_default();
-        if !paths.contains(&path) {
-            paths.push(path);
-        }
-    }
-    let version = |map: &BTreeMap<String, Content>, path: &String| map.get(path).cloned().flatten();
-    for (unit, paths) in units {
-        let files: Vec<_> = (paths.iter())
-            .map(|&path| {
-                let (base, mine) = (version(&synced, path), here.get(path).cloned());
-                (path, base, mine, there.get(path).cloned())
-            })
-            .collect();
-        let outside = (files.iter())
-            .any(|(path, base, mine, _)| mine != base && *mine != version(&written, path));
-        let refused = (files.iter())
-            .filter(|(_, base, _, theirs)| theirs != base)
-            .find_map(|(path, _, _, theirs)| shared::check(path, theirs.as_ref()?).err());
-        let changed_here = went_back_here(unit, &here, &synced)
-            || files.iter().any(|(_, base, mine, _)| mine != base);
-        let changed_there = files.iter().any(|(_, base, _, theirs)| theirs != base);
-        let was_paused = paths.iter().any(|path| two_machines.contains(path));
-        // GitHub's version supersedes a merge of the version both last synced.
-        let own_merge = changed_there && only_own_merges(unit, &here, &synced);
-        let paused = match () {
-            _ if files.iter().all(|(_, _, mine, theirs)| mine == theirs) => None,
-            _ if outside => Some(Paused::OutsideWiffletree),
-            _ => match refused {
-                Some(reason) => Some(Paused::CannotBeRead {
-                    machine: changed_by(&clone, &remote, &paths),
-                    reason: format!("{reason:#}"),
-                }),
-                None if changed_here && changed_there && !own_merge || was_paused => {
-                    Some(Paused::TwoMachines {
-                        machine: changed_by(&clone, &remote, &paths),
-                    })
-                }
-                None => None,
-            },
-        };
-        for (path, base, mine, theirs) in files {
-            let path = path.clone();
-            match &paused {
-                Some(why) => passed.paused.push((path, why.clone(), theirs)),
-                None if mine == theirs && mine != base => passed.alike.push((path, mine)),
-                None if mine == theirs => {}
-                None if mine == base || own_merge => passed.pulled.push((path, mine, theirs)),
-                None => passed.committed.push((path, mine)),
-            }
-        }
-    }
-    take_other_files(&clone, &previous, &remote)?;
-    runtime::git_output(&clone, &["reset", "--quiet", &remote])?;
-    {
-        let writes = shared::lock(&writes);
-        let read = |path: &String| !writes.touched(path, since);
-        passed.pulled.retain(|(path, ..)| read(path));
-        passed.alike.retain(|(path, _)| read(path));
-        passed.committed.retain(|(path, _)| read(path));
-        passed.paused.retain(|(path, ..)| read(path));
-    }
-    let mut refused = None;
-    passed.committed.retain(|(path, content)| {
-        let Some(Err(error)) = content.as_deref().map(|c| shared::check(path, c)) else {
-            return true;
-        };
-        refused = Some(format!(
-            "{path} was not pushed: this Mac would refuse it: {error:#}"
-        ));
-        false
-    });
-    if !passed.committed.is_empty() {
-        let message = format!("{} · {}", subject(&passed.committed), machine_name());
-        let pushed = stage(&clone, &passed.committed)
-            .and_then(|()| commit_staged(&clone, &message, &tools.git))
-            .and_then(|made| {
-                if made {
-                    push(&clone, &passed.repository, &tools.git)?;
-                }
-                let head = runtime::git_output(&clone, &["rev-parse", "HEAD"])?;
-                Ok(made.then(|| head.trim().to_owned()))
-            });
-        match pushed {
-            Ok(head) => passed.pushed = head,
-            Err(error) => passed.error = Some(format!("{error:#}")),
-        }
+    let Settings {
+        mut passed,
+        refused,
+        ..
+    } = settings;
+    match pushed {
+        Ok(head) => passed.pushed = head,
+        Err(error) => passed.error = Some(error),
     }
     passed.error = passed.error.or(refused);
     Ok(passed)
@@ -1081,7 +848,9 @@ pub(crate) fn prepare(
     tools: &Tools,
 ) -> Result<Prepared> {
     let (check, staging) = read(home, input, tools)?;
-    let (clone, mine) = (staging.path(), home.join(shared::FOLDER));
+    // Before anything is pushed.
+    repos::refuse_another(home, &check.repository)?;
+    let (clone, mine) = (staging.path(), shared::folder(home));
     let read_from = contents(&mine)?;
     let change = match (check.joining.is_some(), with) {
         (false, None) => "Set up the shared settings",
@@ -1116,50 +885,85 @@ impl Host {
         let prepared = prepare(&self.home, input, with, tools)?;
         self.adopt_settings_repository(prepared)
     }
-    /// Puts a prepared clone in place of the shared folder, moving the folder to `backups/`, and
-    /// records the repository in this machine's settings. A shared setting saved since the
-    /// clone was prepared refuses it, and a failure puts the folder back.
+    /// Makes a prepared clone, at `<data folder>/repos/<owner>-<name>/`, the shared folder, and
+    /// records the repository in this machine's settings. With another settings repository
+    /// chosen, its settings files are first copied to `<data folder>/shared/`, as Stop syncing
+    /// does, and its clone stays where it is. Then the settings files of `<data folder>/shared/`
+    /// move to `backups/`; no clone ever does. A shared setting saved since the clone was
+    /// prepared refuses it, and a failure leaves the shared folder in use as it was.
     pub(crate) fn adopt_settings_repository(&mut self, prepared: Prepared) -> Result<HostSettings> {
         // One that ran before is dropped, not recorded against the new clone.
         let passes = self.sync_passes.clone();
         let _no_pass = no_pass_running(&passes)?;
         let _writing = shared::Writing::start(&self.shared_writes, "");
-        let shared = self.home.join(shared::FOLDER);
         ensure!(
-            contents(&shared)? == prepared.read_from,
+            contents(&self.shared_folder())? == prepared.read_from,
             "A shared setting changed meanwhile, and stays as you saved it here. The repository has the earlier settings: join it with this Mac's to push yours."
         );
-        let backups = self.home.join("backups");
-        fs::create_dir_all(&backups)?;
-        let at = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S%.3fZ");
-        let backup = backups.join(format!("shared-{at}"));
-        fs::rename(&shared, &backup)?;
+        // A clone in the way may have appeared since `prepare` checked.
+        repos::refuse_another(&self.home, &prepared.repository)?;
+        self.copy_settings_to_shared_folder()?;
+        let clone = repos::clone_folder(&self.home, &prepared.repository.name);
+        let placed = place_clone(prepared.staging.path(), &clone)?;
         let settings = HostSettings {
             settings_repository: Some(prepared.repository.clone()),
             ..self.settings()
         };
-        let adopted = fs::rename(prepared.staging.path(), &shared)
-            .map_err(anyhow::Error::from)
-            .and_then(|()| {
-                self.save_settings(&settings).inspect_err(|_| {
-                    let _ = fs::rename(&shared, prepared.staging.path());
-                })
-            });
-        if let Err(error) = adopted {
-            fs::rename(&backup, &shared)?;
+        if let Err(error) = self.save_settings(&settings) {
+            if placed == Placed::Moved {
+                let _ = fs::rename(&clone, prepared.staging.path());
+            }
             return Err(error);
         }
         self.record_clone()?;
         self.recall_skill_histories();
+        self.back_up_settings_files()?;
         Ok(self.settings())
     }
-    /// Stops syncing on this machine and forgets the repository chosen. The shared folder stays
-    /// as it is and in use, the notes about paused files close, and GitHub is left unchanged.
+    /// Copies the settings repository's settings files, exactly as they are, to
+    /// `<data folder>/shared/`, in place of the ones there; nothing without one.
+    fn copy_settings_to_shared_folder(&self) -> Result<()> {
+        if self.settings().settings_repository.is_none() {
+            return Ok(());
+        }
+        let (clone, shared) = (self.shared_folder(), self.home.join(shared::FOLDER));
+        // A clone the first start could not move is still in `shared/`, settings and all.
+        if clone == shared {
+            return Ok(());
+        }
+        // Gone once the clone moved out of it at the first start.
+        fs::create_dir_all(&shared)?;
+        for path in SHARED_PATHS {
+            remove_path(&shared.join(path))?;
+            if fs::symlink_metadata(clone.join(path)).is_ok() {
+                copy_tree(&clone.join(path), &shared.join(path), None)?;
+            }
+        }
+        Ok(())
+    }
+    /// Moves the settings files of `<data folder>/shared/` to `backups/shared-<time>/`.
+    fn back_up_settings_files(&self) -> Result<()> {
+        let folder = self.home.join(shared::FOLDER);
+        let at = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S%.3fZ");
+        let backup = self.home.join("backups").join(format!("shared-{at}"));
+        for path in SHARED_PATHS {
+            if fs::symlink_metadata(folder.join(path)).is_ok() {
+                fs::create_dir_all(&backup)?;
+                fs::rename(folder.join(path), backup.join(path))?;
+            }
+        }
+        Ok(())
+    }
+    /// Stops syncing settings on this machine and forgets the repository chosen. The settings
+    /// files are copied from the clone to `<data folder>/shared/`, which is the shared folder from
+    /// then on, so every setting keeps its value. The clone stays where it is, the notes about
+    /// paused files close, and GitHub is left unchanged.
     pub(crate) fn stop_settings_sync(&mut self) -> Result<HostSettings> {
         let passes = self.sync_passes.clone();
         let _no_pass = no_pass_running(&passes)?;
         // A pass started before this, still to take the lock, then reads nothing and pushes nothing.
         let _writing = shared::Writing::start(&self.shared_writes, "");
+        self.copy_settings_to_shared_folder()?;
         let settings = HostSettings {
             settings_repository: None,
             ..self.settings()
@@ -1169,32 +973,73 @@ impl Host {
         self.sync = Synced::default();
         Ok(self.settings())
     }
+    /// At the first start of the release that put clones under `repos/`, moves the settings
+    /// repository's clone there from `<data folder>/shared/`. The move is one rename within the
+    /// data folder, so a start cut short leaves the clone in `shared/` and the next start moves
+    /// it. Without a settings repository, `shared/` stays a plain folder.
+    pub(crate) fn move_settings_clone(&self) -> Result<()> {
+        let Some(repository) = shared::chosen(&self.home) else {
+            return Ok(());
+        };
+        let (from, to) = (
+            self.home.join(shared::FOLDER),
+            repos::clone_folder(&self.home, &repository.name),
+        );
+        if !from.join(".git").exists() {
+            return Ok(());
+        }
+        if to.exists() {
+            // `shared::folder` uses `to` only when it is the repository's clone, and else `from`.
+            match repos::holds(&to, &repository) {
+                true => eprintln!(
+                    "Not moving {}: {} is already the settings repository's clone",
+                    from.display(),
+                    to.display()
+                ),
+                false => eprintln!(
+                    "Not moving the settings repository's clone from {}: {} holds a clone of another repository. Move it aside and start again.",
+                    from.display(),
+                    to.display()
+                ),
+            }
+            return Ok(());
+        }
+        eprintln!(
+            "Moving the settings repository's clone from {} to {}",
+            from.display(),
+            to.display()
+        );
+        fs::create_dir_all(self.home.join(repos::FOLDER))?;
+        fs::rename(&from, &to)?;
+        eprintln!("Moved the settings repository's clone to {}", to.display());
+        // An older release may have left a former name GitHub redirects as `origin`.
+        if repos::holds(&to, &repository) {
+            repos::name_origin(&to, &repository.name)?;
+        }
+        Ok(())
+    }
     /// The pass sync runs next, or `None` while no settings repository is chosen.
     pub(crate) fn sync_pass(&mut self) -> Result<Option<Pass>> {
         let Some(repository) = self.settings().settings_repository else {
             return Ok(None);
         };
-        let recorded = "SELECT EXISTS(SELECT 1 FROM sync_record WHERE path='')";
-        if !self.db.query_row(recorded, [], |r| r.get::<_, bool>(0))? {
-            // A repository chosen before sync's record existed.
-            self.record_clone()?;
-        }
-        let rows: Vec<(String, Content, Content)> = self
-            .db
-            .prepare("SELECT path,synced,written FROM sync_record")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-            .collect::<rusqlite::Result<_>>()?;
-        let mut synced: BTreeMap<String, Content> = BTreeMap::new();
-        let mut written = BTreeMap::new();
-        for (path, content, wrote) in rows {
-            written.insert(path.clone(), wrote);
-            synced.insert(path, content);
-        }
-        let commit = synced.remove("").flatten().map(String::from_utf8);
+        let record = match Record::read(&self.db)? {
+            Some(record) => record,
+            None => {
+                // A repository chosen before sync's record existed.
+                self.record_clone()?;
+                Record::read(&self.db)?.context("Sync's record has no commit")?
+            }
+        };
+        let Record {
+            commit,
+            synced,
+            written,
+        } = record;
         Ok(Some(Pass {
-            clone: self.home.join(shared::FOLDER),
+            clone: self.shared_folder(),
             repository,
-            commit: commit.transpose()?.context("Sync's record has no commit")?,
+            commit,
             synced,
             written,
             two_machines: (self.db.prepare(
@@ -1226,7 +1071,7 @@ impl Host {
             return Ok(false);
         }
         let sorting = self.settings().keeper.comments;
-        let shared = self.home.join(shared::FOLDER);
+        let shared = self.shared_folder();
         // A skill's rules, rewrite and base are pulled together or not at all.
         let skipped: std::collections::BTreeSet<String> = (passed.pulled.iter())
             .filter(|(path, here, _)| fs::read(shared.join(path)).ok() != *here || touched(path))
@@ -1326,7 +1171,7 @@ impl Host {
         if self.settings().settings_repository.is_none() {
             return Ok(false);
         }
-        let shared = self.home.join(shared::FOLDER);
+        let shared = self.shared_folder();
         for path in paths {
             let recorded = "SELECT synced,written FROM sync_record WHERE path=?1";
             let (synced, written): (Content, Content) = (self.db)
@@ -1414,7 +1259,7 @@ impl Host {
     /// A paused file as the app names it, such as "Implementing · your rules".
     fn setting(&self, path: &str) -> String {
         let name = names(&[path.to_owned()]).join("");
-        let rewritten = self.home.join(shared::FOLDER).join(path).join("rewrite.md");
+        let rewritten = self.shared_folder().join(path).join("rewrite.md");
         match path {
             _ if path.contains("/history/") => format!("{name} · a history entry"),
             _ if !path.ends_with('/') => name,
@@ -1440,7 +1285,7 @@ impl Host {
     /// This machine's version beside the other, line by line, as a note's Compare shows them.
     pub(crate) fn compare_paused(&self, path: &str) -> Result<Vec<Line>> {
         let (paused, files) = self.paused_unit(path)?;
-        let shared = self.home.join(shared::FOLDER);
+        let shared = self.shared_folder();
         // A skill's agents get its rewrite, or else its rules; `base.md` is never theirs to read.
         let text = |version: &dyn Fn(&PausedFile) -> Content| {
             let read = |rewrite: bool| {
@@ -1473,7 +1318,7 @@ impl Host {
             "That note does not offer this choice"
         );
         let _writing = shared::Writing::start(&self.shared_writes, path);
-        let shared = self.home.join(shared::FOLDER);
+        let shared = self.shared_folder();
         let mine = |file: &str| fs::read(shared.join(file)).ok();
         if settle == Settle::SyncThisVersion {
             for (file, ..) in &rows {
@@ -1518,27 +1363,11 @@ impl Host {
     /// Starts sync's record afresh from the clone: each file as its head holds it is synced, and
     /// as the folder holds it written, so a change not yet committed waits to be pushed.
     fn record_clone(&mut self) -> Result<()> {
-        let shared = self.home.join(shared::FOLDER);
-        let head = runtime::git_output(&shared, &["rev-parse", "HEAD"])?;
+        let clone = self.shared_folder();
+        let head = runtime::git_output(&clone, &["rev-parse", "HEAD"])?;
         let head = head.trim();
-        let (synced, written) = (files_at(&shared, head)?, files_here(&shared)?);
-        let paths: std::collections::BTreeSet<&String> =
-            synced.keys().chain(written.keys()).collect();
-        let tx = self.db.transaction()?;
-        tx.execute("DELETE FROM sync_record", [])?;
-        tx.execute("DELETE FROM sync_paused", [])?;
-        tx.execute(
-            "INSERT INTO sync_record(path,synced) VALUES ('',?1)",
-            [head.as_bytes()],
-        )?;
-        for path in paths {
-            tx.execute(
-                "INSERT INTO sync_record(path,synced,written) VALUES (?1,?2,?3)",
-                params![path, synced.get(path), written.get(path)],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
+        let (synced, written) = (files_at(&clone, head)?, files_here(&clone)?);
+        Record::restart(&mut self.db, head, &synced, &written)
     }
     /// What this machine lacks to run the settings it shares through a repository, one line each.
     /// Every line is about this machine's models, which Models chooses.
@@ -1565,12 +1394,14 @@ impl Host {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::github_access::gh_login;
     use crate::publish::tests::{exit, git};
     use crate::test_support::without_background_maintenance;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     pub(crate) const NAME: &str = "MHohlios/wiffletree-storage";
+    const URL: &str = "https://github.com/MHohlios/wiffletree-storage.git";
     const README: &str = "# My Wiffletree storage\n";
 
     /// A local bare repository standing in for GitHub, the answers a fake `gh` gives, and every
@@ -1578,7 +1409,7 @@ pub(crate) mod tests {
     type Hook = (&'static str, Box<dyn FnOnce() + Send>);
 
     pub(crate) struct GitHub {
-        bare: PathBuf,
+        pub(crate) bare: PathBuf,
         repository: Value,
         organization: Option<Value>,
         identity: (&'static str, &'static str),
@@ -1730,7 +1561,7 @@ pub(crate) mod tests {
                 .then(|| String::from_utf8(output.stdout).unwrap())
         }
         /// A commit made on GitHub, as the human would in its web editor.
-        fn commit(&self, file: &str, content: impl AsRef<[u8]>) {
+        pub(crate) fn commit(&self, file: &str, content: impl AsRef<[u8]>) {
             commit_on(&self.bare, file, content);
         }
         /// Every Git command of that name sent, with the options before it.
@@ -1853,7 +1684,7 @@ pub(crate) mod tests {
         host.sync_now(&github.tools()).unwrap();
         assert_eq!(status(&host).error, None);
         assert!(github.show(shared::CHECK_INS).unwrap().contains("20"));
-        assert!(home.path().join("shared/notes.md").exists());
+        assert!(shared::folder(home.path()).join("notes.md").exists());
         for command in ["ls-remote", "clone", "fetch", "push"] {
             let calls = github.calls(command);
             assert!(!calls.is_empty(), "{command}");
@@ -1883,7 +1714,7 @@ pub(crate) mod tests {
         host.sync_now(&github.tools()).unwrap();
         assert_eq!(status(&host).error, None);
         assert!(github.show(shared::CHECK_INS).unwrap().contains("20"));
-        assert!(home.path().join("shared/notes.md").exists());
+        assert!(shared::folder(home.path()).join("notes.md").exists());
         let ls_remote = github.calls("ls-remote");
         assert!(
             ls_remote[0].contains(&"git@github.com:MHohlios/wiffletree-storage.git".to_owned())
@@ -1947,7 +1778,7 @@ pub(crate) mod tests {
     fn a_users_private_repository_is_read_by_its_owner_and_checking_writes_nothing() {
         let (home, host) = host();
         let github = Arc::new(GitHub::new(home.path(), true));
-        let before = (listing(home.path()), listing(&home.path().join("shared")));
+        let before = (listing(home.path()), listing(&shared::folder(home.path())));
         let check = check(&host.home, NAME, &github.tools()).unwrap();
         assert_eq!(
             check,
@@ -1963,7 +1794,7 @@ pub(crate) mod tests {
             }
         );
         assert_eq!(
-            (listing(home.path()), listing(&home.path().join("shared"))),
+            (listing(home.path()), listing(&shared::folder(home.path()))),
             before
         );
         assert_eq!(github.log("%s"), ["Initial commit"]);
@@ -2071,7 +1902,7 @@ pub(crate) mod tests {
                 "{push:?}"
             );
             // The shared folder is the clone, the old one is kept, and the choice stays here.
-            let shared = home.path().join("shared");
+            let shared = shared::folder(home.path());
             assert_eq!(git(&shared, &["rev-parse", "HEAD"]), github.log("%H")[0]);
             assert_eq!(listing(&home.path().join("backups")).len(), 1);
             assert_eq!(host.settings(), settings);
@@ -2127,7 +1958,7 @@ pub(crate) mod tests {
             ),
             (0, "{}\n".into())
         );
-        assert!(!home.path().join("shared/.git").exists());
+        assert!(!shared::folder(home.path()).join(".git").exists());
     }
 
     #[test]
@@ -2163,14 +1994,14 @@ pub(crate) mod tests {
                 (github.pushes(), github.show("other/check-ins.json")),
                 (0, None)
             );
-            assert!(!home.path().join("shared/.git").exists());
+            assert!(!shared::folder(home.path()).join(".git").exists());
         }
         // A link in this machine's shared folder is refused, not followed.
         let (home, mut host) = host();
         let github = Arc::new(GitHub::new(home.path(), true));
         let outside = home.path().join("outside.md");
         fs::write(&outside, "Not a setting.").unwrap();
-        let guide = home.path().join("shared/settings/model-guide.md");
+        let guide = shared::folder(home.path()).join("settings/model-guide.md");
         fs::create_dir_all(guide.parent().unwrap()).unwrap();
         let _ = fs::remove_file(&guide);
         std::os::unix::fs::symlink(&outside, &guide).unwrap();
@@ -2213,7 +2044,7 @@ pub(crate) mod tests {
             (20, 200)
         );
         assert_eq!(settings.settings_repository, None);
-        assert!(!home.path().join("shared/.git").exists());
+        assert!(!shared::folder(home.path()).join(".git").exists());
     }
 
     #[test]
@@ -2237,8 +2068,9 @@ pub(crate) mod tests {
         fs::create_dir(&settings_file).unwrap();
         assert!(host.adopt_settings_repository(prepared).is_err());
         assert_eq!(host.model_selection().unwrap().guide, "Local guide.");
-        assert!(!home.path().join("shared/.git").exists());
-        assert!(listing(&home.path().join("backups")).is_empty());
+        assert!(!shared::folder(home.path()).join(".git").exists());
+        assert!(!repos::clone_folder(home.path(), NAME).exists());
+        assert!(!home.path().join("backups").exists());
     }
 
     #[test]
@@ -2255,7 +2087,7 @@ pub(crate) mod tests {
             },
             ..theirs.clone()
         };
-        let history = home.path().join("shared/skills/coordinating/history");
+        let history = shared::folder(home.path()).join("skills/coordinating/history");
         fs::create_dir_all(&history).unwrap();
         fs::write(
             history.join(format!("{theirs_name}.json")),
@@ -2286,7 +2118,7 @@ pub(crate) mod tests {
         host.set_check_ins(10, 300).unwrap();
         save_rules(&mut host, Skill::Implementing, "Run the linter.");
         assert_eq!(host.settings().settings_repository, None);
-        assert!(!home.path().join("shared/.git").exists());
+        assert!(!shared::folder(home.path()).join(".git").exists());
         host.set_owner_allowed("MHohlios", false).unwrap();
         let github = Arc::new(GitHub::new(home.path(), true));
         host.choose_settings_repository(NAME, None, &github.tools())
@@ -2303,7 +2135,7 @@ pub(crate) mod tests {
             .unwrap()
             .settings_repository
             .unwrap();
-        let clone = home.path().join("shared");
+        let clone = shared::folder(home.path());
         let tip = github.log("%H")[0].clone();
         // A commit that touches README.md is refused before anything is pushed.
         fs::write(clone.join("README.md"), "Changed here.\n").unwrap();
@@ -2357,7 +2189,7 @@ pub(crate) mod tests {
             "{error:#}"
         );
         assert_eq!(github.log("%s"), ["Initial commit"]);
-        assert!(!home.path().join("shared/.git").exists());
+        assert!(!shared::folder(home.path()).join(".git").exists());
         assert_eq!(host.settings().settings_repository, None);
     }
 
@@ -2514,7 +2346,7 @@ pub(crate) mod tests {
         // Triggers the first machine runs, with its keeper model and a re-check level.
         let keeper =
             r#"{"rebase": true, "conflicts": true, "quiet_minutes": 2, "review_level": "Light"}"#;
-        let clone = first_home.path().join("shared");
+        let clone = shared::folder(first_home.path());
         fs::write(clone.join("settings/pr-keeper.json"), keeper).unwrap();
         let mut review = first.settings().verification;
         review.verifiers.push(VerifierConfig {
@@ -2559,7 +2391,7 @@ pub(crate) mod tests {
         let (home, mut host) = host();
         host.create_project("Site").unwrap();
         let coordinator = host.sessions().unwrap().remove(0);
-        let shared = home.path().join("shared");
+        let shared = shared::folder(home.path());
         let before = listing(&shared);
         for tool in mcp::tools().as_array().unwrap() {
             let name = tool["name"].as_str().unwrap();
@@ -2614,7 +2446,7 @@ pub(crate) mod tests {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
-        let shared = home.path().join("shared");
+        let shared = shared::folder(home.path());
         let check_ins = &written["settings/check-ins.json"];
         assert_eq!(
             check_ins,
@@ -2686,7 +2518,7 @@ pub(crate) mod tests {
             .unwrap();
         github.commit("README.md", "Edited on GitHub.\n");
         github.commit("docs/notes.md", "New.\n");
-        let shared = home.path().join("shared");
+        let shared = shared::folder(home.path());
         fs::write(shared.join("README.md"), "Changed here.\n").unwrap();
         host.set_check_ins(40, 400).unwrap();
         host.sync_now(&github.tools()).unwrap();
@@ -2826,7 +2658,7 @@ pub(crate) mod tests {
         second.sync_now(&tools).unwrap();
         let state = second.skills().state(skill);
         assert_eq!((state.rules.as_str(), state.rewrite), ("- New rule.", None));
-        let folder = second.home.join("shared/skills/implementing");
+        let folder = shared::folder(&second.home).join("skills/implementing");
         assert!(!folder.join("rewrite.md").exists() && !folder.join("base.md").exists());
         let notes = notes(&second);
         assert_eq!(notes.len(), 1);
@@ -2841,7 +2673,7 @@ pub(crate) mod tests {
         save_rules(&mut host, Skill::Implementing, "Run the linter.\n");
         host.choose_settings_repository(NAME, None, &github.tools())
             .unwrap();
-        let additions = home.path().join("shared").join(ADDITIONS);
+        let additions = shared::folder(home.path()).join(ADDITIONS);
         let appended = "Run the linter.\nPush to main.\n";
         fs::write(&additions, appended).unwrap();
         host.sync_now(&github.tools()).unwrap();
@@ -2891,7 +2723,7 @@ pub(crate) mod tests {
         host.sync_now(&github.tools()).unwrap();
         assert_eq!(status(&host).error, None);
         assert_eq!(host.settings().verification, before);
-        assert!(!home.path().join("shared").join(ADDITIONS).exists());
+        assert!(!shared::folder(home.path()).join(ADDITIONS).exists());
         let notes = notes(&host);
         let reasons: Vec<&Paused> = notes.iter().map(|n| &n.paused).collect();
         let machine = "F".to_owned();
@@ -2986,7 +2818,7 @@ pub(crate) mod tests {
         save_rules(&mut host, Skill::Implementing, "Run the linter.\n");
         host.choose_settings_repository(NAME, None, &github.tools())
             .unwrap();
-        let additions = home.path().join("shared").join(ADDITIONS);
+        let additions = shared::folder(home.path()).join(ADDITIONS);
         fs::write(&additions, "Push to main.\n").unwrap();
         host.sync_now(&github.tools()).unwrap();
         assert_eq!(notes(&host).len(), 1);
@@ -3067,7 +2899,7 @@ pub(crate) mod tests {
             .unwrap();
         save_rules(&mut host, Skill::Implementing, "Rule two.");
         // Mid-pass, a change has moved the rules aside and not yet put its new file in place.
-        let additions = home.path().join("shared").join(ADDITIONS);
+        let additions = shared::folder(home.path()).join(ADDITIONS);
         let aside = home.path().join("aside.md");
         let changing = Arc::new(Mutex::new(None));
         let (writes, slot) = (host.shared_writes.clone(), changing.clone());
@@ -3117,7 +2949,7 @@ pub(crate) mod tests {
         let passed = self::pass(pass, &github.tools());
         assert!(!host.finish_sync(now(), passed).unwrap());
         assert_eq!(github.log("%H")[1..], rejoined);
-        let clone = host.home.join("shared");
+        let clone = host.shared_folder();
         assert!(clone.join("README.md").exists());
         assert_eq!(git(&clone, &["rev-parse", "HEAD"]), rejoined[0]);
         let status = status(&host);
@@ -3158,7 +2990,7 @@ pub(crate) mod tests {
             held[0].contains(&format!("\"{KEEPER_TRIES}\" needs")),
             "{held:?}"
         );
-        let file = home.path().join("shared").join(shared::KEEPER);
+        let file = shared::folder(home.path()).join(shared::KEEPER);
         assert_eq!(fs::read_to_string(&file).unwrap(), keeper);
         let suggested = Host::open_set_up(folder.path().join("suggested")).unwrap();
         let selection = ModelSelection {
@@ -3179,7 +3011,7 @@ pub(crate) mod tests {
         host.set_check_ins(30, 300).unwrap();
         host.choose_settings_repository(NAME, None, &github.tools())
             .unwrap();
-        let shared = home.path().join("shared");
+        let shared = shared::folder(home.path());
         let outside = "{\n  \"checkin_child_turns\": 40,\n  \"checkin_human_turns\": 400\n}\n";
         fs::write(shared.join(shared::CHECK_INS), outside).unwrap();
         github.commit(shared::CHECK_INS, outside.replace('4', "5"));
@@ -3197,7 +3029,7 @@ pub(crate) mod tests {
         let github = Arc::new(GitHub::new(home.path(), true));
         host.choose_settings_repository(NAME, None, &github.tools())
             .unwrap();
-        fs::write(home.path().join("shared").join(shared::FORMAT), "not json").unwrap();
+        fs::write(shared::folder(home.path()).join(shared::FORMAT), "not json").unwrap();
         host.sync_now(&github.tools()).unwrap();
         let settle = Command::SettlePausedFile {
             path: shared::FORMAT.into(),
@@ -3276,7 +3108,7 @@ pub(crate) mod tests {
         assert!(host.finish_sync(now(), passed).unwrap());
         let joined = host.adopt_settings_repository(join().unwrap()).unwrap();
         assert!(joined.settings_repository.is_some());
-        let shared = home.path().join("shared");
+        let shared = shared::folder(home.path());
         assert_eq!(git(&shared, &["rev-parse", "HEAD"]), other.log("%H")[0]);
         assert_eq!(github.log("%H"), pushed);
     }
@@ -3290,7 +3122,7 @@ pub(crate) mod tests {
         let (home, mut host) = host();
         host.choose_settings_repository(NAME, None, &github.tools())
             .unwrap();
-        let shared = home.path().join("shared");
+        let shared = shared::folder(home.path());
         let before = (listing(&shared), git(&shared, &["rev-parse", "HEAD"]));
         let (settings, record) = (host.settings(), status(&host));
         let joining = prepare(&host.home, NAME, Some(JoinWith::Repository), &other.tools());
@@ -3323,11 +3155,11 @@ pub(crate) mod tests {
         first.sync_now(&tools).unwrap();
         let pass = second.sync_pass().unwrap().unwrap();
         let passed = self::pass(pass, &tools);
-        let additions = second.home.join("shared").join(ADDITIONS);
+        let additions = shared::folder(&second.home).join(ADDITIONS);
         let edited = "Edited while the pass ran.\n";
         fs::write(&additions, edited).unwrap();
         second.finish_sync(now(), passed).unwrap();
-        let folder = second.home.join("shared/skills/implementing");
+        let folder = shared::folder(&second.home).join("skills/implementing");
         assert!(!folder.join("rewrite.md").exists() && !folder.join("base.md").exists());
         assert_eq!(second.skills().state(skill).rules, edited);
     }
@@ -3361,7 +3193,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_rule_saved_twice_within_five_seconds_is_one_commit_the_other_machine_pulls() {
-        let mut pace = Pace::default();
+        let mut pace = repos::Pace::every(&[CADENCE_MS]);
         assert!(pace.start(0));
         pace.finish(0, true);
         pace.wrote(1_000);
@@ -3369,7 +3201,7 @@ pub(crate) mod tests {
         assert!(!pace.start(8_999));
         assert!(pace.start(9_000));
         pace.finish(9_000, true);
-        assert_eq!(pace.next_due(), Some(9_000 + PULL_MS));
+        assert_eq!(pace.next_due(), Some(9_000 + CADENCE_MS));
         let folder = tempfile::tempdir().unwrap();
         let github = Arc::new(GitHub::new(folder.path(), true));
         let (_first_home, mut first) = set_up_elsewhere(&github);
@@ -3423,7 +3255,7 @@ pub(crate) mod tests {
         assert_eq!(again.failing_since, Some(failing_since));
         assert!(again.failed_at > Some(failing_since) && !again.stopped);
         // Passes back off to thirty minutes; a save waits for the next try, Sync now does not.
-        let mut pace = Pace::default();
+        let mut pace = repos::Pace::every(&[CADENCE_MS]);
         let mut at = 0;
         for minutes in [10, 20, 30, 30] {
             assert!(pace.start(at));
@@ -3432,9 +3264,9 @@ pub(crate) mod tests {
             at += minutes * 60_000;
         }
         pace.wrote(at - 60_000);
-        assert!(!pace.start(at - 60_000 + PUSH_DELAY_MS));
+        assert!(!pace.start(at - 60_000 + repos::PUSH_DELAY_MS));
         pace.sync_now();
-        assert!(pace.start(at - 60_000 + PUSH_DELAY_MS));
+        assert!(pace.start(at - 60_000 + repos::PUSH_DELAY_MS));
         github.offline.store(false, Ordering::Relaxed);
         host.sync_now(&github.tools()).unwrap();
         let online = status(&host);
@@ -3498,7 +3330,7 @@ pub(crate) mod tests {
             .unwrap()
             .settings_repository
             .unwrap();
-        let clone = home.path().join("shared");
+        let clone = shared::folder(home.path());
         fs::create_dir_all(clone.join("skills/implementing")).unwrap();
         fs::write(clone.join("skills/implementing/notes-é.md"), "Noted.\n").unwrap();
         git(&clone, &["add", "--all"]);
@@ -3519,7 +3351,7 @@ pub(crate) mod tests {
         fs::write(staging.join("README.md"), README).unwrap();
         Host::open(home.path()).unwrap();
         assert!(!staging.exists());
-        assert!(home.path().join("shared/wiffletree.json").exists());
+        assert!(shared::folder(home.path()).join("wiffletree.json").exists());
     }
 
     #[test]
@@ -3625,7 +3457,7 @@ pub(crate) mod tests {
         let text = base.replacen("Start by clarifying", "Start by restating", 1);
         first.skills().start_rewrite(Skill::Coordinating).unwrap();
         (first.skills().save_rewrite(Skill::Coordinating, &text)).unwrap();
-        let folder = first_home.path().join("shared").join(COORDINATING);
+        let folder = shared::folder(first_home.path()).join(COORDINATING);
         fs::write(folder.join("base.md"), base).unwrap();
         let mut first = first;
         (first.choose_settings_repository(NAME, None, &github.tools())).unwrap();
@@ -3828,9 +3660,7 @@ pub(crate) mod tests {
         let github = Arc::new(GitHub::new(folder.path(), true));
         let tools = github.tools();
         let (home, _second_home, _) = rewritten_on_two_macs(&github);
-        let rewrite = home
-            .path()
-            .join("shared")
+        let rewrite = shared::folder(home.path())
             .join(COORDINATING)
             .join("rewrite.md");
         let edited = format!(
@@ -4000,5 +3830,369 @@ pub(crate) mod tests {
             })
         );
         assert!(host.instructions(Role::ProjectOrchestrator).ends_with(text));
+    }
+
+    /// Every setting's value, apart from the settings repository chosen.
+    fn values(host: &Host) -> (HostSettings, String, String) {
+        let settings = HostSettings {
+            settings_repository: None,
+            ..host.settings()
+        };
+        let rules = host.skills().state(Skill::Implementing).rules;
+        (settings, rules, host.model_selection().unwrap().guide)
+    }
+
+    /// Puts the settings repository's clone back in `<data folder>/shared/`, where releases
+    /// before `repos/` kept it.
+    fn as_an_older_release_left_it(home: &Path, name: &str) {
+        let shared = home.join(shared::FOLDER);
+        fs::remove_dir_all(&shared).unwrap();
+        fs::rename(repos::clone_folder(home, name), &shared).unwrap();
+        fs::remove_dir_all(home.join(repos::FOLDER)).unwrap();
+    }
+
+    /// The backup made last, as `backups/shared-<time>/` names it.
+    fn last_backup(home: &Path) -> PathBuf {
+        let backups = home.join("backups");
+        backups.join(listing(&backups).last().unwrap())
+    }
+
+    #[test]
+    fn at_first_start_each_machines_clone_moves_under_repos_and_every_setting_reads_as_before() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let (first_home, first) = set_up_elsewhere(&github);
+        let (second_home, second) = joined(&github);
+        let before = [values(&first), values(&second)];
+        drop((first, second));
+        let homes = [first_home.path(), second_home.path()];
+        for home in homes {
+            as_an_older_release_left_it(home, NAME);
+        }
+        let mut hosts = homes.map(|home| Host::open(home).unwrap());
+        for ((host, home), before) in hosts.iter().zip(homes).zip(before) {
+            let clone = repos::clone_folder(home, NAME);
+            assert!(clone.join(".git").exists());
+            assert!(!home.join(shared::FOLDER).exists());
+            assert_eq!(host.shared_folder(), clone.canonicalize().unwrap());
+            assert_eq!(values(host), before);
+        }
+        // Both keep syncing from the clone's new place.
+        let tools = github.tools();
+        hosts[0].set_check_ins(20, 200).unwrap();
+        hosts[0].sync_now(&tools).unwrap();
+        hosts[1].sync_now(&tools).unwrap();
+        assert_eq!(hosts[1].settings().checkin_child_turns, 20);
+    }
+
+    #[test]
+    fn a_move_cut_short_is_finished_at_the_next_start_and_a_second_start_changes_nothing() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        host.set_check_ins(10, 300).unwrap();
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        let before = values(&host);
+        drop(host);
+        as_an_older_release_left_it(home.path(), NAME);
+        // The start stopped after making `repos/` and before the rename.
+        fs::create_dir(home.path().join(repos::FOLDER)).unwrap();
+        let clone = repos::clone_folder(home.path(), NAME);
+        let host = Host::open(home.path()).unwrap();
+        assert!(clone.join(".git").exists() && !home.path().join(shared::FOLDER).exists());
+        assert_eq!(values(&host), before);
+        let head = git(&clone, &["rev-parse", "HEAD"]);
+        drop(host);
+        let host = Host::open(home.path()).unwrap();
+        assert_eq!(
+            listing(&home.path().join(repos::FOLDER)),
+            [NAME.replace('/', "-")]
+        );
+        assert_eq!(git(&clone, &["rev-parse", "HEAD"]), head);
+        assert_eq!(values(&host), before);
+        // Stopping after the move recreates `shared/` with every setting.
+        let mut host = host;
+        host.stop_settings_sync().unwrap();
+        assert_eq!(
+            host.shared_folder(),
+            home.path().join(shared::FOLDER).canonicalize().unwrap()
+        );
+        assert_eq!(values(&host), before);
+        assert!(clone.join(".git").exists());
+    }
+
+    #[test]
+    fn without_a_settings_repository_the_shared_folder_stays_a_plain_folder() {
+        let (home, mut host) = host();
+        host.set_check_ins(10, 300).unwrap();
+        drop(host);
+        let host = Host::open(home.path()).unwrap();
+        let shared = home.path().join(shared::FOLDER);
+        assert!(shared.join(shared::CHECK_INS).exists() && !shared.join(".git").exists());
+        assert!(!home.path().join(repos::FOLDER).exists());
+        assert_eq!(host.settings().checkin_child_turns, 10);
+    }
+
+    #[test]
+    fn setting_up_in_a_clone_already_under_repos_reuses_it_and_backs_up_only_settings_files() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        host.set_check_ins(10, 300).unwrap();
+        save_rules(&mut host, Skill::Implementing, "Run the linter.");
+        // A clone of the repository already under `repos/`, as a Space's storage would be.
+        let clone = repos::clone_folder(&host.home, NAME);
+        fs::create_dir(clone.parent().unwrap()).unwrap();
+        let (bare, into) = (github.bare.to_str().unwrap(), clone.to_str().unwrap());
+        git(home.path(), &["clone", "-q", bare, into]);
+        without_background_maintenance(&clone);
+        git(&clone, &["remote", "set-url", "origin", URL]);
+        let space = clone.join("spaces/sage/space.yaml");
+        fs::create_dir_all(space.parent().unwrap()).unwrap();
+        fs::write(&space, "name: Sage\n").unwrap();
+        let before = values(&host);
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        assert_eq!(host.shared_folder(), clone);
+        assert_eq!(fs::read_to_string(&space).unwrap(), "name: Sage\n");
+        assert_eq!(git(&clone, &["rev-parse", "HEAD"]), github.log("%H")[0]);
+        assert_eq!(values(&host), before);
+        let backup = last_backup(home.path());
+        assert_eq!(listing(&backup), ["settings", "skills", "wiffletree.json"]);
+        let shared = home.path().join(shared::FOLDER);
+        assert!(SHARED_PATHS.iter().all(|path| !shared.join(path).exists()));
+        // Nothing is left for a pass to push.
+        host.sync_now(&github.tools()).unwrap();
+        assert_eq!(github.pushes(), 1);
+    }
+
+    #[test]
+    fn joining_again_after_stopping_reuses_the_clone_and_keeps_every_setting() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let (_first, _) = set_up_elsewhere(&github);
+        let (home, mut host) = joined(&github);
+        let clone = host.shared_folder();
+        host.stop_settings_sync().unwrap();
+        host.set_check_ins(70, 700).unwrap();
+        let marker = clone.join("spaces/sage/space.yaml");
+        fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        fs::write(&marker, "name: Sage\n").unwrap();
+        let before = values(&host);
+        let with = Some(JoinWith::ThisMachine);
+        host.choose_settings_repository(NAME, with, &github.tools())
+            .unwrap();
+        assert_eq!(host.shared_folder(), clone);
+        assert!(marker.exists());
+        assert_eq!(values(&host), before);
+        let pushed: Value = serde_json::from_str(&github.show(shared::CHECK_INS).unwrap()).unwrap();
+        assert_eq!(pushed["checkin_child_turns"], 70);
+        let backed_up = last_backup(home.path()).join(shared::CHECK_INS);
+        assert!(fs::read_to_string(backed_up).unwrap().contains("700"));
+    }
+
+    /// A clone of `MHohlios-wiffletree/storage`, whose folder under `repos/` is the one `NAME`
+    /// maps to, holding one file of its own.
+    fn colliding_clone(home: &Path) -> PathBuf {
+        let clone = repos::clone_folder(home, NAME);
+        fs::create_dir_all(&clone).unwrap();
+        git(&clone, &["init", "-q"]);
+        let other = "https://github.com/MHohlios-wiffletree/storage.git";
+        git(&clone, &["remote", "add", "origin", other]);
+        fs::write(clone.join("README.md"), "Another repository.\n").unwrap();
+        clone
+    }
+
+    #[test]
+    fn a_clone_of_another_repository_in_the_same_folder_refuses_the_choice_and_changes_nothing() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        host.set_check_ins(10, 300).unwrap();
+        let other = colliding_clone(&host.home);
+        let before = values(&host);
+        let error = host
+            .choose_settings_repository(NAME, None, &github.tools())
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("another repository"),
+            "{error:#}"
+        );
+        assert_eq!(github.log("%s"), ["Initial commit"]);
+        assert_eq!(host.settings().settings_repository, None);
+        assert_eq!(host.shared_folder(), host.home.join(shared::FOLDER));
+        assert_eq!(values(&host), before);
+        assert_eq!(listing(&other), [".git", "README.md"]);
+        assert!(!home.path().join("backups").exists());
+    }
+
+    /// A machine whose clone the first start left in `shared/`, behind a colliding clone, with
+    /// rules saved since and not yet pushed; and every setting's value.
+    #[allow(clippy::type_complexity)]
+    fn left_in_shared_behind_a_colliding_clone()
+    -> (tempfile::TempDir, Host, (HostSettings, String, String)) {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        host.set_check_ins(10, 300).unwrap();
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        drop(host);
+        as_an_older_release_left_it(home.path(), NAME);
+        colliding_clone(home.path());
+        let mut host = Host::open(home.path()).unwrap();
+        save_rules(&mut host, Skill::Implementing, "Unpushed rule.\n");
+        let before = values(&host);
+        (home, host, before)
+    }
+
+    #[test]
+    fn stopping_sync_with_the_clone_left_in_shared_keeps_every_setting() {
+        let (home, mut host, before) = left_in_shared_behind_a_colliding_clone();
+        host.stop_settings_sync().unwrap();
+        assert_eq!(values(&host), before);
+        let shared = home.path().join(shared::FOLDER);
+        assert!(shared.join(".git").exists() && shared.join(ADDITIONS).exists());
+    }
+
+    #[test]
+    fn switching_with_the_clone_left_in_shared_keeps_every_setting() {
+        let (home, mut host, before) = left_in_shared_behind_a_colliding_clone();
+        let other = home.path().join("other");
+        fs::create_dir(&other).unwrap();
+        let mut other = GitHub::new(&other, true);
+        other.repository["full_name"] = json!("MHohlios/wiffletree-settings");
+        let other = Arc::new(other);
+        let (_elsewhere, _) = set_up_elsewhere(&other);
+        let with = Some(JoinWith::ThisMachine);
+        host.choose_settings_repository(NAME, with, &other.tools())
+            .unwrap();
+        assert_eq!(values(&host), before);
+        assert_eq!(other.show(ADDITIONS).as_deref(), Some("Unpushed rule.\n"));
+    }
+
+    #[test]
+    fn at_first_start_a_clone_of_another_repository_in_the_way_leaves_the_shared_folder_in_place() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        host.set_check_ins(10, 300).unwrap();
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        let before = values(&host);
+        drop(host);
+        as_an_older_release_left_it(home.path(), NAME);
+        let other = colliding_clone(home.path());
+        let host = Host::open(home.path()).unwrap();
+        let shared = home.path().join(shared::FOLDER);
+        assert!(shared.join(".git").exists());
+        assert_eq!(host.shared_folder(), shared.canonicalize().unwrap());
+        assert_eq!(listing(&other), [".git", "README.md"]);
+        assert_eq!(values(&host), before);
+        // Once the other clone is moved aside, the next start moves this one.
+        drop(host);
+        fs::rename(&other, home.path().join("moved-aside")).unwrap();
+        let host = Host::open(home.path()).unwrap();
+        assert!(!shared.exists());
+        assert_eq!(host.shared_folder(), other.canonicalize().unwrap());
+        assert_eq!(values(&host), before);
+    }
+
+    #[test]
+    fn a_clone_an_older_release_made_through_a_former_name_moves_and_keeps_every_setting() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        host.set_check_ins(10, 300).unwrap();
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        let before = values(&host);
+        // An older release kept the URL the human named, which GitHub redirects, as both the
+        // clone's `origin` and the push URL, and GitHub's name for the repository as its name.
+        let former = "https://github.com/MHohlios/former-settings.git";
+        let mut settings = host.settings();
+        settings.settings_repository.as_mut().unwrap().push_url = former.into();
+        host.save_settings(&settings).unwrap();
+        git(
+            &host.shared_folder(),
+            &["remote", "set-url", "origin", former],
+        );
+        drop(host);
+        as_an_older_release_left_it(home.path(), NAME);
+        let host = Host::open(home.path()).unwrap();
+        let clone = repos::clone_folder(home.path(), NAME);
+        assert_eq!(host.shared_folder(), clone.canonicalize().unwrap());
+        assert!(!home.path().join(shared::FOLDER).exists());
+        assert_eq!(values(&host), before);
+        let origin = git(&clone, &["remote", "get-url", "origin"]);
+        assert_eq!(origin.trim(), URL);
+    }
+
+    #[test]
+    fn switching_to_another_repository_leaves_the_first_clone_and_backs_up_its_settings() {
+        const OTHER: &str = "MHohlios/wiffletree-settings";
+        let folder = tempfile::tempdir().unwrap();
+        let [storage, other] = ["storage", "other"].map(|name| folder.path().join(name));
+        fs::create_dir(&storage).unwrap();
+        fs::create_dir(&other).unwrap();
+        let storage = Arc::new(GitHub::new(&storage, true));
+        let mut other = GitHub::new(&other, true);
+        other.repository["full_name"] = json!(OTHER);
+        let other = Arc::new(other);
+        let (_elsewhere, _) = set_up_elsewhere(&other);
+        let (home, mut host) = host();
+        host.set_check_ins(40, 400).unwrap();
+        host.choose_settings_repository(NAME, None, &storage.tools())
+            .unwrap();
+        let first = repos::clone_folder(&host.home, NAME);
+        let space = first.join("spaces/sage/space.yaml");
+        fs::create_dir_all(space.parent().unwrap()).unwrap();
+        fs::write(&space, "name: Sage\n").unwrap();
+        let with = Some(JoinWith::Repository);
+        host.choose_settings_repository(NAME, with, &other.tools())
+            .unwrap();
+        assert!(first.join(".git").exists() && space.exists());
+        assert!(first.join(shared::CHECK_INS).exists());
+        assert_eq!(host.shared_folder(), repos::clone_folder(&host.home, OTHER));
+        assert_eq!(host.settings().checkin_child_turns, 10);
+        // The first repository's settings went to `shared/` and on to `backups/`; no clone did.
+        let backed_up = last_backup(home.path()).join(shared::CHECK_INS);
+        assert!(fs::read_to_string(backed_up).unwrap().contains("400"));
+        for backup in listing(&home.path().join("backups")) {
+            assert!(
+                !home
+                    .path()
+                    .join("backups")
+                    .join(backup)
+                    .join(".git")
+                    .exists()
+            );
+        }
+    }
+
+    #[test]
+    fn stopping_sync_copies_the_settings_to_the_shared_folder_and_leaves_the_clone() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        host.set_check_ins(40, 400).unwrap();
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        // Saved here and not yet pushed.
+        save_rules(&mut host, Skill::Implementing, "Push to main.\n");
+        let clone = host.shared_folder();
+        let before = values(&host);
+        host.stop_settings_sync().unwrap();
+        let shared = host.home.join(shared::FOLDER);
+        assert_eq!(host.shared_folder(), shared);
+        assert_eq!(values(&host), before);
+        for file in [shared::FORMAT, shared::CHECK_INS, ADDITIONS] {
+            assert_eq!(
+                fs::read(shared.join(file)).ok(),
+                fs::read(clone.join(file)).ok()
+            );
+        }
+        assert!(clone.join(".git").exists());
+        assert!(host.sync_pass().unwrap().is_none());
+        drop(host);
+        let host = Host::open(home.path()).unwrap();
+        assert_eq!(host.shared_folder(), shared);
+        assert!(clone.join(".git").exists());
+        assert_eq!(values(&host), before);
+        assert_eq!(github.pushes(), 1);
     }
 }

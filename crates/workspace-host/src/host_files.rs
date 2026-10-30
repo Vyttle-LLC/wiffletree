@@ -134,10 +134,11 @@ impl Roots {
 /// The data folder's own files, never served whatever root holds them: the store and its
 /// copies, its backups, the host's binaries and logs, and its settings.
 fn never_served(inside_data: &Path) -> bool {
-    const NAMES: [&str; 6] = [
+    const NAMES: [&str; 7] = [
         "backups",
         "host",
         "logs",
+        "repos",
         "shared",
         "settings.json",
         "host.lock",

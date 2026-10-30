@@ -711,7 +711,7 @@ pub(crate) mod legacy {
     /// The provider each verifier in the shared review settings was limited to, by lowercase
     /// focus, as saved before the table, or the default reviewers' when none were saved.
     pub(crate) fn verifier_providers(home: &Path) -> BTreeMap<String, Provider> {
-        let path = home.join(shared::FOLDER).join(shared::REVIEW);
+        let path = shared::folder(home).join(shared::REVIEW);
         // Never saved: the default reviewers, which were Claude's and Codex's.
         if !path.exists() {
             return BTreeMap::from([

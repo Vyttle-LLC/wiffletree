@@ -1395,7 +1395,7 @@ mod tests {
     }
 
     fn coordinating(host: &Host, file: &str) -> PathBuf {
-        host.home.join("shared/skills/coordinating").join(file)
+        host.shared_folder().join("skills/coordinating").join(file)
     }
 
     /// Bases Coordinating's rewrite on a stand-in for an earlier stock text, as if it had been
@@ -2270,6 +2270,13 @@ mod tests {
             branch: "main".into(),
             readers: Readers::Invited,
         });
+        // The shared folder is the settings repository's clone.
+        let clone = crate::repos::clone_folder(&host.home, "mike/settings");
+        fs::create_dir_all(clone.parent().unwrap()).unwrap();
+        fs::rename(host.shared_folder(), &clone).unwrap();
+        crate::publish::tests::git(&clone, &["init", "-q"]);
+        let origin = "https://github.com/mike/settings.git";
+        crate::publish::tests::git(&clone, &["remote", "add", "origin", origin]);
         host.save_settings(&settings).unwrap();
         let host = started_again(&home, host);
         assert_eq!(
