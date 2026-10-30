@@ -96,7 +96,7 @@ The other proposals are:
 - PR #162, "Proposal: shared issues in a tracker repository" (`shared-issues`). It is **merged on `main`** as 6194b99a and is an open change there, not yet archived. Where a spec both change, the brain changes go second.
 - PR #163, "Proposal: assistant, Spaces, scheduled jobs and Boards" (`assistant-spaces-jobs-boards`). It is **merged on `main`** as 419a55ef and is an open change there, not yet archived.
 - PR #164, "Coordinators create projects with create_project". It is **merged on `main`** as a8dded2d and its change is archived.
-- the other changes open on `main`: `files-panel`, `processes-panel` and `quiet-findings`;
+- `files-panel`, `processes-panel` and `quiet-findings`, which are archived on `main`;
 - `brain-gate`, in this proposal.
 
 | Shared concept | Where else | Share or align | Open question |
@@ -112,7 +112,6 @@ The other proposals are:
 | Inbox items | Brain batch failures here; conflicts in `brain-compile`; #162 phase 5 adds issue mentions and paused fields | **Align** on one card per source with at most one open item, cleared by the source's own state. | One Inbox section per kind, or one list sorted by age? |
 | Human-only write commands | #162 decision 11: every tracker write is a human command on the host socket | **Align**: brain registry changes, amendments and rulings are likewise human-only commands. | None. |
 | Inspector rail | `files-panel` and `processes-panel` add rail entries; the Memory panel stays where it is | **Align** the rail order (Git, Files, Processes, Memory). This change only adds the "No brain" state. | None. |
-| Ticket review | `quiet-findings` | None. | None. |
 | Which brain a project uses | `spaces` (carved out of #163): every project belongs to a Space, a Space names a brain (a repository and a folder), and the coordinator logs to its Space's brain. This change first proposed mapping each repository to a brain by GitHub owner | **Decided by Michael, 2026-10-29:** the Space decides the brain. The owner mapping is dropped, and the owner only suggests a brain when a Space is created. | None. |
 | How brain writes reach `main` | #163's defaulted decision (c) proposed fetch, rebase and push to `main` with a union merge of shared log files | **Decided by Michael, 2026-10-29:** PR-gated writes supersede (c). #163 no longer adds "Brain pushes from several people", and assistant entries use the per-entry contract (`logs/assistant/…`). | None. |
 | Brain settings shared in a repository | `spaces` keeps a Space's definition in its storage repository (`spaces/<name>/space.yaml`) with the settings repository's rules; here, `wiffletree-brain.json` lives in the brain repository and changes only by PR | **Align**: shared facts live in Git and per-machine facts (clone paths, models) stay local, in both. | None. The compiler and gate settings stay with the brain, because several Spaces may name one brain; a Space names only the brain and its folder. |

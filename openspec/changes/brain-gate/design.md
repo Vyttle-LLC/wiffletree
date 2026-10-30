@@ -112,7 +112,6 @@ These are merged on `main`:
 | Repository config in a shared repository | `wiffletree-brain.json` here; `wiffletree-issues.yaml` and `spaces/<space>/space.yaml` in storage repositories (`spaces`, `shared-issues`) | **Align** on one config file per shared repository, at its root, with unknown keys kept. | None. Trackers use YAML to match `space.yaml` in the same repository; `wiffletree-brain.json` and `wiffletree.json` stay JSON (recommended in `spaces`; confirmed by Michael, 2026-10-29). |
 | `CODEOWNERS` and auto-merge | Brains need review for gate and config changes; trackers push directly | No overlap today. | None. |
 | The entry contract | `brain-log-capture`'s renderer | **Share**: one fixture set in `gate/tests/fixtures/`. | None. |
-| Ticket review and inspector panels | `quiet-findings`, `files-panel`, `processes-panel` | None. | None. |
 | Sensitive data in shared outputs | #163: a shared job's first output waits for the runner's approval; Space storage syncs by direct push with the settings repository's rules (`spaces`) | **Share**: the same local scans run before `spaces/` is pushed, as for issues. | None. Storage repositories get no caller; the local scans hold a failing file instead (recommended in `spaces`; confirmed by Michael, 2026-10-29). |
 | Brain writes | #163's defaulted decision (c), a direct push with union merge, would bypass the gate | **Decided by Michael, 2026-10-29:** PR-gated writes supersede (c), so every brain write passes this gate. | None. |
 | Projects created by a coordinator | #164 (merged) | None. | None. |

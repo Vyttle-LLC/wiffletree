@@ -1,7 +1,7 @@
 # processes-panel Specification
 
 ## Purpose
-TBD - created by archiving change processes-panel. Update Purpose after archive.
+Shows what each agent has running, and lets the human stop one process group without stopping the agent: per agent, and for the project coordinator across every unarchived agent of the project.
 
 ## Requirements
 
