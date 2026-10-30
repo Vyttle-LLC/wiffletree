@@ -80,6 +80,10 @@ fn read(home: &Path, input: &str, tools: &Tools) -> Result<(SettingsRepositoryCh
     }
     clone.extend([repository.push_url.as_str(), into]);
     run_at(&tools.git, home, &repository.push_url, &clone)?;
+    // The clone's `origin` names its repository as GitHub does, even when renamed since the URL
+    // tried, so `repos::holds` knows it. Sync names its URL on every command, never `origin`.
+    let origin = format!("https://github.com/{}.git", repository.name);
+    runtime::git_output(staging.path(), &["remote", "set-url", "origin", &origin])?;
     if head.is_none() {
         let branch = format!("refs/heads/{}", repository.branch);
         run(
@@ -847,6 +851,8 @@ pub(crate) fn prepare(
     tools: &Tools,
 ) -> Result<Prepared> {
     let (check, staging) = read(home, input, tools)?;
+    // Before anything is pushed.
+    repos::refuse_another(home, &check.repository.name)?;
     let (clone, mine) = (staging.path(), shared::folder(home));
     let read_from = contents(&mine)?;
     let change = match (check.joining.is_some(), with) {
@@ -897,6 +903,8 @@ impl Host {
             contents(&self.shared_folder())? == prepared.read_from,
             "A shared setting changed meanwhile, and stays as you saved it here. The repository has the earlier settings: join it with this Mac's to push yours."
         );
+        // A clone in the way may have appeared since `prepare` checked.
+        repos::refuse_another(&self.home, &prepared.repository.name)?;
         self.copy_settings_to_shared_folder()?;
         let clone = repos::clone_folder(&self.home, &prepared.repository.name);
         let placed = place_clone(prepared.staging.path(), &clone)?;
@@ -976,7 +984,23 @@ impl Host {
             self.home.join(shared::FOLDER),
             repos::clone_folder(&self.home, &repository.name),
         );
-        if to.exists() || !from.join(".git").exists() {
+        if !from.join(".git").exists() {
+            return Ok(());
+        }
+        if to.exists() {
+            // `shared::folder` uses `to` only when it is the repository's clone, and else `from`.
+            match repos::holds(&to, &repository.name) {
+                true => eprintln!(
+                    "Not moving {}: {} is already the settings repository's clone",
+                    from.display(),
+                    to.display()
+                ),
+                false => eprintln!(
+                    "Not moving the settings repository's clone from {}: {} holds a clone of another repository. Move it aside and start again.",
+                    from.display(),
+                    to.display()
+                ),
+            }
             return Ok(());
         }
         eprintln!(
@@ -1372,6 +1396,7 @@ pub(crate) mod tests {
     use std::sync::{Arc, Mutex};
 
     pub(crate) const NAME: &str = "MHohlios/wiffletree-storage";
+    const URL: &str = "https://github.com/MHohlios/wiffletree-storage.git";
     const README: &str = "# My Wiffletree storage\n";
 
     /// A local bare repository standing in for GitHub, the answers a fake `gh` gives, and every
@@ -3915,6 +3940,7 @@ pub(crate) mod tests {
         let (bare, into) = (github.bare.to_str().unwrap(), clone.to_str().unwrap());
         git(home.path(), &["clone", "-q", bare, into]);
         without_background_maintenance(&clone);
+        git(&clone, &["remote", "set-url", "origin", URL]);
         let space = clone.join("spaces/sage/space.yaml");
         fs::create_dir_all(space.parent().unwrap()).unwrap();
         fs::write(&space, "name: Sage\n").unwrap();
@@ -3957,6 +3983,66 @@ pub(crate) mod tests {
         assert_eq!(pushed["checkin_child_turns"], 70);
         let backed_up = last_backup(home.path()).join(shared::CHECK_INS);
         assert!(fs::read_to_string(backed_up).unwrap().contains("700"));
+    }
+
+    /// A clone of `MHohlios-wiffletree/storage`, whose folder under `repos/` is the one `NAME`
+    /// maps to, holding one file of its own.
+    fn colliding_clone(home: &Path) -> PathBuf {
+        let clone = repos::clone_folder(home, NAME);
+        fs::create_dir_all(&clone).unwrap();
+        git(&clone, &["init", "-q"]);
+        let other = "https://github.com/MHohlios-wiffletree/storage.git";
+        git(&clone, &["remote", "add", "origin", other]);
+        fs::write(clone.join("README.md"), "Another repository.\n").unwrap();
+        clone
+    }
+
+    #[test]
+    fn a_clone_of_another_repository_in_the_same_folder_refuses_the_choice_and_changes_nothing() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        host.set_check_ins(10, 300).unwrap();
+        let other = colliding_clone(&host.home);
+        let before = values(&host);
+        let error = host
+            .choose_settings_repository(NAME, None, &github.tools())
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("another repository"),
+            "{error:#}"
+        );
+        assert_eq!(github.log("%s"), ["Initial commit"]);
+        assert_eq!(host.settings().settings_repository, None);
+        assert_eq!(host.shared_folder(), host.home.join(shared::FOLDER));
+        assert_eq!(values(&host), before);
+        assert_eq!(listing(&other), [".git", "README.md"]);
+        assert!(!home.path().join("backups").exists());
+    }
+
+    #[test]
+    fn at_first_start_a_clone_of_another_repository_in_the_way_leaves_the_shared_folder_in_place() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        host.set_check_ins(10, 300).unwrap();
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        let before = values(&host);
+        drop(host);
+        as_an_older_release_left_it(home.path(), NAME);
+        let other = colliding_clone(home.path());
+        let host = Host::open(home.path()).unwrap();
+        let shared = home.path().join(shared::FOLDER);
+        assert!(shared.join(".git").exists());
+        assert_eq!(host.shared_folder(), shared.canonicalize().unwrap());
+        assert_eq!(listing(&other), [".git", "README.md"]);
+        assert_eq!(values(&host), before);
+        // Once the other clone is moved aside, the next start moves this one.
+        drop(host);
+        fs::rename(&other, home.path().join("moved-aside")).unwrap();
+        let host = Host::open(home.path()).unwrap();
+        assert!(!shared.exists());
+        assert_eq!(host.shared_folder(), other.canonicalize().unwrap());
+        assert_eq!(values(&host), before);
     }
 
     #[test]

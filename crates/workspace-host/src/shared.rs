@@ -26,11 +26,17 @@ pub(crate) fn chosen(home: &Path) -> Option<SettingsRepository> {
         .settings_repository
 }
 
-/// The shared folder of the data folder `home`.
+/// The shared folder of the data folder `home`: the settings repository's clone, and
+/// `<data folder>/shared/` without one or while the clone under `repos/` is not that
+/// repository's, as before a first start's move.
 pub(crate) fn folder(home: &Path) -> PathBuf {
-    match chosen(home) {
-        Some(repository) => repos::clone_folder(home, &repository.name),
-        None => home.join(FOLDER),
+    let clone = chosen(home).map(|repository| {
+        let clone = repos::clone_folder(home, &repository.name);
+        (repos::holds(&clone, &repository.name), clone)
+    });
+    match clone {
+        Some((true, clone)) => clone,
+        _ => home.join(FOLDER),
     }
 }
 

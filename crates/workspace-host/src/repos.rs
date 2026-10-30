@@ -14,6 +14,43 @@ pub(crate) fn clone_folder(home: &Path, name: &str) -> PathBuf {
     home.join(FOLDER).join(name.replace('/', "-"))
 }
 
+/// Whether the clone at `clone` fetches the GitHub repository `owner/name` as `origin`. Two
+/// repositories can share a folder name, as `a-b/c` and `a/b-c` do, so a clone found under
+/// `repos/` is used only when this holds. Reads `.git/config` itself, as the shared folder is
+/// resolved often.
+pub(crate) fn holds(clone: &Path, name: &str) -> bool {
+    let Ok(config) = fs::read_to_string(clone.join(".git/config")) else {
+        return false;
+    };
+    let mut in_origin = false;
+    for line in config.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_origin = line == "[remote \"origin\"]";
+            continue;
+        }
+        let url = (line.strip_prefix("url"))
+            .and_then(|rest| rest.trim_start().strip_prefix('='))
+            .map(str::trim);
+        if let Some(url) = url.filter(|_| in_origin) {
+            return pr_watch::github_repository(url)
+                .is_some_and(|(owner, repo)| format!("{owner}/{repo}").eq_ignore_ascii_case(name));
+        }
+    }
+    false
+}
+
+/// Refuses a clone under `repos/` that is in the folder `owner/name` would use but is of another
+/// repository.
+pub(crate) fn refuse_another(home: &Path, name: &str) -> Result<()> {
+    let clone = clone_folder(home, name);
+    ensure!(
+        !clone.exists() || holds(&clone, name),
+        "{} holds a clone of another repository, whose name maps to the same folder as {name}. Move it aside, then try again.",
+        clone.display()
+    );
+    Ok(())
+}
+
 /// A file's content, `None` for no file.
 pub(crate) type Content = Option<Vec<u8>>;
 

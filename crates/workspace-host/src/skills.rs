@@ -2274,6 +2274,9 @@ mod tests {
         let clone = crate::repos::clone_folder(&host.home, "mike/settings");
         fs::create_dir_all(clone.parent().unwrap()).unwrap();
         fs::rename(host.shared_folder(), &clone).unwrap();
+        crate::publish::tests::git(&clone, &["init", "-q"]);
+        let origin = "https://github.com/mike/settings.git";
+        crate::publish::tests::git(&clone, &["remote", "add", "origin", origin]);
         host.save_settings(&settings).unwrap();
         let host = started_again(&home, host);
         assert_eq!(
