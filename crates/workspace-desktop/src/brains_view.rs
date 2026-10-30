@@ -885,7 +885,6 @@ fn sync_state(brain: &Brain) -> (String, Tone) {
     }
 }
 
-/// What the grant allows, naming the repository, as its confirmation says.
 fn grant_lines(repository: &str) -> Vec<String> {
     vec![
         format!("Wiffletree may push its own wiffletree/brain/‹login›/‹batch› branches to {repository}, open pull requests from them into main, turn on auto-merge for them, close a batch PR you discard and delete a branch it pushed."),
@@ -1149,11 +1148,10 @@ fn batch_note(batch: &BrainBatch, required: &[String]) -> String {
             BrainStage::Queued => "Waits to be pushed".into(),
             BrainStage::PrOpen => "PR open".into(),
             BrainStage::Checks => {
-                let checks = required_checks(batch, required);
-                let passed = (checks.iter())
+                let passed = (required_checks(batch, required).iter())
                     .filter(|c| c.conclusion == BrainCheckConclusion::Success)
                     .count();
-                format!("Checks running · {passed} of {} passed", checks.len())
+                format!("Checks running · {passed} of {} passed", required.len())
             }
             BrainStage::AutoMerging => "All checks passed · auto-merging".into(),
             BrainStage::Merged => format!("Merged {}", age(batch.updated_at).to_lowercase()),
@@ -1383,14 +1381,18 @@ mod tests {
             check("sensitive-info", BrainCheckConclusion::Pending),
             check("summary-comment", BrainCheckConclusion::Failure),
         ];
-        let required = ["secret-scan".to_owned(), "sensitive-info".to_owned()];
+        let required = [
+            "secret-scan".to_owned(),
+            "sensitive-info".to_owned(),
+            "not-reported-yet".to_owned(),
+        ];
         let listed: Vec<&str> = (required_checks(&running, &required).into_iter())
             .map(|c| c.name.as_str())
             .collect();
         assert_eq!(listed, ["secret-scan", "sensitive-info"]);
         assert_eq!(
             batch_note(&running, &required),
-            "Checks running · 1 of 2 passed"
+            "Checks running · 1 of 3 passed"
         );
         assert!(required_checks(&running, &[]).is_empty());
     }

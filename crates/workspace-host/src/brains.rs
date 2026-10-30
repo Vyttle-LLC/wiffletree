@@ -2961,9 +2961,14 @@ mod tests {
             github.gh_calls("pr").iter().all(|c| c[1] != "merge"),
             "no auto-merge"
         );
-        assert!(
-            item_prompt(&open, &BrainProblem::AwaitingReview).contains("waits for your review")
-        );
+        let raised: Option<String> = (host.db)
+            .query_row(
+                "SELECT attention_id FROM brain_batches WHERE id=?1",
+                [&batch.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(raised, None, "the Brains page shows it; no Inbox item");
 
         github.merge(214);
         run(&mut host, &tools);

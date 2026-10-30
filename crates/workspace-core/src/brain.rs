@@ -160,7 +160,7 @@ pub struct BrainBatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request: Option<BrainPullRequest>,
     pub stage: BrainStage,
-    /// What went wrong, while something did; it is the batch's one Inbox item.
+    /// What went wrong, while something did; a project's batch raises it as its one Inbox item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<BrainProblem>,
     /// The checks GitHub ran on the pull request's head: names, conclusions, files and lines.
@@ -191,8 +191,8 @@ pub enum BrainBatchKind {
     SetUp,
 }
 
-/// Who wrote a batch: the project whose Inbox gets its item, or no project, whose item shows on
-/// the Brains page.
+/// Who wrote a batch: the project whose Inbox gets its item, or no project, whose problem shows
+/// on the Brains page only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
 pub enum BrainSource {
@@ -239,7 +239,7 @@ pub enum BrainProblem {
     /// `main` does not require these gate checks, so the host does not turn on auto-merge.
     GateNotRequired { missing: Vec<String> },
     /// A Set up pull request: `CODEOWNERS` covers its files, so it waits for the code owner's
-    /// review instead of auto-merging.
+    /// review instead of auto-merging. Set up comes from the Brains page, which alone shows it.
     AwaitingReview,
     /// Something other than the host changed the batch's worktree, so it is not pushed.
     ChangedOutside,

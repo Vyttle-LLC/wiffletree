@@ -13,7 +13,8 @@ impl Inspector {
         index.snapshot().spaces.iter().find(|s| &s.id == space)
     }
 
-    /// Where a local brain of the project's Space is on this Mac, which pending memories export to.
+    /// Where the project's Space keeps its brain on this Mac, a local folder or a GitHub brain's
+    /// clone, which pending memories export to.
     fn local_brain_path(&self, space: &Space) -> Option<String> {
         let index = self.shared.index.as_ref()?;
         index
@@ -73,9 +74,9 @@ impl Inspector {
     fn brain_section(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let space = self.project_space();
         let brain = space.and_then(|s| s.brain.as_ref());
-        let local = (space.zip(brain))
-            .filter(|(_, b)| matches!(b.repository, BrainRepository::Local { .. }))
-            .and_then(|(s, _)| self.local_brain_path(s));
+        let local = space
+            .filter(|_| brain.is_some())
+            .and_then(|s| self.local_brain_path(s));
         let exports = local.is_some();
         let mut links = div().flex().flex_wrap().gap_2().child(
             button("open-brains")
