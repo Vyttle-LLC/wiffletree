@@ -245,6 +245,12 @@ pub(super) enum Intent {
         kind: Creation,
         ticket: Option<String>,
     },
+    /// Opens Start project from issue on what the host offers for the issue.
+    StartProjectFromIssue {
+        id: IssueId,
+        title: String,
+        defaults: IssueProjectDefaults,
+    },
 }
 
 /// A change to the snapshot the host has confirmed.

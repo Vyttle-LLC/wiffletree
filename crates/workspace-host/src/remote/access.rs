@@ -64,7 +64,8 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::SuggestSpaceBrain { .. }
         | Command::OriginBranches { .. }
         | Command::Issues { .. }
-        | Command::Issue { .. } => Row::Read,
+        | Command::Issue { .. }
+        | Command::IssueProjectDefaults { .. } => Row::Read,
         Command::ResolvePaths { .. } | Command::ReadFile { .. } | Command::ListFolder { .. } => {
             Row::HostPath
         }
@@ -122,6 +123,9 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::Comment { .. }
         | Command::MoveIssue { .. }
         | Command::MarkIssueRead { .. }
+        | Command::StartProjectFromIssue { .. }
+        | Command::LinkIssue { .. }
+        | Command::UnlinkIssue { .. }
         | Command::SetWorkspacesDir { .. }
         | Command::SetVerification { .. }
         | Command::SetBuildsAtOnce { .. }

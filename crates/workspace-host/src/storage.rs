@@ -1369,7 +1369,8 @@ impl Host {
         }
         self.apply_numbers(storage, &found.adopted)?;
         // The pass compared every issue file, so an edit made by hand is indexed now too.
-        self.refresh_issue_index(Some(&storage.key()))
+        self.refresh_issue_index(Some(&storage.key()))?;
+        Ok(())
     }
     /// Takes a pulled `space.yaml` of a Space on this Mac, or the tracker's config, into the
     /// store, and a pulled issue's file into the index.
@@ -1548,7 +1549,7 @@ pub(crate) mod tests {
     }
 
     /// The Sage Space as a teammate's Mac wrote it to `spaces/sage/space.yaml`.
-    fn sage(description: &str) -> String {
+    pub(crate) fn sage(description: &str) -> String {
         let space = Space {
             id: SpaceId("sage-id".into()),
             name: "Sage".into(),

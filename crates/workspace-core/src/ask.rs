@@ -258,6 +258,9 @@ pub fn move_issue(id: IssueId, state: IssueState) -> Ask<Issue> {
 pub fn mark_issue_read(id: IssueId) -> Ask<()> {
     Ask::new(Command::MarkIssueRead { id })
 }
+pub fn issue_project_defaults(id: IssueId, space_id: Option<SpaceId>) -> Ask<IssueProjectDefaults> {
+    Ask::new(Command::IssueProjectDefaults { id, space_id })
+}
 pub fn new_project_defaults(space_id: Option<SpaceId>) -> Ask<SpaceRepositories> {
     Ask::new(Command::NewProjectDefaults { space_id })
 }

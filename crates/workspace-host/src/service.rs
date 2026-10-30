@@ -2270,6 +2270,14 @@ impl Actor {
                             }
                             serde_json::to_value(listing)?
                         }
+                        // A read, but one that finds issues changed on disk refreshes the
+                        // snapshot, so the sidebar's unread count follows the list.
+                        Command::Issues { space_id, .. } => {
+                            if self.host.refresh_issues_of(space_id.as_ref())? {
+                                self.state_changed();
+                            }
+                            self.host.execute(command.clone())?
+                        }
                         _ => self.host.execute(command.clone())?,
                     };
                     // Stopping an agent stops what it started, before the command returns: for
@@ -2325,6 +2333,9 @@ impl Actor {
                         } => Some(self.host.session(session_id)?.project_id),
                         Command::ResolveAttention { .. } => {
                             response["project_id"].as_str().map(str::to_owned)
+                        }
+                        Command::StartProjectFromIssue { .. } => {
+                            response["id"].as_str().map(str::to_owned)
                         }
                         _ => None,
                     };
@@ -2503,7 +2514,10 @@ impl Actor {
                     _ => {}
                 }
                 // A checklist is a work step, not a state change: it reloads no snapshot.
-                !matches!(name.as_str(), "workspace_context" | "set_plan")
+                !matches!(
+                    name.as_str(),
+                    "workspace_context" | "set_plan" | "list_issues" | "read_issue"
+                )
             }
             Event::Provider {
                 session,
@@ -11150,5 +11164,34 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': text,
         let threshold = actor.host.settings().checkin_child_turns as i64;
         run_turns(&mut actor, &sorting.id, now(), 2 * threshold);
         assert!(turn_check_ins(&actor, &ticket.coordinator_id).is_empty());
+    }
+
+    #[test]
+    fn listing_issues_that_changed_on_disk_refreshes_the_snapshots_unread_count() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        host.record_gh_login(Some("jlin".into()));
+        let personal = host.spaces().unwrap().remove(0).space;
+        let new = NewIssue {
+            title: "Renew the passport".into(),
+            ..NewIssue::default()
+        };
+        let filed = host.create_issue(&personal.id, new).unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+        let list = Command::Issues {
+            space_id: None,
+            search: None,
+        };
+        command(&mut actor, list.clone()).unwrap();
+        assert!(!actor.changes.state, "nothing changed on disk");
+        let folder = actor.host.storage_folder(&personal.storage.repository);
+        let file = folder
+            .join(tracker::issue_folder(&filed.id))
+            .join("issue.md");
+        let edited = fs::read_to_string(&file).unwrap().replace("the", "both");
+        fs::write(&file, edited).unwrap();
+        command(&mut actor, list).unwrap();
+        assert!(actor.changes.state, "an edit by hand reaches the sidebar");
+        assert_eq!(actor.host.issue_trackers().unwrap()[0].unread, 1);
     }
 }

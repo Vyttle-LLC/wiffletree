@@ -436,6 +436,20 @@ fn every_tracker_write_is_the_humans_and_reading_issues_is_not() {
             state: IssueState::Todo,
         },
         Command::MarkIssueRead { id: id.clone() },
+        Command::StartProjectFromIssue {
+            id: id.clone(),
+            space_id: space().id,
+        },
+        Command::LinkIssue {
+            id: id.clone(),
+            project_id: text(),
+            ticket_id: None,
+        },
+        Command::UnlinkIssue {
+            id: id.clone(),
+            project_id: text(),
+            ticket_id: Some(text()),
+        },
     ];
     for command in writes {
         assert!(command.is_human_only() && !command.is_read(), "{command:?}");
@@ -444,7 +458,11 @@ fn every_tracker_write_is_the_humans_and_reading_issues_is_not() {
         space_id: None,
         search: None,
     };
-    for command in [issues, Command::Issue { id }] {
+    let defaults = Command::IssueProjectDefaults {
+        id: id.clone(),
+        space_id: None,
+    };
+    for command in [issues, defaults, Command::Issue { id }] {
         assert!(!command.is_human_only() && command.is_read(), "{command:?}");
     }
     let sync = Command::SyncIssues { space_id: None };

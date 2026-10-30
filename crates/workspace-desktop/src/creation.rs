@@ -21,6 +21,7 @@ pub(crate) enum Creation {
     Repository,
     Import,
     ProjectRepositories,
+    ProjectFromIssue,
 }
 
 impl Creation {
@@ -31,6 +32,7 @@ impl Creation {
             Self::Repository => "Attach repository",
             Self::Import => "Add repositories",
             Self::ProjectRepositories => "Project repositories",
+            Self::ProjectFromIssue => "Start project from issue",
         }
     }
     pub(crate) fn action(self) -> &'static str {
@@ -40,8 +42,18 @@ impl Creation {
             Self::Repository => "Attach repository",
             Self::Import => "Add selected",
             Self::ProjectRepositories => "Save",
+            Self::ProjectFromIssue => "Start project",
         }
     }
+}
+
+/// The issue Start project from issue starts from, and what the host offers for it.
+pub(crate) struct FromIssue {
+    pub id: IssueId,
+    pub title: String,
+    pub defaults: IssueProjectDefaults,
+    /// The repositories the project would use in the offered Space, by name.
+    pub repositories: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -57,6 +69,18 @@ impl SelectItem for Choice {
     fn value(&self) -> &String {
         &self.id
     }
+}
+
+/// The Spaces Start project from issue offers: those sharing the issue's tracker, in the
+/// host's order.
+fn space_choices(spaces: &[Space], offered: &[SpaceId]) -> Vec<Choice> {
+    (offered.iter())
+        .filter_map(|id| spaces.iter().find(|space| &space.id == id))
+        .map(|space| Choice {
+            id: space.id.as_str().to_owned(),
+            label: space.name.clone(),
+        })
+        .collect()
 }
 
 /// The new-agent dialog names no focus, and its pre-fill reads the row of the agent it creates.
@@ -94,6 +118,7 @@ pub(crate) struct CreationForm {
     workspace_repositories: Vec<Repository>,
     /// The project's choice: `None` uses every workspace repository.
     chosen_repositories: Option<BTreeSet<String>>,
+    from_issue: Option<FromIssue>,
 }
 
 fn default_instruction(role: Role) -> &'static str {
@@ -175,9 +200,10 @@ impl CreationForm {
             InputState::new(window, cx).placeholder(match kind {
                 Creation::Ticket => "e.g. Build notification preferences",
                 Creation::Repository => "/Users/you/dev/repository",
-                Creation::Agent | Creation::Import | Creation::ProjectRepositories => {
-                    "e.g. ~/dev/* or ~/dev/company/app"
-                }
+                Creation::Agent
+                | Creation::Import
+                | Creation::ProjectRepositories
+                | Creation::ProjectFromIssue => "e.g. ~/dev/* or ~/dev/company/app",
             })
         });
         let detail = cx.new(|cx| {
@@ -220,7 +246,35 @@ impl CreationForm {
             scanning: false,
             workspace_repositories: snapshot.repositories.clone(),
             chosen_repositories,
+            from_issue: None,
         }
+    }
+
+    /// Start project from issue: the Space picker offers only the Spaces sharing the issue's
+    /// tracker, starting on the one the host chose.
+    pub(crate) fn from_issue(
+        index: &WorkspaceIndex,
+        issue: FromIssue,
+        bridge: Bridge,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut form = Self::new(
+            Creation::ProjectFromIssue,
+            index,
+            None,
+            None,
+            bridge,
+            window,
+            cx,
+        );
+        form.options = space_choices(&index.snapshot().spaces, &issue.defaults.spaces);
+        let chosen = issue.defaults.repositories.space_id.as_str();
+        let at = form.options.iter().position(|choice| choice.id == chosen);
+        let options = form.options.clone();
+        form.choices = cx.new(|cx| SelectState::new(options, at.map(IndexPath::new), window, cx));
+        form.from_issue = Some(issue);
+        form
     }
 
     /// The installed CLIs' models, offered by the model picker beside the table's, and what
@@ -289,6 +343,13 @@ impl CreationForm {
                 base,
             });
         }
+        if let Some(issue) = &self.from_issue {
+            let space = self.choices.read(cx).selected_value().cloned();
+            return Ok(Command::StartProjectFromIssue {
+                id: issue.id.clone(),
+                space_id: SpaceId(space.ok_or("Choose a Space")?),
+            });
+        }
         let project_id = self.project_id.clone().ok_or("Select a project first")?;
         if self.kind == Creation::ProjectRepositories {
             return Ok(Command::SetProjectRepositories {
@@ -345,9 +406,10 @@ impl CreationForm {
                 },
                 focus: AGENT_FOCUS.map(Into::into),
             }),
-            Creation::Repository | Creation::Import | Creation::ProjectRepositories => {
-                unreachable!("answered above")
-            }
+            Creation::Repository
+            | Creation::Import
+            | Creation::ProjectRepositories
+            | Creation::ProjectFromIssue => unreachable!("answered above"),
         }
     }
 
@@ -653,6 +715,48 @@ impl CreationForm {
             ))
     }
 
+    /// Start project from issue: the Space, among those sharing the issue's tracker, and the
+    /// repositories the project would use.
+    fn issue_project_fields(&self, cx: &mut Context<Self>) -> Div {
+        let Some(issue) = &self.from_issue else {
+            return div();
+        };
+        let not_here = &issue.defaults.repositories.not_cloned;
+        let offered = issue.defaults.repositories.space_id.as_str();
+        let offered = (self.options.iter())
+            .find(|choice| choice.id == offered)
+            .map_or("", |choice| choice.label.as_str());
+        let uses = match issue.repositories.is_empty() {
+            true => format!("In {offered}, it starts with no repository."),
+            false => format!("In {offered}, it uses {}.", issue.repositories.join(", ")),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(Self::field(
+                "Space",
+                Select::new(&self.choices)
+                    .w_full()
+                    .placeholder("Choose a Space")
+                    .disabled(self.pending),
+            ))
+            .child(Self::note(
+                "The project uses the issue’s repositories that are on this Mac, or the Space’s when the issue lists none. The coordinator gets the issue as its first message, as context written by its authors.",
+                cx,
+            ))
+            .child(Self::note(uses, cx))
+            .when(!not_here.is_empty(), |d| {
+                d.child(
+                    Self::note(
+                        format!("Not on this Mac, so left out: {}.", not_here.join(", ")),
+                        cx,
+                    )
+                    .text_color(cx.theme().warning),
+                )
+            })
+    }
+
     fn project_repository_fields(&self, cx: &mut Context<Self>) -> Div {
         let uses_all = self.chosen_repositories.is_none();
         let mut body = div().flex().flex_col().gap_4().child(
@@ -891,6 +995,14 @@ impl Render for CreationForm {
             Creation::Repository => self.repository_fields(cx),
             Creation::Import => self.import_fields(cx),
             Creation::ProjectRepositories => self.project_repository_fields(cx),
+            Creation::ProjectFromIssue => self.issue_project_fields(cx),
+        };
+        let about = match (&self.from_issue, &self.project_id) {
+            (Some(issue), _) => format!("From {} · {}", issue.id, issue.title),
+            (None, Some(_)) => format!("In {}", self.project_name),
+            (None, None) => {
+                "For the whole workspace. Projects that use every repository pick these up.".into()
+            }
         };
         div()
             .w_full()
@@ -898,15 +1010,7 @@ impl Render for CreationForm {
             .flex_col()
             .gap_4()
             .text_size(px(font::TEXT))
-            .child(Self::note(
-                if self.project_id.is_some() {
-                    format!("In {}", self.project_name)
-                } else {
-                    "For the whole workspace. Projects that use every repository pick these up."
-                        .into()
-                },
-                cx,
-            ))
+            .child(Self::note(about, cx))
             .child(fields)
             .when(!self.error.is_empty(), |d| {
                 d.child(
@@ -929,5 +1033,43 @@ impl Render for CreationForm {
                         .child(Self::note("Saving…", cx)),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::space_choices;
+    use workspace_core::*;
+
+    fn space(id: &str, name: &str) -> Space {
+        Space {
+            id: SpaceId(id.into()),
+            name: name.into(),
+            description: String::new(),
+            instructions: String::new(),
+            brain: None,
+            storage: SpaceStorage {
+                repository: StorageRepository::Local { id: "7k2q".into() },
+                folder: id.into(),
+            },
+            repositories: vec![],
+            models: SpaceModels::default(),
+            sources: vec![],
+            extra: Extra::new(),
+        }
+    }
+
+    #[test]
+    fn start_project_from_issue_offers_only_the_spaces_sharing_the_tracker() {
+        let spaces = [
+            space("sage", "Sage"),
+            space("personal", "Personal"),
+            space("watch", "Sage Watch"),
+        ];
+        let offered = [SpaceId("watch".into()), SpaceId("sage".into())];
+        let labels: Vec<String> = (space_choices(&spaces, &offered).into_iter())
+            .map(|choice| choice.label)
+            .collect();
+        assert_eq!(labels, ["Sage Watch", "Sage"], "in the host's order");
     }
 }

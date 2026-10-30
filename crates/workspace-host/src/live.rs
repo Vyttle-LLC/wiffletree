@@ -515,6 +515,7 @@ impl Host {
         // The stop cannot be undone, so what it says depends on whether the ticket was finished.
         self.archive_settled(&stopped, finished.is_ok());
         finished?;
+        self.follow_ticket_work(&ticket, false);
         Ok(ticket)
     }
     pub fn agent_context(&self, id: &str) -> Result<Value> {
@@ -1000,6 +1001,7 @@ impl Host {
                 let ticket = self.owned_ticket(id, string("ticket_id")?)?;
                 Ok(serde_json::to_value(self.close_ticket(&ticket.id)?)?)
             }
+            "list_issues" | "read_issue" | "link_issue" => self.issue_tool(&session, name, &args),
             "archive_agent" => {
                 let agent = self.session(string("session_id")?)?;
                 let owned = self
@@ -1059,7 +1061,7 @@ impl Host {
         }
     }
     /// The ticket, if the caller is the project coordinator that owns it.
-    fn owned_ticket(&self, caller: &str, ticket_id: &str) -> Result<Ticket> {
+    pub(crate) fn owned_ticket(&self, caller: &str, ticket_id: &str) -> Result<Ticket> {
         let ticket = self.ticket(ticket_id)?;
         ensure!(
             ticket.coordinator_id == caller

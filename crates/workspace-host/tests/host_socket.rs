@@ -863,6 +863,20 @@ fn tracker_writes_need_the_apps_credential_and_reading_issues_does_not() {
             state: IssueState::Todo,
         },
         Command::MarkIssueRead { id: id.clone() },
+        Command::StartProjectFromIssue {
+            id: id.clone(),
+            space_id: personal.id.clone(),
+        },
+        Command::LinkIssue {
+            id: id.clone(),
+            project_id: "p".into(),
+            ticket_id: None,
+        },
+        Command::UnlinkIssue {
+            id: id.clone(),
+            project_id: "p".into(),
+            ticket_id: None,
+        },
     ];
     for command in writes.clone() {
         let refused = agent.request(PROTOCOL_VERSION, command);

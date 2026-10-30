@@ -784,6 +784,10 @@ pub struct Snapshot {
     /// each have an entry with the same counts.
     #[serde(default)]
     pub issue_trackers: Vec<IssueTracker>,
+    /// The Space of the last issue filed on this Mac, where New issue starts without a Space
+    /// filter.
+    #[serde(default)]
+    pub last_filed_space: Option<SpaceId>,
     pub repositories: Vec<Repository>,
     /// The sessions that are not archived and open tickets' archived agents, in the order they
     /// were created, then archived sessions still in a turn.
@@ -3257,6 +3261,37 @@ pub enum Command {
     MarkIssueRead {
         id: IssueId,
     },
+    /// Read-only: what Start project from issue offers for the issue, starting in `space_id`
+    /// when it shares the issue's tracker, else in the one of them last used for a new project;
+    /// answered with `IssueProjectDefaults`.
+    IssueProjectDefaults {
+        id: IssueId,
+        #[serde(default)]
+        space_id: Option<SpaceId>,
+    },
+    /// Creates a project and its coordinator in `space_id`, one of the Spaces sharing the
+    /// issue's tracker, with the issue's repositories on this Mac, or the Space's when it lists
+    /// none; links it to the issue, sends the coordinator the issue as untrusted context, and
+    /// records in the tracker that the human started work. Answered with `CreatedProject`.
+    StartProjectFromIssue {
+        id: IssueId,
+        space_id: SpaceId,
+    },
+    /// Links an issue to a project on this Mac, or to one of its tickets; answered with the
+    /// `Issue` as its state now follows the linked work.
+    LinkIssue {
+        id: IssueId,
+        project_id: String,
+        #[serde(default)]
+        ticket_id: Option<String>,
+    },
+    /// Removes a link; the issue keeps its state. Answered with the remaining `IssueLink`s.
+    UnlinkIssue {
+        id: IssueId,
+        project_id: String,
+        #[serde(default)]
+        ticket_id: Option<String>,
+    },
     /// Replaces a Space's definition; its id and storage stay as they are.
     UpdateSpace {
         space: Box<Space>,
@@ -3723,6 +3758,7 @@ impl Command {
             | Self::OriginBranches { .. }
             | Self::Issues { .. }
             | Self::Issue { .. }
+            | Self::IssueProjectDefaults { .. }
             | Self::RemoteAccess => true,
             Self::ImportRepositories { .. }
             | Self::RefreshRepositories
@@ -3776,6 +3812,9 @@ impl Command {
             | Self::Comment { .. }
             | Self::MoveIssue { .. }
             | Self::MarkIssueRead { .. }
+            | Self::StartProjectFromIssue { .. }
+            | Self::LinkIssue { .. }
+            | Self::UnlinkIssue { .. }
             | Self::SetWorkspacesDir { .. }
             | Self::SetVerification { .. }
             | Self::SetBuildsAtOnce { .. }
@@ -3848,6 +3887,9 @@ impl Command {
                 | Self::Comment { .. }
                 | Self::MoveIssue { .. }
                 | Self::MarkIssueRead { .. }
+                | Self::StartProjectFromIssue { .. }
+                | Self::LinkIssue { .. }
+                | Self::UnlinkIssue { .. }
                 | Self::SetSpaceBrain { .. }
                 | Self::SpaceStorage { .. }
                 | Self::ConfirmBrain { .. }

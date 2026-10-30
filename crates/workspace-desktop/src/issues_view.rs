@@ -35,14 +35,14 @@ const LIST_ORDER: [IssueState; 7] = [
 /// An error shorter than this is a pass retrying; longer, the footer turns red.
 const ERROR_TURNS_RED_MS: i64 = 60 * 60 * 1000;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Layout {
     List,
     Board,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Assignee {
+enum Assignee {
     Me,
     Nobody,
     Login(String),
@@ -50,12 +50,12 @@ pub(super) enum Assignee {
 
 /// The page's filters besides the Space, which the host filters by, and search.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) struct Filters {
-    pub(super) all_states: bool,
-    pub(super) assignee: Option<Assignee>,
-    pub(super) priority: Option<Priority>,
-    pub(super) label: Option<String>,
-    pub(super) repository: Option<String>,
+struct Filters {
+    all_states: bool,
+    assignee: Option<Assignee>,
+    priority: Option<Priority>,
+    label: Option<String>,
+    repository: Option<String>,
 }
 
 pub(super) struct IssuesPage {
@@ -71,8 +71,6 @@ pub(super) struct IssuesPage {
     /// The trackers as the last snapshot summarized them; a change asks for the list again.
     trackers: Vec<IssueTracker>,
     open: Option<Entity<IssueView>>,
-    /// The Space of the last issue filed here, where New issue starts without a Space filter.
-    last_filed: Option<SpaceId>,
 }
 impl EventEmitter<Intent> for IssuesPage {}
 impl IssuesPage {
@@ -96,7 +94,6 @@ impl IssuesPage {
             asked: 0,
             trackers: vec![],
             open: None,
-            last_filed: None,
         }
     }
 
@@ -110,13 +107,21 @@ impl IssuesPage {
         let trackers = (self.shared.snapshot()).map_or(vec![], |s| s.issue_trackers.clone());
         let changed = trackers != self.trackers;
         self.trackers = trackers;
-        if opened || changed {
-            self.load(window, cx);
-            if let Some(open) = &self.open {
-                open.update(cx, |issue, cx| issue.load(window, cx));
-            }
-            cx.notify();
+        if let Some(open) = &self.open {
+            open.update(cx, |issue, cx| issue.share(&self.shared, cx));
         }
+        if opened || changed {
+            self.reload(window, cx);
+        }
+    }
+    /// Reads the list and the open issue again, as after a change elsewhere, such as starting a
+    /// project from the open issue.
+    pub(super) fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.load(window, cx);
+        if let Some(open) = &self.open {
+            open.update(cx, |issue, cx| issue.reload_seen(window, cx));
+        }
+        cx.notify();
     }
     /// Shows the issues of one Space, or of all, as the Space page's Open Issues does.
     pub(super) fn filter_space(
@@ -186,10 +191,37 @@ impl IssuesPage {
             IssueViewEvent::Changed => view.load(window, cx),
             // Marked read whether or not it was unread; marking a read issue changes nothing.
             IssueViewEvent::Open(id) => view.open_issue(id.clone(), true, window, cx),
+            IssueViewEvent::StartProject { id, title } => {
+                view.start_project(id.clone(), title.clone(), window, cx)
+            }
+            IssueViewEvent::OpenSession(id) => cx.emit(Intent::Select(id.clone())),
         })
         .detach();
         self.open = Some(issue);
         cx.notify();
+    }
+    /// Asks what Start project from issue offers, starting in the filtered Space, and opens it.
+    fn start_project(
+        &mut self,
+        id: IssueId,
+        title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ask = ask::issue_project_defaults(id.clone(), self.space.clone());
+        self.ask(
+            ask,
+            window,
+            cx,
+            move |_, defaults, window, cx| match defaults {
+                Ok(defaults) => cx.emit(Intent::StartProjectFromIssue {
+                    id,
+                    title,
+                    defaults,
+                }),
+                Err(error) => toast_error(error, window, cx),
+            },
+        );
     }
 
     /// Moves a dragged card's issue to the column it was dropped on, showing it there at once.
@@ -227,7 +259,11 @@ impl IssuesPage {
     fn new_issue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let trackable = self.trackable();
         let ids: Vec<SpaceId> = trackable.iter().map(|t| t.space.id.clone()).collect();
-        let default = new_issue::default_space(self.space.as_ref(), self.last_filed.as_ref(), &ids);
+        let last_filed = self
+            .shared
+            .snapshot()
+            .and_then(|s| s.last_filed_space.as_ref());
+        let default = new_issue::default_space(self.space.as_ref(), last_filed, &ids);
         let Some(space) = default else {
             return toast_error(
                 "No Space here has a tracker yet. Set up issues on a Space’s page.",
@@ -274,12 +310,11 @@ impl IssuesPage {
         cx: &mut Context<Self>,
     ) {
         self.ask(
-            ask::create_issue(space.clone(), issue),
+            ask::create_issue(space, issue),
             window,
             cx,
             move |view, filed, window, cx| match filed {
                 Ok(issue) => {
-                    view.last_filed = Some(space);
                     toast(format!("Filed {}", issue.id), window, cx);
                     view.load(window, cx);
                 }
@@ -396,7 +431,7 @@ impl IssuesPage {
             .items_center()
             .gap_2()
             .child(space)
-            .child(open)
+            .when(self.layout == Layout::List, |d| d.child(open))
             .child(assignee)
             .child(priority)
             .child(label)
@@ -711,7 +746,12 @@ impl Render for IssuesPage {
             }
             None => vec![],
         };
-        let shown = filtered(&listings, &self.filters, self.login().as_deref());
+        let shown = shown(
+            &listings,
+            &self.filters,
+            self.layout,
+            self.login().as_deref(),
+        );
         let content = if self.listings.is_none() {
             hint("Reading…", p)
         } else if shown.is_empty() {
@@ -917,7 +957,7 @@ fn avatar(login: Option<&str>, me: Option<&str>, p: Palette) -> Div {
 }
 
 /// Up to two letters of a login: `pshah` is PS, `tomas-reyes` TR.
-pub(super) fn initials(login: &str) -> String {
+fn initials(login: &str) -> String {
     let parts: Vec<&str> = login
         .split(['-', '_', '.'])
         .filter(|p| !p.is_empty())
@@ -948,8 +988,10 @@ pub(super) fn unread(trackers: &[IssueTracker]) -> usize {
 }
 
 /// The listings the filters keep: open ones unless all states are asked for, then by assignee,
-/// priority, label and repository. One that cannot be read passes every filter but the state.
-pub(super) fn filtered<'a>(
+/// priority, label and repository. One that cannot be read has no state and no fields: the open
+/// filter, Nobody and No priority keep it, and any other assignee, priority, label or repository
+/// filter drops it.
+fn filtered<'a>(
     listings: &'a [IssueListing],
     filters: &Filters,
     me: Option<&str>,
@@ -969,10 +1011,23 @@ pub(super) fn filtered<'a>(
         .collect()
 }
 
+/// The listings a layout shows. The board has a column for every state, so a card dropped on
+/// Done or Canceled stays there: it ignores the open filter.
+fn shown<'a>(
+    listings: &'a [IssueListing],
+    filters: &Filters,
+    layout: Layout,
+    me: Option<&str>,
+) -> Vec<&'a IssueListing> {
+    let filters = Filters {
+        all_states: filters.all_states || layout == Layout::Board,
+        ..filters.clone()
+    };
+    filtered(listings, &filters, me)
+}
+
 /// The listings grouped by state in the list's order, with those that cannot be read first.
-pub(super) fn grouped<'a>(
-    listings: &[&'a IssueListing],
-) -> Vec<(Option<IssueState>, Vec<&'a IssueListing>)> {
+fn grouped<'a>(listings: &[&'a IssueListing]) -> Vec<(Option<IssueState>, Vec<&'a IssueListing>)> {
     let states = std::iter::once(None).chain(LIST_ORDER.map(Some));
     states
         .filter_map(|state| {
@@ -992,7 +1047,7 @@ fn group_note(state: IssueState) -> Option<&'static str> {
 
 /// What a row says about the issue's work. Linked work arrives with phase 3; until then, who
 /// filed it and when.
-pub(super) fn work_line(listing: &IssueListing) -> String {
+fn work_line(listing: &IssueListing) -> String {
     match listing.author.is_empty() {
         true => String::new(),
         false => format!(
@@ -1004,7 +1059,7 @@ pub(super) fn work_line(listing: &IssueListing) -> String {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Tone {
+enum Tone {
     Plain,
     Yellow,
     Red,
@@ -1013,7 +1068,7 @@ pub(super) enum Tone {
 /// One footer line per tracker shown, the filtered Space's or every one here: the repository,
 /// when it last synced and what waits; yellow while a file is paused, red once an error has
 /// lasted more than an hour.
-pub(super) fn footer_lines(
+fn footer_lines(
     spaces: &[Space],
     trackers: &[IssueTracker],
     filtered: Option<&SpaceId>,
@@ -1090,8 +1145,8 @@ fn age_at(at: i64, now: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Assignee, Filters, Tone, filtered, footer_lines, grouped, initials, short_repository,
-        unread, work_line,
+        Assignee, Filters, Layout, Tone, filtered, footer_lines, grouped, initials,
+        short_repository, shown, unread, work_line,
     };
     use workspace_core::*;
 
@@ -1177,6 +1232,19 @@ mod tests {
         );
         let open = filtered(&listings, &Filters::default(), None);
         assert_eq!(open.len(), 4, "Done is hidden; an unreadable issue is not");
+    }
+
+    #[test]
+    fn the_board_shows_every_state_so_a_card_dropped_on_done_stays_there() {
+        let listings = [
+            listing("CEL-151", Some(IssueState::Todo)),
+            listing("CEL-127", Some(IssueState::Done)),
+            listing("CEL-120", Some(IssueState::Canceled)),
+        ];
+        let open = Filters::default();
+        assert_eq!(shown(&listings, &open, Layout::List, None).len(), 1);
+        let board = shown(&listings, &open, Layout::Board, None);
+        assert_eq!(board.len(), 3, "the open filter does not apply");
     }
 
     #[test]

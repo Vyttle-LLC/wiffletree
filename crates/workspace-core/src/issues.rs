@@ -1,6 +1,6 @@
 //! Shared issues (OpenSpec change `shared-issues`): records of ideas, bugs and requests kept in a
 //! Space's storage repository, its tracker. An issue is not a ticket: tickets stay local.
-use crate::{Extra, Paused, SpaceId};
+use crate::{Extra, Paused, SpaceId, SpaceRepositories};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
@@ -255,6 +255,32 @@ pub struct IssueRecord {
     pub events: Vec<IssueEvent>,
     #[serde(default)]
     pub paused: Vec<PausedIssueFile>,
+    /// Its links to this Mac's projects and tickets.
+    #[serde(default)]
+    pub links: Vec<IssueLink>,
+}
+
+/// A link between an issue and a project on this Mac, or one of its tickets. Links stay on this
+/// Mac: the tracker learns only that work started, the linked PRs and the state they derive.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueLink {
+    /// Its storage repository, as `StorageRepository::key`.
+    pub tracker: String,
+    pub issue: IssueId,
+    pub project_id: String,
+    /// Set when only this ticket of the project is linked.
+    #[serde(default)]
+    pub ticket_id: Option<String>,
+}
+
+/// What Start project from issue offers: the Spaces sharing the issue's tracker, and the chosen
+/// one with the repositories the project would use.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueProjectDefaults {
+    pub spaces: Vec<SpaceId>,
+    /// The issue's repositories on this Mac, or the Space's when the issue lists none; in
+    /// `not_cloned`, the listed ones not on this Mac.
+    pub repositories: SpaceRepositories,
 }
 
 /// A Space's tracker as the snapshot summarizes it. No issue text.

@@ -173,7 +173,7 @@ pub(super) fn default_space(
 /// What the form says above File: for a tracker on GitHub, that issues are permanent and read by
 /// everyone with access to its storage repository, and to keep personal data out; for a local
 /// tracker, that the issue stays on this Mac.
-pub(super) fn warning(space: &Space) -> (bool, String) {
+fn warning(space: &Space) -> (bool, String) {
     match &space.storage.repository {
         StorageRepository::GitHub { owner, name } => (
             true,
@@ -192,7 +192,7 @@ pub(super) fn warning(space: &Space) -> (bool, String) {
 }
 
 /// How the issue is named once filed: a temporary ID until a GitHub tracker numbers it.
-pub(super) fn naming_line(space: &Space, prefix: &str) -> String {
+fn naming_line(space: &Space, prefix: &str) -> String {
     match &space.storage.repository {
         StorageRepository::GitHub { owner, name } => format!(
             "It shows a temporary ID, such as {prefix}-new-qxvb, until it reaches {owner}/{name} and is numbered."
@@ -202,7 +202,7 @@ pub(super) fn naming_line(space: &Space, prefix: &str) -> String {
 }
 
 /// Labels as typed, split at commas, trimmed, without blanks or repeats.
-pub(super) fn parse_labels(text: &str) -> Vec<String> {
+fn parse_labels(text: &str) -> Vec<String> {
     let mut labels: Vec<String> = vec![];
     for label in text.split(',').map(str::trim).filter(|l| !l.is_empty()) {
         if !labels.iter().any(|l| l == label) {

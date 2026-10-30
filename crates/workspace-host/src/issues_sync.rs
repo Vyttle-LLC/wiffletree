@@ -847,6 +847,18 @@ mod tests {
     }
 
     #[test]
+    fn the_space_of_the_last_issue_filed_is_kept_across_launches() {
+        let (home, mut host) = host();
+        host.record_gh_login(Some("jlin".into()));
+        assert_eq!(host.last_filed_space().unwrap(), None);
+        let personal = host.spaces().unwrap().remove(0).space;
+        file(&mut host, &personal, "Renew the passport", "");
+        drop(host);
+        let again = Host::open_set_up(home.path()).unwrap();
+        assert_eq!(again.last_filed_space().unwrap(), Some(personal.id));
+    }
+
+    #[test]
     fn a_temporary_id_is_rewritten_only_where_it_is_a_whole_word() {
         let text = "SAGE-new-abcd, XSAGE-new-abcd and SAGE-new-abcde";
         assert_eq!(

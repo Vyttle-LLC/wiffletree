@@ -63,7 +63,7 @@ mod welcome;
 mod wording;
 mod workspace_notes;
 use bridge::{Bridge, ChangedSteps};
-use creation::{Creation, CreationForm};
+use creation::{Creation, CreationForm, FromIssue};
 use gpui::{prelude::*, *};
 use gpui_component::{
     Root, Sizable, Theme, ThemeMode, TitleBar, WindowExt,
@@ -484,6 +484,11 @@ impl Workspace {
             Intent::Create { kind, ticket } => {
                 self.open_creation(*kind, ticket.as_deref(), window, cx)
             }
+            Intent::StartProjectFromIssue {
+                id,
+                title,
+                defaults,
+            } => self.open_issue_project(id.clone(), title.clone(), defaults.clone(), window, cx),
         }
         self.share(window, cx);
         cx.notify();
@@ -799,8 +804,77 @@ impl Workspace {
                 self.select(coordinator_id, window, cx);
                 self.shared.panel = Some(Panel::Team);
             }
+            // The issue's Work box lists the project once the issue is read again.
+            Command::StartProjectFromIssue { .. } => {
+                if let Ok(created) = serde_json::from_value::<CreatedProject>(value) {
+                    let mut said = format!("Started {}", created.project.name);
+                    if !created.not_on_this_mac.is_empty() {
+                        said.push_str(&format!(
+                            ". Not on this Mac, so left out: {}",
+                            created.not_on_this_mac.join(", ")
+                        ));
+                    }
+                    toast(said, window, cx);
+                }
+                self.issues
+                    .update(cx, |issues, cx| issues.reload(window, cx));
+            }
             _ => {}
         }
+    }
+    /// Opens Start project from issue with the Spaces sharing the issue's tracker.
+    fn open_issue_project(
+        &mut self,
+        id: IssueId,
+        title: String,
+        defaults: IssueProjectDefaults,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.shared.index.clone() else {
+            return;
+        };
+        let repositories = (defaults.repositories.repository_ids.iter())
+            .filter_map(|id| index.snapshot().repositories.iter().find(|r| &r.id == id))
+            .map(|r| r.name.clone())
+            .collect();
+        let issue = FromIssue {
+            id,
+            title,
+            defaults,
+            repositories,
+        };
+        let bridge = self.bridge.clone();
+        let form = cx.new(|cx| CreationForm::from_issue(&index, issue, bridge, window, cx));
+        self.creation = Some(form.clone());
+        let kind = Creation::ProjectFromIssue;
+        let weak = cx.weak_entity();
+        let cancel = weak.clone();
+        window.open_alert_dialog(cx, move |dialog, window, _| {
+            let weak = weak.clone();
+            let cancel = cancel.clone();
+            dialog
+                .title(kind.title())
+                .width(px(560.).min(window.viewport_size().width - px(48.)))
+                .confirm()
+                .ok_text(kind.action())
+                .child(form.clone())
+                .on_ok(move |_, window, cx| {
+                    let _ = weak.update(cx, |view, cx| view.submit_creation(window, cx));
+                    false
+                })
+                .on_cancel(move |_, _, cx| {
+                    cancel
+                        .update(cx, |view, cx| {
+                            if view.creation.as_ref().is_some_and(|f| f.read(cx).pending) {
+                                return false;
+                            }
+                            view.creation = None;
+                            true
+                        })
+                        .unwrap_or(true)
+                })
+        });
     }
     /// Asks for the latest snapshot, or, while one is on its way, for one more after it.
     fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -983,6 +1057,7 @@ impl Workspace {
                 | Command::AttachRepository { .. }
                 | Command::ImportRepositories { .. }
                 | Command::SetProjectRepositories { .. }
+                | Command::StartProjectFromIssue { .. }
         ) && let Some(form) = &self.creation
         {
             form.update(cx, |form, cx| {

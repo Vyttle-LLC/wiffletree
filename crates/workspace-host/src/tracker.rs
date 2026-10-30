@@ -163,7 +163,7 @@ fn parse_events(content: &[u8]) -> Vec<IssueEvent> {
 }
 
 /// `events.jsonl` as `content` holds it with `events` appended, one line each.
-fn with_events(content: Option<Vec<u8>>, events: &[IssueEvent]) -> Result<Vec<u8>> {
+pub(crate) fn with_events(content: Option<Vec<u8>>, events: &[IssueEvent]) -> Result<Vec<u8>> {
     let mut content = content.unwrap_or_default();
     if !content.is_empty() && !content.ends_with(b"\n") {
         content.push(b'\n');
@@ -180,11 +180,11 @@ pub(crate) fn issue_folder(id: &IssueId) -> String {
     format!("{ISSUES}/{id}")
 }
 
-fn issue_file(id: &IssueId) -> String {
+pub(crate) fn issue_file(id: &IssueId) -> String {
     format!("{}/issue.md", issue_folder(id))
 }
 
-fn events_file(id: &IssueId) -> String {
+pub(crate) fn events_file(id: &IssueId) -> String {
     format!("{}/events.jsonl", issue_folder(id))
 }
 
@@ -246,7 +246,7 @@ impl Store {
     pub(crate) fn exists(&self, id: &IssueId) -> bool {
         holds_files(&self.folder.join(issue_folder(id)))
     }
-    fn read(&self, path: &str) -> Option<Vec<u8>> {
+    pub(crate) fn read(&self, path: &str) -> Option<Vec<u8>> {
         fs::read(self.folder.join(path)).ok()
     }
     /// The issue's `issue.md`, or why it cannot be read.
@@ -347,6 +347,7 @@ impl Store {
             comments,
             events,
             paused: vec![],
+            links: vec![],
         })
     }
 }
@@ -418,7 +419,7 @@ fn temporary_letters() -> String {
         .collect()
 }
 
-fn event(by: &str, at: &str, kind: &str, from: Value, to: Value) -> IssueEvent {
+pub(crate) fn event(by: &str, at: &str, kind: &str, from: Value, to: Value) -> IssueEvent {
     let mut fields = serde_json::Map::new();
     fields.insert("from".into(), from);
     fields.insert("to".into(), to);
@@ -441,22 +442,22 @@ fn validate_title(title: &str) -> Result<String> {
 }
 
 /// The files of one write, relative to the tracker's root, and what it did, such as `filed`.
-struct Write {
-    id: IssueId,
-    files: Vec<(String, Vec<u8>)>,
-    did: String,
+pub(crate) struct Write {
+    pub(crate) id: IssueId,
+    pub(crate) files: Vec<(String, Vec<u8>)>,
+    pub(crate) did: String,
 }
 
 impl Host {
     /// The login the human writes issues as.
-    fn issue_author(&self) -> Result<String> {
+    pub(crate) fn issue_author(&self) -> Result<String> {
         self.gh_login.clone().context(
             "Sign gh in to write issues: run gh auth login in Terminal, then try again. Issues can still be read.",
         )
     }
     /// The Space whose tracker holds issues with `prefix`, which is unique on this Mac, and the
     /// tracker.
-    fn tracker_for(&self, prefix: &str) -> Result<(Space, TrackerConfig)> {
+    pub(crate) fn tracker_for(&self, prefix: &str) -> Result<(Space, TrackerConfig)> {
         for record in self.spaces()? {
             if let Ok(tracker) = self.tracker(&record.space)
                 && tracker.prefix == prefix
@@ -584,7 +585,9 @@ impl Host {
     /// Reads into the index each issue whose folder changed on disk since it was indexed, and
     /// drops each one gone, of the tracker in storage repository `only`, or of every tracker:
     /// an issue added or edited by hand, in a local tracker or the clone, is listed as it is.
-    pub(crate) fn refresh_issue_index(&self, only: Option<&str>) -> Result<()> {
+    /// Says whether it changed the index.
+    pub(crate) fn refresh_issue_index(&self, only: Option<&str>) -> Result<bool> {
+        let mut refreshed = false;
         for (space, tracker) in self.trackers()? {
             let storage = space.storage.repository.key();
             if only.is_some_and(|only| only != storage) {
@@ -613,8 +616,18 @@ impl Host {
                 )?;
             }
             tx.commit()?;
+            refreshed = true;
         }
-        Ok(())
+        Ok(refreshed)
+    }
+    /// Refreshes the index of the Space's tracker, or of every tracker, as listing does; says
+    /// whether it changed, so the snapshot's counts can follow a read.
+    pub(crate) fn refresh_issues_of(&self, space_id: Option<&SpaceId>) -> Result<bool> {
+        let storage = match space_id {
+            Some(id) => Some(self.space(id)?.space.storage.repository.key()),
+            None => None,
+        };
+        self.refresh_issue_index(storage.as_deref())
     }
     /// The issues of the Space's tracker, or of every tracker here, with their unread marks; with
     /// `search`, only those whose ID, title, description or comments hold each of its words.
@@ -623,11 +636,11 @@ impl Host {
         space_id: Option<&SpaceId>,
         search: Option<&str>,
     ) -> Result<Vec<IssueListing>> {
+        self.refresh_issues_of(space_id)?;
         let storage = match space_id {
             Some(id) => Some(self.space(id)?.space.storage.repository.key()),
             None => None,
         };
-        self.refresh_issue_index(storage.as_deref())?;
         let words: Vec<String> = (search.unwrap_or_default().split_whitespace())
             .map(str::to_lowercase)
             .collect();
@@ -692,6 +705,7 @@ impl Host {
             None => id.clone(),
         };
         let mut record = store.record(id, &storage.key())?;
+        record.links = self.issue_links(&storage.key(), id)?;
         if let StorageRepository::GitHub { .. } = storage {
             let under = format!("{}/%", issue_folder(id));
             record.paused = (self.db.prepare(
@@ -776,9 +790,25 @@ impl Host {
                 did: "filed".into(),
             },
         )?;
+        self.db.execute_batch("DELETE FROM issue_last_filed")?;
+        self.db.execute(
+            "INSERT INTO issue_last_filed(space) VALUES (?1)",
+            [space.id.as_str()],
+        )?;
         Ok(issue)
     }
-    fn store(&self, space: &Space, prefix: &str) -> Store {
+    /// The Space of the last issue filed on this Mac, while it is here.
+    pub(crate) fn last_filed_space(&self) -> Result<Option<SpaceId>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT space FROM issue_last_filed WHERE space IN (SELECT id FROM spaces)",
+                [],
+                |r| r.get(0).map(SpaceId),
+            )
+            .optional()?)
+    }
+    pub(crate) fn store(&self, space: &Space, prefix: &str) -> Store {
         Store {
             folder: self.storage_folder(&space.storage.repository),
             prefix: prefix.to_owned(),
@@ -837,14 +867,20 @@ impl Host {
         self.write_issue_files(&space, Write { id, files, did })?;
         Ok(issue)
     }
-    /// Moves the issue to `state`, recording the move as an event.
+    /// Moves the issue to `state`, recording the move as an event, with the state its linked
+    /// work derived when the move overrides it; the issue follows its work again once that
+    /// changes.
     pub fn move_issue(&mut self, id: &IssueId, state: IssueState) -> Result<Issue> {
         let (by, space, store, current) = self.writable(id)?;
         if current.state == state {
             return Ok(current);
         }
         let at = schedules::rfc3339(now());
-        let moved = event(&by, &at, "state", json!(current.state), json!(state));
+        let mut moved = event(&by, &at, "state", json!(current.state), json!(state));
+        let derived = self.derived_state(&space.storage.repository.key(), id)?;
+        if let Some(derived) = derived.filter(|derived| *derived != state) {
+            moved.fields.insert("overrode".into(), json!(derived));
+        }
         let issue = Issue { state, ..current };
         let files = vec![
             (issue_file(id), issue_md(&issue)?),
@@ -881,7 +917,7 @@ impl Host {
     }
     /// Writes one change's files to the Space's tracker: committed at once in a local
     /// repository, and recorded for the next pass, due two seconds later, in a GitHub one.
-    fn write_issue_files(&mut self, space: &Space, write: Write) -> Result<()> {
+    pub(crate) fn write_issue_files(&mut self, space: &Space, write: Write) -> Result<()> {
         let storage = &space.storage.repository;
         let folder = self.storage_folder(storage);
         for (path, content) in &write.files {
@@ -982,6 +1018,12 @@ impl Host {
                 "DELETE FROM sync_record WHERE repository=?1 AND path LIKE ?2",
                 params![key, format!("{}/%", issue_folder(temporary))],
             )?;
+            for table in ["issue_links", "issue_derived"] {
+                self.db.execute(
+                    &format!("UPDATE {table} SET id=?3 WHERE storage=?1 AND id=?2"),
+                    params![storage.key(), old, new],
+                )?;
+            }
             self.db.execute(
                 "UPDATE issue_temporary SET number=?3 WHERE storage=?1 AND temporary=?2",
                 params![storage.key(), old, new],

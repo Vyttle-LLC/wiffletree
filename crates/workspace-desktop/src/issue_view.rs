@@ -21,11 +21,20 @@ pub(super) enum IssueViewEvent {
     /// The human changed the issue, so the list is out of date.
     Changed,
     Open(IssueId),
+    /// Start project from issue, for the Issues page to offer its Spaces.
+    StartProject {
+        id: IssueId,
+        title: String,
+    },
+    /// Opens a linked project's coordinator.
+    OpenSession(String),
 }
 
 pub(super) struct IssueView {
     bridge: Bridge,
     host: HostView,
+    /// The workspace as last shared, for the linked projects and tickets.
+    index: Option<Rc<WorkspaceIndex>>,
     pub(super) id: IssueId,
     record: Option<Result<IssueRecord, String>>,
     composer: Entity<TextareaState>,
@@ -62,6 +71,7 @@ impl IssueView {
         let mut view = Self {
             bridge,
             host: shared.host.clone(),
+            index: shared.index.clone(),
             id,
             record: None,
             composer,
@@ -82,6 +92,28 @@ impl IssueView {
     /// Reads the issue again from its files.
     pub(super) fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.read(false, window, cx);
+    }
+    /// Takes the workspace as it is now, whose tickets and PRs the Work box lists.
+    pub(super) fn share(&mut self, shared: &Shared, cx: &mut Context<Self>) {
+        let changed = !matches!(
+            (&self.index, &shared.index),
+            (Some(old), Some(new)) if Rc::ptr_eq(old, new)
+        );
+        if changed {
+            self.index = shared.index.clone();
+            cx.notify();
+        }
+    }
+    /// Reads the issue again after its tracker changed, such as when a pass pulled a teammate's
+    /// change, and marks what it holds now read: the human is looking at it.
+    pub(super) fn reload_seen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.load(window, cx);
+        self.ask(
+            ask::mark_issue_read(self.id.clone()),
+            window,
+            cx,
+            |_, _, _, _| {},
+        );
     }
     /// Reads the issue; `after_change` ends the change waiting on it, so the next edit starts
     /// from what the host wrote. An issue numbered while open is followed to its number.
@@ -231,7 +263,7 @@ impl IssueView {
                     p,
                 ))
             })
-            .child(prop("Work", work_box(p), p))
+            .child(prop("Work", self.work_box(p, cx), p))
             .when(!related.is_empty(), |d| {
                 d.child(prop("Related", self.related_links(related, p, cx), p))
             })
@@ -267,6 +299,81 @@ impl IssueView {
             });
         }
         list
+    }
+
+    /// The Work box: the linked project, its tickets and their PRs; who started work on another
+    /// Mac and its PRs; or, with no work yet, Start project from issue.
+    fn work_box(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        let Some(Ok(record)) = &self.record else {
+            return card(p);
+        };
+        let line = |text: String| hint(text, p).whitespace_normal();
+        match work(record, self.index.as_deref()) {
+            Work::Nothing => {
+                let id = self.id.clone();
+                let title = (record.issue.as_ref()).map_or_else(String::new, |i| i.title.clone());
+                let start = ui::gated(
+                    button("issue-start-project")
+                        .primary()
+                        .label("Start project from issue"),
+                    &self.host,
+                )
+                .disabled(self.login.is_none())
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(IssueViewEvent::StartProject {
+                        id: id.clone(),
+                        title: title.clone(),
+                    })
+                }));
+                let start = match self.login {
+                    Some(_) => start,
+                    None => start.tooltip("Sign gh in to start work on an issue"),
+                };
+                card(p)
+                    .child(hint("No project yet.", p))
+                    .child(start)
+                    .child(line(
+                        "Opens a coordinator with this issue as its goal.".into(),
+                    ))
+            }
+            Work::Here(projects) => {
+                let mut list = card(p);
+                for (at, project) in projects.into_iter().enumerate() {
+                    let open = project.coordinator.clone();
+                    list = list.child(
+                        button(("issue-work-project", at))
+                            .xsmall()
+                            .ghost()
+                            .label(project.name)
+                            .disabled(open.is_none())
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                if let Some(id) = &open {
+                                    cx.emit(IssueViewEvent::OpenSession(id.clone()));
+                                }
+                            })),
+                    );
+                    for (title, pr) in project.tickets {
+                        list = list.child(line(match pr {
+                            Some((number, state)) => {
+                                format!("{title} · PR #{number} {}", pr_state_label(state))
+                            }
+                            None => title,
+                        }));
+                    }
+                }
+                list
+            }
+            Work::Elsewhere { started_by, prs } => {
+                let mut list = card(p);
+                for by in started_by {
+                    list = list.child(line(format!("{by} started a project")));
+                }
+                for (url, status) in prs {
+                    list = list.child(line(format!("{url} · {status}")));
+                }
+                list
+            }
+        }
     }
 
     fn composer(&self, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -328,22 +435,97 @@ fn prop(label: &'static str, value: impl IntoElement, p: Palette) -> Div {
         .child(value)
 }
 
-/// The Work box. Starting a project from an issue arrives with the links of phase 3.
-fn work_box(p: Palette) -> Div {
-    card(p)
-        .child(hint("No project yet.", p))
-        .child(
-            button("issue-start-project")
-                .primary()
-                .label("Start project from issue")
-                .disabled(true)
-                .tooltip("Starting a project from an issue comes in a later release."),
-        )
-        .child(hint("Opens a coordinator with this issue as its goal.", p))
+/// What the Work box shows.
+#[derive(Debug, PartialEq)]
+enum Work {
+    /// Nothing linked anywhere, so it offers Start project from issue.
+    Nothing,
+    /// Linked work on this Mac: each project, its coordinator and its linked tickets.
+    Here(Vec<LinkedProject>),
+    /// Work started on another Mac: who started it, and each linked PR's last status.
+    Elsewhere {
+        started_by: Vec<String>,
+        prs: Vec<(String, String)>,
+    },
+}
+
+#[derive(Debug, PartialEq)]
+struct LinkedProject {
+    id: String,
+    name: String,
+    coordinator: Option<String>,
+    /// Each linked ticket's title, and its PR's number and state when it has one.
+    tickets: Vec<(String, Option<(u64, PrState)>)>,
+}
+
+/// The issue's work: its links on this Mac with what they are here, else what the tracker's
+/// `work` and `pr` events say another Mac started.
+fn work(record: &IssueRecord, index: Option<&WorkspaceIndex>) -> Work {
+    if let Some(index) = index.filter(|_| !record.links.is_empty()) {
+        let mut projects: Vec<LinkedProject> = vec![];
+        for link in &record.links {
+            let Some(project) = index.project(&link.project_id) else {
+                continue;
+            };
+            let coordinator = index.roots(&project.id).next().map(|s| s.id.clone());
+            let tickets = (coordinator.iter())
+                .flat_map(|root| index.tickets_owned_by(root))
+                .filter(|t| link.ticket_id.as_ref().is_none_or(|only| *only == t.id))
+                .map(|t| {
+                    let pr = t.pull_request.as_ref().map(|pr| (pr.number, pr.state));
+                    (t.title.clone(), pr)
+                })
+                .collect::<Vec<_>>();
+            match projects.iter_mut().find(|p| p.id == project.id) {
+                Some(listed) => listed.tickets.extend(tickets),
+                None => projects.push(LinkedProject {
+                    id: project.id.clone(),
+                    name: project.name.clone(),
+                    coordinator,
+                    tickets,
+                }),
+            }
+        }
+        // A ticket linked by itself and through its project shows once.
+        for project in &mut projects {
+            let mut shown = vec![];
+            project.tickets.retain(|ticket| {
+                let new = !shown.contains(ticket);
+                shown.push(ticket.clone());
+                new
+            });
+        }
+        return Work::Here(projects);
+    }
+    let mut started_by: Vec<String> = vec![];
+    let mut prs: Vec<(String, String)> = vec![];
+    for event in &record.events {
+        let field = |key: &str| event.fields.get(key).and_then(|v| v.as_str());
+        match (event.kind.as_str(), field("url"), field("status")) {
+            ("work", ..) if !started_by.contains(&event.by) => started_by.push(event.by.clone()),
+            ("pr", Some(url), Some(status)) => {
+                prs.retain(|(seen, _)| seen != url);
+                prs.push((url.to_owned(), status.to_owned()));
+            }
+            _ => {}
+        }
+    }
+    match started_by.is_empty() && prs.is_empty() {
+        true => Work::Nothing,
+        false => Work::Elsewhere { started_by, prs },
+    }
+}
+
+fn pr_state_label(state: PrState) -> &'static str {
+    match state {
+        PrState::Open => "open",
+        PrState::Closed => "closed",
+        PrState::Merged => "merged",
+    }
 }
 
 /// The issues this one names, with how: `blocks`, `blocked by`, `related to`, `duplicate of`.
-pub(super) fn related(issue: &Issue) -> Vec<(&'static str, String)> {
+fn related(issue: &Issue) -> Vec<(&'static str, String)> {
     let mut related = vec![];
     for (how, ids) in [
         ("blocks", &issue.blocks),
@@ -357,7 +539,7 @@ pub(super) fn related(issue: &Issue) -> Vec<(&'static str, String)> {
 }
 
 /// The `@login` mentions and issue IDs a draft names, each once, in order.
-pub(super) fn references(text: &str) -> (Vec<String>, Vec<String>) {
+fn references(text: &str) -> (Vec<String>, Vec<String>) {
     let (mut mentions, mut ids): (Vec<String>, Vec<String>) = (vec![], vec![]);
     let words = text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '@'));
     for word in words {
@@ -379,7 +561,7 @@ pub(super) fn references(text: &str) -> (Vec<String>, Vec<String>) {
 
 /// One line of the timeline, in time order.
 #[derive(Debug, PartialEq)]
-pub(super) enum Entry<'a> {
+enum Entry<'a> {
     Filed {
         by: &'a str,
         at: &'a str,
@@ -401,7 +583,7 @@ impl Entry<'_> {
 }
 
 /// The issue's filing, comments and events as one timeline, oldest first.
-pub(super) fn timeline<'a>(issue: &'a Issue, record: &'a IssueRecord) -> Vec<Entry<'a>> {
+fn timeline<'a>(issue: &'a Issue, record: &'a IssueRecord) -> Vec<Entry<'a>> {
     let mut entries = vec![Entry::Filed {
         by: &issue.author,
         at: &issue.created,
@@ -418,7 +600,7 @@ pub(super) fn timeline<'a>(issue: &'a Issue, record: &'a IssueRecord) -> Vec<Ent
 }
 
 /// What an event did, after who did it: "moved this from Todo to In progress".
-pub(super) fn event_text(event: &IssueEvent) -> String {
+fn event_text(event: &IssueEvent) -> String {
     let field = |name: &str| event.fields.get(name).cloned().unwrap_or_default();
     let state = |name: &str| {
         serde_json::from_value::<IssueState>(field(name)).map_or("another state", |s| s.label())
@@ -603,7 +785,7 @@ impl Requests for IssueView {
 
 #[cfg(test)]
 mod tests {
-    use super::{Entry, event_text, references, related, timeline};
+    use super::{Entry, LinkedProject, Work, event_text, references, related, timeline, work};
     use serde_json::json;
     use workspace_core::*;
 
@@ -659,6 +841,7 @@ mod tests {
                 json!({"from": "none", "to": "urgent"}),
             )],
             paused: vec![],
+            links: vec![],
         };
         let entries = timeline(&issue, &record);
         assert_eq!(
@@ -732,6 +915,70 @@ mod tests {
                 ("blocks", "CEL-148".to_owned()),
                 ("related to", "see the wiki".to_owned())
             ]
+        );
+    }
+
+    fn record(links: Vec<IssueLink>, events: Vec<IssueEvent>) -> IssueRecord {
+        IssueRecord {
+            tracker: "celadon-theme/storage".into(),
+            id: issue().id,
+            issue: Some(issue()),
+            raw: None,
+            problem: None,
+            comments: vec![],
+            events,
+            paused: vec![],
+            links,
+        }
+    }
+
+    #[test]
+    fn the_work_box_names_who_started_work_elsewhere_and_each_prs_last_status() {
+        assert_eq!(work(&record(vec![], vec![]), None), Work::Nothing);
+        let url = "https://github.com/celadon-theme/celadon-chat/pull/412";
+        let mut started = event("2026-10-29T15:00:00Z", "work", json!({"action":"started"}));
+        started.by = "pshah".into();
+        let events = vec![
+            started,
+            event(
+                "2026-10-29T16:00:00Z",
+                "pr",
+                json!({"url":url,"status":"open"}),
+            ),
+            event(
+                "2026-10-30T09:00:00Z",
+                "pr",
+                json!({"url":url,"status":"merged"}),
+            ),
+        ];
+        assert_eq!(
+            work(&record(vec![], events), None),
+            Work::Elsewhere {
+                started_by: vec!["pshah".into()],
+                prs: vec![(url.into(), "merged".into())],
+            }
+        );
+    }
+
+    #[test]
+    fn the_work_box_lists_the_linked_project_here_with_its_tickets_once() {
+        let (_home, host, root, ticket) = crate::test_support::ticket_store();
+        let index = WorkspaceIndex::new(host.snapshot().unwrap(), Default::default());
+        let link = |ticket_id: Option<String>| IssueLink {
+            tracker: "celadon-theme/storage".into(),
+            issue: issue().id,
+            project_id: root.project_id.clone(),
+            ticket_id,
+        };
+        let linked = record(vec![link(None), link(Some(ticket.id.clone()))], vec![]);
+        assert_eq!(
+            work(&linked, Some(&index)),
+            Work::Here(vec![LinkedProject {
+                id: root.project_id.clone(),
+                name: "Calls".into(),
+                coordinator: Some(root.id.clone()),
+                tickets: vec![("Fix inbound calls".into(), None)],
+            }])
         );
     }
 }
