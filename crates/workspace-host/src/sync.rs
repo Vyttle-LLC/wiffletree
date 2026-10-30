@@ -927,6 +927,10 @@ impl Host {
             return Ok(());
         }
         let (clone, shared) = (self.shared_folder(), self.home.join(shared::FOLDER));
+        // A clone the first start could not move is still in `shared/`, settings and all.
+        if clone == shared {
+            return Ok(());
+        }
         // Gone once the clone moved out of it at the first start.
         fs::create_dir_all(&shared)?;
         for path in SHARED_PATHS {
@@ -4018,6 +4022,50 @@ pub(crate) mod tests {
         assert_eq!(values(&host), before);
         assert_eq!(listing(&other), [".git", "README.md"]);
         assert!(!home.path().join("backups").exists());
+    }
+
+    /// A machine whose clone the first start left in `shared/`, behind a colliding clone, with
+    /// rules saved since and not yet pushed; and every setting's value.
+    #[allow(clippy::type_complexity)]
+    fn left_in_shared_behind_a_colliding_clone()
+    -> (tempfile::TempDir, Host, (HostSettings, String, String)) {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        host.set_check_ins(10, 300).unwrap();
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        drop(host);
+        as_an_older_release_left_it(home.path(), NAME);
+        colliding_clone(home.path());
+        let mut host = Host::open(home.path()).unwrap();
+        save_rules(&mut host, Skill::Implementing, "Unpushed rule.\n");
+        let before = values(&host);
+        (home, host, before)
+    }
+
+    #[test]
+    fn stopping_sync_with_the_clone_left_in_shared_keeps_every_setting() {
+        let (home, mut host, before) = left_in_shared_behind_a_colliding_clone();
+        host.stop_settings_sync().unwrap();
+        assert_eq!(values(&host), before);
+        let shared = home.path().join(shared::FOLDER);
+        assert!(shared.join(".git").exists() && shared.join(ADDITIONS).exists());
+    }
+
+    #[test]
+    fn switching_with_the_clone_left_in_shared_keeps_every_setting() {
+        let (home, mut host, before) = left_in_shared_behind_a_colliding_clone();
+        let other = home.path().join("other");
+        fs::create_dir(&other).unwrap();
+        let mut other = GitHub::new(&other, true);
+        other.repository["full_name"] = json!("MHohlios/wiffletree-settings");
+        let other = Arc::new(other);
+        let (_elsewhere, _) = set_up_elsewhere(&other);
+        let with = Some(JoinWith::ThisMachine);
+        host.choose_settings_repository(NAME, with, &other.tools())
+            .unwrap();
+        assert_eq!(values(&host), before);
+        assert_eq!(other.show(ADDITIONS).as_deref(), Some("Unpushed rule.\n"));
     }
 
     #[test]
