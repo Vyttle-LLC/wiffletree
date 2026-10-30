@@ -56,7 +56,10 @@ pub(super) struct SpacesPage {
     /// The storage repository for New, or the repository to add Spaces from.
     storage_input: Entity<InputState>,
     prefix_input: Entity<InputState>,
-    /// The form's code repositories and default models, saved with Save.
+    /// The folder in the brain that entries are written to.
+    brain_folder: Entity<InputState>,
+    /// The form's brain, code repositories and default models, saved with Save.
+    brain: Option<SpaceBrain>,
     repositories: Vec<String>,
     models: SpaceModels,
     /// New stores the Space in a GitHub repository rather than on this Mac.
@@ -101,6 +104,8 @@ impl SpacesPage {
                 .new(|cx| InputState::new(window, cx).placeholder("owner/name or a GitHub URL")),
             prefix_input: cx
                 .new(|cx| InputState::new(window, cx).placeholder("2 to 5 capitals, such as SAGE")),
+            brain_folder: cx.new(|cx| InputState::new(window, cx).placeholder("second-brain")),
+            brain: None,
             repositories: vec![],
             models: SpaceModels::default(),
             on_github: false,
@@ -171,6 +176,7 @@ impl SpacesPage {
             .is_some_and(|(from, read)| self.edited(from, cx).as_ref() != Ok(read))
     }
     fn load(&mut self, space: &Space, window: &mut Window, cx: &mut Context<Self>) {
+        self.brain = space.brain.clone();
         self.repositories = space.repositories.clone();
         self.models = space.models.clone();
         self.editing_prefix = false;
@@ -180,6 +186,9 @@ impl SpacesPage {
         self.name.update(cx, |input, cx| {
             input.set_value(space.name.clone(), window, cx)
         });
+        let folder = (space.brain.as_ref()).map_or(String::new(), |b| b.folder.clone());
+        self.brain_folder
+            .update(cx, |input, cx| input.set_value(folder, window, cx));
         for (state, value) in [
             (&self.description, space.description.clone()),
             (&self.instructions, space.instructions.clone()),
@@ -243,8 +252,14 @@ impl SpacesPage {
             return Err("Give the Space a name".into());
         }
         let sources = parse_sources(&self.sources.read(cx).value(), &space.sources)?;
+        let folder = self.brain_folder.read(cx).value().trim().to_owned();
+        let brain = match (&self.brain, folder.is_empty()) {
+            (Some(_), true) => return Err("Name the brain’s folder, such as second-brain".into()),
+            (brain, _) => brain.clone().map(|brain| SpaceBrain { folder, ..brain }),
+        };
         Ok(Space {
             name,
+            brain,
             description: self.description.read(cx).value().trim().to_owned(),
             instructions: self.instructions.read(cx).value().trim().to_owned(),
             repositories: self.repositories.clone(),
@@ -775,36 +790,59 @@ impl SpacesPage {
             cx.listener(move |view, _, window, cx| view.choose_brain(id.clone(), window, cx)),
         );
         let field = div().flex().flex_col().gap_1();
-        match &space.brain {
-            Some(SpaceBrain {
-                repository: BrainRepository::GitHub { owner, name, .. },
-                folder,
-                ..
-            }) => field
-                .child(mono(format!("{owner}/{name} · folder {folder}/"), p))
-                .child(hint("Changes reach main through gated pull requests.", p)),
-            Some(SpaceBrain { folder, .. }) => field
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(mono(
-                            format!("{} · folder {folder}/", brain_label(space, local)),
-                            p,
-                        ))
-                        .child(choose),
-                )
-                .child(hint("A folder on this Mac.", p)),
-            None => field.child(
+        let Some(brain) = &self.brain else {
+            return field.child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
                     .child(hint("None", p))
                     .child(choose),
-            ),
-        }
+            );
+        };
+        let (named, caption) = match &brain.repository {
+            BrainRepository::GitHub { owner, name, .. } => {
+                let at = local
+                    .and_then(|l| l.brain_path.clone())
+                    .unwrap_or_else(|| "not cloned on this Mac".into());
+                let caption = "Changes reach main through gated pull requests.";
+                (format!("{owner}/{name} · {at}"), caption)
+            }
+            BrainRepository::Local { .. } => (brain_label(space, local), "A folder on this Mac."),
+        };
+        let choose = match &brain.repository {
+            BrainRepository::GitHub { .. } => choose.label("Choose where it’s cloned…"),
+            BrainRepository::Local { .. } => choose,
+        };
+        field
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(mono(named, p))
+                    .child(choose)
+                    .child(
+                        button("no-brain")
+                            .xsmall()
+                            .ghost()
+                            .label("No brain")
+                            .tooltip("Projects in this Space log nowhere; saved with Save")
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.brain = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(hint("Folder", p))
+                    .child(Input::new(&self.brain_folder).small().w(px(200.))),
+            )
+            .child(hint(caption, p))
     }
 
     fn repositories_field(&self, space: &Space, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -1383,6 +1421,7 @@ fn merged(read: &Space, form: &Space, latest: &Space) -> Space {
         instructions: pick(&read.instructions, &form.instructions, &latest.instructions),
         repositories: pick(&read.repositories, &form.repositories, &latest.repositories),
         models: pick(&read.models, &form.models, &latest.models),
+        brain: pick(&read.brain, &form.brain, &latest.brain),
         sources: pick(&read.sources, &form.sources, &latest.sources),
         ..latest.clone()
     }
@@ -1719,6 +1758,17 @@ impl Requests for SpacesPage {
                 self.shown = None;
                 self.loaded = None;
                 self.error = None;
+            }
+            // The brain just chosen is the Space's now: the form leaves its brain unedited, so
+            // Save keeps it and a form with no other edit reloads with it.
+            Ok(_) if matches!(command, Command::SetSpaceBrain { .. }) => {
+                self.error = None;
+                if let Some((from, _)) = &self.loaded {
+                    self.brain = from.brain.clone();
+                    let folder = (from.brain.as_ref()).map_or(String::new(), |b| b.folder.clone());
+                    self.brain_folder
+                        .update(cx, |input, cx| input.set_value(folder, window, cx));
+                }
             }
             Ok(_) => self.error = None,
         }

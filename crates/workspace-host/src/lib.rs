@@ -1853,7 +1853,7 @@ impl Host {
                 serde_json::to_value(self.storage_status(&space_id)?)?
             }
             Command::SetSpaceBrain { space_id, path } => {
-                self.set_space_brain(&space_id, &path, None)?;
+                self.set_space_brain(&space_id, &path)?;
                 Value::Null
             }
             Command::SetTrackerPrefix { space_id, prefix } => {

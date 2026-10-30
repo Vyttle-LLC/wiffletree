@@ -2580,7 +2580,7 @@ sources:
         let (_home, mut host) = host();
         let personal = personal(&host);
         let brain = tempfile::tempdir().unwrap();
-        host.set_space_brain(&personal.id, brain.path().to_str().unwrap(), None)
+        host.set_space_brain(&personal.id, brain.path().to_str().unwrap())
             .unwrap();
         let record = host.space(&personal.id).unwrap();
         let path = fs::canonicalize(brain.path()).unwrap();
@@ -2614,6 +2614,49 @@ sources:
         assert!(
             !repos::clone_folder(home.path(), NAME).exists(),
             "the storage clone is not placed"
+        );
+    }
+
+    #[test]
+    fn a_github_brain_left_missing_at_join_is_given_its_clone_on_the_space_page() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let mut sage = read_space(
+            sage("").as_bytes(),
+            SpaceStorage {
+                repository: super::github(NAME),
+                folder: "sage".into(),
+            },
+        )
+        .unwrap();
+        sage.brain = Some(SpaceBrain {
+            repository: BrainRepository::GitHub {
+                owner: "Sage-Social".into(),
+                name: "sagehaven-docs".into(),
+                extra: Extra::new(),
+            },
+            folder: "second-brain".into(),
+            extra: Extra::new(),
+        });
+        github.commit("spaces/sage/space.yaml", space_yaml(&sage).unwrap());
+        let (_home, mut host) = host();
+        let id = join_sage(&mut host, &github).unwrap()[0].space.id.clone();
+        assert_eq!(
+            host.space(&id).unwrap().local.brain_path,
+            None,
+            "left missing"
+        );
+        let other = clone_of(&folder.path().join("other"), "Sage-Social/api");
+        let error = host.set_space_brain(&id, &other).unwrap_err();
+        assert!(format!("{error:#}").contains("is not a clone of Sage-Social/sagehaven-docs"));
+        let docs = clone_of(&folder.path().join("docs"), "Sage-Social/sagehaven-docs");
+        host.set_space_brain(&id, &docs).unwrap();
+        let record = host.space(&id).unwrap();
+        let path = fs::canonicalize(&docs).unwrap();
+        assert_eq!(record.local.brain_path.as_deref(), path.to_str());
+        assert_eq!(
+            record.space.brain, sage.brain,
+            "the brain stays the GitHub one"
         );
     }
 }

@@ -2978,7 +2978,8 @@ pub enum Command {
     SpaceStorage {
         space_id: SpaceId,
     },
-    /// Sets the Space's brain to the local folder `path`, for every project in it.
+    /// From the Space's page: where its GitHub brain is cloned on this Mac, or else its brain as
+    /// the local folder `path`, for every project in it.
     SetSpaceBrain {
         space_id: SpaceId,
         path: String,

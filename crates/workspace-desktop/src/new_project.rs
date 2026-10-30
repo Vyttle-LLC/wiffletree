@@ -111,6 +111,7 @@ impl NewProjectForm {
             return Err("Use a name of at most 128 bytes".into());
         }
         let message = self.message.read(cx).value().trim().to_owned();
+        first_message_fits(&message)?;
         Ok(NewProject {
             name,
             space_id: defaults.space_id.clone(),
@@ -215,6 +216,18 @@ impl NewProjectForm {
                     )
                 }),
         )
+    }
+}
+
+/// Refuses a first message the host would refuse, before the project is created, so the
+/// dialog keeps it.
+fn first_message_fits(message: &str) -> Result<(), String> {
+    match message.len() <= MAX_TEXT_BYTES {
+        true => Ok(()),
+        false => Err(format!(
+            "The first message is {} bytes; at most {MAX_TEXT_BYTES} are allowed",
+            message.len()
+        )),
     }
 }
 
@@ -326,7 +339,7 @@ impl Render for NewProjectForm {
 
 #[cfg(test)]
 mod tests {
-    use super::{RepositoryRow, repository_rows};
+    use super::{RepositoryRow, first_message_fits, repository_rows};
     use std::collections::BTreeSet;
     use workspace_core::*;
 
@@ -387,5 +400,12 @@ mod tests {
             4,
             "a repository ticked by hand stays listed"
         );
+    }
+
+    #[test]
+    fn a_first_message_too_long_is_refused_before_the_project_is_created() {
+        assert!(first_message_fits(&"a".repeat(MAX_TEXT_BYTES)).is_ok());
+        let error = first_message_fits(&"a".repeat(MAX_TEXT_BYTES + 1)).unwrap_err();
+        assert!(error.contains("at most 65536"), "{error}");
     }
 }

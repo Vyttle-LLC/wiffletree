@@ -490,11 +490,40 @@ impl Host {
     /// it that a local brain already names.
     pub fn attach_brain(&mut self, project: &str, path: &str) -> Result<()> {
         let project = self.project(project)?;
-        self.set_space_brain(&project.space, path, Some(&project.id))
+        self.set_local_brain(&project.space, path, Some(&project.id))
+    }
+    /// Sets the Space's brain from its page: where a GitHub brain is cloned on this Mac, or else
+    /// a local folder.
+    pub fn set_space_brain(&mut self, space: &SpaceId, path: &str) -> Result<()> {
+        let SpaceRecord { space, mut local } = self.space(space)?;
+        let Some(SpaceBrain {
+            repository: BrainRepository::GitHub { owner, name, .. },
+            ..
+        }) = &space.brain
+        else {
+            return self.set_local_brain(&space.id, path, None);
+        };
+        let brain = format!("{owner}/{name}");
+        let path = fs::canonicalize(path).context("The brain's clone must already exist")?;
+        let cloned = match repositories::read_origin(&path) {
+            repositories::Origin::GitHub { owner, name, .. } => format!("{owner}/{name}"),
+            _ => String::new(),
+        };
+        ensure!(
+            cloned.eq_ignore_ascii_case(&brain),
+            "{} is not a clone of {brain}",
+            path.display()
+        );
+        local.brain_path = Some(path.to_str().context("Brain path is not UTF-8")?.into());
+        self.db.execute(
+            "UPDATE spaces SET local=?2 WHERE id=?1",
+            params![space.id.as_str(), encode(&local)?],
+        )?;
+        Ok(())
     }
     /// Sets the Space's brain to the local folder `path`, keeping the folder in it that a local
     /// brain already names; `project`, when it was set from one, records it there.
-    pub fn set_space_brain(
+    fn set_local_brain(
         &mut self,
         space: &SpaceId,
         path: &str,
