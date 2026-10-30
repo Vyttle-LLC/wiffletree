@@ -437,13 +437,7 @@ fn spawn_merge_job(
         sender,
         (job, reply),
         move |(job, _)| merge::run(job, &tools),
-        |(job, _)| merge::Outcome {
-            ticket_id: job.ticket_id.clone(),
-            request_id: job.request.id.clone(),
-            stage: job.request.stage.clone(),
-            result: merge::Decided::Refused("the merge job stopped unexpectedly".into()),
-            children: vec![],
-        },
+        |(job, _)| merge::stopped(job),
         |(_, reply), outcome| Event::Merged(Box::new(outcome), reply),
     );
 }

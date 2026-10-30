@@ -2,7 +2,7 @@
 //! human, and the desktop draws the same card from the stored request, so the two cannot
 //! disagree.
 use crate::{
-    ApprovalCard, CheckState, MergeRequest, MergeState, Repository, Ticket, VerificationOutcome,
+    ApprovalCard, CheckState, MergeRequest, Repository, Ticket, VerificationOutcome, capitalized,
     owner_entry, short_sha,
 };
 
@@ -39,17 +39,18 @@ pub fn merge_card(
     if verification.and_then(|v| v.verified_commit()) == Some(request.head.as_str()) {
         method[0].push_str(", the reviewed commit");
     }
-    if let Some(pr) = ticket.open_pull_request() {
-        match pr.checks {
-            CheckState::Success => method.push("checks passed".into()),
-            CheckState::Failure => method.push("checks failed".into()),
-            CheckState::Pending => method.push("checks running".into()),
-            CheckState::None => method.push("no checks".into()),
-        }
-        method.push(match pr.merge_state {
-            MergeState::Dirty => "conflicts with its base".into(),
-            _ => "no conflict".into(),
-        });
+    if let Some(read) = request.read {
+        let checks = match read.checks {
+            CheckState::Success => "checks passed",
+            CheckState::Failure => "checks failed",
+            CheckState::Pending => "checks running",
+            CheckState::None => "no checks",
+        };
+        let conflict = match read.mergeable {
+            true => "no conflict",
+            false => "whether it conflicts not worked out yet",
+        };
+        method.push(format!("GitHub last read: {checks}, {conflict}"));
     }
     let mut rows = vec![
         ("Repository", repository_row),
@@ -123,11 +124,4 @@ fn coordinator_waiver(request: &MergeRequest) -> Option<&str> {
         .waived
         .as_deref()
         .filter(|reason| *reason != APPROVED_WAIVER)
-}
-
-fn capitalized(text: &str) -> String {
-    let mut chars = text.chars();
-    chars.next().map_or(String::new(), |first| {
-        first.to_uppercase().chain(chars).collect()
-    })
 }

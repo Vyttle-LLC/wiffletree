@@ -39,15 +39,16 @@ pub(crate) struct Outcome {
 pub(crate) enum Decided {
     /// Why nothing was merged: a check failed.
     Refused(String),
-    /// GitHub could not be read, so nothing was merged.
+    /// GitHub's answer is not known, because it could not be read or the job stopped, and this
+    /// decision merged nothing.
     Unread(String),
     /// GitHub reports another head than the request's.
     HeadMoved(String),
     /// Every check holds, but the checks are running or GitHub has not worked out whether the
     /// pull request can be merged.
-    Waiting(MergeMethod),
+    Waiting(MergeMethod, MergeRead),
     /// Every check holds, and the request waits for the human's approval before it merges.
-    Ready(MergeMethod),
+    Ready(MergeMethod, MergeRead),
     /// GitHub merged it; the merge commit when it was read back.
     Merged {
         method: Option<MergeMethod>,
@@ -107,6 +108,18 @@ pub(crate) fn run(job: &Job, tools: &Tools) -> Outcome {
     }
 }
 
+/// The outcome of a job whose thread stopped before it reported, such as by a panic. A request
+/// waiting for the human keeps its card; any other ends, as when GitHub cannot be read.
+pub(crate) fn stopped(job: &Job) -> Outcome {
+    Outcome {
+        ticket_id: job.ticket_id.clone(),
+        request_id: job.request.id.clone(),
+        stage: job.request.stage.clone(),
+        result: Decided::Unread("the merge job stopped unexpectedly".into()),
+        children: vec![],
+    }
+}
+
 fn decide_and_merge(job: &Job, tools: &Tools) -> Decided {
     let read = read_pull_request(job, tools, job.request.number)
         .and_then(|pr| Ok((pr, read_github(job, tools)?)));
@@ -119,8 +132,8 @@ fn decide_and_merge(job: &Job, tools: &Tools) -> Decided {
     // Only a `Merging` request sends, with the method the host thread recorded when an earlier
     // read found it ready, so a restart can tell a merge that may have been sent, and its method.
     let method = match (decided, job.request.stage == MergeStage::Merging) {
-        (Decided::Ready(method), true) if job.request.method == Some(method) => method,
-        (Decided::Ready(method), true) => {
+        (Decided::Ready(method, _), true) if job.request.method == Some(method) => method,
+        (Decided::Ready(method, _), true) => {
             return Decided::Refused(format!(
                 "GitHub's first allowed merge method is now {}, not {}. Nothing was merged",
                 method.label(),
@@ -322,11 +335,14 @@ fn decide(job: &Job, pr: &PullRequestNow, github: &GitHubNow) -> Decided {
             request.repository
         ));
     };
-    if pr.checks == CheckState::Pending || pr.mergeable == "UNKNOWN" || pr.merge_state == "UNKNOWN"
-    {
-        return Decided::Waiting(method);
+    let read = MergeRead {
+        checks: pr.checks,
+        mergeable: pr.mergeable == "MERGEABLE" && pr.merge_state != "UNKNOWN",
+    };
+    if pr.checks == CheckState::Pending || !read.mergeable {
+        return Decided::Waiting(method, read);
     }
-    Decided::Ready(method)
+    Decided::Ready(method, read)
 }
 
 /// The local checks once more, on the job's own thread and just before `gh pr merge`: against
@@ -552,6 +568,7 @@ impl Host {
             approved: false,
             method: None,
             unreviewed: vec![],
+            read: None,
             stage: MergeStage::Checking,
         });
         self.save_ticket(&ticket)?;
@@ -687,7 +704,7 @@ impl Host {
     /// and that a merge may now be sent, so a restart finishes or ends it on GitHub's word, and
     /// returns the job that checks GitHub once more and sends it.
     fn start_merge(&mut self, outcome: &Outcome) -> Result<Option<Job>> {
-        let Decided::Ready(method) = outcome.result else {
+        let Decided::Ready(method, _) = outcome.result else {
             return Ok(None);
         };
         let mut ticket = self.ticket(&outcome.ticket_id)?;
@@ -719,16 +736,24 @@ impl Host {
         let Some(mut request) = current else {
             return Ok(json!({"status": "ended"}));
         };
-        // A re-read while the human decides only ends the request on what would refuse it. Once
-        // the human answered, that answer's own reading of GitHub decides instead.
+        // A re-read while the human decides only ends the request on what would refuse it, and
+        // otherwise keeps what GitHub said for the card. Once the human answered, that answer's
+        // own reading of GitHub decides instead.
         if let MergeStage::WaitingForHuman { .. } = outcome.stage {
-            let still_waiting = request.stage == outcome.stage;
-            let stands = matches!(
-                outcome.result,
-                Decided::Waiting(_) | Decided::Ready(_) | Decided::Unread(_)
-            );
-            if !still_waiting || stands {
+            if request.stage != outcome.stage {
                 return Ok(json!({"status": "unchanged"}));
+            }
+            match outcome.result {
+                Decided::Waiting(_, read) | Decided::Ready(_, read) => {
+                    ticket.merging = Some(MergeRequest {
+                        read: Some(read),
+                        ..request
+                    });
+                    self.save_ticket(&ticket)?;
+                    return Ok(json!({"status": "unchanged"}));
+                }
+                Decided::Unread(_) => return Ok(json!({"status": "unchanged"})),
+                _ => {}
             }
         }
         let ended = match outcome.result {
@@ -746,10 +771,12 @@ impl Host {
                 }
                 Err(why) => why,
             },
-            Decided::Waiting(method) | Decided::Ready(method) if !request.may_merge() => {
-                return self.ask_merge(&mut ticket, request, method);
+            Decided::Waiting(method, read) | Decided::Ready(method, read)
+                if !request.may_merge() =>
+            {
+                return self.ask_merge(&mut ticket, request, method, read);
             }
-            Decided::Waiting(_) | Decided::Ready(_) => {
+            Decided::Waiting(..) | Decided::Ready(..) => {
                 return self.wait_for_checks(&mut ticket, request);
             }
             Decided::Refused(why) | Decided::Unread(why) => why,
@@ -822,12 +849,14 @@ impl Host {
         ticket: &mut Ticket,
         request: MergeRequest,
         method: MergeMethod,
+        read: MergeRead,
     ) -> Result<Value> {
         let repository = self.ticket_repository(ticket)?;
         let accepted = self.acceptance(ticket, request.waived.as_deref())?;
         let request = MergeRequest {
             method: Some(method),
             unreviewed: accepted.waived_commits,
+            read: Some(read),
             ..request
         };
         let prompt = approval_prompt(ticket, &request, &repository);
@@ -2306,6 +2335,9 @@ mod tests {
         fake.github.lock().unwrap().unreadable = true;
         pass(&mut f, &fake);
         fake.github.lock().unwrap().unreadable = false;
+        // A re-read whose job stopped, such as by a panic, keeps it too.
+        let reread = f.host.merges_due(&repository, true).unwrap().remove(0);
+        f.host.record_merge(stopped(&reread), false).unwrap();
         assert_eq!(f.open_items().len(), 1);
         assert!(messages(&f.host).is_empty());
 
@@ -2320,6 +2352,42 @@ mod tests {
         let told = messages(&f.host);
         assert_eq!(told.len(), 1);
         assert!(told[0].contains("feature/spaces is protected"), "{told:?}");
+    }
+
+    #[test]
+    fn the_approval_card_says_what_github_last_said_not_the_watchers_record() {
+        let (mut f, fake) = ready();
+        f.review(VerificationOutcome::Blocked);
+        // The watcher's last pass saw passed checks; GitHub now reports them running.
+        let mut ticket = f.ticket();
+        ticket.pull_request.as_mut().unwrap().checks = CheckState::Success;
+        f.host.save_ticket(&ticket).unwrap();
+        fake.set(180, "statusCheckRollup", json!([{"state": "PENDING"}]));
+        merge(&mut f, &fake, None).unwrap();
+        let item = f.open_items().remove(0);
+        assert!(
+            item.prompt
+                .contains("GitHub last read: checks running, no conflict"),
+            "{}",
+            item.prompt
+        );
+        let card = |f: &Fixture| {
+            let ticket = f.ticket();
+            let repository = f.host.ticket_repository(&ticket).unwrap();
+            merge_card(&ticket, ticket.merging.as_ref().unwrap(), &repository).rows[2]
+                .1
+                .clone()
+        };
+        fake.set(180, "statusCheckRollup", json!([{"state": "SUCCESS"}]));
+        fake.set(180, "mergeable", json!("UNKNOWN"));
+        pass(&mut f, &fake);
+        let method = card(&f);
+        assert!(
+            method.ends_with(
+                "GitHub last read: checks passed, whether it conflicts not worked out yet"
+            ),
+            "{method}"
+        );
     }
 
     #[test]

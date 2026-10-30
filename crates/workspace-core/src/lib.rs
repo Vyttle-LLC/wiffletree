@@ -1990,7 +1990,18 @@ pub struct MergeRequest {
     /// The commits no review checked that the merge would take, as the approval card lists them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unreviewed: Vec<String>,
+    /// What GitHub last said about the pull request while the request waits for the human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read: Option<MergeRead>,
     pub stage: MergeStage,
+}
+/// The pull request's checks and mergeability as the host last read them from GitHub for a
+/// merge request, never from the PR watcher's record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeRead {
+    pub checks: CheckState,
+    /// GitHub had worked out that it merges with no conflict.
+    pub mergeable: bool,
 }
 impl MergeRequest {
     /// Whether the host may merge without asking the human.
@@ -2279,6 +2290,13 @@ fn serde_name(value: &impl Serialize) -> String {
 /// The first seven characters of a commit id.
 pub fn short_sha(sha: &str) -> &str {
     &sha[..sha.len().min(7)]
+}
+/// `text` with its first letter in upper case, such as "Squash" for "squash".
+pub fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or(String::new(), |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

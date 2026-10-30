@@ -225,7 +225,7 @@ pub(crate) fn host_merge_lines(
     };
     let head = short_sha(&merge.head);
     let mut detail = vec![match merge.method {
-        Some(method) => format!("{} · head {head}", capitalize_first(method.label())),
+        Some(method) => format!("{} · head {head}", capitalized(method.label())),
         None => format!("Finished after a restart · head {head}"),
     }];
     let verified = ticket
@@ -418,18 +418,11 @@ fn try_lines(tried: &KeeperTry, base: &str, now: i64) -> Option<(String, String)
             format!("tried once at head {head} and threw the try away, {ago}"),
             format!(
                 "{} Nothing was pushed. Handed to the coordinator; the keeper will not try this head again.",
-                capitalize_first(why)
+                capitalized(why)
             ),
         )),
         Some(TryEnd::Pushed | TryEnd::NotPushed) => None,
     }
-}
-
-fn capitalize_first(words: &str) -> String {
-    let mut chars = words.chars();
-    chars.next().map_or(String::new(), |first| {
-        first.to_uppercase().chain(chars).collect()
-    })
 }
 
 /// Each keeper review that was withdrawn, newest first, for the card: kept on the keeper's
@@ -1265,6 +1258,7 @@ mod tests {
             approved: false,
             method: None,
             unreviewed: vec![],
+            read: None,
             stage: MergeStage::WaitingForChecks,
         };
         ticket.merging = Some(request.clone());

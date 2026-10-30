@@ -166,7 +166,7 @@ fn every_roles_instructions_state_the_publishing_rules_in_wiffletrees_own_words(
     // The paragraph the human confirmed on October 13, 2026, with the coordinator's waiver of a
     // blocked review standing since October 29 and its merges into branches that are not
     // protected since October 30.
-    let confirmed = "Do not deploy, publish, change credentials, touch production, or alter main, the default branch or another shared branch without explicit human authorization. Nothing leaves this machine from your shell: never run git push, and never create, edit, comment on, review, close or merge a pull request yourself. To push a ticket's branch and open or update its pull request, call publish_ticket once the ticket's review has ended. The workspace runs the push itself: without asking when the human allowed the repository's owner, which workspace_context shows, and the review passed or the coordinator waived a blocked review; otherwise only after the human approves each step in their inbox. Write the pull request's title and description by the repository's and the human's own PR rules. Only the coordinator merges a pull request, with merge_ticket, and only into a branch that is not protected; only the human merges into a protected branch, which workspace_context lists for each repository.";
+    let confirmed = "Do not deploy, publish, change credentials, touch production, or alter main, the default branch or another shared branch without explicit human authorization. The one standing authorization is the coordinator's merge_ticket into a branch that is not protected. Nothing leaves this machine from your shell: never run git push, and never create, edit, comment on, review, close or merge a pull request yourself. To push a ticket's branch and open or update its pull request, call publish_ticket once the ticket's review has ended. The workspace runs the push itself: without asking when the human allowed the repository's owner, which workspace_context shows, and the review passed or the coordinator waived a blocked review; otherwise only after the human approves each step in their inbox. Write the pull request's title and description by the repository's and the human's own PR rules. Only the coordinator merges a pull request, with merge_ticket, and only into a branch that is not protected; only the human merges into a protected branch, which workspace_context lists for each repository.";
     for role in Role::ALL {
         assert!(core(role).contains(confirmed), "{role:?}");
         // With every skill at stock no skill for pull requests is named, and no agent may
@@ -195,6 +195,7 @@ fn every_roles_instructions_state_the_publishing_rules_in_wiffletrees_own_words(
             assert!(
                 sentence.contains("never")
                     || sentence.contains("only the coordinator merges")
+                    || sentence.contains("the coordinator's merge_ticket")
                     || sentence.contains("does not merge")
                     || sentence.contains("not a merge")
                     || sentence.contains("after the pr merges"),
