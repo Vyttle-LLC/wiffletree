@@ -91,6 +91,20 @@ fn inside_repository(path: &str) -> bool {
             .all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
+/// Refuses a path in `worktree` that passes through a symlink, which the brain may have
+/// committed to point outside it, so the host never writes or reads through one.
+fn refuse_symlinks(worktree: &Path, path: &str) -> Result<()> {
+    let mut at = worktree.to_path_buf();
+    for component in Path::new(path).components() {
+        at.push(component);
+        ensure!(
+            !fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink()),
+            "{path} goes through a symlink in the brain, which Wiffletree does not write"
+        );
+    }
+    Ok(())
+}
+
 /// A lowercase ULID: 48 bits of milliseconds, then 80 random bits, in Crockford's base 32.
 fn new_batch_id() -> String {
     const ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
@@ -1373,6 +1387,7 @@ impl Host {
         let paths: Vec<String> = files.iter().map(|(path, _)| path.clone()).collect();
         let committed = (|| {
             for (path, content) in files {
+                refuse_symlinks(&worktree, path)?;
                 let file = worktree.join(path);
                 fs::create_dir_all(file.parent().context("A file is in a folder")?)?;
                 fs::write(file, content)?;
@@ -1589,6 +1604,7 @@ impl Host {
             written.as_deref() == Some(head.trim()) && changed_files(&worktree)?.is_empty(),
             "Something other than Wiffletree changed this batch's worktree; discard the batch"
         );
+        refuse_symlinks(&worktree, path)?;
         let file = worktree.join(path);
         let content = fs::read_to_string(&file)?;
         let mut lines: Vec<String> = content.split('\n').map(str::to_owned).collect();
@@ -2070,6 +2086,19 @@ mod tests {
             fs::write(path, "From a teammate.\n").unwrap();
             git(&work, &["add", "."]);
             git(&work, &["commit", "-q", "-m", "A teammate's change"]);
+            git(&work, &["push", "-q", "origin", "main"]);
+        }
+        /// A teammate's commit on `main` of `file` as a symlink to `target`.
+        #[cfg(unix)]
+        fn commit_symlink_on_main(&self, file: &str, target: &Path) {
+            let work = self.folder.join(format!("teammate-{}", new_id()));
+            let bare = self.bare.to_str().unwrap();
+            git(&self.folder, &["clone", "-q", bare, work.to_str().unwrap()]);
+            let path = work.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(target, path).unwrap();
+            git(&work, &["add", "."]);
+            git(&work, &["commit", "-q", "-m", "A symlink"]);
             git(&work, &["push", "-q", "origin", "main"]);
         }
         fn main_log(&self) -> Vec<String> {
@@ -2946,6 +2975,25 @@ mod tests {
             format!("{error:#}").contains("already open"),
             "one Set up PR"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_up_never_writes_through_a_codeowners_symlink_the_brain_committed() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = GitHub::new(folder.path());
+        let tools = github.tools();
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        fs::write(&victim, "Not the brain's.\n").unwrap();
+        github.commit_symlink_on_main(".github/CODEOWNERS", &victim);
+        let (mut host, _) = host_with_brain(home.path());
+        run(&mut host, &tools);
+        let error = host.set_up_brain(REPO, &tools.git).unwrap_err();
+        assert!(format!("{error:#}").contains("symlink"), "{error:#}");
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "Not the brain's.\n");
+        assert!(host.brain_batches(None).unwrap().is_empty());
     }
 
     #[test]
