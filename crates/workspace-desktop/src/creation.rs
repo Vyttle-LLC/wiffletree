@@ -7,7 +7,7 @@ use gpui_component::{
     checkbox::Checkbox,
     input::{Input, InputState, Textarea, TextareaState},
     menu::{DropdownMenu, PopupMenuItem},
-    select::{Select, SelectItem, SelectState},
+    select::{Select, SelectEvent, SelectItem, SelectState},
 };
 use std::{collections::BTreeSet, rc::Rc};
 // GPUI exports an accessibility `Role` too; ours wins over both globs.
@@ -273,8 +273,57 @@ impl CreationForm {
         let at = form.options.iter().position(|choice| choice.id == chosen);
         let options = form.options.clone();
         form.choices = cx.new(|cx| SelectState::new(options, at.map(IndexPath::new), window, cx));
+        cx.subscribe(&form.choices, |form, _, event: &SelectEvent<_>, cx| {
+            let SelectEvent::Confirm(Some(space)) = event else {
+                return;
+            };
+            form.offer_issue_space(SpaceId(space.clone()), cx);
+        })
+        .detach();
         form.from_issue = Some(issue);
         form
+    }
+
+    /// Asks the host what Start project from issue would use in `space`, so the repositories and
+    /// the missing-clone warning follow the Space picker.
+    fn offer_issue_space(&mut self, space: SpaceId, cx: &mut Context<Self>) {
+        let Some(issue) = &self.from_issue else {
+            return;
+        };
+        if issue.defaults.repositories.space_id == space {
+            return;
+        }
+        let ask = ask::issue_project_defaults(issue.id.clone(), Some(space));
+        let defaults = match self.bridge.ask(ask) {
+            Ok(defaults) => defaults,
+            Err(error) => {
+                self.error = error;
+                cx.notify();
+                return;
+            }
+        };
+        cx.spawn(async move |this, cx| {
+            let defaults = defaults.await;
+            let _ = this.update(cx, |form, cx| {
+                match defaults {
+                    Ok(defaults) => form.take_issue_defaults(defaults),
+                    Err(error) => form.error = error,
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn take_issue_defaults(&mut self, defaults: IssueProjectDefaults) {
+        let Some(issue) = &mut self.from_issue else {
+            return;
+        };
+        issue.repositories = (defaults.repositories.repository_ids.iter())
+            .filter_map(|id| self.workspace_repositories.iter().find(|r| &r.id == id))
+            .map(|r| r.name.clone())
+            .collect();
+        issue.defaults = defaults;
     }
 
     /// The installed CLIs' models, offered by the model picker beside the table's, and what

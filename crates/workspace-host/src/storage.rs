@@ -1375,6 +1375,8 @@ impl Host {
             self.apply_numbers(storage, &found.numbered)?;
         }
         self.apply_numbers(storage, &found.adopted)?;
+        // A file put back by hand since no longer holds back its issue's work.
+        self.follow_pending_work(storage);
         // The pass compared every issue file, so an edit made by hand is indexed now too.
         self.refresh_issue_index(Some(&storage.key()))?;
         Ok(())

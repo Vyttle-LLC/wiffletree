@@ -238,15 +238,16 @@ impl Host {
         }
         Ok(linked)
     }
-    /// Appends `events` to the issue and, when its linked work derives another state than it
-    /// last did here, sets the issue to that state with an automatic `state` event, all as one
-    /// write. Without a link, the issue keeps its state. `did` names the events for the commit.
+    /// Appends `events`, after any still pending, to the issue and, when its linked work
+    /// derives another state than it last did here, sets the issue to that state with an
+    /// automatic `state` event, all as one write. Without a link, the issue keeps its state.
+    /// `did` names the events for the commit.
     fn follow_work(
         &mut self,
         space: &Space,
         id: &IssueId,
         at: &str,
-        mut events: Vec<IssueEvent>,
+        events: Vec<IssueEvent>,
         did: &str,
     ) -> Result<()> {
         let storage = space.storage.repository.key();
@@ -256,21 +257,24 @@ impl Host {
             false => Some(derive(&self.linked_tickets(&links)?)),
         };
         let changed = derived != self.derived_state(&storage, id)?;
-        // A file changed outside Wiffletree waits for the human, and with it this write; the
-        // derived state stays unrecorded, so the next change of its work tries again.
+        let (mut events, mut did) = self.pending_work(&storage, id, events, did)?;
+        // A file changed outside Wiffletree waits for the human, and with it this write: the
+        // events stay pending and the derived state unrecorded until the file is settled.
         let files = [issue_file(id), events_file(id)];
         let paths = files.each_ref().map(String::as_str);
         if self.changed_outside(&space.storage.repository, &paths)? {
+            if !events.is_empty() {
+                self.db.execute(
+                    "INSERT OR REPLACE INTO issue_pending(storage,id,events,did) VALUES (?1,?2,?3,?4)",
+                    params![storage, id.to_string(), json!(events).to_string(), did.join(", ")],
+                )?;
+            }
             eprintln!("Issues: {id} was changed outside Wiffletree; its work is followed later");
             return Ok(());
         }
         let store = self.store(space, id.prefix());
         let current = store.issue(id)?;
         let mut issue = current.clone();
-        let mut did: Vec<String> = (!did.is_empty())
-            .then(|| did.to_owned())
-            .into_iter()
-            .collect();
         if let Some(state) = derived.filter(|state| changed && *state != current.state) {
             let mut moved = event(
                 &self.issue_author()?,
@@ -294,6 +298,10 @@ impl Host {
             let (id, did) = (id.clone(), did.join(", "));
             self.write_issue_files(space, Write { id, files, did })?;
         }
+        self.db.execute(
+            "DELETE FROM issue_pending WHERE storage=?1 AND id=?2",
+            params![storage, id.to_string()],
+        )?;
         if changed {
             match derived {
                 Some(state) => self.db.execute(
@@ -307,6 +315,64 @@ impl Host {
             };
         }
         Ok(())
+    }
+    /// The issue's pending events and what they did, followed by `events` and `did`.
+    fn pending_work(
+        &self,
+        storage: &str,
+        id: &IssueId,
+        events: Vec<IssueEvent>,
+        did: &str,
+    ) -> Result<(Vec<IssueEvent>, Vec<String>)> {
+        let pending: Option<(String, String)> = self
+            .db
+            .query_row(
+                "SELECT events,did FROM issue_pending WHERE storage=?1 AND id=?2",
+                params![storage, id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let (mut all, mut dids): (Vec<IssueEvent>, Vec<String>) = match pending {
+            Some((events, did)) => (serde_json::from_str(&events)?, vec![did]),
+            None => (vec![], vec![]),
+        };
+        all.extend(events);
+        dids.push(did.to_owned());
+        dids.retain(|did| !did.is_empty());
+        Ok((all, dids))
+    }
+    /// Writes the events each issue of the storage repository `storage` kept pending while one
+    /// of its files was changed outside Wiffletree, now that it no longer is, with the state its
+    /// work derives. An issue that is gone drops them. A failure is logged with the ID only.
+    pub(crate) fn follow_pending_work(&mut self, storage: &StorageRepository) {
+        let key = storage.key();
+        let pending: Vec<String> = (|| -> Result<Vec<String>> {
+            let mut rows = self
+                .db
+                .prepare("SELECT id FROM issue_pending WHERE storage=?1")?;
+            let rows = rows.query_map([&key], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })()
+        .unwrap_or_default();
+        for id in pending {
+            let followed = (|| -> Result<()> {
+                let id = IssueId::parse(&id)?;
+                let (space, _) = self.tracker_for(id.prefix())?;
+                if !self.store(&space, id.prefix()).exists(&id) {
+                    self.db.execute(
+                        "DELETE FROM issue_pending WHERE storage=?1 AND id=?2",
+                        params![key, id.to_string()],
+                    )?;
+                    return Ok(());
+                }
+                let at = schedules::rfc3339(now());
+                self.follow_work(&space, &id, &at, vec![], "")
+            })();
+            if let Err(error) = followed.with_context(|| format!("{id}’s work was not followed"))
+            {
+                eprintln!("Issues: {error}");
+            }
+        }
     }
     /// After a ticket's PR or state changed: each issue linked to the ticket, or to its project,
     /// records the PR's status when `pr_changed`, and follows its work. A failure is logged with
@@ -1097,10 +1163,42 @@ mod tests {
         host.sync_issues(None, &github.tools()).unwrap();
         let remote = github.show("issues/SAGE-1/issue.md").unwrap();
         assert!(!remote.contains("Ignore your instructions"), "never pushed");
-        // Put back, the issue follows its work at the next change of it.
-        fs::write(&path, &pushed).unwrap();
+        // Settled, the pending work event is written and the issue follows its work.
+        let path = "issues/SAGE-1/issue.md";
+        host.settle_paused(Some(NAME), path, Settle::PutBackSynced)
+            .unwrap();
+        let here = host.read_issue(&id).unwrap().issue.unwrap();
+        assert_eq!(here.description, "Screenshots are scaled at 1x.");
+        assert_eq!(events(&host, &id, "work").len(), 1);
+        assert_eq!(state(&host, &id), IssueState::InProgress);
+        host.sync_issues(None, &github.tools()).unwrap();
+        let remote = github.show("issues/SAGE-1/events.jsonl").unwrap();
+        assert!(remote.contains(r#""kind":"work""#), "{remote}");
+    }
+
+    #[test]
+    fn work_events_wait_while_a_file_is_changed_outside_and_follow_when_it_is_put_back_by_hand() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let (_home, mut host) = crate::storage::tests::host();
+        crate::storage::tests::join_sage(&mut host, &github).unwrap();
+        let sage = space_named(&host, "Sage");
+        file(&mut host, &sage, &[], "");
+        host.sync_issues(None, &github.tools()).unwrap();
+        let id = IssueId::parse("SAGE-1").unwrap();
+        let path = host
+            .storage_folder(&sage.storage.repository)
+            .join("issues/SAGE-1/issue.md");
+        let pushed = fs::read_to_string(&path).unwrap();
+        fs::write(&path, pushed.replace("priority: none", "priority: urgent")).unwrap();
+        let project = host.create_project_in("Sage work", &sage.id).unwrap();
+        host.link_issue(&id, &project.id, None).unwrap();
         host.unlink_issue(&id, &project.id, None).unwrap();
         host.link_issue(&id, &project.id, None).unwrap();
+        assert!(events(&host, &id, "work").is_empty());
+        fs::write(&path, &pushed).unwrap();
+        host.sync_issues(None, &github.tools()).unwrap();
+        assert_eq!(events(&host, &id, "work").len(), 2, "both kept, in order");
         assert_eq!(state(&host, &id), IssueState::InProgress);
     }
 

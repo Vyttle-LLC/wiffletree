@@ -1484,6 +1484,7 @@ impl Host {
                 for (file, content) in taken {
                     self.take_pulled(&storage, &file, content.as_deref())?;
                 }
+                self.follow_pending_work(&storage);
                 self.storage_written.borrow_mut().insert(key);
             }
             None => self.shared_written.set(true),

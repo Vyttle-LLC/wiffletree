@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS issue_links (storage TEXT NOT NULL, id TEXT NOT NULL,
 -- The state each linked issue's work last derived on this Mac. The issue follows its work when
 -- this changes, so a manual move holds until then.
 CREATE TABLE IF NOT EXISTS issue_derived (storage TEXT NOT NULL, id TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY(storage, id));
+-- The `work` and `pr` events linked work gave an issue while one of its files was changed
+-- outside Wiffletree, as a JSON array, and what they did for the commit message. They are
+-- written once the file is settled.
+CREATE TABLE IF NOT EXISTS issue_pending (storage TEXT NOT NULL, id TEXT NOT NULL, events TEXT NOT NULL, did TEXT NOT NULL, PRIMARY KEY(storage, id));
 -- The parts of an issue paused by the per-field merge, a front matter field or the description,
 -- with the remote's value they compare against. Whole files pause in `sync_paused` until that
 -- merge exists.
