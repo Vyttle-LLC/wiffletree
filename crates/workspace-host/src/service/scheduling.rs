@@ -207,8 +207,13 @@ impl Actor {
                 }
                 continue;
             }
-            let read_since = (self.host.quotas()?.iter())
-                .any(|q| q.provider == session.provider && q.observed_at > retry.failed_at);
+            // Only a usable reading says the limit reset; a failed refresh says nothing.
+            let read_since = self.host.quotas()?.iter().any(|q| {
+                q.provider == session.provider
+                    && q.observed_at > retry.failed_at
+                    && q.error.is_none()
+                    && !q.windows.is_empty()
+            });
             if retry.resets_at.is_some_and(|reset| reset <= at) || read_since {
                 self.host.reconcile_session(&session.id, true)?;
                 Host::event(

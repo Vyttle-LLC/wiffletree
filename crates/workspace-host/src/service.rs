@@ -3106,8 +3106,11 @@ impl Actor {
                     &format!("{run}; {reason}"),
                 )?;
                 "stopped"
-            } else if matches!(target.status, Status::Paused | Status::Disconnected)
-                || self.active.contains_key(&target.id)
+            } else if self.active.contains_key(&target.id)
+                || target.status == Status::Paused
+                // One waiting for a usage limit's reset would retry by itself; it is paused.
+                || (target.status == Status::Disconnected
+                    && self.host.session_runtime(&target.id)?.limit_retry.is_none())
             {
                 "already_paused"
             } else {
@@ -7709,6 +7712,40 @@ mod tests {
 
         actor.retry_after_limits(now() + 3_600_000).unwrap();
         assert_eq!(actor.host.message(&input).unwrap().receipt, Receipt::Held);
+
+        // A refresh that failed is newer, but says nothing about the limit.
+        let later = now() + 1_000;
+        let failed = QuotaReading {
+            windows: vec![],
+            error: Some("Quota could not be read".into()),
+            ..five_hour(Provider::Claude, "allowed", None, later)
+        };
+        actor.host.record_quota(failed).unwrap();
+        actor.retry_after_limits(later).unwrap();
+        assert_eq!(actor.host.message(&input).unwrap().receipt, Receipt::Held);
+    }
+
+    #[test]
+    fn a_parent_stop_during_a_limit_wait_keeps_the_child_paused_past_the_reset() {
+        let (_home, mut actor, implementer, coordinator, input) = implementer_taking_input();
+        let reset = now() + 3_600_000;
+        let rejected = five_hour(Provider::Claude, "rejected", Some(reset), now());
+        fail_turn(
+            &mut actor,
+            &implementer,
+            "run",
+            Some(rejected),
+            SESSION_LIMIT,
+        );
+
+        let args = json!({"session_ids":[implementer.id],"reason":"Hold on"});
+        let stopped = actor.stop_agents(&coordinator.id, &args).unwrap();
+        assert_eq!(stopped["agents"][0]["result"], "paused_idle");
+        actor.retry_after_limits(reset + 1).unwrap();
+
+        assert_eq!(actor.host.message(&input).unwrap().receipt, Receipt::Held);
+        let implementer = actor.host.session(&implementer.id).unwrap();
+        assert_eq!(implementer.status, Status::Paused);
     }
 
     #[test]
