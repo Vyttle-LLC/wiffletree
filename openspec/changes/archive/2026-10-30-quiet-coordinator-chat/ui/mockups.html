@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Coordinator chat without repeats — mockup v2</title>
+<style>
+  :root {
+    --bg: #1c262d; --panel: #22303a; --line: #33434e; --text: #e6ebee; --muted: #8d9aa3;
+    --bubble: #2f4a5c; --accent: #e08a6a; --green: #7cc59a; --pill: #2c3a44;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { padding: 24px 32px 8px; max-width: 1000px; }
+  header h1 { font-size: 18px; margin: 0 0 4px; }
+  header p { color: var(--muted); margin: 0 0 6px; }
+  .wrap { padding: 16px 32px 32px; max-width: 900px; }
+  .chat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 0 18px 16px; }
+  .board { position: sticky; top: 0; background: var(--panel); border-bottom: 1px solid var(--line); margin: 0 -18px 10px; padding: 10px 18px; font-size: 12.5px; }
+  .board .title { color: var(--muted); margin-bottom: 4px; display: flex; justify-content: space-between; }
+  .board .row { display: grid; grid-template-columns: 2fr 2fr 1fr; gap: 8px; padding: 1px 0; }
+  .human { display: flex; justify-content: flex-end; margin: 14px 0; }
+  .human div { background: var(--bubble); padding: 8px 12px; border-radius: 12px; max-width: 80%; }
+  .agent { display: grid; grid-template-columns: 28px 1fr; gap: 10px; margin: 10px 0 14px; }
+  .avatar { width: 28px; height: 28px; border-radius: 7px; background: #3a2c28; color: var(--accent); display: grid; place-items: center; font-size: 13px; }
+  .name { font-weight: 600; display: flex; justify-content: space-between; }
+  .name span { color: var(--muted); font-weight: 400; font-size: 12px; }
+  .meta { color: var(--muted); font-size: 12.5px; margin: 6px 0 2px 2px; }
+  .since { font-size: 12px; color: var(--muted); border-left: 2px solid var(--green); padding-left: 8px; margin-bottom: 6px; }
+  .since b { color: var(--green); font-weight: 600; }
+  details.run { margin: 8px 0; color: var(--muted); font-size: 12.5px; }
+  details.run summary { cursor: pointer; list-style: none; }
+  details.run summary::before { content: "› "; }
+  details.run[open] summary::before { content: "⌄ "; }
+  details.run .inside { border-left: 2px solid var(--line); margin: 6px 0 0 4px; padding: 2px 0 2px 12px; color: var(--text); }
+  details.run .inside p { margin: 6px 0; }
+  .pill { background: var(--pill); border-radius: 9px; padding: 0 7px; font-size: 11.5px; color: var(--muted); margin-right: 6px; }
+  .dim { color: var(--muted); }
+  .changes { padding: 0 32px 40px; max-width: 1000px; }
+  .changes h2 { font-size: 15px; }
+  .changes li { margin: 6px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Coordinator chat without repeats (v2)</h1>
+  <p>Mockup only. The same two hours as before. The difference from v1: nothing gets folded because it's a background turn. A reply folds only when Wiffletree's own records show nothing changed since the coordinator's last update, and the folded line says so.</p>
+</header>
+
+<div class="wrap">
+  <div class="chat">
+    <div class="board">
+      <div class="title"><span>Tickets · live from the workspace, always current</span><span>▾</span></div>
+      <div class="row"><span>Proposal</span><span>Accepted</span><span>#184 merged</span></div>
+      <div class="row"><span>Stage 1: list, rules, Repositories</span><span>Implementing · full suite 795/1,682</span><span>Not published</span></div>
+      <div class="row"><span>Stage 2: host merges</span><span>Implementing (stacked on stage 1)</span><span>Not published</span></div>
+    </div>
+
+    <div class="human"><div>Can stage 2 start before stage 1 merges?</div></div>
+    <div class="meta">Worked 41s · 3 steps</div>
+    <div class="agent"><div class="avatar">▦</div><div>
+      <div class="name">Coordinator <span>2h ago</span></div>
+      Yes. I'll stack stage 2 on stage 1's branch, so its PR opens into stage 1 and retargets main once stage 1 lands. Starting it now.
+    </div></div>
+
+    <div class="meta">1 agent message · Implementer (stage 2) · 1h 50m ago</div>
+    <div class="agent"><div class="avatar">▦</div><div>
+      <div class="name">Coordinator <span>1h 49m ago · update</span></div>
+      <div class="since"><b>Since last update:</b> stage 2 implementer started · stage 1 changed 15 files</div>
+      Stage 2 is under way on the stacked branch. Stage 1 is still in scope, so I'm letting both run.
+    </div></div>
+
+    <details class="run">
+      <summary>4 check-ins, no change · Implementer (stage 1) · 1h 34m ago – 34m ago</summary>
+      <div class="inside">
+        <p class="dim">Wiffletree found no ticket, commit, review or PR change since the update above. Each reply is still here in full.</p>
+        <p><span class="pill">No change</span>Letting stage 1 continue; still running desktop tests. <span class="dim">1h 34m ago</span></p>
+        <p><span class="pill">No change</span>Still running tests, in scope. <span class="dim">1h 4m ago</span></p>
+        <p class="dim">… opening a line shows the coordinator's whole reply …</p>
+      </div>
+    </details>
+
+    <div class="meta">1 agent message · Implementer (stage 1) · 4m ago</div>
+    <div class="agent"><div class="avatar">▦</div><div>
+      <div class="name">Coordinator <span>3m ago · update</span></div>
+      <div class="since"><b>Since last update:</b> stage 1 committed 684cd0f1 (work in progress)</div>
+      Stage 1's full suite is at 795 of 1,682 tests with none failed. It's slow because the machine is busy (load about 56), not stuck. I'll start the full review when it reports ready.
+    </div></div>
+  </div>
+</div>
+
+<div class="changes">
+  <h2>How it decides something is a repeat</h2>
+  <ol>
+    <li><b>Wiffletree, not the model, detects repeats.</b> When the coordinator replies to a turn you didn't start, Wiffletree compares the workspace's recorded facts with the moment of its last shown update: ticket states, commits on each ticket branch, review cycles and findings, PRs, questions and stopped agents. If any of them changed, the reply stays full and opens with a <i>Since last update</i> line listing the changes. If none changed, the reply folds as <i>No change</i>.</li>
+    <li><b>Nothing is lost.</b> A folded reply keeps its full text one click away, as agent messages do today. Folding is display only. If the coordinator wrote something important in a no-change turn, it can mark the reply as news so it stays full.</li>
+    <li><b>The ticket table stops repeating.</b> A ticket board pinned at the top of the chat shows each ticket's status and PR from the workspace's records, so it's always current. The coordinator's instructions drop the table from routine updates and keep it for when a ticket is finished, accepted, published or ready for you.</li>
+    <li><b>Always full:</b> your messages, the coordinator's replies to them, failures and blocked reports. Decisions that need you still go to the inbox card.</li>
+  </ol>
+</div>
+</body>
+</html>

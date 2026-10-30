@@ -37,8 +37,17 @@ fn peer_message(message: &Message, session_id: &str) -> bool {
             .is_some_and(|sender| sender != session_id || message.id.starts_with(TIMER_PREFIX))
 }
 
+/// A coordinator's reply that Wiffletree found said nothing its records don't: it folds with
+/// the peer messages around it.
+fn unchanged_reply(message: &Message) -> bool {
+    message.update == Some(ReplyUpdate::Unchanged)
+}
+/// Heads an opened run that holds unchanged replies.
+const UNCHANGED_NOTE: &str = "Wiffletree found no ticket, commit, review, PR, question or agent change since the update above. Each reply is here in full.";
+
 /// Where a message sits in the transcript. Every message keeps its own list row, so the list's
-/// splices stay one row per message; a run of peer messages draws as one row at its head.
+/// splices stay one row per message; a run of peer messages and unchanged replies draws as one
+/// row at its head.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Placement {
     Alone,
@@ -52,7 +61,7 @@ pub(super) fn placements(messages: &[Message], session_id: &str) -> Vec<Placemen
     let mut placements = Vec::with_capacity(messages.len());
     let mut head = None;
     for (row, message) in messages.iter().enumerate() {
-        if !peer_message(message, session_id) {
+        if !peer_message(message, session_id) && !unchanged_reply(message) {
             head = None;
             placements.push(Placement::Alone);
         } else if let Some(head) = head {
@@ -78,17 +87,13 @@ struct PeerLine<'a> {
 
 fn peer_line(message: &Message) -> PeerLine<'_> {
     let kind = MessageKind::of(&message.id, &message.body);
-    let trouble = match kind {
-        MessageKind::Report(ReportKind::Failed) => Some("failed"),
-        MessageKind::Report(ReportKind::Blocked) => Some("blocked"),
-        MessageKind::TurnResult { failed: true } => Some("error"),
-        MessageKind::Notice(notice) => notice.trouble().map(ReportKind::name),
-        _ => None,
-    };
     PeerLine {
-        kind: kind.name(),
+        kind: match unchanged_reply(message) {
+            true => Some("no_change"),
+            false => kind.name(),
+        },
         text: kind.text(&message.body),
-        trouble,
+        trouble: kind.trouble(),
     }
 }
 
@@ -110,25 +115,41 @@ fn run_troubles(run: &[Message]) -> Vec<String> {
         .collect()
 }
 
-/// "2 agent messages, 1 notice · Implementer, Wiffletree", the start of a run's row.
-fn run_heading(agent_messages: usize, notices: usize, senders: &[SharedString]) -> String {
+/// What a run holds: agent messages, Wiffletree's notices and the session's unchanged replies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RunCounts {
+    agent_messages: usize,
+    notices: usize,
+    unchanged_replies: usize,
+}
+
+/// "2 agent messages, 1 notice · Implementer, Wiffletree", the start of a run's row, or with
+/// unchanged replies "4 agent messages, 4 replies, no change · Implementer". `senders` are the
+/// peer messages' senders; the session's own replies are not named.
+fn run_heading(counts: RunCounts, senders: &[SharedString]) -> String {
     let mut names: Vec<&str> = vec![];
     for sender in senders {
         if !names.contains(&sender.as_ref()) {
             names.push(sender);
         }
     }
-    let counts: Vec<String> = [(agent_messages, "agent message"), (notices, "notice")]
-        .into_iter()
-        .filter(|(count, _)| *count > 0)
-        .map(|(count, noun)| counted(count, noun))
-        .collect();
-    format!("{} · {}", counts.join(", "), names.join(", "))
-}
-
-/// Messages without a sender are the human's, apart from Wiffletree's own notices.
-fn from_human(message: &Message) -> bool {
-    message.sender.is_none() && host_notice(&message.id).is_none()
+    let mut parts: Vec<String> = [
+        (counts.agent_messages, "agent message"),
+        (counts.notices, "notice"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, noun)| counted(count, noun))
+    .collect();
+    match counts.unchanged_replies {
+        0 => {}
+        1 => parts.push("1 reply, no change".into()),
+        n => parts.push(format!("{n} replies, no change")),
+    }
+    match names.is_empty() {
+        true => parts.join(", "),
+        false => format!("{} · {}", parts.join(", "), names.join(", ")),
+    }
 }
 
 /// How a row not in a run of peer messages draws. Wiffletree's notices are always in a run.
@@ -174,6 +195,8 @@ pub(super) struct Row {
     first_line: SharedString,
     /// What it says, its file references linked; none when blank.
     body: Option<Linked>,
+    /// On a full reply Wiffletree compared with the last one: what changed since, one line.
+    since: Option<SharedString>,
     /// A run's heading and what went wrong across it, on the run's first row.
     run: Option<(String, Vec<String>)>,
     run_id: SharedString,
@@ -228,7 +251,7 @@ fn prepare(messages: &[Message], senders: &Senders, bridge: &Bridge) -> Vec<Row>
         .map(|(message, &placement)| {
             let kind = MessageKind::of(&message.id, &message.body);
             let own = message.sender.as_deref() == Some(senders.session_id.as_str());
-            let shape = if from_human(message) {
+            let shape = if message.from_human() {
                 Shape::Human
             } else if kind == MessageKind::Compaction {
                 Shape::Compaction
@@ -242,7 +265,7 @@ fn prepare(messages: &[Message], senders: &Senders, bridge: &Bridge) -> Vec<Row>
                 _ if peer => {
                     let tone = match (line.trouble, kind) {
                         (Some(_), _) => Tone::Trouble,
-                        (None, MessageKind::Notice(_)) => Tone::Notice,
+                        (None, MessageKind::Notice(_) | MessageKind::Reply) => Tone::Notice,
                         (None, _) => Tone::Kind,
                     };
                     let pill = line.kind.map(|kind| (humanize(kind).into(), tone));
@@ -275,6 +298,12 @@ fn prepare(messages: &[Message], senders: &Senders, bridge: &Bridge) -> Vec<Row>
                 receipt: message.receipt.label().into(),
                 first_line: first_line(line.text, 160).into(),
                 body: shown.then(|| Linked::new(&message.id, text, senders.bases(message), bridge)),
+                since: match &message.update {
+                    Some(ReplyUpdate::Changed { changes }) if !peer => {
+                        Some(changes.join(" · ").into())
+                    }
+                    _ => None,
+                },
                 run: None,
                 run_id: format!("peer-run-{}", message.id).into(),
                 line_id: format!("peer-line-{}", message.id).into(),
@@ -284,14 +313,21 @@ fn prepare(messages: &[Message], senders: &Senders, bridge: &Bridge) -> Vec<Row>
     for (head, placement) in placements.iter().enumerate() {
         if let Placement::Heads(count) = *placement {
             let run = head..(head + count).min(messages.len());
-            let names: Vec<SharedString> = rows[run.clone()]
-                .iter()
-                .map(|row| row.sender.clone())
+            let in_run = || messages[run.clone()].iter().zip(&rows[run.clone()]);
+            let names: Vec<SharedString> = in_run()
+                .filter(|(message, _)| !unchanged_reply(message))
+                .map(|(_, row)| row.sender.clone())
                 .collect();
-            let notices = (messages[run.clone()].iter())
-                .filter(|m| host_notice(&m.id).is_some())
+            let notices = in_run()
+                .filter(|(m, _)| host_notice(&m.id).is_some())
                 .count();
-            let heading = run_heading(run.len() - notices, notices, &names);
+            let unchanged_replies = in_run().filter(|(m, _)| unchanged_reply(m)).count();
+            let counts = RunCounts {
+                agent_messages: run.len() - notices - unchanged_replies,
+                notices,
+                unchanged_replies,
+            };
+            let heading = run_heading(counts, &names);
             rows[head].run = Some((heading, run_troubles(&messages[run])));
         }
     }
@@ -450,7 +486,31 @@ fn agent_message(message: &Message, row: &Row, own: bool, p: Palette) -> Div {
                         .when(!own, |d| d.child(receipt(message, row, p)))
                         .child(meta(age(message.created_at), p)),
                 )
+                .children(row.since.as_ref().map(|since| since_line(since, p)))
                 .children(row.body.as_ref().map(Linked::view)),
+        )
+}
+
+/// The muted line heading a reply whose project facts changed since the last full one.
+fn since_line(changes: &SharedString, p: Palette) -> Div {
+    div()
+        .pl_2()
+        .border_l_2()
+        .border_color(p.green)
+        .text_size(px(font::DETAIL))
+        .text_color(p.subtle)
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_1()
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(p.green)
+                        .child("Since last update:"),
+                )
+                .child(changes.clone()),
         )
 }
 
@@ -532,6 +592,9 @@ fn peer_run(
                     .flex()
                     .flex_col()
                     .gap(px(3.))
+                    .when(run.iter().any(unchanged_reply), |d| {
+                        d.child(div().child(UNCHANGED_NOTE))
+                    })
                     .children(run.iter().zip(rows).map(|(message, row)| {
                         peer_line_row(message, row, &head, open, p, view.clone())
                     })),
@@ -767,7 +830,7 @@ impl Transcript {
     /// Messages from the human that wait for a stopped project.
     pub(super) fn waiting_messages(&self) -> usize {
         (self.shown.messages.iter())
-            .filter(|m| from_human(m) && m.receipt == Receipt::Queued)
+            .filter(|m| m.from_human() && m.receipt == Receipt::Queued)
             .count()
     }
 
@@ -1397,13 +1460,15 @@ mod tests {
     use super::{
         MessageRevisions, PageAsk,
         Placement::{Alone, Folded, Heads},
-        Senders, Shape, Tone, from_human, peer_line, peer_message, placements, prepare,
-        run_heading, run_troubles, transcript_overlap,
+        RunCounts, Senders, Shape, Tone, peer_line, peer_message, placements, prepare, run_heading,
+        run_troubles, transcript_overlap,
     };
     use crate::shared::Shared;
     use gpui::SharedString;
     use std::{collections::HashMap, rc::Rc, sync::Arc};
-    use workspace_core::{Archive, Message, Receipt, Role, Session, Snapshot, WorkspaceIndex};
+    use workspace_core::{
+        Archive, Message, Receipt, ReplyUpdate, Role, Session, Snapshot, WorkspaceIndex,
+    };
 
     fn message(id: &str, body: &str) -> Message {
         Message {
@@ -1416,18 +1481,19 @@ mod tests {
             receipt: Receipt::Completed,
             created_at: 0,
             attachments: vec![],
+            update: None,
         }
     }
 
     #[test]
     fn host_messages_are_wiffletree_notices_not_the_humans() {
-        assert!(from_human(&message("m1", "Hello")));
-        assert!(from_human(&message("answer:a", "Human answer to Q: yes")));
-        assert!(!from_human(&message("pr:t:merged:141", "PR #141 merged.")));
-        assert!(!from_human(&message("verification:t:1:outcome", "Passed")));
+        assert!(message("m1", "Hello").from_human());
+        assert!(message("answer:a", "Human answer to Q: yes").from_human());
+        assert!(!message("pr:t:merged:141", "PR #141 merged.").from_human());
+        assert!(!message("verification:t:1:outcome", "Passed").from_human());
         let mut reply = message("output:r", "Done");
         reply.sender = Some("agent".into());
-        assert!(!from_human(&reply));
+        assert!(!reply.from_human());
         assert!(peer_message(
             &message("pr:t:merged:141", "PR #141 merged."),
             "s"
@@ -1568,7 +1634,7 @@ mod tests {
         ];
         assert_eq!(placements(&transcript, "me"), [Alone, Heads(1)]);
         assert_eq!(
-            run_heading(1, 0, &[SharedString::from("Coordinator")]),
+            run_heading(counts(1, 0, 0), &[SharedString::from("Coordinator")]),
             "1 agent message · Coordinator"
         );
     }
@@ -1694,12 +1760,12 @@ mod tests {
     fn a_runs_heading_names_each_sender_once() {
         let senders = ["Implementer", "Tester", "Implementer"].map(SharedString::from);
         assert_eq!(
-            run_heading(3, 0, &senders),
+            run_heading(counts(3, 0, 0), &senders),
             "3 agent messages · Implementer, Tester"
         );
         let watcher = ["Wiffletree PR watcher"; 5].map(SharedString::from);
         assert_eq!(
-            run_heading(0, 5, &watcher),
+            run_heading(counts(0, 5, 0), &watcher),
             "5 notices · Wiffletree PR watcher"
         );
         let mixed = [
@@ -1710,9 +1776,100 @@ mod tests {
         ]
         .map(SharedString::from);
         assert_eq!(
-            run_heading(2, 2, &mixed),
+            run_heading(counts(2, 2, 0), &mixed),
             "2 agent messages, 2 notices · Implementer, Wiffletree, Wiffletree PR keeper"
         );
+    }
+
+    fn counts(agent_messages: usize, notices: usize, unchanged_replies: usize) -> RunCounts {
+        RunCounts {
+            agent_messages,
+            notices,
+            unchanged_replies,
+        }
+    }
+    /// The session's own reply, with Wiffletree's comparison.
+    fn reply(id: &str, body: &str, update: Option<ReplyUpdate>) -> Message {
+        let mut reply = from(Some("me"), id, body);
+        reply.update = update;
+        reply
+    }
+
+    #[test]
+    fn unchanged_replies_fold_with_the_check_ins_around_them() {
+        let check_in = |id: &str| {
+            from(
+                Some("impl"),
+                id,
+                "[check-in] Implementer has been in one turn for 30 minutes.",
+            )
+        };
+        let since = Some(ReplyUpdate::Changed {
+            changes: vec!["Stage 1 committed 684cd0f".into()],
+        });
+        let transcript = [
+            from(None, "m1", "Can stage 2 start?"),
+            reply("output:r1", "Yes.", None),
+            check_in("check-in:a"),
+            reply("output:r2", "Letting stage 1 continue.", since.clone()),
+            check_in("check-in:b"),
+            reply("output:r3", "Still testing.", Some(ReplyUpdate::Unchanged)),
+            check_in("check-in:c"),
+            reply(
+                "output:r4",
+                "Still testing, in scope.",
+                Some(ReplyUpdate::Unchanged),
+            ),
+            check_in("check-in:d"),
+            reply("output:r5", "Stage 1 is at 795 tests.", since),
+        ];
+        assert_eq!(
+            placements(&transcript, "me"),
+            [
+                Alone,
+                Alone,
+                Heads(1),
+                Alone,
+                Heads(5),
+                Folded,
+                Folded,
+                Folded,
+                Folded,
+                Alone
+            ]
+        );
+        let line = peer_line(&transcript[5]);
+        assert_eq!(
+            (line.kind, line.text),
+            (Some("no_change"), "Still testing.")
+        );
+        let home = tempfile::tempdir().unwrap();
+        let rows = prepared(&transcript, home.path());
+        let (heading, troubles) = rows[4].run.clone().unwrap();
+        assert_eq!(
+            heading,
+            "3 agent messages, 2 replies, no change · Implementer"
+        );
+        assert!(troubles.is_empty());
+        // Each folded reply's line says No change and opens to the whole reply.
+        let folded = &rows[5];
+        assert_eq!(folded.sender.as_ref(), "Coordinator");
+        let (pill, tone) = folded.pill.clone().unwrap();
+        assert_eq!((pill.as_ref(), tone), ("No change", Tone::Notice));
+        assert_eq!(
+            folded.body.as_ref().unwrap().text().as_ref(),
+            "Still testing."
+        );
+        // A changed reply stays full under what changed; one without a result has no line.
+        assert_eq!(
+            rows[9].since.as_ref().map(|s| s.as_ref()),
+            Some("Stage 1 committed 684cd0f")
+        );
+        assert_eq!(
+            (rows[9].placement, rows[9].shape),
+            (Alone, Shape::Agent { own: true })
+        );
+        assert!(rows[1].since.is_none());
     }
 
     /// A page prepared for session `me`, with the senders' names and `bases` for every link,

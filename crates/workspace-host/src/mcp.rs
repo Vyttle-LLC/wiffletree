@@ -64,8 +64,8 @@ pub fn tools() -> Value {
         ),
         tool(
             "set_plan",
-            "Record your checklist for this turn: the steps you expect, in order, each with its text and whether it is done. Send the whole list every time; it replaces the last one. Call it when you start work and again as items finish or the plan changes. It only shows your progress to the human: it messages no one and never replaces report. At most 50 items of up to 200 characters each.",
-            json!({"items":{"type":"array","maxItems":50,"items":{"type":"object","properties":{"text":{"type":"string","minLength":1,"maxLength":200},"done":{"type":"boolean"}},"required":["text","done"],"additionalProperties":false}}}),
+            "Record your checklist for this turn: the steps you expect, in order, each with its text and whether it is done. Send the whole list every time; it replaces the last one. Call it when you start work and again as items finish or the plan changes. It only shows your progress to the human: it messages no one and never replaces report. At most 50 items of up to 200 characters each. Coordinator: pass news: true when this turn's reply tells the human something Wiffletree's records do not show, so it is never folded as no change.",
+            json!({"items":{"type":"array","maxItems":50,"items":{"type":"object","properties":{"text":{"type":"string","minLength":1,"maxLength":200},"done":{"type":"boolean"}},"required":["text","done"],"additionalProperties":false}},"news":{"type":"boolean"}}),
             vec!["items"]
         ),
         tool(

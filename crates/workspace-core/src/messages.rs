@@ -218,6 +218,17 @@ impl MessageKind {
             _ => body,
         }
     }
+    /// What went wrong, for a message a folded run counts in red: "failed", "blocked" or
+    /// "error".
+    pub fn trouble(self) -> Option<&'static str> {
+        match self {
+            Self::Report(ReportKind::Failed) => Some("failed"),
+            Self::Report(ReportKind::Blocked) => Some("blocked"),
+            Self::TurnResult { failed: true } => Some("error"),
+            Self::Notice(notice) => notice.trouble().map(ReportKind::name),
+            _ => None,
+        }
+    }
     /// A timer fire's label, the rest of its first line.
     pub fn timer_label(self, body: &str) -> Option<&str> {
         let label = body.strip_prefix(TIMER_TAG)?.lines().next()?;

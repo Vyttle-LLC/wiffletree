@@ -64,7 +64,7 @@ pub(super) fn forget_settled(minimized: &mut BTreeSet<String>, open: &[Attention
 /// the composer draws only this one.
 pub(super) struct Conversation {
     bridge: Bridge,
-    shared: Shared,
+    pub(super) shared: Shared,
     inbox: Entity<inbox::Inbox>,
     header: Entity<ConversationHeader>,
     pub(super) transcript: Entity<Transcript>,
@@ -83,6 +83,8 @@ pub(super) struct Conversation {
     drop_checks: DropChecks,
     /// Projects whose decision card is folded to one row. Kept in memory only.
     minimized_decisions: BTreeSet<String>,
+    /// The ticket table's "N done" line is open. Kept in memory only.
+    pub(super) done_tickets_open: bool,
     /// The chat's model menu, rebuilt when the catalog or the snapshot changes.
     chat_models: Rc<BTreeMap<(Provider, String), String>>,
 }
@@ -128,6 +130,7 @@ impl Conversation {
             sending: BTreeSet::new(),
             drop_checks: DropChecks::default(),
             minimized_decisions: BTreeSet::new(),
+            done_tickets_open: false,
             chat_models: Rc::default(),
         }
     }
@@ -1105,6 +1108,7 @@ impl Render for Conversation {
                 v.attach_files(paths.paths().to_vec(), w, c)
             }))
             .child(self.header.clone().cached(conversation_header::style()))
+            .children(self.ticket_table(session, p, cx))
             .child(
                 (self.transcript.clone())
                     .cached(StyleRefinement::default().w_full().flex_1().min_h_0()),

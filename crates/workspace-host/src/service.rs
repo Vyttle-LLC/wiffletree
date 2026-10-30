@@ -306,7 +306,7 @@ pub(crate) fn only_arguments(tool: &str, args: &Value, allowed: &[&str]) -> Resu
 const SET_PLAN_STEP: &str = "set_plan";
 /// A `set_plan` checklist as (done, text) pairs. Input over the bounds is refused, never cut.
 fn plan_items(args: &Value) -> Result<Vec<(bool, String)>> {
-    only_arguments("set_plan", args, &["items"])?;
+    only_arguments("set_plan", args, &["items", "news"])?;
     let items = args["items"].as_array().context("Missing items")?;
     ensure!(
         items.len() <= MAX_PLAN_ITEMS,
@@ -761,6 +761,8 @@ struct Active {
     sorted: Option<keeper::Sorted>,
     /// A quota reading during this turn said its provider's limit is reached.
     limit_reached: bool,
+    /// The coordinator marked this turn's reply as news with `set_plan`, so it never folds.
+    news: bool,
 }
 impl Active {
     fn new(
@@ -787,6 +789,7 @@ impl Active {
             sort: false,
             sorted: None,
             limit_reached: false,
+            news: false,
         }
     }
 }
@@ -2707,7 +2710,19 @@ impl Actor {
                     let answer = (!failed).then_some(active.output.as_str());
                     self.host.keeper_sorted(sorted, answer)?;
                 } else if !failed && !active.sort {
-                    self.host.append_output(&session, run, &active.output)?;
+                    // A comparison that fails shows the reply in full rather than losing it.
+                    let update = match session.role == Role::ProjectOrchestrator
+                        && !active.output.trim().is_empty()
+                    {
+                        true => (self.host)
+                            .reply_update(&session, &active.messages, active.news)
+                            .unwrap_or_else(|e| {
+                                eprintln!("Workspace reply update: {e:#}");
+                                None
+                            }),
+                        false => None,
+                    };
+                    (self.host).append_reply(&session, run, &active.output, update.as_ref())?;
                 }
                 // A failure on the provider's usage limit is retried by itself at the reset. Only
                 // the provider's own failure counts: a stop or a quit keeps its manual Retry.
@@ -3102,7 +3117,13 @@ impl Actor {
     /// It writes that step and nothing else: no message, no status, no state signal.
     fn set_plan(&mut self, caller: &str, args: &Value) -> Result<Value> {
         let items = plan_items(args)?;
-        let active = self.active.get(caller).context("No active turn")?;
+        let news = match args.get("news") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(news)) => *news,
+            Some(_) => bail!("news must be true or false"),
+        };
+        let active = self.active.get_mut(caller).context("No active turn")?;
+        active.news |= news;
         ensure!(
             active.steps.len() < MAX_RUN_STEPS
                 || active.steps.iter().any(|s| s.id == SET_PLAN_STEP),
@@ -9486,6 +9507,30 @@ mod tests {
             crew.set_plan(full),
             Ok(json!({"done":0,"total":MAX_PLAN_ITEMS}))
         );
+    }
+
+    #[test]
+    fn set_plan_marks_the_turns_reply_as_news() {
+        fn plan(crew: &mut Crew, args: Value) -> std::result::Result<Value, String> {
+            let (reply, result) = async_channel::bounded(1);
+            crew.handle(Event::Tool {
+                token: String::new(),
+                name: "set_plan".into(),
+                args,
+                reply,
+            });
+            result.try_recv().unwrap()
+        }
+        let mut crew = Crew::new();
+        let items = json!([{"text":"Check","done":false}]);
+        let refused = plan(&mut crew, json!({"items":items,"news":"yes"})).unwrap_err();
+        assert!(refused.contains("news must be true or false"), "{refused}");
+        assert!(plan(&mut crew, json!({"items":items,"news":false})).is_ok());
+        assert!(!crew.actor.active[&crew.implementer.id].news);
+        assert!(plan(&mut crew, json!({"items":items,"news":true})).is_ok());
+        // A later checklist without the mark keeps it.
+        assert!(plan(&mut crew, json!({"items":items})).is_ok());
+        assert!(crew.actor.active[&crew.implementer.id].news);
     }
 
     #[test]

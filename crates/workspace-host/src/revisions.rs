@@ -114,8 +114,8 @@ fn messages(db: &Connection) -> Result<()> {
            ON CONFLICT(session_id) DO UPDATE SET revision=revision+1;
          END;
          CREATE TEMP TRIGGER IF NOT EXISTS revision_message_update AFTER UPDATE ON main.messages
-         WHEN (OLD.sequence,OLD.id,OLD.project_id,OLD.sender,OLD.recipient,OLD.body,OLD.receipt,OLD.created_at,OLD.attachments)
-           IS NOT (NEW.sequence,NEW.id,NEW.project_id,NEW.sender,NEW.recipient,NEW.body,NEW.receipt,NEW.created_at,NEW.attachments) BEGIN
+         WHEN (OLD.sequence,OLD.id,OLD.project_id,OLD.sender,OLD.recipient,OLD.body,OLD.receipt,OLD.created_at,OLD.attachments,OLD.reply_update)
+           IS NOT (NEW.sequence,NEW.id,NEW.project_id,NEW.sender,NEW.recipient,NEW.body,NEW.receipt,NEW.created_at,NEW.attachments,NEW.reply_update) BEGIN
            INSERT INTO message_revisions VALUES (OLD.recipient,1)
            ON CONFLICT(session_id) DO UPDATE SET revision=revision+1;
            INSERT INTO message_revisions SELECT NEW.recipient,1 WHERE NEW.recipient!=OLD.recipient
