@@ -30,6 +30,15 @@ pub(crate) fn holds(clone: &Path, repository: &SettingsRepository) -> bool {
         })
 }
 
+/// Sets the clone's `origin` to GitHub's URL for `owner/name`, even when the repository was
+/// renamed since the URL it was cloned from, so `holds` knows it. Sync names its URL on every
+/// command and never fetches or pushes through `origin`.
+pub(crate) fn name_origin(clone: &Path, name: &str) -> Result<()> {
+    let origin = format!("https://github.com/{name}.git");
+    runtime::git_output(clone, &["remote", "set-url", "origin", &origin])?;
+    Ok(())
+}
+
 /// The URL `origin` fetches, as the clone's `.git/config` holds it.
 fn origin(clone: &Path) -> Option<String> {
     let config = fs::read_to_string(clone.join(".git/config")).ok()?;

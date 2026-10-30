@@ -80,10 +80,7 @@ fn read(home: &Path, input: &str, tools: &Tools) -> Result<(SettingsRepositoryCh
     }
     clone.extend([repository.push_url.as_str(), into]);
     run_at(&tools.git, home, &repository.push_url, &clone)?;
-    // The clone's `origin` names its repository as GitHub does, even when renamed since the URL
-    // tried, so `repos::holds` knows it. Sync names its URL on every command, never `origin`.
-    let origin = format!("https://github.com/{}.git", repository.name);
-    runtime::git_output(staging.path(), &["remote", "set-url", "origin", &origin])?;
+    repos::name_origin(staging.path(), &repository.name)?;
     if head.is_none() {
         let branch = format!("refs/heads/{}", repository.branch);
         run(
@@ -1011,6 +1008,10 @@ impl Host {
         fs::create_dir_all(self.home.join(repos::FOLDER))?;
         fs::rename(&from, &to)?;
         eprintln!("Moved the settings repository's clone to {}", to.display());
+        // An older release may have left a former name GitHub redirects as `origin`.
+        if repos::holds(&to, &repository) {
+            repos::name_origin(&to, &repository.name)?;
+        }
         Ok(())
     }
     /// The pass sync runs next, or `None` while no settings repository is chosen.
@@ -4070,6 +4071,8 @@ pub(crate) mod tests {
         assert_eq!(host.shared_folder(), clone.canonicalize().unwrap());
         assert!(!home.path().join(shared::FOLDER).exists());
         assert_eq!(values(&host), before);
+        let origin = git(&clone, &["remote", "get-url", "origin"]);
+        assert_eq!(origin.trim(), URL);
     }
 
     #[test]
