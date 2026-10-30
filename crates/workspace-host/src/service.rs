@@ -5164,7 +5164,7 @@ mod tests {
             .sessions()
             .unwrap()
             .into_iter()
-            .find(|s| s.project_id == billing.id)
+            .find(|s| s.project_id == billing.project.id)
             .unwrap()
             .id;
         let question = host

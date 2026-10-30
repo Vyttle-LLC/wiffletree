@@ -347,6 +347,31 @@ pub struct ProjectCreator {
     pub project_id: String,
     pub session_id: String,
 }
+/// What a coordinator's `create_project` answers: the new project and the repositories of its
+/// Space it went without, because they are not cloned on this Mac.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatedProject {
+    #[serde(flatten)]
+    pub project: Project,
+    /// As `owner/name`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_on_this_mac: Vec<String>,
+}
+impl Repository {
+    /// Its GitHub name, `owner/name`: where GitHub says it is, or else what `origin` names.
+    pub fn github_identity(&self) -> Option<String> {
+        let github = self.github.as_ref()?;
+        Some(match &github.facts {
+            Some(facts) => facts.name_with_owner.clone(),
+            None => format!("{}/{}", github.owner, github.name),
+        })
+    }
+    /// Whether it is the GitHub repository `identity` names, ignoring case as GitHub does.
+    pub fn is_github(&self, identity: &str) -> bool {
+        self.github_identity()
+            .is_some_and(|own| own.eq_ignore_ascii_case(identity))
+    }
+}
 impl Project {
     pub fn uses(&self, repository_id: &str) -> bool {
         self.repositories
@@ -2929,6 +2954,30 @@ pub enum Command {
         project_id: String,
         space_id: SpaceId,
     },
+    /// The Space New project starts in, `space_id` or else the one last used for a new project,
+    /// with its repositories on this Mac; answered with `SpaceRepositories`.
+    NewProjectDefaults {
+        #[serde(default)]
+        space_id: Option<SpaceId>,
+    },
+    /// Puts the repository named `owner/name` in exactly `space_ids`, editing each Space's list
+    /// of repositories; none puts it under No Space.
+    SetRepositorySpaces {
+        repository: String,
+        space_ids: Vec<SpaceId>,
+    },
+    /// The Space to suggest for a repository being added, from its GitHub owner; answered with
+    /// an `Option<SpaceId>`, where `None` suggests No Space.
+    SuggestRepositorySpace {
+        repository: String,
+    },
+    /// The upgrade's suggested Spaces for the repositories it found, until the human confirms
+    /// them; answered with `Vec<RepositorySuggestion>`.
+    RepositorySuggestions,
+    /// Applies the human's choices for the upgrade's suggestions and stops offering them.
+    ConfirmRepositorySuggestions {
+        choices: Vec<RepositorySpaces>,
+    },
     ExportLogs {
         project_id: String,
     },
@@ -3228,6 +3277,9 @@ impl Command {
             | Self::ReadFile { .. }
             | Self::ListFolder { .. }
             | Self::CoreInstructions
+            | Self::NewProjectDefaults { .. }
+            | Self::SuggestRepositorySpace { .. }
+            | Self::RepositorySuggestions
             | Self::RemoteAccess => true,
             Self::ImportRepositories { .. }
             | Self::RefreshRepositories
@@ -3261,6 +3313,8 @@ impl Command {
             | Self::UpdateSpace { .. }
             | Self::RemoveSpace { .. }
             | Self::MoveProjectToSpace { .. }
+            | Self::SetRepositorySpaces { .. }
+            | Self::ConfirmRepositorySuggestions { .. }
             | Self::ExportLogs { .. }
             | Self::SetWorkspacesDir { .. }
             | Self::SetVerification { .. }
@@ -3300,8 +3354,8 @@ impl Command {
     /// credential. They send a message as the human, answer the Inbox, which also approves a
     /// publish, or grant publish or push authority without it: owners whose PRs open without
     /// asking, the PR keeper's rebases and pushes, and a settings repository the host pushes to.
-    /// Spaces are the human's: creating, editing or removing one, setting its brain and moving a
-    /// project into one. Remote access is the human's too: its state carries the pairing code.
+    /// Spaces are the human's: creating, editing or removing one, setting its brain, moving a
+    /// project into one and choosing which repositories it lists. Remote access is the human's too: its state carries the pairing code.
     pub fn is_human_only(&self) -> bool {
         matches!(
             self,
@@ -3316,6 +3370,8 @@ impl Command {
                 | Self::UpdateSpace { .. }
                 | Self::RemoveSpace { .. }
                 | Self::MoveProjectToSpace { .. }
+                | Self::SetRepositorySpaces { .. }
+                | Self::ConfirmRepositorySuggestions { .. }
                 | Self::AttachBrain { .. }
                 | Self::RemoteAccess
                 | Self::SetRemoteAccess { .. }

@@ -555,16 +555,16 @@ impl Host {
         Ok(self.insert_project(name, space, None)?.0)
     }
     /// A coordinator's `create_project`: the new project joins the creator's Space, takes
-    /// `repositories` as its selection, or every workspace repository, and starts at once on
-    /// `brief`, which its coordinator receives as the creating coordinator's words. All of it
-    /// happens, or none of it.
+    /// `repositories` as its selection, or else that Space's repositories on this Mac, and starts
+    /// at once on `brief`, which its coordinator receives as the creating coordinator's words.
+    /// All of it happens, or none of it.
     pub fn create_project_from(
         &mut self,
         creator: &str,
         name: &str,
         brief: &str,
         repositories: Option<Vec<String>>,
-    ) -> Result<Project> {
+    ) -> Result<CreatedProject> {
         let creator = self.session(creator)?;
         ensure!(
             creator.role == Role::ProjectOrchestrator,
@@ -588,7 +588,7 @@ impl Host {
         );
         let body = header + brief;
         self.atomically(|host| {
-            let (mut project, coordinator) = host.insert_project(
+            let (project, coordinator) = host.insert_project(
                 name,
                 &from.space,
                 Some(ProjectCreator {
@@ -596,9 +596,14 @@ impl Host {
                     session_id: creator.id.clone(),
                 }),
             )?;
-            if repositories.is_some() {
-                project = host.set_project_repositories(&project.id, repositories)?;
-            }
+            let (repositories, not_on_this_mac) = match repositories {
+                Some(ids) => (ids, vec![]),
+                None => {
+                    let space = host.space_repositories(&from.space)?;
+                    (space.repository_ids, space.not_cloned)
+                }
+            };
+            let project = host.set_project_repositories(&project.id, Some(repositories))?;
             host.send(
                 &format!("{PROJECT_BRIEF_PREFIX}{}", project.id),
                 None,
@@ -606,7 +611,10 @@ impl Host {
                 &body,
             )?;
             host.set_live(&project.id, true)?;
-            Ok(project)
+            Ok(CreatedProject {
+                project,
+                not_on_this_mac,
+            })
         })
     }
     /// Records, once, that the human's own words reached `session`: called only where they
@@ -1695,6 +1703,26 @@ impl Host {
                 project_id,
                 space_id,
             } => serde_json::to_value(self.move_project_to_space(&project_id, &space_id)?)?,
+            Command::NewProjectDefaults { space_id } => {
+                serde_json::to_value(self.new_project_defaults(space_id)?)?
+            }
+            Command::SetRepositorySpaces {
+                repository,
+                space_ids,
+            } => {
+                self.set_repository_spaces(&repository, &space_ids)?;
+                json!({"set":true})
+            }
+            Command::SuggestRepositorySpace { repository } => {
+                serde_json::to_value(self.suggest_repository_space(&repository)?)?
+            }
+            Command::RepositorySuggestions => {
+                serde_json::to_value(self.repository_suggestions(&publish::Tools::default())?)?
+            }
+            Command::ConfirmRepositorySuggestions { choices } => {
+                self.confirm_repository_suggestions(&choices)?;
+                json!({"confirmed":true})
+            }
             Command::ExportLogs { project_id } => {
                 serde_json::to_value(self.export_logs(&project_id)?)?
             }

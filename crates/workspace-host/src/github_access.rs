@@ -70,7 +70,7 @@ pub(crate) fn run_at(git: &GitTool, path: &Path, url: &str, args: &[&str]) -> Re
     run(git, path, &[gh_login(url), args].concat())
 }
 
-fn gh_json(tools: &Tools, home: &Path, endpoint: &str) -> Result<Value> {
+pub(crate) fn gh_json(tools: &Tools, home: &Path, endpoint: &str) -> Result<Value> {
     let args = ["api", "--hostname", repositories::GITHUB_HOST, endpoint];
     let answer = (tools.gh)(home, &args)?;
     ensure!(

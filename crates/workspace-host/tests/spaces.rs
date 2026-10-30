@@ -1,6 +1,8 @@
 //! Spaces (store schema 9): the upgrade from projects' brain folders, exports through a
-//! project's Space, Space commands and session owners.
+//! project's Space, Space commands, session owners, New project's defaults and the Spaces a
+//! repository is in.
 use rusqlite::{Connection, params};
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use workspace_core::*;
 use workspace_host::Host;
@@ -29,7 +31,8 @@ fn log(session: &str, milestone: &str) -> LogInput {
 fn before_spaces(home: &Path, brains: &[(&str, Option<&str>)]) {
     let db = Connection::open(home.join("workspace.sqlite3")).unwrap();
     db.execute_batch(
-        "DROP TABLE spaces; DROP TABLE trackers; ALTER TABLE work_logs DROP COLUMN space_id;
+        "DROP TABLE spaces; DROP TABLE trackers; DROP TABLE repository_suggestions;
+         ALTER TABLE work_logs DROP COLUMN space_id;
          PRAGMA user_version = 8;",
     )
     .unwrap();
@@ -423,7 +426,7 @@ fn projects_go_to_the_space_last_used_or_their_creators() {
     let created = host
         .create_project_from(&coordinator.id, "Billing", "Move invoices.", None)
         .unwrap();
-    assert_eq!(created.space, vyttle.id);
+    assert_eq!(created.project.space, vyttle.id);
     assert!(
         host.create_project_in("Nowhere", &SpaceId("missing".into()))
             .is_err()
@@ -540,4 +543,219 @@ fn a_worker_owned_by_a_space_or_a_brain_is_refused_and_nothing_is_stored() {
         host.session_owner(&owned.id).unwrap(),
         SessionOwner::Project(project.id)
     );
+}
+
+/// A workspace repository whose `origin` is the GitHub repository `identity`, written beside
+/// the host as its GitHub read would leave it.
+fn on_github(home: &Path, identity: &str) -> String {
+    let (owner, name) = identity.split_once('/').unwrap();
+    let id = format!("repo-{name}");
+    let repository = json!({"id": id, "name": name, "path": format!("/dev/{identity}"),
+        "base": "origin/main", "github": {"owner": owner, "name": name}});
+    let db = Connection::open(home.join("workspace.sqlite3")).unwrap();
+    db.execute(
+        "INSERT INTO repositories VALUES (?1,?2,?3)",
+        params![id, repository["path"].as_str(), repository.to_string()],
+    )
+    .unwrap();
+    id
+}
+
+/// `space` listing `repositories`, saved as the human's Space page saves it.
+fn listing(host: &mut Host, space: &SpaceId, repositories: &[&str]) {
+    let mut definition = host.space(space).unwrap().space;
+    definition.repositories = repositories.iter().map(|r| r.to_string()).collect();
+    host.update_space(definition).unwrap();
+}
+
+#[test]
+fn new_project_starts_in_the_space_last_used_with_its_repositories_here() {
+    let home = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(home.path()).unwrap();
+    let personal = host.default_space().unwrap();
+    let sage = host.create_space("Sage", "", "", None).unwrap().space.id;
+    let mobile = on_github(home.path(), "Sage-Social/mobile-app");
+    let watch = on_github(home.path(), "Sage-Social/watch-app");
+    let dotfiles = on_github(home.path(), "MHohlios/dotfiles");
+    listing(
+        &mut host,
+        &sage,
+        &[
+            "Sage-Social/api",
+            "sage-social/WATCH-APP",
+            "Sage-Social/mobile-app",
+        ],
+    );
+    listing(&mut host, &personal, &["MHohlios/dotfiles"]);
+    host.create_project_in("Calls", &sage).unwrap();
+
+    let defaults = host.new_project_defaults(None).unwrap();
+    assert_eq!(
+        defaults,
+        SpaceRepositories {
+            space_id: sage.clone(),
+            // In workspace order, matched ignoring case; no personal repository.
+            repository_ids: vec![mobile, watch],
+            not_cloned: vec!["Sage-Social/api".into()],
+        }
+    );
+    // Switching the Space replaces them with the new Space's.
+    let switched = host.new_project_defaults(Some(personal.clone())).unwrap();
+    assert_eq!(switched.space_id, personal);
+    assert_eq!(switched.repository_ids, [dotfiles]);
+    assert!(switched.not_cloned.is_empty());
+    // Asking is a read: the Space last used stays Sage.
+    assert_eq!(host.default_space().unwrap(), sage);
+    let answered = host
+        .execute(Command::NewProjectDefaults { space_id: None })
+        .unwrap();
+    assert_eq!(answered["space_id"], sage.as_str());
+}
+
+#[test]
+fn a_repository_may_be_in_several_spaces_or_none() {
+    let home = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(home.path()).unwrap();
+    let personal = host.default_space().unwrap();
+    let sage = host.create_space("Sage", "", "", None).unwrap().space.id;
+    let watch = host
+        .create_space("Sage Watch", "", "", None)
+        .unwrap()
+        .space
+        .id;
+    let api = on_github(home.path(), "Sage-Social/api");
+    let repository = host.repository(&api).unwrap();
+    listing(&mut host, &sage, &["Sage-Social/mobile-app"]);
+    let listed = |host: &Host| -> Vec<Vec<String>> {
+        (host.spaces().unwrap().into_iter())
+            .map(|r| r.space.repositories)
+            .collect()
+    };
+
+    host.execute(Command::SetRepositorySpaces {
+        repository: "Sage-Social/api".into(),
+        space_ids: vec![sage.clone(), watch.clone()],
+    })
+    .unwrap();
+    assert_eq!(
+        listed(&host),
+        [
+            vec![],
+            vec!["Sage-Social/mobile-app".into(), "Sage-Social/api".into()],
+            vec!["Sage-Social/api".to_string()],
+        ]
+    );
+    assert_eq!(
+        host.new_project_defaults(Some(watch.clone()))
+            .unwrap()
+            .repository_ids,
+        std::slice::from_ref(&api)
+    );
+
+    // Removing the Sage chip leaves Sage Watch's and every other entry as they were.
+    host.set_repository_spaces("sage-social/API", std::slice::from_ref(&watch))
+        .unwrap();
+    assert_eq!(
+        listed(&host),
+        [
+            vec![],
+            vec!["Sage-Social/mobile-app".to_string()],
+            vec!["Sage-Social/api".to_string()],
+        ]
+    );
+
+    // No Space.
+    host.set_repository_spaces("Sage-Social/api", &[]).unwrap();
+    assert_eq!(
+        listed(&host),
+        [vec![], vec!["Sage-Social/mobile-app".to_string()], vec![]]
+    );
+    // The workspace repository's own record is unchanged.
+    assert_eq!(host.repository(&api).unwrap(), repository);
+
+    // A refusal changes no Space.
+    for (repository, spaces) in [
+        ("not an identity", vec![personal.clone()]),
+        (
+            "Sage-Social/api",
+            vec![sage.clone(), SpaceId("missing".into())],
+        ),
+    ] {
+        assert!(host.set_repository_spaces(repository, &spaces).is_err());
+    }
+    assert_eq!(
+        listed(&host),
+        [vec![], vec!["Sage-Social/mobile-app".to_string()], vec![]]
+    );
+}
+
+#[test]
+fn adding_a_repository_suggests_a_space_by_its_owner() {
+    let home = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(home.path()).unwrap();
+    let sage = host.create_space("Sage", "", "", None).unwrap().space.id;
+    let vyttle = host.create_space("Vyttle", "", "", None).unwrap().space.id;
+    listing(
+        &mut host,
+        &sage,
+        &["Sage-Social/mobile-app", "Sage-Social/api"],
+    );
+    listing(
+        &mut host,
+        &vyttle,
+        &["Vyttle-LLC/site", "sage-social/shared"],
+    );
+    let before = host.spaces().unwrap();
+    let suggest = |host: &mut Host, repository: &str| {
+        serde_json::from_value::<Option<SpaceId>>(
+            host.execute(Command::SuggestRepositorySpace {
+                repository: repository.into(),
+            })
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    // Sage lists the most Sage-Social repositories.
+    assert_eq!(suggest(&mut host, "Sage-Social/watch-app"), Some(sage));
+    assert_eq!(suggest(&mut host, "Vyttle-LLC/app"), Some(vyttle));
+    assert_eq!(suggest(&mut host, "octo/scratch"), None, "No Space");
+    // The owner only suggests: nothing joins a Space.
+    assert_eq!(host.spaces().unwrap(), before);
+}
+
+#[test]
+fn the_upgrade_holds_suggestions_for_the_repositories_it_found() {
+    let home = tempfile::tempdir().unwrap();
+    let project = {
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        host.create_project("Calls").unwrap().id
+    };
+    let api = on_github(home.path(), "Sage-Social/api");
+    before_spaces(home.path(), &[(&project, None)]);
+    let found = |home: &Path| -> Vec<String> {
+        let db = Connection::open(home.join("workspace.sqlite3")).unwrap();
+        (db.prepare("SELECT repository_id FROM repository_suggestions")
+            .unwrap())
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+    };
+
+    let mut host = Host::open_set_up(home.path()).unwrap();
+    assert_eq!(found(home.path()), [api]);
+    assert!(
+        (host.spaces().unwrap().iter()).all(|r| r.space.repositories.is_empty()),
+        "no Space lists a repository before the human confirms"
+    );
+    host.execute(Command::ConfirmRepositorySuggestions { choices: vec![] })
+        .unwrap();
+    assert!(found(home.path()).is_empty());
+    drop(host);
+    // A later start suggests nothing again, and a fresh store has nothing to suggest.
+    Host::open_set_up(home.path()).unwrap();
+    assert!(found(home.path()).is_empty());
+    let fresh = tempfile::tempdir().unwrap();
+    Host::open_set_up(fresh.path()).unwrap();
+    assert!(found(fresh.path()).is_empty());
 }
