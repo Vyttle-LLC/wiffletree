@@ -2945,11 +2945,6 @@ pub enum Command {
         before: Option<i64>,
         limit: usize,
     },
-    /// Sets the brain of the project's Space to a local folder.
-    AttachBrain {
-        project_id: String,
-        path: String,
-    },
     /// Creates a Space with local storage and a local tracker, or, with `storage`, stored in
     /// that private GitHub repository (`owner/name` or its URL), whose tracker it shares; without
     /// `prefix`, a new tracker gets the one proposed from the Space's name.
@@ -3407,7 +3402,6 @@ impl Command {
             | Self::ResolveAttention { .. }
             | Self::DismissAttention { .. }
             | Self::AppendLog { .. }
-            | Self::AttachBrain { .. }
             | Self::SetSpaceBrain { .. }
             | Self::CreateSpace { .. }
             | Self::UpdateSpace { .. }
@@ -3485,7 +3479,6 @@ impl Command {
                 | Self::JoinSpaces { .. }
                 | Self::SetTrackerPrefix { .. }
                 | Self::SetUpIssues { .. }
-                | Self::AttachBrain { .. }
                 | Self::SetSpaceBrain { .. }
                 | Self::SpaceStorage { .. }
                 | Self::ConfirmBrain { .. }

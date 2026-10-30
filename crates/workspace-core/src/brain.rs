@@ -224,6 +224,9 @@ pub enum BrainProblem {
     AutoMergeRefused,
     /// `main` does not require these gate checks, so the host does not turn on auto-merge.
     GateNotRequired { missing: Vec<String> },
+    /// A Set up pull request: `CODEOWNERS` covers its files, so it waits for the code owner's
+    /// review instead of auto-merging.
+    AwaitingReview,
     /// Something other than the host changed the batch's worktree, so it is not pushed.
     ChangedOutside,
     /// Git or `gh` failed on this batch, with its reason; the brain's other batches went on.
@@ -296,4 +299,7 @@ pub const GATE_RULES: [&str; 10] = [
 pub struct BrainsPage {
     pub brains: Vec<Brain>,
     pub batches: Vec<BrainBatch>,
+    /// This host as a compiler, which the page offers as the one to compile on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub this_host: Option<BrainCompiler>,
 }

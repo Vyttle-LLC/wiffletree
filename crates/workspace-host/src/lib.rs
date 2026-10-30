@@ -1717,10 +1717,6 @@ impl Host {
                 before,
                 limit,
             } => serde_json::to_value(self.logs(&project_id, before, limit)?)?,
-            Command::AttachBrain { project_id, path } => {
-                self.attach_brain(&project_id, &path)?;
-                json!({"saved":true})
-            }
             Command::CreateSpace {
                 name,
                 description,

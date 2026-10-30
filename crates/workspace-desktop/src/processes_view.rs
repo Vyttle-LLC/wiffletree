@@ -511,6 +511,7 @@ mod tests {
             Page::Usage,
             Page::Repositories,
             Page::Spaces,
+            Page::Brains,
         ] {
             assert_eq!(reading(Some(Panel::Processes), page, Some("tester")), None);
         }

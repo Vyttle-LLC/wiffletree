@@ -25,10 +25,10 @@ Depends on `spaces`, which names each Space's brain and provides `github_access.
 
 ## 5. Desktop
 
-- [ ] 5.1 Add Brains to the sidebar's Workspace section. The Brains page shows the brain cards with the Spaces that name each, and the PR gate list with checks per batch, following `design/mockups/current/brains.html` minus its superseded repository mapping. It offers Sync now, Set up, the compiler change, the grant confirmation and links to each Space's settings. Show the warnings for auto-merge, required checks and the legacy pointer.
-- [ ] 5.2 Remove the attach-brain control from `memory_view.rs`. The Memory panel shows "No brain" with a link to the Brains page; its full summary arrives in `brain-browser`.
+- [x] 5.1 Add Brains to the sidebar's Workspace section. The Brains page shows the brain cards with the Spaces that name each, and the PR gate list with checks per batch, following `design/mockups/current/brains.html` minus its superseded repository mapping. It offers Sync now, Set up, the compiler change, the grant confirmation and links to each Space's settings. Show the warnings for auto-merge, required checks and the legacy pointer.
+- [x] 5.2 Remove the attach-brain control from `memory_view.rs`. The Memory panel shows "No brain" with a link to the Brains page; its full summary arrives in `brain-browser`.
 
 ## 6. Docs and checks
 
-- [ ] 6.1 `docs/PRD.md` already describes this change (this proposal's PR). Check it still matches the implementation and update it if not.
-- [ ] 6.2 Run the new `brains` tests and the `memory` and migration tests, then the full suite once before ready_for_testing.
+- [x] 6.1 `docs/PRD.md` already describes this change (this proposal's PR). Check it still matches the implementation and update it if not.
+- [x] 6.2 Run the new `brains` tests and the `memory` and migration tests, then the full suite once before ready_for_testing.

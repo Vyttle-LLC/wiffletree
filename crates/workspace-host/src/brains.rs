@@ -1,8 +1,9 @@
 //! Brains (OpenSpec change `brain-registry-sync`): the registry of the brains this Mac's Spaces
 //! name, each brain's `wiffletree-brain.json`, the host's own checkout, and the batches that reach
-//! `main` only through a pull request set to auto-merge. A pass runs off the host thread. Its only
-//! writes to GitHub are pushes of `wiffletree/brain/` branches, never forced, and `gh pr create`,
-//! `gh pr merge --auto --squash` and `gh pr close`; everything it watches it reads with GETs.
+//! `main` only through a pull request set to auto-merge, or, for Set up, merged by the code owner
+//! after their review. A pass runs off the host thread. Its only writes to GitHub are pushes of
+//! `wiffletree/brain/` branches, never forced, and `gh pr create`, `gh pr merge --auto --squash`
+//! and `gh pr close`; everything it watches it reads with GETs.
 //! Nothing here stores or logs a brain file's content or a check's output text.
 use crate::*;
 use github_access::{gh_json, remote_head, run, run_at};
@@ -11,11 +12,11 @@ use std::collections::BTreeMap;
 
 const SCHEMA: &str = include_str!("brains.sql");
 /// The file in the checkout's `.git` that tells the legacy safety-net to keep away.
-pub(crate) const MARKER: &str = "wiffletree-managed";
+const MARKER: &str = "wiffletree-managed";
 /// Where each batch's worktree of its brain's checkout lives, under the data folder.
 const BATCHES: &str = "brain-batches";
 /// Every branch the host pushes to a brain is under this.
-pub(crate) const BRANCH_PREFIX: &str = "wiffletree/brain/";
+const BRANCH_PREFIX: &str = "wiffletree/brain/";
 const MAIN: &str = "main";
 /// The legacy pointer, under the human's home folder: the path of one brain per machine.
 pub(crate) const LEGACY_POINTER: &str = ".config/claude-second-brain";
@@ -45,13 +46,13 @@ const SHOWN_AFTER_MERGE_MS: i64 = 86_400_000;
 
 /// A gate release that Set up pins the caller to: its tag and commit.
 #[derive(Clone, Copy)]
-pub(crate) struct GateRelease {
-    pub(crate) tag: &'static str,
-    pub(crate) commit: &'static str,
+struct GateRelease {
+    tag: &'static str,
+    commit: &'static str,
 }
 /// The release Set up pins: the tag `brain-gate-v1.0.0` points at this commit, the merge of #175
 /// that moved the gate into Wiffletree (`brain-gate` task 5.1).
-pub(crate) const GATE_RELEASE: GateRelease = GateRelease {
+const GATE_RELEASE: GateRelease = GateRelease {
     tag: "brain-gate-v1.0.0",
     commit: "083ab25267aa260569ab61106ff8fdff5bb2ba0e",
 };
@@ -122,13 +123,7 @@ fn offline(error: &str) -> bool {
 /// Pushes `commit` to the batch branch `branch` at `url`, with no tags or submodules and never
 /// forced: only a branch under `wiffletree/brain/`, and only a commit that contains the branch's
 /// head on GitHub. The only way the host pushes to a brain.
-pub(crate) fn push_branch(
-    git: &GitTool,
-    dir: &Path,
-    url: &str,
-    commit: &str,
-    branch: &str,
-) -> Result<()> {
+fn push_branch(git: &GitTool, dir: &Path, url: &str, commit: &str, branch: &str) -> Result<()> {
     ensure!(
         branch.starts_with(BRANCH_PREFIX) && !branch.contains("..") && !branch.contains(':'),
         "The host pushes only its own batch branches to a brain"
@@ -165,7 +160,7 @@ fn delete_branch(git: &GitTool, dir: &Path, url: &str, branch: &str) -> Result<(
 }
 
 /// What the host read of `wiffletree-brain.json` at `commit`, which is always `main`'s head.
-pub(crate) fn read_config(checkout: &Path, commit: &str) -> Result<BrainConfigReading> {
+fn read_config(checkout: &Path, commit: &str) -> Result<BrainConfigReading> {
     let listed = runtime::git_output(
         checkout,
         &["ls-tree", "--name-only", commit, "--", BrainConfig::FILE],
@@ -180,7 +175,7 @@ pub(crate) fn read_config(checkout: &Path, commit: &str) -> Result<BrainConfigRe
 
 /// Validates the file's JSON, version and brain folder. Its reasons name a place in the file,
 /// never a value from it.
-pub(crate) fn parse_config(bytes: &[u8]) -> BrainConfigReading {
+fn parse_config(bytes: &[u8]) -> BrainConfigReading {
     let invalid = |reason: String| BrainConfigReading::Invalid { reason };
     let value: Value = match serde_json::from_slice(bytes) {
         Ok(value) => value,
@@ -251,7 +246,7 @@ pub(crate) struct Pass {
 }
 
 /// A batch the pass may push, open, watch or discard.
-pub(crate) struct Work {
+struct Work {
     batch: BrainBatch,
     worktree: PathBuf,
     /// The commit GitHub has on the batch branch from this host.
@@ -452,7 +447,8 @@ fn clone(home: &Path, checkout: &Path, url: &str, repository: &str, git: &GitToo
 /// Pushes the batch's commits, opens its PR and turns on auto-merge, each when not done yet.
 /// `false` when the batch's worktree changed outside Wiffletree or GitHub refused the push, so
 /// the batch failed and has nothing new to watch. Auto-merge waits while `missing` names a gate
-/// check `main` does not require.
+/// check `main` does not require, and is never turned on for Set up, which waits for the code
+/// owner's review.
 fn publish_batch(
     (home, repository, url): (&Path, &str, &str),
     work: &mut Work,
@@ -505,7 +501,9 @@ fn publish_batch(
         }
     };
     let waiting = batch.pull_request.as_ref().is_some_and(|pr| !pr.auto_merge);
-    if waiting && !missing.is_empty() {
+    if batch.kind == BrainBatchKind::SetUp {
+        batch.problem = Some(BrainProblem::AwaitingReview);
+    } else if waiting && !missing.is_empty() {
         batch.problem = Some(BrainProblem::GateNotRequired {
             missing: missing.to_vec(),
         });
@@ -571,8 +569,12 @@ fn open_pull_request(
     let files: String = (batch.files.iter())
         .map(|file| format!("- `{file}`\n"))
         .collect();
+    let merges = match batch.kind {
+        BrainBatchKind::SetUp => "It waits for the code owner's review; it does not auto-merge.",
+        _ => "It merges by itself once the brain gate's required checks pass.",
+    };
     let body = format!(
-        "Opened by Wiffletree for a {} batch ({}).\n\nFiles:\n{files}\nIt merges by itself once the brain gate's required checks pass.\n",
+        "Opened by Wiffletree for a {} batch ({}).\n\nFiles:\n{files}\n{merges}\n",
         kind_name(batch.kind),
         batch.id
     );
@@ -723,6 +725,8 @@ fn watch(
         )
     } else if pr["mergeable_state"] == "dirty" {
         (BrainStage::Failed, Some(BrainProblem::Conflict))
+    } else if batch.kind == BrainBatchKind::SetUp {
+        (BrainStage::PrOpen, Some(BrainProblem::AwaitingReview))
     } else if !gate.missing.is_empty() {
         // Even with auto-merge on, a gate check main does not require keeps the item open.
         let missing = gate.missing.to_vec();
@@ -814,6 +818,9 @@ fn item_prompt(batch: &BrainBatch, problem: &BrainProblem) -> String {
             batch.repository,
             missing.join(", "),
             if missing.len() == 1 { "" } else { "s" }
+        ),
+        BrainProblem::AwaitingReview => format!(
+            "{about} waits for your review: CODEOWNERS covers the brain gate's files, so it does not auto-merge. Review and merge it on GitHub; the host sees the merge at its next pass."
         ),
         BrainProblem::Error { reason } => format!(
             "{about} could not move on: {reason}. Auto-merge waits; the host tries again at the next pass. Discard the batch if it keeps failing."
@@ -1076,7 +1083,8 @@ impl Host {
     }
 
     /// The brains page: every registered brain, with the legacy pointer's warning when it names
-    /// the human's clone of one, and the batches not yet merged or merged in the last day.
+    /// the human's clone of one, the batches not yet merged or merged in the last day, and this
+    /// host as a compiler.
     pub fn brains_page(&self) -> Result<BrainsPage> {
         let shown_since = now() - SHOWN_AFTER_MERGE_MS;
         let batches = (self.brain_batches(None)?.into_iter())
@@ -1091,7 +1099,16 @@ impl Host {
                     .as_deref()
                     .is_some_and(|n| n.eq_ignore_ascii_case(&brain.repository));
         }
-        Ok(BrainsPage { brains, batches })
+        let this_host = BrainCompiler {
+            host_id: self.host_id()?,
+            name: sync::machine_name(),
+            extra: Extra::new(),
+        };
+        Ok(BrainsPage {
+            brains,
+            batches,
+            this_host: Some(this_host),
+        })
     }
 
     /// The human's grant: the host may push batch branches to the brain, open PRs from them into
@@ -1673,10 +1690,21 @@ impl Host {
         self.save_brain(&brain)?;
         let checkout = PathBuf::from(&brain.checkout);
         let mut merged = false;
-        for work in passed.work {
+        for mut work in passed.work {
             let Ok(before) = self.brain_batch(&work.batch.id) else {
                 continue;
             };
+            // The human amended it while the pass ran, so the new commit is the host's own and
+            // the next pass pushes it.
+            let written: Option<String> = self.db.query_row(
+                "SELECT written FROM brain_batches WHERE id=?1",
+                [&work.batch.id],
+                |r| r.get(0),
+            )?;
+            if work.batch.problem == Some(BrainProblem::ChangedOutside) && written != work.written {
+                work.batch.stage = before.stage;
+                work.batch.problem = before.problem.clone();
+            }
             let published = work.batch.pull_request.is_some() || work.pushed.is_some();
             if before.is_finished() && !work.discard_requested {
                 // The human discarded it here while the pass ran. Had the pass published it
@@ -2168,10 +2196,9 @@ mod tests {
             let mut host = Host::open_set_up(home.path()).unwrap();
             let one = host.create_space("Vyttle", "", "", None).unwrap().space.id;
             let two = host.create_space("Notes", "", "", None).unwrap().space.id;
-            let a = host.create_project_in("A", &one).unwrap();
-            let b = host.create_project_in("B", &two).unwrap();
-            host.attach_brain(&a.id, vyttle.to_str().unwrap()).unwrap();
-            host.attach_brain(&b.id, notes.to_str().unwrap()).unwrap();
+            host.set_space_brain(&one, vyttle.to_str().unwrap())
+                .unwrap();
+            host.set_space_brain(&two, notes.to_str().unwrap()).unwrap();
             (one, two)
         };
         // Back to before this release: the `spaces` upgrade left both as local brains.
@@ -2859,6 +2886,74 @@ mod tests {
             format!("{error:#}").contains("already open"),
             "one Set up PR"
         );
+    }
+
+    #[test]
+    fn set_up_opens_its_pr_without_auto_merge_and_waits_for_the_code_owners_review() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = GitHub::new(folder.path());
+        let tools = github.tools();
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, _) = host_with_brain(home.path());
+        run(&mut host, &tools);
+        host.confirm_brain(REPO).unwrap();
+        let batch = host.set_up_brain(REPO, &tools.git).unwrap();
+        run(&mut host, &tools);
+        passing_checks(&github);
+        run(&mut host, &tools);
+        let open = host.brain_batch(&batch.id).unwrap();
+        assert_eq!(open.stage, BrainStage::PrOpen);
+        assert_eq!(open.problem, Some(BrainProblem::AwaitingReview));
+        assert!(!open.pull_request.as_ref().unwrap().auto_merge);
+        assert!(
+            github.gh_calls("pr").iter().all(|c| c[1] != "merge"),
+            "no auto-merge"
+        );
+        assert!(
+            item_prompt(&open, &BrainProblem::AwaitingReview).contains("waits for your review")
+        );
+
+        github.merge(214);
+        run(&mut host, &tools);
+        let merged = host.brain_batch(&batch.id).unwrap();
+        assert_eq!((merged.stage, merged.problem), (BrainStage::Merged, None));
+    }
+
+    #[test]
+    fn an_amendment_made_while_a_pass_runs_is_pushed_and_not_taken_for_an_outside_change() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = GitHub::new(folder.path());
+        let tools = github.tools();
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, _) = host_with_brain(home.path());
+        run(&mut host, &tools);
+        host.confirm_brain(REPO).unwrap();
+        let batch = queue_log(&mut host, &tools, BrainSource::BrainsPage);
+        run(&mut host, &tools);
+        let branch = host.brain_batch(&batch.id).unwrap().branch.unwrap();
+        let before = github.head(&branch).unwrap();
+
+        let pass = host.brain_pass(REPO).unwrap().unwrap();
+        let redact = BrainAmendment::Redact {
+            path: batch.files[0].clone(),
+            line: 3,
+            rule: "phone".into(),
+        };
+        host.amend_brain_batch(&batch.id, &redact, &tools.git)
+            .unwrap();
+        host.finish_brain_pass(super::pass(pass, &tools)).unwrap();
+        let raced = host.brain_batch(&batch.id).unwrap();
+        assert_ne!(raced.problem, Some(BrainProblem::ChangedOutside));
+        assert_ne!(raced.stage, BrainStage::Failed);
+
+        run(&mut host, &tools);
+        let after = github.head(&branch).unwrap();
+        assert_eq!(
+            git(&github.bare, &["rev-parse", &format!("{after}~")]),
+            before,
+            "the amendment is pushed as one commit on top"
+        );
+        assert_eq!(host.brain_batch(&batch.id).unwrap().problem, None);
     }
 
     #[test]
