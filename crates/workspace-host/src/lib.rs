@@ -100,6 +100,8 @@ pub struct Host {
     pub(crate) db: Connection,
     /// Files remote devices are uploading, kept while the host runs.
     uploads: remote::uploads::Uploads,
+    /// The human's `gh` login, once a read found it, for the upgrade's Space suggestions.
+    gh_login: Option<String>,
     _lock: StoreLock,
     pub home: PathBuf,
     /// When each timer whose last fire failed may try again; see `fire_due_schedules`.
@@ -326,6 +328,7 @@ impl Host {
             merge_runs: vec![],
             detected: Default::default(),
             uploads: Default::default(),
+            gh_login: None,
         };
         // Before anything reads or writes a shared setting, so the shared folder is in place.
         host.move_settings_clone()?;

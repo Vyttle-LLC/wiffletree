@@ -204,8 +204,8 @@ Every `Command`, by `type`. A read changes nothing in the store, so no event fol
 | `new_project_defaults` | `space_id?: Option<SpaceId>` | read | New project's Space, `space_id` or else the one last used for a new project, with the workspace repositories whose GitHub name it lists and the ones it lists that are not cloned here. Answers with `SpaceRepositories`. |
 | `set_repository_spaces` | `repository: String`, `space_ids: Vec<SpaceId>` | change, human only | Puts the repository named `owner/name` in exactly these Spaces, editing each Space's repositories; none puts it under No Space. The workspace repository is unchanged. |
 | `suggest_repository_space` | `repository: String` | read | The Space listing the most repositories of its GitHub owner, or `null` for No Space. Only a suggestion. |
-| `repository_suggestions` | — | read | The upgrade's suggested Space for each repository it found, until confirmed: the Space whose projects use that owner's repositories most, else Personal for the human's own `gh` login, else none. Answers with `Vec<RepositorySuggestion>`. |
-| `confirm_repository_suggestions` | `choices: Vec<RepositorySpaces>` | change, human only | Applies each choice as `set_repository_spaces` does and stops offering the upgrade's suggestions. |
+| `repository_suggestions` | — | read | The upgrade's suggested Space for each repository it found, until confirmed: the Space whose projects use that owner's repositories most, else Personal for the human's own `gh` login (`new_personal` while Personal does not exist), else none. The login is read once, off the host thread at start. Answers with `Vec<RepositorySuggestion>`. |
+| `confirm_repository_suggestions` | `choices: Vec<RepositorySpaces>` | change, human only | Applies each choice as `set_repository_spaces` does, creating Personal as a fresh install does for a choice with `new_personal`, and stops offering the upgrade's suggestions. |
 | `export_logs` | `project_id: String` | change |  |
 | `runs` | `project_id: String` | read |  |
 | `activity` | `project_id: String`, `before: Option<i64>`, `limit: usize` | read |  |

@@ -197,6 +197,12 @@ fn insert_space(
     Ok(())
 }
 
+/// The login `gh` is signed in to GitHub as, or `None` when it cannot say.
+pub(crate) fn gh_login(tools: &publish::Tools, home: &Path) -> Option<String> {
+    let user = github_access::gh_json(tools, home, "user").ok()?;
+    user["login"].as_str().map(str::to_owned)
+}
+
 /// The Space counted most, the first of those on a tie, or `None` when none is counted.
 fn most(counts: impl Iterator<Item = (SpaceId, usize)>) -> Option<SpaceId> {
     let counts: Vec<(SpaceId, usize)> = counts.filter(|(_, count)| *count > 0).collect();
@@ -558,16 +564,13 @@ impl Host {
     }
     /// The upgrade's suggestions for the repositories it found that are still here and on
     /// GitHub, by owner: the Space whose projects use that owner's repositories most, else
-    /// Personal for the human's own `gh` login, else No Space. They change nothing.
+    /// Personal for the human's own `gh` login, else No Space. They change nothing; the login is
+    /// read only while none is known.
     pub(crate) fn repository_suggestions(
-        &self,
+        &mut self,
         tools: &publish::Tools,
     ) -> Result<Vec<RepositorySuggestion>> {
-        let found: Vec<String> = (self
-            .db
-            .prepare("SELECT repository_id FROM repository_suggestions")?)
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+        let found = self.found_repositories()?;
         let workspace = self.repositories()?;
         let suggested: Vec<(&Repository, String)> = (workspace.iter())
             .filter(|r| found.contains(&r.id))
@@ -586,12 +589,14 @@ impl Host {
             .filter_map(|(space, repository)| Some((space, owner_of(&repository)?)))
             .collect();
         let spaces = self.spaces()?;
-        let personal = (spaces.iter())
-            .find(|r| r.space.name == PERSONAL)
-            .map(|r| r.space.id.clone());
-        let login = github_access::gh_json(tools, &self.home, "user")
-            .ok()
-            .and_then(|user| user["login"].as_str().map(str::to_owned));
+        let personal = match spaces.iter().find(|r| r.space.name == PERSONAL) {
+            Some(record) => SuggestedSpace::Space(record.space.id.clone()),
+            None => SuggestedSpace::NewPersonal,
+        };
+        if self.gh_login.is_none() {
+            self.gh_login = gh_login(tools, &self.home);
+        }
+        let login = self.gh_login.as_ref();
         Ok(suggested
             .into_iter()
             .map(|(repository, identity)| {
@@ -602,26 +607,56 @@ impl Host {
                         .count();
                     (record.space.id.clone(), count)
                 }));
-                let own = login
-                    .as_ref()
-                    .is_some_and(|l| l.eq_ignore_ascii_case(&owner));
+                let own = login.is_some_and(|l| l.eq_ignore_ascii_case(&owner));
                 RepositorySuggestion {
                     repository_id: repository.id.clone(),
-                    space_id: by_projects.or_else(|| personal.clone().filter(|_| own)),
+                    space: (by_projects.map(SuggestedSpace::Space))
+                        .or_else(|| own.then(|| personal.clone())),
                     repository: identity,
                 }
             })
             .collect())
     }
+    /// Whether the upgrade's suggestions wait on the human's `gh` login, which no read has
+    /// found yet.
+    pub(crate) fn wants_gh_login(&self) -> Result<bool> {
+        Ok(self.gh_login.is_none() && !self.found_repositories()?.is_empty())
+    }
+    /// Keeps the human's `gh` login for the host's lifetime, once one is found.
+    pub(crate) fn record_gh_login(&mut self, login: Option<String>) {
+        if login.is_some() {
+            self.gh_login = login;
+        }
+    }
     /// Applies the human's choices for the upgrade's suggestions, and stops offering them.
+    /// Choosing Personal when it is missing creates it.
     pub fn confirm_repository_suggestions(&mut self, choices: &[RepositorySpaces]) -> Result<()> {
         self.atomically(|host| {
             for choice in choices {
-                host.set_repository_spaces(&choice.repository, &choice.space_ids)?;
+                let mut spaces = choice.space_ids.clone();
+                if choice.new_personal {
+                    let personal = host
+                        .spaces()?
+                        .into_iter()
+                        .find(|r| r.space.name == PERSONAL);
+                    spaces.push(match personal {
+                        Some(record) => record.space.id,
+                        None => host.create_space(PERSONAL, "", "", None)?.space.id,
+                    });
+                }
+                host.set_repository_spaces(&choice.repository, &spaces)?;
             }
             host.db.execute("DELETE FROM repository_suggestions", [])?;
             Ok(())
         })
+    }
+    /// The workspace repositories the upgrade found, while their suggestions wait.
+    fn found_repositories(&self) -> Result<Vec<String>> {
+        Ok(self
+            .db
+            .prepare("SELECT repository_id FROM repository_suggestions")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
     }
     /// Each project's Space with each repository it uses: the ones its selection names, or,
     /// for a project that may use every repository, the ones its tickets were in.
@@ -708,8 +743,16 @@ mod tests {
 
     /// A `gh` signed in as `login`.
     fn signed_in(login: &'static str) -> publish::Tools {
+        counted_signed_in(login, Default::default())
+    }
+    /// `signed_in`, counting its calls in `calls`.
+    fn counted_signed_in(
+        login: &'static str,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> publish::Tools {
         publish::Tools {
             gh: std::sync::Arc::new(move |_, args| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 assert_eq!(args.last(), Some(&"user"), "{args:?}");
                 Ok(runtime::GhAnswer {
                     status: std::os::unix::process::ExitStatusExt::from_raw(0),
@@ -760,15 +803,16 @@ mod tests {
             (suggestions.iter())
                 .find(|s| s.repository_id == repository.id)
                 .unwrap()
-                .space_id
+                .space
                 .clone()
         };
+        let sage = Some(SuggestedSpace::Space(sage));
         assert_eq!(suggestions.len(), 4);
-        assert_eq!(suggested(&mobile), Some(sage.clone()));
-        assert_eq!(suggested(&api), Some(sage.clone()));
+        assert_eq!(suggested(&mobile), sage);
+        assert_eq!(suggested(&api), sage);
         assert_eq!(
             suggested(&dotfiles),
-            Some(personal.clone()),
+            Some(SuggestedSpace::Space(personal)),
             "the human's own login"
         );
         assert_eq!(suggested(&scratch), None, "No Space");
@@ -778,6 +822,7 @@ mod tests {
         host.confirm_repository_suggestions(&[RepositorySpaces {
             repository: "octo/scratch".into(),
             space_ids: vec![],
+            new_personal: false,
         }])
         .unwrap();
         assert_eq!(host.spaces().unwrap(), before);
@@ -806,12 +851,13 @@ mod tests {
             ..publish::Tools::default()
         };
         let suggestions = host.repository_suggestions(&signed_out).unwrap();
-        assert_eq!(suggestions[0].space_id, None);
+        assert_eq!(suggestions[0].space, None);
         assert_eq!(suggestions[0].repository, "MHohlios/dotfiles");
 
         host.confirm_repository_suggestions(&[RepositorySpaces {
             repository: "MHohlios/dotfiles".into(),
             space_ids: vec![personal.clone()],
+            new_personal: false,
         }])
         .unwrap();
         assert_eq!(
@@ -819,6 +865,81 @@ mod tests {
             ["MHohlios/dotfiles"]
         );
         assert!(host.repository_suggestions(&signed_out).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_gh_login_is_read_once_for_the_hosts_lifetime() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let dotfiles = on_github(&host, "MHohlios/dotfiles");
+        host.db
+            .execute(
+                "INSERT INTO repository_suggestions VALUES (?1)",
+                [&dotfiles.id],
+            )
+            .unwrap();
+        assert!(host.wants_gh_login().unwrap());
+        let calls = std::sync::Arc::default();
+        let gh = counted_signed_in("MHohlios", std::sync::Arc::clone(&calls));
+        for _ in 0..2 {
+            host.repository_suggestions(&gh).unwrap();
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!host.wants_gh_login().unwrap());
+    }
+
+    #[test]
+    fn personal_is_suggested_for_the_login_and_created_only_when_confirmed() {
+        let home = tempfile::tempdir().unwrap();
+        let project = {
+            let mut host = Host::open_set_up(home.path()).unwrap();
+            on_github(&host, "MHohlios/dotfiles");
+            host.create_project("Notes").unwrap().id
+        };
+        // Rewind to schema 8, where the only project has a brain, so the upgrade makes no
+        // Personal.
+        let db = Connection::open(home.path().join(STORE_FILE)).unwrap();
+        db.execute_batch(
+            "DROP TABLE spaces; DROP TABLE trackers; DROP TABLE repository_suggestions;
+             ALTER TABLE work_logs DROP COLUMN space_id; PRAGMA user_version = 8;",
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE projects SET data=json_set(json_remove(data,'$.space'),'$.brain','/u/dev/brain') WHERE id=?1",
+            [&project],
+        )
+        .unwrap();
+        drop(db);
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let names = |host: &Host| -> Vec<String> {
+            (host.spaces().unwrap().into_iter())
+                .map(|r| r.space.name)
+                .collect()
+        };
+        assert_eq!(names(&host), ["brain"]);
+
+        let suggestions = host.repository_suggestions(&signed_in("MHohlios")).unwrap();
+        assert_eq!(suggestions[0].space, Some(SuggestedSpace::NewPersonal));
+        assert_eq!(
+            names(&host),
+            ["brain"],
+            "nothing is created before confirming"
+        );
+
+        host.confirm_repository_suggestions(&[RepositorySpaces {
+            repository: "MHohlios/dotfiles".into(),
+            space_ids: vec![],
+            new_personal: true,
+        }])
+        .unwrap();
+        let personal = &host.spaces().unwrap()[1];
+        assert_eq!(personal.space.name, PERSONAL);
+        assert_eq!(personal.space.repositories, ["MHohlios/dotfiles"]);
+        assert_eq!(personal.space.brain, None);
+        assert!(matches!(
+            personal.space.storage.repository,
+            StorageRepository::Local { .. }
+        ));
     }
 
     #[test]

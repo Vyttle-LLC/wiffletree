@@ -297,7 +297,6 @@ fn repository_ids_choose_the_new_projects_repositories() {
             json!({"name": "Web only", "brief": "Do", "repository_ids": [web.id]}),
         )
         .unwrap();
-    // The chosen repositories win over the Space's, and nothing is named as skipped.
     assert!(result.get("not_on_this_mac").is_none(), "{result}");
     let project: Project = serde_json::from_value(result).unwrap();
     assert_eq!(project.repositories, Some(vec![web.id.clone()]));
@@ -305,7 +304,6 @@ fn repository_ids_choose_the_new_projects_repositories() {
         .map(|r| r.id)
         .collect();
     assert_eq!(used, std::slice::from_ref(&web.id));
-    // It still belongs to the creator's Space.
     assert_eq!(
         project.space,
         host.project(&creator.project_id).unwrap().space

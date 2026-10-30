@@ -730,6 +730,7 @@ fn space_commands_need_the_apps_credential_and_reads_do_not() {
             choices: vec![RepositorySpaces {
                 repository: "Sage-Social/api".into(),
                 space_ids: vec![personal.id.clone()],
+                new_personal: true,
             }],
         },
     ];

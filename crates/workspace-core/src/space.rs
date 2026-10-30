@@ -167,6 +167,9 @@ pub struct SpaceRepositories {
 pub struct RepositorySpaces {
     pub repository: String,
     pub space_ids: Vec<SpaceId>,
+    /// Also lists it in Personal, which is created as on a fresh install when it is missing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub new_personal: bool,
 }
 
 /// The upgrade's suggested Space for a workspace repository; `None` suggests No Space.
@@ -175,7 +178,15 @@ pub struct RepositorySuggestion {
     pub repository_id: String,
     /// Its GitHub name, `owner/name`.
     pub repository: String,
-    pub space_id: Option<SpaceId>,
+    pub space: Option<SuggestedSpace>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum SuggestedSpace {
+    Space(SpaceId),
+    /// Personal, which does not exist yet; confirming it creates it.
+    NewPersonal,
 }
 
 /// The owner of a repository named `owner/name`.
