@@ -34,4 +34,4 @@ The host SHALL keep the shared settings in one shared folder: the settings repos
 
 #### Scenario: A settings repository
 - **WHEN** a machine uses `MHohlios/wiffletree-storage` as its settings repository
-- **THEN** its shared folder is `<data folder>/repos/MHohlios-wiffletree-storage/`, and no shared setting is read from `<data folder>/shared/`
+- **THEN** its shared folder is `<data folder>/repos/github.com/MHohlios/wiffletree-storage/`, and no shared setting is read from `<data folder>/shared/`
