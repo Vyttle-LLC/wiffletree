@@ -43,15 +43,15 @@ pub(crate) fn migrate_to_workspace(db: &Connection) -> Result<()> {
                 ids.push(survivor);
             }
         }
+        // As JSON: these projects are older than Spaces, which `Project` now needs.
         let projects = tx
-            .prepare("SELECT data FROM projects")?
-            .query_map([], |r| decode::<Project>(r, 0))?
+            .prepare("SELECT id FROM projects")?
+            .query_map([], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        for mut project in projects {
-            project.repositories = chosen.remove(&project.id);
+        for id in projects {
             tx.execute(
-                "UPDATE projects SET data=?2 WHERE id=?1",
-                params![project.id, encode(&project)?],
+                "UPDATE projects SET data=json_set(data,'$.repositories',json(?2)) WHERE id=?1",
+                params![id, encode(&chosen.remove(&id))?],
             )?;
         }
         let sessions = tx

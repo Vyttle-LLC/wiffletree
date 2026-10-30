@@ -131,8 +131,10 @@ impl Host {
             created_at: now(),
             input,
         };
+        // The entry belongs to the Space its project is in now, wherever the project moves later.
+        let space = self.project(&log.project_id)?.space;
         let tx = self.db.transaction()?;
-        tx.execute("INSERT INTO work_logs(id,project_id,session_id,milestone,repository,data) VALUES (?1,?2,?3,?4,?5,?6)", params![log.id, log.project_id, log.input.session_id, log.input.milestone, log.repository, encode(&log)?])?;
+        tx.execute("INSERT INTO work_logs(id,project_id,session_id,milestone,repository,data,space_id) VALUES (?1,?2,?3,?4,?5,?6,?7)", params![log.id, log.project_id, log.input.session_id, log.input.milestone, log.repository, encode(&log)?, space.as_str()])?;
         log.sequence = tx.last_insert_rowid();
         Self::event(
             &tx,
@@ -148,57 +150,103 @@ impl Host {
         self.project(project)?;
         Ok(self.db.prepare("SELECT sequence,data FROM work_logs WHERE project_id=?1 AND sequence<?2 ORDER BY sequence DESC LIMIT ?3")?.query_map(params![project, before.unwrap_or(i64::MAX), page_limit(limit)?], |r| { let mut log: WorkLog = decode(r, 1)?; log.sequence = r.get(0)?; Ok(log) })?.collect::<rusqlite::Result<Vec<_>>>()?)
     }
-    pub fn attach_brain(&mut self, project: &str, path: &str) -> Result<()> {
-        let mut project = self.project(project)?;
-        let path = fs::canonicalize(path)
-            .context("Brain directory must already exist; setup is explicit")?;
-        ensure!(path.is_dir(), "Brain attachment must be a directory");
-        project.brain = Some(path.to_str().context("Brain path is not UTF-8")?.into());
-        let tx = self.db.transaction()?;
-        tx.execute(
-            "UPDATE projects SET data=?2 WHERE id=?1",
-            params![project.id, encode(&project)?],
-        )?;
-        Self::event(
-            &tx,
-            &project.id,
-            None,
-            "brain_attached",
-            project.brain.as_deref().unwrap_or_default(),
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
     pub fn runs(&self, project: &str) -> Result<Vec<MaintenanceRun>> {
         self.project(project)?;
         self.list_data("SELECT data FROM maintenance_runs WHERE project_id=?1 ORDER BY sequence DESC LIMIT 100", [project])
     }
     pub fn export_logs(&mut self, project_id: &str) -> Result<MaintenanceRun> {
         let project = self.project(project_id)?;
-        let result = self.export_batch(&project);
+        let (exported, failure) = match self.export_batch(&project) {
+            Ok((exported, failures)) => (
+                exported,
+                (!failures.is_empty()).then(|| failures.join("; ")),
+            ),
+            Err(error) => (0, Some(format!("{error:#}"))),
+        };
         let run = MaintenanceRun {
             id: new_id(),
             project_id: project_id.into(),
-            outcome: match &result {
-                Ok(0) => "skipped: no pending input".into(),
-                Ok(_) => "completed: source logs exported; semantic compilation unavailable".into(),
-                Err(e) => format!("failed: {e:#}"),
+            outcome: match (&failure, exported) {
+                (Some(failure), _) => format!("failed: {failure}"),
+                (None, 0) => "skipped: no pending input".into(),
+                (None, _) => {
+                    "completed: source logs exported; semantic compilation unavailable".into()
+                }
             },
-            exported: result.as_ref().copied().unwrap_or(0),
+            exported,
             created_at: now(),
         };
         self.db.execute(
             "INSERT INTO maintenance_runs(project_id,data) VALUES (?1,?2)",
             params![project_id, encode(&run)?],
         )?;
-        result?;
+        if let Some(failure) = failure {
+            bail!(failure);
+        }
         Ok(run)
     }
-    fn export_batch(&mut self, project: &Project) -> Result<usize> {
-        let brain = project
-            .brain
-            .as_deref()
-            .context("Attach a brain before exporting logs")?;
+    /// Exports each entry to the brain of the Space the project was in when it was logged, so a
+    /// moved project's later entries go to its new Space and its earlier ones stay put. Each
+    /// Space is exported on its own: one with nothing pending is never touched, and one that
+    /// fails leaves the others' entries delivered. Answers how many entries were exported and
+    /// each failure, naming its Space.
+    fn export_batch(&mut self, project: &Project) -> Result<(usize, Vec<String>)> {
+        let spaces: Vec<String> = (self.db.prepare(
+            "SELECT space_id FROM work_logs WHERE project_id=?1 AND space_id IS NOT NULL GROUP BY space_id ORDER BY MIN(sequence)",
+        )?)
+        .query_map([&project.id], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+        let (mut exported, mut failures) = (0, vec![]);
+        for space in spaces {
+            // A removed Space's entries have nowhere to go.
+            let Some(SpaceRecord { space, local }) = self.find_space(&SpaceId(space))? else {
+                continue;
+            };
+            let path = space.brain.as_ref().and(local.brain_path.as_deref());
+            if self.pending_entries(project, &space.id, path)? == 0 {
+                continue;
+            }
+            let result = match (&space.brain, path) {
+                (None, _) if space.id == project.space => Err(anyhow::anyhow!(
+                    "This project's Space has no brain; attach one before exporting logs"
+                )),
+                // An earlier Space without a brain keeps its entries.
+                (None, _) => continue,
+                (Some(_), None) => Err(anyhow::anyhow!("its brain is not on this Mac")),
+                (Some(brain), Some(path)) => {
+                    self.export_to_brain(project, &space.id, path, &brain.folder)
+                }
+            };
+            match result {
+                Ok(count) => exported += count,
+                Err(error) => failures.push(format!("{}: {error:#}", space.name)),
+            }
+        }
+        Ok((exported, failures))
+    }
+    /// How many of the project's entries logged in `space` have not reached `brain`, or no brain
+    /// at all when there is none on this Mac.
+    fn pending_entries(
+        &self,
+        project: &Project,
+        space: &SpaceId,
+        brain: Option<&str>,
+    ) -> Result<i64> {
+        Ok(self.db.query_row(
+            "SELECT count(*) FROM work_logs l WHERE project_id=?1 AND space_id=?2 AND NOT EXISTS(SELECT 1 FROM log_exports e WHERE e.log_id=l.id AND (?3 IS NULL OR e.brain=?3))",
+            params![project.id, space.as_str(), brain],
+            |r| r.get(0),
+        )?)
+    }
+    /// Exports the project's entries logged in `space` that `brain` has not received to
+    /// `<brain>/<folder>/logs/`.
+    fn export_to_brain(
+        &mut self,
+        project: &Project,
+        space: &SpaceId,
+        brain: &str,
+        folder: &str,
+    ) -> Result<usize> {
         let root = fs::canonicalize(brain)?;
         let lock = OpenOptions::new()
             .read(true)
@@ -208,11 +256,11 @@ impl Host {
             .open(root.join(".workspace-brain.lock"))?;
         lock.try_lock().context("Another writer owns this brain")?;
         let _lock = BrainLock(lock);
-        let logs: Vec<WorkLog> = self.list_data("SELECT data FROM work_logs l WHERE project_id=?1 AND NOT EXISTS(SELECT 1 FROM log_exports e WHERE e.log_id=l.id AND e.brain=?2) ORDER BY sequence ASC LIMIT 100", params![project.id, brain])?;
+        let logs: Vec<WorkLog> = self.list_data("SELECT data FROM work_logs l WHERE project_id=?1 AND space_id=?3 AND NOT EXISTS(SELECT 1 FROM log_exports e WHERE e.log_id=l.id AND e.brain=?2) ORDER BY sequence ASC LIMIT 100", params![project.id, brain, space.as_str()])?;
         if logs.is_empty() {
             return Ok(0);
         }
-        let brain_directory = root.join("second-brain");
+        let brain_directory = root.join(folder);
         if brain_directory.exists() {
             ensure!(
                 fs::canonicalize(&brain_directory)?.starts_with(&root),

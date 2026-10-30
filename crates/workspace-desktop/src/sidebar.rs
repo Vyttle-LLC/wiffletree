@@ -1733,6 +1733,7 @@ mod tests {
             provider: Provider::Claude,
             status,
             archived: false,
+            owner: None,
         }
     }
 

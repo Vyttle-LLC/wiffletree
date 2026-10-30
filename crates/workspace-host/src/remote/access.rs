@@ -83,6 +83,10 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::DismissAttention { .. }
         | Command::AppendLog { .. }
         | Command::AttachBrain { .. }
+        | Command::CreateSpace { .. }
+        | Command::UpdateSpace { .. }
+        | Command::RemoveSpace { .. }
+        | Command::MoveProjectToSpace { .. }
         | Command::ExportLogs { .. }
         | Command::SetWorkspacesDir { .. }
         | Command::SetVerification { .. }

@@ -37,6 +37,7 @@ fn insert_team(db: &Connection, id: &str, main: &Session, repository: &str, arch
         provider: Provider::Codex,
         status: Status::Ready,
         archived,
+        owner: None,
     };
     db.execute(
         "INSERT INTO sessions VALUES (?1,?2,?3,'task_orchestrator',?4)",
@@ -261,7 +262,7 @@ fn teams_move_under_their_coordinator_without_losing_anything() {
 
     let mut host = Host::open_set_up(&f.home).unwrap();
 
-    assert_eq!(version(&f.home), 8);
+    assert_eq!(version(&f.home), 9);
     assert!(f.home.join("workspace.sqlite3.pre-flatten").exists());
     // Ticket ids, titles, briefs, states, worktrees, branches, sessions, runtimes, runs and
     // message bodies are as they were; only re-sent copies and the notice are new.
@@ -400,7 +401,7 @@ fn teams_move_under_their_coordinator_without_losing_anything() {
         std::fs::read(f.home.join("workspace.sqlite3.pre-flatten")).unwrap(),
         backup
     );
-    assert_eq!(version(&f.home), 8);
+    assert_eq!(version(&f.home), 9);
     assert_eq!(
         host.activity(&f.main.project_id, None, 100)
             .unwrap()
@@ -449,7 +450,7 @@ fn a_failure_mid_migration_leaves_schema_5_for_a_full_retry() {
     db.execute_batch("DROP TRIGGER fail_second").unwrap();
     drop(db);
     let host = Host::open_set_up(&f.home).unwrap();
-    assert_eq!(version(&f.home), 8);
+    assert_eq!(version(&f.home), 9);
     assert_eq!(host.ticket(&f.open.id).unwrap().coordinator_id, f.main.id);
     assert_eq!(host.ticket(&f.closed.id).unwrap().coordinator_id, f.main.id);
 }
@@ -591,7 +592,7 @@ fn model_selection_migrates_a_pre_flatten_store_after_schema_6() {
 
     // The upgrade to the table reads stand-in CLIs, never the machine's own.
     let host = Host::open_detecting(&f.home, &common::signed_in(&PROVIDERS)).unwrap();
-    assert_eq!(version(&f.home), 8);
+    assert_eq!(version(&f.home), 9);
     // Schema 6 ran first: the team is retired and its ticket belongs to the coordinator.
     assert!(host.session(f.team).unwrap().archived);
     assert_eq!(host.ticket(&f.open.id).unwrap().coordinator_id, f.main.id);
@@ -676,7 +677,7 @@ fn an_existing_store_opens_newest_first_and_loses_nothing() {
 
     let mut host = Host::open_set_up(home).unwrap();
 
-    assert_eq!(version(home), 8);
+    assert_eq!(version(home), 9);
     assert_eq!(stored(), before);
     let order = |host: &Host| -> Vec<String> {
         let projects = host.projects().unwrap();
@@ -692,7 +693,7 @@ fn an_existing_store_opens_newest_first_and_loses_nothing() {
 
     // Reopening migrates nothing again.
     let host = Host::open_set_up(home).unwrap();
-    assert_eq!(version(home), 8);
+    assert_eq!(version(home), 9);
     assert_eq!(order(&host), ["Dialer", "Calls", "Alerts", "Billing"]);
     assert_eq!(host.project(&billing.id).unwrap().name, "Billing");
 }
@@ -710,7 +711,7 @@ fn a_schema_7_store_gains_empty_device_and_message_upload_tables_and_loses_nothi
 
     let host = Host::open_set_up(home).unwrap();
 
-    assert_eq!(version(home), 8);
+    assert_eq!(version(home), 9);
     assert!(host.devices().unwrap().is_empty());
     let uploads: i64 = raw(home)
         .query_row("SELECT count(*) FROM message_uploads", [], |r| r.get(0))
@@ -738,8 +739,8 @@ fn a_schema_7_store_gains_empty_device_and_message_upload_tables_and_loses_nothi
 fn a_store_from_a_newer_application_is_refused() {
     let (directory, _projects) = unordered_store();
     raw(directory.path())
-        .execute_batch("PRAGMA user_version = 9;")
+        .execute_batch("PRAGMA user_version = 10;")
         .unwrap();
     assert!(Host::open_set_up(directory.path()).is_err());
-    assert_eq!(version(directory.path()), 9);
+    assert_eq!(version(directory.path()), 10);
 }

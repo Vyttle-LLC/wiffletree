@@ -2014,6 +2014,10 @@ impl Actor {
                     .map(|(id, _)| id.clone());
                 let result = (|| -> Result<Option<Value>> {
                     let id = identity.context("Expired or invalid session credential")?;
+                    ensure!(
+                        self.host.session_owner(&id)?.offers_coordination_tools(),
+                        "{name} is for project work, and this session is owned by a Space or a brain"
+                    );
                     match name.as_str() {
                         "stop_agents" => return self.stop_agents(&id, &args).map(Some),
                         "resume_agent" => return self.resume_agent(&id, &args).map(Some),
@@ -4810,6 +4814,55 @@ mod tests {
             actor.sender = original;
         }
         replies.try_recv().unwrap()
+    }
+
+    #[test]
+    fn a_session_owned_by_a_space_or_a_brain_gets_no_workspace_tool() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let project = host.create_project("Calls").unwrap();
+        let coordinator = host.sessions().unwrap().remove(0);
+        let (mut actor, _, _) = idle_actor(host);
+        let mut turn = active_turn("run", vec![]);
+        turn.token = coordinator.id.clone();
+        actor.active.insert(coordinator.id.clone(), turn);
+        let refused_every_tool = |actor: &mut Actor| {
+            for tool in [
+                "workspace_context",
+                "create_ticket",
+                "send_message",
+                "stop_agents",
+            ] {
+                let refused = call_tool(actor, &coordinator.id, tool, json!({})).unwrap_err();
+                assert!(
+                    refused.contains("owned by a Space or a brain"),
+                    "{tool}: {refused}"
+                );
+            }
+        };
+        for owner in [
+            SessionOwner::Space(project.space.clone()),
+            SessionOwner::Brain("Sage-Social/sagehaven-docs".into()),
+        ] {
+            // No role runs outside projects yet, so the session is given its owner directly.
+            let owned = Session {
+                owner: Some(owner.clone()),
+                ..coordinator.clone()
+            };
+            actor
+                .host
+                .db
+                .execute(
+                    "UPDATE sessions SET data=?2 WHERE id=?1",
+                    params![owned.id, encode(&owned).unwrap()],
+                )
+                .unwrap();
+            refused_every_tool(&mut actor);
+            // A change that rewrites the stored session keeps its owner.
+            actor.host.set_status(&owned.id, Status::Paused).unwrap();
+            assert_eq!(actor.host.session(&owned.id).unwrap().owner, Some(owner));
+            refused_every_tool(&mut actor);
+        }
     }
     /// Complete one logical job, including its returned local checkout inspection.
     fn complete_job(actor: &mut Actor, events: &Receiver<Event>) -> bool {

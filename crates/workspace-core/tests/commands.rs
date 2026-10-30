@@ -12,6 +12,23 @@ fn profile() -> ModelProfile {
     }
 }
 
+fn space() -> Space {
+    Space {
+        id: SpaceId(text()),
+        name: text(),
+        description: text(),
+        instructions: text(),
+        brain: None,
+        storage: SpaceStorage {
+            repository: StorageRepository::Local { id: text() },
+            folder: text(),
+        },
+        repositories: vec![],
+        models: SpaceModels::default(),
+        sources: vec![],
+    }
+}
+
 #[test]
 fn reads_are_exactly_the_commands_that_change_nothing() {
     let reads = [
@@ -136,7 +153,10 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
             instruction: text(),
             focus: None,
         },
-        Command::CreateProject { name: text() },
+        Command::CreateProject {
+            name: text(),
+            space_id: None,
+        },
         Command::RenameProject {
             project_id: text(),
             name: text(),
@@ -198,6 +218,22 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
         Command::AttachBrain {
             project_id: text(),
             path: text(),
+        },
+        Command::CreateSpace {
+            name: text(),
+            description: text(),
+            instructions: text(),
+            prefix: None,
+        },
+        Command::UpdateSpace {
+            space: Box::new(space()),
+        },
+        Command::RemoveSpace {
+            space_id: space().id,
+        },
+        Command::MoveProjectToSpace {
+            project_id: text(),
+            space_id: space().id,
         },
         Command::ExportLogs { project_id: text() },
         Command::SetWorkspacesDir { path: text() },
@@ -282,4 +318,47 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
     for command in &writes {
         assert!(!command.is_read(), "{command:?} changes the store");
     }
+}
+
+#[test]
+fn space_commands_are_the_humans() {
+    let human = [
+        Command::CreateSpace {
+            name: text(),
+            description: text(),
+            instructions: text(),
+            prefix: None,
+        },
+        Command::UpdateSpace {
+            space: Box::new(space()),
+        },
+        Command::RemoveSpace {
+            space_id: space().id,
+        },
+        Command::MoveProjectToSpace {
+            project_id: text(),
+            space_id: space().id,
+        },
+        Command::AttachBrain {
+            project_id: text(),
+            path: text(),
+        },
+    ];
+    for command in human {
+        assert!(command.is_human_only() && !command.is_read(), "{command:?}");
+    }
+    assert!(!Command::Snapshot.is_human_only());
+}
+
+#[test]
+fn a_snapshot_from_a_host_older_than_spaces_still_reads() {
+    let old = serde_json::json!({
+        "projects": [{"id": "p", "name": "Calls", "brain": "/Users/m/dev/brain"}],
+        "repositories": [],
+        "sessions": [],
+        "attention": [],
+    });
+    let snapshot: Snapshot = serde_json::from_value(old).unwrap();
+    assert_eq!(snapshot.projects[0].space, SpaceId::default());
+    assert!(snapshot.spaces.is_empty() && snapshot.space_locals.is_empty());
 }

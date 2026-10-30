@@ -174,6 +174,7 @@ fn seed_history(
                 provider: Provider::Claude,
                 status: Status::Done,
                 archived: !(open && role == Role::Implementer),
+                owner: None,
             };
             session.execute(params![
                 agent.id,

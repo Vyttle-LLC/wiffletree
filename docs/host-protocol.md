@@ -97,7 +97,7 @@ This host lists `events`, `files`, `folders`, `restart-when-idle`, `uploads`, `a
 
 ### Human-only commands
 
-Some commands are only the human's to give: a `send` with no `sender`, which is a message from the human; answering the Inbox (`resolve_attention`, `dismiss_attention`, which also approves a publish); granting publish or push authority without the Inbox (`set_owner_allowed`, `set_keeper`, `set_up_settings_repository`, `join_settings_repository`); and in `remote-hosts` pairing and device access. On the socket they run only for a connection whose `Hello` carried the app's client credential; without it they are refused and change nothing. Every other command works without it. This raises the bar for an agent, which runs as the same user and can open the socket; it is not a sandbox.
+Some commands are only the human's to give: a `send` with no `sender`, which is a message from the human; answering the Inbox (`resolve_attention`, `dismiss_attention`, which also approves a publish); granting publish or push authority without the Inbox (`set_owner_allowed`, `set_keeper`, `set_up_settings_repository`, `join_settings_repository`); creating, editing or removing a Space, setting its brain and moving a project into one (`create_space`, `update_space`, `remove_space`, `attach_brain`, `move_project_to_space`); and in `remote-hosts` pairing and device access. On the socket they run only for a connection whose `Hello` carried the app's client credential; without it they are refused and change nothing. Every other command works without it, but a `snapshot` sent to such a connection leaves out `space_locals`, this Mac's facts about each Space. This raises the bar for an agent, which runs as the same user and can open the socket; it is not a sandbox.
 
 ## Events
 
@@ -177,7 +177,7 @@ Every `Command`, by `type`. A read changes nothing in the store, so no event fol
 | `usage` | `days: u16`, `project_id: Option<String>`, `provider: Option<Provider>`, `timezone: String` | read |  |
 | `create_ticket` | `coordinator_id: String`, `repository_id: String`, `title: String`, `brief: String` | change | `coordinator_id` must be a project coordinator whose project uses `repository_id`. |
 | `assign_ticket` | `ticket_id: String`, `role: Role`, `profile: ModelProfile`, `instruction: String`, `focus?: Option<String>` | change | The human assigns an agent; `profile` is never limited by the Who runs what table. |
-| `create_project` | `name: String` | change | The human creates a project. A coordinator creates one with the workspace tool `create_project`, which also takes a brief and repository ids and records the coordinator in `Project.created_by`. |
+| `create_project` | `name: String`, `space_id?: Option<SpaceId>` | change | The human creates a project, in `space_id` or else the Space last used for a new project. A coordinator creates one with the workspace tool `create_project`, which also takes a brief and repository ids and records the coordinator in `Project.created_by`. |
 | `rename_project` | `project_id: String`, `name: String` | change |  |
 | `move_projects` | `project_ids: Vec<String>`, `before?: Option<String>` | change | Moves the projects, kept in their relative order, to just before `before`, or to the end of the order. |
 | `attach_repository` | `project_id: Option<String>`, `path: String`, `base: String` | change | Adds one repository with an explicit base, updating the base if it is already known. |
@@ -196,7 +196,11 @@ Every `Command`, by `type`. A read changes nothing in the store, so no event fol
 | `dismiss_attention` | `id: String` | change, human only | Clears a question from the inbox without answering or waking its asker. |
 | `append_log` | `input: LogInput` | change |  |
 | `logs` | `project_id: String`, `before: Option<i64>`, `limit: usize` | read |  |
-| `attach_brain` | `project_id: String`, `path: String` | change |  |
+| `attach_brain` | `project_id: String`, `path: String` | change, human only | Sets the brain of the project's Space to a local folder, for every project in that Space. |
+| `create_space` | `name: String`, `description?: String`, `instructions?: String`, `prefix?: Option<String>` | change, human only | Creates a Space with local storage and a local tracker; without `prefix`, the one proposed from its name. Answers with a `SpaceRecord`. |
+| `update_space` | `space: Space` | change, human only | Replaces a Space's definition; its id and storage stay as they are. Answers with a `SpaceRecord`. |
+| `remove_space` | `space_id: SpaceId` | change, human only | Refused for the last Space and while an open project belongs to it; its archived projects move to Personal. |
+| `move_project_to_space` | `project_id: String`, `space_id: SpaceId` | change, human only | Later entries go to the new Space's brain; earlier ones stay where they are. |
 | `export_logs` | `project_id: String` | change |  |
 | `runs` | `project_id: String` | read |  |
 | `activity` | `project_id: String`, `before: Option<i64>`, `limit: usize` | read |  |

@@ -254,6 +254,7 @@ fn per_project_attachments_migrate_to_one_workspace_list() {
         provider: Provider::Claude,
         status: Status::Ready,
         archived: false,
+        owner: None,
     };
     db.execute(
         "INSERT INTO sessions VALUES (?1,?2,NULL,'task_orchestrator',?3)",

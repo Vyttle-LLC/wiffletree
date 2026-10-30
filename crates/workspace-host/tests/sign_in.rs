@@ -56,6 +56,7 @@ fn a_signed_out_cli_is_never_chosen_even_while_its_status_is_pending() {
         &service,
         Command::CreateProject {
             name: "Signed out".into(),
+            space_id: None,
         },
     );
     let project: Project = serde_json::from_value(project).unwrap();
