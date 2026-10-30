@@ -32,7 +32,7 @@ Six stages, each a ticket or a few, each landing on its own. Every stage needs `
 
 ## 4. Boards with the web view
 
-- [ ] 4.1 Prototype: a WKWebView over a GPUI placeholder through `wry`'s `build_as_child` (fallback: `objc` binding), following bounds on resize and pane moves, hidden when unpainted, still image under GPUI overlays, focus and window shortcuts. Measure memory with one board open and closed. Report before 4.4 builds on it.
+- [x] 4.1 Prototype: a WKWebView over a GPUI placeholder through `wry`'s `build_as_child` (fallback: `objc` binding), following bounds on resize and pane moves, hidden when unpainted, still image under GPUI overlays, focus and window shortcuts. Measure memory with one board open and closed. Report before 4.4 builds on it.
 - [ ] 4.2 Desktop: the `wiffletree-board://` scheme reading only the output's folder, the CSP header, the content rule list blocking every other scheme, navigation and new-window refusal, non-persistent data store. Verify a fetch, a socket, a link and a redirect all stay inside.
 - [ ] 4.3 Host: board listing from storage repositories and the private store, versions from Git history.
 - [ ] 4.4 Desktop: Boards library (filters, search, previews, stale and runner labels, jobs list); open by type (native Markdown, web view, Quick Look, default app); version picker; Share to Space….
