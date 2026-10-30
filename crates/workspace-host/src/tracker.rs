@@ -1,17 +1,21 @@
 //! The tracker's files (OpenSpec change `shared-issues`, phase 1): one folder per issue under
 //! `issues/` of a Space's storage repository, with `issue.md`, `comments/` and `events.jsonl`,
 //! and an index of them in `issues.sql`. The files are the source of truth; the index is rebuilt
-//! from them when it is missing or its format changes. Every write here is the human's. Issue
-//! text is untrusted and may hold personal data: nothing here logs it, and commit messages name
-//! issues by ID only.
+//! from them when it is missing or its format changes, and an issue is read into it again when
+//! its folder changed on disk, by anyone. Every write here is the human's. Issue text is
+//! untrusted and may hold personal data: nothing here logs it, and commit messages name issues
+//! by ID only.
 use crate::*;
 use repos::{Content, Record};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::time::UNIX_EPOCH;
 use storage::TRACKER;
 
 pub(crate) const ISSUES: &str = "issues";
 /// Raised when the index's layout changes, so it is rebuilt from the files.
-const INDEX_FORMAT: i64 = 1;
+const INDEX_FORMAT: i64 = 2;
 const FENCE: &str = "---\n";
 
 /// `issue.md`'s front matter, in the order it is written, so an unchanged field makes no diff.
@@ -254,33 +258,59 @@ impl Store {
         ensure!(&issue.id == id, "Its id names another issue");
         Ok(issue)
     }
-    pub(crate) fn listing(&self, id: &IssueId, tracker: &str) -> IssueListing {
-        let empty = IssueListing {
-            id: id.clone(),
-            tracker: tracker.to_owned(),
-            title: String::new(),
-            state: None,
-            priority: Priority::None,
-            assignee: None,
-            labels: vec![],
-            repositories: vec![],
-            problem: None,
-        };
-        match self.issue(id) {
-            Ok(issue) => IssueListing {
-                title: issue.title,
-                state: Some(issue.state),
-                priority: issue.priority,
-                assignee: issue.assignee,
-                labels: issue.labels,
-                repositories: issue.repositories,
-                ..empty
-            },
-            Err(error) => IssueListing {
-                problem: Some(format!("{error:#}")),
-                ..empty
-            },
+    /// The issue folder's files, relative to it, in order.
+    fn files(&self, id: &IssueId) -> Vec<(String, PathBuf)> {
+        let folder = self.folder.join(issue_folder(id));
+        let mut files: Vec<(String, PathBuf)> = (storage::files_under(&folder).unwrap_or_default())
+            .into_iter()
+            .filter_map(|file| {
+                let name = file.strip_prefix(&folder).ok()?.to_str()?.to_owned();
+                Some((name, file))
+            })
+            .collect();
+        files.sort();
+        files
+    }
+    /// The names, sizes and times of the issue folder's files, which any write changes.
+    pub(crate) fn stamp(&self, id: &IssueId) -> String {
+        let mut stamp = String::new();
+        for (name, file) in self.files(id) {
+            let meta = fs::metadata(&file).ok();
+            let size = meta.as_ref().map_or(0, fs::Metadata::len);
+            let modified = (meta.and_then(|m| m.modified().ok()))
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |since| since.as_nanos());
+            stamp.push_str(&format!("{name}\0{size}\0{modified}\n"));
         }
+        stamp
+    }
+    /// What the index keeps of the issue, read from its files.
+    pub(crate) fn indexed(&self, id: &IssueId, tracker: &str) -> Result<Indexed> {
+        // Taken first, so a write while the files are read is found by the next look.
+        let stamp = self.stamp(id);
+        let mut digest = Sha256::new();
+        for (name, file) in self.files(id) {
+            digest.update(name.as_bytes());
+            digest.update([0]);
+            digest.update(fs::read(&file).unwrap_or_default());
+            digest.update([0]);
+        }
+        let version = (digest.finalize().iter())
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let record = self.record(id, tracker)?;
+        let mut text = vec![id.to_string()];
+        match &record.issue {
+            Some(issue) => text.extend([issue.title.clone(), issue.description.clone()]),
+            None => text.extend(record.raw.clone()),
+        }
+        text.extend(record.comments.iter().map(|comment| comment.body.clone()));
+        Ok(Indexed {
+            listing: listing(&record),
+            stamp,
+            version,
+            text: text.join("\n").to_lowercase(),
+        })
     }
     /// The issue with its comments in time order and its events. A file that does not parse is
     /// shown raw with the problem, never rewritten.
@@ -318,6 +348,47 @@ impl Store {
             events,
             paused: vec![],
         })
+    }
+}
+
+/// One issue as the index keeps it, `issues.sql`'s `issue_index`.
+pub(crate) struct Indexed {
+    listing: IssueListing,
+    stamp: String,
+    version: String,
+    text: String,
+}
+
+/// The list's line for an issue; one whose `issue.md` does not parse has its problem and no
+/// fields.
+fn listing(record: &IssueRecord) -> IssueListing {
+    let empty = IssueListing {
+        id: record.id.clone(),
+        tracker: record.tracker.clone(),
+        title: String::new(),
+        state: None,
+        priority: Priority::None,
+        assignee: None,
+        labels: vec![],
+        repositories: vec![],
+        author: String::new(),
+        created: String::new(),
+        problem: record.problem.clone(),
+        unread: false,
+    };
+    match &record.issue {
+        Some(issue) => IssueListing {
+            title: issue.title.clone(),
+            state: Some(issue.state),
+            priority: issue.priority,
+            assignee: issue.assignee.clone(),
+            labels: issue.labels.clone(),
+            repositories: issue.repositories.clone(),
+            author: issue.author.clone(),
+            created: issue.created.clone(),
+            ..empty
+        },
+        None => empty,
     }
 }
 
@@ -454,24 +525,37 @@ impl Host {
         if format == Some(INDEX_FORMAT) {
             return Ok(());
         }
-        let tx = self.db.unchecked_transaction()?;
-        tx.execute("DELETE FROM issue_index", [])?;
-        tx.execute("DELETE FROM issue_index_format", [])?;
-        tx.execute("INSERT INTO issue_index_format VALUES (?1)", [INDEX_FORMAT])?;
-        tx.commit()?;
+        // Another format may have other columns, so the table is made again.
+        self.db
+            .execute_batch("DROP TABLE IF EXISTS issue_index; DELETE FROM issue_index_format;")?;
+        self.db.execute_batch(include_str!("issues.sql"))?;
+        self.db
+            .execute("INSERT INTO issue_index_format VALUES (?1)", [INDEX_FORMAT])?;
         for (space, tracker) in self.trackers()? {
             self.reindex_tracker(&space, &tracker.prefix)?;
         }
         Ok(())
     }
-    /// Reads every issue of the Space's tracker into the index again.
+    /// Reads every issue of the Space's tracker into the index again. A tracker this Mac has
+    /// never read starts with every issue read, so joining a team's backlog marks none new.
     pub(crate) fn reindex_tracker(&self, space: &Space, prefix: &str) -> Result<()> {
         let storage = space.storage.repository.key();
         let store = self.store(space, prefix);
         let tx = self.db.unchecked_transaction()?;
+        let seen: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM issue_index WHERE storage=?1) OR EXISTS(SELECT 1 FROM issue_read WHERE storage=?1)",
+            [&storage],
+            |r| r.get(0),
+        )?;
         tx.execute("DELETE FROM issue_index WHERE storage=?1", [&storage])?;
         for id in store.ids() {
-            index_listing(&tx, &store.listing(&id, &storage))?;
+            index(&tx, &store.indexed(&id, &storage)?)?;
+        }
+        if !seen {
+            tx.execute(
+                "INSERT OR REPLACE INTO issue_read SELECT storage,id,version FROM issue_index WHERE storage=?1",
+                [&storage],
+            )?;
         }
         tx.commit()?;
         Ok(())
@@ -485,30 +569,105 @@ impl Host {
             prefix: id.prefix().to_owned(),
         };
         match store.exists(id) {
-            true => index_listing(&self.db, &store.listing(id, &key))?,
+            true => index(&self.db, &store.indexed(id, &key)?)?,
             false => {
-                self.db.execute(
-                    "DELETE FROM issue_index WHERE storage=?1 AND id=?2",
-                    params![key, id.to_string()],
-                )?;
+                for table in ["issue_index", "issue_read"] {
+                    self.db.execute(
+                        &format!("DELETE FROM {table} WHERE storage=?1 AND id=?2"),
+                        params![key, id.to_string()],
+                    )?;
+                }
             }
         }
         Ok(())
     }
-    /// The index's issues of the Space's tracker, or of every tracker here.
-    pub fn list_issues(&self, space_id: Option<&SpaceId>) -> Result<Vec<IssueListing>> {
+    /// Reads into the index each issue whose folder changed on disk since it was indexed, and
+    /// drops each one gone, of the tracker in storage repository `only`, or of every tracker:
+    /// an issue added or edited by hand, in a local tracker or the clone, is listed as it is.
+    pub(crate) fn refresh_issue_index(&self, only: Option<&str>) -> Result<()> {
+        for (space, tracker) in self.trackers()? {
+            let storage = space.storage.repository.key();
+            if only.is_some_and(|only| only != storage) {
+                continue;
+            }
+            let store = self.store(&space, &tracker.prefix);
+            let mut stamps: BTreeMap<String, String> = (self
+                .db
+                .prepare("SELECT id,stamp FROM issue_index WHERE storage=?1")?)
+            .query_map([&storage], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+            let changed: Vec<IssueId> = (store.ids().into_iter())
+                .filter(|id| stamps.remove(&id.to_string()) != Some(store.stamp(id)))
+                .collect();
+            if changed.is_empty() && stamps.is_empty() {
+                continue;
+            }
+            let tx = self.db.unchecked_transaction()?;
+            for id in &changed {
+                index(&tx, &store.indexed(id, &storage)?)?;
+            }
+            for gone in stamps.keys() {
+                tx.execute(
+                    "DELETE FROM issue_index WHERE storage=?1 AND id=?2",
+                    params![storage, gone],
+                )?;
+            }
+            tx.commit()?;
+        }
+        Ok(())
+    }
+    /// The issues of the Space's tracker, or of every tracker here, with their unread marks; with
+    /// `search`, only those whose ID, title, description or comments hold each of its words.
+    pub fn list_issues(
+        &self,
+        space_id: Option<&SpaceId>,
+        search: Option<&str>,
+    ) -> Result<Vec<IssueListing>> {
         let storage = match space_id {
             Some(id) => Some(self.space(id)?.space.storage.repository.key()),
             None => None,
         };
-        let mut listed: Vec<IssueListing> = (self
-            .db
-            .prepare("SELECT data FROM issue_index WHERE ?1 IS NULL OR storage=?1")?)
-        .query_map([storage], |r| r.get::<_, String>(0))?
-        .map(|data| Ok(serde_json::from_str(&data?)?))
-        .collect::<Result<_>>()?;
+        self.refresh_issue_index(storage.as_deref())?;
+        let words: Vec<String> = (search.unwrap_or_default().split_whitespace())
+            .map(str::to_lowercase)
+            .collect();
+        let mut listed = vec![];
+        let mut rows = self.db.prepare(
+            "SELECT i.data, i.text, r.version IS NOT i.version FROM issue_index i LEFT JOIN issue_read r ON r.storage=i.storage AND r.id=i.id WHERE ?1 IS NULL OR i.storage=?1",
+        )?;
+        let rows = rows.query_map([storage], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get(2)?))
+        })?;
+        for row in rows {
+            let (data, text, unread) = row?;
+            if words.iter().all(|word| text.contains(word.as_str())) {
+                let listing: IssueListing = serde_json::from_str(&data)?;
+                listed.push(IssueListing { unread, ..listing });
+            }
+        }
         listed.sort_by(|a, b| (&a.tracker, &a.id).cmp(&(&b.tracker, &b.id)));
         Ok(listed)
+    }
+    /// Marks the issue read on this Mac as its files are now. Nothing is written to its tracker.
+    pub fn mark_issue_read(&self, id: &IssueId) -> Result<()> {
+        let (space, _) = self.tracker_for(id.prefix())?;
+        let storage = &space.storage.repository;
+        self.reindex_issue(storage, id)?;
+        self.mark_read(&storage.key(), id)
+    }
+    fn mark_read(&self, storage: &str, id: &IssueId) -> Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO issue_read SELECT storage,id,version FROM issue_index WHERE storage=?1 AND id=?2",
+            params![storage, id.to_string()],
+        )?;
+        Ok(())
+    }
+    fn is_read(&self, storage: &str, id: &IssueId) -> Result<bool> {
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM issue_index i JOIN issue_read r ON r.storage=i.storage AND r.id=i.id AND r.version=i.version WHERE i.storage=?1 AND i.id=?2)",
+            params![storage, id.to_string()],
+            |r| r.get(0),
+        )?)
     }
     /// One issue, read from its files, with its paused files.
     pub fn read_issue(&self, id: &IssueId) -> Result<IssueRecord> {
@@ -535,8 +694,9 @@ impl Host {
         }
         Ok(record)
     }
-    /// Files a new issue in Triage: numbered at once in a local tracker, by the same rule as a
-    /// push; with a temporary ID in a GitHub tracker until a pass pushes it.
+    /// Files a new issue, in Triage unless the form chose another state: numbered at once in a
+    /// local tracker, by the same rule as a push; with a temporary ID in a GitHub tracker until
+    /// a pass pushes it.
     pub fn create_issue(&mut self, space_id: &SpaceId, new: NewIssue) -> Result<Issue> {
         let author = self.issue_author()?;
         let space = self.space(space_id)?.space;
@@ -576,7 +736,7 @@ impl Host {
         let issue = Issue {
             id: id.clone(),
             title: validate_title(&new.title)?,
-            state: IssueState::Triage,
+            state: new.state,
             priority: new.priority,
             assignee: new.assignee,
             labels: new.labels,
@@ -724,7 +884,9 @@ impl Host {
                 self.issues_written.borrow_mut().insert(key);
             }
         }
-        self.reindex_issue(storage, &write.id)
+        // The human's own change is no news to them.
+        self.reindex_issue(storage, &write.id)?;
+        self.mark_read(&storage.key(), &write.id)
     }
     /// After a pass pushed new issues as `numbered`, renames each one's folder in the clone
     /// from its temporary ID and rewrites the temporary ID in the files under `issues/`, as the
@@ -773,6 +935,16 @@ impl Host {
                     }
                 }
             }
+            // Each issue the renaming touched, as it was and is now, so one read stays read.
+            let mut issues = vec![(temporary.clone(), number.clone())];
+            for (was, _, now) in &touched {
+                let pair = (issue_of(was), issue_of(&relative(now)?));
+                if let (Some(was), Some(now)) = pair
+                    && !issues.contains(&(was.clone(), now.clone()))
+                {
+                    issues.push((was, now));
+                }
+            }
             // Only a file that held what the host wrote or synced is the host's write now; one
             // changed outside Wiffletree stays unrecorded and is paused again.
             for (was, before, now) in touched {
@@ -797,8 +969,14 @@ impl Host {
                 "UPDATE issue_temporary SET number=?3 WHERE storage=?1 AND temporary=?2",
                 params![storage.key(), old, new],
             )?;
-            self.reindex_issue(storage, temporary)?;
-            self.reindex_issue(storage, number)?;
+            for (was, now) in issues {
+                let read = self.is_read(&storage.key(), &was)?;
+                self.reindex_issue(storage, &was)?;
+                self.reindex_issue(storage, &now)?;
+                if read {
+                    self.mark_read(&storage.key(), &now)?;
+                }
+            }
         }
         Ok(())
     }
@@ -809,10 +987,10 @@ impl Host {
             let space = record.space;
             let storage = space.storage.repository.key();
             let prefix = self.tracker(&space).ok().map(|tracker| tracker.prefix);
-            let (issues, open): (usize, usize) = self.db.query_row(
-                "SELECT count(*), coalesce(sum(state NOT IN ('done','canceled')),0) FROM issue_index WHERE storage=?1",
+            let (issues, open, unread): (usize, usize, usize) = self.db.query_row(
+                "SELECT count(*), coalesce(sum(i.state NOT IN ('done','canceled')),0), coalesce(sum(r.version IS NOT i.version),0) FROM issue_index i LEFT JOIN issue_read r ON r.storage=i.storage AND r.id=i.id WHERE i.storage=?1",
                 [&storage],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )?;
             let local = matches!(space.storage.repository, StorageRepository::Local { .. });
             let key = repos::key(&storage);
@@ -842,6 +1020,7 @@ impl Host {
                 login: self.gh_login.clone(),
                 issues,
                 open,
+                unread,
                 waiting,
                 paused,
                 synced_at,
@@ -852,17 +1031,21 @@ impl Host {
     }
 }
 
-fn index_listing(db: &Connection, listing: &IssueListing) -> Result<()> {
+fn index(db: &Connection, indexed: &Indexed) -> Result<()> {
+    let listing = &indexed.listing;
     let state = listing
         .state
         .map(|state| json!(state).as_str().map(str::to_owned));
     db.execute(
-        "INSERT OR REPLACE INTO issue_index(storage,id,state,data) VALUES (?1,?2,?3,?4)",
+        "INSERT OR REPLACE INTO issue_index(storage,id,state,data,stamp,version,text) VALUES (?1,?2,?3,?4,?5,?6,?7)",
         params![
             listing.tracker,
             listing.id.to_string(),
             state.flatten(),
-            encode(listing)?
+            encode(listing)?,
+            indexed.stamp,
+            indexed.version,
+            indexed.text,
         ],
     )?;
     Ok(())
@@ -976,12 +1159,12 @@ pub(crate) mod tests {
             [id("CEL-160")],
             "a folder named by no ID is no issue"
         );
-        let listing = store.listing(&id("CEL-160"), "celadon-theme/storage");
-        assert_eq!(listing.title, "");
-        assert!(listing.problem.unwrap().contains("front matter"));
         let record = store
             .record(&id("CEL-160"), "celadon-theme/storage")
             .unwrap();
+        let listing = listing(&record);
+        assert_eq!(listing.title, "");
+        assert!(listing.problem.unwrap().contains("front matter"));
         assert_eq!(record.raw.as_deref(), Some(raw));
         assert!(record.issue.is_none() && record.problem.is_some());
         assert_eq!(

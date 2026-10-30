@@ -121,6 +121,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::EditIssue { .. }
         | Command::Comment { .. }
         | Command::MoveIssue { .. }
+        | Command::MarkIssueRead { .. }
         | Command::SetWorkspacesDir { .. }
         | Command::SetVerification { .. }
         | Command::SetBuildsAtOnce { .. }

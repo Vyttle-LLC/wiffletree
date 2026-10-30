@@ -207,6 +207,8 @@ impl Shared {
 pub(super) enum Intent {
     Select(String),
     OpenPage(Page),
+    /// Opens the Issues page filtered to a Space, or to every Space.
+    OpenIssues(Option<SpaceId>),
     ShowPanel(Panel),
     TogglePanel(Panel),
     ClosePanel,

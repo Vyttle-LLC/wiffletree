@@ -289,7 +289,7 @@ mod tests {
     }
 
     fn listed(host: &Host, space: &Space) -> Vec<String> {
-        (host.list_issues(Some(&space.id)).unwrap().into_iter())
+        (host.list_issues(Some(&space.id), None).unwrap().into_iter())
             .map(|listing| listing.id.to_string())
             .collect()
     }
@@ -409,7 +409,7 @@ mod tests {
         let raw = "---\ntitle: [unclosed\n---\nWritten by hand.\n";
         github.commit("issues/SAGE-7/issue.md", raw);
         sync(&mut host, &github).unwrap();
-        let listing = host.list_issues(Some(&sage.id)).unwrap().remove(0);
+        let listing = host.list_issues(Some(&sage.id), None).unwrap().remove(0);
         assert_eq!(listing.id, id("SAGE-7"));
         assert!(listing.problem.is_some());
         let record = host.read_issue(&id("SAGE-7")).unwrap();
@@ -576,14 +576,14 @@ mod tests {
         github.commit("issues/SAGE-1/issue.md", theirs("SAGE-1"));
         let (_home, mut host, sage) = sage_here(&github);
         file(&mut host, &sage, "Watch app drops replies", "");
-        let before = host.list_issues(None).unwrap();
+        let before = host.list_issues(None, None).unwrap();
         assert_eq!(before.len(), 2);
         host.db
             .execute_batch("DROP TABLE issue_index; DROP TABLE issue_index_format;")
             .unwrap();
         host.db.execute_batch(include_str!("issues.sql")).unwrap();
         host.rebuild_issue_index().unwrap();
-        assert_eq!(host.list_issues(None).unwrap(), before);
+        assert_eq!(host.list_issues(None, None).unwrap(), before);
     }
 
     #[test]
@@ -688,7 +688,8 @@ mod tests {
         let mut a = file(&mut host, &sage, "Replies need a retry", "");
         a.related.push(b.id.to_string());
         host.edit_issue(a.clone()).unwrap();
-        host.comment_on_issue(&a.id, "Seen on two watches.").unwrap();
+        host.comment_on_issue(&a.id, "Seen on two watches.")
+            .unwrap();
         let mut first = host.read_issue(&id("SAGE-1")).unwrap().issue.unwrap();
         first.related.push(a.id.to_string());
         host.edit_issue(first).unwrap();
@@ -696,7 +697,10 @@ mod tests {
         sync(&mut host, &github).unwrap();
         assert_eq!(github.log("%H").len(), commits, "nothing reaches GitHub");
         let there = github.show("issues/SAGE-1/issue.md").unwrap();
-        assert!(!there.contains("SAGE-2") && !there.contains("SAGE-3"), "{there}");
+        assert!(
+            !there.contains("SAGE-2") && !there.contains("SAGE-3"),
+            "{there}"
+        );
         let mut held: Vec<String> = (host.held_notes().unwrap().into_iter())
             .map(|note| match note {
                 WorkspaceNote::Held(held) => held.path,
@@ -712,9 +716,107 @@ mod tests {
         ];
         let comments = clone_of(&host).join(&a).join("comments");
         let comment = fs::read_dir(comments).unwrap().next().unwrap().unwrap();
-        expected.push(format!("{a}/comments/{}", comment.file_name().to_str().unwrap()));
+        expected.push(format!(
+            "{a}/comments/{}",
+            comment.file_name().to_str().unwrap()
+        ));
         expected.sort();
         assert_eq!(held, expected, "each held under the ID this Mac shows");
+    }
+
+    #[test]
+    fn an_issue_added_or_edited_by_hand_in_a_local_tracker_is_listed_and_counted() {
+        let (_home, mut host) = host();
+        host.record_gh_login(Some("jlin".into()));
+        let personal = host.spaces().unwrap().remove(0).space;
+        let prefix = host.tracker(&personal).unwrap().prefix;
+        let filed = file(&mut host, &personal, "Renew the passport", "");
+        let folder = host.storage_folder(&personal.storage.repository);
+        let by_hand = format!("{prefix}-9");
+        fs::create_dir_all(folder.join("issues").join(&by_hand)).unwrap();
+        let text = String::from_utf8(issue_md(&blurry(&by_hand)).unwrap()).unwrap();
+        fs::write(folder.join(format!("issues/{by_hand}/issue.md")), &text).unwrap();
+        let mine = folder.join(issue_folder(&filed.id)).join("issue.md");
+        let edited = fs::read_to_string(&mine)
+            .unwrap()
+            .replace("Renew the passport", "Renew both passports");
+        fs::write(&mine, edited).unwrap();
+        let listings = host.list_issues(Some(&personal.id), None).unwrap();
+        let titles: Vec<(&str, bool)> = (listings.iter())
+            .map(|listing| (listing.title.as_str(), listing.unread))
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                ("Renew both passports", true),
+                ("Theme previews look blurry on Retina displays", true)
+            ]
+        );
+        let tracker = &host.issue_trackers().unwrap()[0];
+        assert_eq!((tracker.issues, tracker.unread), (2, 2));
+        fs::remove_dir_all(folder.join("issues").join(&by_hand)).unwrap();
+        assert_eq!(listed(&host, &personal), [filed.id.to_string()]);
+    }
+
+    #[test]
+    fn a_teammates_change_is_unread_until_opened_and_the_humans_own_never_is() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        github.commit("issues/SAGE-1/issue.md", theirs("SAGE-1"));
+        let (_home, mut host, sage) = sage_here(&github);
+        let unread = |host: &Host| -> Vec<(String, bool)> {
+            (host.list_issues(Some(&sage.id), None).unwrap().into_iter())
+                .map(|listing| (listing.id.to_string(), listing.unread))
+                .collect()
+        };
+        assert_eq!(unread(&host), [("SAGE-1".into(), false)], "joined as read");
+        github.commit(
+            "issues/SAGE-1/comments/2026-10-30T09-00-00Z-pshah.md",
+            "---\nauthor: pshah\ncreated: 2026-10-30T09:00:00Z\n---\nThe gallery export is 1x.\n",
+        );
+        github.commit("issues/SAGE-2/issue.md", theirs("SAGE-2"));
+        sync(&mut host, &github).unwrap();
+        assert_eq!(
+            unread(&host),
+            [("SAGE-1".into(), true), ("SAGE-2".into(), true)]
+        );
+        assert_eq!(host.issue_trackers().unwrap()[1].unread, 2);
+        host.mark_issue_read(&id("SAGE-1")).unwrap();
+        host.comment_on_issue(&id("SAGE-2"), "Mine.").unwrap();
+        let filed = file(&mut host, &sage, "Watch app drops replies", "");
+        let mut expected = vec![("SAGE-1".into(), false), ("SAGE-2".into(), false)];
+        expected.push((filed.id.to_string(), false));
+        assert_eq!(unread(&host), expected);
+        sync(&mut host, &github).unwrap();
+        assert_eq!(
+            unread(&host)[2],
+            ("SAGE-3".into(), false),
+            "numbering keeps it read"
+        );
+        assert_eq!(host.issue_trackers().unwrap()[1].unread, 0);
+    }
+
+    #[test]
+    fn search_finds_words_in_titles_descriptions_and_comments_in_any_case() {
+        let (_home, mut host) = host();
+        host.record_gh_login(Some("jlin".into()));
+        let personal = host.spaces().unwrap().remove(0).space;
+        let passport = file(&mut host, &personal, "Renew the passport", "Before March.");
+        let dentist = file(&mut host, &personal, "Book the dentist", "");
+        host.comment_on_issue(&dentist.id, "Ask about the Retainer.")
+            .unwrap();
+        let found = |search: &str| -> Vec<String> {
+            (host.list_issues(None, Some(search)).unwrap().into_iter())
+                .map(|listing| listing.id.to_string())
+                .collect()
+        };
+        let (passport, dentist) = (passport.id.to_string(), dentist.id.to_string());
+        assert_eq!(found("PASSPORT"), [passport.as_str()]);
+        assert_eq!(found("march"), [passport.as_str()]);
+        assert_eq!(found("retainer dentist"), [dentist.as_str()]);
+        assert_eq!(found(&dentist), [dentist.as_str()]);
+        assert!(found("retainer march").is_empty(), "every word must match");
+        assert_eq!(found("  ").len(), 2);
     }
 
     #[test]

@@ -1,0 +1,719 @@
+//! One issue (OpenSpec change `shared-issues`, task 2.3, mockup study c): its description and one
+//! timeline of comments and events, a composer, and beside them its properties, Work box and
+//! related issues. An `issue.md` that does not parse is shown raw with a warning. Issue text is
+//! untrusted: everything a teammate wrote is shown as plain text, never rendered.
+use super::*;
+use chrono::DateTime;
+use gpui_component::{
+    Disableable,
+    button::ButtonVariants,
+    input::{Textarea, TextareaState},
+};
+use issues_view::{PRIORITIES, label_color, picker, priority_label, short_repository};
+use ui::{card, hint, mono, pill};
+// GPUI exports a `Priority` too; the issue's wins over both globs.
+use workspace_core::Priority;
+
+/// What the issue asks of the Issues page around it.
+pub(super) enum IssueViewEvent {
+    /// Back to the list.
+    Back,
+    /// The human changed the issue, so the list is out of date.
+    Changed,
+    Open(IssueId),
+}
+
+pub(super) struct IssueView {
+    bridge: Bridge,
+    host: HostView,
+    pub(super) id: IssueId,
+    record: Option<Result<IssueRecord, String>>,
+    composer: Entity<TextareaState>,
+    /// The human's `gh` login, which writes need.
+    login: Option<String>,
+    /// A change is waiting for the host.
+    busy: bool,
+}
+impl EventEmitter<IssueViewEvent> for IssueView {}
+impl IssueView {
+    /// Reads the issue, and marks it read when it was unread.
+    pub(super) fn new(
+        bridge: Bridge,
+        id: IssueId,
+        unread: bool,
+        shared: &Shared,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let composer = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(2, 10)
+                .placeholder("Write a comment… Markdown, @mention, link CEL-123 or a PR")
+        });
+        // The mentions and links under the composer follow the draft.
+        cx.subscribe(&composer, |_, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
+        let login =
+            (shared.snapshot()).and_then(|s| s.issue_trackers.iter().find_map(|t| t.login.clone()));
+        let mut view = Self {
+            bridge,
+            host: shared.host.clone(),
+            id,
+            record: None,
+            composer,
+            login,
+            busy: false,
+        };
+        view.load(window, cx);
+        if unread {
+            view.ask(
+                ask::mark_issue_read(view.id.clone()),
+                window,
+                cx,
+                |_, _, _, cx| cx.emit(IssueViewEvent::Changed),
+            );
+        }
+        view
+    }
+    /// Reads the issue again from its files.
+    pub(super) fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ask(
+            ask::issue(self.id.clone()),
+            window,
+            cx,
+            |view, record, _, cx| {
+                view.record = Some(record);
+                cx.notify();
+            },
+        );
+    }
+    /// Sends one change the human made, then reads the issue and the list again.
+    fn change<R: serde::de::DeserializeOwned + 'static>(
+        &mut self,
+        change: Ask<R>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        done: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        self.busy = true;
+        self.ask(change, window, cx, move |view, reply, window, cx| {
+            view.busy = false;
+            match reply {
+                Ok(_) => {
+                    done(view, window, cx);
+                    view.load(window, cx);
+                    cx.emit(IssueViewEvent::Changed);
+                }
+                Err(error) => toast_error(error, window, cx),
+            }
+        });
+        cx.notify();
+    }
+    fn comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let body = self.composer.read(cx).value().trim().to_owned();
+        if body.is_empty() || self.busy {
+            return;
+        }
+        let ask = ask::comment_on_issue(self.id.clone(), body);
+        self.change(ask, window, cx, |view, window, cx| {
+            (view.composer).update(cx, |input, cx| input.set_value("", window, cx));
+        });
+    }
+    fn edit(&mut self, edit: impl FnOnce(&mut Issue), window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Ok(IssueRecord {
+            issue: Some(issue), ..
+        })) = &self.record
+        else {
+            return;
+        };
+        let mut issue = issue.clone();
+        edit(&mut issue);
+        self.change(ask::edit_issue(issue), window, cx, |_, _, _| {});
+    }
+
+    fn properties(&self, issue: &Issue, p: Palette, cx: &mut Context<Self>) -> Div {
+        let weak = cx.weak_entity();
+        let states = IssueState::ALL.map(|state| (state, state.label().into()));
+        let state = picker(
+            "issue-state",
+            issue.state.label(),
+            states.to_vec(),
+            Some(issue.state),
+            {
+                let weak = weak.clone();
+                move |state, window, cx| {
+                    let _ = weak.update(cx, |view, cx| {
+                        let ask = ask::move_issue(view.id.clone(), state);
+                        view.change(ask, window, cx, |_, _, _| {});
+                    });
+                }
+            },
+        );
+        let priorities = PRIORITIES.map(|p| (p, priority_label(p).into()));
+        let priority = picker(
+            "issue-priority",
+            priority_label(issue.priority),
+            priorities.to_vec(),
+            Some(issue.priority),
+            move |priority, window, cx| {
+                let _ = weak.update(cx, |view, cx| {
+                    view.edit(|issue| issue.priority = priority, window, cx)
+                });
+            },
+        );
+        let mine = self.login.is_some() && issue.assignee == self.login;
+        let assign = self.login.clone().map(|login| {
+            let label = if mine { "Unassign" } else { "Assign to me" };
+            ui::gated(
+                button("issue-assign").xsmall().ghost().label(label),
+                &self.host,
+            )
+            .on_click(cx.listener(move |view, _, window, cx| {
+                let assignee = (!mine).then(|| login.clone());
+                view.edit(|issue| issue.assignee = assignee, window, cx)
+            }))
+        });
+        let labels = (issue.labels.iter()).map(|label| pill(label.clone(), label_color(label, p)));
+        let repositories = (issue.repositories.iter())
+            .map(|repository| pill(short_repository(repository).to_owned(), p.subtle));
+        let related = related(issue);
+        div()
+            .w(px(260.))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(prop("State", div().child(state), p))
+            .child(prop("Priority", div().child(priority), p))
+            .child(prop(
+                "Assignee",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(issue.assignee.clone().unwrap_or_else(|| "Nobody".into()))
+                    .children(assign),
+                p,
+            ))
+            .when(!issue.labels.is_empty(), |d| {
+                d.child(prop(
+                    "Labels",
+                    div().flex().flex_wrap().gap_1().children(labels),
+                    p,
+                ))
+            })
+            .when(!issue.repositories.is_empty(), |d| {
+                d.child(prop(
+                    "Repositories",
+                    div().flex().flex_wrap().gap_1().children(repositories),
+                    p,
+                ))
+            })
+            .child(prop("Work", work_box(p), p))
+            .when(!related.is_empty(), |d| {
+                d.child(prop("Related", self.related_links(related, p, cx), p))
+            })
+    }
+
+    fn related_links(
+        &self,
+        related: Vec<(&'static str, String)>,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let mut list = div().flex().flex_col().gap_1();
+        for (at, (how, id)) in related.into_iter().enumerate() {
+            let line = div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .text_size(px(font::SMALL))
+                .text_color(p.subtle)
+                .child(how);
+            list = list.child(match IssueId::parse(&id) {
+                Ok(parsed) => line.child(
+                    button(("issue-related", at))
+                        .xsmall()
+                        .ghost()
+                        .label(id)
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(IssueViewEvent::Open(parsed.clone()))
+                        })),
+                ),
+                // Written by hand, not an ID: shown as written.
+                Err(_) => line.child(mono(id, p)),
+            });
+        }
+        list
+    }
+
+    fn composer(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        let draft = self.composer.read(cx).value().to_string();
+        let (mentions, links) = references(&draft);
+        let mut named = vec![];
+        if !mentions.is_empty() {
+            named.push(format!("Mentions {}", mentions.join(", ")));
+        }
+        if !links.is_empty() {
+            named.push(format!("Links {}", links.join(", ")));
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(p.edge.opacity(edge::FIRM))
+            .bg(p.surface)
+            .child(
+                Textarea::new(&self.composer)
+                    .w_full()
+                    .appearance(false)
+                    .bordered(false),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(hint(named.join(" · "), p).flex_1())
+                    .child(
+                        ui::gated(
+                            button("issue-comment")
+                                .ghost()
+                                .label("Comment")
+                                .disabled(self.busy || draft.trim().is_empty()),
+                            &self.host,
+                        )
+                        .on_click(cx.listener(|view, _, window, cx| view.comment(window, cx))),
+                    ),
+            )
+    }
+}
+
+fn prop(label: &'static str, value: impl IntoElement, p: Palette) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .text_size(px(font::CAPTION))
+                .text_color(p.subtle)
+                .child(label),
+        )
+        .child(value)
+}
+
+/// The Work box. Starting a project from an issue arrives with the links of phase 3.
+fn work_box(p: Palette) -> Div {
+    card(p)
+        .child(hint("No project yet.", p))
+        .child(
+            button("issue-start-project")
+                .primary()
+                .label("Start project from issue")
+                .disabled(true)
+                .tooltip("Starting a project from an issue comes in a later release."),
+        )
+        .child(hint("Opens a coordinator with this issue as its goal.", p))
+}
+
+/// The issues this one names, with how: `blocks`, `blocked by`, `related to`, `duplicate of`.
+pub(super) fn related(issue: &Issue) -> Vec<(&'static str, String)> {
+    let mut related = vec![];
+    for (how, ids) in [
+        ("blocks", &issue.blocks),
+        ("blocked by", &issue.blocked_by),
+        ("related to", &issue.related),
+    ] {
+        related.extend(ids.iter().map(|id| (how, id.clone())));
+    }
+    related.extend((issue.duplicate_of.iter()).map(|id| ("duplicate of", id.clone())));
+    related
+}
+
+/// The `@login` mentions and issue IDs a draft names, each once, in order.
+pub(super) fn references(text: &str) -> (Vec<String>, Vec<String>) {
+    let (mut mentions, mut ids): (Vec<String>, Vec<String>) = (vec![], vec![]);
+    let words = text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '@'));
+    for word in words {
+        let word = word.trim_matches('-');
+        if let Some(login) = word.strip_prefix('@')
+            && !login.is_empty()
+            && !login.contains('@')
+        {
+            let mention = word.to_owned();
+            if !mentions.contains(&mention) {
+                mentions.push(mention);
+            }
+        } else if IssueId::parse(word).is_ok() && !ids.iter().any(|id| id == word) {
+            ids.push(word.to_owned());
+        }
+    }
+    (mentions, ids)
+}
+
+/// One line of the timeline, in time order.
+#[derive(Debug, PartialEq)]
+pub(super) enum Entry<'a> {
+    Filed {
+        by: &'a str,
+        at: &'a str,
+    },
+    Comment(&'a Comment),
+    Event {
+        by: &'a str,
+        at: &'a str,
+        text: String,
+    },
+}
+impl Entry<'_> {
+    fn at(&self) -> &str {
+        match self {
+            Self::Filed { at, .. } | Self::Event { at, .. } => at,
+            Self::Comment(comment) => &comment.created,
+        }
+    }
+}
+
+/// The issue's filing, comments and events as one timeline, oldest first.
+pub(super) fn timeline<'a>(issue: &'a Issue, record: &'a IssueRecord) -> Vec<Entry<'a>> {
+    let mut entries = vec![Entry::Filed {
+        by: &issue.author,
+        at: &issue.created,
+    }];
+    entries.extend(record.comments.iter().map(Entry::Comment));
+    entries.extend(record.events.iter().map(|event| Entry::Event {
+        by: &event.by,
+        at: &event.at,
+        text: event_text(event),
+    }));
+    // Stable, so the filing stays first among entries of the same second.
+    entries.sort_by(|a, b| a.at().cmp(b.at()));
+    entries
+}
+
+/// What an event did, after who did it: "moved this from Todo to In progress".
+pub(super) fn event_text(event: &IssueEvent) -> String {
+    let field = |name: &str| event.fields.get(name).cloned().unwrap_or_default();
+    let state = |name: &str| {
+        serde_json::from_value::<IssueState>(field(name)).map_or("another state", |s| s.label())
+    };
+    let automatic = field("auto") == serde_json::json!(true);
+    match event.kind.as_str() {
+        "state" => format!(
+            "moved this from {} to {}{}",
+            state("from"),
+            state("to"),
+            if automatic { " automatically" } else { "" }
+        ),
+        "priority" => {
+            let priority = serde_json::from_value::<Priority>(field("to")).unwrap_or_default();
+            format!("set priority to {}", priority_label(priority))
+        }
+        "assignee" => match field("to").as_str() {
+            Some(login) => format!("assigned {login}"),
+            None => "removed the assignee".into(),
+        },
+        "work" => "started a project".into(),
+        "pr" => match (field("url").as_str(), field("status").as_str()) {
+            (Some(url), Some(status)) => format!("linked {url} · {status}"),
+            _ => "linked a pull request".into(),
+        },
+        "link" => "linked work".into(),
+        other => format!("changed {other}"),
+    }
+}
+
+/// How long ago an RFC 3339 time was, or the time as written when it does not parse.
+pub(super) fn ago(at: &str) -> String {
+    DateTime::parse_from_rfc3339(at)
+        .map_or_else(|_| at.to_owned(), |at| wording::age(at.timestamp_millis()))
+}
+
+impl Render for IssueView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(is_dark(cx));
+        let crumbs = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .text_size(px(font::SMALL))
+            .text_color(p.subtle)
+            .child(
+                button("issue-back")
+                    .xsmall()
+                    .ghost()
+                    .label("Issues")
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(IssueViewEvent::Back))),
+            )
+            .child("›")
+            .child(issue_id(&self.id, p));
+        let record = match &self.record {
+            None => return div().child(crumbs).child(hint("Reading…", p)),
+            Some(Err(error)) => {
+                return div()
+                    .child(crumbs)
+                    .child(hint(error.clone(), p).text_color(p.red));
+            }
+            Some(Ok(record)) => record.clone(),
+        };
+        let paused = (!record.paused.is_empty()).then(|| {
+            hint(
+                format!(
+                    "{} of this issue’s files changed on this Mac outside Wiffletree or on two Macs at once. They stay here, unpushed, until you settle them in the Inbox.",
+                    wording::counted(record.paused.len(), "file")
+                ),
+                p,
+            )
+            .text_color(p.yellow)
+        });
+        let Some(issue) = &record.issue else {
+            let problem = record.problem.clone().unwrap_or_default();
+            return div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(crumbs)
+                .children(paused)
+                .child(
+                    ui::banner(p.yellow).child(format!(
+                        "This issue.md can’t be read: {problem}. It is shown as written, and Wiffletree won’t change it."
+                    )),
+                )
+                .child(
+                    div()
+                        .p_3()
+                        .rounded_md()
+                        .bg(p.surface)
+                        .font_family(".SystemMonoFont")
+                        .text_size(px(font::SMALL))
+                        .whitespace_normal()
+                        .child(record.raw.clone().unwrap_or_default()),
+                );
+        };
+        let mut thread = div().flex().flex_col().gap_2();
+        for entry in timeline(issue, &record) {
+            thread = thread.child(match entry {
+                Entry::Filed { by, at } => event_line(by, "filed this", at, p),
+                Entry::Event { by, at, text } => event_line(by, &text, at, p),
+                Entry::Comment(comment) => comment_card(comment, p),
+            });
+        }
+        let main = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .text_size(px(font::TITLE))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(issue.title.clone()),
+            )
+            .child(if issue.description.is_empty() {
+                hint("No description.", p)
+            } else {
+                div().whitespace_normal().child(issue.description.clone())
+            })
+            .child(thread)
+            .child(self.composer(p, cx));
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(crumbs)
+            .children(paused)
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_6()
+                    .child(main)
+                    .child(self.properties(issue, p, cx)),
+            )
+    }
+}
+
+/// An issue's ID, greyed while it is temporary.
+pub(super) fn issue_id(id: &IssueId, p: Palette) -> Div {
+    let shown = mono(id.to_string(), p);
+    match id.is_temporary() {
+        true => shown.opacity(0.6),
+        false => shown,
+    }
+}
+
+fn event_line(by: &str, text: &str, at: &str, p: Palette) -> Div {
+    div()
+        .text_size(px(font::SMALL))
+        .text_color(p.subtle)
+        .child(format!("{by} {text} · {}", ago(at)))
+}
+
+fn comment_card(comment: &Comment, p: Palette) -> Div {
+    let who = match &comment.assistant_for {
+        Some(login) => format!("Assistant for {login}"),
+        None => comment.author.clone(),
+    };
+    let edited = comment.edited.as_ref().map_or("", |_| " · edited");
+    card(p)
+        .when(comment.assistant_for.is_some(), |d| {
+            d.border_color(p.magenta.opacity(0.4))
+        })
+        .child(
+            div()
+                .text_size(px(font::SMALL))
+                .text_color(p.subtle)
+                .child(format!("{who} · {}{edited}", ago(&comment.created))),
+        )
+        .child(div().whitespace_normal().child(comment.body.clone()))
+}
+
+impl Requests for IssueView {
+    fn bridge(&self) -> &Bridge {
+        &self.bridge
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Entry, event_text, references, related, timeline};
+    use serde_json::json;
+    use workspace_core::*;
+
+    fn issue() -> Issue {
+        Issue {
+            id: IssueId::parse("CEL-151").unwrap(),
+            title: "Delivery webhook retries forever on a malformed payload".into(),
+            state: IssueState::Todo,
+            priority: Priority::Urgent,
+            assignee: None,
+            labels: vec!["bug".into()],
+            repositories: vec!["celadon-theme/celadon-chat".into()],
+            blocks: vec!["CEL-148".into()],
+            blocked_by: vec![],
+            related: vec!["see the wiki".into()],
+            duplicate_of: None,
+            author: "treyes".into(),
+            created: "2026-10-29T14:00:00Z".into(),
+            description: "A payload without message.id gets 500.".into(),
+            extra: Extra::new(),
+        }
+    }
+    fn event(at: &str, kind: &str, fields: serde_json::Value) -> IssueEvent {
+        IssueEvent {
+            at: at.into(),
+            by: "jlin".into(),
+            kind: kind.into(),
+            fields: fields.as_object().unwrap().clone(),
+        }
+    }
+
+    #[test]
+    fn the_timeline_puts_the_filing_comments_and_events_in_time_order() {
+        let issue = issue();
+        let comment = Comment {
+            file: "2026-10-29T14-08-00Z-pshah.md".into(),
+            author: "pshah".into(),
+            created: "2026-10-29T14:08:00Z".into(),
+            edited: None,
+            assistant_for: None,
+            body: "Seeing it too.".into(),
+        };
+        let record = IssueRecord {
+            tracker: "celadon-theme/storage".into(),
+            id: issue.id.clone(),
+            issue: Some(issue.clone()),
+            raw: None,
+            problem: None,
+            comments: vec![comment.clone()],
+            events: vec![event(
+                "2026-10-29T14:17:00Z",
+                "priority",
+                json!({"from": "none", "to": "urgent"}),
+            )],
+            paused: vec![],
+        };
+        let entries = timeline(&issue, &record);
+        assert_eq!(
+            entries,
+            [
+                Entry::Filed {
+                    by: "treyes",
+                    at: "2026-10-29T14:00:00Z"
+                },
+                Entry::Comment(&comment),
+                Entry::Event {
+                    by: "jlin",
+                    at: "2026-10-29T14:17:00Z",
+                    text: "set priority to Urgent".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn events_read_as_what_changed() {
+        let at = "2026-10-29T14:17:00Z";
+        let moved = event(at, "state", json!({"from": "todo", "to": "in_progress"}));
+        assert_eq!(event_text(&moved), "moved this from Todo to In progress");
+        let auto = event(
+            at,
+            "state",
+            json!({"from": "in_progress", "to": "in_review", "auto": true}),
+        );
+        assert_eq!(
+            event_text(&auto),
+            "moved this from In progress to In review automatically"
+        );
+        let assigned = event(at, "assignee", json!({"from": null, "to": "pshah"}));
+        assert_eq!(event_text(&assigned), "assigned pshah");
+        let unassigned = event(at, "assignee", json!({"from": "pshah", "to": null}));
+        assert_eq!(event_text(&unassigned), "removed the assignee");
+        let pr = event(
+            at,
+            "pr",
+            json!({"url": "https://github.com/o/r/pull/412", "status": "open"}),
+        );
+        assert_eq!(
+            event_text(&pr),
+            "linked https://github.com/o/r/pull/412 · open"
+        );
+        assert_eq!(
+            event_text(&event(at, "estimate", json!({}))),
+            "changed estimate"
+        );
+    }
+
+    #[test]
+    fn a_draft_names_its_mentions_and_issue_ids_once_each() {
+        let (mentions, ids) =
+            references("@pshah can you check CEL-148 and CEL-new-qxvb? cc @pshah, CEL-148.");
+        assert_eq!(mentions, ["@pshah"]);
+        assert_eq!(ids, ["CEL-148", "CEL-new-qxvb"]);
+        let (mentions, ids) = references("mail me@example.com about cel-1");
+        assert!(
+            mentions.is_empty() && ids.is_empty(),
+            "{mentions:?} {ids:?}"
+        );
+    }
+
+    #[test]
+    fn related_issues_say_how_and_keep_what_was_written_by_hand() {
+        assert_eq!(
+            related(&issue()),
+            [
+                ("blocks", "CEL-148".to_owned()),
+                ("related to", "see the wiki".to_owned())
+            ]
+        );
+    }
+}

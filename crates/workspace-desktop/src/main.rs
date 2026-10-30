@@ -23,6 +23,8 @@ mod history_sheet;
 mod hosts;
 mod inbox;
 mod inspector;
+mod issue_view;
+mod issues_view;
 mod leftovers;
 mod live_work;
 mod memory_view;
@@ -30,6 +32,7 @@ mod menu_bar;
 mod models;
 mod models_view;
 mod native_quit;
+mod new_issue;
 mod new_project;
 mod palette;
 mod preferences;
@@ -208,6 +211,7 @@ enum Page {
     Usage,
     Models,
     Skills,
+    Issues,
     Repositories,
     Spaces,
     Brains,
@@ -238,6 +242,7 @@ struct Workspace {
     brains: Entity<brains_view::BrainsPage>,
     brain_browser: Entity<brain_browser_view::BrainBrowser>,
     brain_search: Entity<brain_search::BrainSearch>,
+    issues: Entity<issues_view::IssuesPage>,
     usage: Entity<usage_view::UsagePage>,
     sidebar: Entity<sidebar::Sidebar>,
     inspector: Entity<Inspector>,
@@ -296,6 +301,8 @@ impl Workspace {
         Self::adopt(&brain_search, window, cx);
         // The shell draws the overlay while it is open.
         cx.observe(&brain_search, |_, _, cx| cx.notify()).detach();
+        let issues = cx.new(|cx| issues_view::IssuesPage::new(bridge.clone(), window, cx));
+        Self::adopt(&issues, window, cx);
         let sidebar = cx.new(|cx| sidebar::Sidebar::new(bridge.clone(), window, cx));
         Self::adopt(&sidebar, window, cx);
         let usage = cx.new(|_| usage_view::UsagePage::new(bridge.clone()));
@@ -321,6 +328,7 @@ impl Workspace {
             brains,
             brain_browser,
             brain_search,
+            issues,
             usage,
             sidebar,
             inspector,
@@ -424,6 +432,12 @@ impl Workspace {
         match intent {
             Intent::Select(id) => self.select(id.clone(), window, cx),
             Intent::OpenPage(page) => self.open_page(*page, window, cx),
+            Intent::OpenIssues(space_id) => {
+                self.issues.update(cx, |issues, cx| {
+                    issues.filter_space(space_id.clone(), window, cx)
+                });
+                self.open_page(Page::Issues, window, cx);
+            }
             Intent::ShowPanel(panel) => self.show_panel(*panel, window, cx),
             Intent::TogglePanel(panel) => self.toggle_panel(*panel, window, cx),
             Intent::ClosePanel => self.shared.panel = None,
@@ -494,6 +508,8 @@ impl Workspace {
             .update(cx, |brains, cx| brains.share(shared.clone(), window, cx));
         self.brain_browser
             .update(cx, |browser, cx| browser.share(shared.clone(), window, cx));
+        self.issues
+            .update(cx, |issues, cx| issues.share(shared.clone(), window, cx));
         self.models
             .update(cx, |models, cx| models.share(shared.clone(), window, cx));
         self.skills

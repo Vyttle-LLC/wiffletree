@@ -3220,10 +3220,13 @@ pub enum Command {
         space_id: Option<SpaceId>,
     },
     /// Read-only: the issues of the Space's tracker, or of every tracker on this Mac without
-    /// `space_id`, as `IssueListing`s ordered by tracker and ID.
+    /// `space_id`, as `IssueListing`s ordered by tracker and ID; with `search`, only those
+    /// whose ID, title, description or comments hold each of its words.
     Issues {
         #[serde(default)]
         space_id: Option<SpaceId>,
+        #[serde(default)]
+        search: Option<String>,
     },
     /// Read-only: one issue with its comments and events, as an `IssueRecord`.
     Issue {
@@ -3249,6 +3252,10 @@ pub enum Command {
     MoveIssue {
         id: IssueId,
         state: IssueState,
+    },
+    /// Marks an issue read on this Mac as it is now; nothing is written to its tracker.
+    MarkIssueRead {
+        id: IssueId,
     },
     /// Replaces a Space's definition; its id and storage stay as they are.
     UpdateSpace {
@@ -3768,6 +3775,7 @@ impl Command {
             | Self::EditIssue { .. }
             | Self::Comment { .. }
             | Self::MoveIssue { .. }
+            | Self::MarkIssueRead { .. }
             | Self::SetWorkspacesDir { .. }
             | Self::SetVerification { .. }
             | Self::SetBuildsAtOnce { .. }
@@ -3839,6 +3847,7 @@ impl Command {
                 | Self::EditIssue { .. }
                 | Self::Comment { .. }
                 | Self::MoveIssue { .. }
+                | Self::MarkIssueRead { .. }
                 | Self::SetSpaceBrain { .. }
                 | Self::SpaceStorage { .. }
                 | Self::ConfirmBrain { .. }

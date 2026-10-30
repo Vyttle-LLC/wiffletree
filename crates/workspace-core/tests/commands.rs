@@ -435,11 +435,16 @@ fn every_tracker_write_is_the_humans_and_reading_issues_is_not() {
             id: id.clone(),
             state: IssueState::Todo,
         },
+        Command::MarkIssueRead { id: id.clone() },
     ];
     for command in writes {
         assert!(command.is_human_only() && !command.is_read(), "{command:?}");
     }
-    for command in [Command::Issues { space_id: None }, Command::Issue { id }] {
+    let issues = Command::Issues {
+        space_id: None,
+        search: None,
+    };
+    for command in [issues, Command::Issue { id }] {
         assert!(!command.is_human_only() && command.is_read(), "{command:?}");
     }
     let sync = Command::SyncIssues { space_id: None };

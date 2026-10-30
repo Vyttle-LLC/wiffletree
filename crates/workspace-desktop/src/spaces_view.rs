@@ -15,7 +15,6 @@ use wording::{age, counted};
 
 const SCANS: &str = "Before pushing issues/ or spaces/, Wiffletree runs the brain gate’s personal-data and secret scans on this Mac and holds a file that fails, instead of pushing it.";
 const ROUTER: &str = "The router reads this to decide where a message goes.";
-const ISSUES_PAGE_LATER: &str = "The Issues page comes in a later release.";
 const ALSO_SETTINGS: &str =
     "Your settings repository. Settings, the Space and issues each sync only their own folders.";
 const SOURCES_FORMAT: &str =
@@ -1053,13 +1052,14 @@ impl SpacesPage {
         if is_shared(space) {
             box_ = box_.child(hint(SCANS, p));
         }
-        // The Issues page arrives with shared issues' phase 2; until then the button says so.
         let open_issues = status.prefix.is_some().then(|| {
+            let space_id = space.id.clone();
             button("space-open-issues")
                 .ghost()
                 .label("Open Issues")
-                .disabled(true)
-                .tooltip(ISSUES_PAGE_LATER)
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(Intent::OpenIssues(Some(space_id.clone())))
+                }))
         });
         let sync_now = is_shared(space).then(|| {
             ui::gated(

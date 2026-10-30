@@ -1996,8 +1996,8 @@ impl Host {
                 self.sync_issues(space_id.as_ref(), &publish::Tools::default())?;
                 Value::Null
             }
-            Command::Issues { space_id } => {
-                serde_json::to_value(self.list_issues(space_id.as_ref())?)?
+            Command::Issues { space_id, search } => {
+                serde_json::to_value(self.list_issues(space_id.as_ref(), search.as_deref())?)?
             }
             Command::Issue { id } => serde_json::to_value(self.read_issue(&id)?)?,
             Command::CreateIssue { space_id, issue } => {
@@ -2008,6 +2008,10 @@ impl Host {
                 serde_json::to_value(self.comment_on_issue(&id, &body)?)?
             }
             Command::MoveIssue { id, state } => serde_json::to_value(self.move_issue(&id, state)?)?,
+            Command::MarkIssueRead { id } => {
+                self.mark_issue_read(&id)?;
+                Value::Null
+            }
             Command::SyncNow => {
                 self.sync_now(&publish::Tools::default())?;
                 Value::Null

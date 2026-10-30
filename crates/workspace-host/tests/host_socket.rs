@@ -838,7 +838,11 @@ fn tracker_writes_need_the_apps_credential_and_reading_issues_does_not() {
     });
     let (personal, id, folder, issue) = filed.get().unwrap();
     let mut agent = fixture.welcomed(None);
-    let listed = agent.request(PROTOCOL_VERSION, Command::Issues { space_id: None });
+    let issues = Command::Issues {
+        space_id: None,
+        search: Some("passport".into()),
+    };
+    let listed = agent.request(PROTOCOL_VERSION, issues);
     assert_eq!(listed.error, None, "reading issues is answered");
     let read = agent.result(Command::Issue { id: id.clone() });
     assert_eq!(read["issue"]["title"], "Renew the passport");
@@ -858,6 +862,7 @@ fn tracker_writes_need_the_apps_credential_and_reading_issues_does_not() {
             id: id.clone(),
             state: IssueState::Todo,
         },
+        Command::MarkIssueRead { id: id.clone() },
     ];
     for command in writes.clone() {
         let refused = agent.request(PROTOCOL_VERSION, command);

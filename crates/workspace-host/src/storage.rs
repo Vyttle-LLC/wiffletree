@@ -1368,7 +1368,8 @@ impl Host {
             self.apply_numbers(storage, &found.numbered)?;
         }
         self.apply_numbers(storage, &found.adopted)?;
-        Ok(())
+        // The pass compared every issue file, so an edit made by hand is indexed now too.
+        self.refresh_issue_index(Some(&storage.key()))
     }
     /// Takes a pulled `space.yaml` of a Space on this Mac, or the tracker's config, into the
     /// store, and a pulled issue's file into the index.
@@ -1420,6 +1421,7 @@ impl Host {
         let folder = self.storage_folder(&space.storage.repository);
         let prefix = self.tracker(&space).ok().map(|tracker| tracker.prefix);
         let path = folder.to_string_lossy().into_owned();
+        self.refresh_issue_index(Some(&space.storage.repository.key()))?;
         let issues: usize = self.db.query_row(
             "SELECT count(*) FROM issue_index WHERE storage=?1",
             [space.storage.repository.key()],

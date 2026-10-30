@@ -65,10 +65,13 @@ impl<'de> Deserialize<'de> for IssueId {
     }
 }
 
-/// The fixed states, in order. A tracker listing others is refused.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// The fixed states, in order. A tracker listing others is refused. A new issue starts in Triage.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueState {
+    #[default]
     Triage,
     Backlog,
     Todo,
@@ -149,12 +152,14 @@ pub struct Issue {
     pub extra: Extra,
 }
 
-/// A new issue as the human's form gives it. It starts in Triage.
+/// A new issue as the human's form gives it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewIssue {
     pub title: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
+    pub state: IssueState,
     #[serde(default)]
     pub priority: Priority,
     #[serde(default)]
@@ -218,8 +223,17 @@ pub struct IssueListing {
     pub labels: Vec<String>,
     #[serde(default)]
     pub repositories: Vec<String>,
+    /// A GitHub login.
+    #[serde(default)]
+    pub author: String,
+    /// RFC 3339, in UTC.
+    #[serde(default)]
+    pub created: String,
     #[serde(default)]
     pub problem: Option<String>,
+    /// Changed since the human last opened it on this Mac.
+    #[serde(default)]
+    pub unread: bool,
 }
 
 /// One issue with its discussion, answering `Command::Issue`.
@@ -257,6 +271,9 @@ pub struct IssueTracker {
     pub login: Option<String>,
     pub issues: usize,
     pub open: usize,
+    /// Issues changed since the human last opened them on this Mac.
+    #[serde(default)]
+    pub unread: usize,
     /// Files changed on this Mac that wait to be pushed.
     pub waiting: usize,
     pub paused: usize,

@@ -11,12 +11,12 @@ Each numbered phase is one pull request and ships on its own. Every phase needs 
 
 ## 2. Issues UI
 
-- [ ] 2.1 `workspace-desktop`: `Page::Issues` in `main.rs` and `ui.rs`; an Issues row with its new-count before Repositories in `sidebar.rs`, and the footer naming the filtered Space's tracker.
-- [ ] 2.2 New `issues_view.rs`: list grouped by state and board with drag to move, filters (Space, open, assignee, priority, label, repository), search, unread marks kept on this Mac.
-- [ ] 2.3 New `issue_view.rs`: description, timeline of comments and events, composer with mentions and issue IDs, properties, Work box (Start project from issue disabled until phase 3), related issues, raw view with warning for a file that does not parse.
-- [ ] 2.4 New `new_issue.rs`: the form, the Space defaulting to the current Space, temporary ID, and the permanent-history and personal-data warning naming the storage repository, or the stays-on-this-Mac line for a local tracker.
-- [ ] 2.5 `workspace-host`: search over titles, descriptions and comments from the index; read state per issue in `issues.sql`.
-- [ ] 2.6 Docs: README section on shared issues and their limits; `docs/DEVELOPMENT.md` notes.
+- [x] 2.1 `workspace-desktop`: `Page::Issues` in `main.rs` and `ui.rs`; an Issues row with its new-count before Repositories in `sidebar.rs`, and the footer naming the filtered Space's tracker.
+- [x] 2.2 New `issues_view.rs`: list grouped by state and board with drag to move, filters (Space, open, assignee, priority, label, repository), search, unread marks kept on this Mac.
+- [x] 2.3 New `issue_view.rs`: description, timeline of comments and events, composer with mentions and issue IDs, properties, Work box (Start project from issue disabled until phase 3), related issues, raw view with warning for a file that does not parse.
+- [x] 2.4 New `new_issue.rs`: the form, the Space defaulting to the current Space, temporary ID, and the permanent-history and personal-data warning naming the storage repository, or the stays-on-this-Mac line for a local tracker.
+- [x] 2.5 `workspace-host`: search over titles, descriptions and comments from the index; read state per issue in `issues.sql`.
+- [x] 2.6 Docs: README section on shared issues and their limits; `docs/DEVELOPMENT.md` notes.
 
 ## 3. Links between issues and projects or tickets, and automatic states
 
