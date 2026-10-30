@@ -1,11 +1,17 @@
-# Runs the validation suite on pull requests, which must be up to date with main to merge; the release workflow reuses it before publishing.
+# Runs the validation suite on pull requests, which must be up to date with main to merge, and on every push to main; the release
+# workflow reuses it before publishing.
 # The core and host tests are built once on Linux and run in four shards. macOS jobs lint, run the desktop tests, the tests that
-# only build on macOS (the `mac` nextest profile) and the communication tests. Outside pull requests, as in a release, the whole
-# suite also runs on macOS. The `check` job, which branch protection requires, passes only when every other job did.
+# only build on macOS (the `mac` nextest profile) and the communication tests. Outside pull requests, as on main and in a release,
+# the whole suite also runs on macOS. The `check` job, which branch protection requires, passes only when every other job did.
+# Only runs on main save the Rust build caches. A pull request can restore caches saved on its own ref or on main, so saving from
+# main starts every new pull request warm; pull requests and releases restore and never save, which keeps their caches from
+# pushing main's out of the repository's cache limit.
 name: CI
 
 on:
   pull_request:
+  push:
+    branches: [main]
   workflow_call:
 
 concurrency:
@@ -22,6 +28,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@nextest
 
       - name: Build the core and host tests
@@ -70,6 +78,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Ensure the Metal toolchain
         run: xcrun --find metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
@@ -86,6 +96,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@nextest
 
       - name: Ensure the Metal toolchain
@@ -121,6 +133,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@nextest
 
       - name: Ensure the Metal toolchain
