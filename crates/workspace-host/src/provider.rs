@@ -1279,12 +1279,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("provider");
         // The provider prints its own niceness, then starts a tool command the way a Bash tool
-        // does, leading its own process group, which prints its pid, group and niceness.
+        // does, leading its own process group, which prints its pid, group, niceness and
+        // thread caps.
         fs::write(
             &script,
-            "#!/bin/sh\nps -o nice= -p $$\nset -m\nsh -c 'ps -o pid=,pgid=,nice= -p $$' &\nwait\n",
+            "#!/bin/sh\nps -o nice= -p $$\nset -m\nsh -c 'echo $(ps -o pid=,pgid=,nice= -p $$) $CARGO_BUILD_JOBS $NEXTEST_TEST_THREADS' &\nwait\n",
         )
         .unwrap();
+        // A cap the test's own environment sets, as `NEXTEST_TEST_THREADS` may, is passed on.
+        let cap = |name| std::env::var(name).unwrap_or(crate::runtime::agent_threads().to_string());
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
         for provider in [Provider::Claude, Provider::Codex] {
             let mut cmd = ProcessCommand::new(&script);
@@ -1298,7 +1301,7 @@ mod tests {
             let [own, tool] = lines.as_slice() else {
                 panic!("{provider:?}: {output}");
             };
-            let [pid, group, tool] = tool.as_slice() else {
+            let [pid, group, tool, jobs, test_threads] = tool.as_slice() else {
                 panic!("{provider:?}: {output}");
             };
             assert_eq!(own.as_slice(), ["10"], "{provider:?}");
@@ -1307,6 +1310,8 @@ mod tests {
                 "{provider:?}: the tool command leads its own group"
             );
             assert_eq!(*tool, "10", "{provider:?}");
+            assert_eq!(*jobs, cap("CARGO_BUILD_JOBS"), "{provider:?}");
+            assert_eq!(*test_threads, cap("NEXTEST_TEST_THREADS"), "{provider:?}");
         }
     }
 

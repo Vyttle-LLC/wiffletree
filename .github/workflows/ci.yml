@@ -19,6 +19,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
 
       - name: Ensure the Metal toolchain
         run: xcrun --find metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
@@ -30,7 +31,7 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Rust tests
-        run: cargo test --locked --workspace
+        run: cargo nextest run --locked --workspace
 
       - name: Communication tests
         run: |
