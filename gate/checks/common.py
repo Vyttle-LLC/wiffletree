@@ -54,6 +54,17 @@ def changed_files() -> list[Change]:
     return changes
 
 
+# The repository the gate itself lives in: Wiffletree, or wherever it moves.
+GATE_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+# Its fixtures plant fake values on purpose, so they are exempt there, and only there.
+GATE_FIXTURES = "gate/tests/"
+
+
+def scanning_gate_repo() -> bool:
+    """Whether the repository being checked is the gate's own."""
+    return os.path.realpath(git("rev-parse", "--show-toplevel").strip()) == GATE_REPO_ROOT
+
+
 def tracked_files(*pathspecs: str) -> list[str]:
     return [path for path in git("ls-files", "-z", "--", *pathspecs).split("\0") if path]
 

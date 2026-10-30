@@ -10,8 +10,8 @@ matched value.
 ```text
 gate/
   action.yml       the composite action; input `check` names one check
-  checks/          the checks (Python 3.11+, standard library only) and markdown-lint.sh
-  config/          the default gitleaks and markdownlint-cli2 configs
+  checks/          the checks (Python 3.11+, standard library only)
+  config/          the default gitleaks and markdownlint-cli2 configs, and markdownlint's output formatter
   tests/           the fixture tests and fixtures/, the one fixture set for the entry contract
 ```
 
@@ -24,7 +24,7 @@ be required.
 | --- | --- | --- |
 | `secret-scan` | gitleaks finds a secret in the PR's commits | `checks/secret_scan.py` |
 | `sensitive-info` | A line the PR adds holds child PII or a credential (see below) | `checks/sensitive_scan.py` |
-| `markdown-lint` | markdownlint-cli2 errors under `config/markdownlint-cli2.jsonc` | `checks/markdown-lint.sh` |
+| `markdown-lint` | markdownlint-cli2 errors under `config/markdownlint-cli2.jsonc` | `checks/markdown_lint.py` |
 | `wikilinks` | A `[[link]]` in `notes/` or `STATUS.md` names no existing note | `checks/wikilinks.py` |
 | `log-schema` | A file under `logs/` breaks the entry contract or the size cap | `checks/log_schema.py` |
 | `path-ownership` | The PR mixes PR classes, or edits or deletes a log entry | `checks/path_ownership.py` |
@@ -33,8 +33,9 @@ be required.
 Every finding names the file, line, column where it has one, and rule. In
 GitHub Actions each finding is also an annotation with the file and line. No
 check prints the matched text or the line around it: gitleaks writes a
-redacted report that the check reads, markdownlint's descriptions and `[…]`
-details are dropped, and neither tool's error messages are repeated.
+redacted report that the check reads, markdownlint writes only locations and
+rules through the gate's formatter, and neither tool's error messages are
+repeated.
 
 `gate-tests` runs the gate's bundled fixture tests against the tools the action
 installed, on the brain's runner. That proves the pinned gate works there. The
@@ -120,7 +121,8 @@ exception is a separator-free digit run written directly after a CI run or job
 context: `runs/`, `jobs/`, or the word `run`, `run ID` or `job` followed by a
 space, `#` or `:`. Any other ID that looks like a phone number needs an
 explicit suppression. Street addresses and coordinates are best effort. Files
-under `gate/tests/` are exempt, because the gate's fixtures plant fake values.
+under `gate/tests/` are exempt only when the gate scans its own repository,
+whose fixtures plant fake values; in a brain they are scanned like any other.
 
 ### Suppressing a false positive
 
@@ -171,8 +173,10 @@ live only in the brain repository, never in Wiffletree.
 
 gitleaks uses the gate's `config/gitleaks.toml`, which extends gitleaks'
 default rules. A brain's own `.gitleaks.toml`, when present, extends that in
-turn; it must not have an `[extend]` table of its own. markdownlint always uses
-the gate's config, so every brain lints alike.
+turn; it must not have an `[extend]` table of its own. markdownlint uses only
+the gate's config: the check lints copies of the tracked Markdown files in a
+scratch folder, so a brain's `.markdownlint*` files are ignored and every
+brain lints alike.
 
 ## The caller
 
@@ -286,7 +290,7 @@ the commit to compare with; it defaults to `origin/$GITHUB_BASE_REF`, then
 export GATE_BASE=origin/main
 python3 <wiffletree>/gate/checks/secret_scan.py
 python3 <wiffletree>/gate/checks/sensitive_scan.py     # --all scans every tracked file instead
-bash    <wiffletree>/gate/checks/markdown-lint.sh
+python3 <wiffletree>/gate/checks/markdown_lint.py
 python3 <wiffletree>/gate/checks/wikilinks.py
 python3 <wiffletree>/gate/checks/log_schema.py
 python3 <wiffletree>/gate/checks/path_ownership.py
@@ -299,10 +303,7 @@ Every check exits with one of these codes:
 | --- | --- |
 | 0 | The check passes. Warnings may be printed. |
 | 1 | The check has findings, each printed as `ERROR: <file>:<line>: <message>`. |
-| 2 | The check could not run: the config, the allow-list or a brain `.gitleaks.toml` is unusable, or gitleaks itself failed. |
-
-`markdown-lint.sh` exits with markdownlint-cli2's own code, which is 1 for
-findings and 2 for an error.
+| 2 | The check could not run: the config, the brain folder, the allow-list or a brain `.gitleaks.toml` is unusable, or gitleaks or markdownlint-cli2 itself failed. |
 
 The fixture tests build throwaway Git repositories from `tests/fixtures/brain/`
 and prove that each check passes good input and fails bad input, and that no

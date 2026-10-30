@@ -65,7 +65,7 @@ runs:
         case "$CHECK" in
           secret-scan) python3 "$GATE/checks/secret_scan.py" ;;
           sensitive-info) python3 "$GATE/checks/sensitive_scan.py" ;;
-          markdown-lint) bash "$GATE/checks/markdown-lint.sh" ;;
+          markdown-lint) python3 "$GATE/checks/markdown_lint.py" ;;
           wikilinks) python3 "$GATE/checks/wikilinks.py" ;;
           log-schema) python3 "$GATE/checks/log_schema.py" ;;
           path-ownership) python3 "$GATE/checks/path_ownership.py" ;;

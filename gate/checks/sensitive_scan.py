@@ -16,7 +16,17 @@ from dataclasses import dataclass
 from typing import Callable, Iterable
 
 import gate_config
-from common import AddedLine, added_lines, config_error, finish, read_text, report, tracked_files
+from common import (
+    GATE_FIXTURES,
+    AddedLine,
+    added_lines,
+    config_error,
+    finish,
+    read_text,
+    report,
+    scanning_gate_repo,
+    tracked_files,
+)
 
 
 @dataclass(frozen=True)
@@ -151,13 +161,14 @@ class Allowlist:
         return (rule, value.lower()) in self.values
 
 
-# The gate's own fixtures plant fake values on purpose.
-DEFAULT_PATH_GLOBS = ("gate/tests/*",)
+def default_path_globs() -> tuple[str, ...]:
+    """The gate's fixtures are exempt in the gate's own repository; in a brain, nothing is."""
+    return (GATE_FIXTURES + "*",) if scanning_gate_repo() else ()
 
 
 def load_allowlist(path: str | None) -> Allowlist:
     if path is None:
-        return Allowlist(path_globs=DEFAULT_PATH_GLOBS, values=frozenset())
+        return Allowlist(path_globs=default_path_globs(), values=frozenset())
     try:
         with open(path, "rb") as handle:
             data = tomllib.load(handle)
@@ -177,7 +188,7 @@ def load_allowlist(path: str | None) -> Allowlist:
         if entry["rule"] not in RULE_IDS:
             config_error(f"{path}: [[value]] entry #{number} has an unknown rule; known rules: {sorted(RULE_IDS)}")
     return Allowlist(
-        path_globs=DEFAULT_PATH_GLOBS + tuple(entry["glob"] for entry in data.get("path", [])),
+        path_globs=default_path_globs() + tuple(entry["glob"] for entry in data.get("path", [])),
         values=frozenset((entry["rule"], entry["match"].lower()) for entry in data.get("value", [])),
     )
 

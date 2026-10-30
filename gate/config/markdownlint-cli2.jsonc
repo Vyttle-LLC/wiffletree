@@ -1,5 +1,5 @@
-// markdownlint-cli2 configuration for the brain gate (gate/checks/markdown-lint.sh),
-// tuned to the brain format. Every brain lints with this file.
+// markdownlint-cli2 configuration for the brain gate (gate/checks/markdown_lint.py),
+// tuned to the brain format. Every brain lints with this file alone.
 {
   "config": {
     "default": true,
@@ -14,5 +14,7 @@
     "MD041": false
   },
   "globs": ["**/*.md"],
-  "ignores": ["node_modules/**"]
+  "ignores": ["node_modules/**"],
+  // Resolved beside this file; it keeps the files' text out of the output.
+  "outputFormatters": [["./markdownlint-formatter.cjs"]]
 }

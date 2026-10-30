@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from common import base_ref, config_error, finish, read_text, report
+from common import GATE_FIXTURES, base_ref, config_error, finish, read_text, report, scanning_gate_repo
 
 GATE_CONFIG = Path(__file__).resolve().parents[1] / "config" / "gitleaks.toml"
 BRAIN_CONFIG = ".gitleaks.toml"
@@ -22,15 +22,19 @@ _EXTEND_TABLE = re.compile(r"^\s*\[extend\]", re.MULTILINE)
 
 
 def config_path(scratch: Path) -> Path:
-    """The gate's config, or the brain's config extending it."""
-    if not os.path.exists(BRAIN_CONFIG):
+    """The gate's config, extended by the brain's config or, in the gate's own
+    repository, by an exemption for the gate's fixtures."""
+    if scanning_gate_repo():
+        extension = f"[allowlist]\ndescription = \"Gate fixtures\"\npaths = ['''^{GATE_FIXTURES}''']\n"
+    elif os.path.exists(BRAIN_CONFIG):
+        extension = read_text(BRAIN_CONFIG)
+        if _EXTEND_TABLE.search(extension):
+            config_error(f"{BRAIN_CONFIG} must not have an [extend] table; the gate extends its own config with this file")
+    else:
         return GATE_CONFIG
-    brain = read_text(BRAIN_CONFIG)
-    if _EXTEND_TABLE.search(brain):
-        config_error(f"{BRAIN_CONFIG} must not have an [extend] table; the gate extends its own config with this file")
     combined = scratch / "gitleaks.toml"
     # A TOML basic string is written like a JSON string.
-    combined.write_text(f"{brain}\n\n[extend]\npath = {json.dumps(str(GATE_CONFIG))}\n", encoding="utf-8")
+    combined.write_text(f"{extension}\n\n[extend]\npath = {json.dumps(str(GATE_CONFIG))}\n", encoding="utf-8")
     return combined
 
 

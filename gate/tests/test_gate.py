@@ -70,6 +70,7 @@ class GateRepo:
         if not with_config:
             self.delete(CONFIG_FILE)
             self.delete(ALLOWLIST)
+        self.gate = CHECKS_DIR.parent
         self.commit("base")
         self.git("tag", "base")
 
@@ -103,14 +104,20 @@ class GateRepo:
         self.commit(message)
         self.git("tag", "--force", "base")
 
+    def become_gate_repo(self) -> None:
+        """Put a copy of the gate at gate/ in the base and run that copy, as in Wiffletree's own repository."""
+        for part in ("checks", "config"):
+            shutil.copytree(CHECKS_DIR.parent / part, self.root / "gate" / part, ignore=shutil.ignore_patterns("__pycache__"))
+        self.gate = self.root / "gate"
+        self.rebase_here("base with the gate")
+
     def run(self, *command: str) -> subprocess.CompletedProcess[str]:
         env = {k: v for k, v in os.environ.items() if not k.startswith("GITHUB_")}
         env["GATE_BASE"] = "base"
         return subprocess.run(command, cwd=self.root, env=env, capture_output=True, text=True)
 
     def check(self, script: str) -> subprocess.CompletedProcess[str]:
-        runner = "bash" if script.endswith(".sh") else sys.executable
-        return self.run(runner, str(CHECKS_DIR / script))
+        return self.run(sys.executable, str(self.gate / "checks" / script))
 
     def cleanup(self) -> None:
         shutil.rmtree(self.root)
@@ -173,6 +180,14 @@ class SecretScanTest(GateTestCase):
         self.repo.write(".gitleaks.toml", "[extend]\nuseDefault = true\n")
         self.repo.rebase_here("base with brain gitleaks config")
         self.assertConfigError(self.pr({entry_path(): entry_text()}), "must not have an [extend] table")
+
+    def test_gate_fixtures_are_scanned_in_a_brain(self):
+        self.assertFails(self.pr({"gate/tests/fixtures/x.md": f"{self.token()}\n"}), "[rule: github-pat]")
+
+    def test_gate_fixtures_are_exempt_in_the_gate_repo(self):
+        self.repo.become_gate_repo()
+        self.assertPasses(self.pr({"gate/tests/fixtures/x.md": f"{self.token()}\n"}))
+        self.assertFails(self.pr({"docs/x.md": f"{self.token()}\n"}), "[rule: github-pat]")
 
     def test_gitleaks_errors_are_not_echoed(self):
         token = self.token()
@@ -272,8 +287,13 @@ class SensitiveScanTest(GateTestCase):
         self.repo.rebase_here("base without an allow-list")
         self.assertFlags("support@vendor.example", "email")
 
-    def test_gate_fixtures_are_exempt(self):
+    def test_gate_fixtures_are_scanned_in_a_brain(self):
+        self.assertFails(self.pr({"gate/tests/fixtures/x.md": "Call +18025551234.\n"}), "[rule: phone]")
+
+    def test_gate_fixtures_are_exempt_in_the_gate_repo(self):
+        self.repo.become_gate_repo()
         self.assertPasses(self.pr({"gate/tests/fixtures/x.md": "Call +18025551234.\n"}))
+        self.assertFails(self.pr({"docs/x.md": "Call +18025551234.\n"}), "[rule: phone]")
 
     def test_added_line_resembling_a_file_header_is_still_scanned(self):
         text = "intro\n++ /dev/null\n++ b/gate/tests/x\nCall +18025551234.\n"
@@ -286,25 +306,36 @@ class SensitiveScanTest(GateTestCase):
 
 
 class MarkdownLintTest(GateTestCase):
-    script = "markdown-lint.sh"
+    script = "markdown_lint.py"
 
     def test_brain_style_passes(self):
         self.assertPasses(self.pr({entry_path(): entry_text()}))
 
     def test_lint_error_fails(self):
-        self.assertFails(self.pr({"README.md": "# Docs\n\n\n\nToo many blanks.\n"}), "README.md:3 error MD012")
+        self.assertFails(self.pr({"README.md": "# Docs\n\n\n\nToo many blanks.\n"}), "ERROR: README.md:3: markdownlint [rule: MD012/")
 
     def test_findings_never_quote_the_file(self):
         result = self.pr({"README.md": "# Docs\n\n#Planted heading\n"})
-        self.assertFails(result, "README.md:3:1 error MD018")
+        self.assertFails(result, "README.md:3: markdownlint at column 1 [rule: MD018/")
         self.assertNotIn("Planted", result.stdout + result.stderr)
 
     def test_reference_details_are_not_echoed(self):
         text = "# Docs\n\nSee [the report][Planted 801-555-0123].\n\n[unused planted ref]: https://example.org\n"
         result = self.pr({"README.md": text})
-        self.assertFails(result, "README.md:3:5 error MD052", "README.md:5:1 error MD053")
+        self.assertFails(result, "README.md:3: markdownlint at column 5 [rule: MD052/", "README.md:5: markdownlint at column 1 [rule: MD053/")
         self.assertNotIn("planted", (result.stdout + result.stderr).lower())
         self.assertNotIn("801-555-0123", result.stdout + result.stderr)
+
+    def test_paths_with_spaces_are_reported(self):
+        result = self.pr({"second-brain/notes/topic/Beta Note.md": "# Beta Note\n\n\n\nText.\n"})
+        self.assertFails(result, "ERROR: second-brain/notes/topic/Beta Note.md:3: markdownlint [rule: MD012/")
+
+    def test_brain_markdownlint_configs_are_ignored(self):
+        self.repo.write(".markdownlint.json", '{"default": false}\n')
+        self.repo.write(".markdownlint-cli2.jsonc", '{"config": {"default": false}, "ignores": ["**"]}\n')
+        self.repo.write("second-brain/.markdownlint.json", '{"default": false}\n')
+        self.repo.rebase_here("base with brain markdownlint configs")
+        self.assertFails(self.pr({"second-brain/notes/Gamma.md": "# Gamma\n\n\n\nText.\n"}), "[rule: MD012/")
 
 
 class WikilinksTest(GateTestCase):
@@ -478,11 +509,26 @@ class ConfigTest(GateTestCase):
             ("{", "is not valid JSON"),
             ('{"gate": {"max_entry_body_chars": true}}', "`gate.max_entry_body_chars` must be a whole number"),
             ('{"gate": {"allowed_email_domains": "example.org"}}', "`gate.allowed_email_domains` must be a list"),
+            ('{"brain_dir": "/second-brain"}', "`brain_dir` must be a folder inside the repository"),
+            ('{"brain_dir": "../second-brain"}', "`brain_dir` must be a folder inside the repository"),
+            ('{"brain_dir": "docs/../../x"}', "`brain_dir` must be a folder inside the repository"),
+            ('{"brain_dir": ""}', "`brain_dir` must be a folder inside the repository"),
+            ('{"brain_dir": "./"}', "`brain_dir` must be a folder inside the repository"),
         ):
             with self.subTest(text=text):
                 self.setUp()
                 self.repo.write(CONFIG_FILE, text)
                 self.assertConfigError(self.pr(), expected)
+
+    def test_brain_dir_is_normalized(self):
+        for brain_dir in ("./second-brain", "second-brain/", "./second-brain//"):
+            with self.subTest(brain_dir=brain_dir):
+                self.setUp()
+                self.repo.write(CONFIG_FILE, json.dumps({"brain_dir": brain_dir}))
+                self.repo.rebase_here("base with brain_dir")
+                self.assertPasses(self.pr({entry_path(): entry_text()}))
+                result = self.pr({"second-brain/logs/sms-service/notes.txt": "x\n"})
+                self.assertFails(result, "second-brain/logs/sms-service/notes.txt: not a legacy log")
 
 
 if __name__ == "__main__":

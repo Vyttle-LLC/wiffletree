@@ -37,7 +37,15 @@ def _setting(table: dict[str, Any], name: str, kind: type, default: Any, descrip
 _file = _load()
 _gate: dict[str, Any] = _setting(_file, "gate", dict, {}, "an object")
 
-BRAIN_DIR: str = _setting(_file, "brain_dir", str, "second-brain", "a string")
+def _brain_dir(value: str) -> str:
+    """The brain folder as a plain relative path: no `./`, `//` or trailing `/`."""
+    parts = [part for part in value.split("/") if part not in ("", ".")]
+    if value.startswith("/") or not parts or ".." in parts:
+        config_error(f"{CONFIG_FILE}: `brain_dir` must be a folder inside the repository")
+    return "/".join(parts)
+
+
+BRAIN_DIR: str = _brain_dir(_setting(_file, "brain_dir", str, "second-brain", "a string"))
 
 # A new-layout log entry's body (everything after its frontmatter) may hold at
 # most this many characters.
