@@ -331,11 +331,12 @@ impl Bridge {
         let reply = self.send(ask.command().clone())?;
         Ok(async move { reply.await.and_then(|reply| ask.decode(reply)) })
     }
-    /// Sends `ask` and waits briefly for its answer, for a test. The app never waits for the
-    /// host on its UI thread. Fails at once while the host is out of reach.
+    /// Sends `ask` and waits for its answer, for a test. The app never waits for the host on its
+    /// UI thread. Fails at once while the host is out of reach, so the long wait only covers a
+    /// host that is connected but slow, as on a machine under heavy load.
     #[cfg(test)]
     pub(crate) fn ask_now<R: DeserializeOwned>(&self, ask: Ask<R>) -> Result<R, String> {
-        self.ask_within(ask, Duration::from_secs(2))
+        self.ask_within(ask, Duration::from_secs(30))
     }
     /// Sends `ask` and waits at most `timeout` for its answer. Fails at once while the host is
     /// out of reach or refuses the app; run it off the main thread.

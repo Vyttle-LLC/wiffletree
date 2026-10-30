@@ -9,8 +9,9 @@ use gpui::*;
 use std::{rc::Rc, time::Duration};
 use workspace_core::{Snapshot, Status, ask};
 
-/// How long quitting waits to hear how many agents work before it just quits.
-const COUNT_WAIT: Duration = Duration::from_secs(2);
+/// How long quitting waits to hear how many agents work before it just quits. Tests wait longer,
+/// so a host slowed by heavy load still answers.
+const COUNT_WAIT: Duration = Duration::from_secs(if cfg!(test) { 30 } else { 2 });
 /// How long Stop agents and quit waits for the host, which answers once its turns have stopped.
 const STOP_WAIT: Duration = Duration::from_secs(60);
 

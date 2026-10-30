@@ -1297,6 +1297,11 @@ mod tests {
         // A cap the test's own environment sets, as `NEXTEST_TEST_THREADS` may, is passed on.
         let cap = |name| std::env::var(name).unwrap_or(crate::runtime::agent_threads().to_string());
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        // The provider runs at the agent niceness, or at this process's own when that is
+        // already nicer, since a process cannot lower its niceness.
+        // SAFETY: `getpriority` reads this process's niceness.
+        let own_niceness = unsafe { libc::getpriority(libc::PRIO_PROCESS as _, 0) };
+        let expected_niceness = own_niceness.max(crate::runtime::AGENT_NICENESS).to_string();
         for provider in [Provider::Claude, Provider::Codex] {
             let mut cmd = ProcessCommand::new(&script);
             configure(&mut cmd, &turn(provider, None, vec![]));
@@ -1312,12 +1317,12 @@ mod tests {
             let [pid, group, tool, jobs, test_threads] = tool.as_slice() else {
                 panic!("{provider:?}: {output}");
             };
-            assert_eq!(own.as_slice(), ["10"], "{provider:?}");
+            assert_eq!(own.as_slice(), [expected_niceness.as_str()], "{provider:?}");
             assert_eq!(
                 pid, group,
                 "{provider:?}: the tool command leads its own group"
             );
-            assert_eq!(*tool, "10", "{provider:?}");
+            assert_eq!(*tool, expected_niceness, "{provider:?}");
             assert_eq!(*jobs, cap("CARGO_BUILD_JOBS"), "{provider:?}");
             assert_eq!(*test_threads, cap("NEXTEST_TEST_THREADS"), "{provider:?}");
         }
