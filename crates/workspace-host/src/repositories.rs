@@ -631,31 +631,30 @@ impl Host {
         Ok(repository)
     }
 
-    /// Saves the human's protected branches in their order. Only a new entry is checked, so a
-    /// stored one stays valid when the base or GitHub's default later covers it.
-    pub fn set_protected_branches(&mut self, id: &str, entries: Vec<String>) -> Result<Repository> {
-        ensure!(
-            entries.len() <= 100,
-            "Protect at most 100 branches or patterns"
-        );
-        let known = self.repository(id)?;
-        let remotes = runtime::git_output(Path::new(&known.path), &["remote"])?;
-        let remotes: Vec<String> = remotes.lines().map(str::to_owned).collect();
-        let mut repository = Repository {
-            protected_branches: vec![],
-            ..known.clone()
-        };
-        for entry in entries {
-            text(&entry, 256)?;
-            let refusal = match known.protected_branches.contains(&entry) {
-                true => (repository.protected_branches.contains(&entry))
-                    .then(|| format!("“{entry}” is already on the list")),
-                false => ProtectedBranches::of(&repository).refusal(&entry, &remotes),
-            };
-            if let Some(refusal) = refusal {
+    /// Adds one entry to the human's protected branches, refusing it with the reason, or removes
+    /// one. It changes the stored list, so an edit from a stale client keeps the others; entries
+    /// already stored stay when the base or GitHub's default later covers them.
+    pub fn set_protected_branch(
+        &mut self,
+        id: &str,
+        entry: &str,
+        protected: bool,
+    ) -> Result<Repository> {
+        let mut repository = self.repository(id)?;
+        if protected {
+            text(entry, 256)?;
+            ensure!(
+                repository.protected_branches.len() < 100,
+                "Protect at most 100 branches or patterns"
+            );
+            let remotes = runtime::git_output(Path::new(&repository.path), &["remote"])?;
+            let remotes: Vec<String> = remotes.lines().map(str::to_owned).collect();
+            if let Some(refusal) = ProtectedBranches::of(&repository).refusal(entry, &remotes) {
                 bail!(refusal);
             }
-            repository.protected_branches.push(entry);
+            repository.protected_branches.push(entry.to_owned());
+        } else {
+            repository.protected_branches.retain(|e| e != entry);
         }
         self.db.execute(
             "UPDATE repositories SET data=?2 WHERE id=?1",
@@ -1254,30 +1253,39 @@ mod tests {
         let added = host
             .add_repository(path.to_str().unwrap(), "origin/main")
             .unwrap();
-        let mut set = |entries: &[&str]| {
-            let entries = entries.iter().map(|e| e.to_string()).collect();
-            host.set_protected_branches(&added.id, entries)
+        let id = added.id.clone();
+        let mut set = |entry: &str, protected| {
+            let command = Command::SetProtectedBranches {
+                repository_id: id.clone(),
+                entry: entry.into(),
+                protected,
+            };
+            host.execute(command)
         };
-        let refused = set(&["origin/main"]).unwrap_err().to_string();
+        let refused = set("origin/main", true).unwrap_err().to_string();
         assert_eq!(
             refused,
             "Name a branch, not a remote branch: “main” is already protected"
         );
-        assert!(set(&["release/[0-9"]).is_err());
-        assert!(set(&["demo", "demo"]).is_err());
-        let saved = set(&["release/*", "demo"]).unwrap();
-        assert_eq!(saved.protected_branches, ["release/*", "demo"]);
-        // A stored entry is not checked again, so it stays once the base covers it.
+        assert!(set("release/[0-9", true).is_err());
+        // Two quick edits from a client that has not seen the first: neither drops the other.
+        set("release/*", true).unwrap();
+        set("demo", true).unwrap();
+        assert!(set("demo", true).is_err());
+        let stored = |host: &Host| host.repository(&added.id).unwrap().protected_branches;
+        assert_eq!(stored(&host), ["release/*", "demo"]);
+        // A stored entry stays once the base covers it, and the base cannot be added again.
         host.set_repository_base(&added.id, "origin/release/1")
             .unwrap();
-        let mut set = |entries: &[&str]| {
-            let entries = entries.iter().map(|e| e.to_string()).collect();
-            host.set_protected_branches(&added.id, entries)
-        };
-        assert!(set(&["demo", "release/*"]).is_ok());
-        assert!(set(&["demo", "release/*", "release/1"]).is_err());
-        let refreshed = host.repository(&added.id).unwrap();
-        assert_eq!(refreshed.protected_branches, ["demo", "release/*"]);
+        assert!(
+            host.set_protected_branch(&added.id, "release/1", true)
+                .is_err()
+        );
+        host.set_protected_branch(&added.id, "release/*", false)
+            .unwrap();
+        host.set_protected_branch(&added.id, "hotfix", true)
+            .unwrap();
+        assert_eq!(stored(&host), ["demo", "hotfix"]);
         assert_eq!(
             host.origin_branches(&added.id).unwrap(),
             ["main", "release/1"]
@@ -1532,8 +1540,7 @@ mod tests {
         assert_eq!(repository(&host)["publishes_without_asking"], true);
         // The base and the human's entries are protected; merging is possible elsewhere.
         let id = host.repositories().unwrap()[0].id.clone();
-        host.set_protected_branches(&id, vec!["release/*".into()])
-            .unwrap();
+        host.set_protected_branch(&id, "release/*", true).unwrap();
         let protected = repository(&host)["protected_branches"].clone();
         assert_eq!(protected["merging"], "into_unprotected");
         assert_eq!(
@@ -1552,8 +1559,7 @@ mod tests {
         let (_home, mut host, coordinator) = project_on_github();
         host.set_owner_allowed("Sage-Social", true).unwrap();
         let id = host.repositories().unwrap()[0].id.clone();
-        host.set_protected_branches(&id, vec!["release/*".into()])
-            .unwrap();
+        host.set_protected_branch(&id, "release/*", true).unwrap();
         let tools = mcp::tools();
         for tool in tools.as_array().unwrap() {
             let name = tool["name"].as_str().unwrap();
@@ -1567,7 +1573,7 @@ mod tests {
                 &coordinator.id,
                 name,
                 json!({"entry": "celadon-theme", "allowed": true, "owner": "celadon-theme",
-                    "allowed_owners": ["celadon-theme"], "repository_id": id, "entries": []}),
+                    "allowed_owners": ["celadon-theme"], "repository_id": id, "protected": false}),
             );
         }
         assert_eq!(host.settings().allowed_owners, ["Sage-Social"]);

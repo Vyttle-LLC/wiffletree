@@ -318,7 +318,8 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
         },
         Command::SetProtectedBranches {
             repository_id: text(),
-            entries: vec![],
+            entry: text(),
+            protected: false,
         },
         Command::RemoveLeftoverWorktrees { ticket_ids: vec![] },
         Command::StopProcesses {

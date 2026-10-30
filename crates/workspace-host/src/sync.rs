@@ -2344,6 +2344,49 @@ pub(crate) mod tests {
         (home, host)
     }
 
+    /// A repository on this machine whose protected branches list `entry`.
+    fn protecting(host: &mut Host, home: &Path, entry: &str) -> String {
+        let path = home.join("protected-app");
+        fs::create_dir_all(&path).unwrap();
+        git(&path, &["init", "-q", "-b", "main"]);
+        git(&path, &["commit", "-q", "--allow-empty", "-m", "start"]);
+        let added = host.add_repository(path.to_str().unwrap(), "main").unwrap();
+        host.set_protected_branch(&added.id, entry, true).unwrap();
+        added.id
+    }
+
+    #[test]
+    fn protected_branches_stay_on_each_machine_through_the_settings_repository() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let (first_home, mut first) = set_up_elsewhere(&github);
+        protecting(&mut first, first_home.path(), "release/*");
+        first.sync_now(&github.tools()).unwrap();
+        let (home, mut host) = host();
+        host.set_workspaces_dir(home.path().join("work").to_str().unwrap())
+            .unwrap();
+        let mine = protecting(&mut host, home.path(), "demo");
+        for with in [JoinWith::Repository, JoinWith::ThisMachine] {
+            host.choose_settings_repository(NAME, Some(with), &github.tools())
+                .unwrap();
+            host.sync_now(&github.tools()).unwrap();
+            let entries = host.repository(&mine).unwrap().protected_branches;
+            assert_eq!(entries, ["demo"]);
+            host.stop_settings_sync().unwrap();
+        }
+        // Neither machine's entry was written to the settings repository.
+        let shared = String::from_utf8_lossy(
+            &std::process::Command::new("git")
+                .args(["log", "--all", "-p"])
+                .current_dir(&github.bare)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .into_owned();
+        assert!(!shared.contains("release/*") && !shared.contains("\"demo\""));
+    }
+
     #[test]
     fn joining_with_the_repositorys_settings_keeps_both_histories_and_backs_up_the_folder() {
         let folder = tempfile::tempdir().unwrap();

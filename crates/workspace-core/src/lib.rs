@@ -3254,12 +3254,15 @@ pub enum Command {
         repository_id: String,
         base: String,
     },
-    /// Saves a repository's protected branches, refusing a new entry with the reason; answers
-    /// with the `Repository`. Only the human's client sends it: a removed entry is a branch the
-    /// host may then merge into.
+    /// Adds an entry to a repository's protected branches, refusing it with the reason, or
+    /// removes one; answers with the `Repository`. Only the human's client sends it: a removed
+    /// entry is a branch the host may then merge into.
     SetProtectedBranches {
         repository_id: String,
-        entries: Vec<String>,
+        /// One entry, added to the host's current list or removed from it, so a client whose
+        /// list is stale changes nothing else.
+        entry: String,
+        protected: bool,
     },
     /// Read-only: the branches on a repository's `origin`, as last fetched, for the protected
     /// branches each pattern matches.

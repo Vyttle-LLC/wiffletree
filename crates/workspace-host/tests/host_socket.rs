@@ -706,7 +706,7 @@ fn removing_a_protected_branch_needs_the_apps_credential() {
         let repository = host
             .add_repository(checkout.path().to_str().unwrap(), "main")
             .unwrap();
-        host.set_protected_branches(&repository.id, vec!["release/*".into()])
+        host.set_protected_branch(&repository.id, "release/*", true)
             .unwrap();
         id.set(repository.id).unwrap();
     });
@@ -715,7 +715,8 @@ fn removing_a_protected_branch_needs_the_apps_credential() {
             PROTOCOL_VERSION,
             Command::SetProtectedBranches {
                 repository_id: id.get().unwrap().clone(),
-                entries: vec![],
+                entry: "release/*".into(),
+                protected: false,
             },
         )
     };

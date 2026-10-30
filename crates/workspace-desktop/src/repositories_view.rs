@@ -887,14 +887,6 @@ impl RepositoriesPage {
         cx.notify();
     }
 
-    fn saved_entries(&self, repository_id: &str) -> Vec<String> {
-        (self.shared.snapshot().into_iter())
-            .flat_map(|s| &s.repositories)
-            .find(|r| r.id == repository_id)
-            .map(|r| r.protected_branches.clone())
-            .unwrap_or_default()
-    }
-
     /// Adds the entry as typed; the host refuses one it cannot read, with the reason.
     fn add_protected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.shared.host.changes_refused().is_some() {
@@ -903,12 +895,10 @@ impl RepositoriesPage {
         let Some(edit) = &self.protected_edit else {
             return;
         };
-        let repository_id = edit.repository_id.clone();
-        let mut entries = self.saved_entries(&repository_id);
-        entries.push(self.protected_input.read(cx).value().trim().to_owned());
         let command = Command::SetProtectedBranches {
-            repository_id,
-            entries,
+            repository_id: edit.repository_id.clone(),
+            entry: self.protected_input.read(cx).value().trim().to_owned(),
+            protected: true,
         };
         self.request(command, window, cx);
     }
@@ -920,11 +910,10 @@ impl RepositoriesPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut entries = self.saved_entries(repository_id);
-        entries.retain(|e| e != entry);
         let command = Command::SetProtectedBranches {
             repository_id: repository_id.to_owned(),
-            entries,
+            entry: entry.to_owned(),
+            protected: false,
         };
         self.request(command, window, cx);
     }
@@ -1713,7 +1702,6 @@ fn checks_summary(checks: Option<&RepositoryChecks>, kept: bool) -> (Option<Stri
     }
 }
 
-/// Why a base was not saved, and the base that stands.
 /// Why Wiffletree merges nothing in the repository, when it doesn't.
 fn merges_nothing(repository: &Repository, allowed: &[String]) -> Option<String> {
     Some(match Merging::of(repository, allowed) {
@@ -1800,6 +1788,7 @@ fn method_line(repository: &Repository) -> String {
     }
 }
 
+/// Why a base was not saved, and the base that stands.
 fn refused_base(error: &str, saved: Option<&str>) -> String {
     match saved {
         Some(saved) => format!("{error}. The base is still {saved}."),
@@ -1914,11 +1903,17 @@ impl Requests for RepositoriesPage {
                     edit.origin = serde_json::from_value(branches).ok()
                 }
                 (Command::OriginBranches { .. }, Err(_)) => {}
-                (_, Ok(_)) => {
+                (
+                    Command::SetProtectedBranches {
+                        protected: true, ..
+                    },
+                    Ok(_),
+                ) => {
                     edit.error = None;
                     self.protected_input
                         .update(cx, |input, cx| input.set_value("", window, cx));
                 }
+                (_, Ok(_)) => {}
                 (_, Err(error)) => edit.error = Some(error),
             }
             cx.notify();

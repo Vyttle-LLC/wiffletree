@@ -1952,8 +1952,13 @@ impl Host {
             } => serde_json::to_value(self.set_repository_base(&repository_id, &base)?)?,
             Command::SetProtectedBranches {
                 repository_id,
-                entries,
-            } => serde_json::to_value(self.set_protected_branches(&repository_id, entries)?)?,
+                entry,
+                protected,
+            } => serde_json::to_value(self.set_protected_branch(
+                &repository_id,
+                &entry,
+                protected,
+            )?)?,
             Command::OriginBranches { repository_id } => {
                 serde_json::to_value(self.origin_branches(&repository_id)?)?
             }
