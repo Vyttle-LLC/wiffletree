@@ -172,6 +172,8 @@ pub(crate) fn format(content: &[u8]) -> Result<u64> {
 pub(crate) struct Recorder<'a> {
     db: &'a Connection,
     root: PathBuf,
+    /// The record's key: the settings repository's, or the shared folder's empty one.
+    repository: String,
     wrote: &'a Cell<bool>,
     writes: &'a SharedWrites,
 }
@@ -182,10 +184,8 @@ impl Recorder<'_> {
     /// `None` for a file removed.
     pub(crate) fn wrote(&self, path: &Path, content: Option<&[u8]>) -> Result<()> {
         let file = path.strip_prefix(&self.root)?.to_str();
-        self.db.execute(
-            "INSERT INTO sync_record(path,written) VALUES (?1,?2) ON CONFLICT(path) DO UPDATE SET written=excluded.written",
-            params![file.context("A shared file's path is not UTF-8")?, content],
-        )?;
+        let file = file.context("A shared file's path is not UTF-8")?;
+        repos::Record::wrote(self.db, &self.repository, file, content)?;
         self.wrote.set(true);
         Ok(())
     }
@@ -328,6 +328,7 @@ impl Host {
         Recorder {
             db: &self.db,
             root: self.shared_folder(),
+            repository: self.settings_key().unwrap_or_default(),
             wrote: &self.shared_written,
             writes: &self.shared_writes,
         }

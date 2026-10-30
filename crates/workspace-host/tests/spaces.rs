@@ -127,7 +127,8 @@ fn the_upgrade_makes_a_space_per_brain_folder_and_personal_for_the_rest() {
         spaces[0].space.brain,
         Some(SpaceBrain {
             repository: BrainRepository::Local,
-            folder: "second-brain".into()
+            folder: "second-brain".into(),
+            extra: Extra::new(),
         })
     );
     assert_eq!(spaces[2].space.brain, None);
@@ -459,6 +460,7 @@ fn space_names_and_prefixes_are_unique() {
         command: "gh".into(),
         prefixes: vec!["gh pr view".into()],
         check: Some("gh auth status".into()),
+        extra: Extra::new(),
     }];
     assert_eq!(host.update_space(edited.clone()).unwrap().space, edited);
     let mut bad = edited;

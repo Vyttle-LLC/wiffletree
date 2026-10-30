@@ -435,6 +435,20 @@ fn spawn_sync_pass(sender: Sender<Event>, pass: sync::Pass, tools: publish::Tool
         |(), passed| Event::Synced(passed),
     );
 }
+fn spawn_storage_pass(
+    sender: Sender<Event>,
+    key: String,
+    pass: storage::Pass,
+    tools: publish::Tools,
+) {
+    spawn_job(
+        sender,
+        key,
+        move |_| storage::pass(pass, &tools),
+        |_| Err(anyhow::anyhow!("The sync pass stopped unexpectedly")),
+        Event::StorageSynced,
+    );
+}
 fn spawn_skill_merge(sender: Sender<Event>, run: skills::MergeRun) {
     spawn_job(
         sender,
@@ -527,6 +541,16 @@ enum KeeperPollAction {
     Due(i64),
     Reproduced(keeper::Reproduced),
 }
+/// What a staged storage repository is for.
+enum StorageChoice {
+    Create {
+        name: String,
+        description: String,
+        instructions: String,
+        prefix: Option<String>,
+    },
+    Join(Vec<JoinSpace>),
+}
 enum Event {
     KeeperPolled(
         Box<checkout::KeeperPoll>,
@@ -548,6 +572,15 @@ enum Event {
     /// A settings repository's clone is ready, off the host thread, to replace the shared folder.
     SettingsRepositoryPrepared {
         prepared: Result<sync::Prepared>,
+        reply: Reply,
+    },
+    /// A storage repository's pass finished on its own thread.
+    StorageSynced(String, Result<storage::Passed>),
+    /// A storage repository was checked and cloned off the host thread, for a new Space or the
+    /// Spaces to join.
+    StorageStaged {
+        staged: Result<storage::Staged>,
+        then: StorageChoice,
         reply: Reply,
     },
     /// Codex's account limits, read on their own thread, to record.
@@ -834,6 +867,9 @@ struct Actor {
     publish_tools: publish::Tools,
     /// The settings repository's pace, whose only rule set is settings.
     sync_pace: repos::Pace,
+    /// By `repos::key`, the pace of each GitHub storage repository that is not the settings
+    /// repository, whose pass runs with the settings rule set.
+    storage_paces: std::collections::BTreeMap<String, repos::Pace>,
     /// The listener for paired devices, open while remote access is on.
     remote: remote::Remote,
     /// The count of things that need the human, as last sent.
@@ -983,6 +1019,7 @@ impl Service {
                     github_reading: false,
                     publish_tools: publish::Tools::default(),
                     sync_pace: repos::Pace::every(&[sync::CADENCE_MS]),
+                    storage_paces: Default::default(),
                     remote: remote::Remote::new(remote, requests),
                     attention: None,
                 };
@@ -1339,8 +1376,43 @@ impl Actor {
                     let _ = reply.try_send(result);
                 });
             }
+            Command::CheckStorageRepository { repository } => {
+                let added: Vec<SpaceId> = (self.host.spaces()?.into_iter())
+                    .map(|r| r.space.id)
+                    .collect();
+                let (home, input, reply) =
+                    (self.host.home.clone(), repository.clone(), reply.clone());
+                let tools = self.publish_tools.clone();
+                std::thread::spawn(move || {
+                    let result = storage::stage(&home, &input, &tools, &added)
+                        .and_then(|staged| Ok(serde_json::to_value(staged.check)?))
+                        .map_err(|e| format!("{e:#}"));
+                    let _ = reply.try_send(result);
+                });
+            }
+            Command::CreateSpace {
+                name,
+                description,
+                instructions,
+                prefix,
+                storage: Some(repository),
+            } => {
+                let then = StorageChoice::Create {
+                    name: name.clone(),
+                    description: description.clone(),
+                    instructions: instructions.clone(),
+                    prefix: prefix.clone(),
+                };
+                self.stage_storage(repository, then, reply)?;
+            }
+            Command::JoinSpaces { repository, spaces } => {
+                self.stage_storage(repository, StorageChoice::Join(spaces.clone()), reply)?;
+            }
             Command::SetUpSettingsRepository { repository }
             | Command::JoinSettingsRepository { repository, .. } => {
+                // Before anything is pushed: a brain here is never the settings repository.
+                self.host
+                    .refuse_second_use_of(repository, storage::Use::Settings)?;
                 let with = match command {
                     Command::JoinSettingsRepository { with, .. } => Some(*with),
                     _ => None,
@@ -1356,6 +1428,9 @@ impl Actor {
             }
             Command::SyncNow => {
                 self.sync_pace.sync_now();
+                self.storage_paces
+                    .values_mut()
+                    .for_each(repos::Pace::sync_now);
                 let _ = reply.try_send(Ok(Value::Null));
             }
             Command::RefreshCodexQuota => {
@@ -1452,7 +1527,9 @@ impl Actor {
         }
         self.refresh_overlaps(now());
         self.refresh_pull_requests(now(), dirty);
-        let syncing = self.refresh_settings_sync(now());
+        // Storage first, as a write to a Space stored in the settings clone makes its pass due.
+        let storing = self.refresh_storage_sync(now());
+        let syncing = self.refresh_settings_sync(now()) || storing;
         self.start_skill_merges();
         self.signal(dirty || syncing);
         if !self.checkout_deferred.is_empty()
@@ -1501,7 +1578,11 @@ impl Actor {
                         .as_ref()
                         .is_some_and(|read| reservations.blocks_repository(&self.host, &read.id))
             }
-            Event::Synced(_) | Event::GitHub(_) | Event::SettingsRepositoryPrepared { .. } => true,
+            Event::Synced(_)
+            | Event::GitHub(_)
+            | Event::SettingsRepositoryPrepared { .. }
+            | Event::StorageSynced(..)
+            | Event::StorageStaged { .. } => true,
             Event::KeeperPolled(plan, ..) => self.host.tickets().is_ok_and(|tickets| {
                 tickets.iter().any(|ticket| {
                     ticket.repository_id == plan.repository.id && reservations.contains(&ticket.id)
@@ -1534,6 +1615,10 @@ impl Actor {
         if self.host.shared_written.take() {
             self.sync_pace.wrote(at);
         }
+        match self.host.settings_cadence() {
+            Ok(every) => self.sync_pace.set_every(every),
+            Err(e) => eprintln!("Workspace sync: {e:#}"),
+        }
         let mut started = false;
         if self.sync_pace.start(at) {
             match self.host.sync_pass() {
@@ -1551,6 +1636,104 @@ impl Actor {
         self.host.sync.next_pull_at = self.sync_pace.next_due();
         self.host.sync.syncing = self.sync_pace.running();
         if let Some(due) = self.sync_pace.next_due() {
+            self.wake(due);
+        }
+        started
+    }
+
+    /// Checks and clones a storage repository off the host thread, once the repository is known
+    /// not to be a brain here, for the Space it is chosen for.
+    fn stage_storage(
+        &mut self,
+        repository: &str,
+        then: StorageChoice,
+        reply: &Reply,
+    ) -> Result<()> {
+        self.host
+            .refuse_second_use_of(repository, storage::Use::Storage)?;
+        let added: Vec<SpaceId> = (self.host.spaces()?.into_iter())
+            .map(|r| r.space.id)
+            .collect();
+        let (home, input, reply) = (self.host.home.clone(), repository.to_owned(), reply.clone());
+        let (sender, tools) = (self.sender.clone(), self.publish_tools.clone());
+        // Every refusal runs before an empty repository gets its first commit.
+        let requested = match &then {
+            StorageChoice::Create {
+                name,
+                description,
+                instructions,
+                prefix,
+            } => Some(self.host.precheck_stored_space(
+                &storage::NewSpace {
+                    name,
+                    description,
+                    instructions,
+                    prefix: prefix.as_deref(),
+                },
+                repository,
+            )?),
+            StorageChoice::Join(_) => None,
+        };
+        std::thread::spawn(move || {
+            let staged = storage::stage(&home, &input, &tools, &added).and_then(|staged| {
+                if let Some(requested) = requested {
+                    storage::start_if_empty(&home, &staged, &requested, &tools)?;
+                }
+                Ok(staged)
+            });
+            let _ = sender.send_blocking(Event::StorageStaged {
+                staged,
+                then,
+                reply,
+            });
+        });
+        Ok(())
+    }
+
+    /// Starts a pass of each GitHub storage repository that syncs on its own when one is due,
+    /// and arms a wake-up for the next; `true` when a pass started. A write to the settings
+    /// repository's clone makes its own pass due instead.
+    fn refresh_storage_sync(&mut self, at: i64) -> bool {
+        let settings = self.host.settings_key();
+        for key in std::mem::take(&mut *self.host.storage_written.borrow_mut()) {
+            match self.storage_paces.get_mut(&key) {
+                _ if Some(&key) == settings.as_ref() => self.sync_pace.wrote(at),
+                Some(pace) => pace.wrote(at),
+                None => {}
+            }
+        }
+        let cadences = self.host.storage_cadences().unwrap_or_else(|e| {
+            eprintln!("Storage sync: {e:#}");
+            vec![]
+        });
+        self.storage_paces
+            .retain(|key, pace| pace.running() || cadences.iter().any(|(k, _)| k == key));
+        let mut started = false;
+        for (key, cadence) in cadences {
+            let pace = (self.storage_paces.entry(key.clone()))
+                .or_insert_with(|| repos::Pace::every(&[cadence]));
+            if !pace.start(at) {
+                continue;
+            }
+            match self.host.storage_pass(&key) {
+                Ok(Some(pass)) => {
+                    let tools = self.publish_tools.clone();
+                    spawn_storage_pass(self.sender.clone(), key, pass, tools);
+                    started = true;
+                }
+                Ok(None) => pace.finish(at, true),
+                Err(e) => {
+                    pace.finish(at, false);
+                    eprintln!("Syncing {key}: {e:#}");
+                }
+            }
+        }
+        if let Some(due) = self
+            .storage_paces
+            .values()
+            .filter_map(repos::Pace::next_due)
+            .min()
+        {
             self.wake(due);
         }
         started
@@ -1767,6 +1950,47 @@ impl Actor {
                 let adopted = result.is_ok();
                 let _ = reply.try_send(result);
                 adopted
+            }
+            Event::StorageSynced(key, passed) => {
+                if let Some(pace) = self.storage_paces.get_mut(&key) {
+                    pace.finish(now(), passed.is_ok());
+                }
+                self.host.finish_storage_pass(passed).unwrap_or_else(|e| {
+                    eprintln!("Syncing {key}: {e:#}");
+                });
+                true
+            }
+            Event::StorageStaged {
+                staged,
+                then,
+                reply,
+            } => {
+                let result = staged
+                    .and_then(|staged| match then {
+                        StorageChoice::Create {
+                            name,
+                            description,
+                            instructions,
+                            prefix,
+                        } => {
+                            let new = storage::NewSpace {
+                                name: &name,
+                                description: &description,
+                                instructions: &instructions,
+                                prefix: prefix.as_deref(),
+                            };
+                            Ok(serde_json::to_value(
+                                self.host.create_stored_space(&new, staged)?,
+                            )?)
+                        }
+                        StorageChoice::Join(spaces) => Ok(serde_json::to_value(
+                            self.host.join_spaces(staged, &spaces)?,
+                        )?),
+                    })
+                    .map_err(|e| format!("{e:#}"));
+                let added = result.is_ok();
+                let _ = reply.try_send(result);
+                added
             }
             Event::Synced(passed) => {
                 let at = now();
@@ -4321,6 +4545,7 @@ mod tests {
             github_reading: false,
             publish_tools: publish::Tools::default(),
             sync_pace: repos::Pace::every(&[sync::CADENCE_MS]),
+            storage_paces: Default::default(),
             remote: remote::Remote::new(remote::Options::default(), requests),
             attention: None,
         };

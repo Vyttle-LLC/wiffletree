@@ -24,6 +24,10 @@ impl fmt::Display for SpaceId {
 /// The name of the Space the host creates on a fresh install and for projects without a brain.
 pub const PERSONAL: &str = "Personal";
 
+/// The keys of a Space's files this release does not know, kept where they were read so that a
+/// write puts them back: in the Space, its brain, models, sources and tracker config.
+pub type Extra = std::collections::BTreeMap<String, serde_json::Value>;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Space {
     pub id: SpaceId,
@@ -45,6 +49,8 @@ pub struct Space {
     /// The MCP servers and local CLIs this Space's threads may use.
     #[serde(default)]
     pub sources: Vec<Source>,
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 
 /// A Space's brain: a Git repository and the folder in it that entries are written to.
@@ -52,6 +58,8 @@ pub struct Space {
 pub struct SpaceBrain {
     pub repository: BrainRepository,
     pub folder: String,
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 impl SpaceBrain {
     /// The folder exports have always written to, under the attached directory.
@@ -64,6 +72,8 @@ pub enum BrainRepository {
     GitHub {
         owner: String,
         name: String,
+        #[serde(flatten)]
+        extra: Extra,
     },
     /// A folder on this Mac; its path is a machine-local fact (`SpaceLocal::brain_path`).
     Local,
@@ -104,6 +114,8 @@ pub struct SpaceModels {
     pub threads: Option<ModelProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jobs: Option<ModelProfile>,
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 
 /// A source a Space's threads may use, in the format job recipes use.
@@ -113,6 +125,8 @@ pub enum Source {
     Mcp {
         server: String,
         tools: Vec<String>,
+        #[serde(flatten)]
+        extra: Extra,
     },
     Cli {
         command: String,
@@ -120,6 +134,8 @@ pub enum Source {
         /// How to check that the CLI is signed in, such as `gh auth status`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         check: Option<String>,
+        #[serde(flatten)]
+        extra: Extra,
     },
 }
 
@@ -134,6 +150,9 @@ pub struct SpaceLocal {
     /// The models this person may use in the Space; `None` allows every model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<ModelProfile>>,
+    /// What the Space's page notes about this Mac, such as a model it falls back from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 impl Default for SpaceLocal {
     fn default() -> Self {
@@ -141,6 +160,7 @@ impl Default for SpaceLocal {
             enabled: true,
             brain_path: None,
             models: None,
+            notes: vec![],
         }
     }
 }
@@ -201,9 +221,46 @@ pub fn repository_owner(identity: &str) -> &str {
 pub struct TrackerConfig {
     pub format: u32,
     pub prefix: String,
+    /// Such as the states and labels `shared-issues` adds.
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 impl TrackerConfig {
     pub const FORMAT: u32 = 1;
+    pub fn new(prefix: String) -> Self {
+        Self {
+            format: Self::FORMAT,
+            prefix,
+            extra: Extra::new(),
+        }
+    }
+}
+
+/// What checking a GitHub repository as a Space's storage found. Nothing was written.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageCheck {
+    pub repository: crate::SettingsRepository,
+    pub organization: bool,
+    /// The Spaces under its `spaces/`, by folder.
+    pub spaces: Vec<SpaceListing>,
+    /// Its tracker's prefix; `None` when it has no `wiffletree-issues.yaml` yet.
+    pub prefix: Option<String>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceListing {
+    pub folder: String,
+    pub id: SpaceId,
+    pub name: String,
+    pub description: String,
+    /// Already added on this Mac.
+    pub added: bool,
+}
+/// A Space ticked to join, with where its brain is on this Mac, if anywhere.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoinSpace {
+    pub folder: String,
+    #[serde(default)]
+    pub brain_path: Option<String>,
 }
 
 /// The owner of a session: a project, or, for sessions that are not project work, a Space or a

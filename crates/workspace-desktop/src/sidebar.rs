@@ -1784,6 +1784,7 @@ mod tests {
             setting: "Implementing".into(),
             paused: Paused::OutsideWiffletree,
             text: String::new(),
+            repository: None,
         });
         let items = [attention("a"), attention("b")];
         assert_eq!(needs_you(&items, &[], "a"), 1);

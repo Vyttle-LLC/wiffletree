@@ -33,7 +33,7 @@ pub(crate) fn migrate(db: &Connection) -> Result<()> {
     if empty {
         let tx = db.unchecked_transaction()?;
         let (space, tracker) = new_space(PERSONAL, &mut prefixes(&tx)?);
-        insert_space(&tx, &space, &SpaceLocal::default(), &tracker)?;
+        insert_space(&tx, &space, &SpaceLocal::default(), Some(&tracker))?;
         tx.commit()?;
     }
     db.execute_batch("PRAGMA user_version = 9;")?;
@@ -81,13 +81,14 @@ fn upgrade(db: &Connection) -> Result<()> {
         space.0.brain = Some(SpaceBrain {
             repository: BrainRepository::Local,
             folder: SpaceBrain::DEFAULT_FOLDER.into(),
+            extra: Extra::new(),
         });
-        insert_space(db, &space.0, &local, &space.1)?;
+        insert_space(db, &space.0, &local, Some(&space.1))?;
         space_of_brain.insert(brain.clone(), space.0.id);
     }
     let personal = if brains.is_empty() || projects.iter().any(|(_, p)| brain_of(p).is_none()) {
         let (space, tracker) = new_space(PERSONAL, &mut prefixes);
-        insert_space(db, &space, &SpaceLocal::default(), &tracker)?;
+        insert_space(db, &space, &SpaceLocal::default(), Some(&tracker))?;
         Some(space.id)
     } else {
         None
@@ -172,28 +173,28 @@ fn new_space(name: &str, prefixes: &mut Vec<String>) -> (Space, TrackerConfig) {
         repositories: vec![],
         models: SpaceModels::default(),
         sources: vec![],
+        extra: Extra::new(),
     };
-    let tracker = TrackerConfig {
-        format: TrackerConfig::FORMAT,
-        prefix,
-    };
+    let tracker = TrackerConfig::new(prefix);
     (space, tracker)
 }
 
-fn insert_space(
+pub(crate) fn insert_space(
     db: &Connection,
     space: &Space,
     local: &SpaceLocal,
-    tracker: &TrackerConfig,
+    tracker: Option<&TrackerConfig>,
 ) -> Result<()> {
     db.execute(
         "INSERT INTO spaces(id,data,local) VALUES (?1,?2,?3)",
         params![space.id.as_str(), encode(space)?, encode(local)?],
     )?;
-    db.execute(
-        "INSERT INTO trackers VALUES (?1,?2)",
-        params![space.storage.repository.key(), encode(tracker)?],
-    )?;
+    if let Some(tracker) = tracker {
+        db.execute(
+            "INSERT INTO trackers VALUES (?1,?2)",
+            params![space.storage.repository.key(), encode(tracker)?],
+        )?;
+    }
     Ok(())
 }
 
@@ -218,7 +219,7 @@ fn most(counts: impl Iterator<Item = (SpaceId, usize)>) -> Option<SpaceId> {
         .map(|(space, _)| space)
 }
 
-fn validate(space: &Space) -> Result<()> {
+pub(crate) fn validate(space: &Space) -> Result<()> {
     text(&space.name, 128)?;
     ensure!(
         space.description.len() <= 4096,
@@ -238,7 +239,7 @@ fn validate(space: &Space) -> Result<()> {
         );
     }
     if let Some(brain) = &space.brain {
-        if let BrainRepository::GitHub { owner, name } = &brain.repository {
+        if let BrainRepository::GitHub { owner, name, .. } = &brain.repository {
             validate_repository_identity(&format!("{owner}/{name}"))?;
         }
         let folder = Path::new(&brain.folder);
@@ -252,7 +253,7 @@ fn validate(space: &Space) -> Result<()> {
     }
     for source in &space.sources {
         let (name, allowed) = match source {
-            Source::Mcp { server, tools } => (server, tools),
+            Source::Mcp { server, tools, .. } => (server, tools),
             Source::Cli {
                 command, prefixes, ..
             } => (command, prefixes),
@@ -333,7 +334,7 @@ impl Host {
         ensure!(changed == 1, "Space not found");
         Ok(())
     }
-    fn ensure_unused_name(&self, name: &str, except: Option<&SpaceId>) -> Result<()> {
+    pub(crate) fn ensure_unused_name(&self, name: &str, except: Option<&SpaceId>) -> Result<()> {
         let clash = self.spaces()?.into_iter().any(|record| {
             Some(&record.space.id) != except && record.space.name.eq_ignore_ascii_case(name.trim())
         });
@@ -367,9 +368,12 @@ impl Host {
         validate(&space)?;
         let local = SpaceLocal::default();
         // A savepoint, so removing a Space can recreate Personal within its own change.
-        let tx = self.db.savepoint()?;
-        insert_space(&tx, &space, &local, &tracker)?;
-        tx.commit()?;
+        self.atomically(|host| {
+            insert_space(&host.db, &space, &local, Some(&tracker))?;
+            host.write_space_file(&space).inspect_err(|_| {
+                let _ = fs::remove_dir_all(host.storage_folder(&space.storage.repository));
+            })
+        })?;
         Ok(SpaceRecord { space, local })
     }
     /// Replaces a Space's definition. Its storage stays where it is.
@@ -381,14 +385,24 @@ impl Host {
         );
         validate(&space)?;
         self.ensure_unused_name(&space.name, Some(&space.id))?;
+        if let Some(SpaceBrain {
+            repository: BrainRepository::GitHub { owner, name, .. },
+            ..
+        }) = &space.brain
+        {
+            self.refuse_second_use(&format!("{owner}/{name}"), storage::Use::Brain)?;
+        }
         let space = Space {
             name: space.name.trim().into(),
             ..space
         };
-        self.db.execute(
-            "UPDATE spaces SET data=?2 WHERE id=?1",
-            params![space.id.as_str(), encode(&space)?],
-        )?;
+        self.atomically(|host| {
+            host.db.execute(
+                "UPDATE spaces SET data=?2 WHERE id=?1",
+                params![space.id.as_str(), encode(&space)?],
+            )?;
+            host.write_space_file(&space)
+        })?;
         Ok(SpaceRecord {
             space,
             local: current.local,
@@ -480,26 +494,28 @@ impl Host {
             mut space,
             mut local,
         } = self.space(&project.space)?;
-        let folder = match space.brain {
+        let (folder, extra) = match space.brain {
             Some(SpaceBrain {
                 repository: BrainRepository::Local,
                 folder,
-            }) => folder,
-            _ => SpaceBrain::DEFAULT_FOLDER.into(),
+                extra,
+            }) => (folder, extra),
+            _ => (SpaceBrain::DEFAULT_FOLDER.into(), Extra::new()),
         };
         space.brain = Some(SpaceBrain {
             repository: BrainRepository::Local,
             folder,
+            extra,
         });
         local.brain_path = Some(path.clone());
-        let tx = self.db.transaction()?;
-        tx.execute(
-            "UPDATE spaces SET data=?2,local=?3 WHERE id=?1",
-            params![space.id.as_str(), encode(&space)?, encode(&local)?],
-        )?;
-        Self::event(&tx, &project.id, None, "brain_attached", &path)?;
-        tx.commit()?;
-        Ok(())
+        self.atomically(|host| {
+            host.db.execute(
+                "UPDATE spaces SET data=?2,local=?3 WHERE id=?1",
+                params![space.id.as_str(), encode(&space)?, encode(&local)?],
+            )?;
+            Self::event(&host.db, &project.id, None, "brain_attached", &path)?;
+            host.write_space_file(&space)
+        })
     }
     /// The workspace repositories whose GitHub name `space` lists, and the ones it lists that
     /// are not cloned on this Mac.
@@ -529,7 +545,8 @@ impl Host {
         self.space_repositories(&space)
     }
     /// Puts `repository`, named `owner/name`, in exactly `spaces`, writing only the Spaces whose
-    /// list changes. The workspace repository itself is left as it is.
+    /// list changes, each to its `space.yaml` too, so membership travels with the Space. The
+    /// workspace repository itself is left as it is.
     pub fn set_repository_spaces(&mut self, repository: &str, spaces: &[SpaceId]) -> Result<()> {
         validate_repository_identity(repository)?;
         for space in spaces {
@@ -550,6 +567,7 @@ impl Host {
                     "UPDATE spaces SET data=?2 WHERE id=?1",
                     params![space.id.as_str(), encode(&space)?],
                 )?;
+                host.write_space_file(&space)?;
             }
             Ok(())
         })

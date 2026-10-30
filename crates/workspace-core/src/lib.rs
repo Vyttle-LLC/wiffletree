@@ -910,7 +910,7 @@ impl Snapshot {
     pub fn paused_settings(&self) -> impl Iterator<Item = &PausedSetting> {
         self.workspace_notes.iter().filter_map(|note| match note {
             WorkspaceNote::Paused(setting) => Some(setting),
-            WorkspaceNote::SkillQuestion(_) => None,
+            WorkspaceNote::SkillQuestion(_) | WorkspaceNote::Held(_) => None,
         })
     }
 
@@ -1071,6 +1071,21 @@ pub enum WorkspaceNote {
     /// A shared setting sync paused.
     Paused(PausedSetting),
     SkillQuestion(SkillQuestion),
+    /// A file held back from a push because a scan failed or could not run.
+    Held(HeldFile),
+}
+/// A file of a storage repository that is not pushed until a scan passes it. Names the check and
+/// its rule, never what matched.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldFile {
+    /// The storage repository, `owner/name`.
+    pub repository: String,
+    pub path: String,
+    /// `sensitive-info` or `secret-scan`.
+    pub check: String,
+    /// The rule that failed, such as `phone`; `None` when the check could not run.
+    pub rule: Option<String>,
+    pub text: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PausedSetting {
@@ -1081,6 +1096,9 @@ pub struct PausedSetting {
     pub paused: Paused,
     /// What happened and what this machine does meanwhile, starting with `setting`.
     pub text: String,
+    /// The storage repository the file is in; `None` for the settings repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
 }
 /// How the human settles a paused file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2930,8 +2948,9 @@ pub enum Command {
         project_id: String,
         path: String,
     },
-    /// Creates a Space with local storage and a local tracker; without `prefix`, the one
-    /// proposed from its name.
+    /// Creates a Space with local storage and a local tracker, or, with `storage`, stored in
+    /// that private GitHub repository (`owner/name` or its URL), whose tracker it shares; without
+    /// `prefix`, a new tracker gets the one proposed from the Space's name.
     CreateSpace {
         name: String,
         #[serde(default)]
@@ -2940,6 +2959,30 @@ pub enum Command {
         instructions: String,
         #[serde(default)]
         prefix: Option<String>,
+        #[serde(default)]
+        storage: Option<String>,
+    },
+    /// Read-only: checks a GitHub repository as a Space's storage and lists the Spaces it holds
+    /// and its tracker's prefix; answers with `StorageCheck`. Writes nothing.
+    CheckStorageRepository {
+        repository: String,
+    },
+    /// Adds the ticked Spaces of a storage repository on GitHub to this Mac; answers with the
+    /// Spaces added, as `SpaceRecord`s.
+    JoinSpaces {
+        repository: String,
+        spaces: Vec<JoinSpace>,
+    },
+    /// Changes the prefix of the tracker a Space's storage repository is: a local tracker's at
+    /// any time, rewriting its issue IDs, and a GitHub tracker's only while it has no issue.
+    SetTrackerPrefix {
+        space_id: SpaceId,
+        prefix: String,
+    },
+    /// Adds `wiffletree-issues.yaml` to a Space's GitHub storage repository that has none.
+    SetUpIssues {
+        space_id: SpaceId,
+        prefix: String,
     },
     /// Replaces a Space's definition; its id and storage stay as they are.
     UpdateSpace {
@@ -3069,12 +3112,17 @@ pub enum Command {
     SettlePausedFile {
         path: String,
         settle: Settle,
+        /// The storage repository the note names; `None` for the settings repository.
+        #[serde(default)]
+        repository: Option<String>,
     },
     /// Read-only: this machine's version of a paused file beside the other one, line by line,
     /// the other being the last synced version for an edit made outside Wiffletree. For a
     /// skill, its rewrite or else its rules. Answers with lines as `SkillStockChanges` does.
     ComparePausedFile {
         path: String,
+        #[serde(default)]
+        repository: Option<String>,
     },
     /// Read-only: a skill's history, newest first, each entry with why it could not be read
     /// when it cannot.
@@ -3265,6 +3313,7 @@ impl Command {
             | Self::GitHistory { .. }
             | Self::Settings
             | Self::CheckSettingsRepository { .. }
+            | Self::CheckStorageRepository { .. }
             | Self::ComparePausedFile { .. }
             | Self::SkillHistory { .. }
             | Self::SkillMergeReview { .. }
@@ -3315,6 +3364,9 @@ impl Command {
             | Self::MoveProjectToSpace { .. }
             | Self::SetRepositorySpaces { .. }
             | Self::ConfirmRepositorySuggestions { .. }
+            | Self::JoinSpaces { .. }
+            | Self::SetTrackerPrefix { .. }
+            | Self::SetUpIssues { .. }
             | Self::ExportLogs { .. }
             | Self::SetWorkspacesDir { .. }
             | Self::SetVerification { .. }
@@ -3372,6 +3424,9 @@ impl Command {
                 | Self::MoveProjectToSpace { .. }
                 | Self::SetRepositorySpaces { .. }
                 | Self::ConfirmRepositorySuggestions { .. }
+                | Self::JoinSpaces { .. }
+                | Self::SetTrackerPrefix { .. }
+                | Self::SetUpIssues { .. }
                 | Self::AttachBrain { .. }
                 | Self::RemoteAccess
                 | Self::SetRemoteAccess { .. }

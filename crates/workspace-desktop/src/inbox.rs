@@ -91,18 +91,16 @@ impl Inbox {
     }
     fn note_action(
         &mut self,
-        path: String,
+        note: workspace_notes::NoteRef,
         action: workspace_notes::NoteAction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let command = match action {
             workspace_notes::NoteAction::Compare => {
-                workspace_notes::toggle_compare(&mut self.compared, path)
+                workspace_notes::toggle_compare(&mut self.compared, note)
             }
-            workspace_notes::NoteAction::Settle(settle) => {
-                Some(Command::SettlePausedFile { path, settle })
-            }
+            workspace_notes::NoteAction::Settle(settle) => Some(note.settle(settle)),
         };
         match command {
             Some(command) => self.request(command, window, cx),
@@ -295,7 +293,13 @@ impl Inbox {
                     .items_center()
                     .justify_between()
                     .gap_2()
-                    .child(hint("Workspace · settings sync", p))
+                    .child(hint(
+                        match &note.repository {
+                            Some(repository) => format!("Workspace · {repository}"),
+                            None => "Workspace · settings sync".into(),
+                        },
+                        p,
+                    ))
                     .child(pill("Paused", p.yellow)),
             )
             .child(
@@ -333,6 +337,28 @@ impl Inbox {
             .children(
                 workspace_notes::kept_note(note, compared)
                     .map(|kept| hint(kept, p).text_size(px(font::CAPTION))),
+            )
+    }
+    /// A storage repository's file a scan held back from a push: which file, the check and its
+    /// rule, never what matched.
+    pub(super) fn held_card(&self, held: &HeldFile, p: Palette) -> Div {
+        card(p)
+            .bg(p.surface)
+            .border_color(p.yellow.opacity(0.55))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(hint(format!("Workspace · {}", held.repository), p))
+                    .child(pill("Held", p.yellow)),
+            )
+            .child(
+                div()
+                    .text_size(px(font::TEXT))
+                    .line_height(relative(1.5))
+                    .child(held.text.clone()),
             )
     }
     /// The card for a publish step waiting on this item, drawn from the ticket's frozen request,
@@ -385,10 +411,15 @@ impl Requests for Inbox {
                     self.answering = None;
                 }
             }
-            Command::ComparePausedFile { path } => match serde_json::from_value(value) {
-                Ok(lines) => workspace_notes::compared_arrived(&mut self.compared, &path, lines),
-                Err(error) => eprintln!("Compare paused file: {error}"),
-            },
+            Command::ComparePausedFile { path, repository } => {
+                match serde_json::from_value(value) {
+                    Ok(lines) => {
+                        let note = workspace_notes::NoteRef { path, repository };
+                        workspace_notes::compared_arrived(&mut self.compared, &note, lines)
+                    }
+                    Err(error) => eprintln!("Compare paused file: {error}"),
+                }
+            }
             Command::SettlePausedFile { .. } => self.compared = None,
             _ => {}
         }

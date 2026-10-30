@@ -41,6 +41,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::GitHistory { .. }
         | Command::Settings
         | Command::CheckSettingsRepository { .. }
+        | Command::CheckStorageRepository { .. }
         | Command::ComparePausedFile { .. }
         | Command::SkillHistory { .. }
         | Command::SkillMergeReview { .. }
@@ -92,6 +93,9 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::MoveProjectToSpace { .. }
         | Command::SetRepositorySpaces { .. }
         | Command::ConfirmRepositorySuggestions { .. }
+        | Command::JoinSpaces { .. }
+        | Command::SetTrackerPrefix { .. }
+        | Command::SetUpIssues { .. }
         | Command::ExportLogs { .. }
         | Command::SetWorkspacesDir { .. }
         | Command::SetVerification { .. }
