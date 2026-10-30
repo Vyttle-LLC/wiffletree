@@ -447,7 +447,9 @@ impl Conversation {
         }
         let runtime = self.shared.runtime(&session.id);
         if let Some(error) = runtime.and_then(|r| r.last_error.as_deref()) {
-            let limit_retry = runtime.and_then(|r| r.limit_retry.as_ref());
+            // Only an interrupted session retries by itself; a paused one waits for a resume.
+            let limit_retry = (runtime.and_then(|r| r.limit_retry.as_ref()))
+                .filter(|_| session.status == Status::Disconnected);
             // Pausing is the user's own action, and a usage limit retries by itself, so
             // neither reads as a failure.
             let tone = if session.status == Status::Paused || limit_retry.is_some() {

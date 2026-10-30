@@ -184,47 +184,63 @@ impl Actor {
     /// that no longer says it is reached. The retry is the human's Retry, so the input carries
     /// its interrupted-turn note. A session paused meanwhile waits for the human.
     pub(super) fn retry_after_limits(&mut self, at: i64) -> Result<()> {
-        for mut runtime in self.host.runtimes()? {
+        for runtime in self.host.runtimes()? {
             let Some(retry) = runtime.limit_retry.clone() else {
                 continue;
             };
-            let session = self.host.session(&runtime.session_id)?;
-            if session.status != Status::Disconnected || self.active.contains_key(&session.id) {
-                continue;
+            let id = runtime.session_id.clone();
+            // One session's retry must never stop the others from being scheduled.
+            if let Err(error) = self.retry_after_limit(runtime, retry, at) {
+                eprintln!("Retrying {id} after its usage limit: {error:#}");
             }
-            if let Some(spent) = self.host.limit_reached(session.provider, at)? {
-                // A later reading may move the reset; the conversation shows the latest.
-                if spent.until != retry.resets_at {
-                    runtime.limit_retry = Some(LimitRetry {
-                        resets_at: spent.until,
-                        ..retry
-                    });
-                    self.host.save_runtime(&runtime)?;
-                    self.state_changed();
-                }
-                if let Some(until) = spent.until {
-                    self.wake(until);
-                }
-                continue;
-            }
-            // Only a usable reading says the limit reset; a failed refresh says nothing.
-            let read_since = self.host.quotas()?.iter().any(|q| {
-                q.provider == session.provider
-                    && q.observed_at > retry.failed_at
-                    && q.error.is_none()
-                    && !q.windows.is_empty()
-            });
-            if retry.resets_at.is_some_and(|reset| reset <= at) || read_since {
-                self.host.reconcile_session(&session.id, true)?;
-                Host::event(
-                    &self.host.db,
-                    &session.project_id,
-                    Some(&session.id),
-                    "limit_retried",
-                    "Held input retried after the usage limit reset",
-                )?;
+        }
+        Ok(())
+    }
+    fn retry_after_limit(
+        &mut self,
+        mut runtime: SessionRuntime,
+        retry: LimitRetry,
+        at: i64,
+    ) -> Result<()> {
+        let session = self.host.session(&runtime.session_id)?;
+        if session.archived
+            || session.status != Status::Disconnected
+            || self.active.contains_key(&session.id)
+        {
+            return Ok(());
+        }
+        if let Some(spent) = self.host.limit_reached(session.provider, at)? {
+            // A later reading may move the reset; the conversation shows the latest.
+            if spent.until != retry.resets_at {
+                runtime.limit_retry = Some(LimitRetry {
+                    resets_at: spent.until,
+                    ..retry
+                });
+                self.host.save_runtime(&runtime)?;
                 self.state_changed();
             }
+            if let Some(until) = spent.until {
+                self.wake(until);
+            }
+            return Ok(());
+        }
+        // Only a usable reading says the limit reset; a failed refresh says nothing.
+        let read_since = self.host.quotas()?.iter().any(|q| {
+            q.provider == session.provider
+                && q.observed_at > retry.failed_at
+                && q.error.is_none()
+                && !q.windows.is_empty()
+        });
+        if retry.resets_at.is_some_and(|reset| reset <= at) || read_since {
+            self.host.reconcile_session(&session.id, true)?;
+            Host::event(
+                &self.host.db,
+                &session.project_id,
+                Some(&session.id),
+                "limit_retried",
+                "Held input retried after the usage limit reset",
+            )?;
+            self.state_changed();
         }
         Ok(())
     }

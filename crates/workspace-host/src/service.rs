@@ -7576,7 +7576,6 @@ mod tests {
 
     const SESSION_LIMIT: &str = "You've hit your session limit · resets 7pm (America/New_York)";
 
-    /// A reading of `provider` whose 5-hour window is `status`, observed `observed_at`.
     fn five_hour(
         provider: Provider,
         status: &str,
@@ -7609,8 +7608,6 @@ mod tests {
         (home, actor, implementer, coordinator, input)
     }
 
-    /// Ends `session`'s turn `run` with `error`, after a reading that says, or not, that its
-    /// provider's limit is reached.
     fn fail_turn(
         actor: &mut Actor,
         session: &Session,
@@ -7723,6 +7720,27 @@ mod tests {
         actor.host.record_quota(failed).unwrap();
         actor.retry_after_limits(later).unwrap();
         assert_eq!(actor.host.message(&input).unwrap().receipt, Receipt::Held);
+    }
+
+    #[test]
+    fn an_archived_session_is_not_retried_at_the_reset() {
+        let (_home, mut actor, implementer, _, input) = implementer_taking_input();
+        let reset = now() + 3_600_000;
+        let rejected = five_hour(Provider::Claude, "rejected", Some(reset), now());
+        fail_turn(
+            &mut actor,
+            &implementer,
+            "run",
+            Some(rejected),
+            SESSION_LIMIT,
+        );
+
+        actor.host.set_archived(&implementer.id, true).unwrap();
+        actor.retry_after_limits(reset + 1).unwrap();
+
+        assert_ne!(actor.host.message(&input).unwrap().receipt, Receipt::Queued);
+        let runtime = actor.host.session_runtime(&implementer.id).unwrap();
+        assert!(runtime.limit_retry.is_some(), "nothing was retried");
     }
 
     #[test]
