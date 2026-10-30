@@ -480,59 +480,15 @@ mod tests {
         rebased_off_merged_parent(false);
     }
 
-    /// What `same_patch` saw, for a failure on a machine the test cannot be rerun on: the graph,
-    /// and for the reviewed commit and its replay onto `main_tip`, each merge-base and patch id.
-    fn explain(
-        repository: &Path,
-        branch: &str,
-        parent_head: &str,
-        reviewed: &str,
-        main_tip: &str,
-    ) -> String {
-        let run = |dir: &Path, script: &str| {
-            let output = std::process::Command::new("sh")
-                .current_dir(dir)
-                .args(["-c", script])
-                .output()
-                .unwrap();
-            format!(
-                "$ {script}\n{}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            )
-        };
-        let replay = repository.parent().unwrap().join("explain-checkout");
-        let replay_path = replay.to_str().unwrap();
-        let mut lines = vec![
-            run(repository, "git --version"),
-            run(repository, "git log --graph --all --format='%h %p %ct %s'"),
-            run(
-                repository,
-                &format!(
-                    "git worktree add -q --detach {replay_path} {reviewed} && cd {replay_path} \
-                     && git -c user.name=t -c user.email=t@t rebase -q --onto {main_tip} {parent_head} \
-                     && git rev-parse HEAD"
-                ),
-            ),
-        ];
-        for commit in [reviewed, "HEAD"] {
-            for from in [branch, "origin/main"] {
-                lines.push(run(
-                    &replay,
-                    &format!(
-                        "b=$(git merge-base {from} {commit}); echo $b; \
-                         git diff $b {commit} | git patch-id --stable; git diff --stat $b {commit}"
-                    ),
-                ));
-            }
-        }
-        lines.join("\n")
-    }
-
     /// The parent merges into main, which gained an unrelated commit first, as a squash or a
     /// merge commit; the keeper rebases the reviewed child onto main, which then moves on.
     fn rebased_off_merged_parent(squash: bool) {
         let mut f = fixture();
+        // The keeper's rebase commits as the repository's configured identity, as kept tests set
+        // it; a runner without one cannot guess an email.
+        for (key, value) in [("user.name", "F"), ("user.email", "f@example.invalid")] {
+            git(&f.repository, &["config", key, value]);
+        }
         let mut parent = f.ticket();
         parent.pushed = Some(f.head());
         f.host.save_ticket(&parent).unwrap();
@@ -589,16 +545,7 @@ mod tests {
         let outcome = crate::keeper::rebase(&job, |_, _| Ok(true));
         let rebased = match outcome.result {
             crate::keeper::Rebased::Same(rebased) => rebased,
-            crate::keeper::Rebased::Changed(_) => panic!(
-                "the rebase changed the patch\n{}",
-                explain(
-                    repository,
-                    &parent.branch,
-                    &parent_head,
-                    &reviewed,
-                    &main_tip
-                )
-            ),
+            crate::keeper::Rebased::Changed(_) => panic!("the rebase changed the patch"),
             crate::keeper::Rebased::Conflict(files) => panic!("the rebase conflicts in {files:?}"),
             crate::keeper::Rebased::Failed(why) => panic!("the rebase failed: {why}"),
             _ => panic!("the base moved or was deleted"),
