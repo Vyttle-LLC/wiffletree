@@ -1055,11 +1055,22 @@ impl Host {
         Ok(ticket)
     }
     pub(crate) fn append_output(&mut self, session: &Session, run: &str, body: &str) -> Result<()> {
+        self.append_reply(session, run, body, None)
+    }
+    /// `append_output` for a turn's reply, with how it compares with the last full reply.
+    pub(crate) fn append_reply(
+        &mut self,
+        session: &Session,
+        run: &str,
+        body: &str,
+        update: Option<&ReplyUpdate>,
+    ) -> Result<()> {
         if body.trim().is_empty() {
             return Ok(());
         }
         let body = body.chars().take(MAX_TEXT_BYTES / 4).collect::<String>();
-        self.db.execute("INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at) VALUES (?1,?2,?3,?3,?4,'completed',?5) ON CONFLICT(id) DO UPDATE SET body=excluded.body",params![reply_id(run),session.project_id,session.id,body,now()])?;
+        let update = update.map(encode).transpose()?;
+        self.db.execute("INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at,reply_update) VALUES (?1,?2,?3,?3,?4,'completed',?5,?6) ON CONFLICT(id) DO UPDATE SET body=excluded.body,reply_update=excluded.reply_update",params![reply_id(run),session.project_id,session.id,body,now(),update])?;
         Ok(())
     }
 }

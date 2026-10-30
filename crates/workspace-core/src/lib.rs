@@ -531,6 +531,26 @@ pub struct Message {
     /// Only the human's messages carry attachments.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
+    /// On a coordinator's reply to a turn the human did not start: how the project's recorded
+    /// facts compare with its last reply shown in full. Display only; the body never changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<ReplyUpdate>,
+}
+impl Message {
+    /// Messages without a sender are the human's, Inbox answers included, apart from
+    /// Wiffletree's own notices.
+    pub fn from_human(&self) -> bool {
+        self.sender.is_none() && host_notice(&self.id).is_none()
+    }
+}
+/// What changed in a project's records between a coordinator's last full reply and this one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReplyUpdate {
+    /// Nothing recorded changed, so the reply folds.
+    Unchanged,
+    /// The differences, one line each, such as "Stage 1 committed 684cd0f".
+    Changed { changes: Vec<String> },
 }
 /// A page of a repository's local history, newest first, read from Git without changing it.
 #[derive(Clone, Debug, Serialize, Deserialize)]

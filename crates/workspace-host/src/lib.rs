@@ -48,6 +48,7 @@ mod sync;
 mod telemetry;
 #[cfg(test)]
 mod test_support;
+mod updates;
 pub mod usage;
 mod verification;
 mod worktrees;
@@ -303,6 +304,7 @@ impl Host {
         db.execute_batch(include_str!("skills.sql"))?;
         repositories::migrate_to_workspace(&db)?;
         attachments::migrate(&db)?;
+        updates::migrate(&db)?;
         revisions::migrate(&db)?;
         worktrees::migrate(&db)?;
         checkout::migrate(&db)?;
@@ -1054,6 +1056,10 @@ impl Host {
             created_at: row.get(7)?,
             // By name: columns added by migrations can arrive in either order.
             attachments: decode(row, row.as_ref().column_index("attachments")?)?,
+            update: match row.get::<_, Option<String>>("reply_update")? {
+                Some(_) => Some(decode(row, row.as_ref().column_index("reply_update")?)?),
+                None => None,
+            },
         })
     }
     pub fn message(&self, id: &str) -> Result<Message> {
