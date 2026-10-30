@@ -57,7 +57,6 @@ fn model_color(model: &str, p: Palette) -> Hsla {
 fn swatch(color: Hsla) -> Div {
     div().size(px(9.)).flex_none().rounded(px(3.)).bg(color)
 }
-/// A right-aligned table cell.
 fn cell(text: impl Into<SharedString>) -> Div {
     div().w(px(78.)).flex_none().text_right().child(text.into())
 }
@@ -359,8 +358,7 @@ impl UsagePage {
                             )
                             .child(div().flex_none().child(compact(total)))
                             .child(
-                                cell(dollars(coordinator.cost.total()))
-                                    .font_weight(FontWeight::SEMIBOLD),
+                                cell(estimated(coordinator.cost)).font_weight(FontWeight::SEMIBOLD),
                             ),
                     )
                     .child(meter(total as f64 / largest as f64 * 100., p.focus, p))

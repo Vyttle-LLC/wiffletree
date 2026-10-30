@@ -593,7 +593,7 @@ impl Host {
                         project: self.project(&session.project_id)?.name,
                         own: TokenTotals::default(),
                         workers: TokenTotals::default(),
-                        cost: Cost::default(),
+                        cost: None,
                     },
                 );
             }
@@ -604,7 +604,7 @@ impl Host {
                 entry.workers.add(counts);
             }
             if let Some(price) = &price {
-                entry.cost.add(price);
+                entry.cost.get_or_insert_default().add(price);
             }
         }
         let mut models: Vec<_> = models.into_values().collect();
@@ -1406,6 +1406,7 @@ mod tests {
                 .find(|c| c.id == id)
                 .unwrap()
                 .cost
+                .unwrap()
                 .total()
         };
         close(coordinator(&all, &main.id), opus + sol);
@@ -1423,6 +1424,115 @@ mod tests {
         assert_eq!(codex.unpriced_requests, 0);
         assert_eq!(codex.daily_models.len(), 1);
         close(coordinator(&codex, &main.id), sol);
+    }
+    #[test]
+    fn a_long_prompt_is_priced_apart_from_a_short_one_on_the_same_model() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(directory.path()).unwrap();
+        let session = root(&mut host, "Project");
+        let time = now() - 1000;
+        let (short, long) = (50_000, 150_000);
+        for (id, input) in [("short", short), ("long", long)] {
+            run(&host, &session, id, time, Value::Null);
+            host.record_usage(
+                id,
+                id,
+                Some("claude-haiku-5-5"),
+                &json!({"input_tokens":input,"output_tokens":1_000}),
+                true,
+                time,
+            )
+            .unwrap();
+        }
+        let priced = |input, long_prompt| {
+            pricing::estimate(
+                "claude-haiku-5-5",
+                &BilledTokens {
+                    uncached_input: input,
+                    output: 1_000,
+                    long_prompt,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .total()
+        };
+        let expected = priced(short, false) + priced(long, true);
+        let flat = priced(short, false) + priced(long, false);
+
+        let report = host
+            .usage_report(7, None, None, "America/New_York")
+            .unwrap();
+        assert_eq!(report.models.len(), 1);
+        assert!((report.cost.total() - expected).abs() < 1e-9);
+        assert!((report.models[0].cost.unwrap().total() - expected).abs() < 1e-9);
+        assert!(report.cost.total() > flat);
+    }
+    #[test]
+    fn each_day_keeps_its_own_models_and_a_day_outside_the_period_is_dropped() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(directory.path()).unwrap();
+        let session = root(&mut host, "Project");
+        let now = at("2026-03-10T18:00:00Z");
+        for (id, model, time) in [
+            ("older", "claude-opus-5-5", at("2026-03-09T15:00:00Z")),
+            ("today", "claude-sonnet-5-5", at("2026-03-10T15:00:00Z")),
+            ("unpriced", "unreported", at("2026-03-10T16:00:00Z")),
+            ("outside", "claude-fable-5-1", at("2026-03-07T15:00:00Z")),
+        ] {
+            run(&host, &session, id, time, Value::Null);
+            host.record_usage(
+                id,
+                id,
+                Some(model),
+                &json!({"input_tokens":1_000,"output_tokens":100}),
+                true,
+                time,
+            )
+            .unwrap();
+        }
+
+        let report = host
+            .usage_report_at(2, None, None, "America/New_York", now)
+            .unwrap();
+        let days: Vec<_> = report
+            .daily_models
+            .iter()
+            .map(|day| (day.date.as_str(), day.usage.model.as_str()))
+            .collect();
+        assert_eq!(
+            days,
+            [
+                ("2026-03-09", "claude-opus-5-5"),
+                ("2026-03-10", "claude-sonnet-5-5"),
+                ("2026-03-10", "unreported"),
+            ]
+        );
+        assert_eq!(report.totals.requests, 3);
+        assert!(report.models.iter().all(|m| m.model != "claude-fable-5-1"));
+    }
+    #[test]
+    fn a_coordinator_whose_requests_are_all_unpriced_has_no_cost() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(directory.path()).unwrap();
+        let session = root(&mut host, "Project");
+        let time = now() - 1000;
+        run(&host, &session, "unknown", time, Value::Null);
+        host.record_usage(
+            "unknown",
+            "unknown",
+            Some("unreported"),
+            &json!({"input_tokens":100,"output_tokens":5}),
+            true,
+            time,
+        )
+        .unwrap();
+
+        let report = host
+            .usage_report(7, None, None, "America/New_York")
+            .unwrap();
+        assert_eq!(report.coordinators.len(), 1);
+        assert!(report.coordinators[0].cost.is_none());
     }
     #[test]
     fn migration_backfills_codex_once_but_does_not_sum_legacy_claude_session_totals() {
