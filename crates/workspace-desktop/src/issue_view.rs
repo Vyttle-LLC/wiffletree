@@ -81,12 +81,21 @@ impl IssueView {
     }
     /// Reads the issue again from its files.
     pub(super) fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.read(false, window, cx);
+    }
+    /// Reads the issue; `after_change` ends the change waiting on it, so the next edit starts
+    /// from what the host wrote. An issue numbered while open is followed to its number.
+    fn read(&mut self, after_change: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.ask(
             ask::issue(self.id.clone()),
             window,
             cx,
-            |view, record, _, cx| {
+            move |view, record, _, cx| {
+                if let Ok(record) = &record {
+                    view.id = record.id.clone();
+                }
                 view.record = Some(record);
+                view.busy &= !after_change;
                 cx.notify();
             },
         );
@@ -99,18 +108,27 @@ impl IssueView {
         cx: &mut Context<Self>,
         done: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) {
+        // One change at a time: each edit sends the whole issue, so it must start from the last.
+        if self.busy {
+            return;
+        }
         self.busy = true;
-        self.ask(change, window, cx, move |view, reply, window, cx| {
-            view.busy = false;
-            match reply {
+        self.ask(
+            change,
+            window,
+            cx,
+            move |view, reply, window, cx| match reply {
                 Ok(_) => {
                     done(view, window, cx);
-                    view.load(window, cx);
+                    view.read(true, window, cx);
                     cx.emit(IssueViewEvent::Changed);
                 }
-                Err(error) => toast_error(error, window, cx),
-            }
-        });
+                Err(error) => {
+                    view.busy = false;
+                    toast_error(error, window, cx);
+                }
+            },
+        );
         cx.notify();
     }
     fn comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {

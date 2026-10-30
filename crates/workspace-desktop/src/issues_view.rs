@@ -184,7 +184,8 @@ impl IssuesPage {
                 cx.notify();
             }
             IssueViewEvent::Changed => view.load(window, cx),
-            IssueViewEvent::Open(id) => view.open_issue(id.clone(), false, window, cx),
+            // Marked read whether or not it was unread; marking a read issue changes nothing.
+            IssueViewEvent::Open(id) => view.open_issue(id.clone(), true, window, cx),
         })
         .detach();
         self.open = Some(issue);

@@ -674,6 +674,23 @@ impl Host {
         let (space, _) = self.tracker_for(id.prefix())?;
         let storage = &space.storage.repository;
         let store = self.store(&space, id.prefix());
+        // A temporary ID this Mac gave an issue since pushed reads as its number.
+        let numbered: Option<String> = match id.is_temporary() && !store.exists(id) {
+            true => self
+                .db
+                .query_row(
+                    "SELECT number FROM issue_temporary WHERE storage=?1 AND temporary=?2",
+                    params![storage.key(), id.to_string()],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten(),
+            false => None,
+        };
+        let id = &match numbered {
+            Some(number) => IssueId::parse(&number)?,
+            None => id.clone(),
+        };
         let mut record = store.record(id, &storage.key())?;
         if let StorageRepository::GitHub { .. } = storage {
             let under = format!("{}/%", issue_folder(id));

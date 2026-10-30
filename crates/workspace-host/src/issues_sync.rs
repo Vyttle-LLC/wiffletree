@@ -382,6 +382,12 @@ mod tests {
             host.read_issue(&id("SAGE-2")).unwrap().issue.unwrap().id,
             id("SAGE-2")
         );
+        let followed = host.read_issue(&filed.id).unwrap();
+        assert_eq!(
+            followed.id,
+            id("SAGE-2"),
+            "an open temporary ID follows its number"
+        );
         assert_eq!(host.issue_trackers().unwrap()[1].waiting, 0);
         sync(&mut host, &github).unwrap();
         assert_eq!(github.log("%s").len(), 5, "nothing is pushed twice");
