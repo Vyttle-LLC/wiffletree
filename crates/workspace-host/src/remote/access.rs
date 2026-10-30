@@ -49,7 +49,10 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::Processes { .. }
         | Command::Subscribe { .. }
         | Command::Ping
-        | Command::CoreInstructions => Row::Read,
+        | Command::CoreInstructions
+        | Command::NewProjectDefaults { .. }
+        | Command::SuggestRepositorySpace { .. }
+        | Command::RepositorySuggestions => Row::Read,
         Command::ResolvePaths { .. } | Command::ReadFile { .. } | Command::ListFolder { .. } => {
             Row::HostPath
         }
@@ -87,6 +90,8 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::UpdateSpace { .. }
         | Command::RemoveSpace { .. }
         | Command::MoveProjectToSpace { .. }
+        | Command::SetRepositorySpaces { .. }
+        | Command::ConfirmRepositorySuggestions { .. }
         | Command::ExportLogs { .. }
         | Command::SetWorkspacesDir { .. }
         | Command::SetVerification { .. }

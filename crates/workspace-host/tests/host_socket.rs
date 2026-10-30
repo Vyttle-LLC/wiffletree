@@ -722,12 +722,34 @@ fn space_commands_need_the_apps_credential_and_reads_do_not() {
             project_id: project.id.clone(),
             path: fixture.data.path().to_string_lossy().into_owned(),
         },
+        Command::SetRepositorySpaces {
+            repository: "Sage-Social/api".into(),
+            space_ids: vec![personal.id.clone()],
+        },
+        Command::ConfirmRepositorySuggestions {
+            choices: vec![RepositorySpaces {
+                repository: "Sage-Social/api".into(),
+                space_ids: vec![personal.id.clone()],
+                new_personal: true,
+            }],
+        },
     ];
     for command in writes {
         let refused = agent.request(PROTOCOL_VERSION, command);
         assert!(refused.error.unwrap().contains("client credential"));
     }
     assert_eq!(snapshot(&mut agent).spaces, spaces);
+    // New project's defaults and the owner's suggestion are reads.
+    let defaults = agent.result(Command::NewProjectDefaults { space_id: None });
+    assert_eq!(defaults["space_id"], personal.id.as_str());
+    let suggested = agent.request(
+        PROTOCOL_VERSION,
+        Command::SuggestRepositorySpace {
+            repository: "Sage-Social/api".into(),
+        },
+    );
+    assert_eq!(suggested.error, None);
+    assert_eq!(suggested.result, None, "No Space");
     let mut app = fixture.welcomed(Some(fixture.credential()));
     let edited = app.request(
         PROTOCOL_VERSION,

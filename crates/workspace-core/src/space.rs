@@ -152,6 +152,50 @@ pub struct SpaceRecord {
     pub local: SpaceLocal,
 }
 
+/// A Space's repositories on this Mac, as New project ticks them and `create_project` uses them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceRepositories {
+    pub space_id: SpaceId,
+    /// The workspace repositories whose GitHub name the Space lists, in workspace order.
+    pub repository_ids: Vec<String>,
+    /// The repositories the Space lists that are not cloned on this Mac, as `owner/name`.
+    pub not_cloned: Vec<String>,
+}
+
+/// The Spaces a repository, named `owner/name`, is in; none puts it under No Space.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositorySpaces {
+    pub repository: String,
+    pub space_ids: Vec<SpaceId>,
+    /// Also lists it in Personal, which is created as on a fresh install when it is missing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub new_personal: bool,
+}
+
+/// The upgrade's suggested Space for a workspace repository; `None` suggests No Space.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositorySuggestion {
+    pub repository_id: String,
+    /// Its GitHub name, `owner/name`.
+    pub repository: String,
+    pub space: Option<SuggestedSpace>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum SuggestedSpace {
+    Space(SpaceId),
+    /// Personal, which does not exist yet; confirming it creates it.
+    NewPersonal,
+}
+
+/// The owner of a repository named `owner/name`.
+pub fn repository_owner(identity: &str) -> &str {
+    identity
+        .split_once('/')
+        .map_or(identity, |(owner, _)| owner)
+}
+
 /// A storage repository's `wiffletree-issues.yaml`: it makes the repository its Spaces' tracker.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackerConfig {

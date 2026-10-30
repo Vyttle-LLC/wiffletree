@@ -391,6 +391,15 @@ fn spawn_pull_request_check(
         },
     );
 }
+fn spawn_gh_login_read(sender: Sender<Event>, tools: publish::Tools, home: PathBuf) {
+    spawn_job(
+        sender,
+        (),
+        move |_| spaces::gh_login(&tools, &home),
+        |_| None,
+        |(), login| Event::GhLogin(login),
+    );
+}
 fn spawn_github_read(
     sender: Sender<Event>,
     read: impl FnOnce() -> repositories::GitHubReading + Send + 'static,
@@ -589,6 +598,8 @@ enum Event {
     /// A read of the repositories' GitHub facts finished on its own thread; `None` when it
     /// panicked, and what is stored then stands.
     GitHub(Option<repositories::GitHubReading>),
+    /// The human's `gh` login, read on its own thread for the upgrade's Space suggestions.
+    GhLogin(Option<String>),
     /// A publish step finished on its own thread.
     Published(publish::Outcome),
     /// A PR keeper rebase finished on its own thread.
@@ -991,6 +1002,7 @@ impl Service {
                 actor.refresh_overlaps(now());
                 actor.refresh_pull_requests(now(), true);
                 actor.refresh_github();
+                actor.read_gh_login();
                 actor.refresh_settings_sync(now());
                 actor.start_skill_merges();
                 actor.signal(false);
@@ -1592,6 +1604,20 @@ impl Actor {
             }
             Ok(_) => {}
             Err(e) => eprintln!("Workspace GitHub read: {e:#}"),
+        }
+    }
+
+    /// Reads the human's `gh` login off the host thread while the upgrade's Space suggestions
+    /// wait on it, so answering them runs no `gh`.
+    fn read_gh_login(&mut self) {
+        match self.host.wants_gh_login() {
+            Ok(true) => spawn_gh_login_read(
+                self.sender.clone(),
+                self.publish_tools.clone(),
+                self.host.home.clone(),
+            ),
+            Ok(false) => {}
+            Err(e) => eprintln!("Workspace gh login: {e:#}"),
         }
     }
 
@@ -2258,6 +2284,10 @@ impl Actor {
                         false
                     }
                 }
+            }
+            Event::GhLogin(login) => {
+                self.host.record_gh_login(login);
+                false
             }
             Event::GitHub(reading) => {
                 self.github_reading = false;
@@ -5164,7 +5194,7 @@ mod tests {
             .sessions()
             .unwrap()
             .into_iter()
-            .find(|s| s.project_id == billing.id)
+            .find(|s| s.project_id == billing.project.id)
             .unwrap()
             .id;
         let question = host

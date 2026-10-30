@@ -83,8 +83,12 @@ fn a_coordinator_creates_a_project_that_starts_on_its_labelled_brief() {
     assert_eq!(messages[0].receipt, Receipt::Queued);
     assert!(messages[0].body.ends_with("Move invoices to the new API."));
     assert!(host.live_projects().unwrap().contains(&project.id));
-    // Every workspace repository, including ones added later.
-    assert_eq!(project.repositories, None);
+    // The creator's Space lists no repository, so the project uses none.
+    assert_eq!(
+        project.space,
+        host.project(&creator.project_id).unwrap().space
+    );
+    assert_eq!(project.repositories, Some(vec![]));
 }
 
 #[test]
@@ -192,7 +196,7 @@ fn only_the_creator_sees_the_created_projects_tickets() {
     let project = create(
         &mut host,
         &creator.id,
-        json!({"name": "Billing", "brief": "Fix the finding."}),
+        json!({"name": "Billing", "brief": "Fix the finding.", "repository_ids": [web.id]}),
     )
     .unwrap();
     let coordinator = coordinator_of(&host, &project.id);
@@ -223,19 +227,86 @@ fn only_the_creator_sees_the_created_projects_tickets() {
     }
 }
 
+/// Names each workspace repository's GitHub repository, as its GitHub read would, and has the
+/// creator's Space list `listed`.
+fn in_space(
+    home: &tempfile::TempDir,
+    host: &mut Host,
+    creator: &Session,
+    on_github: &[(&Repository, &str)],
+    listed: &[&str],
+) {
+    let db = rusqlite::Connection::open(home.path().join("home/workspace.sqlite3")).unwrap();
+    for (repository, identity) in on_github {
+        let (owner, name) = identity.split_once('/').unwrap();
+        db.execute(
+            "UPDATE repositories SET data=json_set(data,'$.github',json(?2)) WHERE id=?1",
+            rusqlite::params![
+                repository.id,
+                json!({"owner": owner, "name": name}).to_string()
+            ],
+        )
+        .unwrap();
+    }
+    let space = host.project(&creator.project_id).unwrap().space;
+    let mut definition = host.space(&space).unwrap().space;
+    definition.repositories = listed.iter().map(|r| r.to_string()).collect();
+    host.update_space(definition).unwrap();
+}
+
+#[test]
+fn without_repository_ids_it_uses_the_spaces_repositories_here_and_names_the_rest() {
+    let (home, mut host, creator, [web, api]) = fixture();
+    in_space(
+        &home,
+        &mut host,
+        &creator,
+        &[(&web, "Sage-Social/web"), (&api, "octo/api")],
+        &["sage-social/WEB", "Sage-Social/mobile-app"],
+    );
+    let result = host
+        .agent_tool(
+            &creator.id,
+            "create_project",
+            json!({"name": "Billing", "brief": "Do"}),
+        )
+        .unwrap();
+    let created: CreatedProject = serde_json::from_value(result).unwrap();
+    assert_eq!(created.project.repositories, Some(vec![web.id.clone()]));
+    assert_eq!(created.not_on_this_mac, ["Sage-Social/mobile-app"]);
+    assert_eq!(
+        created.project.space,
+        host.project(&creator.project_id).unwrap().space
+    );
+}
+
 #[test]
 fn repository_ids_choose_the_new_projects_repositories() {
-    let (_home, mut host, creator, [web, _api]) = fixture();
-    let project = create(
+    let (home, mut host, creator, [web, api]) = fixture();
+    in_space(
+        &home,
         &mut host,
-        &creator.id,
-        json!({"name": "Web only", "brief": "Do", "repository_ids": [web.id]}),
-    )
-    .unwrap();
+        &creator,
+        &[(&web, "Sage-Social/web"), (&api, "Sage-Social/api")],
+        &["Sage-Social/api", "Sage-Social/mobile-app"],
+    );
+    let result = host
+        .agent_tool(
+            &creator.id,
+            "create_project",
+            json!({"name": "Web only", "brief": "Do", "repository_ids": [web.id]}),
+        )
+        .unwrap();
+    assert!(result.get("not_on_this_mac").is_none(), "{result}");
+    let project: Project = serde_json::from_value(result).unwrap();
     assert_eq!(project.repositories, Some(vec![web.id.clone()]));
+    let used: Vec<String> = (host.project_repositories(&project.id).unwrap().into_iter())
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(used, std::slice::from_ref(&web.id));
     assert_eq!(
-        host.project_repositories(&project.id).unwrap(),
-        vec![web.clone()]
+        project.space,
+        host.project(&creator.project_id).unwrap().space
     );
 }
 
