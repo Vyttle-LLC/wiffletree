@@ -23,7 +23,7 @@ The host SHALL refuse `merge_ticket`, merging nothing, when the base of the tick
 - **THEN** it is refused, saying GitHub could not be read, and nothing is merged
 
 ### Requirement: The checks before a merge
-Before merging or asking the human, the host SHALL refuse `merge_ticket` unless all of these hold: the ticket is open, has a pull request the watcher recorded as open and has no merge request running or waiting; the ticket could be accepted with the same `waived` reason, by the same code `accept_ticket` uses; the repository publishes without asking (see repository-owners); the pull request, read again from GitHub, opens into the ticket's base; its base is not protected; its head is the commit the host last pushed for the ticket and the worktree's HEAD, and is the reviewed commit or a patch-equivalent one, as `publish_ticket` checks; it is not a draft; GitHub reports it mergeable, with no conflict and not blocked; and its checks have not failed and it has at least one check. A pull request behind its base SHALL NOT be refused for that. A refusal SHALL say why and SHALL merge nothing. No answer from the human SHALL override these checks.
+Before merging or asking the human, the host SHALL refuse `merge_ticket` unless all of these hold: the ticket is open, has a pull request the watcher recorded as open and has no merge request running or waiting; the ticket could be accepted by the same code `accept_ticket` uses, with the same `waived` reason or, after a blocked cycle without one, with the reason the merge would record (see "The merge accepts the ticket") standing in for it; the repository publishes without asking (see repository-owners); the pull request, read again from GitHub, opens into the ticket's base; its base is not protected; its head is the commit the host last pushed for the ticket and the worktree's HEAD, and is the reviewed commit or a patch-equivalent one, as `publish_ticket` checks; it is not a draft; GitHub reports it mergeable, with no conflict and not blocked; and its checks have not failed. A pull request with no checks at all SHALL be merged on Wiffletree's own review alone. A pull request behind its base SHALL NOT be refused for that. A refusal SHALL say why and SHALL merge nothing. No answer from the human SHALL override these checks.
 
 #### Scenario: An owner that is not allowed
 - **WHEN** the coordinator merges a ticket in `celadon-theme/website` and `celadon-theme` is not allowed
@@ -42,19 +42,23 @@ Before merging or asking the human, the host SHALL refuse `merge_ticket` unless 
 - **THEN** it is refused, saying the checks failed
 
 #### Scenario: No checks
-- **WHEN** the pull request has no checks at all
-- **THEN** it is refused, saying the repository runs no checks on it, so the human merges it
+- **WHEN** the pull request has no checks at all, its review passed at its head and every other check holds
+- **THEN** it is merged
 
 #### Scenario: Acceptance would be refused
 - **WHEN** the ticket's ledger has untriaged F6
 - **THEN** it is refused, naming F6, and nothing is merged
+
+#### Scenario: A blocked review without a waiver
+- **WHEN** the ticket's latest cycle ended blocked, every verifier checked, nothing is untriaged, and the coordinator calls `merge_ticket` without `waived`
+- **THEN** it is not refused for the missing waiver, and it waits for the human's approval
 
 #### Scenario: Behind its base
 - **WHEN** the pull request is behind `feature/spaces` with no conflict and passing checks after a passed review
 - **THEN** it is merged
 
 ### Requirement: A merge waits for running checks
-When every check holds except that the pull request's checks are still running, the host SHALL record a waiting merge on the ticket with its head, and SHALL decide it again after each PR watcher pass of the repository. It SHALL merge once the checks have passed and every check still holds. It SHALL end the request, merging nothing, and tell the coordinator once, when the checks fail, the pull request closes or merges otherwise, a conflict appears, the base becomes protected, a new verification cycle starts, or the head becomes a commit the host did not push with the same change. When the host itself pushes a new head with the same change, such as the PR keeper's rebase, the request SHALL follow that head and wait for its checks. Accepting or closing the ticket SHALL withdraw it.
+When every check holds except that the pull request's checks are still running, the host SHALL record a waiting merge on the ticket with its head, and SHALL decide it again after each PR watcher pass of the repository. It SHALL merge once the checks have passed and every check still holds. It SHALL end the request, merging nothing, and tell the coordinator once, when the checks fail, the pull request closes or merges otherwise, a conflict appears, the base becomes protected, a new verification cycle starts, or the head becomes a commit the host did not push with the same change. When the host itself pushes a new head with the same change, such as the PR keeper's rebase, a request that needs no approval SHALL follow that head and wait for its checks. A request that needs the human's approval SHALL end on any change of head, before or after the human answered, withdrawing its Inbox item, and the coordinator SHALL be told to call `merge_ticket` again. Accepting or closing the ticket SHALL withdraw it.
 
 #### Scenario: Checks pass later
 - **WHEN** the coordinator merges a ticket whose checks are running, and the next pass finds them passed
@@ -67,6 +71,14 @@ When every check holds except that the pull request's checks are still running, 
 #### Scenario: The keeper rebases while it waits
 - **WHEN** the PR keeper pushes a rebase with the same change while a merge waits
 - **THEN** the request waits for the new head's checks and merges that head
+
+#### Scenario: The keeper rebases an approved merge
+- **WHEN** the human approved a merge after a blocked review at `c81f04d`, it waits for checks, and the PR keeper pushes `d07e2b1` with the same change
+- **THEN** nothing is merged, the request ends, and the coordinator is told to call `merge_ticket` again
+
+#### Scenario: The keeper rebases before the human answers
+- **WHEN** a merge after a blocked review waits for the human's approval and the PR keeper pushes a head with the same change
+- **THEN** the Inbox item is withdrawn, nothing is merged, and the coordinator is told to call `merge_ticket` again
 
 ### Requirement: A merge after a blocked review always asks the human
 A merge SHALL run without asking only when the ticket's latest verification cycle passed and the request needs no waiver. When the latest cycle ended blocked, whether or not the coordinator passed `waived`, and when the head stands on a waiver of commits no review checked, the host SHALL merge nothing until the human approves one Inbox item. The item SHALL name the repository and whether it is public, the branches and that the base is not protected, the merge method and head, the review with how it ended and its verifiers, the waiver's reason if given, and the findings still open. The host SHALL make every check again when the human approves and immediately before it merges; when one fails, it SHALL merge nothing and tell the coordinator. Approval SHALL cover that head only. When the checks are still running after the approval, the merge SHALL wait for them without asking again. This SHALL apply in every repository, including an allowed owner's after a waived blocked review, which publishes without asking.

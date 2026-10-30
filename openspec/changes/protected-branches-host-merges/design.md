@@ -45,7 +45,10 @@ See proposal.md for why. The code and text this builds on, at main 3be59c36:
 11. A merge requested while checks are running waits for them.
 12. A merge after a blocked review always asks the human, waived or not. This is deliberately stricter than publishing (`ticket-publishing/spec.md:418`).
 
-**Everything else in this document is a design decision made while writing the proposal, not the human's.** In particular: unreviewed commits waived at the cap also ask (decision 4); `merge_ticket` takes an optional `waived` and records the human's approval as the acceptance waiver when none is given (decision 4); "checks passed" means GitHub's rollup is `success`, and a PR with no checks is refused (decision 3, marked for the human under Open Questions); `behind` does not block a merge (decision 3); a waiting merge follows the host's own same-change pushes (decision 5); the old base stays protected only when it is still the default or on the list (decision 1); and the pattern syntax (decision 2).
+**Decided by the human on October 30, 2026, on this proposal:**
+13. A pull request with no checks at all is merged on Wiffletree's own review alone. Every other condition still applies, and pending or failing checks still wait or refuse. In the human's words: "if they dont setup checks that is not on us. we did our reviews".
+
+**Everything else in this document is a design decision made while writing the proposal, not the human's.** In particular: unreviewed commits waived at the cap also ask (decision 4); `merge_ticket` takes an optional `waived` and records the human's approval as the acceptance waiver when none is given (decisions 3 and 4); `behind` does not block a merge (decision 3); a waiting merge that needs no approval follows the host's own same-change pushes, and one that needs approval ends on any new head (decision 5); the old base stays protected only when it is still the default or on the list (decision 1); and the pattern syntax (decision 2).
 
 ### 1. What is protected
 A branch is protected in a repository when any of these holds:
@@ -68,13 +71,13 @@ The host refuses an entry, with the reason, when it is empty or has whitespace; 
 ### 3. The checks before a merge
 `merge_ticket` takes a ticket id and an optional one-line `waived` reason. Only the project coordinator that owns the ticket may call it (`owned_ticket` plus a role check). In order, the host refuses with the reason, and merges nothing, unless:
 1. The ticket is open, has a pull request the watcher recorded as open, and no merge request for it is already waiting.
-2. Acceptance would be allowed: the same checks `accept_ticket` makes (`check_verified_head`, `ensure_findings_settled`, no cycle running, no unreviewed head, the worktree clean and not locked), with `waived` standing in for the acceptance waiver. They run through the same code as `accept_ticket`.
+2. Acceptance would be allowed: the same checks `accept_ticket` makes (`check_verified_head`, `ensure_findings_settled`, no cycle running, no unreviewed head, the worktree clean and not locked), with `waived` standing in for the acceptance waiver. After a blocked cycle without `waived`, the reason the merge would record (decision 4) stands in, so the request can reach the human's approval; every other acceptance check (every verifier checked, nothing untriaged, the verified head) still applies. They run through the same code as `accept_ticket`.
 3. The repository publishes without asking (its owner is allowed and GitHub has answered for it).
 4. The host reads the PR again from GitHub (`gh pr view --json baseRefName,headRefOid,mergeable,mergeStateStatus,isDraft,state,statusCheckRollup`), and its base is the ticket's base as `stacks::Base::pull_request_base` gives it.
 5. The base is not protected (decision 1). GitHub's part is read now, never from a cache: `gh api repos/{o}/{r}` (`default_branch` and the allowed merge methods), `gh api repos/{o}/{r}/branches/{base}` (`protected`) and `gh api repos/{o}/{r}/rules/branches/{base}` (rulesets that apply). All three are read-only and work with read access. If any of them fails, the merge is refused: "GitHub could not be read, so nothing was merged."
 6. The PR's head is the commit the host last pushed for the ticket and the worktree's HEAD, and it is the reviewed commit or a patch-equivalent one, as `publish_ticket` checks.
 7. The PR is not a draft, `mergeable` is `MERGEABLE`, and the merge state is not `DIRTY` (conflict) or `BLOCKED`. `BEHIND` is allowed: the base is unprotected, and GitHub merges a branch that is behind when nothing conflicts.
-8. The checks rollup is `success`. `pending` makes the request wait (decision 5); `failure`, `error` or no checks at all refuse it.
+8. The checks rollup is `success`, or the PR has no checks at all, when Wiffletree's own review stands alone (human decision 13). `pending` makes the request wait (decision 5); `failure` or `error` refuse it.
 
 No Inbox answer overrides checks 1 to 8. The approval in decision 4 is asked only after they hold.
 
@@ -93,7 +96,8 @@ The acceptance after the merge records a waiver: the coordinator's `waived` reas
 A request whose checks are pending is stored on the ticket (`Ticket.merging`: the head, the method, whether the human approved, and the cycle it was decided on). The host decides it again after each PR watcher pass for that repository, which already runs every few minutes and at once after a push, so no new scheduler is added. The request:
 - merges when every check in decision 3 holds and the rollup is `success`;
 - ends, telling the coordinator, when the checks fail, the PR closes or merges otherwise, a conflict appears, the base becomes protected, or a new verification cycle starts;
-- follows the head when the host itself pushed a new head with the same change, such as the PR keeper's rebase, and waits for that head's checks; any other new head ends it.
+- when it needs no approval, follows the head when the host itself pushed a new head with the same change, such as the PR keeper's rebase, and waits for that head's checks; any other new head ends it;
+- when it needs the human's approval (decision 4), ends on any new head, before or after the human answered, withdrawing its Inbox item, because an approval covers one head. The coordinator is told to call `merge_ticket` again, which asks again for the new head.
 
 The ticket's PR line says "merges when they pass" while it waits. Accepting or closing the ticket withdraws it. `merge_ticket` called again while one waits is refused, naming it.
 
@@ -141,5 +145,4 @@ Repositories load with no human entries; the default branch and base are protect
 
 ## Open Questions
 
-- **A pull request with no checks at all.** Recommendation: refuse it, saying the repository runs no checks, so the human merges it. The alternative merges it as if checks passed. This is for the human to confirm; the specs follow the recommendation.
 - **Retargeting after a merge the human made.** Not included. If the human wants it later, the PR watcher's merged message could retarget the same way.
