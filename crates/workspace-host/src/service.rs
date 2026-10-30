@@ -6,6 +6,7 @@ use crate::agent_processes::StopReason;
 use crate::compaction::CompactionRecord;
 use crate::events::{self, EventLog, Pings, Subscription};
 use crate::keeper::KeeperSession;
+use crate::policies::{limit_reached, reset_time};
 use crate::provider::{ProviderEvent, Turn, TurnKind};
 use crate::stream::StepUpdate;
 use crate::*;
@@ -262,6 +263,32 @@ fn stopped_by_parent_notice(reason: &str) -> String {
     format!(
         "Stopped by its parent: {reason}\nIts input will not be retried; the next message runs normally. Partial work may remain."
     )
+}
+/// What says a failed turn hit its provider's usage limit: a quota reading during the turn,
+/// or, when none did, the provider's error text.
+fn limit_signal(reading_said_so: bool, error: &str) -> Option<&'static str> {
+    if reading_said_so {
+        return Some("quota reading");
+    }
+    let error = error.to_lowercase();
+    let said = [
+        "usage limit",
+        "session limit",
+        "weekly limit",
+        "usage_limit_exceeded",
+    ]
+    .iter()
+    .any(|words| error.contains(words))
+        || (error.contains("hit your") && error.contains("limit"));
+    said.then_some("error text")
+}
+/// When a turn that failed on a usage limit is retried.
+fn retries_when(session: &Session, retry: &LimitRetry) -> String {
+    let provider = session.provider.label();
+    match retry.resets_at {
+        Some(at) => format!("at {} when {provider}'s limit resets", reset_time(at)),
+        None => format!("once a {provider} quota reading shows its limit has reset"),
+    }
 }
 /// Refuses arguments a tool does not take, so a misspelt one is not silently ignored.
 pub(crate) fn only_arguments(tool: &str, args: &Value, allowed: &[&str]) -> Result<()> {
@@ -688,6 +715,8 @@ struct Active {
     sort: bool,
     /// The comments this turn sorts, once it ends.
     sorted: Option<keeper::Sorted>,
+    /// A quota reading during this turn said its provider's limit is reached.
+    limit_reached: bool,
 }
 impl Active {
     fn new(
@@ -713,6 +742,7 @@ impl Active {
             omitted_steps: 0,
             sort: false,
             sorted: None,
+            limit_reached: false,
         }
     }
 }
@@ -2351,6 +2381,11 @@ impl Actor {
                 )?;
             }
             ProviderEvent::Quota(reading) => {
+                let reached =
+                    limit_reached(std::slice::from_ref(&reading), session.provider, now());
+                if let Some(active) = self.active.get_mut(id).filter(|a| a.run == run) {
+                    active.limit_reached |= reached.is_some();
+                }
                 self.host.record_quota(reading)?;
                 // A reading may end a wait for a reset whose time is unknown.
                 if self.host.any_waiting()? {
@@ -2412,9 +2447,40 @@ impl Actor {
                 } else if !failed && !active.sort {
                     self.host.append_output(&session, run, &active.output)?;
                 }
+                // A failure on the provider's usage limit is retried by itself at the reset. Only
+                // the provider's own failure counts: a stop or a quit keeps its manual Retry.
+                let limit = (error.as_deref())
+                    .filter(|_| {
+                        !cancelled
+                            && !active.stopped_by_human
+                            && !active.sort
+                            && session.role != Role::Keeper
+                            && session.status != Status::Paused
+                    })
+                    .and_then(|error| limit_signal(active.limit_reached, error));
                 runtime.last_finished_at = Some(now());
                 runtime.last_error = error.clone();
+                runtime.limit_retry = match limit {
+                    Some(_) => Some(LimitRetry {
+                        failed_at: now(),
+                        resets_at: (self.host.limit_reached(session.provider, now())?)
+                            .and_then(|spent| spent.until),
+                    }),
+                    None => None,
+                };
                 self.host.save_runtime(&runtime)?;
+                if let (Some(signal), Some(retry)) = (limit, &runtime.limit_retry) {
+                    Host::event(
+                        &self.host.db,
+                        &session.project_id,
+                        Some(id),
+                        "turn_limit_wait",
+                        &format!(
+                            "{run}; from the {signal}; {}",
+                            retries_when(&session, retry)
+                        ),
+                    )?;
+                }
                 for message in &active.messages {
                     self.host.db.execute(
                         "UPDATE messages SET receipt=?2 WHERE id=?1",
@@ -2478,9 +2544,14 @@ impl Actor {
                     && !active.stopped_by_human
                     && (error.is_some() || (session.role.is_worker() && !active.reported))
                 {
-                    let body = match &error {
-                        Some(error) => turn_error_body(&session.name, error),
-                        None => turn_finished_body(&session.name, &active.output),
+                    let body = match (&error, &runtime.limit_retry) {
+                        (Some(_), Some(retry)) => turn_limit_body(
+                            &session.name,
+                            session.provider.label(),
+                            &retries_when(&session, retry),
+                        ),
+                        (Some(error), None) => turn_error_body(&session.name, error),
+                        (None, _) => turn_finished_body(&session.name, &active.output),
                     };
                     self.host.send(
                         &turn_result_id(run),
@@ -3035,8 +3106,11 @@ impl Actor {
                     &format!("{run}; {reason}"),
                 )?;
                 "stopped"
-            } else if matches!(target.status, Status::Paused | Status::Disconnected)
-                || self.active.contains_key(&target.id)
+            } else if self.active.contains_key(&target.id)
+                || target.status == Status::Paused
+                // One waiting for a usage limit's reset would retry by itself; it is paused.
+                || (target.status == Status::Disconnected
+                    && self.host.session_runtime(&target.id)?.limit_retry.is_none())
             {
                 "already_paused"
             } else {
@@ -3749,6 +3823,7 @@ impl Actor {
         runtime.last_error = None;
         runtime.held = false;
         runtime.waiting = false;
+        runtime.limit_retry = None;
         runtime.last_started_at = Some(started_at);
         runtime.directory = Some(cwd.to_string_lossy().into_owned());
         self.record_turn_start(&run, &session, &input, &detail, &runtime)?;
@@ -7497,6 +7572,301 @@ mod tests {
             )
             .unwrap();
         assert_eq!(outcome, "failed");
+    }
+
+    const SESSION_LIMIT: &str = "You've hit your session limit · resets 7pm (America/New_York)";
+
+    fn five_hour(
+        provider: Provider,
+        status: &str,
+        resets_at: Option<i64>,
+        observed_at: i64,
+    ) -> QuotaReading {
+        QuotaReading {
+            provider,
+            account: None,
+            observed_at,
+            source: "fixture".into(),
+            windows: vec![QuotaWindow {
+                key: "five_hour".into(),
+                label: "5-hour".into(),
+                used_percent: None,
+                observed_at,
+                duration_mins: Some(300),
+                resets_at,
+                status: Some(status.into()),
+            }],
+            error: None,
+        }
+    }
+
+    /// The implementer's turn `run`, which took its assignment, as `implementer_in_turn` has it.
+    fn implementer_taking_input() -> (tempfile::TempDir, Actor, Session, Session, String) {
+        let (home, mut actor, _, implementer, coordinator) = implementer_in_turn("assigned");
+        let input = format!("assignment:{}", implementer.id);
+        actor.active.get_mut(&implementer.id).unwrap().messages = vec![input.clone()];
+        (home, actor, implementer, coordinator, input)
+    }
+
+    fn fail_turn(
+        actor: &mut Actor,
+        session: &Session,
+        run: &str,
+        reading: Option<QuotaReading>,
+        error: &str,
+    ) {
+        if let Some(reading) = reading {
+            let quota = ProviderEvent::Quota(reading);
+            actor.provider_event(&session.id, run, quota).unwrap();
+        }
+        let finished = ProviderEvent::Finished {
+            error: Some(error.into()),
+            usage: Value::Null,
+            cancelled: false,
+        };
+        actor.provider_event(&session.id, run, finished).unwrap();
+    }
+
+    #[test]
+    fn a_turn_failed_on_a_usage_limit_retries_its_input_at_the_reset_even_after_a_restart() {
+        let (home, mut actor, implementer, coordinator, input) = implementer_taking_input();
+        let reset = now() + 3_600_000;
+        let rejected = five_hour(Provider::Claude, "rejected", Some(reset), now());
+        fail_turn(
+            &mut actor,
+            &implementer,
+            "run",
+            Some(rejected),
+            SESSION_LIMIT,
+        );
+
+        assert_eq!(actor.host.message(&input).unwrap().receipt, Receipt::Held);
+        let runtime = actor.host.session_runtime(&implementer.id).unwrap();
+        assert_eq!(runtime.limit_retry.unwrap().resets_at, Some(reset));
+        assert_eq!(runtime.last_error.as_deref(), Some(SESSION_LIMIT));
+        // The coordinator is told once that it waits, not asked to resume it.
+        let told = actor.host.message(&turn_result_id("run")).unwrap();
+        assert_eq!(told.recipient, coordinator.id);
+        assert!(
+            told.body.contains("hit Claude's usage limit"),
+            "{}",
+            told.body
+        );
+        assert!(told.body.contains("nothing is needed from you"));
+        assert!(!told.body.contains("stopped with an error"));
+
+        actor.retry_after_limits(now()).unwrap();
+        assert_eq!(actor.host.message(&input).unwrap().receipt, Receipt::Held);
+
+        // The wait is kept in the store, so a restarted host still retries.
+        drop(actor);
+        let (mut actor, _, _) = idle_actor(Host::open_set_up(home.path().join("home")).unwrap());
+        actor.retry_after_limits(reset + 1).unwrap();
+
+        let retried = actor.host.message(&input).unwrap();
+        assert_eq!(retried.receipt, Receipt::Queued);
+        let runtime = actor.host.session_runtime(&implementer.id).unwrap();
+        assert_eq!(runtime.limit_retry, None);
+        assert_eq!(runtime.last_error, None);
+        let implementer = actor.host.session(&implementer.id).unwrap();
+        assert_eq!(implementer.status, Status::Ready);
+        let prompt = actor.prompt(&implementer, &[retried]).unwrap();
+        assert!(prompt.contains("Retry of interrupted turn run"), "{prompt}");
+    }
+
+    #[test]
+    fn an_unknown_reset_retries_at_the_next_reading_that_is_not_rejected() {
+        let (_home, mut actor, implementer, _, input) = implementer_taking_input();
+        let rejected = five_hour(Provider::Claude, "rejected", None, now());
+        fail_turn(
+            &mut actor,
+            &implementer,
+            "run",
+            Some(rejected),
+            SESSION_LIMIT,
+        );
+        let runtime = actor.host.session_runtime(&implementer.id).unwrap();
+        assert_eq!(runtime.limit_retry.unwrap().resets_at, None);
+
+        let later = now() + 1_000;
+        let still = five_hour(Provider::Claude, "rejected", None, later);
+        actor.host.record_quota(still).unwrap();
+        actor.retry_after_limits(later).unwrap();
+        assert_eq!(actor.host.message(&input).unwrap().receipt, Receipt::Held);
+
+        let allowed = five_hour(Provider::Claude, "allowed", None, later);
+        actor.host.record_quota(allowed).unwrap();
+        actor.retry_after_limits(later).unwrap();
+        assert_eq!(actor.host.message(&input).unwrap().receipt, Receipt::Queued);
+    }
+
+    #[test]
+    fn the_error_text_alone_marks_a_limit_failure_and_waits_for_a_reading() {
+        let (_home, mut actor, implementer, _, input) = implementer_taking_input();
+        fail_turn(&mut actor, &implementer, "run", None, SESSION_LIMIT);
+        let runtime = actor.host.session_runtime(&implementer.id).unwrap();
+        assert_eq!(runtime.limit_retry.unwrap().resets_at, None);
+
+        actor.retry_after_limits(now() + 3_600_000).unwrap();
+        assert_eq!(actor.host.message(&input).unwrap().receipt, Receipt::Held);
+
+        // A refresh that failed is newer, but says nothing about the limit.
+        let later = now() + 1_000;
+        let failed = QuotaReading {
+            windows: vec![],
+            error: Some("Quota could not be read".into()),
+            ..five_hour(Provider::Claude, "allowed", None, later)
+        };
+        actor.host.record_quota(failed).unwrap();
+        actor.retry_after_limits(later).unwrap();
+        assert_eq!(actor.host.message(&input).unwrap().receipt, Receipt::Held);
+    }
+
+    #[test]
+    fn an_archived_session_is_not_retried_at_the_reset() {
+        let (_home, mut actor, implementer, _, input) = implementer_taking_input();
+        let reset = now() + 3_600_000;
+        let rejected = five_hour(Provider::Claude, "rejected", Some(reset), now());
+        fail_turn(
+            &mut actor,
+            &implementer,
+            "run",
+            Some(rejected),
+            SESSION_LIMIT,
+        );
+
+        actor.host.set_archived(&implementer.id, true).unwrap();
+        actor.retry_after_limits(reset + 1).unwrap();
+
+        assert_ne!(actor.host.message(&input).unwrap().receipt, Receipt::Queued);
+        let runtime = actor.host.session_runtime(&implementer.id).unwrap();
+        assert!(runtime.limit_retry.is_some(), "nothing was retried");
+    }
+
+    #[test]
+    fn a_parent_stop_during_a_limit_wait_keeps_the_child_paused_past_the_reset() {
+        let (_home, mut actor, implementer, coordinator, input) = implementer_taking_input();
+        let reset = now() + 3_600_000;
+        let rejected = five_hour(Provider::Claude, "rejected", Some(reset), now());
+        fail_turn(
+            &mut actor,
+            &implementer,
+            "run",
+            Some(rejected),
+            SESSION_LIMIT,
+        );
+
+        let args = json!({"session_ids":[implementer.id],"reason":"Hold on"});
+        let stopped = actor.stop_agents(&coordinator.id, &args).unwrap();
+        assert_eq!(stopped["agents"][0]["result"], "paused_idle");
+        actor.retry_after_limits(reset + 1).unwrap();
+
+        assert_eq!(actor.host.message(&input).unwrap().receipt, Receipt::Held);
+        let implementer = actor.host.session(&implementer.id).unwrap();
+        assert_eq!(implementer.status, Status::Paused);
+    }
+
+    #[test]
+    fn skip_during_a_limit_wait_drops_the_input_and_the_retry() {
+        let (_home, mut actor, implementer, _, input) = implementer_taking_input();
+        let reset = now() + 3_600_000;
+        let rejected = five_hour(Provider::Claude, "rejected", Some(reset), now());
+        fail_turn(
+            &mut actor,
+            &implementer,
+            "run",
+            Some(rejected),
+            SESSION_LIMIT,
+        );
+
+        actor
+            .host
+            .reconcile_session(&implementer.id, false)
+            .unwrap();
+        actor.retry_after_limits(reset + 1).unwrap();
+
+        assert_eq!(
+            actor.host.message(&input).unwrap().receipt,
+            Receipt::Cancelled
+        );
+        let runtime = actor.host.session_runtime(&implementer.id).unwrap();
+        assert_eq!(runtime.limit_retry, None);
+    }
+
+    #[test]
+    fn other_failures_and_stops_still_wait_for_a_manual_retry() {
+        let crash = "Provider exited without a successful terminal result (exit status: 1)";
+        let stopped = provider::Cancelled.to_string();
+        let rejected = || Some(five_hour(Provider::Claude, "rejected", None, now()));
+        for (reading, error, cancelled) in [
+            (None, crash, false),
+            // A stop or a quit is never a limit failure, even while the limit is reached.
+            (rejected(), stopped.as_str(), true),
+            (rejected(), QUIT_DURING_TURN, true),
+        ] {
+            let (_home, mut actor, implementer, coordinator, input) = implementer_taking_input();
+            if let Some(reading) = reading {
+                let quota = ProviderEvent::Quota(reading);
+                actor.provider_event(&implementer.id, "run", quota).unwrap();
+            }
+            let finished = ProviderEvent::Finished {
+                error: Some(error.into()),
+                usage: Value::Null,
+                cancelled,
+            };
+            actor
+                .provider_event(&implementer.id, "run", finished)
+                .unwrap();
+
+            let runtime = actor.host.session_runtime(&implementer.id).unwrap();
+            assert_eq!(runtime.limit_retry, None, "{error}");
+            actor.retry_after_limits(now() + 86_400_000).unwrap();
+            assert_eq!(
+                actor.host.message(&input).unwrap().receipt,
+                Receipt::Held,
+                "{error}"
+            );
+            if !cancelled {
+                let told = actor.host.message(&turn_result_id("run")).unwrap();
+                assert_eq!(told.recipient, coordinator.id);
+                assert!(told.body.contains("stopped with an error"));
+            }
+        }
+    }
+
+    #[test]
+    fn a_verifier_that_hits_a_limit_resumes_and_keeps_its_cycle_open() {
+        let (_home, mut actor, ticket, verifiers) = waiting_round(1);
+        let verifier = actor.host.session(&verifiers[0]).unwrap();
+        let round = ticket.verification.as_ref().unwrap().rounds[0].verifiers[0]
+            .message_id
+            .clone();
+        let input = vec![actor.host.message(&round).unwrap()];
+        let runtime = actor.host.session_runtime(&verifier.id).unwrap();
+        (actor.record_turn_start("run", &verifier, &input, &json!({}), &runtime)).unwrap();
+        (actor.active).insert(verifier.id.clone(), active_turn("run", vec![round.clone()]));
+        let reset = now() + 3_600_000;
+        let rejected = five_hour(verifier.provider, "rejected", Some(reset), now());
+        fail_turn(&mut actor, &verifier, "run", Some(rejected), SESSION_LIMIT);
+
+        let running = |actor: &Actor| {
+            let ticket = actor.host.ticket(&ticket.id).unwrap();
+            ticket.running_cycle().is_some()
+        };
+        assert!(running(&actor));
+        assert_eq!(actor.host.message(&round).unwrap().receipt, Receipt::Held);
+
+        actor.retry_after_limits(reset + 1).unwrap();
+
+        assert!(running(&actor));
+        assert_eq!(actor.host.message(&round).unwrap().receipt, Receipt::Queued);
+        let waiting = actor.waiting_rounds().unwrap();
+        assert!(
+            waiting.iter().any(
+                |(t, members)| t.id == ticket.id && members.iter().any(|m| m.id == verifier.id)
+            ),
+            "its round starts it again"
+        );
     }
 
     fn update(id: &str, kind: StepKind, state: StepState, title: &str) -> StepUpdate {

@@ -85,7 +85,8 @@ impl Host {
         self.save_runtime(&runtime)
     }
     /// Releases a paused or interrupted session: its held input is queued again or dropped.
-    /// Both the human's Retry and Skip and a coordinator's resume_agent come through here.
+    /// Both the human's Retry and Skip and a coordinator's resume_agent come through here, as
+    /// does the automatic retry after a usage limit resets, which either of them cancels.
     pub fn reconcile_session(&mut self, id: &str, retry: bool) -> Result<()> {
         let session = self.session(id)?;
         ensure!(
@@ -108,6 +109,7 @@ impl Host {
         }
         runtime.last_error = None;
         runtime.stopped_by = None;
+        runtime.limit_retry = None;
         self.save_runtime(&runtime)?;
         self.set_status(id, Status::Ready)
     }
@@ -838,18 +840,23 @@ impl Host {
                 }
                 if message.receipt == Receipt::Queued && held {
                     receipt["receipt"] = json!("queued_while_held");
-                    receipt["hint"] = json!(
-                        match self.session_runtime(&recipient.id)?.stopped_by {
-                            Some(Stopper::Human) => format!(
-                                "{} was stopped by the human, so this waits until it is resumed. If it is your child, call resume_agent with session_id {} only when the human says so.",
-                                recipient.name, recipient.id
-                            ),
-                            _ => format!(
-                                "{} is stopped, so this waits until it is resumed. If it is your child, call resume_agent with session_id {}.",
-                                recipient.name, recipient.id
-                            ),
-                        }
-                    );
+                    let runtime = self.session_runtime(&recipient.id)?;
+                    let waits_for_limit =
+                        recipient.status == Status::Disconnected && runtime.limit_retry.is_some();
+                    receipt["hint"] = json!(match runtime.stopped_by {
+                        _ if waits_for_limit => format!(
+                            "{} hit its provider's usage limit and resumes by itself when it resets; this runs then. Nothing is needed; resume_agent with held: retry runs it sooner.",
+                            recipient.name
+                        ),
+                        Some(Stopper::Human) => format!(
+                            "{} was stopped by the human, so this waits until it is resumed. If it is your child, call resume_agent with session_id {} only when the human says so.",
+                            recipient.name, recipient.id
+                        ),
+                        _ => format!(
+                            "{} is stopped, so this waits until it is resumed. If it is your child, call resume_agent with session_id {}.",
+                            recipient.name, recipient.id
+                        ),
+                    });
                 }
                 Ok(receipt)
             }

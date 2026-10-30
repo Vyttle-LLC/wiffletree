@@ -175,6 +175,7 @@ Acceptance:
 - The table, the threshold and the guide save atomically and survive restart; the verifier list and its caps survive restart.
 - With Claude's weekly window at 96%, a new implementer starts on its then choice and its chat shows the reason; a running Claude implementer is not switched. Below the threshold, or with no reading, the first choice is used, and a spent window whose reset has passed no longer counts.
 - The Claude reviewer waits rather than running on Codex; with every choice spent the agent is held until the earliest reset with its input kept, and other work continues.
+- A running turn that fails on its provider's usage limit, known from a quota reading during the turn or else from the error text, keeps its input held and is retried automatically, on the same model, once the limit resets; its chat says when, Retry and Skip still work, and the parent is told once that nothing is needed. Other failures, stops and quits still wait for Retry or Skip.
 - Comment sorting never runs on Codex.
 - The coordinator tools refuse an unknown `like` and the old `profile` arguments with a clear message.
 - Chat overrides survive restart and exact-session resume.

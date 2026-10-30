@@ -28,6 +28,18 @@ pub(crate) fn reset_time(at: i64) -> String {
     })
 }
 
+/// Why `quotas` say `provider`'s limit is reached at `at`, whatever the threshold: a window
+/// reported rejected or full, whose reset is unknown or still ahead.
+pub(crate) fn limit_reached(quotas: &[QuotaReading], provider: Provider, at: i64) -> Option<Spent> {
+    let limits = Limits {
+        quotas,
+        unusable: &BTreeSet::new(),
+        switch_at: 100,
+        now: at,
+    };
+    limits.spent(provider)
+}
+
 impl Host {
     /// Opens a store with both providers counted as signed in and, when it has no saved setup,
     /// saves the one suggested then, without a PR keeper model, which only a store that uses
@@ -254,10 +266,14 @@ impl Host {
             .spent(profile.provider)?
             .map(|spent| spent.waiting(switch_at, &reset_time)))
     }
+    /// Why the latest readings say `provider`'s limit is reached at `at`; see `limit_reached`.
+    pub(crate) fn limit_reached(&self, provider: Provider, at: i64) -> Result<Option<Spent>> {
+        Ok(limit_reached(&self.quotas()?, provider, at))
+    }
     /// Whether any session waits for a reset, so a new quota reading is worth a scheduling pass.
     pub(crate) fn any_waiting(&self) -> Result<bool> {
         Ok(self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM runtimes WHERE json_extract(data,'$.waiting')=1)",
+            "SELECT EXISTS(SELECT 1 FROM runtimes WHERE json_extract(data,'$.waiting')=1 OR json_extract(data,'$.limit_retry') IS NOT NULL)",
             [],
             |r| r.get(0),
         )?)
