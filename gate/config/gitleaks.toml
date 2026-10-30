@@ -1,0 +1,10 @@
+# The brain gate's gitleaks config (gate/checks/secret_scan.py). It uses
+# gitleaks' default rules; a brain's own `.gitleaks.toml` extends it. The only
+# exemption is the gate's own fixture tests, which plant fake secrets on purpose.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Gate fixture tests"
+paths = ['''^gate/tests/''']

@@ -1,0 +1,11 @@
+# Allow-list for the brain gate's sensitive-information scan. Every entry needs
+# a reason. Prefer an inline `<!-- gate:allow <rule> <reason> -->` marker for a
+# one-off; use this file for values or paths that recur.
+#
+# [[value]]  exempts one exact matched text (case-insensitive) for one rule.
+# [[path]]   exempts files by fnmatch glob, where `*` also crosses `/`.
+
+[[value]]
+rule = "email"
+match = "support@vendor.example"
+reason = "A vendor's published support address, not a person."

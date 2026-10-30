@@ -1,0 +1,11 @@
+{
+  "field-values.md": ["`source`", "`type`", "`ref`", "`author`"],
+  "frontmatter-malformed.md": [":4: frontmatter line is not `key: value`", ":5: frontmatter key `extra` is not one of", "missing: author"],
+  "frontmatter-unclosed.md": ["frontmatter block"],
+  "heading-date-mismatch.md": ["heading date"],
+  "id-and-repo-mismatch.md": ["`id` must match", "`repo` must match"],
+  "missing-field.md": ["fields must be exactly"],
+  "ref-pr-without-sha.md": ["`ref` must be"],
+  "ref-without-branch.md": ["`ref` must be"],
+  "ref-without-sha.md": ["`ref` must be"]
+}
