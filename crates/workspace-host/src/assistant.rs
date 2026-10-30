@@ -599,7 +599,9 @@ impl Host {
         }
     }
     /// Copies a scratch file into the board store under the thread's Space and commits it; a
-    /// title saved before gets a new version. Returns the file's name and the version.
+    /// title saved before gets a new version. Each output is a folder holding only its file,
+    /// with its metadata beside the folder as `<folder>.json`, so no file name collides with
+    /// it. Returns the file's name and the version.
     fn save_output(&self, thread: &Thread, title: &str, path: &str) -> Result<(String, u32)> {
         let scratch = fs::canonicalize(scratch_folder(&self.home, &thread.id))?;
         let source = inside_scratch(&scratch, path)?;
@@ -610,7 +612,9 @@ impl Host {
             fs::create_dir_all(&store)?;
             runtime::git_output(&store, &["init", "-q", "-b", "main"])?;
         }
-        let relative = format!("{}/{}", thread.space_id, slug(title));
+        let relative = output_folder(&store.join(thread.space_id.as_str()), title)
+            .map(|folder| format!("{}/{folder}", thread.space_id))?;
+        let metadata = format!("{relative}.json");
         let folder = store.join(&relative);
         if folder.exists() {
             fs::remove_dir_all(&folder)?;
@@ -623,10 +627,7 @@ impl Host {
             .into_owned();
         fs::copy(&source, folder.join(&file))?;
         let about = json!({"title":title,"file":file,"thread_id":thread.id,"saved_at":now()});
-        shared::write_atomically(
-            &folder.join("board.json"),
-            &serde_json::to_vec_pretty(&about)?,
-        )?;
+        shared::write_atomically(&store.join(&metadata), &serde_json::to_vec_pretty(&about)?)?;
         let author = [
             "-c",
             "user.name=Wiffletree",
@@ -634,23 +635,43 @@ impl Host {
             "user.email=wiffletree@localhost",
         ];
         let mut add = author.to_vec();
-        add.extend(["add", "-A", "--", relative.as_str()]);
+        add.extend(["add", "-A", "--", relative.as_str(), metadata.as_str()]);
         runtime::git_output(&store, &add)?;
         let mut commit = author.to_vec();
         let message = format!("Save {relative}");
         commit.extend([
             "commit",
             "-q",
-            "--allow-empty",
             "-m",
             message.as_str(),
             "--",
             relative.as_str(),
+            metadata.as_str(),
         ]);
         runtime::git_output(&store, &commit)?;
-        let count = runtime::git_output(&store, &["rev-list", "--count", "HEAD", "--", &relative])?;
+        // Each save rewrites the metadata, so its commits count the versions.
+        let count = runtime::git_output(&store, &["rev-list", "--count", "HEAD", "--", &metadata])?;
         Ok((file, count.trim().parse().unwrap_or(1)))
     }
+}
+
+/// The folder in a Space's part of the board store that `title` saves to: its slug, or the
+/// slug with `-2`, `-3`… when another title with the same slug holds it.
+fn output_folder(space: &Path, title: &str) -> Result<String> {
+    let slug = slug(title);
+    let held_by = |folder: &str| -> Option<String> {
+        let about: Value =
+            serde_json::from_slice(&fs::read(space.join(format!("{folder}.json"))).ok()?).ok()?;
+        about["title"].as_str().map(str::to_owned)
+    };
+    (1..)
+        .map(|n| match n {
+            1 => slug.clone(),
+            n => format!("{slug}-{n}"),
+        })
+        .take(1000)
+        .find(|folder| held_by(folder).is_none_or(|held| held == title))
+        .context("Too many outputs share this title's name")
 }
 
 /// `path`, absolute or relative to `scratch`, as a regular file inside it, links resolved.
@@ -944,6 +965,29 @@ mod tests {
         }
         let outside = json!({"path":"/etc/hosts","title":"Hosts"});
         assert!(host.thread_tool(&session, "save_output", &outside).is_err());
+    }
+
+    #[test]
+    fn each_title_keeps_its_own_output_whatever_its_file_is_named() {
+        let (home, mut host, sage) = store();
+        start(&mut host, "t1", &sage, "Exports");
+        let session = host.session("t1").unwrap();
+        let scratch = scratch_folder(home.path(), "t1");
+        let mut save = |file: &str, body: &str, title: &str| {
+            fs::write(scratch.join(file), body).unwrap();
+            let args = json!({"path": file, "title": title});
+            host.thread_tool(&session, "save_output", &args).unwrap()["version"].clone()
+        };
+        assert_eq!(save("board.json", "{\"rows\":1}", "JSON export"), 1);
+        assert_eq!(save("one.md", "one", "A B"), 1);
+        assert_eq!(save("two.md", "two", "A-B"), 1);
+        assert_eq!(save("one.md", "one again", "A B"), 2);
+        let space = board_store(home.path()).join(sage.as_str());
+        let read = |path: &str| fs::read_to_string(space.join(path)).unwrap();
+        assert_eq!(read("json-export/board.json"), "{\"rows\":1}");
+        assert_eq!(read("a-b/one.md"), "one again");
+        assert_eq!(read("a-b-2/two.md"), "two");
+        assert!(read("a-b-2.json").contains("\"A-B\""));
     }
 
     #[test]

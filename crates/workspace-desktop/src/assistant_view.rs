@@ -112,6 +112,8 @@ pub(super) struct AssistantPage {
     search: Entity<InputState>,
     /// What the search box found, while it holds a query.
     hits: Option<Vec<ThreadHit>>,
+    /// The Space search is limited to; `None` searches every Space.
+    search_space: Option<SpaceId>,
     title: Entity<InputState>,
     renaming: bool,
     brief: Option<BriefForm>,
@@ -158,6 +160,7 @@ impl AssistantPage {
             read: None,
             search,
             hits: None,
+            search_space: None,
             title,
             renaming: false,
             brief: None,
@@ -326,7 +329,7 @@ impl AssistantPage {
             self.hits = None;
             return cx.notify();
         }
-        let ask = ask::search_threads(query.clone(), None);
+        let ask = ask::search_threads(query.clone(), self.search_space.clone());
         self.ask(ask, window, cx, move |view, hits, window, cx| {
             // A later query's answer wins.
             if view.search.read(cx).value().trim() != query {
@@ -611,13 +614,45 @@ impl AssistantPage {
                     .child(icon("plus").size(px(13.)))
                     .on_click(cx.listener(|v, _, w, c| v.select(None, w, c))),
             )
+            .child(div().ml_auto().mb(px(6.)).child(self.search_space_menu(cx)))
             .child(
                 div()
-                    .ml_auto()
                     .mb(px(6.))
                     .w(px(200.))
                     .child(Input::new(&self.search).xsmall().cleanable(true)),
             )
+    }
+
+    /// Limits search to one Space, or searches all of them.
+    fn search_space_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let spaces = self.spaces().to_vec();
+        let current = self.search_space.clone();
+        let label = (spaces.iter())
+            .find(|s| Some(&s.id) == current.as_ref())
+            .map_or("All Spaces".into(), |s| s.name.clone());
+        let weak = cx.weak_entity();
+        button("search-space")
+            .ghost()
+            .xsmall()
+            .label(label)
+            .dropdown_caret(true)
+            .dropdown_menu(move |mut menu, _, _| {
+                let choices = std::iter::once((None, "All Spaces".to_owned()))
+                    .chain(spaces.iter().map(|s| (Some(s.id.clone()), s.name.clone())));
+                for (space, name) in choices {
+                    let (weak, checked) = (weak.clone(), space == current);
+                    menu = menu.item(PopupMenuItem::new(name).checked(checked).on_click(
+                        move |_, window, cx| {
+                            let _ = weak.update(cx, |view, cx| {
+                                view.search_space = space.clone();
+                                view.run_search(window, cx);
+                                cx.notify();
+                            });
+                        },
+                    ));
+                }
+                menu
+            })
     }
 
     fn search_results(&self, hits: &[ThreadHit], p: Palette, cx: &mut Context<Self>) -> Div {
