@@ -280,6 +280,10 @@ impl Host {
             })?
             .collect::<rusqlite::Result<_>>()?)
     }
+    /// Every Space's id, in the order they were created.
+    pub fn space_ids(&self) -> Result<Vec<SpaceId>> {
+        Ok(self.spaces()?.into_iter().map(|r| r.space.id).collect())
+    }
     pub fn space(&self, id: &SpaceId) -> Result<SpaceRecord> {
         self.find_space(id)?.context("Space not found")
     }
@@ -486,6 +490,16 @@ impl Host {
     /// it that a local brain already names.
     pub fn attach_brain(&mut self, project: &str, path: &str) -> Result<()> {
         let project = self.project(project)?;
+        self.set_space_brain(&project.space, path, Some(&project.id))
+    }
+    /// Sets the Space's brain to the local folder `path`, keeping the folder in it that a local
+    /// brain already names; `project`, when it was set from one, records it there.
+    pub fn set_space_brain(
+        &mut self,
+        space: &SpaceId,
+        path: &str,
+        project: Option<&str>,
+    ) -> Result<()> {
         let path = fs::canonicalize(path)
             .context("Brain directory must already exist; setup is explicit")?;
         ensure!(path.is_dir(), "Brain attachment must be a directory");
@@ -493,7 +507,7 @@ impl Host {
         let SpaceRecord {
             mut space,
             mut local,
-        } = self.space(&project.space)?;
+        } = self.space(space)?;
         // A local brain keeps its folder and the keys this release does not know.
         space.brain = Some(match space.brain {
             Some(
@@ -514,7 +528,9 @@ impl Host {
                 "UPDATE spaces SET data=?2,local=?3 WHERE id=?1",
                 params![space.id.as_str(), encode(&space)?, encode(&local)?],
             )?;
-            Self::event(&host.db, &project.id, None, "brain_attached", &path)?;
+            if let Some(project) = project {
+                Self::event(&host.db, project, None, "brain_attached", &path)?;
+            }
             host.write_space_file(&space)
         })
     }

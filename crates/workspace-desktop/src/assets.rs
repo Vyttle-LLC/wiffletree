@@ -115,6 +115,10 @@ const DRAWINGS: &[(&str, &str)] = &[
     ("refresh", r#"<path d="M20 10a8 8 0 1 0-1 7M20 4v6h-6"/>"#),
     ("folder", r#"<path d="M3 7V5h7l2 3h9v11H3V7Z"/>"#),
     (
+        "spaces",
+        r#"<rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/>"#,
+    ),
+    (
         "git-pull-request",
         r#"<circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5v7M18 15.5V9a3 3 0 0 0-3-3h-4"/><path d="m13 3.5-2.5 2.5L13 8.5"/>"#,
     ),

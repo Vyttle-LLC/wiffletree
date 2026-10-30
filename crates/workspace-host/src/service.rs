@@ -865,7 +865,8 @@ struct Actor {
     github_reading: bool,
     /// `gh` as every GitHub read runs it, and Git as publish steps run it.
     publish_tools: publish::Tools,
-    /// The settings repository's pace, whose only rule set is settings.
+    /// The settings repository's pace, with the cadence of every rule set it holds: settings,
+    /// and the Spaces and tracker of a storage repository it also is.
     sync_pace: repos::Pace,
     /// By `repos::key`, the pace of each GitHub storage repository that is not the settings
     /// repository, whose pass runs with the settings rule set.
@@ -1377,9 +1378,7 @@ impl Actor {
                 });
             }
             Command::CheckStorageRepository { repository } => {
-                let added: Vec<SpaceId> = (self.host.spaces()?.into_iter())
-                    .map(|r| r.space.id)
-                    .collect();
+                let added = self.host.space_ids()?;
                 let (home, input, reply) =
                     (self.host.home.clone(), repository.clone(), reply.clone());
                 let tools = self.publish_tools.clone();
@@ -1651,9 +1650,7 @@ impl Actor {
     ) -> Result<()> {
         self.host
             .refuse_second_use_of(repository, storage::Use::Storage)?;
-        let added: Vec<SpaceId> = (self.host.spaces()?.into_iter())
-            .map(|r| r.space.id)
-            .collect();
+        let added = self.host.space_ids()?;
         let (home, input, reply) = (self.host.home.clone(), repository.to_owned(), reply.clone());
         let (sender, tools) = (self.sender.clone(), self.publish_tools.clone());
         // Every refusal runs before an empty repository gets its first commit.
@@ -1712,6 +1709,8 @@ impl Actor {
         for (key, cadence) in cadences {
             let pace = (self.storage_paces.entry(key.clone()))
                 .or_insert_with(|| repos::Pace::every(&[cadence]));
+            // A repository that has just become a tracker is fetched every minute from now on.
+            pace.set_every(cadence);
             if !pace.start(at) {
                 continue;
             }
@@ -1955,9 +1954,11 @@ impl Actor {
                 if let Some(pace) = self.storage_paces.get_mut(&key) {
                     pace.finish(now(), passed.is_ok());
                 }
-                self.host.finish_storage_pass(passed).unwrap_or_else(|e| {
-                    eprintln!("Syncing {key}: {e:#}");
-                });
+                self.host
+                    .finish_storage_pass(&key, passed)
+                    .unwrap_or_else(|e| {
+                        eprintln!("Syncing {key}: {e:#}");
+                    });
                 true
             }
             Event::StorageStaged {
@@ -4550,6 +4551,30 @@ mod tests {
             attention: None,
         };
         (actor, pings.state, pings.steps)
+    }
+
+    #[test]
+    fn a_storage_repository_that_becomes_a_tracker_is_fetched_every_minute_at_once() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = storage::tests::shared_storage(folder.path(), None);
+        let (_home, mut host) = storage::tests::host();
+        storage::tests::join_sage(&mut host, &github).unwrap();
+        let sage = storage::tests::space_named(&host, "Sage");
+        let (mut actor, _, _) = idle_actor(host);
+        let key = repos::key(sync::tests::NAME);
+        let at = now();
+        let cadences = actor.host.storage_cadences().unwrap();
+        assert_eq!(cadences, [(key.clone(), 300_000)], "no tracker yet");
+        let mut pace = repos::Pace::every(&[cadences[0].1]);
+        assert!(pace.start(at));
+        pace.finish(at, true);
+        actor.storage_paces.insert(key.clone(), pace);
+        let pulled = b"format: 1\nprefix: SAGE\n";
+        (actor.host)
+            .take_pulled(&sage.storage.repository, storage::TRACKER, Some(pulled))
+            .unwrap();
+        assert!(!actor.refresh_storage_sync(at), "no pass is due yet");
+        assert_eq!(actor.storage_paces[&key].next_due(), Some(at + 60_000));
     }
 
     /// A ticket whose tester is in its turn, run `run`, under its project coordinator.

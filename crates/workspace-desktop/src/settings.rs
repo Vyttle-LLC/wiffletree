@@ -600,7 +600,7 @@ impl Render for Settings {
                             Some(host) => format!("{host} · the host you're driving"),
                             None => "This Mac · the host".into(),
                         },
-                        "Models · repositories and checks · workspace folder · PR owners allowed · check-ins · reviews · skills · settings repository",
+                        "Spaces · models · repositories and checks · workspace folder · PR owners allowed · check-ins · reviews · skills · settings repository",
                         p,
                     ))
                     .children(self.driving.changes_refused().map(|reason| hint(reason, p)))

@@ -1,5 +1,6 @@
 use super::*;
 use gpui_component::input::SelectAll;
+use new_project::{NewProject, NewProjectForm};
 
 pub(super) struct NameEdit {
     pub project_id: String,
@@ -23,14 +24,68 @@ impl sidebar::Sidebar {
                 .update(cx, |input, cx| input.focus(window, cx));
             return;
         }
-        let name = next_name(self.shared.snapshot());
+        let Some(snapshot) = self.shared.snapshot() else {
+            return;
+        };
+        let name = next_name(Some(snapshot));
+        let bridge = self.bridge().clone();
+        let form = cx.new(|cx| NewProjectForm::new(bridge, snapshot, name, window, cx));
+        let focused = form.clone();
+        let weak = cx.weak_entity();
+        window.open_alert_dialog(cx, move |dialog, window, _| {
+            let (weak, form) = (weak.clone(), form.clone());
+            dialog
+                .title("New project")
+                .width(px(600.).min(window.viewport_size().width - px(48.)))
+                .max_h(window.viewport_size().height - px(100.))
+                .confirm()
+                .ok_text("Create project")
+                .child(form.clone())
+                .on_ok(move |_, window, cx| match form.read(cx).chosen(cx) {
+                    Ok(project) => {
+                        let _ =
+                            weak.update(cx, |view, cx| view.create_project(project, window, cx));
+                        true
+                    }
+                    Err(error) => {
+                        form.update(cx, |form, cx| {
+                            form.error = error;
+                            cx.notify();
+                        });
+                        false
+                    }
+                })
+        });
+        // Focus once the dialog's input exists in the next frame.
+        cx.on_next_frame(window, move |_, window, cx| {
+            focused.update(cx, |form, cx| form.focus(window, cx))
+        });
+    }
+
+    /// Creates the project New project chose, in its Space with its repositories; the first
+    /// message goes to its coordinator once the project arrives.
+    fn create_project(&mut self, project: NewProject, window: &mut Window, cx: &mut Context<Self>) {
+        let NewProject {
+            name,
+            space_id,
+            repository_ids,
+            first_message,
+        } = project;
         self.creating_project = true;
         self.ask(
-            ask::create_project(name),
+            ask::create_project(name, Some(space_id)),
             window,
             cx,
-            |view, project, window, cx| match project {
-                Ok(project) => view.pending_project_selection = Some(project.id),
+            move |view, project, window, cx| match project {
+                Ok(project) => {
+                    let command = Command::SetProjectRepositories {
+                        project_id: project.id.clone(),
+                        repository_ids: Some(repository_ids),
+                    };
+                    view.request(command, window, cx);
+                    view.pending_first_message = first_message;
+                    view.pending_project_selection = Some(project.id);
+                }
                 Err(error) => {
                     view.creating_project = false;
                     toast_error(error, window, cx)

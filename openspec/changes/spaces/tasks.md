@@ -32,8 +32,9 @@ Five stages, each a ticket or a few, each landing on its own. This change lands 
 
 ## 5. Desktop and docs
 
-- [ ] 5.1 Desktop: Settings › Spaces (list, page, New, From a repository, edit, remove, sources), with the Storage and issues box (repository, folder, prefix, issue count, readers, Spaces sharing it, settings repository, sync status, Sync now, Set up issues), following `ui/mockups.html`.
-- [ ] 5.2 Desktop: New project's Space picker and ticked repositories; the Space in the project Overview, with Move to another Space.
-- [ ] 5.3 Desktop: the Repositories page grouped by Space with a No Space section, one Space chip per Space on each row to add or remove Spaces, the suggested Space when adding a repository, and the upgrade's suggestions to confirm on first open, following screen 4 of `ui/mockups.html`.
-- [ ] 5.4 Docs: README on Spaces, storage repositories as trackers, who can read and change a shared Space, and the scans before a push; PRD's project model and storage.
-- [ ] 5.5 Run `openspec validate --strict`, the store, sync and migration tests, then the full suite once before ready_for_testing.
+- [x] 5.1 Desktop: Settings › Spaces (list, page, New, From a repository, edit, remove, sources), with the Storage and issues box (repository, folder, prefix, issue count, readers, Spaces sharing it, settings repository, sync status, Sync now, Set up issues), following `ui/mockups.html`. *Settings › Spaces is the Spaces page in the sidebar's Workspace section, beside Repositories, Models and Skills, as the Settings window lists it; the Space page reads its box from `SpaceStorage` and sets a local brain with `SetSpaceBrain`.*
+- [x] 5.2 Desktop: New project's Space picker and ticked repositories; the Space in the project Overview, with Move to another Space.
+- [x] 5.3 Desktop: the Repositories page grouped by Space with a No Space section, one Space chip per Space on each row to add or remove Spaces, the suggested Space when adding a repository, and the upgrade's suggestions to confirm on first open, following screen 4 of `ui/mockups.html`.
+- [x] 5.4 Docs: README on Spaces, storage repositories as trackers, who can read and change a shared Space, and the scans before a push; PRD's project model and storage.
+- [x] 5.5 Run `openspec validate --strict`, the store, sync and migration tests, then the full suite once before ready_for_testing.
+- [x] 5.6 Stage 3 review follow-ups: Add Space from a repository asks where each code repository is cloned or leaves it missing (`JoinSpace.clones`, F25); a storage repository that gains a tracker is fetched every minute at once (F24); the settings pace's comment (F18); `Host::space_ids()` (F19).

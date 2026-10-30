@@ -356,6 +356,7 @@ fn space_commands_are_the_humans() {
             spaces: vec![JoinSpace {
                 folder: text(),
                 brain_path: None,
+                clones: vec![],
             }],
         },
         Command::SetTrackerPrefix {
@@ -366,10 +367,21 @@ fn space_commands_are_the_humans() {
             space_id: space().id,
             prefix: text(),
         },
+        Command::SetSpaceBrain {
+            space_id: space().id,
+            path: text(),
+        },
     ];
     for command in human {
         assert!(command.is_human_only() && !command.is_read(), "{command:?}");
     }
+    let storage = Command::SpaceStorage {
+        space_id: space().id,
+    };
+    assert!(
+        storage.is_human_only() && storage.is_read(),
+        "it reads where the storage is on this Mac"
+    );
     assert!(!Command::Snapshot.is_human_only());
 }
 

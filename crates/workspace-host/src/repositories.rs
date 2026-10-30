@@ -94,7 +94,7 @@ pub(crate) fn migrate_to_workspace(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn folder_path(value: &str) -> Result<PathBuf> {
+pub(crate) fn folder_path(value: &str) -> Result<PathBuf> {
     let value = value.trim().strip_suffix("/*").unwrap_or(value.trim());
     text(value, 4096)?;
     fs::canonicalize(settings::expand_home(value)?).context("Folder does not exist")

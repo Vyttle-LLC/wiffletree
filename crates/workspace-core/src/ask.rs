@@ -148,11 +148,54 @@ pub fn git_history(repository_id: String, skip: usize, limit: usize) -> Ask<GitH
         limit,
     })
 }
-pub fn create_project(name: String) -> Ask<Project> {
-    Ask::new(Command::CreateProject {
+/// A project in `space_id`, or else in the Space last used for a new project.
+pub fn create_project(name: String, space_id: Option<SpaceId>) -> Ask<Project> {
+    Ask::new(Command::CreateProject { name, space_id })
+}
+pub fn create_space(
+    name: String,
+    description: String,
+    instructions: String,
+    prefix: Option<String>,
+    storage: Option<String>,
+) -> Ask<SpaceRecord> {
+    Ask::new(Command::CreateSpace {
         name,
-        space_id: None,
+        description,
+        instructions,
+        prefix,
+        storage,
     })
+}
+pub fn update_space(space: Space) -> Ask<SpaceRecord> {
+    Ask::new(Command::UpdateSpace {
+        space: Box::new(space),
+    })
+}
+pub fn check_storage_repository(repository: String) -> Ask<StorageCheck> {
+    Ask::new(Command::CheckStorageRepository { repository })
+}
+pub fn join_spaces(repository: String, spaces: Vec<JoinSpace>) -> Ask<Vec<SpaceRecord>> {
+    Ask::new(Command::JoinSpaces { repository, spaces })
+}
+pub fn space_storage(space_id: SpaceId) -> Ask<StorageStatus> {
+    Ask::new(Command::SpaceStorage { space_id })
+}
+pub fn set_tracker_prefix(space_id: SpaceId, prefix: String) -> Ask<TrackerConfig> {
+    Ask::new(Command::SetTrackerPrefix { space_id, prefix })
+}
+pub fn set_up_issues(space_id: SpaceId, prefix: String) -> Ask<TrackerConfig> {
+    Ask::new(Command::SetUpIssues { space_id, prefix })
+}
+pub fn new_project_defaults(space_id: Option<SpaceId>) -> Ask<SpaceRepositories> {
+    Ask::new(Command::NewProjectDefaults { space_id })
+}
+/// `None` suggests No Space.
+pub fn suggest_repository_space(repository: String) -> Ask<Option<SpaceId>> {
+    Ask::new(Command::SuggestRepositorySpace { repository })
+}
+pub fn repository_suggestions() -> Ask<Vec<RepositorySuggestion>> {
+    Ask::new(Command::RepositorySuggestions)
 }
 pub fn rename_project(project_id: String, name: String) -> Ask<Project> {
     Ask::new(Command::RenameProject { project_id, name })

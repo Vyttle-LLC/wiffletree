@@ -160,6 +160,8 @@ pub(super) struct Sidebar {
     pub(super) shared: Shared,
     /// The project created by New project, until its first snapshot selects and names it.
     pub(super) pending_project_selection: Option<String>,
+    /// New project's first message, sent to that project's coordinator once it arrives.
+    pub(super) pending_first_message: Option<String>,
     pub(super) creating_project: bool,
     pub(super) project_name: Entity<InputState>,
     pub(super) project_edit: Option<project_name::NameEdit>,
@@ -199,6 +201,7 @@ impl Sidebar {
             bridge,
             shared: Shared::default(),
             pending_project_selection: None,
+            pending_first_message: None,
             creating_project: false,
             project_name,
             project_edit: None,
@@ -215,8 +218,8 @@ impl Sidebar {
         sidebar.watch_for_updates(window, cx);
         sidebar
     }
-    /// Redraws when anything it lists changed, and selects and names a project it created once
-    /// the project arrives.
+    /// Redraws when anything it lists changed, and selects a project it created once the
+    /// project arrives.
     pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
         let old = std::mem::replace(&mut self.shared, shared);
         let (selection, moved) = self.shared.moved_from(&old);
@@ -247,13 +250,23 @@ impl Sidebar {
         let Some(root) = root.cloned() else {
             return;
         };
-        let project_id = self.pending_project_selection.take().unwrap();
+        self.pending_project_selection = None;
         self.creating_project = false;
-        // Naming it needs its row, which a collapsed group would hide.
+        // Its row shows, even in a collapsed group.
         self.collapsed_groups.remove(&tree::group_key(&root.name));
-        cx.emit(Intent::Select(root.id));
+        cx.emit(Intent::Select(root.id.clone()));
         self.tree_scroll.set_offset(point(px(0.), px(0.)));
-        self.begin_project_rename(project_id, window, cx);
+        if let Some(body) = self.pending_first_message.take() {
+            let first = Command::Send {
+                id: new_id(),
+                sender: None,
+                recipient: root.id,
+                body,
+                attachments: vec![],
+                uploads: vec![],
+            };
+            self.request(first, window, cx);
+        }
     }
     /// Checks for a newer release now and hourly while the window is open. The app installs a
     /// staged one when it exits.
@@ -610,6 +623,7 @@ impl Sidebar {
                     .child(eyebrow(self.shared.host.workspace_heading(), p)),
             );
         for (page, label, glyph) in [
+            (Page::Spaces, "Spaces", "spaces"),
             (Page::Repositories, "Repositories", "folder"),
             (Page::Usage, "Usage and limits", "activity"),
             (Page::Models, "Models", "settings"),

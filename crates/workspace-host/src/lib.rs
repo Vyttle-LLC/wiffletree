@@ -140,6 +140,9 @@ pub struct Host {
     /// The GitHub storage repositories, by `repos::key`, the host wrote to since their sync took
     /// this; see `storage`.
     pub(crate) storage_written: std::cell::RefCell<std::collections::BTreeSet<String>>,
+    /// By `repos::key`, what the latest pass of each storage repository that syncs on its own
+    /// did; see `storage`.
+    pub(crate) storage_synced: std::collections::BTreeMap<String, storage::Synced>,
     /// `PATH` for the scans before a push, which find Python and gitleaks on it; the host's own
     /// when `None`. Tests give one with stand-in tools.
     pub(crate) scan_path: Option<std::ffi::OsString>,
@@ -332,6 +335,7 @@ impl Host {
             sync_passes: Default::default(),
             sync: Default::default(),
             storage_written: Default::default(),
+            storage_synced: Default::default(),
             scan_path: None,
             skill_histories: Default::default(),
             merges_wait_for_sync: false,
@@ -1832,7 +1836,7 @@ impl Host {
                 )?)?
             }
             Command::CheckStorageRepository { repository } => {
-                let added: Vec<SpaceId> = self.spaces()?.into_iter().map(|r| r.space.id).collect();
+                let added = self.space_ids()?;
                 let tools = publish::Tools::default();
                 serde_json::to_value(
                     storage::stage(&self.home, &repository, &tools, &added)?.check,
@@ -1840,10 +1844,17 @@ impl Host {
             }
             Command::JoinSpaces { repository, spaces } => {
                 self.refuse_second_use_of(&repository, storage::Use::Storage)?;
-                let added: Vec<SpaceId> = self.spaces()?.into_iter().map(|r| r.space.id).collect();
+                let added = self.space_ids()?;
                 let tools = publish::Tools::default();
                 let staged = storage::stage(&self.home, &repository, &tools, &added)?;
                 serde_json::to_value(self.join_spaces(staged, &spaces)?)?
+            }
+            Command::SpaceStorage { space_id } => {
+                serde_json::to_value(self.storage_status(&space_id)?)?
+            }
+            Command::SetSpaceBrain { space_id, path } => {
+                self.set_space_brain(&space_id, &path, None)?;
+                Value::Null
             }
             Command::SetTrackerPrefix { space_id, prefix } => {
                 serde_json::to_value(self.set_tracker_prefix(&space_id, &prefix)?)?
