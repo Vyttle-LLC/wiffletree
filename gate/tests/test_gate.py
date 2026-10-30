@@ -111,13 +111,14 @@ class GateRepo:
         self.gate = self.root / "gate"
         self.rebase_here("base with the gate")
 
-    def run(self, *command: str) -> subprocess.CompletedProcess[str]:
+    def run(self, *command: str, **env_overrides: str) -> subprocess.CompletedProcess[str]:
         env = {k: v for k, v in os.environ.items() if not k.startswith("GITHUB_")}
         env["GATE_BASE"] = "base"
+        env.update(env_overrides)
         return subprocess.run(command, cwd=self.root, env=env, capture_output=True, text=True)
 
-    def check(self, script: str) -> subprocess.CompletedProcess[str]:
-        return self.run(sys.executable, str(self.gate / "checks" / script))
+    def check(self, script: str, **env_overrides: str) -> subprocess.CompletedProcess[str]:
+        return self.run(sys.executable, str(self.gate / "checks" / script), **env_overrides)
 
     def cleanup(self) -> None:
         shutil.rmtree(self.root)
@@ -499,6 +500,36 @@ class DefaultsTest(GateTestCase):
     def test_legacy_log_edits_fail(self):
         self.script = "path_ownership.py"
         self.assertFails(self.pr({LEGACY_LOG: "# changed\n"}), "legacy logs are frozen")
+
+
+class RunnerTest(GateTestCase):
+    """How the checks behave on the runner: annotations and missing tools."""
+
+    CHECKS = ("secret_scan.py", "sensitive_scan.py", "markdown_lint.py", "wikilinks.py", "log_schema.py", "path_ownership.py")
+
+    def test_annotation_properties_are_escaped(self):
+        path = "docs/a,b:c%.md"
+        self.repo.write(path, "Call +18025551234.\n")
+        self.repo.commit()
+        result = self.repo.check("sensitive_scan.py", GITHUB_ACTIONS="true")
+        self.assertFails(result, "::error file=docs/a%2Cb%3Ac%25.md,line=1::possible phone number")
+
+    def test_missing_tools_exit_with_config_error(self):
+        for script in self.CHECKS:
+            with self.subTest(script=script):
+                result = self.repo.check(script, PATH="")
+                self.assertConfigError(result, "git is not installed or not on PATH")
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_missing_scanner_is_named(self):
+        only_git = Path(tempfile.mkdtemp(prefix="brain-gate-path-"))
+        self.addCleanup(shutil.rmtree, only_git)
+        (only_git / "git").symlink_to(shutil.which("git"))
+        for script, tool in (("secret_scan.py", "gitleaks"), ("markdown_lint.py", "markdownlint-cli2")):
+            with self.subTest(script=script):
+                result = self.repo.check(script, PATH=str(only_git))
+                self.assertConfigError(result, f"{tool} is not installed or not on PATH")
+                self.assertNotIn("Traceback", result.stderr)
 
 
 class ConfigTest(GateTestCase):

@@ -10,11 +10,10 @@ discarded.
 import json
 import os
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 
-from common import config_error, finish, report, tracked_files
+from common import config_error, finish, report, run_tool, tracked_files
 
 GATE_CONFIG = Path(__file__).resolve().parents[1] / "config" / "markdownlint-cli2.jsonc"
 
@@ -29,12 +28,10 @@ def main() -> None:
         files.mkdir(exist_ok=True)
 
         findings_file = Path(scratch) / "findings.json"
-        result = subprocess.run(
+        result = run_tool(
             ["markdownlint-cli2", "--config", str(GATE_CONFIG)],
             cwd=files,
             env={**os.environ, "BRAIN_GATE_MARKDOWNLINT_REPORT": str(findings_file)},
-            capture_output=True,
-            text=True,
         )
         if result.returncode not in (0, 1) or not findings_file.exists():
             config_error(f"markdownlint-cli2 could not lint (exit {result.returncode}); run it locally to see why")

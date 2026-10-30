@@ -10,11 +10,10 @@ line, column and rule, never the secret or the line around it.
 import json
 import os
 import re
-import subprocess
 import tempfile
 from pathlib import Path
 
-from common import GATE_FIXTURES, base_ref, config_error, finish, read_text, report, scanning_gate_repo
+from common import GATE_FIXTURES, base_ref, config_error, finish, read_text, report, run_tool, scanning_gate_repo
 
 GATE_CONFIG = Path(__file__).resolve().parents[1] / "config" / "gitleaks.toml"
 BRAIN_CONFIG = ".gitleaks.toml"
@@ -41,7 +40,7 @@ def config_path(scratch: Path) -> Path:
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="brain-gate-") as scratch:
         findings_file = Path(scratch) / "findings.json"
-        result = subprocess.run(
+        result = run_tool(
             [
                 "gitleaks", "git",
                 "--config", str(config_path(Path(scratch))),
@@ -53,9 +52,7 @@ def main() -> None:
                 "--no-banner",
                 "--no-color",
                 ".",
-            ],
-            capture_output=True,
-            text=True,
+            ]
         )
         if result.returncode != 0:
             # Only gitleaks' own errors reach here; findings go to the report.

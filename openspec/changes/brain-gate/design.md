@@ -65,7 +65,7 @@ Wiffletree is a public repository (`Vyttle-LLC/wiffletree`). Brain repositories 
    - A change that can fail a PR the previous version passed is a new major version. That covers a stricter rule, a new required field in the entry contract, or a new check.
    - Fixes that only stop false failures, and new optional config, are minor or patch versions.
    - The caller pins a commit SHA with the tag in a comment, and Update gate moves the pin. The `version` in the brain's config records which release the caller pins.
-7. **One fixture set.** `gate/tests/fixtures/` holds the good and bad entries, notes, PR shapes and sensitive samples. Wiffletree's renderer tests in `brain-log-capture` read the same files, so a contract change fails Wiffletree's own tests in the same PR. The fixtures contain only fake values, and the gate's default path allow-list exempts `gate/tests/`.
+7. **One fixture set.** `gate/tests/fixtures/` holds the good and bad entries, notes, PR shapes and sensitive samples. Wiffletree's renderer tests in `brain-log-capture` read the same files, so a contract change fails Wiffletree's own tests in the same PR. The fixtures contain only fake values. `sensitive-info` and `secret-scan` exempt `gate/tests/` only when the gate scans its own repository; in a brain, `gate/tests/` is scanned like any other path.
 8. **Moving later:** the action's only coupling to this repository is its path. Moving it means publishing the same tags in the new repository and changing each caller's `uses:`, through Update gate. Old tags stay in this repository, so pinned callers keep working.
 9. **Set up writes, in one PR from `brain-registry-sync`:**
    - the caller;

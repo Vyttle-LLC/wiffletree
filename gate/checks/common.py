@@ -16,13 +16,20 @@ from dataclasses import dataclass
 from typing import Iterator, NoReturn
 
 
+def run_tool(command: list[str], **options) -> subprocess.CompletedProcess[str]:
+    """Run a tool the gate needs, stopping with exit code 2 when it is not installed."""
+    try:
+        return subprocess.run(command, capture_output=True, text=True, **options)
+    except FileNotFoundError:
+        config_error(f"{command[0]} is not installed or not on PATH")
+
+
 def git(*args: str) -> str:
-    return subprocess.run(
-        ["git", "-c", "core.quotePath=false", *args],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
+    result = run_tool(["git", "-c", "core.quotePath=false", *args])
+    if result.returncode != 0:
+        # Git's message can quote paths or refs, so it is not repeated.
+        config_error(f"git {args[0]} failed (exit {result.returncode})")
+    return result.stdout
 
 
 def base_ref() -> str:
@@ -125,16 +132,27 @@ def report(level: str, message: str, path: str | None = None, line: int | None =
     print(f"{level.upper()}: {location + ': ' if location else ''}{message}")
     if _IN_ACTIONS:
         props = ",".join(
-            part for part in (path and f"file={path}", line and f"line={line}") if part
+            part for part in (path and f"file={_escape_property(path)}", line and f"line={line}") if part
         )
-        print(f"::{level} {props}::{message}" if props else f"::{level}::{message}")
+        text = _escape_data(message)
+        print(f"::{level} {props}::{text}" if props else f"::{level}::{text}")
+
+
+def _escape_data(text: str) -> str:
+    """Escape a workflow command's message as GitHub documents."""
+    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def _escape_property(text: str) -> str:
+    """Escape a workflow command's property value as GitHub documents."""
+    return _escape_data(text).replace(":", "%3A").replace(",", "%2C")
 
 
 def config_error(message: str) -> NoReturn:
     """Stop with exit code 2: the gate cannot run on this config."""
     print(f"ERROR: {message}", file=sys.stderr)
     if _IN_ACTIONS:
-        print(f"::error::{message}")
+        print(f"::error::{_escape_data(message)}")
     sys.exit(2)
 
 
