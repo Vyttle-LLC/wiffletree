@@ -8,7 +8,7 @@
 - [x] 2.2 `main.rs` runs the gate when called by its name and installs it for both host modes; `LowPriority` passes the hooks to providers.
 - [x] 2.3 `set_builds_at_once`, saved on this machine.
 - [x] 2.4 Remove `VERIFICATION_SLOTS` and the cycle queue; start cycles an earlier host queued; `verify_ticket` stops reporting `queued`.
-- [x] 2.5 Tests: one build at once runs two builds one after the other and the second says it waits; two overlap; killing the gate kills the program; a killed build frees its slot; `cargo tree`, `metadata` and `fmt` run while the slot is held; a cached `cargo test` re-run waits through the runner; a `cargo watch`-style parent holds no slot between its builds; a real `go test` holds its slot until its tests end; a real `go run` frees its slot once its program runs; the setting persists and is bounded; every cycle starts at once; a stored queued cycle starts after an upgrade at HEAD, or ends blocked on a dirty worktree.
+- [x] 2.5 Tests: one build at once runs two builds one after the other and the second says it waits; two overlap; killing the gate kills the program; a killed build frees its slot; `cargo tree`, `metadata` and `fmt` run while the slot is held; a cached `cargo test` re-run waits through the runner; a `cargo watch`-style parent holds no slot between its builds; a build nested in a test under an external Cargo subcommand shares its slot; a real `go test` holds its slot until its tests end; a real `go run` frees its slot once its program runs; the setting persists and is bounded; every cycle starts at once; a stored queued cycle starts after an upgrade at HEAD, or ends blocked on a dirty worktree.
 
 ## 3. Desktop
 

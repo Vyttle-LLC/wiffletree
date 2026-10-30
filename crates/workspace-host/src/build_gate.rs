@@ -8,12 +8,13 @@
 //! <args…>`, which always ends by executing the program in its place, so signals reach it as
 //! before.
 //!
-//! A slot belongs to a build: the outermost `cargo` or `go` command among the call's ancestors
-//! whose subcommand builds, such as `cargo test` or `go vet`, so the nested Cargo of `cargo
-//! clippy` or `cargo nextest`, or one a test starts, shares it, while `cargo watch` is no build
-//! and each `cargo test` it starts is its own. A build takes its slot at its first compile or
-//! test binary and holds it until that command ends, so its test binaries, doctests and docs
-//! run inside it. `cargo run` replaces Cargo with the app, so the app holds no slot; `go run`
+//! A slot belongs to a build: the outermost Cargo or Go command among the call's ancestors
+//! whose subcommand builds, such as `cargo test`, a Cargo alias, `cargo-nextest` (which Cargo
+//! becomes for `cargo nextest`) or `go vet`, so the nested Cargo of `cargo clippy` or `cargo
+//! nextest`, or one a test starts, shares it, while `cargo watch` is no build and each `cargo
+//! test` it starts is its own. A build takes its slot at its first compile or test binary and
+//! holds it until that command ends, so its later test binaries and doctests run inside it; a
+//! `cargo doc` that only runs rustdoc takes none. `cargo run` replaces Cargo with the app, so the app holds no slot; `go run`
 //! keeps Go running beside its app, so it holds its slot only while its compiles and link run.
 //! Waiting builds take free slots oldest first.
 use std::{
@@ -41,11 +42,10 @@ const POLL: Duration = Duration::from_millis(200);
 /// How long a `go run` keeps its slot after its last compile or link started, so the gaps
 /// between them do not hand the slot away.
 const GRACE: Duration = Duration::from_secs(2);
-/// The Cargo subcommands, aliases included, and Go commands that build.
-const CARGO_BUILDS: [&str; 17] = [
-    "build", "b", "check", "c", "clippy", "test", "t", "nextest", "bench", "doc", "d", "rustc",
-    "rustdoc", "install", "run", "r", "fix",
-];
+/// The Cargo subcommands that only start other Cargo commands, so are no build themselves;
+/// every other one, an alias included, counts as a build.
+const CARGO_WRAPPERS: [&str; 2] = ["watch", "make"];
+/// The Go commands that build.
 const GO_BUILDS: [&str; 5] = ["build", "test", "vet", "install", "run"];
 
 /// The environment the host gives its agents, once `install` has run.
@@ -350,8 +350,8 @@ struct Build {
     run: bool,
 }
 
-/// The outermost `cargo` or `go` among the call's ancestors below the host whose subcommand
-/// builds, else the call's parent.
+/// The outermost Cargo or Go command among the call's ancestors below the host whose
+/// subcommand builds, else the call's parent.
 fn owner() -> Build {
     let root: Option<u32> = std::env::var(ROOT).ok().and_then(|r| r.parse().ok());
     let parent = std::os::unix::process::parent_id();
@@ -372,13 +372,8 @@ fn owner() -> Build {
             .name
             .trim_start_matches('.')
             .trim_end_matches("-wrapped");
-        let builds = match tool {
-            "cargo" => CARGO_BUILDS.as_slice(),
-            "go" => GO_BUILDS.as_slice(),
-            _ => &[],
-        };
         let command = arguments(pid).and_then(|args| subcommand(&args).map(str::to_owned));
-        if let Some(command) = command.filter(|c| builds.contains(&c.as_str())) {
+        if let Some(command) = command.filter(|c| builds(tool, c)) {
             owner = Build {
                 pid,
                 identity: process.identity(),
@@ -388,6 +383,17 @@ fn owner() -> Build {
         pid = process.parent;
     }
     owner
+}
+
+/// Whether the process named `tool` builds when running `command`. Cargo replaces itself with
+/// an external subcommand, so `cargo nextest run` runs as `cargo-nextest nextest run`.
+fn builds(tool: &str, command: &str) -> bool {
+    match tool {
+        "go" => GO_BUILDS.contains(&command),
+        "cargo" => !CARGO_WRAPPERS.contains(&command),
+        external if external.starts_with("cargo-") => !CARGO_WRAPPERS.contains(&command),
+        _ => false,
+    }
 }
 
 /// A `cargo` or `go` command line's subcommand: its first word after the global flags.
@@ -545,7 +551,25 @@ mod tests {
         for (command, expected) in cases {
             assert_eq!(subcommand(&line(command)), expected, "{command}");
         }
-        assert!(!CARGO_BUILDS.contains(&"watch") && CARGO_BUILDS.contains(&"t"));
+    }
+
+    #[test]
+    fn a_cargo_alias_or_external_subcommand_builds_and_a_wrapper_does_not() {
+        let cases = [
+            ("cargo", "test", true),
+            ("cargo", "ci", true),
+            ("cargo-nextest", "nextest", true),
+            ("cargo-fakenext", "fakenext", true),
+            ("cargo", "watch", false),
+            ("cargo-watch", "watch", false),
+            ("cargo-make", "make", false),
+            ("go", "run", true),
+            ("go", "mod", false),
+            ("zsh", "build", false),
+        ];
+        for (tool, command, expected) in cases {
+            assert_eq!(builds(tool, command), expected, "{tool} {command}");
+        }
     }
 
     #[test]

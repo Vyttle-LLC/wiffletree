@@ -262,47 +262,55 @@ fn a_cached_cargo_test_rerun_that_compiles_nothing_still_waits_for_a_slot() {
     assert!(finish(holder).status.success());
 }
 
-#[test]
-fn a_cargo_watch_style_parent_holds_no_slot_between_the_builds_it_starts() {
-    let gate = Gate::new(1);
-    // A program named `cargo` that runs `<subcommand>.sh` beside it and waits for it: as
-    // `cargo watch` it starts two `cargo build`s, waiting between them.
+/// A program named `name` in the gate's `tools` folder that runs `<its first argument>.sh`
+/// beside it and waits for it, as Cargo, or the external subcommand Cargo becomes, would.
+fn launcher(gate: &Gate, name: &str) -> PathBuf {
     let tools = gate.path("tools");
-    fs::create_dir(&tools).unwrap();
-    let cargo = tools.join("cargo");
+    fs::create_dir_all(&tools).unwrap();
+    let source = tools.join(format!("{name}.rs"));
     fs::write(
-        tools.join("cargo.rs"),
+        &source,
         "fn main() {\n    let args: Vec<String> = std::env::args().collect();\n    let script = std::path::Path::new(&args[0]).with_file_name(format!(\"{}.sh\", args[1]));\n    let status = std::process::Command::new(\"/bin/sh\").arg(script).status().unwrap();\n    std::process::exit(status.code().unwrap_or(1));\n}\n",
     )
     .unwrap();
+    let program = tools.join(name);
     let built = Command::new("rustc")
         .arg("-o")
-        .arg(&cargo)
-        .arg(tools.join("cargo.rs"))
+        .arg(&program)
+        .arg(&source)
         .status()
         .unwrap();
     assert!(built.success());
+    program
+}
+
+/// Writes `tools/<name>.sh`, and `tools/build.sh`, which compiles crate `$NAME` through the gate.
+fn scripts(gate: &Gate, name: &str, body: String) {
+    let tools = gate.path("tools");
     let home = gate.home.path().display();
-    let script = |name: &str, body: String| {
-        fs::write(tools.join(format!("{name}.sh")), body).unwrap();
-    };
-    script(
-        "build",
+    fs::write(tools.join(format!("{name}.sh")), body).unwrap();
+    fs::write(
+        tools.join("build.sh"),
         format!("{home}/wiffletree-build-gate {home}/rustc --crate-name $NAME"),
-    );
-    script(
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_cargo_watch_style_parent_holds_no_slot_between_the_builds_it_starts() {
+    let gate = Gate::new(1);
+    // As `cargo watch`, it starts two `cargo build`s, waiting between them.
+    let cargo = launcher(&gate, "cargo");
+    let home = gate.home.path().display();
+    scripts(
+        &gate,
         "watch",
         format!(
             "NAME=w1 {cargo} build\ntouch {home}/between\nwhile [ -d {home} ] && [ ! -f {home}/go-on ]; do sleep 0.02; done\nNAME=w2 {cargo} build",
             cargo = cargo.display()
         ),
     );
-    let watch = gate
-        .command(&cargo)
-        .arg("watch")
-        .current_dir(&tools)
-        .spawn()
-        .unwrap();
+    let watch = gate.command(&cargo).arg("watch").spawn().unwrap();
     gate.wait_for_log("start w1");
     gate.release("w1");
     wait_until("the watch between builds", || gate.path("between").exists());
@@ -315,6 +323,41 @@ fn a_cargo_watch_style_parent_holds_no_slot_between_the_builds_it_starts() {
     gate.wait_for_log("start w2");
     gate.release("w2");
     assert!(finish(watch).status.success());
+}
+
+#[test]
+fn a_build_nested_in_a_test_under_an_external_cargo_subcommand_shares_its_slot() {
+    let gate = Gate::new(1);
+    // `cargo fakenext run` as Cargo runs it, replaced by `cargo-fakenext fakenext run`, which
+    // runs a test binary through the gate; the test runs `cargo build`.
+    let nextest = launcher(&gate, "cargo-fakenext");
+    let cargo = launcher(&gate, "cargo");
+    let deps = gate.path("tools/deps");
+    fs::create_dir(&deps).unwrap();
+    let test = deps.join("uitests-1a2b");
+    fs::write(
+        &test,
+        format!("#!/bin/sh\nNAME=inner {} build\n", cargo.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&test, fs::Permissions::from_mode(0o755)).unwrap();
+    scripts(
+        &gate,
+        "fakenext",
+        format!(
+            "{} {}",
+            gate.path("wiffletree-build-gate").display(),
+            test.display()
+        ),
+    );
+    let run = gate
+        .command(&nextest)
+        .args(["fakenext", "run"])
+        .spawn()
+        .unwrap();
+    gate.wait_for_log("start inner");
+    gate.release("inner");
+    assert!(finish(run).status.success());
 }
 
 /// A Go module whose `name` program, or test, writes `go-started` and runs until `release-go`
