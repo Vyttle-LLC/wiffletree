@@ -55,7 +55,8 @@ def main() -> None:
         )
         if result.returncode != 0:
             # Only gitleaks' own errors reach here; findings go to the report.
-            config_error(f"gitleaks could not scan (exit {result.returncode}): {result.stderr.strip()}")
+            # Its message can quote the config's or the commits' text, so it is not repeated.
+            config_error(f"gitleaks could not scan (exit {result.returncode}); run it locally to see why")
         findings = json.loads(findings_file.read_text(encoding="utf-8") or "[]")
 
     for finding in findings:

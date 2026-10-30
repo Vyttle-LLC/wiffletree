@@ -33,8 +33,8 @@ be required.
 Every finding names the file, line, column where it has one, and rule. In
 GitHub Actions each finding is also an annotation with the file and line. No
 check prints the matched text or the line around it: gitleaks writes a
-redacted report that the check reads, and markdownlint's `[Context: …]` is
-dropped.
+redacted report that the check reads, markdownlint's descriptions and `[…]`
+details are dropped, and neither tool's error messages are repeated.
 
 `gate-tests` runs the gate's bundled fixture tests against the tools the action
 installed, on the brain's runner. That proves the pinned gate works there. The

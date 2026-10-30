@@ -174,6 +174,15 @@ class SecretScanTest(GateTestCase):
         self.repo.rebase_here("base with brain gitleaks config")
         self.assertConfigError(self.pr({entry_path(): entry_text()}), "must not have an [extend] table")
 
+    def test_gitleaks_errors_are_not_echoed(self):
+        token = self.token()
+        rule = f'[[rules]]\nid = "x"\nregex = "x"\nsecretGroup = "{token}"\n'
+        self.repo.write(".gitleaks.toml", rule)
+        self.repo.rebase_here("base with a broken brain gitleaks config")
+        result = self.pr({entry_path(): entry_text()})
+        self.assertConfigError(result, "gitleaks could not scan")
+        self.assertNotIn(token, result.stdout + result.stderr)
+
 
 class SensitiveScanTest(GateTestCase):
     script = "sensitive_scan.py"
@@ -289,6 +298,13 @@ class MarkdownLintTest(GateTestCase):
         result = self.pr({"README.md": "# Docs\n\n#Planted heading\n"})
         self.assertFails(result, "README.md:3:1 error MD018")
         self.assertNotIn("Planted", result.stdout + result.stderr)
+
+    def test_reference_details_are_not_echoed(self):
+        text = "# Docs\n\nSee [the report][Planted 801-555-0123].\n\n[unused planted ref]: https://example.org\n"
+        result = self.pr({"README.md": text})
+        self.assertFails(result, "README.md:3:5 error MD052", "README.md:5:1 error MD053")
+        self.assertNotIn("planted", (result.stdout + result.stderr).lower())
+        self.assertNotIn("801-555-0123", result.stdout + result.stderr)
 
 
 class WikilinksTest(GateTestCase):
