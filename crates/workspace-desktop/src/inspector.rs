@@ -717,6 +717,7 @@ impl Inspector {
             WorkspaceNote::SkillQuestion(question) => self
                 .skills
                 .update(cx, |skills, cx| skills.question_card(question, p, cx)),
+            WorkspaceNote::Held(held) => self.inbox.read(cx).held_card(held, p),
         }
     }
 

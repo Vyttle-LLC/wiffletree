@@ -39,7 +39,7 @@ Michael approved #163's mockup and the reconciliation plan. Each decision is spe
 
 Each is the smallest choice that keeps the decisions above consistent. All nine were confirmed by Michael, 2026-10-29.
 
-1. **A repository has one role on a Mac: brain, or storage and settings.** A brain changes only through gated PRs, while storage and settings push their default branch directly; one clone cannot follow both. Setting a brain to a repository that is a storage or settings repository on this Mac, or the reverse, is refused, naming the other use. This also keeps `<owner>-<name>` unique under `repos/`. A storage repository may also be the settings repository, as #163 already allowed.
+1. **A repository has one role on a Mac: brain, or storage and settings.** A brain changes only through gated PRs, while storage and settings push their default branch directly; one clone cannot follow both. Setting a brain to a repository that is a storage or settings repository on this Mac, or the reverse, is refused, naming the other use, so each repository has one clone. A storage repository may also be the settings repository, as #163 already allowed. Each GitHub clone is at `repos/github.com/<owner>/<name>/`: one folder per owner keeps names apart with no escaping, where one folder named `<owner>-<name>` gave `a-b/c` and `a/b-c` the same folder (decided during stage 3, after stage 2 shipped `<owner>-<name>`; existing clones move by the repository their `origin` names, in a rename recorded before it is made and finished at the next start).
 2. **Without a settings repository, the shared folder stays `<data folder>/shared/`.** It is a plain folder, not a clone. Setting up or joining a settings repository makes its clone under `repos/` the shared folder and moves the settings files of `<data folder>/shared/` to `backups/`, as joining already did. Switching from one settings repository to another first runs Stop syncing for the old one, so its clone, which may still be a Space's storage, stays and keeps syncing; no clone is ever moved to `backups/`. Stop syncing copies the settings files back to `<data folder>/shared/` and keeps using them there, while the clone keeps syncing its Space and issue files when it is also storage. `spaces` restates the settings repository's set-up, join and stop requirements to say so.
 3. **The prefix is chosen with the storage.** A new storage repository, local or on GitHub, gets `wiffletree-issues.yaml` in its first commit. The Space form proposes a prefix from the Space's name (its first letters, 2 to 5 capitals) and the human may change it. Prefixes are unique among the storage repositories on this Mac. A GitHub tracker's prefix can change only while it has no issue. A local tracker's prefix can be renamed at any time, rewriting its issue IDs and references, because nothing outside this Mac refers to them; this is the way out when a shared tracker joined later uses the same prefix, and the join refusal says so. A storage repository joined without a tracker config offers Set up issues, which asks for a prefix and commits the config.
 4. **One commit per rule set.** The engine commits each rule set's changes separately (settings, a Space, issues, a board), so every commit touches only one rule set's paths and the settings repository's "a commit holds changes only to `wiffletree.json`, `settings/` and `skills/`" stays true. A repository is fetched at the shortest cadence of the rule sets it holds: every minute once it holds a tracker.
@@ -68,12 +68,13 @@ Space (Sage | Vyttle | Personal)
 
 ```text
 <data folder>/repos/
-  Sage-Social-wiffletree-storage/     storage + settings repository, one clone, one engine
-    wiffletree.json  settings/  skills/     settings rules
-    spaces/sage/  spaces/sage-watch/        settings rules (outside edits pause)
-    spaces/*/boards/                        runner-written: push without comparing  (assistant-spaces-jobs-boards)
-    wiffletree-issues.yaml  issues/         issue rules                            (shared-issues)
-  Sage-Social-sagehaven-docs/         brain: its own clone and PR flow          (brain-registry-sync)
+  github.com/Sage-Social/
+    wiffletree-storage/               storage + settings repository, one clone, one engine
+      wiffletree.json  settings/  skills/   settings rules
+      spaces/sage/  spaces/sage-watch/      settings rules (outside edits pause)
+      spaces/*/boards/                      runner-written: push without comparing  (assistant-spaces-jobs-boards)
+      wiffletree-issues.yaml  issues/       issue rules                            (shared-issues)
+    sagehaven-docs/                   brain: its own clone and PR flow          (brain-registry-sync)
   local-7k2q/                         Personal's local storage, no remote
 ```
 
@@ -118,7 +119,7 @@ Archive order, which decides who restates a requirement that several changes mod
 ## Migration Plan
 
 1. The store migration creates Spaces from `Project.brain` folders and "Personal", each with local storage under `repos/local-<id>/` holding `space.yaml` and `wiffletree-issues.yaml`, and sets `Project.space`. `log_exports` keeps its rows, so nothing is exported twice. Nothing is pushed.
-2. A machine with a settings repository moves its clone from `<data folder>/shared/` to `<data folder>/repos/<owner>-<name>/` and records the new shared folder. A machine without one keeps `<data folder>/shared/`.
+2. A machine with a settings repository moves its clone from `<data folder>/shared/` to `<data folder>/repos/github.com/<owner>/<name>/` and records the new shared folder; a clone stage 2 left at `repos/<owner>-<name>/` moves there too. A machine without one keeps `<data folder>/shared/`. Sync's one record becomes the settings repository's, now that each repository keeps its own.
 3. Rollback before any Space is put on GitHub is a database and data folder restore.
 
 ## Open Questions

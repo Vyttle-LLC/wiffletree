@@ -13,20 +13,67 @@ pub(crate) enum NoteAction {
     Settle(Settle),
 }
 
-/// Acts on the note whose path it is given; the view decides how.
-pub(crate) type OnNote = Rc<dyn Fn(String, NoteAction, &mut Window, &mut App)>;
+/// The note a choice is for: its file, and the storage repository it is in, `None` for the
+/// settings repository.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NoteRef {
+    pub(crate) path: String,
+    pub(crate) repository: Option<String>,
+}
+impl NoteRef {
+    pub(crate) fn of(note: &PausedSetting) -> Self {
+        Self {
+            path: note.path.clone(),
+            repository: note.repository.clone(),
+        }
+    }
+    pub(crate) fn settle(self, settle: Settle) -> Command {
+        Command::SettlePausedFile {
+            path: self.path,
+            settle,
+            repository: self.repository,
+        }
+    }
+    fn compare(&self) -> Command {
+        Command::ComparePausedFile {
+            path: self.path.clone(),
+            repository: self.repository.clone(),
+        }
+    }
+    /// The note a compare request asks about.
+    pub(crate) fn compared_by(command: &Command) -> Option<Self> {
+        match command {
+            Command::ComparePausedFile { path, repository } => Some(Self {
+                path: path.clone(),
+                repository: repository.clone(),
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Acts on the note it is given; the view decides how.
+pub(crate) type OnNote = Rc<dyn Fn(NoteRef, NoteAction, &mut Window, &mut App)>;
 
 /// The note open in Compare, and its lines once the host answers.
-pub(crate) type Compared = Option<(String, Option<Vec<Line>>)>;
+pub(crate) type Compared = Option<(NoteRef, Option<Vec<Line>>)>;
+
+/// Whether `note` is the one open in Compare.
+fn is_open(compared: &Compared, note: &PausedSetting) -> bool {
+    compared
+        .as_ref()
+        .is_some_and(|(open, _)| *open == NoteRef::of(note))
+}
 
 /// Opens the note's comparison, answering with the request for its lines, or hides it when open.
-pub(crate) fn toggle_compare(compared: &mut Compared, path: String) -> Option<Command> {
-    if compared.as_ref().is_some_and(|(open, _)| *open == path) {
+pub(crate) fn toggle_compare(compared: &mut Compared, note: NoteRef) -> Option<Command> {
+    if compared.as_ref().is_some_and(|(open, _)| *open == note) {
         *compared = None;
         return None;
     }
-    *compared = Some((path.clone(), None));
-    Some(Command::ComparePausedFile { path })
+    let ask = note.compare();
+    *compared = Some((note, None));
+    Some(ask)
 }
 
 /// After a sync pass or a change to the notes, asks again for the open comparison, since either
@@ -35,29 +82,29 @@ pub(crate) fn recompare<'a>(
     compared: &mut Compared,
     notes: impl IntoIterator<Item = &'a PausedSetting>,
 ) -> Option<Command> {
-    let (path, lines) = compared.as_mut()?;
-    if !notes.into_iter().any(|note| note.path == *path) {
+    let (open, lines) = compared.as_mut()?;
+    if !notes.into_iter().any(|note| NoteRef::of(note) == *open) {
         *compared = None;
         return None;
     }
     *lines = None;
-    Some(Command::ComparePausedFile { path: path.clone() })
+    Some(open.compare())
 }
 
 /// Closes the comparison a failed request was asking for, such as one whose note was settled in
 /// the other window; the caller shows the host's error.
 pub(crate) fn compare_failed(compared: &mut Compared, command: &Command) {
-    if let Command::ComparePausedFile { path } = command
-        && compared.as_ref().is_some_and(|(open, _)| open == path)
+    if let Some(asked) = NoteRef::compared_by(command)
+        && compared.as_ref().is_some_and(|(open, _)| *open == asked)
     {
         *compared = None;
     }
 }
 
 /// Keeps lines that answer the note still open.
-pub(crate) fn compared_arrived(compared: &mut Compared, path: &str, lines: Vec<Line>) {
+pub(crate) fn compared_arrived(compared: &mut Compared, note: &NoteRef, lines: Vec<Line>) {
     if let Some((open, shown)) = compared
-        && open == path
+        && open == note
     {
         *shown = Some(lines);
     }
@@ -99,7 +146,7 @@ fn choices(note: &PausedSetting) -> Vec<(Settle, String, bool)> {
 /// The buttons that settle a note.
 pub(crate) fn settle_buttons(note: &PausedSetting, on: &OnNote) -> Vec<Button> {
     let buttons = choices(note).into_iter().map(|(settle, label, main)| {
-        let (on, path) = (on.clone(), note.path.clone());
+        let (on, path) = (on.clone(), NoteRef::of(note));
         let id = SharedString::from(format!("settle-{}-{label}", note.path));
         let button = button(id).label(label);
         let button = if main {
@@ -121,10 +168,8 @@ pub(crate) fn compare_link(
     compared: &Compared,
     on: &OnNote,
 ) -> Button {
-    let shown = compared
-        .as_ref()
-        .is_some_and(|(path, _)| *path == note.path);
-    let (on, path) = (on.clone(), note.path.clone());
+    let shown = is_open(compared, note);
+    let (on, path) = (on.clone(), NoteRef::of(note));
     button(SharedString::from(format!("compare-{}", note.path)))
         .link()
         .label(if shown { open } else { label })
@@ -134,8 +179,8 @@ pub(crate) fn compare_link(
 /// This Mac's version beside the other's, each with the lines only it has marked, once the host
 /// has answered for this note.
 pub(crate) fn comparison(note: &PausedSetting, compared: &Compared, p: Palette) -> Option<Div> {
-    let (path, lines) = compared.as_ref()?;
-    if *path != note.path {
+    let (open, lines) = compared.as_ref()?;
+    if *open != NoteRef::of(note) {
         return None;
     }
     let Some(lines) = lines else {
@@ -200,10 +245,7 @@ pub(crate) fn comparison(note: &PausedSetting, compared: &Compared, p: Palette) 
 
 /// Where the version not kept stays, under an open comparison of two machines' versions.
 pub(crate) fn kept_note(note: &PausedSetting, compared: &Compared) -> Option<String> {
-    let open = compared
-        .as_ref()
-        .is_some_and(|(path, _)| *path == note.path);
-    if !open || !matches!(note.paused, Paused::TwoMachines { .. }) {
+    if !is_open(compared, note) || !matches!(note.paused, Paused::TwoMachines { .. }) {
         return None;
     }
     let history = match note.setting.split_once(" · ") {
@@ -218,7 +260,7 @@ pub(crate) fn kept_note(note: &PausedSetting, compared: &Compared) -> Option<Str
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{choices, compare_failed, kept_note, recompare, short};
+    use super::{NoteRef, choices, compare_failed, kept_note, recompare, short};
     use workspace_core::skills::Line;
     use workspace_core::*;
 
@@ -228,6 +270,14 @@ mod tests {
             setting: "Implementing · your rules".into(),
             paused,
             text: String::new(),
+            repository: None,
+        }
+    }
+
+    fn settings_note(path: &str) -> NoteRef {
+        NoteRef {
+            path: path.into(),
+            repository: None,
         }
     }
 
@@ -270,7 +320,7 @@ mod tests {
         let two = note(Paused::TwoMachines {
             machine: "Mike’s MacBook Air".into(),
         });
-        let open = Some((two.path.clone(), None));
+        let open = Some((NoteRef::of(&two), None));
         assert_eq!(
             kept_note(&two, &open).unwrap(),
             "The version you don’t keep stays in the repository’s history and in Implementing’s history."
@@ -284,18 +334,24 @@ mod tests {
         let two = note(Paused::TwoMachines {
             machine: "Mike’s MacBook Air".into(),
         });
-        let mut compared = Some((two.path.clone(), Some(vec![Line::Added("Older.".into())])));
+        let open = NoteRef::of(&two);
+        let mut compared = Some((open.clone(), Some(vec![Line::Added("Older.".into())])));
         let asked = recompare(&mut compared, std::slice::from_ref(&two));
-        assert!(matches!(asked, Some(Command::ComparePausedFile { path }) if path == two.path));
-        assert_eq!(compared, Some((two.path.clone(), None)));
+        assert!(
+            matches!(asked, Some(Command::ComparePausedFile { path, repository: None }) if path == two.path)
+        );
+        assert_eq!(compared, Some((open, None)));
         assert!(recompare(&mut compared, &[]).is_none());
         assert_eq!(compared, None);
     }
 
     #[test]
     fn a_failed_compare_closes_the_comparison_it_asked_for() {
-        let ask = |path: &str| Command::ComparePausedFile { path: path.into() };
-        let mut compared = Some(("skills/a/".to_owned(), None));
+        let ask = |path: &str| Command::ComparePausedFile {
+            path: path.into(),
+            repository: None,
+        };
+        let mut compared = Some((settings_note("skills/a/"), None));
         compare_failed(&mut compared, &ask("skills/b/"));
         assert!(compared.is_some());
         compare_failed(&mut compared, &Command::Snapshot);

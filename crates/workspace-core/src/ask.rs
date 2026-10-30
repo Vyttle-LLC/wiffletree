@@ -88,8 +88,8 @@ pub fn steps(session_id: String, run_id: Option<String>, after: u64) -> Ask<Step
         after,
     })
 }
-pub fn compare_paused_file(path: String) -> Ask<Vec<Line>> {
-    Ask::new(Command::ComparePausedFile { path })
+pub fn compare_paused_file(path: String, repository: Option<String>) -> Ask<Vec<Line>> {
+    Ask::new(Command::ComparePausedFile { path, repository })
 }
 pub fn set_model_selection(
     selection: ModelSelection,

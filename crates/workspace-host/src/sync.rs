@@ -5,7 +5,7 @@
 use crate::shared::SharedStore;
 use crate::skills::{Change, Line, SkillStore};
 use crate::*;
-use github_access::{candidates, first_readable, gh_protocol, private_repository, run, run_at};
+use github_access::run;
 use publish::{GitTool, Tools};
 use repos::{Content, Record, Remote, RuleSet};
 use std::collections::BTreeMap;
@@ -57,38 +57,7 @@ fn read_machine_name() -> String {
 /// What GitHub and Git say about the repository, with a clone of its branch in a new folder of
 /// the data folder that is removed when dropped.
 fn read(home: &Path, input: &str, tools: &Tools) -> Result<(SettingsRepositoryCheck, TempDir)> {
-    let (owner, name, urls) = candidates(input, &gh_protocol(tools, home))?;
-    let private = private_repository(tools, home, &owner, &name)?;
-    let organization = private.organization;
-    let (push_url, head) = first_readable(home, urls, &private.default_branch, &tools.git)?;
-    let repository = SettingsRepository {
-        name: private.name,
-        push_url,
-        branch: private.default_branch,
-        readers: private.readers,
-    };
-    let staging = tempfile::Builder::new()
-        .prefix("shared-staging-")
-        .tempdir_in(home)?;
-    let into = staging
-        .path()
-        .to_str()
-        .context("The data folder's path is not UTF-8")?;
-    let mut clone = vec!["clone", "--quiet", "--no-tags", "--single-branch"];
-    if head.is_some() {
-        clone.extend(["--branch", &repository.branch]);
-    }
-    clone.extend([repository.push_url.as_str(), into]);
-    run_at(&tools.git, home, &repository.push_url, &clone)?;
-    repos::name_origin(staging.path(), &repository.name)?;
-    if head.is_none() {
-        let branch = format!("refs/heads/{}", repository.branch);
-        run(
-            &tools.git,
-            staging.path(),
-            &["symbolic-ref", "HEAD", &branch],
-        )?;
-    }
+    let (repository, organization, staging) = repos::clone_to_staging(home, input, tools)?;
     for path in SHARED_PATHS {
         refuse_links(staging.path(), Path::new(path))?;
     }
@@ -445,6 +414,9 @@ pub(crate) struct Pass {
     writes: shared::SharedWrites,
     since: u64,
     running: Arc<Mutex<()>>,
+    /// When the settings repository is also a Space's storage: what its Space and tracker rule
+    /// sets compare, and the scans before their push.
+    storage: Option<(storage::Input, scan::Scanner)>,
 }
 
 /// What a pass did, for the host thread to write and record.
@@ -462,6 +434,10 @@ pub(crate) struct Passed {
     paused: Vec<(String, Paused, Content)>,
     /// Why committing or pushing failed; what was pulled still applies.
     error: Option<String>,
+    /// Why the settings rule set compared nothing, while the repository's other rule sets went on.
+    failed: Option<anyhow::Error>,
+    /// What the storage rule sets found, when the repository is also storage.
+    storage: Option<storage::Found>,
     since: u64,
 }
 
@@ -756,9 +732,13 @@ impl RuleSet for Settings {
         let message = format!("{} · {}", subject(&passed.committed), machine_name());
         Some((passed.committed.clone(), message))
     }
+    fn failed(&mut self, error: anyhow::Error) {
+        self.passed.failed = Some(error);
+    }
 }
 
-/// Runs the settings repository's engine with its one rule set, settings. Files to pull are
+/// Runs the settings repository's engine with its settings rule set and, when it is also a
+/// Space's storage, the Space and tracker rule sets, scanning what those push. Files to pull are
 /// returned for the host thread to write.
 pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
     let Pass {
@@ -771,6 +751,7 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
         writes,
         since,
         running,
+        storage,
     } = pass;
     // Held for the whole pass, so no clone is adopted in its place until the pass is done. A
     // pass the host started before an adoption changes nothing, and the host drops it.
@@ -792,6 +773,8 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
             committed: vec![],
             paused: vec![],
             error: None,
+            failed: None,
+            storage: None,
             since,
         },
         refused: None,
@@ -799,30 +782,41 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
     if shared::lock(&settings.writes).touched("", since) {
         return Ok(settings.passed);
     }
-    let rule_sets: &mut [&mut dyn RuleSet] = &mut [&mut settings];
-    let pushed = repos::pass(
-        &clone,
-        remote(&repository),
-        &previous,
-        rule_sets,
-        &tools.git,
-    )?;
+    let (input, scanner) = storage.unzip();
+    let mut stored = input.map(storage::RuleSets::new);
+    let outcome = {
+        let mut rule_sets: Vec<&mut dyn RuleSet> = vec![&mut settings];
+        if let Some(stored) = &mut stored {
+            rule_sets.extend(stored.as_mut());
+        }
+        repos::pass(
+            &clone,
+            remote(&repository),
+            &previous,
+            &mut rule_sets,
+            scanner.as_ref(),
+            &tools.git,
+        )?
+    };
     let Settings {
         mut passed,
         refused,
         ..
     } = settings;
-    match pushed {
+    let fetched = runtime::git_output(&clone, &["rev-parse", "FETCH_HEAD"])?;
+    passed.remote = fetched.trim().to_owned();
+    match outcome.pushed {
         Ok(head) => passed.pushed = head,
         Err(error) => passed.error = Some(error),
     }
     passed.error = passed.error.or(refused);
+    passed.storage = stored.map(|stored| stored.found(outcome.held));
     Ok(passed)
 }
 
 /// Holds off sync passes while the host changes what they sync with. Refused while one runs,
 /// which can take minutes.
-fn no_pass_running(passes: &Mutex<()>) -> Result<std::sync::MutexGuard<'_, ()>> {
+pub(crate) fn no_pass_running(passes: &Mutex<()>) -> Result<std::sync::MutexGuard<'_, ()>> {
     match passes.try_lock() {
         Ok(none) => Ok(none),
         Err(std::sync::TryLockError::Poisoned(none)) => Ok(none.into_inner()),
@@ -882,10 +876,11 @@ impl Host {
         with: Option<JoinWith>,
         tools: &Tools,
     ) -> Result<HostSettings> {
+        self.refuse_second_use_of(input, storage::Use::Settings)?;
         let prepared = prepare(&self.home, input, with, tools)?;
         self.adopt_settings_repository(prepared)
     }
-    /// Makes a prepared clone, at `<data folder>/repos/<owner>-<name>/`, the shared folder, and
+    /// Makes a prepared clone, at `<data folder>/repos/github.com/<owner>/<name>/`, the shared folder, and
     /// records the repository in this machine's settings. With another settings repository
     /// chosen, its settings files are first copied to `<data folder>/shared/`, as Stop syncing
     /// does, and its clone stays where it is. Then the settings files of `<data folder>/shared/`
@@ -968,8 +963,20 @@ impl Host {
             settings_repository: None,
             ..self.settings()
         };
+        let key = self.settings_key().unwrap_or_default();
         self.save_settings(&settings)?;
-        self.db.execute("DELETE FROM sync_paused", [])?;
+        // Only the settings rule set stops: a Space stored in the clone keeps its pauses.
+        let paused: Vec<String> = (self
+            .db
+            .prepare("SELECT path FROM sync_paused WHERE repository=?1")?)
+        .query_map([&key], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+        for path in paused.iter().filter(|path| is_shared(path)) {
+            self.db.execute(
+                "DELETE FROM sync_paused WHERE repository=?1 AND path=?2",
+                params![key, path],
+            )?;
+        }
         self.sync = Synced::default();
         Ok(self.settings())
     }
@@ -1009,7 +1016,7 @@ impl Host {
             from.display(),
             to.display()
         );
-        fs::create_dir_all(self.home.join(repos::FOLDER))?;
+        fs::create_dir_all(to.parent().context("A clone is in a folder")?)?;
         fs::rename(&from, &to)?;
         eprintln!("Moved the settings repository's clone to {}", to.display());
         // An older release may have left a former name GitHub redirects as `origin`.
@@ -1023,19 +1030,30 @@ impl Host {
         let Some(repository) = self.settings().settings_repository else {
             return Ok(None);
         };
-        let record = match Record::read(&self.db)? {
+        let key = repos::key(&repository.name);
+        let record = match Record::read(&self.db, &key)? {
             Some(record) => record,
             None => {
                 // A repository chosen before sync's record existed.
                 self.record_clone()?;
-                Record::read(&self.db)?.context("Sync's record has no commit")?
+                Record::read(&self.db, &key)?.context("Sync's record has no commit")?
             }
         };
         let Record {
             commit,
-            synced,
-            written,
+            mut synced,
+            mut written,
         } = record;
+        // The record also holds the files of a Space stored in the clone, which are not settings.
+        synced.retain(|path, _| is_shared(path));
+        written.retain(|path, _| is_shared(path));
+        let storage = match self.storage_input(&key)? {
+            Some(input) => {
+                let scanner = scan::Scanner::bundled(&self.home, self.scan_path.clone())?;
+                Some((input, scanner))
+            }
+            None => None,
+        };
         Ok(Some(Pass {
             clone: self.shared_folder(),
             repository,
@@ -1043,20 +1061,22 @@ impl Host {
             synced,
             written,
             two_machines: (self.db.prepare(
-                "SELECT path FROM sync_paused WHERE json_extract(why,'$.kind')='two_machines'",
+                "SELECT path FROM sync_paused WHERE repository=?1 AND json_extract(why,'$.kind')='two_machines'",
             )?)
-            .query_map([], |r| r.get(0))?
+            .query_map([&key], |r| r.get(0))?
+            .filter(|path| path.as_ref().is_ok_and(|path: &String| is_shared(path)))
             .collect::<rusqlite::Result<_>>()?,
             writes: self.shared_writes.clone(),
             since: shared::lock(&self.shared_writes).ended(),
             running: self.sync_passes.clone(),
+            storage,
         }))
     }
     /// Writes what a pass pulled and records what it synced and paused; `true` when the status
     /// or a setting changed. What the host wrote or settled during the pass is left for the
     /// next one, and a pass that started before a clone was adopted is dropped.
     pub(crate) fn finish_sync(&mut self, at: i64, passed: Result<Passed>) -> Result<bool> {
-        let passed = match passed {
+        let mut passed = match passed {
             Ok(passed) => passed,
             Err(error) => {
                 self.sync.stopped = error.is::<Stopped>();
@@ -1069,6 +1089,22 @@ impl Host {
         let touched = |path: &str| shared::lock(&writes).touched(path, passed.since);
         if self.settings().settings_repository.as_ref() != Some(&passed.repository) || touched("") {
             return Ok(false);
+        }
+        let key = repos::key(&passed.repository.name);
+        if let Some(found) = passed.storage.take() {
+            self.finish_storage(found, passed.pushed.is_some())?;
+        }
+        if let Some(error) = passed.failed.take() {
+            // The other rule sets' commits were pushed; only settings waits.
+            let commit = passed.pushed.unwrap_or(passed.remote);
+            self.db.execute(
+                "UPDATE sync_record SET synced=?2 WHERE repository=?1 AND path=''",
+                params![key, commit.as_bytes()],
+            )?;
+            self.sync.stopped = error.is::<Stopped>();
+            self.sync.failed(at, format!("{error:#}"));
+            self.merge_after_pass(&[]);
+            return Ok(true);
         }
         let sorting = self.settings().keeper.comments;
         let shared = self.shared_folder();
@@ -1099,21 +1135,28 @@ impl Host {
         for (rows, written) in [(&pulled, "excluded.written"), (&synced, "written")] {
             for (path, content) in rows {
                 tx.execute(
-                    &format!("INSERT INTO sync_record(path,synced,written) VALUES (?1,?2,?2) ON CONFLICT(path) DO UPDATE SET synced=excluded.synced, written={written}"),
-                    params![path, content],
+                    &format!("INSERT INTO sync_record(repository,path,synced,written) VALUES (?1,?2,?3,?3) ON CONFLICT(repository,path) DO UPDATE SET synced=excluded.synced, written={written}"),
+                    params![key, path, content],
                 )?;
             }
         }
-        let paused: Vec<String> = (tx.prepare("SELECT path FROM sync_paused")?)
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        for path in paused.iter().filter(|path| !touched(path)) {
-            tx.execute("DELETE FROM sync_paused WHERE path=?1", [path])?;
+        let paused: Vec<String> = (tx
+            .prepare("SELECT path FROM sync_paused WHERE repository=?1")?)
+        .query_map([&key], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+        for path in paused
+            .iter()
+            .filter(|path| is_shared(path) && !touched(path))
+        {
+            tx.execute(
+                "DELETE FROM sync_paused WHERE repository=?1 AND path=?2",
+                params![key, path],
+            )?;
         }
         for (path, why, theirs) in passed.paused.iter().filter(|(path, ..)| !touched(path)) {
             tx.execute(
-                "INSERT OR REPLACE INTO sync_paused(path,why,theirs) VALUES (?1,?2,?3)",
-                params![path, serde_json::to_string(why)?, theirs],
+                "INSERT OR REPLACE INTO sync_paused(repository,path,why,theirs) VALUES (?1,?2,?3,?4)",
+                params![key, path, serde_json::to_string(why)?, theirs],
             )?;
         }
         tx.commit()?;
@@ -1168,14 +1211,14 @@ impl Host {
     /// Whether, with a settings repository, any of the shared `paths` holds what the host
     /// neither last wrote nor last synced, which the next pass pauses.
     pub(crate) fn changed_outside_wiffletree(&self, paths: &[String]) -> Result<bool> {
-        if self.settings().settings_repository.is_none() {
+        let Some(key) = self.settings_key() else {
             return Ok(false);
-        }
+        };
         let shared = self.shared_folder();
         for path in paths {
-            let recorded = "SELECT synced,written FROM sync_record WHERE path=?1";
+            let recorded = "SELECT synced,written FROM sync_record WHERE repository=?1 AND path=?2";
             let (synced, written): (Content, Content) = (self.db)
-                .query_row(recorded, [path], |r| Ok((r.get(0)?, r.get(1)?)))
+                .query_row(recorded, params![key, path], |r| Ok((r.get(0)?, r.get(1)?)))
                 .optional()?
                 .unwrap_or_default();
             let mine = fs::read(shared.join(path)).ok();
@@ -1189,10 +1232,12 @@ impl Host {
         let Some(repository) = self.settings().settings_repository else {
             return Ok(None);
         };
+        let key = repos::key(&repository.name);
         let waiting: Vec<String> = (self.db.prepare(
-            "SELECT path FROM sync_record WHERE path<>'' AND written IS NOT synced AND path NOT IN (SELECT path FROM sync_paused) ORDER BY path",
+            "SELECT path FROM sync_record WHERE repository=?1 AND path<>'' AND written IS NOT synced AND path NOT IN (SELECT path FROM sync_paused WHERE repository=?1) ORDER BY path",
         )?)
-        .query_map([], |r| r.get(0))?
+        .query_map([&key], |r| r.get(0))?
+        .filter(|path| path.as_ref().is_ok_and(|path: &String| is_shared(path)))
         .collect::<rusqlite::Result<_>>()?;
         Ok(Some(SyncStatus {
             repository,
@@ -1213,21 +1258,35 @@ impl Host {
     /// changes first, then edits made outside Wiffletree, then what this machine cannot read.
     /// Then one per skill question, from `skills`, which are the skill states.
     pub(crate) fn workspace_notes(&self, skills: &[SkillState]) -> Result<Vec<WorkspaceNote>> {
-        let rows: Vec<(String, String)> = (self.db.prepare("SELECT path,why FROM sync_paused")?)
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?;
+        let rows: Vec<(String, String, String)> = (self
+            .db
+            .prepare("SELECT repository,path,why FROM sync_paused")?)
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+        let settings = self.settings_key().unwrap_or_default();
         let mut notes = BTreeMap::new();
-        for (path, why) in rows {
+        for (key, path, why) in rows {
             let path = unit(&path).to_owned();
             let paused: Paused = serde_json::from_str(&why)?;
-            let setting = self.setting(&path);
+            let repository = match key == settings && is_shared(&path) {
+                true => None,
+                false => Some(self.stored_repository_name(&key)?),
+            };
+            let setting = match &repository {
+                None => self.setting(&path),
+                Some(_) => self.stored_file_name(&key, &path)?,
+            };
             // "rules" or "rewrite" for a skill.
             let own = setting
                 .rsplit_once(" · your ")
                 .map_or("version", |(_, own)| own);
+            let others = match repository {
+                None => "Other settings keep syncing.",
+                Some(_) => "Other files keep syncing.",
+            };
             let text = match &paused {
                 Paused::TwoMachines { machine } => format!(
-                    "{setting} changed on this Mac and on {machine} since they last synced. This Mac keeps using its own {own}. Other settings keep syncing."
+                    "{setting} changed on this Mac and on {machine} since they last synced. This Mac keeps using its own {own}. {others}"
                 ),
                 Paused::OutsideWiffletree => format!(
                     "{setting} was changed outside Wiffletree on this Mac, by an editor, a script or an agent’s shell. It isn’t sent to your other Macs until you choose. This Mac uses it as it is now."
@@ -1241,8 +1300,9 @@ impl Host {
                 setting,
                 paused,
                 text,
+                repository,
             };
-            notes.insert(path, note);
+            notes.insert((key, path), note);
         }
         let mut notes: Vec<PausedSetting> = notes.into_values().collect();
         notes.sort_by_key(|note| match note.paused {
@@ -1253,8 +1313,53 @@ impl Host {
         let questions = (skills.iter()).filter_map(|state| state.question.clone());
         let notes = notes.into_iter().map(WorkspaceNote::Paused);
         Ok(notes
+            .chain(self.held_notes()?)
             .chain(questions.map(WorkspaceNote::SkillQuestion))
             .collect())
+    }
+    /// A repository as `owner/name`, by its record key.
+    fn stored_repository_name(&self, key: &str) -> Result<String> {
+        let stored: Option<String> = (self.db)
+            .query_row(
+                "SELECT data FROM storage_repositories WHERE key=?1",
+                [key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(match stored {
+            Some(data) => serde_json::from_str::<SettingsRepository>(&data)?.name,
+            None => key.to_owned(),
+        })
+    }
+    /// A paused file of a storage repository as the app names it, such as "Sage · Space".
+    fn stored_file_name(&self, key: &str, path: &str) -> Result<String> {
+        if path == storage::TRACKER {
+            return Ok("Issue prefix".into());
+        }
+        for record in self.spaces()? {
+            let space = &record.space;
+            let folder = format!("spaces/{}/", space.storage.folder);
+            if repos::key(&space.storage.repository.key()) == key
+                && let Some(file) = path.strip_prefix(&folder)
+            {
+                return Ok(match file {
+                    "space.yaml" => format!("{} · Space", space.name),
+                    file => format!("{} · {file}", space.name),
+                });
+            }
+        }
+        Ok(path.to_owned())
+    }
+    /// The record key and folder of the clone a note names: a storage repository's, or the
+    /// shared folder's for `None`.
+    fn paused_in(&self, repository: Option<&str>) -> (String, PathBuf) {
+        match repository {
+            None => (
+                self.settings_key().unwrap_or_default(),
+                self.shared_folder(),
+            ),
+            Some(name) => (repos::key(name), repos::clone_folder(&self.home, name)),
+        }
     }
     /// A paused file as the app names it, such as "Implementing · your rules".
     fn setting(&self, path: &str) -> String {
@@ -1268,11 +1373,11 @@ impl Host {
         }
     }
     /// Why the file, or a skill's folder, a note names is paused, and each of its files.
-    fn paused_unit(&self, path: &str) -> Result<(Paused, Vec<PausedFile>)> {
+    fn paused_unit(&self, key: &str, path: &str) -> Result<(Paused, Vec<PausedFile>)> {
         let mut rows: Vec<(String, String, Content, Content)> = (self.db.prepare(
-            "SELECT p.path,p.why,p.theirs,r.synced FROM sync_paused p LEFT JOIN sync_record r USING(path)",
+            "SELECT p.path,p.why,p.theirs,r.synced FROM sync_paused p LEFT JOIN sync_record r USING(repository,path) WHERE p.repository=?1",
         )?)
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .query_map([key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<rusqlite::Result<_>>()?;
         rows.retain(|(file, ..)| unit(file) == path);
         let (_, why, ..) = rows.first().context("That setting is not paused")?;
@@ -1283,9 +1388,9 @@ impl Host {
         Ok((paused, files.collect()))
     }
     /// This machine's version beside the other, line by line, as a note's Compare shows them.
-    pub(crate) fn compare_paused(&self, path: &str) -> Result<Vec<Line>> {
-        let (paused, files) = self.paused_unit(path)?;
-        let shared = self.shared_folder();
+    pub(crate) fn compare_paused(&self, repository: Option<&str>, path: &str) -> Result<Vec<Line>> {
+        let (key, shared) = self.paused_in(repository);
+        let (paused, files) = self.paused_unit(&key, path)?;
         // A skill's agents get its rewrite, or else its rules; `base.md` is never theirs to read.
         let text = |version: &dyn Fn(&PausedFile) -> Content| {
             let read = |rewrite: bool| {
@@ -1306,8 +1411,14 @@ impl Host {
     }
     /// Settles a paused file, or a skill's rules, rewrite and base together, as its note offers.
     /// The next pass, due five seconds later, pushes or pulls what the choice leaves.
-    pub(crate) fn settle_paused(&self, path: &str, settle: Settle) -> Result<()> {
-        let (paused, mut rows) = self.paused_unit(path)?;
+    pub(crate) fn settle_paused(
+        &mut self,
+        repository: Option<&str>,
+        path: &str,
+        settle: Settle,
+    ) -> Result<()> {
+        let (key, shared) = self.paused_in(repository);
+        let (paused, mut rows) = self.paused_unit(&key, path)?;
         let offered = match paused {
             Paused::TwoMachines { .. } => [Settle::KeepThisMachines, Settle::UseTheOthers],
             Paused::OutsideWiffletree => [Settle::SyncThisVersion, Settle::PutBackSynced],
@@ -1317,20 +1428,24 @@ impl Host {
             offered.contains(&settle),
             "That note does not offer this choice"
         );
-        let _writing = shared::Writing::start(&self.shared_writes, path);
-        let shared = self.shared_folder();
+        let stored = repository.is_some();
+        let writes = self.shared_writes.clone();
+        let _writing = (!stored).then(|| shared::Writing::start(&writes, path));
         let mine = |file: &str| fs::read(shared.join(file)).ok();
         if settle == Settle::SyncThisVersion {
             for (file, ..) in &rows {
                 if let Some(content) = mine(file) {
-                    shared::check(file, &content)
-                        .with_context(|| format!("{file} can't be synced"))?;
+                    let checked = match stored {
+                        true => storage::check(file, &content),
+                        false => shared::check(file, &content),
+                    };
+                    checked.with_context(|| format!("{file} can't be synced"))?;
                 }
             }
         }
-        let recorder = self.recorder();
         // `rewrite.md` decides a skill's mode, so it changes last.
         rows.sort_by_key(|(file, ..)| file.ends_with("/rewrite.md"));
+        let mut taken = vec![];
         for (file, theirs, synced) in rows {
             let at = shared.join(&file);
             let (written, synced) = match settle {
@@ -1346,28 +1461,45 @@ impl Host {
                         None => drop(fs::remove_file(&at)),
                     }
                 }
-                recorder.wrote(&at, content.as_deref())?;
+                taken.push((file.clone(), content.clone()));
+                match stored {
+                    true => Record::wrote(&self.db, &key, &file, content.as_deref())?,
+                    false => self.recorder().wrote(&at, content.as_deref())?,
+                }
             }
             if let Some(synced) = synced {
                 self.db.execute(
-                    "INSERT INTO sync_record(path,synced) VALUES (?1,?2) ON CONFLICT(path) DO UPDATE SET synced=excluded.synced",
-                    params![file, synced],
+                    "INSERT INTO sync_record(repository,path,synced) VALUES (?1,?2,?3) ON CONFLICT(repository,path) DO UPDATE SET synced=excluded.synced",
+                    params![key, file, synced],
                 )?;
             }
-            self.db
-                .execute("DELETE FROM sync_paused WHERE path=?1", [&file])?;
+            self.db.execute(
+                "DELETE FROM sync_paused WHERE repository=?1 AND path=?2",
+                params![key, file],
+            )?;
         }
-        self.shared_written.set(true);
+        match repository {
+            Some(name) => {
+                let storage = storage::github(name);
+                for (file, content) in taken {
+                    self.take_pulled(&storage, &file, content.as_deref())?;
+                }
+                self.storage_written.borrow_mut().insert(key);
+            }
+            None => self.shared_written.set(true),
+        }
         Ok(())
     }
-    /// Starts sync's record afresh from the clone: each file as its head holds it is synced, and
-    /// as the folder holds it written, so a change not yet committed waits to be pushed.
+    /// Starts sync's record of the settings files afresh from the clone: each file as its head
+    /// holds it is synced, and as the folder holds it written, so a change not yet committed
+    /// waits to be pushed. A Space stored in the clone keeps its record, pauses and holds.
     fn record_clone(&mut self) -> Result<()> {
         let clone = self.shared_folder();
         let head = runtime::git_output(&clone, &["rev-parse", "HEAD"])?;
         let head = head.trim();
         let (synced, written) = (files_at(&clone, head)?, files_here(&clone)?);
-        Record::restart(&mut self.db, head, &synced, &written)
+        let key = self.settings_key().unwrap_or_default();
+        Record::restart(&self.db, &key, head, &synced, &written, &is_shared)
     }
     /// What this machine lacks to run the settings it shares through a repository, one line each.
     /// Every line is about this machine's models, which Models chooses.
@@ -1394,7 +1526,7 @@ impl Host {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::github_access::gh_login;
+    use crate::github_access::{candidates, gh_login};
     use crate::publish::tests::{exit, git};
     use crate::test_support::without_background_maintenance;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1410,7 +1542,7 @@ pub(crate) mod tests {
 
     pub(crate) struct GitHub {
         pub(crate) bare: PathBuf,
-        repository: Value,
+        pub(crate) repository: Value,
         organization: Option<Value>,
         identity: (&'static str, &'static str),
         gh: Mutex<Vec<Vec<String>>>,
@@ -1549,7 +1681,7 @@ pub(crate) mod tests {
             let log = git(&self.bare, &["log", &format!("--format={format}"), "main"]);
             log.lines().map(str::to_owned).collect()
         }
-        fn show(&self, file: &str) -> Option<String> {
+        pub(crate) fn show(&self, file: &str) -> Option<String> {
             let output = std::process::Command::new("git")
                 .current_dir(&self.bare)
                 .args(["show", &format!("main:{file}")])
@@ -2544,14 +2676,19 @@ pub(crate) mod tests {
 
     fn compare(host: &mut Host, path: &str) -> Vec<Line> {
         let path = path.into();
-        let lines = host.execute(Command::ComparePausedFile { path }).unwrap();
+        let repository = None;
+        let lines = (host.execute(Command::ComparePausedFile { path, repository })).unwrap();
         serde_json::from_value(lines).unwrap()
     }
 
     fn settle(host: &mut Host, path: &str, settle: Settle) {
-        let path = path.into();
-        host.execute(Command::SettlePausedFile { path, settle })
-            .unwrap();
+        let (path, repository) = (path.into(), None);
+        (host.execute(Command::SettlePausedFile {
+            path,
+            settle,
+            repository,
+        }))
+        .unwrap();
     }
 
     const ADDITIONS: &str = "skills/implementing/additions.md";
@@ -2587,6 +2724,7 @@ pub(crate) mod tests {
                 text: format!(
                     "Implementing · your rules changed on this Mac and on {machine} since they last synced. This Mac keeps using its own rules. Other settings keep syncing."
                 ),
+                repository: None,
             }]
         );
         assert_eq!(status(&second).waiting.len(), 0);
@@ -3037,6 +3175,7 @@ pub(crate) mod tests {
         let settle = Command::SettlePausedFile {
             path: shared::FORMAT.into(),
             settle: Settle::SyncThisVersion,
+            repository: None,
         };
         let refused = format!("{:#}", host.execute(settle).unwrap_err());
         assert!(
@@ -3188,6 +3327,7 @@ pub(crate) mod tests {
         let settle = Command::SettlePausedFile {
             path: shared::CHECK_INS.into(),
             settle: Settle::UseTheOthers,
+            repository: None,
         };
         let refused = format!("{:#}", host.execute(settle).unwrap_err());
         assert_eq!(refused, "That setting is not paused");
@@ -3898,19 +4038,19 @@ pub(crate) mod tests {
         let before = values(&host);
         drop(host);
         as_an_older_release_left_it(home.path(), NAME);
-        // The start stopped after making `repos/` and before the rename.
-        fs::create_dir(home.path().join(repos::FOLDER)).unwrap();
+        // The start stopped after making the owner's folder and before the rename.
         let clone = repos::clone_folder(home.path(), NAME);
+        fs::create_dir_all(clone.parent().unwrap()).unwrap();
         let host = Host::open(home.path()).unwrap();
         assert!(clone.join(".git").exists() && !home.path().join(shared::FOLDER).exists());
         assert_eq!(values(&host), before);
         let head = git(&clone, &["rev-parse", "HEAD"]);
         drop(host);
         let host = Host::open(home.path()).unwrap();
-        assert_eq!(
-            listing(&home.path().join(repos::FOLDER)),
-            [NAME.replace('/', "-")]
-        );
+        let (owner, name) = NAME.split_once('/').unwrap();
+        let owners = home.path().join(repos::FOLDER).join("github.com");
+        assert_eq!(listing(&owners), [owner]);
+        assert_eq!(listing(&owners.join(owner)), [name]);
         assert_eq!(git(&clone, &["rev-parse", "HEAD"]), head);
         assert_eq!(values(&host), before);
         // Stopping after the move recreates `shared/` with every setting.
@@ -3932,7 +4072,12 @@ pub(crate) mod tests {
         let host = Host::open(home.path()).unwrap();
         let shared = home.path().join(shared::FOLDER);
         assert!(shared.join(shared::CHECK_INS).exists() && !shared.join(".git").exists());
-        assert!(!home.path().join(repos::FOLDER).exists());
+        // Only Personal's local storage is under `repos/`.
+        let repos = listing(&home.path().join(repos::FOLDER));
+        assert!(
+            repos.len() == 1 && repos[0].starts_with("local-"),
+            "{repos:?}"
+        );
         assert_eq!(host.settings().checkin_child_turns, 10);
     }
 
@@ -3944,7 +4089,7 @@ pub(crate) mod tests {
         save_rules(&mut host, Skill::Implementing, "Run the linter.");
         // A clone of the repository already under `repos/`, as a Space's storage would be.
         let clone = repos::clone_folder(&host.home, NAME);
-        fs::create_dir(clone.parent().unwrap()).unwrap();
+        fs::create_dir_all(clone.parent().unwrap()).unwrap();
         let (bare, into) = (github.bare.to_str().unwrap(), clone.to_str().unwrap());
         git(home.path(), &["clone", "-q", bare, into]);
         without_background_maintenance(&clone);

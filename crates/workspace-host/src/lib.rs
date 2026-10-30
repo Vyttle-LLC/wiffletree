@@ -31,6 +31,7 @@ mod repos;
 mod repositories;
 mod revisions;
 pub mod runtime;
+mod scan;
 pub(crate) mod schedules;
 pub use schedules::TimerPass;
 pub mod service;
@@ -41,6 +42,7 @@ pub mod socket;
 mod spaces;
 mod stacks;
 mod steps;
+mod storage;
 mod stream;
 mod sync;
 mod telemetry;
@@ -135,6 +137,12 @@ pub struct Host {
     pub(crate) sync_passes: std::sync::Arc<std::sync::Mutex<()>>,
     /// What the latest sync pass did; see `sync`.
     pub(crate) sync: sync::Synced,
+    /// The GitHub storage repositories, by `repos::key`, the host wrote to since their sync took
+    /// this; see `storage`.
+    pub(crate) storage_written: std::cell::RefCell<std::collections::BTreeSet<String>>,
+    /// `PATH` for the scans before a push, which find Python and gitleaks on it; the host's own
+    /// when `None`. Tests give one with stand-in tools.
+    pub(crate) scan_path: Option<std::ffi::OsString>,
     /// By skill, in `Skill::ALL`'s order, what its history says beyond its files.
     skill_histories: [skills::Recalled; 4],
     /// With a settings repository, the merges due at start wait for this launch's first sync
@@ -288,6 +296,7 @@ impl Host {
         db.execute_batch(include_str!("schedules.sql"))?;
         db.execute_batch(include_str!("selection.sql"))?;
         db.execute_batch(include_str!("sync.sql"))?;
+        repos::migrate_records(&db, &home)?;
         db.execute_batch(include_str!("skills.sql"))?;
         repositories::migrate_to_workspace(&db)?;
         attachments::migrate(&db)?;
@@ -322,6 +331,8 @@ impl Host {
             shared_writes: Default::default(),
             sync_passes: Default::default(),
             sync: Default::default(),
+            storage_written: Default::default(),
+            scan_path: None,
             skill_histories: Default::default(),
             merges_wait_for_sync: false,
             merge_tries: Default::default(),
@@ -330,8 +341,11 @@ impl Host {
             uploads: Default::default(),
             gh_login: None,
         };
-        // Before anything reads or writes a shared setting, so the shared folder is in place.
+        // Before anything reads or writes a shared setting, so the shared folder is in place:
+        // clones an earlier release named `<owner>-<name>` first, then one still in `shared/`.
+        repos::migrate_clone_folders(&host.db, &host.home)?;
         host.move_settings_clone()?;
+        host.ensure_local_storage()?;
         host.clear_uploads()?;
         host.recover()?;
         host.end_interrupted_publishes()?;
@@ -1691,12 +1705,32 @@ impl Host {
                 description,
                 instructions,
                 prefix,
+                storage: None,
             } => serde_json::to_value(self.create_space(
                 &name,
                 &description,
                 &instructions,
                 prefix.as_deref(),
             )?)?,
+            Command::CreateSpace {
+                name,
+                description,
+                instructions,
+                prefix,
+                storage: Some(repository),
+            } => {
+                let new = storage::NewSpace {
+                    name: &name,
+                    description: &description,
+                    instructions: &instructions,
+                    prefix: prefix.as_deref(),
+                };
+                let requested = self.precheck_stored_space(&new, &repository)?;
+                let tools = publish::Tools::default();
+                let staged = storage::stage(&self.home, &repository, &tools, &[])?;
+                storage::start_if_empty(&self.home, &staged, &requested, &tools)?;
+                serde_json::to_value(self.create_stored_space(&new, staged)?)?
+            }
             Command::UpdateSpace { space } => serde_json::to_value(self.update_space(*space)?)?,
             Command::RemoveSpace { space_id } => {
                 self.remove_space(&space_id)?;
@@ -1797,17 +1831,41 @@ impl Host {
                     &publish::Tools::default(),
                 )?)?
             }
+            Command::CheckStorageRepository { repository } => {
+                let added: Vec<SpaceId> = self.spaces()?.into_iter().map(|r| r.space.id).collect();
+                let tools = publish::Tools::default();
+                serde_json::to_value(
+                    storage::stage(&self.home, &repository, &tools, &added)?.check,
+                )?
+            }
+            Command::JoinSpaces { repository, spaces } => {
+                self.refuse_second_use_of(&repository, storage::Use::Storage)?;
+                let added: Vec<SpaceId> = self.spaces()?.into_iter().map(|r| r.space.id).collect();
+                let tools = publish::Tools::default();
+                let staged = storage::stage(&self.home, &repository, &tools, &added)?;
+                serde_json::to_value(self.join_spaces(staged, &spaces)?)?
+            }
+            Command::SetTrackerPrefix { space_id, prefix } => {
+                serde_json::to_value(self.set_tracker_prefix(&space_id, &prefix)?)?
+            }
+            Command::SetUpIssues { space_id, prefix } => {
+                serde_json::to_value(self.set_up_issues(&space_id, &prefix)?)?
+            }
             Command::SyncNow => {
                 self.sync_now(&publish::Tools::default())?;
                 Value::Null
             }
             Command::StopSettingsSync => serde_json::to_value(self.stop_settings_sync()?)?,
-            Command::SettlePausedFile { path, settle } => {
-                self.settle_paused(&path, settle)?;
+            Command::SettlePausedFile {
+                path,
+                settle,
+                repository,
+            } => {
+                self.settle_paused(repository.as_deref(), &path, settle)?;
                 Value::Null
             }
-            Command::ComparePausedFile { path } => {
-                serde_json::to_value(self.compare_paused(&path)?)?
+            Command::ComparePausedFile { path, repository } => {
+                serde_json::to_value(self.compare_paused(repository.as_deref(), &path)?)?
             }
             Command::SkillHistory { skill } => serde_json::to_value(self.skills().listing(skill))?,
             Command::StartSkillRewrite { skill } => {

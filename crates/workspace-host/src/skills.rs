@@ -920,10 +920,12 @@ impl Host {
     }
     /// Whether sync has paused the skill's files.
     fn skill_paused(&self, skill: Skill) -> rusqlite::Result<bool> {
-        let paths = CURRENT.map(|file| format!("skills/{}/{file}", skill.folder()));
+        let [rules, rewrite, base] =
+            CURRENT.map(|file| format!("skills/{}/{file}", skill.folder()));
+        let repository = self.settings_key().unwrap_or_default();
         self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sync_paused WHERE path IN (?1,?2,?3))",
-            paths,
+            "SELECT EXISTS(SELECT 1 FROM sync_paused WHERE repository=?1 AND path IN (?2,?3,?4))",
+            [repository, rules, rewrite, base],
             |r| r.get(0),
         )
     }
@@ -2018,8 +2020,7 @@ mod tests {
         let before = rewritten_against_v0(&host);
         assert!(host.skill_merge_due(Skill::Coordinating).unwrap());
         // A paused skill waits until the pause is settled.
-        let pause =
-            "INSERT INTO sync_paused(path,why) VALUES ('skills/coordinating/rewrite.md','{}')";
+        let pause = "INSERT INTO sync_paused(repository,path,why) VALUES ('','skills/coordinating/rewrite.md','{}')";
         host.db.execute(pause, []).unwrap();
         assert!(!host.skill_merge_due(Skill::Coordinating).unwrap());
         host.db.execute("DELETE FROM sync_paused", []).unwrap();
@@ -2257,7 +2258,7 @@ mod tests {
     fn at_start_a_paused_skill_or_one_with_a_settings_repository_waits() {
         let (home, host) = host();
         let before = rewritten_against_v0(&host);
-        let pause = "INSERT INTO sync_paused(path,why) VALUES ('skills/coordinating/base.md','{}')";
+        let pause = "INSERT INTO sync_paused(repository,path,why) VALUES ('','skills/coordinating/base.md','{}')";
         host.db.execute(pause, []).unwrap();
         let host = started_again(&home, host);
         assert_eq!(

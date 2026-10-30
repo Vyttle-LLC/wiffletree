@@ -9,6 +9,8 @@ import tempfile
 import time
 
 root=Path(__file__).resolve().parents[1]
+# The host Cargo built, wherever CARGO_TARGET_DIR put it.
+target=Path(os.environ.get('CARGO_TARGET_DIR') or root/'target')
 fake=root/'crates/workspace-host/tests/fixtures/provider.py'
 with tempfile.TemporaryDirectory(prefix='workspace-protocol-test-') as tmp:
     tmp=Path(tmp);repo=tmp/'repo';repo.mkdir()
@@ -17,7 +19,7 @@ with tempfile.TemporaryDirectory(prefix='workspace-protocol-test-') as tmp:
         subprocess.run(['git',*args],cwd=repo,check=True,capture_output=True)
     (tmp/'usage').mkdir();prompts=tmp/'prompts';prompts.mkdir()
     env={**os.environ,'WORKSPACE_TEST_USAGE_DIR':str(tmp/'usage'),'WORKSPACE_TEST_PROMPT_DIR':str(prompts),'WORKSPACE_CODEX_BIN':str(fake),'WORKSPACE_CLAUDE_BIN':str(fake)}
-    def start():return subprocess.Popen([str(root/'target/debug/workspace-host'),'--data-dir',str(tmp/'home')],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,env=env)
+    def start():return subprocess.Popen([str(target/'debug/workspace-host'),'--data-dir',str(tmp/'home')],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,env=env)
     host=start()
     def request(command):
         host.stdin.write(json.dumps({'version':1,'id':'test','command':command})+'\n');host.stdin.flush()

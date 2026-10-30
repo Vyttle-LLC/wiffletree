@@ -2,7 +2,7 @@
 //! the sync mark the sidebar footer shows.
 use super::*;
 use crate::wording::{self, counted};
-use crate::workspace_notes::{self, NoteAction, OnNote};
+use crate::workspace_notes::{self, NoteAction, NoteRef, OnNote};
 use ui::banner;
 
 const AN_HOUR_MS: i64 = 60 * 60_000;
@@ -395,10 +395,10 @@ impl Settings {
     }
 
     /// Opens or hides a paused setting's comparison, or settles it as its note would.
-    fn note_action(&mut self, path: String, action: NoteAction, cx: &mut Context<Self>) {
+    fn note_action(&mut self, note: NoteRef, action: NoteAction, cx: &mut Context<Self>) {
         let command = match action {
-            NoteAction::Compare => workspace_notes::toggle_compare(&mut self.compared, path),
-            NoteAction::Settle(settle) => Some(Command::SettlePausedFile { path, settle }),
+            NoteAction::Compare => workspace_notes::toggle_compare(&mut self.compared, note),
+            NoteAction::Settle(settle) => Some(note.settle(settle)),
         };
         cx.notify();
         if let Some(command) = command {
@@ -418,10 +418,10 @@ impl Settings {
             let answer = answer.await;
             let _ = this.update(cx, |view, cx| {
                 shared::replied(&asked, answer.is_ok(), cx);
-                let shown = answer.and_then(|value| match command {
-                    Command::ComparePausedFile { path } => {
+                let shown = answer.and_then(|value| match NoteRef::compared_by(&command) {
+                    Some(note) => {
                         let lines = serde_json::from_value(value).map_err(|e| e.to_string())?;
-                        workspace_notes::compared_arrived(&mut view.compared, &path, lines);
+                        workspace_notes::compared_arrived(&mut view.compared, &note, lines);
                         Ok(())
                     }
                     _ => {
@@ -597,6 +597,7 @@ mod tests {
                 machine: "Mike’s MacBook Air".into(),
             },
             text: String::new(),
+            repository: None,
         };
         let tooltip = Mark::Paused(1).tooltip(&status(), &[note]);
         assert_eq!(

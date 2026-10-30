@@ -26,6 +26,7 @@ fn space() -> Space {
         repositories: vec![],
         models: SpaceModels::default(),
         sources: vec![],
+        extra: Extra::new(),
     }
 }
 
@@ -91,7 +92,11 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
         },
         Command::Settings,
         Command::CheckSettingsRepository { repository: text() },
-        Command::ComparePausedFile { path: text() },
+        Command::CheckStorageRepository { repository: text() },
+        Command::ComparePausedFile {
+            path: text(),
+            repository: None,
+        },
         Command::SkillHistory {
             skill: Skill::Coordinating,
         },
@@ -224,6 +229,7 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
             description: text(),
             instructions: text(),
             prefix: None,
+            storage: None,
         },
         Command::UpdateSpace {
             space: Box::new(space()),
@@ -272,6 +278,7 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
         Command::SettlePausedFile {
             path: text(),
             settle: Settle::UseTheOthers,
+            repository: Some(text()),
         },
         Command::StartSkillRewrite {
             skill: Skill::Coordinating,
@@ -328,6 +335,7 @@ fn space_commands_are_the_humans() {
             description: text(),
             instructions: text(),
             prefix: None,
+            storage: Some(text()),
         },
         Command::UpdateSpace {
             space: Box::new(space()),
@@ -342,6 +350,21 @@ fn space_commands_are_the_humans() {
         Command::AttachBrain {
             project_id: text(),
             path: text(),
+        },
+        Command::JoinSpaces {
+            repository: text(),
+            spaces: vec![JoinSpace {
+                folder: text(),
+                brain_path: None,
+            }],
+        },
+        Command::SetTrackerPrefix {
+            space_id: space().id,
+            prefix: text(),
+        },
+        Command::SetUpIssues {
+            space_id: space().id,
+            prefix: text(),
         },
     ];
     for command in human {
