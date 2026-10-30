@@ -126,7 +126,7 @@ fn the_upgrade_makes_a_space_per_brain_folder_and_personal_for_the_rest() {
     assert_eq!(
         spaces[0].space.brain,
         Some(SpaceBrain {
-            repository: BrainRepository::Local,
+            repository: BrainRepository::local(),
             folder: "second-brain".into(),
             extra: Extra::new(),
         })

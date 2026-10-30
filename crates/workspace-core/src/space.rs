@@ -76,7 +76,18 @@ pub enum BrainRepository {
         extra: Extra,
     },
     /// A folder on this Mac; its path is a machine-local fact (`SpaceLocal::brain_path`).
-    Local,
+    Local {
+        #[serde(flatten)]
+        extra: Extra,
+    },
+}
+impl BrainRepository {
+    /// A local brain, as this release writes it.
+    pub fn local() -> Self {
+        Self::Local {
+            extra: Extra::new(),
+        }
+    }
 }
 
 /// Where a Space's definition lives: its folder under `spaces/` in a storage repository.
@@ -111,11 +122,41 @@ impl StorageRepository {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpaceModels {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub threads: Option<ModelProfile>,
+    pub threads: Option<SpaceModel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub jobs: Option<ModelProfile>,
+    pub jobs: Option<SpaceModel>,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// A Space's default model, written as a `ModelProfile` is, with the keys this release does not
+/// know.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceModel {
+    pub provider: crate::Provider,
+    pub model: String,
+    pub effort: String,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+impl SpaceModel {
+    pub fn profile(&self) -> ModelProfile {
+        ModelProfile {
+            provider: self.provider,
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+        }
+    }
+}
+impl From<ModelProfile> for SpaceModel {
+    fn from(profile: ModelProfile) -> Self {
+        Self {
+            provider: profile.provider,
+            model: profile.model,
+            effort: profile.effort,
+            extra: Extra::new(),
+        }
+    }
 }
 
 /// A source a Space's threads may use, in the format job recipes use.

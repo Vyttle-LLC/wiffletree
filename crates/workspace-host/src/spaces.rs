@@ -79,7 +79,7 @@ fn upgrade(db: &Connection) -> Result<()> {
         };
         let mut space = new_space(&name, &mut prefixes);
         space.0.brain = Some(SpaceBrain {
-            repository: BrainRepository::Local,
+            repository: BrainRepository::local(),
             folder: SpaceBrain::DEFAULT_FOLDER.into(),
             extra: Extra::new(),
         });
@@ -494,18 +494,19 @@ impl Host {
             mut space,
             mut local,
         } = self.space(&project.space)?;
-        let (folder, extra) = match space.brain {
-            Some(SpaceBrain {
-                repository: BrainRepository::Local,
-                folder,
-                extra,
-            }) => (folder, extra),
-            _ => (SpaceBrain::DEFAULT_FOLDER.into(), Extra::new()),
-        };
-        space.brain = Some(SpaceBrain {
-            repository: BrainRepository::Local,
-            folder,
-            extra,
+        // A local brain keeps its folder and the keys this release does not know.
+        space.brain = Some(match space.brain {
+            Some(
+                brain @ SpaceBrain {
+                    repository: BrainRepository::Local { .. },
+                    ..
+                },
+            ) => brain,
+            _ => SpaceBrain {
+                repository: BrainRepository::local(),
+                folder: SpaceBrain::DEFAULT_FOLDER.into(),
+                extra: Extra::new(),
+            },
         });
         local.brain_path = Some(path.clone());
         self.atomically(|host| {

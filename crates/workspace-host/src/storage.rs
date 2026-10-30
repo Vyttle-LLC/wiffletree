@@ -74,6 +74,11 @@ fn read_space(content: &[u8], storage: SpaceStorage) -> Result<Space> {
         file.format == SPACE_FORMAT,
         "This Space was written by a newer Wiffletree. Update to use it."
     );
+    // The file's place is the Space's storage, which the file itself never names.
+    ensure!(
+        !file.extra.contains_key("storage"),
+        "space.yaml names a storage, which a Space's file cannot"
+    );
     let space = Space {
         id: file.id,
         name: file.name,
@@ -229,9 +234,12 @@ fn commit_local(folder: &Path, paths: &[&str], message: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whether a tracker's clone holds any issue.
-fn has_issues(folder: &Path) -> Result<bool> {
-    Ok(!files_under(&folder.join(ISSUES))?.is_empty())
+/// Whether a tracker holds any issue: in its clone, or on GitHub as of `synced`, the commit last
+/// synced, as a pass never brings `issues/` into the clone for this release.
+fn has_issues(folder: &Path, synced: &str) -> Result<bool> {
+    let listed = ["ls-tree", "-r", "--name-only", synced, "--", ISSUES];
+    let on_github = !runtime::git_output(folder, &listed)?.trim().is_empty();
+    Ok(on_github || !files_under(&folder.join(ISSUES))?.is_empty())
 }
 
 /// A GitHub repository checked as a Space's storage, with a clone of its branch in a staging
@@ -830,8 +838,11 @@ impl Host {
                 commit_local(&folder, &[TRACKER, ISSUES], &message)?;
             }
             Some(key) => {
+                let synced = Record::read(&self.db, &key)?
+                    .context("The storage repository has no record")?
+                    .commit;
                 ensure!(
-                    !has_issues(&folder)?,
+                    !has_issues(&folder, &synced)?,
                     "{storage} has issues, and a shared tracker's prefix changes only while it has none"
                 );
                 self.write_stored(&key, &folder, TRACKER, &content)?;
@@ -1093,7 +1104,10 @@ impl Host {
                     .copied()
                     .unwrap_or(false)
             })
-            .map(|profile| format!("{} is not available here; using {instead}", profile.short()))
+            .map(|model| {
+                let named = model.profile().short();
+                format!("{named} is not available here; using {instead}")
+            })
             .collect())
     }
     /// What a pass of the GitHub storage repository `key` compares, or `None` when no Space on
@@ -1560,6 +1574,11 @@ brain:
   cache: 7
 models:
   future_default: opus
+  threads:
+    provider: claude
+    model: opus
+    effort: high
+    future_option: keep-model
 sources:
 - kind: mcp
   server: linear
@@ -1595,11 +1614,64 @@ sources:
         assert_eq!(file["brain"]["cache"], 7);
         assert_eq!(file["brain"]["repository"]["mirror"], true);
         assert_eq!(file["models"]["future_default"], "opus");
+        assert_eq!(file["models"]["threads"]["future_option"], "keep-model");
+        assert_eq!(file["models"]["threads"]["model"], "opus");
         assert_eq!(file["sources"][0]["note"], "first");
         assert_eq!(file["sources"][1]["note"], "second");
         // Read back by this release, the file is the same Space.
         let again = read_space(&space_yaml(&space).unwrap(), space.storage.clone()).unwrap();
         assert_eq!(again, space);
+    }
+
+    #[test]
+    fn a_local_brain_repository_keeps_its_unknown_keys() {
+        let text = "format: 1\nid: home\nname: Home\nbrain:\n  repository:\n    kind: local\n    future_option: keep-repository\n  folder: second-brain\n";
+        let storage = SpaceStorage {
+            repository: super::github(NAME),
+            folder: "home".into(),
+        };
+        let space = Space {
+            description: "Changed here".into(),
+            ..read_space(text.as_bytes(), storage).unwrap()
+        };
+        let file = written(&space);
+        assert_eq!(file["brain"]["repository"]["kind"], "local");
+        assert_eq!(
+            file["brain"]["repository"]["future_option"],
+            "keep-repository"
+        );
+    }
+
+    #[test]
+    fn a_space_file_naming_a_storage_is_refused_and_paused_when_pulled() {
+        let storage = SpaceStorage {
+            repository: super::github(NAME),
+            folder: "sage".into(),
+        };
+        let named = sage("") + "storage: a teammate's note\n";
+        let error = read_space(named.as_bytes(), storage).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("names a storage"),
+            "{error:#}"
+        );
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let (home, mut host) = host();
+        join_sage(&mut host, &github).unwrap();
+        github.commit("spaces/sage/space.yaml", &named);
+        sync(&mut host, &github);
+        let notes = host.workspace_notes(&[]).unwrap();
+        assert!(
+            matches!(notes.as_slice(), [WorkspaceNote::Paused(p)]
+                if matches!(p.paused, Paused::CannotBeRead { .. })),
+            "{notes:?}"
+        );
+        drop(host);
+        let host = Host::open(home.path()).unwrap();
+        assert_eq!(
+            space_named(&host, "Sage").description,
+            "Secure family messaging"
+        );
     }
 
     #[test]
@@ -1738,6 +1810,25 @@ sources:
         fs::write(issue, "---\nid: SG-1\n---\n").unwrap();
         let error = host.set_tracker_prefix(&sage.id, "SAGE").unwrap_err();
         assert!(format!("{error:#}").contains("changes only while it has none"));
+    }
+
+    #[test]
+    fn an_issue_another_mac_pushed_keeps_a_shared_trackers_prefix() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let (home, mut host) = host();
+        join_sage(&mut host, &github).unwrap();
+        github.commit("issues/SAGE-1/issue.md", "---\nid: SAGE-1\n---\n");
+        sync(&mut host, &github);
+        let clone = repos::clone_folder(home.path(), NAME);
+        assert!(
+            !clone.join("issues").exists(),
+            "issues/ is left for shared-issues"
+        );
+        let sage = space_named(&host, "Sage");
+        let error = host.set_tracker_prefix(&sage.id, "SG").unwrap_err();
+        assert!(format!("{error:#}").contains("changes only while it has none"));
+        assert_eq!(github.show(TRACKER).unwrap(), "format: 1\nprefix: SAGE\n");
     }
 
     #[test]
@@ -2180,11 +2271,14 @@ sources:
             },
         )
         .unwrap();
-        sage.models.jobs = Some(ModelProfile {
-            provider: Provider::Claude,
-            model: "opus".into(),
-            effort: "high".into(),
-        });
+        sage.models.jobs = Some(
+            ModelProfile {
+                provider: Provider::Claude,
+                model: "opus".into(),
+                effort: "high".into(),
+            }
+            .into(),
+        );
         github.commit("spaces/sage/space.yaml", space_yaml(&sage).unwrap());
         let (_home, mut host) = host();
         let check = stage(&host.home, NAME, &github.tools(), &[]).unwrap().check;
