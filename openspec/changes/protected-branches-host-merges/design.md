@@ -57,6 +57,8 @@ A branch is protected in a repository when any of these holds:
 - It matches an entry the human added to the repository's list.
 - GitHub reports that branch protection or a ruleset applies to it.
 
+Any active ruleset rule that `gh api repos/{o}/{r}/rules/branches/{branch}` returns for the branch counts, whatever its type. Picking rule types (`pull_request`, `required_status_checks`, `update`, `non_fast_forward`, `deletion` and so on) would leave a gap whenever GitHub adds a type; counting every rule is simpler and fails closed. A ruleset in evaluate mode is not returned by that endpoint and does not count. A ruleset that targets every branch (`~ALL`) protects every branch, so its GitHub row reads "all branches" and the block says Wiffletree can merge nothing in that repository while it applies.
+
 Changing the base does not keep the old base protected; it stays protected only if it is also the default branch or on the list. The page shows the base row with "always protected while it is the base" so this is not a surprise.
 
 The always-protected rows are derived each time, not stored, so they cannot be removed and cannot go stale. The human's entries are stored on the `Repository` record as `protected_branches: Vec<String>`, beside `base` and `checks`, so they stay on this machine with the rest of the record and the settings repository never sees them.
@@ -76,7 +78,7 @@ The host refuses an entry, with the reason, when it is empty or has whitespace; 
 4. The host reads the PR again from GitHub (`gh pr view --json baseRefName,headRefOid,mergeable,mergeStateStatus,isDraft,state,statusCheckRollup`), and its base is the ticket's base as `stacks::Base::pull_request_base` gives it.
 5. The base is not protected (decision 1). GitHub's part is read now, never from a cache: `gh api repos/{o}/{r}` (`default_branch` and the allowed merge methods), `gh api repos/{o}/{r}/branches/{base}` (`protected`) and `gh api repos/{o}/{r}/rules/branches/{base}` (rulesets that apply). All three are read-only and work with read access. If any of them fails, the merge is refused: "GitHub could not be read, so nothing was merged."
 6. The PR's head is the commit the host last pushed for the ticket and the worktree's HEAD, and it is the reviewed commit or a patch-equivalent one, as `publish_ticket` checks.
-7. The PR is not a draft, `mergeable` is `MERGEABLE`, and the merge state is not `DIRTY` (conflict) or `BLOCKED`. `BEHIND` is allowed: the base is unprotected, and GitHub merges a branch that is behind when nothing conflicts.
+7. The PR is not a draft, `mergeable` is `MERGEABLE`, and the merge state is not `DIRTY` (conflict) or `BLOCKED`. GitHub computes mergeability lazily, so `mergeable` `UNKNOWN` (or merge state `UNKNOWN`) makes the request wait like pending checks (decision 5) instead of refusing it. `BEHIND` is allowed: the base is unprotected, and GitHub merges a branch that is behind when nothing conflicts.
 8. The checks rollup is `success`, or the PR has no checks at all, when Wiffletree's own review stands alone (human decision 13). `pending` makes the request wait (decision 5); `failure` or `error` refuse it.
 
 No Inbox answer overrides checks 1 to 8. The approval in decision 4 is asked only after they hold.
@@ -94,7 +96,7 @@ The acceptance after the merge records a waiver: the coordinator's `waived` reas
 
 ### 5. Waiting for checks
 A request whose checks are pending is stored on the ticket (`Ticket.merging`: the head, the method, whether the human approved, and the cycle it was decided on). The host decides it again after each PR watcher pass for that repository, which already runs every few minutes and at once after a push, so no new scheduler is added. The request:
-- merges when every check in decision 3 holds and the rollup is `success`;
+- merges when every check in decision 3 holds, `mergeable` is known to be `MERGEABLE` and the rollup is `success` or there are no checks;
 - ends, telling the coordinator, when the checks fail, the PR closes or merges otherwise, a conflict appears, the base becomes protected, or a new verification cycle starts;
 - when it needs no approval, follows the head when the host itself pushed a new head with the same change, such as the PR keeper's rebase, and waits for that head's checks; any other new head ends it;
 - when it needs the human's approval (decision 4), ends on any new head, before or after the human answered, withdrawing its Inbox item, because an approval covers one head. The coordinator is told to call `merge_ticket` again, which asks again for the new head.
