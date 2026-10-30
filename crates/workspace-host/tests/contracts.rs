@@ -164,22 +164,26 @@ fn publishing_is_one_tool_only_merge_ticket_merges_and_none_approves_closes_or_c
 #[test]
 fn every_roles_instructions_state_the_publishing_rules_in_wiffletrees_own_words() {
     // The paragraph the human confirmed on October 13, 2026, with the coordinator's waiver of a
-    // blocked review standing since October 29.
-    let confirmed = "Do not deploy, publish, change credentials, touch production, or alter main, the default branch or another shared branch without explicit human authorization. Nothing leaves this machine from your shell: never run git push, and never create, edit, comment on, review, close or merge a pull request yourself. To push a ticket's branch and open or update its pull request, call publish_ticket once the ticket's review has ended. The workspace runs the push itself: without asking when the human allowed the repository's owner, which workspace_context shows, and the review passed or the coordinator waived a blocked review; otherwise only after the human approves each step in their inbox. Write the pull request's title and description by the repository's and the human's own PR rules. Only the human merges.";
+    // blocked review standing since October 29 and its merges into branches that are not
+    // protected since October 30.
+    let confirmed = "Do not deploy, publish, change credentials, touch production, or alter main, the default branch or another shared branch without explicit human authorization. Nothing leaves this machine from your shell: never run git push, and never create, edit, comment on, review, close or merge a pull request yourself. To push a ticket's branch and open or update its pull request, call publish_ticket once the ticket's review has ended. The workspace runs the push itself: without asking when the human allowed the repository's owner, which workspace_context shows, and the review passed or the coordinator waived a blocked review; otherwise only after the human approves each step in their inbox. Write the pull request's title and description by the repository's and the human's own PR rules. Only the coordinator merges a pull request, with merge_ticket, and only into a branch that is not protected; only the human merges into a protected branch, which workspace_context lists for each repository.";
     for role in Role::ALL {
         assert!(core(role).contains(confirmed), "{role:?}");
-        // With every skill at stock no skill for pull requests is named, and nobody but the
-        // human merges.
+        // With every skill at stock no skill for pull requests is named, and no agent may
+        // merge from its shell.
         let skill = provider::skill(role);
         let lower = skill.to_lowercase();
-        for gone in ["open-pr", "open_pr", "may merge", "feature branch"] {
+        for gone in ["open-pr", "open_pr", "may merge", "only the human merges."] {
             assert!(!lower.contains(gone), "{role:?}: {gone}");
         }
         // The owner list is "allowed" and the behavior "without asking".
         for word in ["approved owner", "automatic pr", "automatic pull"] {
             assert!(!lower.contains(word), "{role:?}: {word}");
         }
-        // Merging is named only to say who does it and that the tools do not.
+        if core(role).contains("Project coordinator core") {
+            continue;
+        }
+        // Other roles read about merging only who does it and that they do not.
         let about_merging = |sentence: &&str| {
             sentence
                 .to_lowercase()
@@ -190,7 +194,7 @@ fn every_roles_instructions_state_the_publishing_rules_in_wiffletrees_own_words(
             let sentence = sentence.to_lowercase();
             assert!(
                 sentence.contains("never")
-                    || sentence.contains("only the human merges")
+                    || sentence.contains("only the coordinator merges")
                     || sentence.contains("does not merge")
                     || sentence.contains("not a merge")
                     || sentence.contains("after the pr merges"),
@@ -199,6 +203,14 @@ fn every_roles_instructions_state_the_publishing_rules_in_wiffletrees_own_words(
         }
     }
     let coordinator = core(Role::ProjectOrchestrator);
+    for stated in [
+        "merge it with merge_ticket",
+        "the merge accepts the ticket in the same step",
+        "A merge after a blocked review, with or without waived, or over commits no review checked, always waits for the human's approval",
+        "Only the human merges into a protected branch, including a feature branch into the default branch",
+    ] {
+        assert!(coordinator.contains(stated), "{stated}");
+    }
     assert!(coordinator.contains(
         "publish it with publish_ticket after its cycle ends, or have its implementer do it"
     ));
@@ -216,19 +228,27 @@ fn the_readme_says_what_wiffletree_publishes_and_what_it_cannot_prevent() {
         "never pushes",
         "does not push, open pull requests",
         "Integration is manual",
+        "never approves, merges",
+        "merging stays yours",
     ] {
         assert!(!readme.contains(gone), "{gone}");
     }
     for stated in [
         "pushes a ticket's branch and opens its pull request only through its own checked operation",
-        "It never approves, merges, closes or comments on a pull request.",
-        "Agents can still run any command on your Mac, including a push",
+        "It merges a ticket's pull request only through its own checked merge",
+        "It never merges into a protected branch and never approves, closes or comments on a pull request.",
+        "Agents can still run any command on your Mac, including a push or a merge",
         "**Humans own integration.**",
+        "You merge into protected branches",
     ] {
         assert!(readme.contains(stated), "{stated}");
     }
     let notes = include_str!("../../../docs/DEVELOPMENT.md");
-    assert!(notes.contains("an agent's shell can still run `git push` or `gh pr create`"));
+    assert!(
+        notes
+            .contains("an agent's shell can still run `git push`, `gh pr create` or `gh pr merge`")
+    );
+    assert!(notes.contains("merges a ticket's pull request only through `merge_ticket`"));
     for text in [readme, notes] {
         let lower = text.to_lowercase();
         assert!(!lower.contains("approved owner") && !lower.contains("automatic pr"));
@@ -260,7 +280,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = core(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator core — v8"));
+    assert!(coordinator.contains("Project coordinator core — v9"));
     // A background reply the records show unchanged folds; news keeps it full.
     assert!(
         coordinator
@@ -279,7 +299,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
     }
     for role in Role::ALL {
         let core = core(role);
-        assert!(core.contains("Wiffletree communication contract — v10"));
+        assert!(core.contains("Wiffletree communication contract — v11"));
         // The core outranks the skill that follows it.
         assert!(core.contains(
             "where it disagrees with this contract, the contract's tools and rules still apply"

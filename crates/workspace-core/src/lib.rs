@@ -11,6 +11,7 @@ mod host;
 pub mod host_copy;
 mod index;
 mod launch;
+mod merging;
 mod messages;
 mod models;
 mod owners;
@@ -36,6 +37,7 @@ pub use files::*;
 pub use host::*;
 pub use index::WorkspaceIndex;
 pub use launch::*;
+pub use merging::*;
 pub use messages::*;
 pub use models::*;
 pub use owners::*;
@@ -1981,9 +1983,13 @@ pub struct MergeRequest {
     /// The human approved merging this head.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub approved: bool,
-    /// The method the merge is sent with, recorded once every check held and before it is sent.
+    /// The method the merge is sent with, recorded once every check held and before it is sent,
+    /// and when the human is asked, so the approval card names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<MergeMethod>,
+    /// The commits no review checked that the merge would take, as the approval card lists them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreviewed: Vec<String>,
     pub stage: MergeStage,
 }
 impl MergeRequest {

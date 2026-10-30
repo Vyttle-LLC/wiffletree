@@ -49,6 +49,13 @@ pub(crate) enum Outcome {
     Read(Pass),
     Failed(String),
 }
+impl Outcome {
+    /// Whether the pass read GitHub and left its rate limit above the floor, so a few more
+    /// read-only calls fit.
+    pub(crate) fn leaves_headroom(&self) -> bool {
+        matches!(self, Self::Read(pass) if pass.rate_limit.remaining >= RATE_LIMIT_FLOOR)
+    }
+}
 pub(crate) struct Pass {
     /// The tickets that have a PR.
     pub found: Vec<Found>,

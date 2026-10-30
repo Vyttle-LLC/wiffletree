@@ -12,7 +12,9 @@ use wording::{age, counted, from_now};
 
 const WITHOUT_ASKING: &str =
     "For repositories owned by these accounts. Everything else asks you first.";
-const NEVER: &str = "Wiffletree never approves, merges, closes or comments on a pull request.";
+const NEVER: &str = "Wiffletree never approves, closes or comments on a pull request, and never merges into a protected branch.";
+const KEEPER_NEVER: &str =
+    "The PR keeper never merges, approves, closes or comments on a pull request.";
 const HELD: &str = "A trigger held here can be turned off only on a Mac that runs it.";
 const UNTIL_GITHUB_ANSWERS: &str = "Owners are still listed, because they come from each repository’s remote on disk. Until GitHub has answered for a repository, it asks first, whatever is ticked. Wiffletree asks GitHub again the next time you come back.";
 const KEEP: &str =
@@ -943,7 +945,8 @@ impl RepositoriesPage {
             .flex_col()
             .gap_2()
             .child(section("OPENING PRS WITHOUT ASKING", p).child(pill("This Mac only", p.subtle)))
-            .child(hint(WITHOUT_ASKING, p));
+            .child(hint(WITHOUT_ASKING, p))
+            .child(div().text_size(px(font::SMALL)).child(NEVER));
         if let Some(error) = &snapshot.github_error {
             card = card.child(
                 banner(p.yellow).child(
@@ -1133,7 +1136,7 @@ impl RepositoriesPage {
                 "Sort new comments",
                 vec![hint(SORT, p).into_any_element()],
             ))
-            .child(div().text_size(px(font::SMALL)).child(NEVER))
+            .child(div().text_size(px(font::SMALL)).child(KEEPER_NEVER))
     }
 
     /// The repository's checks command and its limit, or its editor while the human edits it.
@@ -1953,8 +1956,8 @@ impl Render for RepositoriesPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        BASE_HINT, NEVER, Pick, UNTIL_GITHUB_ANSWERS, WITHOUT_ASKING, checks_summary, confirmed,
-        entry_matches, fixes_are_on, grouped, held_lines, method_line, partly_on_hint,
+        BASE_HINT, KEEPER_NEVER, NEVER, Pick, UNTIL_GITHUB_ANSWERS, WITHOUT_ASKING, checks_summary,
+        confirmed, entry_matches, fixes_are_on, grouped, held_lines, method_line, partly_on_hint,
         pr_check_status, protected_summary, refused_base, repository_counts, suggestion_reason,
         toggled, with_fixes, with_picks,
     };
@@ -2222,7 +2225,11 @@ mod tests {
         }
         assert_eq!(
             NEVER,
-            "Wiffletree never approves, merges, closes or comments on a pull request."
+            "Wiffletree never approves, closes or comments on a pull request, and never merges into a protected branch."
+        );
+        assert_eq!(
+            KEEPER_NEVER,
+            "The PR keeper never merges, approves, closes or comments on a pull request."
         );
         assert_eq!(
             WITHOUT_ASKING,

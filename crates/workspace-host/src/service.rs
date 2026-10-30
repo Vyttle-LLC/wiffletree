@@ -440,6 +440,7 @@ fn spawn_merge_job(
         |(job, _)| merge::Outcome {
             ticket_id: job.ticket_id.clone(),
             request_id: job.request.id.clone(),
+            stage: job.request.stage.clone(),
             result: merge::Decided::Refused("the merge job stopped unexpectedly".into()),
             children: vec![],
         },
@@ -2459,7 +2460,7 @@ impl Actor {
                         false
                     });
                 // Each waiting merge is decided again on what this pass recorded.
-                match self.host.merges_due(&repository) {
+                match (self.host).merges_due(&repository, outcome.leaves_headroom()) {
                     Ok(jobs) => jobs
                         .into_iter()
                         .for_each(|job| self.run_merge_job(job, None)),

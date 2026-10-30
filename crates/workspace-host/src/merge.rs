@@ -7,9 +7,6 @@
 use crate::*;
 use publish::Tools;
 
-/// The acceptance waiver a merge after a blocked review records when the coordinator gave none.
-pub(crate) const APPROVED_WAIVER: &str = "Merged after a blocked review with the human's approval";
-
 /// One decision about a merge request, with everything it needs off the host thread.
 pub(crate) struct Job {
     pub ticket_id: String,
@@ -34,12 +31,16 @@ pub(crate) struct Child {
 pub(crate) struct Outcome {
     pub ticket_id: String,
     pub request_id: String,
+    /// The request's stage when the job started.
+    pub stage: MergeStage,
     pub result: Decided,
     pub children: Vec<(Child, Retarget)>,
 }
 pub(crate) enum Decided {
-    /// Why nothing was merged: a check failed, or GitHub could not be read.
+    /// Why nothing was merged: a check failed.
     Refused(String),
+    /// GitHub could not be read, so nothing was merged.
+    Unread(String),
     /// GitHub reports another head than the request's.
     HeadMoved(String),
     /// Every check holds, but the checks are running or GitHub has not worked out whether the
@@ -100,6 +101,7 @@ pub(crate) fn run(job: &Job, tools: &Tools) -> Outcome {
     Outcome {
         ticket_id: job.ticket_id.clone(),
         request_id: job.request.id.clone(),
+        stage: job.request.stage.clone(),
         result,
         children,
     }
@@ -110,7 +112,7 @@ fn decide_and_merge(job: &Job, tools: &Tools) -> Decided {
         .and_then(|pr| Ok((pr, read_github(job, tools)?)));
     let decided = match read {
         Ok((pr, github)) => decide(job, &pr, &github),
-        Err(error) => Decided::Refused(format!(
+        Err(error) => Decided::Unread(format!(
             "GitHub could not be read, so nothing was merged: {error:#}"
         )),
     };
@@ -549,6 +551,7 @@ impl Host {
             needs_approval: checked.needs_approval,
             approved: false,
             method: None,
+            unreviewed: vec![],
             stage: MergeStage::Checking,
         });
         self.save_ticket(&ticket)?;
@@ -689,7 +692,9 @@ impl Host {
         };
         let mut ticket = self.ticket(&outcome.ticket_id)?;
         let ready = (ticket.merging.clone()).filter(|request| {
+            // A read made at another stage, such as a re-read while the human decided, is stale.
             request.id == outcome.request_id
+                && request.stage == outcome.stage
                 && matches!(request.stage, MergeStage::Checking | MergeStage::Rechecking)
                 && request.may_merge()
                 && ticket.is_open()
@@ -714,6 +719,18 @@ impl Host {
         let Some(mut request) = current else {
             return Ok(json!({"status": "ended"}));
         };
+        // A re-read while the human decides only ends the request on what would refuse it. Once
+        // the human answered, that answer's own reading of GitHub decides instead.
+        if let MergeStage::WaitingForHuman { .. } = outcome.stage {
+            let still_waiting = request.stage == outcome.stage;
+            let stands = matches!(
+                outcome.result,
+                Decided::Waiting(_) | Decided::Ready(_) | Decided::Unread(_)
+            );
+            if !still_waiting || stands {
+                return Ok(json!({"status": "unchanged"}));
+            }
+        }
         let ended = match outcome.result {
             Decided::Merged { method, commit } => {
                 return self.merged(ticket, request, method, commit, outcome.children, answering);
@@ -735,7 +752,7 @@ impl Host {
             Decided::Waiting(_) | Decided::Ready(_) => {
                 return self.wait_for_checks(&mut ticket, request);
             }
-            Decided::Refused(why) => why,
+            Decided::Refused(why) | Decided::Unread(why) => why,
             // A re-decision cut short by a restart sent no merge: the next pass decides it anew.
             Decided::Unfinished if request.stage == MergeStage::Rechecking => {
                 return self.wait_for_checks(&mut ticket, request);
@@ -807,14 +824,13 @@ impl Host {
         method: MergeMethod,
     ) -> Result<Value> {
         let repository = self.ticket_repository(ticket)?;
-        let unreviewed = self.acceptance(ticket, request.waived.as_deref())?;
-        let prompt = approval_prompt(
-            ticket,
-            &request,
-            &repository,
-            method,
-            &unreviewed.waived_commits,
-        );
+        let accepted = self.acceptance(ticket, request.waived.as_deref())?;
+        let request = MergeRequest {
+            method: Some(method),
+            unreviewed: accepted.waived_commits,
+            ..request
+        };
+        let prompt = approval_prompt(ticket, &request, &repository);
         let item = self.request_attention(
             &request.caller,
             "local",
@@ -1046,8 +1062,14 @@ impl Host {
     }
 
     /// Decides again each waiting request of the repository after a PR watcher pass, and
-    /// returns the jobs that read GitHub for those still standing.
-    pub(crate) fn merges_due(&mut self, repository_id: &str) -> Result<Vec<Job>> {
+    /// returns the jobs that read GitHub for those still standing. A request waiting for the
+    /// human is read only when `read_waiting_for_human`, once per pass that left GitHub's rate
+    /// limit above the watcher's floor: the read sends no merge and starts no pass.
+    pub(crate) fn merges_due(
+        &mut self,
+        repository_id: &str,
+        read_waiting_for_human: bool,
+    ) -> Result<Vec<Job>> {
         let mut jobs = vec![];
         for mut ticket in self.tickets()? {
             let Some(mut request) = ticket.merging.clone() else {
@@ -1085,8 +1107,8 @@ impl Host {
                 }
             };
             if !request.may_merge() {
-                // It waits for the human, unless the pass found what would refuse it anyway;
-                // GitHub is read in full once the human approves.
+                // It waits for the human, unless the pass found what would refuse it anyway, or
+                // GitHub, read again, does; GitHub is read in full once more on approval.
                 let refused = match (pr.checks, pr.merge_state) {
                     (CheckState::Failure, _) => Some("its checks failed"),
                     (_, MergeState::Dirty) => Some("it conflicts with its base"),
@@ -1094,6 +1116,8 @@ impl Host {
                 };
                 if let Some(why) = refused {
                     self.end_merge(&mut ticket, &format!("{named} was not merged: {why}."))?;
+                } else if read_waiting_for_human {
+                    jobs.push(self.merge_job(&ticket, &repository)?);
                 }
                 continue;
             }
@@ -1206,72 +1230,11 @@ impl Host {
     }
 }
 
-/// The Inbox item's text, written by the host from the stored request.
-fn approval_prompt(
-    ticket: &Ticket,
-    request: &MergeRequest,
-    repository: &Repository,
-    method: MergeMethod,
-    unreviewed: &[String],
-) -> String {
-    let facts = repository.github.as_ref().and_then(|g| g.facts.as_ref());
-    let visibility = match facts {
-        Some(facts) if facts.public => "public",
-        _ => "private",
-    };
-    let blocked =
-        (ticket.verification.as_ref()).is_some_and(|v| v.outcome == VerificationOutcome::Blocked);
-    let mut lines = vec![
-        match blocked {
-            true => format!(
-                "Merge PR #{} although its review ended blocked?",
-                request.number
-            ),
-            false => format!(
-                "Merge PR #{} over commits no review checked?",
-                request.number
-            ),
-        },
-        format!("Repository: {} · {visibility}", request.repository),
-        format!(
-            "Branches: {} → {} · {} is not protected",
-            request.branch, request.base, request.base
-        ),
-        format!("Merge: {} at {}", method.label(), short_sha(&request.head)),
-    ];
-    if let Some(verification) = &ticket.verification {
-        lines.push(format!(
-            "Review: {}",
-            verification.review_line(&request.head)
-        ));
-        let unchecked = verification.unchecked();
-        if !unchecked.is_empty() {
-            lines.push(format!("Did not check: {}", unchecked.join(", ")));
-        }
-    }
-    let waiver = match request.waived.as_deref() {
-        Some(APPROVED_WAIVER) | None => "none given",
-        Some(reason) => reason,
-    };
-    lines.push(format!("Waiver: {waiver}"));
-    if !unreviewed.is_empty() {
-        let commits: Vec<&str> = unreviewed.iter().map(|c| short_sha(c)).collect();
-        lines.push(format!("Unreviewed commits: {}", commits.join(", ")));
-    }
-    let findings = ticket.open_findings();
-    if !findings.is_empty() {
-        lines.push("Open findings:".into());
-        lines.extend(
-            findings
-                .iter()
-                .map(|entry| format!("{} · {}", entry.heading(), entry.finding.summary)),
-        );
-    }
-    lines.push(
-        "Wiffletree checks everything again and merges this head only; if the head moves, nothing is merged."
-            .into(),
-    );
-    let mut prompt = lines.join("\n");
+/// The Inbox item's text, written by the host from the stored request; the desktop draws the
+/// same card.
+fn approval_prompt(ticket: &Ticket, request: &MergeRequest, repository: &Repository) -> String {
+    let card = merge_card(ticket, request, repository);
+    let mut prompt = format!("{}\n{}", card.text(), card.note);
     if prompt.len() > 4000 {
         let end = (0..=4000).rev().find(|&i| prompt.is_char_boundary(i));
         prompt.truncate(end.unwrap_or_default());
@@ -1518,10 +1481,11 @@ mod tests {
         assert_eq!(f.ticket().merging.unwrap().stage, MergeStage::Merging);
         sending.unwrap()
     }
-    /// Runs the decisions due after a PR watcher pass, as the service does.
+    /// Runs the decisions due after a PR watcher pass with rate limit to spare, as the service
+    /// does.
     fn pass(f: &mut Fixture, fake: &Fake) {
         let repository = f.ticket().repository_id;
-        for job in f.host.merges_due(&repository).unwrap() {
+        for job in f.host.merges_due(&repository, true).unwrap() {
             settle(f, fake, &job, false).unwrap();
         }
     }
@@ -1983,11 +1947,12 @@ mod tests {
         assert!(items[0].operation_id.starts_with(MERGE_PREFIX));
         assert!(items[0].is_permission(), "drawn with Approve and Deny");
         for part in [
-            "Merge PR #180 although its review ended blocked?",
-            "allowed-org/app · private",
-            "wiffletree/fix-contrast → feature/spaces · feature/spaces is not protected",
-            "Merge: squash at",
-            "Waiver: none given",
+            "Merge PR #180 into feature/spaces although its review ended blocked?",
+            "allowed-org/app · private · allowed-org is an allowed owner",
+            "wiffletree/fix-contrast → feature/spaces · not protected",
+            "Method: Squash · head",
+            "Waiver: None given",
+            "Approving merges this head only.",
         ] {
             assert!(items[0].prompt.contains(part), "{}", items[0].prompt);
         }
@@ -2023,7 +1988,8 @@ mod tests {
         merge(&mut f, &fake, Some("F4 is cosmetic")).unwrap();
         let item = f.open_items().remove(0);
         assert!(
-            item.prompt.contains("Waiver: F4 is cosmetic"),
+            item.prompt
+                .contains("Waiver: “F4 is cosmetic” · the coordinator"),
             "{}",
             item.prompt
         );
@@ -2330,6 +2296,74 @@ mod tests {
     }
 
     #[test]
+    fn a_merge_waiting_for_the_human_ends_when_github_reads_its_base_protected() {
+        let (mut f, fake) = ready();
+        f.review(VerificationOutcome::Blocked);
+        merge(&mut f, &fake, None).unwrap();
+        let repository = f.ticket().repository_id;
+        // Nothing changed, or GitHub could not be read: the card stays.
+        pass(&mut f, &fake);
+        fake.github.lock().unwrap().unreadable = true;
+        pass(&mut f, &fake);
+        fake.github.lock().unwrap().unreadable = false;
+        assert_eq!(f.open_items().len(), 1);
+        assert!(messages(&f.host).is_empty());
+
+        fake.github.lock().unwrap().protected.push(BASE.into());
+        // A pass that left the rate limit near its floor reads nothing more.
+        assert!(f.host.merges_due(&repository, false).unwrap().is_empty());
+        assert_eq!(f.open_items().len(), 1);
+        pass(&mut f, &fake);
+        assert!(f.open_items().is_empty(), "the Inbox item is withdrawn");
+        assert!(f.ticket().merging.is_none());
+        assert!(fake.merges().is_empty());
+        let told = messages(&f.host);
+        assert_eq!(told.len(), 1);
+        assert!(told[0].contains("feature/spaces is protected"), "{told:?}");
+    }
+
+    #[test]
+    fn a_re_read_finishing_after_the_human_answered_leaves_the_answer_to_decide() {
+        let (mut f, fake) = ready();
+        f.review(VerificationOutcome::Blocked);
+        merge(&mut f, &fake, None).unwrap();
+        let repository = f.ticket().repository_id;
+        let reread = f.host.merges_due(&repository, true).unwrap().remove(0);
+        fake.github.lock().unwrap().protected.push(BASE.into());
+        let refused = run(&reread, &fake.tools);
+        let item = f.open_items().remove(0);
+        f.host.resolve_attention(&item.id, "approved").unwrap();
+        let approved = f.host.answer_merge(&item.id, true).unwrap().unwrap();
+        let (status, next) = f.host.record_merge(refused, false).unwrap();
+        assert_eq!(status["status"], "unchanged");
+        assert!(next.is_none());
+        assert_eq!(f.ticket().merging.unwrap().stage, MergeStage::Checking);
+        // The approval's own reading of GitHub refuses it, once.
+        settle(&mut f, &fake, &approved, false).unwrap();
+        assert!(fake.merges().is_empty());
+        assert!(f.ticket().merging.is_none());
+        assert_eq!(messages(&f.host).len(), 1);
+
+        // A re-read that found it ready starts no merge of its own: the approval's read does.
+        let (mut f, fake) = ready();
+        f.review(VerificationOutcome::Blocked);
+        merge(&mut f, &fake, None).unwrap();
+        let reread = f
+            .host
+            .merges_due(&repository_of(&f), true)
+            .unwrap()
+            .remove(0);
+        let ready = run(&reread, &fake.tools);
+        let item = f.open_items().remove(0);
+        f.host.resolve_attention(&item.id, "approved").unwrap();
+        let approved = f.host.answer_merge(&item.id, true).unwrap().unwrap();
+        let (_, next) = f.host.record_merge(ready, false).unwrap();
+        assert!(next.is_none());
+        settle(&mut f, &fake, &approved, false).unwrap();
+        assert_eq!(fake.merges().len(), 1);
+    }
+
+    #[test]
     fn a_restart_after_acceptance_still_finishes_the_merge_with_its_result() {
         let (mut f, fake) = ready();
         ready_to_send(&mut f, &fake);
@@ -2390,7 +2424,7 @@ mod tests {
         merge(&mut f, &fake, None).unwrap();
         // A pass starts its decision, and the host stops before it reports back.
         let repository = repository_of(&f);
-        assert_eq!(f.host.merges_due(&repository).unwrap().len(), 1);
+        assert_eq!(f.host.merges_due(&repository, true).unwrap().len(), 1);
         let mut f = restart(f);
         let jobs = f.host.interrupted_merges().unwrap();
         f.host
@@ -2431,7 +2465,7 @@ mod tests {
         merge(&mut f, &fake, None).unwrap();
         fake.set(180, "statusCheckRollup", json!([{"state": "SUCCESS"}]));
         let repository = repository_of(&f);
-        let rechecking = f.host.merges_due(&repository).unwrap().remove(0);
+        let rechecking = f.host.merges_due(&repository, true).unwrap().remove(0);
         let (_, sending) = (f.host)
             .record_merge(run(&rechecking, &fake.tools), false)
             .unwrap();
