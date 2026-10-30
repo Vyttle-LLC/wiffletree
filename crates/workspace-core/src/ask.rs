@@ -392,3 +392,57 @@ pub fn list_folder(path: PathBuf) -> Ask<FolderListing> {
 pub fn core_instructions() -> Ask<Vec<crate::skills::CoreText>> {
     Ask::new(Command::CoreInstructions)
 }
+pub fn start_thread(
+    space_id: SpaceId,
+    body: String,
+    profile: Option<ModelProfile>,
+) -> Ask<assistant::Thread> {
+    Ask::new(Command::StartThread {
+        id: new_id(),
+        space_id,
+        body,
+        attachments: vec![],
+        profile,
+    })
+}
+pub fn rename_thread(thread_id: String, title: String) -> Ask<assistant::Thread> {
+    Ask::new(Command::RenameThread { thread_id, title })
+}
+pub fn set_thread_open(thread_id: String, open: bool) -> Ask<assistant::Thread> {
+    Ask::new(Command::SetThreadOpen { thread_id, open })
+}
+pub fn order_threads(thread_ids: Vec<String>) -> Ask<()> {
+    Ask::new(Command::OrderThreads { thread_ids })
+}
+pub fn delete_thread(thread_id: String) -> Ask<()> {
+    Ask::new(Command::DeleteThread { thread_id })
+}
+pub fn search_threads(query: String, space_id: Option<SpaceId>) -> Ask<Vec<assistant::ThreadHit>> {
+    Ask::new(Command::SearchThreads { query, space_id })
+}
+pub fn draft_project_brief(thread_id: String) -> Ask<Message> {
+    Ask::new(Command::DraftProjectBrief { thread_id })
+}
+pub fn make_project(
+    thread_id: String,
+    name: String,
+    brief: String,
+    files: Vec<String>,
+) -> Ask<Project> {
+    Ask::new(Command::MakeProject {
+        thread_id,
+        name,
+        brief,
+        files,
+    })
+}
+pub fn scratch_files(thread_id: String) -> Ask<Vec<String>> {
+    Ask::new(Command::ScratchFiles { thread_id })
+}
+pub fn dismiss_thread_card(thread_id: String, card_id: String) -> Ask<assistant::Thread> {
+    Ask::new(Command::DismissThreadCard { thread_id, card_id })
+}
+/// Answered with the name as saved.
+pub fn set_assistant_name(name: String) -> Ask<String> {
+    Ask::new(Command::SetAssistantName { name })
+}

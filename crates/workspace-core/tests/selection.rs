@@ -326,9 +326,36 @@ fn table() -> ModelSelection {
                 opus(),
                 Then::Wait,
             ),
+            row(Job::Assistant, sonnet(), Then::Model(sol())),
         ],
         ..ModelSelection::default()
     }
+}
+
+#[test]
+fn a_table_saved_before_the_assistant_row_gets_one_copied_from_the_implementers_small_work() {
+    let mut older = table();
+    older.jobs.retain(|row| row.job != Job::Assistant);
+    assert_eq!(
+        older.validate().unwrap_err().to_string(),
+        "Choose who runs the Assistant job"
+    );
+    older.fit(&VerificationSettings::default());
+    let assistant = older.row(&Job::Assistant).unwrap();
+    assert_eq!(assistant.main, implementer().small.unwrap());
+    assert!(older.copied.contains(&"Assistant".to_owned()));
+    older.validate().unwrap();
+    // Without a small-work line, its main line.
+    let mut plain = table();
+    plain.jobs.retain(|row| row.job != Job::Assistant);
+    plain.jobs[1].small = None;
+    plain.fit(&VerificationSettings::default());
+    assert_eq!(plain.row(&Job::Assistant).unwrap().main, implementer().main);
+    // A saved row is kept as it is.
+    let mut saved = table();
+    saved.fit(&VerificationSettings::default());
+    assert!(!saved.copied.contains(&"Assistant".to_owned()));
+    assert_eq!(saved.row(&Job::Assistant).unwrap().main.first, sonnet());
 }
 
 #[test]
@@ -433,7 +460,7 @@ fn only_verifier_rows_may_skip() {
     selection.jobs[3] = skipping_reviewer();
     selection.jobs[3].small = Some(selection.jobs[3].main.clone());
     selection.validate().unwrap();
-    for index in 0..3 {
+    for index in [0, 1, 2, 4] {
         let mut refused = table();
         refused.jobs[index].main.then = Then::Skip;
         let name = refused.jobs[index].job.name();
@@ -483,7 +510,8 @@ fn rows_follow_the_configured_verifiers() {
             "Tester",
             "Tests",
             "Correctness",
-            "Regressions"
+            "Regressions",
+            "Assistant"
         ]
     );
     assert_eq!(selection.copied, ["Tests", "Regressions"]);

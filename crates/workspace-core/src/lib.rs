@@ -1,5 +1,6 @@
 //! Provider-neutral contracts. No renderer, database or provider runtime dependencies.
 pub mod ask;
+pub mod assistant;
 pub mod backoff;
 mod brain;
 mod brain_browser;
@@ -83,9 +84,12 @@ pub enum Role {
     Maintenance,
     /// The PR keeper's model runs. Only the host creates these agents; no coordinator tool can.
     Keeper,
+    /// An assistant thread, owned by its Space and outside every project. Only the human
+    /// starts one.
+    Assistant,
 }
 impl Role {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::ProjectOrchestrator,
         Self::TaskOrchestrator,
         Self::Implementer,
@@ -93,6 +97,7 @@ impl Role {
         Self::Reviewer,
         Self::Maintenance,
         Self::Keeper,
+        Self::Assistant,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -103,10 +108,14 @@ impl Role {
             Self::Reviewer => "Reviewer",
             Self::Maintenance => "Maintenance",
             Self::Keeper => "PR keeper",
+            Self::Assistant => "Assistant",
         }
     }
     pub fn is_worker(self) -> bool {
-        !matches!(self, Self::ProjectOrchestrator | Self::TaskOrchestrator)
+        !matches!(
+            self,
+            Self::ProjectOrchestrator | Self::TaskOrchestrator | Self::Assistant
+        )
     }
     /// A ticket agent's short name: its role, plus its focus when others share that role.
     pub fn agent_label(self, focus: Option<&str>) -> String {
@@ -125,13 +134,15 @@ pub enum Skill {
     Implementing,
     Reviewing,
     KeepingAPr,
+    Assisting,
 }
 impl Skill {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Coordinating,
         Self::Implementing,
         Self::Reviewing,
         Self::KeepingAPr,
+        Self::Assisting,
     ];
     /// The skill a role's instructions end with. The PR keeper's comment sorting is not a role's
     /// turn and gets none.
@@ -142,6 +153,7 @@ impl Skill {
             Role::Implementer | Role::Maintenance => Self::Implementing,
             Role::Tester | Role::Reviewer => Self::Reviewing,
             Role::Keeper => Self::KeepingAPr,
+            Role::Assistant => Self::Assisting,
         }
     }
     pub fn name(self) -> &'static str {
@@ -150,6 +162,7 @@ impl Skill {
             Self::Implementing => "Implementing",
             Self::Reviewing => "Reviewing",
             Self::KeepingAPr => "Keeping a PR",
+            Self::Assisting => "Assisting",
         }
     }
     pub fn purpose(self) -> &'static str {
@@ -166,6 +179,9 @@ impl Skill {
             Self::KeepingAPr => {
                 "How the PR keeper's model resolves a conflict or fixes failed checks in its one try."
             }
+            Self::Assisting => {
+                "How the assistant's threads answer, research, draft in their scratch folder and hand code work to a project."
+            }
         }
     }
     /// The skill's folder in the skills folder.
@@ -175,6 +191,7 @@ impl Skill {
             Self::Implementing => "implementing",
             Self::Reviewing => "reviewing",
             Self::KeepingAPr => "keeping-a-pr",
+            Self::Assisting => "assisting",
         }
     }
 }
@@ -878,6 +895,16 @@ pub struct Snapshot {
     /// Why each keeper trigger the shared settings turn on is off on this machine.
     #[serde(default)]
     pub keeper_held: Vec<String>,
+    /// The assistant's name, a shared setting.
+    #[serde(default = "assistant_name")]
+    pub assistant_name: String,
+    /// The assistant's threads in the tab strip, in strip order. Their sessions are not in
+    /// `sessions`: no project, panel or tree lists them.
+    #[serde(default)]
+    pub threads: Vec<assistant::ThreadTab>,
+}
+fn assistant_name() -> String {
+    assistant::DEFAULT_NAME.into()
 }
 /// What a `Snapshot` leaves out: archived sessions other than open tickets' agents, accepted
 /// and closed tickets no unarchived agent works on, and those sessions' runtimes. Answers
@@ -1104,6 +1131,9 @@ pub struct HostSettings {
     /// machine; the rest wait. Kept on this machine only.
     #[serde(default = "default_builds_at_once")]
     pub builds_at_once: usize,
+    /// The assistant's name. Shared: read from `settings/assistant.json`.
+    #[serde(default = "assistant_name")]
+    pub assistant_name: String,
 }
 /// A private GitHub repository the shared folder syncs with, as this machine recorded it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1292,6 +1322,7 @@ impl HostSettings {
             settings_repository: None,
             remote_access: false,
             builds_at_once: DEFAULT_BUILDS_AT_ONCE,
+            assistant_name: assistant_name(),
         }
     }
     pub fn validate_check_ins(child_turns: u32, human_turns: u32) -> Result<()> {
@@ -3177,6 +3208,69 @@ pub enum Command {
         before: Option<i64>,
         limit: usize,
     },
+    /// Starts an assistant thread in `space_id` with its first message, `body`, and titles it
+    /// from that message; `profile` is the model the user chose in the composer, if any.
+    /// Answered with the `Thread`. Later messages go to it with `Send`, its id the recipient.
+    StartThread {
+        id: String,
+        space_id: SpaceId,
+        body: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<ModelProfile>,
+    },
+    RenameThread {
+        thread_id: String,
+        title: String,
+    },
+    /// Takes a thread's tab out of the strip, or with `open` brings it back.
+    SetThreadOpen {
+        thread_id: String,
+        open: bool,
+    },
+    /// Puts the strip's tabs in this order.
+    OrderThreads {
+        thread_ids: Vec<String>,
+    },
+    /// Removes a thread's conversation and scratch folder; its brain entries stay.
+    DeleteThread {
+        thread_id: String,
+    },
+    /// Threads whose title or messages contain `query`, open or idle, newest first, in
+    /// `space_id` when given. Answered with `Vec<ThreadHit>`.
+    SearchThreads {
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space_id: Option<SpaceId>,
+    },
+    /// Asks the thread to write a project brief from its conversation with `project_brief`.
+    DraftProjectBrief {
+        thread_id: String,
+    },
+    /// Make this a project: creates a project in the thread's Space with that Space's
+    /// repositories, whose first human message is `brief` with a link back to the thread and
+    /// copies of the scratch files named in `files`. The thread becomes read-only. Answered
+    /// with the `Project`.
+    MakeProject {
+        thread_id: String,
+        name: String,
+        brief: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<String>,
+    },
+    /// The files in a thread's scratch folder, by path relative to it.
+    ScratchFiles {
+        thread_id: String,
+    },
+    DismissThreadCard {
+        thread_id: String,
+        card_id: String,
+    },
+    /// Names the assistant, a shared setting.
+    SetAssistantName {
+        name: String,
+    },
     /// Creates a Space with local storage and a local tracker, or, with `storage`, stored in
     /// that private GitHub repository (`owner/name` or its URL), whose tracker it shares; without
     /// `prefix`, a new tracker gets the one proposed from the Space's name.
@@ -3802,6 +3896,8 @@ impl Command {
             | Self::Issue { .. }
             | Self::IssueProjectDefaults { .. }
             | Self::IssuePeople { .. }
+            | Self::SearchThreads { .. }
+            | Self::ScratchFiles { .. }
             | Self::RemoteAccess => true,
             Self::ImportRepositories { .. }
             | Self::RefreshRepositories
@@ -3830,6 +3926,15 @@ impl Command {
             | Self::ResolveAttention { .. }
             | Self::DismissAttention { .. }
             | Self::AppendLog { .. }
+            | Self::StartThread { .. }
+            | Self::RenameThread { .. }
+            | Self::SetThreadOpen { .. }
+            | Self::OrderThreads { .. }
+            | Self::DeleteThread { .. }
+            | Self::DraftProjectBrief { .. }
+            | Self::MakeProject { .. }
+            | Self::DismissThreadCard { .. }
+            | Self::SetAssistantName { .. }
             | Self::SetSpaceBrain { .. }
             | Self::CreateSpace { .. }
             | Self::UpdateSpace { .. }
@@ -3910,11 +4015,23 @@ impl Command {
     /// amending a batch, Send now and the legacy import, and fixing or releasing a held entry.
     /// Every write to a tracker is the human's, settling a paused issue file, following an issue
     /// and every step of a Linear import too; reading issues is not. Remote access is the human's
-    /// too: its state carries the pairing code.
+    /// too: its state carries the pairing code. The assistant is the human's: its threads, their
+    /// text and its name.
     pub fn is_human_only(&self) -> bool {
         matches!(
             self,
             Self::Send { sender: None, .. }
+                | Self::StartThread { .. }
+                | Self::RenameThread { .. }
+                | Self::SetThreadOpen { .. }
+                | Self::OrderThreads { .. }
+                | Self::DeleteThread { .. }
+                | Self::SearchThreads { .. }
+                | Self::DraftProjectBrief { .. }
+                | Self::MakeProject { .. }
+                | Self::ScratchFiles { .. }
+                | Self::DismissThreadCard { .. }
+                | Self::SetAssistantName { .. }
                 | Self::ResolveAttention { .. }
                 | Self::DismissAttention { .. }
                 | Self::SetOwnerAllowed { .. }

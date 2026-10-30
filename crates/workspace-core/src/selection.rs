@@ -65,6 +65,8 @@ pub enum Job {
         focus: String,
     },
     Keeper,
+    /// The assistant's threads.
+    Assistant,
 }
 impl Job {
     /// "Implementer", or a verifier's focus.
@@ -75,6 +77,7 @@ impl Job {
             Self::Tester => "Tester".into(),
             Self::Verifier { focus } => focus.clone(),
             Self::Keeper => "PR keeper".into(),
+            Self::Assistant => "Assistant".into(),
         }
     }
     /// Verifier focuses compare ignoring surrounding spaces and ASCII case, as levels do.
@@ -105,6 +108,7 @@ impl Job {
             Role::Tester => Some(Job::Tester),
             Role::Reviewer => Some(first_reviewer(verification).unwrap_or(Job::Tester)),
             Role::Keeper => Some(Job::Keeper),
+            Role::Assistant => Some(Job::Assistant),
             Role::TaskOrchestrator | Role::Maintenance => None,
         }
     }
@@ -263,8 +267,25 @@ impl ModelSelection {
     /// Makes the rows follow the configured verifiers: a verifier no longer configured loses
     /// its row, and one without a row gets a copy, named in `copied`: a reviewer the first
     /// reviewer's row, and a tester, or a reviewer with no reviewer row to copy, the Tester
-    /// row. Rows are put in the page's order.
+    /// row. A table saved before the Assistant row existed gets one copied from the
+    /// Implementer row's small-work line, or its main line without one, named in `copied`.
+    /// Rows are put in the page's order.
     pub fn fit(&mut self, verification: &VerificationSettings) {
+        self.copied.clear();
+        if self.row(&Job::Assistant).is_none()
+            && let Some(implementer) = self.row(&Job::Implementer)
+        {
+            let main = implementer
+                .small
+                .clone()
+                .unwrap_or(implementer.main.clone());
+            self.jobs.push(JobRow {
+                job: Job::Assistant,
+                main,
+                small: None,
+            });
+            self.copied.push(Job::Assistant.name());
+        }
         let tester = self.row(&Job::Tester).cloned();
         let reviewer = (verification.verifiers.iter())
             .filter(|v| v.role == Role::Reviewer)
@@ -281,7 +302,6 @@ impl ModelSelection {
         };
         let mut rest = std::mem::take(&mut self.jobs);
         let mut fitted = vec![];
-        self.copied.clear();
         for job in [Job::Coordinator, Job::Implementer, Job::Tester] {
             fitted.extend(take(&mut rest, &job));
         }
@@ -307,10 +327,16 @@ impl ModelSelection {
             }
         }
         fitted.extend(take(&mut rest, &Job::Keeper));
+        fitted.extend(take(&mut rest, &Job::Assistant));
         self.jobs = fitted;
     }
     pub fn validate(&self) -> Result<()> {
-        for job in [Job::Coordinator, Job::Implementer, Job::Tester] {
+        for job in [
+            Job::Coordinator,
+            Job::Implementer,
+            Job::Tester,
+            Job::Assistant,
+        ] {
             let rows = self.jobs.iter().filter(|row| row.job == job).count();
             ensure!(rows == 1, "Choose who runs the {} job", job.name());
         }
