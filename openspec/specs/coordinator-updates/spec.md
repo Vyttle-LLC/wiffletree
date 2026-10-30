@@ -1,7 +1,7 @@
 # coordinator-updates Specification
 
 ## Purpose
-TBD - created by archiving change quiet-coordinator-chat. Update Purpose after archive.
+Keep the coordinator's chat a conversation: a pinned, live ticket table from Wiffletree's records, and background replies that fold when the records show nothing changed since the last full reply.
 
 ## Requirements
 
