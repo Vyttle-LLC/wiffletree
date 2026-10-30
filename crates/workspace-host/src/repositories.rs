@@ -118,7 +118,7 @@ fn verify_base(path: &Path, base: &str) -> Result<()> {
     Ok(())
 }
 
-fn candidate(path: &Path, known: &BTreeSet<String>) -> Result<RepositoryCandidate> {
+pub(crate) fn candidate(path: &Path, known: &BTreeSet<String>) -> Result<RepositoryCandidate> {
     let path = fs::canonicalize(path)?;
     let root = runtime::git_output(&path, &["rev-parse", "--show-toplevel"])?;
     ensure!(

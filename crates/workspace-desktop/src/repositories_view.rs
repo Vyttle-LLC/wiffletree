@@ -81,14 +81,14 @@ pub(super) struct RepositoriesPage {
 
 /// The Space chosen for a repository: one of them, Personal before it exists, or none.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Pick {
+enum Pick {
     Space(SpaceId),
     NewPersonal,
     NoSpace,
 }
 
 /// A repository just added, with the Space its owner suggests and the one the human picked.
-pub(super) struct Adding {
+struct Adding {
     repository: String,
     suggested: Option<SpaceId>,
     pick: Option<SpaceId>,
@@ -367,7 +367,8 @@ impl RepositoriesPage {
                         &self.shared.host,
                     )
                     .on_click(cx.listener(|view, _, window, cx| {
-                        let choices = confirmed(&view.suggestions);
+                        let spaces = view.shared.snapshot().map_or(&[][..], |s| &s.spaces);
+                        let choices = confirmed(&view.suggestions, spaces);
                         view.request(
                             Command::ConfirmRepositorySuggestions { choices },
                             window,
@@ -1347,16 +1348,27 @@ fn with_picks(
         .collect()
 }
 
-/// The upgrade's suggestions as the human picked them, to confirm.
-fn confirmed(suggestions: &[(RepositorySuggestion, Pick)]) -> Vec<RepositorySpaces> {
+/// The upgrade's suggestions as the human picked them, to confirm: each adds its pick to the
+/// Spaces the repository is in now, so a chip edited meanwhile stays.
+fn confirmed(
+    suggestions: &[(RepositorySuggestion, Pick)],
+    spaces: &[Space],
+) -> Vec<RepositorySpaces> {
     (suggestions.iter())
-        .map(|(suggestion, pick)| RepositorySpaces {
-            repository: suggestion.repository.clone(),
-            space_ids: match pick {
-                Pick::Space(id) => vec![id.clone()],
-                Pick::NewPersonal | Pick::NoSpace => vec![],
-            },
-            new_personal: *pick == Pick::NewPersonal,
+        .map(|(suggestion, pick)| {
+            let mut space_ids: Vec<SpaceId> = spaces_of(spaces, &suggestion.repository)
+                .map(|s| s.id.clone())
+                .collect();
+            if let Pick::Space(id) = pick
+                && !space_ids.contains(id)
+            {
+                space_ids.push(id.clone());
+            }
+            RepositorySpaces {
+                repository: suggestion.repository.clone(),
+                space_ids,
+                new_personal: *pick == Pick::NewPersonal,
+            }
         })
         .collect()
 }
@@ -1983,10 +1995,31 @@ mod tests {
                 Pick::NoSpace,
             ),
         ];
-        let choices = confirmed(&picks);
+        let choices = confirmed(&picks, &[]);
         assert_eq!(choices[0].space_ids, [sage]);
         assert!(choices[1].new_personal && choices[1].space_ids.is_empty());
         assert!(!choices[2].new_personal && choices[2].space_ids.is_empty());
+    }
+
+    #[test]
+    fn a_chip_edit_before_confirm_stays() {
+        let suggestion = RepositorySuggestion {
+            repository_id: "api".into(),
+            repository: "Sage-Social/api".into(),
+            space: Some(SuggestedSpace::Space(SpaceId("sage".into()))),
+        };
+        // The human put api in Vyttle with a chip, and leaves the suggestion at No Space.
+        let spaces = [space("Sage", &[]), space("Vyttle", &["Sage-Social/api"])];
+        let kept = confirmed(&[(suggestion.clone(), Pick::NoSpace)], &spaces);
+        assert_eq!(kept[0].space_ids, [SpaceId("vyttle".into())]);
+        let both = confirmed(
+            &[(suggestion, Pick::Space(SpaceId("sage".into())))],
+            &spaces,
+        );
+        assert_eq!(
+            both[0].space_ids,
+            [SpaceId("vyttle".into()), SpaceId("sage".into())]
+        );
     }
 
     #[test]

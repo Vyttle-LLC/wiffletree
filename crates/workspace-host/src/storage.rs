@@ -234,11 +234,11 @@ fn commit_local(folder: &Path, paths: &[&str], message: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whether a tracker holds any issue: in its clone, or on GitHub as of `synced`, the commit last
-/// synced, as a pass never brings `issues/` into the clone for this release.
-/// Refuses `clone`, a folder on this Mac, unless its `origin` is one of `space`'s repositories.
+/// Refuses `clone`, a folder on this Mac, unless it is a repository's root with a committed
+/// base, as the workspace adds it, and its `origin` is one of `space`'s repositories.
 fn check_clone(space: &Space, clone: &str) -> Result<()> {
     let path = repositories::folder_path(clone)?;
+    repositories::candidate(&path, &Default::default()).with_context(|| clone.to_owned())?;
     let identity = match repositories::read_origin(&path) {
         repositories::Origin::GitHub { owner, name, .. } => format!("{owner}/{name}"),
         _ => bail!("{clone} is not a clone of a GitHub repository"),
@@ -276,6 +276,8 @@ fn count_issues(folder: &Path, prefix: &str, synced: Option<&str>) -> Result<usi
         .count())
 }
 
+/// Whether a tracker holds any issue: in its clone, or on GitHub as of `synced`, the commit last
+/// synced, as a pass never brings `issues/` into the clone for this release.
 fn has_issues(folder: &Path, synced: &str) -> Result<bool> {
     let listed = ["ls-tree", "-r", "--name-only", synced, "--", ISSUES];
     let on_github = !runtime::git_output(folder, &listed)?.trim().is_empty();
@@ -2587,5 +2589,31 @@ sources:
             record.space.brain.unwrap().repository,
             BrainRepository::Local { .. }
         ));
+    }
+
+    #[test]
+    fn a_clone_the_workspace_would_refuse_fails_the_join_before_anything_is_written() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let (home, mut host) = host();
+        let api = clone_of(&folder.path().join("api"), "Sage-Social/api");
+        let inside = Path::new(&api).join("src");
+        fs::create_dir_all(&inside).unwrap();
+        let error =
+            join_sage_with(&mut host, &github, vec![inside.to_str().unwrap().into()]).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("Expected a Git repository root"),
+            "{error:#}"
+        );
+        assert!(
+            host.find_space(&SpaceId("sage-id".into()))
+                .unwrap()
+                .is_none()
+        );
+        assert!(host.repositories().unwrap().is_empty());
+        assert!(
+            !repos::clone_folder(home.path(), NAME).exists(),
+            "the storage clone is not placed"
+        );
     }
 }

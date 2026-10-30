@@ -1456,7 +1456,7 @@ pub(super) fn space_color(spaces: &[Space], id: &SpaceId, p: Palette) -> Hsla {
 }
 
 /// Stored on GitHub, so other people can read it.
-pub(super) fn is_shared(space: &Space) -> bool {
+fn is_shared(space: &Space) -> bool {
     matches!(space.storage.repository, StorageRepository::GitHub { .. })
 }
 
@@ -1634,7 +1634,7 @@ fn join_refused_by(spaces: &[Space], error: &str) -> Option<SpaceId> {
 }
 
 /// A Space's sources, one a line, as the Sources field edits them.
-pub(super) fn format_sources(sources: &[Source]) -> String {
+fn format_sources(sources: &[Source]) -> String {
     sources
         .iter()
         .map(|source| match source {
@@ -1649,7 +1649,7 @@ pub(super) fn format_sources(sources: &[Source]) -> String {
 
 /// The Sources field read back; a source named as before keeps its sign-in check and the keys
 /// this release does not know.
-pub(super) fn parse_sources(text: &str, before: &[Source]) -> Result<Vec<Source>, String> {
+fn parse_sources(text: &str, before: &[Source]) -> Result<Vec<Source>, String> {
     let mut sources = vec![];
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         let wrong = || format!("“{line}” isn’t a source. {SOURCES_FORMAT}");
