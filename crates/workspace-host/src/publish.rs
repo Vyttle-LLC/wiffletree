@@ -2782,6 +2782,7 @@ pub(crate) mod tests {
                 "library",
             ],
         );
+        crate::test_support::without_background_maintenance(&f.worktree.join("library"));
         git(
             &f.worktree.join("library"),
             &["commit", "-q", "--allow-empty", "-m", "unpushed"],

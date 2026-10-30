@@ -1566,6 +1566,7 @@ impl Host {
 pub(crate) mod tests {
     use super::*;
     use crate::publish::tests::{exit, git};
+    use crate::test_support::without_background_maintenance;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -1699,10 +1700,14 @@ pub(crate) mod tests {
                     before.take().unwrap().1();
                 }
                 drop(before);
-                match command {
+                let answer = match command {
                     "push" => runtime::git_push(path, &local),
                     _ => runtime::git_answer(path, &local),
+                };
+                if command == "clone" && answer.as_ref().is_ok_and(|a| a.status.success()) {
+                    without_background_maintenance(&path.join(args.last().unwrap()));
                 }
+                answer
             };
             Tools {
                 gh: Arc::new(gh),

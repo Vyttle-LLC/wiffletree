@@ -27,7 +27,7 @@ fn created(path: &Path, args: &[&str]) -> Option<PathBuf> {
 
 /// Keeps Git from repacking a test repository in the background, as it may after any commit or
 /// push. The repack deletes loose objects that a local clone of the repository may be copying.
-fn without_background_maintenance(repository: &Path) {
+pub(crate) fn without_background_maintenance(repository: &Path) {
     git(repository, &["config", "maintenance.auto", "false"]);
     git(repository, &["config", "gc.auto", "0"]);
 }
