@@ -879,28 +879,35 @@ impl Transcript {
             .filter(|_| self.selected_working())
     }
 
-    /// Brings the live rows up to date, splicing only those after the first that changed, so
-    /// earlier rows keep their measured heights and a reader scrolled up keeps their place.
+    /// Brings the live rows up to date. A row still in its place, such as a run that grew, is
+    /// measured again, which keeps a scrolled-up reader's place; only the rows after the first
+    /// that moved are spliced.
     fn sync_transcript_rows(&mut self) {
         let feed = self.live_feed();
         let messages = self.shown.messages.len();
         let shown = self.list.item_count();
-        let unchanged = if shown == messages + self.feed.len() {
+        let kept = if shown == messages + self.feed.len() {
             self.feed
                 .iter()
                 .zip(&feed)
-                .take_while(|(a, b)| a == b)
+                .take_while(|(a, b)| a.same_place(b))
                 .count()
         } else {
             0
         };
+        for (row, (old, new)) in self.feed.iter().zip(&feed).take(kept).enumerate() {
+            if old != new {
+                self.list
+                    .remeasure_items(messages + row..messages + row + 1);
+            }
+        }
         self.feed = feed;
         let rows = self.transcript_rows();
         if shown < messages {
             self.list.reset(rows);
-        } else if shown != rows || unchanged < self.feed.len() {
+        } else if shown != rows || kept < self.feed.len() {
             self.list
-                .splice(messages + unchanged..shown, rows - messages - unchanged);
+                .splice(messages + kept..shown, rows - messages - kept);
         }
     }
 

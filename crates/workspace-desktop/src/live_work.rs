@@ -21,6 +21,14 @@ pub(super) struct FeedRow {
     revision: u64,
 }
 
+impl FeedRow {
+    /// Whether `other` is this row at a later moment: the same first step, folded or not as
+    /// before, though its run may have grown or its steps changed.
+    pub(super) fn same_place(&self, other: &Self) -> bool {
+        (self.steps.start, self.folded) == (other.steps.start, other.folded)
+    }
+}
+
 /// Reads, searches, thinking, plan updates and other tool calls fold; a failed one stays visible.
 fn quiet(step: &Step) -> bool {
     !matches!(
@@ -326,6 +334,16 @@ mod tests {
         let grown = feed(&run);
         assert_eq!(before[0], grown[0]);
         assert_ne!(before[1], grown[1]);
+        assert!(
+            before[1].same_place(&grown[1]),
+            "a grown run keeps its place"
+        );
+        // A failed read splits the run: the rows after it are new.
+        run.push(step(Read, 4));
+        run[3].state = StepState::Failed;
+        let split = feed(&run);
+        assert!(split[1].same_place(&grown[1]));
+        assert_eq!(split.len(), 4);
         run[1].revision = 10;
         assert_ne!(feed(&run)[1], grown[1]);
     }
