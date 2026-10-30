@@ -293,15 +293,45 @@ pub struct SpaceListing {
     pub id: SpaceId,
     pub name: String,
     pub description: String,
+    /// Its brain, which joining asks for on this Mac.
+    #[serde(default)]
+    pub brain: Option<SpaceBrain>,
+    /// Its code repositories, as `owner/name`, which joining asks for on this Mac.
+    #[serde(default)]
+    pub repositories: Vec<String>,
     /// Already added on this Mac.
     pub added: bool,
 }
-/// A Space ticked to join, with where its brain is on this Mac, if anywhere.
+/// A Space ticked to join, with where its brain and code repositories are on this Mac. A
+/// repository with no clone named here stays missing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JoinSpace {
     pub folder: String,
     #[serde(default)]
     pub brain_path: Option<String>,
+    /// Folders on this Mac, each a clone of one of the Space's code repositories, which join
+    /// the workspace's repositories.
+    #[serde(default)]
+    pub clones: Vec<String>,
+}
+
+/// What the Space page's Storage and issues box shows about a Space's storage repository.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageStatus {
+    /// Its tracker's prefix; `None` for a GitHub repository joined without a tracker, which
+    /// offers Set up issues.
+    pub prefix: Option<String>,
+    pub issues: usize,
+    /// Who GitHub says can read it; `None` for local storage, which only this Mac reads.
+    pub readers: Option<crate::Readers>,
+    /// It is also this Mac's settings repository.
+    pub settings_repository: bool,
+    /// Its clone or local repository on this Mac.
+    pub path: String,
+    /// When a pass last reached GitHub; `None` for local storage, which never syncs.
+    pub synced_at: Option<i64>,
+    /// Why the latest pass failed.
+    pub error: Option<String>,
 }
 
 /// The owner of a session: a project, or, for sessions that are not project work, a Space or a

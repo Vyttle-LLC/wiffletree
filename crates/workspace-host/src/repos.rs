@@ -651,9 +651,13 @@ impl Pace {
             failures: 0,
         }
     }
-    /// Fetches every `every` milliseconds from the next pass on, as the rule sets the repository
-    /// holds change.
+    /// Fetches every `every` milliseconds, as the rule sets the repository holds change: a
+    /// shorter cadence brings the next fetch forward at once, a longer one starts with the next
+    /// pass. A repository backing off keeps its wait.
     pub(crate) fn set_every(&mut self, every: i64) {
+        if every < self.every && self.failures == 0 {
+            self.pull_at -= self.every - every;
+        }
         self.every = every;
     }
     /// While GitHub cannot be reached, a save waits for the next try.
@@ -995,6 +999,27 @@ mod tests {
             pace.next_due(),
             Some(180_000),
             "backing off while out of reach"
+        );
+    }
+
+    #[test]
+    fn a_shorter_cadence_brings_the_next_fetch_forward_at_once() {
+        let mut pace = Pace::every(&[300_000]);
+        assert!(pace.start(0));
+        pace.finish(0, true);
+        pace.set_every(60_000);
+        assert_eq!(pace.next_due(), Some(60_000));
+        pace.set_every(60_000);
+        assert_eq!(
+            pace.next_due(),
+            Some(60_000),
+            "the same cadence changes nothing"
+        );
+        pace.set_every(300_000);
+        assert_eq!(
+            pace.next_due(),
+            Some(60_000),
+            "a longer one waits for the next pass"
         );
     }
 }

@@ -2973,6 +2973,17 @@ pub enum Command {
         repository: String,
         spaces: Vec<JoinSpace>,
     },
+    /// Read-only, the human's: what the Space page shows about the Space's storage repository;
+    /// answered with `StorageStatus`.
+    SpaceStorage {
+        space_id: SpaceId,
+    },
+    /// From the Space's page: where its GitHub brain is cloned on this Mac, or else its brain as
+    /// the local folder `path`, for every project in it.
+    SetSpaceBrain {
+        space_id: SpaceId,
+        path: String,
+    },
     /// Changes the prefix of the tracker a Space's storage repository is: a local tracker's at
     /// any time, rewriting its issue IDs, and a GitHub tracker's only while it has no issue.
     SetTrackerPrefix {
@@ -3329,6 +3340,7 @@ impl Command {
             | Self::NewProjectDefaults { .. }
             | Self::SuggestRepositorySpace { .. }
             | Self::RepositorySuggestions
+            | Self::SpaceStorage { .. }
             | Self::RemoteAccess => true,
             Self::ImportRepositories { .. }
             | Self::RefreshRepositories
@@ -3358,6 +3370,7 @@ impl Command {
             | Self::DismissAttention { .. }
             | Self::AppendLog { .. }
             | Self::AttachBrain { .. }
+            | Self::SetSpaceBrain { .. }
             | Self::CreateSpace { .. }
             | Self::UpdateSpace { .. }
             | Self::RemoveSpace { .. }
@@ -3407,7 +3420,8 @@ impl Command {
     /// publish, or grant publish or push authority without it: owners whose PRs open without
     /// asking, the PR keeper's rebases and pushes, and a settings repository the host pushes to.
     /// Spaces are the human's: creating, editing or removing one, setting its brain, moving a
-    /// project into one and choosing which repositories it lists. Remote access is the human's too: its state carries the pairing code.
+    /// project into one and choosing which repositories it lists, and reading where its storage
+    /// is on this Mac. Remote access is the human's too: its state carries the pairing code.
     pub fn is_human_only(&self) -> bool {
         matches!(
             self,
@@ -3428,6 +3442,8 @@ impl Command {
                 | Self::SetTrackerPrefix { .. }
                 | Self::SetUpIssues { .. }
                 | Self::AttachBrain { .. }
+                | Self::SetSpaceBrain { .. }
+                | Self::SpaceStorage { .. }
                 | Self::RemoteAccess
                 | Self::SetRemoteAccess { .. }
                 | Self::OpenPairing

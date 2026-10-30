@@ -1,6 +1,7 @@
 //! The right-edge rail and the inspector panel it opens for the selected session.
 use super::*;
 use gpui_component::{
+    Disableable,
     button::ButtonVariants,
     menu::{DropdownMenu, PopupMenuItem},
     tooltip::Tooltip,
@@ -10,6 +11,8 @@ use ui::{
     session_icon,
 };
 use wording::{from_now, local_time};
+
+const MOVE_TO_SPACE: &str = "Its later entries go to that Space’s brain; earlier ones stay where they are. Its repositories don’t change.";
 
 fn scope(role: Role) -> &'static str {
     match role {
@@ -364,6 +367,88 @@ impl Inspector {
             .child(hint(label, p))
     }
 
+    /// The project's Space and the brain it logs to, with Move to another Space, which asks
+    /// first.
+    fn space_section(
+        &self,
+        project: &Project,
+        snapshot: &Snapshot,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let space = snapshot.spaces.iter().find(|s| s.id == project.space);
+        let others: Vec<(SpaceId, String)> = (snapshot.spaces.iter())
+            .filter(|s| s.id != project.space)
+            .map(|s| (s.id.clone(), s.name.clone()))
+            .collect();
+        let (project_id, project_name) = (project.id.clone(), project.name.clone());
+        let weak = cx.weak_entity();
+        let mut section = div().flex().flex_col().gap_1().child(
+            section("SPACE", p).child(
+                ui::gated(
+                    button("move-to-space")
+                        .ghost()
+                        .label("Move to another Space")
+                        .dropdown_caret(true)
+                        .disabled(others.is_empty()),
+                    &self.shared.host,
+                )
+                .dropdown_menu(move |mut menu, _, _| {
+                    for (id, name) in &others {
+                        let (weak, id, name) = (weak.clone(), id.clone(), name.clone());
+                        let (project_id, project_name) = (project_id.clone(), project_name.clone());
+                        menu = menu.item(PopupMenuItem::new(name.clone()).on_click(
+                            move |_, window, cx| {
+                                let move_to = Command::MoveProjectToSpace {
+                                    project_id: project_id.clone(),
+                                    space_id: id.clone(),
+                                };
+                                let weak = weak.clone();
+                                let title = format!("Move {project_name} to {name}?");
+                                window.open_alert_dialog(cx, move |dialog, _, _| {
+                                    let (weak, move_to) = (weak.clone(), move_to.clone());
+                                    dialog
+                                        .title(title.clone())
+                                        .confirm()
+                                        .ok_text("Move")
+                                        .child(MOVE_TO_SPACE)
+                                        .on_ok(move |_, window, cx| {
+                                            let move_to = move_to.clone();
+                                            let _ = weak.update(cx, |view, cx| {
+                                                view.request(move_to, window, cx)
+                                            });
+                                            true
+                                        })
+                                });
+                            },
+                        ));
+                    }
+                    menu
+                }),
+            ),
+        );
+        let Some(space) = space else {
+            return section.child(hint("No Space", p));
+        };
+        let local = snapshot.space_locals.get(&space.id);
+        section = section.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(spaces_view::space_mark(spaces_view::space_color(
+                    &snapshot.spaces,
+                    &space.id,
+                    p,
+                )))
+                .child(space.name.clone()),
+        );
+        section.child(hint(
+            format!("Logs to {}.", spaces_view::brain_label(space, local)),
+            p,
+        ))
+    }
+
     fn repository_row(repository: &Repository, p: Palette) -> Stateful<Div> {
         let path = repository.path.clone();
         div()
@@ -531,6 +616,9 @@ impl Inspector {
                     .child(Self::stat(open, "Open", p))
                     .child(Self::stat(agents, "Agents", p)),
             );
+            if let Some(project) = index.project(&session.project_id) {
+                body = body.child(self.space_section(project, snapshot, p, cx));
+            }
             let weak = cx.weak_entity();
             let mut repositories = div().flex().flex_col().child(
                 section("REPOSITORIES", p).child(

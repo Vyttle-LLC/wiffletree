@@ -234,6 +234,48 @@ fn commit_local(folder: &Path, paths: &[&str], message: &str) -> Result<()> {
     Ok(())
 }
 
+/// Refuses `clone`, a folder on this Mac, unless it is a repository's root with a committed
+/// base, as the workspace adds it, and its `origin` is one of `space`'s repositories.
+fn check_clone(space: &Space, clone: &str) -> Result<()> {
+    let path = repositories::folder_path(clone)?;
+    repositories::candidate(&path, &Default::default()).with_context(|| clone.to_owned())?;
+    let identity = match repositories::read_origin(&path) {
+        repositories::Origin::GitHub { owner, name, .. } => format!("{owner}/{name}"),
+        _ => bail!("{clone} is not a clone of a GitHub repository"),
+    };
+    ensure!(
+        (space.repositories.iter()).any(|listed| listed.eq_ignore_ascii_case(&identity)),
+        "{clone} is a clone of {identity}, which {} does not list",
+        space.name
+    );
+    Ok(())
+}
+
+/// How many issues with `prefix` the tracker in `folder` holds: the folders of `issues/` named
+/// by an issue ID, in the clone and, for a GitHub repository, at the commit last `synced`, as
+/// passes leave `issues/` out of the clone.
+fn count_issues(folder: &Path, prefix: &str, synced: Option<&str>) -> Result<usize> {
+    let mut ids: std::collections::BTreeSet<String> = (fs::read_dir(folder.join(ISSUES))
+        .into_iter())
+    .flatten()
+    .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
+    .collect();
+    if let Some(synced) = synced {
+        let listed =
+            runtime::git_output(folder, &["ls-tree", "--name-only", synced, "--", "issues/"])?;
+        ids.extend(
+            listed
+                .lines()
+                .filter_map(|line| line.strip_prefix("issues/"))
+                .map(str::to_owned),
+        );
+    }
+    Ok(ids
+        .iter()
+        .filter(|id| issue_number(id, prefix).is_some())
+        .count())
+}
+
 /// Whether a tracker holds any issue: in its clone, or on GitHub as of `synced`, the commit last
 /// synced, as a pass never brings `issues/` into the clone for this release.
 fn has_issues(folder: &Path, synced: &str) -> Result<bool> {
@@ -276,6 +318,8 @@ pub(crate) fn stage(home: &Path, input: &str, tools: &Tools, added: &[SpaceId]) 
             id: space.id,
             name: space.name,
             description: space.description,
+            brain: space.brain,
+            repositories: space.repositories,
         });
     }
     spaces.sort_by(|a, b| a.folder.cmp(&b.folder));
@@ -584,6 +628,15 @@ pub(crate) struct Passed {
     pushed: Option<String>,
     error: Option<String>,
     found: Found,
+}
+
+/// What the latest pass of a storage repository that syncs on its own did.
+#[derive(Default)]
+pub(crate) struct Synced {
+    /// When a pass last reached GitHub.
+    at: Option<i64>,
+    /// Why the latest pass failed.
+    error: Option<String>,
 }
 
 /// Runs a storage repository's engine with its Space and tracker rule sets, scanning what it
@@ -1025,8 +1078,9 @@ impl Host {
         Ok((space, tracker))
     }
     /// Adds the ticked Spaces of a GitHub storage repository, checked and cloned in `staged`,
-    /// with where each one's brain is on this Mac. Refused when its tracker's prefix is used by
-    /// another storage repository here.
+    /// with where each one's brain is on this Mac and the clones of its code repositories here,
+    /// which join the workspace. Refused when its tracker's prefix is used by another storage
+    /// repository here, or a clone is of a repository the Space does not list.
     pub(crate) fn join_spaces(
         &mut self,
         staged: Staged,
@@ -1065,6 +1119,9 @@ impl Host {
                 },
             )?;
             self.refuse_brain_of(&space)?;
+            for clone in &tick.clones {
+                check_clone(&space, clone)?;
+            }
             let local = SpaceLocal {
                 brain_path: tick.brain_path.clone(),
                 notes: self.model_notes(&space)?,
@@ -1081,6 +1138,15 @@ impl Host {
             for (at, record) in joined.iter().enumerate() {
                 let tracker = tracker.as_ref().filter(|_| at == 0 && !has_tracker);
                 spaces::insert_space(&host.db, &record.space, &record.local, tracker)?;
+            }
+            let clones: Vec<String> = ticked.iter().flat_map(|t| t.clones.clone()).collect();
+            if !clones.is_empty() {
+                let imported = host.import_repositories(None, &clones, &[], &[])?;
+                ensure!(
+                    imported.failures.is_empty(),
+                    "{}",
+                    imported.failures.join("; ")
+                );
             }
             Ok(())
         })?;
@@ -1189,10 +1255,18 @@ impl Host {
             running: self.sync_passes.clone(),
         }))
     }
-    /// Records a storage repository's own pass.
-    pub(crate) fn finish_storage_pass(&mut self, passed: Result<Passed>) -> Result<()> {
-        let passed = passed?;
-        let key = passed.found.key.clone();
+    /// Records a storage repository's own pass of `key`.
+    pub(crate) fn finish_storage_pass(&mut self, key: &str, passed: Result<Passed>) -> Result<()> {
+        let synced = self.storage_synced.entry(key.to_owned()).or_default();
+        let passed = match passed {
+            Ok(passed) => passed,
+            Err(error) => {
+                synced.error = Some(format!("{error:#}"));
+                return Err(error);
+            }
+        };
+        synced.at = Some(now());
+        synced.error = passed.error.clone();
         if let Some(error) = &passed.error {
             eprintln!("Syncing {key}: {error}");
         }
@@ -1328,6 +1402,55 @@ impl Host {
         }
         Ok(())
     }
+    /// What the Space page's Storage and issues box shows about the Space's storage repository.
+    pub fn storage_status(&self, space_id: &SpaceId) -> Result<StorageStatus> {
+        let space = self.space(space_id)?.space;
+        let folder = self.storage_folder(&space.storage.repository);
+        let prefix = self.tracker(&space).ok().map(|tracker| tracker.prefix);
+        let path = folder.to_string_lossy().into_owned();
+        let Some(key) = Self::storage_key(&space.storage.repository) else {
+            let issues = match &prefix {
+                Some(prefix) => count_issues(&folder, prefix, None)?,
+                None => 0,
+            };
+            return Ok(StorageStatus {
+                prefix,
+                issues,
+                readers: None,
+                settings_repository: false,
+                path,
+                synced_at: None,
+                error: None,
+            });
+        };
+        let data: String = self.db.query_row(
+            "SELECT data FROM storage_repositories WHERE key=?1",
+            [&key],
+            |r| r.get(0),
+        )?;
+        let repository: SettingsRepository = serde_json::from_str(&data)?;
+        let synced = Record::read(&self.db, &key)?.map(|record| record.commit);
+        let issues = match &prefix {
+            Some(prefix) => count_issues(&folder, prefix, synced.as_deref())?,
+            None => 0,
+        };
+        let settings_repository = self.settings_key().as_ref() == Some(&key);
+        let (synced_at, error) = match settings_repository {
+            true => (self.sync_status()?).map_or((None, None), |s| (s.synced_at, s.error)),
+            false => {
+                (self.storage_synced.get(&key)).map_or((None, None), |s| (s.at, s.error.clone()))
+            }
+        };
+        Ok(StorageStatus {
+            prefix,
+            issues,
+            readers: Some(repository.readers),
+            settings_repository,
+            path,
+            synced_at,
+            error,
+        })
+    }
     /// The settings repository's record key, `None` without one. Reads only this Mac's settings
     /// file, as the shared folder's recorder asks while the shared settings are read.
     pub(crate) fn settings_key(&self) -> Option<String> {
@@ -1386,13 +1509,13 @@ impl Host {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::sync::tests::{GitHub, NAME};
     use crate::test_support::{git, scan_tools};
     use std::sync::Arc;
 
-    fn host() -> (TempDir, Host) {
+    pub(crate) fn host() -> (TempDir, Host) {
         let home = tempfile::tempdir().unwrap();
         let mut host = Host::open_set_up(home.path()).unwrap();
         host.scan_path = Some(SCAN_TOOLS.with(|bin| bin.path().into()));
@@ -1442,7 +1565,7 @@ mod tests {
     }
 
     /// A storage repository on GitHub holding Sage and, with `prefix`, a tracker.
-    fn shared_storage(folder: &Path, prefix: Option<&str>) -> Arc<GitHub> {
+    pub(crate) fn shared_storage(folder: &Path, prefix: Option<&str>) -> Arc<GitHub> {
         let github = Arc::new(GitHub::new(folder, true));
         github.commit("spaces/sage/space.yaml", sage("Secure family messaging"));
         if let Some(prefix) = prefix {
@@ -1451,11 +1574,21 @@ mod tests {
         github
     }
 
-    fn join_sage(host: &mut Host, github: &Arc<GitHub>) -> Result<Vec<SpaceRecord>> {
+    pub(crate) fn join_sage(host: &mut Host, github: &Arc<GitHub>) -> Result<Vec<SpaceRecord>> {
+        join_sage_with(host, github, vec![])
+    }
+
+    /// Joins Sage with `clones` as the clones of its code repositories on this Mac.
+    fn join_sage_with(
+        host: &mut Host,
+        github: &Arc<GitHub>,
+        clones: Vec<String>,
+    ) -> Result<Vec<SpaceRecord>> {
         let staged = stage(&host.home, NAME, &github.tools(), &[])?;
         let ticked = [JoinSpace {
             folder: "sage".into(),
             brain_path: None,
+            clones,
         }];
         host.join_spaces(staged, &ticked)
     }
@@ -1464,11 +1597,11 @@ mod tests {
     fn sync(host: &mut Host, github: &Arc<GitHub>) {
         let key = repos::key(NAME);
         let pass = host.storage_pass(&key).unwrap().unwrap();
-        host.finish_storage_pass(self::pass(pass, &github.tools()))
+        host.finish_storage_pass(&key, self::pass(pass, &github.tools()))
             .unwrap();
     }
 
-    fn space_named(host: &Host, name: &str) -> Space {
+    pub(crate) fn space_named(host: &Host, name: &str) -> Space {
         let spaces = host.spaces().unwrap().into_iter();
         spaces.map(|r| r.space).find(|s| s.name == name).unwrap()
     }
@@ -1948,7 +2081,8 @@ sources:
         finished
             .recv_timeout(std::time::Duration::from_secs(30))
             .unwrap();
-        host.finish_storage_pass(running.join().unwrap()).unwrap();
+        host.finish_storage_pass(&repos::key(NAME), running.join().unwrap())
+            .unwrap();
     }
 
     #[test]
@@ -2348,5 +2482,181 @@ sources:
         let committed = git(&folder, &["show", "HEAD:spaces/personal/space.yaml"]);
         assert!(committed.contains("555-0134"));
         assert!(host.workspace_notes(&[]).unwrap().is_empty());
+    }
+
+    /// A clone at `folder` of the GitHub repository `identity`, with one commit.
+    fn clone_of(folder: &Path, identity: &str) -> String {
+        fs::create_dir_all(folder).unwrap();
+        git(folder, &["init", "-q", "-b", "main"]);
+        let url = format!("https://github.com/{identity}.git");
+        git(folder, &["remote", "add", "origin", &url]);
+        git(folder, &["commit", "-q", "--allow-empty", "-m", "First"]);
+        folder.to_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn joining_takes_the_clones_of_the_spaces_repositories_here_and_leaves_the_rest_missing() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let (_home, mut host) = host();
+        let check = stage(&host.home, NAME, &github.tools(), &[]).unwrap().check;
+        assert_eq!(check.spaces[0].repositories, ["Sage-Social/api"]);
+        let elsewhere = clone_of(&folder.path().join("site"), "Vyttle-LLC/site");
+        let error = format!(
+            "{:#}",
+            join_sage_with(&mut host, &github, vec![elsewhere]).unwrap_err()
+        );
+        assert!(
+            error.contains("is a clone of Vyttle-LLC/site, which Sage does not list"),
+            "{error}"
+        );
+        assert!(
+            host.find_space(&SpaceId("sage-id".into()))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            host.repositories().unwrap().is_empty(),
+            "nothing is written"
+        );
+        let api = clone_of(&folder.path().join("api"), "Sage-Social/api");
+        join_sage_with(&mut host, &github, vec![api.clone()]).unwrap();
+        let here = host.repositories().unwrap();
+        let path = fs::canonicalize(&api).unwrap();
+        assert_eq!(
+            (here.iter().map(|r| Path::new(&r.path)).collect::<Vec<_>>()),
+            [path.as_path()],
+            "the clone joins the workspace, whose GitHub read then names it"
+        );
+        let (_home, mut other) = self::host();
+        join_sage(&mut other, &github).unwrap();
+        let sage = space_named(&other, "Sage");
+        let missing = other.space_repositories(&sage.id).unwrap();
+        assert!(missing.repository_ids.is_empty());
+        assert_eq!(missing.not_cloned, ["Sage-Social/api"], "left missing");
+    }
+
+    #[test]
+    fn the_storage_box_counts_issues_and_says_who_reads_them_and_when_they_synced() {
+        let (_home, mut host) = host();
+        let personal = personal(&host);
+        let local = host.storage_folder(&personal.storage.repository);
+        let prefix = host.tracker(&personal).unwrap().prefix;
+        for id in [format!("{prefix}-1"), format!("{prefix}-2"), "notes".into()] {
+            fs::create_dir_all(local.join("issues").join(id)).unwrap();
+        }
+        let status = host.storage_status(&personal.id).unwrap();
+        assert_eq!(status.prefix.as_deref(), Some(prefix.as_str()));
+        assert_eq!((status.issues, status.readers), (2, None));
+        assert_eq!(status.path, local.to_str().unwrap());
+        assert_eq!(
+            (status.synced_at, status.settings_repository),
+            (None, false)
+        );
+
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), None);
+        github.commit("issues/SAGE-1/issue.md", "---\nid: SAGE-1\n---\n");
+        join_sage(&mut host, &github).unwrap();
+        let sage = space_named(&host, "Sage");
+        let status = host.storage_status(&sage.id).unwrap();
+        assert_eq!(
+            (status.prefix, status.issues),
+            (None, 0),
+            "Set up issues is offered"
+        );
+        assert_eq!(status.readers, Some(Readers::Invited));
+        assert_eq!(status.synced_at, None);
+        host.set_up_issues(&sage.id, "SAGE").unwrap();
+        sync(&mut host, &github);
+        let status = host.storage_status(&sage.id).unwrap();
+        assert_eq!(status.prefix.as_deref(), Some("SAGE"));
+        assert_eq!(status.issues, 1, "counted on GitHub, outside the clone");
+        assert!(status.synced_at.is_some() && status.error.is_none());
+    }
+
+    #[test]
+    fn a_spaces_brain_is_set_from_its_page_for_every_project_in_it() {
+        let (_home, mut host) = host();
+        let personal = personal(&host);
+        let brain = tempfile::tempdir().unwrap();
+        host.set_space_brain(&personal.id, brain.path().to_str().unwrap())
+            .unwrap();
+        let record = host.space(&personal.id).unwrap();
+        let path = fs::canonicalize(brain.path()).unwrap();
+        assert_eq!(record.local.brain_path.as_deref(), path.to_str());
+        assert!(matches!(
+            record.space.brain.unwrap().repository,
+            BrainRepository::Local { .. }
+        ));
+    }
+
+    #[test]
+    fn a_clone_the_workspace_would_refuse_fails_the_join_before_anything_is_written() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let (home, mut host) = host();
+        let api = clone_of(&folder.path().join("api"), "Sage-Social/api");
+        let inside = Path::new(&api).join("src");
+        fs::create_dir_all(&inside).unwrap();
+        let error =
+            join_sage_with(&mut host, &github, vec![inside.to_str().unwrap().into()]).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("Expected a Git repository root"),
+            "{error:#}"
+        );
+        assert!(
+            host.find_space(&SpaceId("sage-id".into()))
+                .unwrap()
+                .is_none()
+        );
+        assert!(host.repositories().unwrap().is_empty());
+        assert!(
+            !repos::clone_folder(home.path(), NAME).exists(),
+            "the storage clone is not placed"
+        );
+    }
+
+    #[test]
+    fn a_github_brain_left_missing_at_join_is_given_its_clone_on_the_space_page() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let mut sage = read_space(
+            sage("").as_bytes(),
+            SpaceStorage {
+                repository: super::github(NAME),
+                folder: "sage".into(),
+            },
+        )
+        .unwrap();
+        sage.brain = Some(SpaceBrain {
+            repository: BrainRepository::GitHub {
+                owner: "Sage-Social".into(),
+                name: "sagehaven-docs".into(),
+                extra: Extra::new(),
+            },
+            folder: "second-brain".into(),
+            extra: Extra::new(),
+        });
+        github.commit("spaces/sage/space.yaml", space_yaml(&sage).unwrap());
+        let (_home, mut host) = host();
+        let id = join_sage(&mut host, &github).unwrap()[0].space.id.clone();
+        assert_eq!(
+            host.space(&id).unwrap().local.brain_path,
+            None,
+            "left missing"
+        );
+        let other = clone_of(&folder.path().join("other"), "Sage-Social/api");
+        let error = host.set_space_brain(&id, &other).unwrap_err();
+        assert!(format!("{error:#}").contains("is not a clone of Sage-Social/sagehaven-docs"));
+        let docs = clone_of(&folder.path().join("docs"), "Sage-Social/sagehaven-docs");
+        host.set_space_brain(&id, &docs).unwrap();
+        let record = host.space(&id).unwrap();
+        let path = fs::canonicalize(&docs).unwrap();
+        assert_eq!(record.local.brain_path.as_deref(), path.to_str());
+        assert_eq!(
+            record.space.brain, sage.brain,
+            "the brain stays the GitHub one"
+        );
     }
 }

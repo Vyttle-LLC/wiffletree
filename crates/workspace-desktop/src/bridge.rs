@@ -287,7 +287,7 @@ impl Bridge {
         let snapshot = answer(client, ask::snapshot())?;
         // A store without a saved setup starts nothing, the demo project included.
         if snapshot.projects.is_empty() && snapshot.model_selection.is_saved() {
-            let project = answer(client, ask::create_project("Workspace trial".into()))?;
+            let project = answer(client, ask::create_project("Workspace trial".into(), None))?;
             let base = "HEAD".into();
             answer(client, ask::attach_repository(Some(project.id), path, base))?;
         }

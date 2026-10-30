@@ -58,7 +58,6 @@ pub(crate) type OnNote = Rc<dyn Fn(NoteRef, NoteAction, &mut Window, &mut App)>;
 /// The note open in Compare, and its lines once the host answers.
 pub(crate) type Compared = Option<(NoteRef, Option<Vec<Line>>)>;
 
-/// Whether `note` is the one open in Compare.
 fn is_open(compared: &Compared, note: &PausedSetting) -> bool {
     compared
         .as_ref()

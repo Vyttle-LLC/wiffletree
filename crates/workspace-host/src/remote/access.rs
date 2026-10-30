@@ -53,7 +53,8 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::CoreInstructions
         | Command::NewProjectDefaults { .. }
         | Command::SuggestRepositorySpace { .. }
-        | Command::RepositorySuggestions => Row::Read,
+        | Command::RepositorySuggestions
+        | Command::SpaceStorage { .. } => Row::Read,
         Command::ResolvePaths { .. } | Command::ReadFile { .. } | Command::ListFolder { .. } => {
             Row::HostPath
         }
@@ -87,6 +88,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::DismissAttention { .. }
         | Command::AppendLog { .. }
         | Command::AttachBrain { .. }
+        | Command::SetSpaceBrain { .. }
         | Command::CreateSpace { .. }
         | Command::UpdateSpace { .. }
         | Command::RemoveSpace { .. }

@@ -25,6 +25,7 @@ mod menu_bar;
 mod models;
 mod models_view;
 mod native_quit;
+mod new_project;
 mod palette;
 mod preferences;
 mod processes_view;
@@ -37,6 +38,7 @@ mod settings;
 mod shared;
 mod sidebar;
 mod skills_view;
+mod spaces_view;
 mod staging;
 mod team_view;
 #[cfg(test)]
@@ -194,6 +196,7 @@ enum Page {
     Models,
     Skills,
     Repositories,
+    Spaces,
 }
 
 struct Workspace {
@@ -215,6 +218,7 @@ struct Workspace {
     conversation: Entity<conversation::Conversation>,
     creation: Option<Entity<CreationForm>>,
     repositories: Entity<repositories_view::RepositoriesPage>,
+    spaces: Entity<spaces_view::SpacesPage>,
     usage: Entity<usage_view::UsagePage>,
     sidebar: Entity<sidebar::Sidebar>,
     inspector: Entity<Inspector>,
@@ -261,6 +265,8 @@ impl Workspace {
             repositories_view::RepositoriesPage::new(bridge.clone(), verifiers.clone(), window, cx)
         });
         Self::adopt(&repositories, window, cx);
+        let spaces = cx.new(|cx| spaces_view::SpacesPage::new(bridge.clone(), window, cx));
+        Self::adopt(&spaces, window, cx);
         let sidebar = cx.new(|cx| sidebar::Sidebar::new(bridge.clone(), window, cx));
         Self::adopt(&sidebar, window, cx);
         let usage = cx.new(|_| usage_view::UsagePage::new(bridge.clone()));
@@ -282,6 +288,7 @@ impl Workspace {
             conversation,
             creation: None,
             repositories,
+            spaces,
             usage,
             sidebar,
             inspector,
@@ -422,8 +429,10 @@ impl Workspace {
         self.usage
             .update(cx, |usage, cx| usage.share(shared.clone(), window, cx));
         self.repositories.update(cx, |repositories, cx| {
-            repositories.share(shared.clone(), cx)
+            repositories.share(shared.clone(), window, cx)
         });
+        self.spaces
+            .update(cx, |spaces, cx| spaces.share(shared.clone(), window, cx));
         self.models
             .update(cx, |models, cx| models.share(shared.clone(), window, cx));
         self.skills

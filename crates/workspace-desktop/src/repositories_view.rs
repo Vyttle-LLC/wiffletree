@@ -7,7 +7,7 @@ use gpui_component::{
     input::{Escape, Input, InputEvent},
     menu::{DropdownMenu, PopupMenuItem},
 };
-use ui::{banner, card, empty_state, hint, icon, mono, pill, section};
+use ui::{banner, card, empty_state, eyebrow, hint, icon, mono, pill, section};
 use wording::{age, counted, from_now};
 
 const WITHOUT_ASKING: &str =
@@ -68,6 +68,30 @@ pub(super) struct RepositoriesPage {
     owner_input: Entity<InputState>,
     /// The saved review levels, which the keeper's review level picks from.
     verifiers: Entity<verifiers::VerifierEditor>,
+    /// The upgrade's suggested Spaces with the human's picks, until confirmed; asked for again
+    /// while the page shows, as GitHub names and the `gh` login arrive after start.
+    suggestions: Vec<(RepositorySuggestion, Pick)>,
+    suggestions_asking: bool,
+    /// The workspace repositories known since the first snapshot; one that arrives later is
+    /// being added, and is suggested a Space once its GitHub name is known.
+    seen: Option<BTreeSet<String>>,
+    arriving: BTreeSet<String>,
+    adding: Vec<Adding>,
+}
+
+/// The Space chosen for a repository: one of them, Personal before it exists, or none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Pick {
+    Space(SpaceId),
+    NewPersonal,
+    NoSpace,
+}
+
+/// A repository just added, with the Space its owner suggests and the one the human picked.
+struct Adding {
+    repository: String,
+    suggested: Option<SpaceId>,
+    pick: Option<SpaceId>,
 }
 impl EventEmitter<Intent> for RepositoriesPage {}
 impl RepositoriesPage {
@@ -96,16 +120,354 @@ impl RepositoriesPage {
             base_input,
             base_edit: None,
             owner_input: cx.new(|cx| InputState::new(window, cx).placeholder(OWNER_PLACEHOLDER)),
+            suggestions: vec![],
+            suggestions_asking: false,
+            seen: None,
+            arriving: BTreeSet::new(),
+            adding: vec![],
         }
     }
-    /// Redraws while shown, as the repositories it lists change.
-    pub(super) fn share(&mut self, shared: Shared, cx: &mut Context<Self>) {
+    /// Redraws while shown, as the repositories it lists change; asks for the upgrade's
+    /// suggestions at the first open, and a Space for each repository as it is added.
+    pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
         let (_, moved) = shared.moved_from(&self.shared);
         let opened = shared.page == Page::Repositories && self.shared.page != Page::Repositories;
+        // Another host's repositories are not being added, and its suggestions are its own.
+        if shared.host.name() != self.shared.host.name() {
+            self.seen = None;
+            self.arriving.clear();
+            self.adding.clear();
+            self.suggestions.clear();
+        }
         self.shared = shared;
+        if moved {
+            self.notice_added(window, cx);
+        }
+        let shown = self.shared.page == Page::Repositories;
+        if (opened || (moved && shown)) && !self.suggestions_asking {
+            self.suggestions_asking = true;
+            self.ask(
+                ask::repository_suggestions(),
+                window,
+                cx,
+                |view, suggestions, window, cx| {
+                    view.suggestions_asking = false;
+                    match suggestions {
+                        Ok(suggestions) => {
+                            view.suggestions = with_picks(&view.suggestions, suggestions)
+                        }
+                        Err(error) => toast_error(error, window, cx),
+                    }
+                },
+            );
+        }
         if opened || (moved && self.shared.page == Page::Repositories) {
             cx.notify();
         }
+    }
+
+    /// Finds the repositories added since the last snapshot and asks which Space their owner
+    /// suggests, once each has a GitHub name.
+    fn notice_added(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.shared.snapshot() else {
+            return;
+        };
+        let ids = snapshot.repositories.iter().map(|r| r.id.clone());
+        let Some(seen) = &mut self.seen else {
+            self.seen = Some(ids.collect());
+            return;
+        };
+        for id in ids {
+            if seen.insert(id.clone()) {
+                self.arriving.insert(id);
+            }
+        }
+        // Its GitHub name arrives with a later read; until then it waits.
+        let named: Vec<(String, String)> = (snapshot.repositories.iter())
+            .filter(|r| self.arriving.contains(&r.id))
+            .filter_map(|r| Some((r.id.clone(), r.github_identity()?)))
+            .collect();
+        for (id, _) in &named {
+            self.arriving.remove(id);
+        }
+        let unlisted = named
+            .into_iter()
+            .map(|(_, identity)| identity)
+            .filter(|identity| spaces_of(&snapshot.spaces, identity).next().is_none())
+            .collect::<Vec<_>>();
+        for identity in unlisted {
+            let asked = identity.clone();
+            self.ask(
+                ask::suggest_repository_space(identity),
+                window,
+                cx,
+                move |view, suggested, _, _| {
+                    let suggested = suggested.ok().flatten();
+                    view.adding.push(Adding {
+                        repository: asked,
+                        pick: suggested.clone(),
+                        suggested,
+                    });
+                },
+            );
+        }
+    }
+
+    /// Puts `repository` in exactly `space_ids`, editing each Space's repositories.
+    fn set_spaces(
+        &mut self,
+        repository: String,
+        space_ids: Vec<SpaceId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let command = Command::SetRepositorySpaces {
+            repository,
+            space_ids,
+        };
+        self.request(command, window, cx);
+    }
+
+    /// One chip per Space the repository is in, or "Space" for none; each opens the Spaces to
+    /// add or remove. `at` keeps a repository drawn in several sections apart.
+    fn space_chips(
+        &self,
+        at: usize,
+        repository: &Repository,
+        snapshot: &Snapshot,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let chips = div().flex().flex_wrap().items_center().gap_1();
+        let Some(identity) = repository.github_identity() else {
+            return chips.child(hint("Not on GitHub, so in no Space", p));
+        };
+        let member: Vec<SpaceId> = spaces_of(&snapshot.spaces, &identity)
+            .map(|s| s.id.clone())
+            .collect();
+        let spaces: Vec<(SpaceId, String)> = (snapshot.spaces.iter())
+            .map(|s| (s.id.clone(), s.name.clone()))
+            .collect();
+        let weak = cx.weak_entity();
+        let chip = |id: String, label: String, mark: Option<Hsla>| {
+            let (member, spaces, weak, identity) = (
+                member.clone(),
+                spaces.clone(),
+                weak.clone(),
+                identity.clone(),
+            );
+            ui::gated(
+                button(SharedString::from(id))
+                    .xsmall()
+                    .outline()
+                    .when(mark.is_none(), |b| b.icon(icon("plus")))
+                    .label(label)
+                    .when_some(mark, |b, color| b.child(spaces_view::space_mark(color)))
+                    .dropdown_caret(true),
+                &self.shared.host,
+            )
+            .dropdown_menu(move |mut menu, _, _| {
+                for (space, name) in &spaces {
+                    let checked = member.contains(space);
+                    let chosen = toggled(&member, space);
+                    let (weak, identity) = (weak.clone(), identity.clone());
+                    menu = menu.item(PopupMenuItem::new(name.clone()).checked(checked).on_click(
+                        move |_, window, cx| {
+                            let (identity, chosen) = (identity.clone(), chosen.clone());
+                            let _ = weak.update(cx, |view, cx| {
+                                view.set_spaces(identity, chosen, window, cx)
+                            });
+                        },
+                    ));
+                }
+                menu
+            })
+        };
+        if member.is_empty() {
+            let id = format!("space-chip-{at}-{}-none", repository.id);
+            return chips.child(chip(id, "Space".into(), None));
+        }
+        let mut chips = chips;
+        for space in spaces_of(&snapshot.spaces, &identity) {
+            let id = format!("space-chip-{at}-{}-{}", repository.id, space.id);
+            let color = spaces_view::space_color(&snapshot.spaces, &space.id, p);
+            chips = chips.child(chip(id, space.name.clone(), Some(color)));
+        }
+        chips
+    }
+
+    /// The upgrade's suggestions, each with a picker, and Confirm, which writes them all.
+    fn suggestions_card(
+        &self,
+        snapshot: &Snapshot,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        if self.suggestions.is_empty() {
+            return None;
+        }
+        let mut card = card(p)
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Suggested Spaces"),
+            )
+            .child(hint(SUGGESTED, p));
+        for (at, (suggestion, pick)) in self.suggestions.iter().enumerate() {
+            let label = pick_label(pick, &snapshot.spaces);
+            let mut options: Vec<(Pick, String)> = (snapshot.spaces.iter())
+                .map(|s| (Pick::Space(s.id.clone()), s.name.clone()))
+                .collect();
+            if suggestion.space == Some(SuggestedSpace::NewPersonal) {
+                options.push((Pick::NewPersonal, pick_label(&Pick::NewPersonal, &[])));
+            }
+            options.push((Pick::NoSpace, "No Space".into()));
+            let (weak, current) = (cx.weak_entity(), pick.clone());
+            let picker = button(SharedString::from(format!("suggested-{at}")))
+                .xsmall()
+                .outline()
+                .label(label)
+                .dropdown_caret(true)
+                .dropdown_menu(move |mut menu, _, _| {
+                    for (pick, name) in &options {
+                        let (weak, pick) = (weak.clone(), pick.clone());
+                        let checked = pick == current;
+                        menu =
+                            menu.item(PopupMenuItem::new(name.clone()).checked(checked).on_click(
+                                move |_, _, cx| {
+                                    let pick = pick.clone();
+                                    let _ = weak.update(cx, |view, cx| {
+                                        view.suggestions[at].1 = pick;
+                                        cx.notify();
+                                    });
+                                },
+                            ));
+                    }
+                    menu
+                });
+            card = card.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(suggestion.repository.clone()),
+                    )
+                    .child(picker),
+            );
+        }
+        Some(
+            card.child(
+                div().flex().justify_end().child(
+                    ui::gated(
+                        button("confirm-suggestions").primary().label("Confirm"),
+                        &self.shared.host,
+                    )
+                    .on_click(cx.listener(|view, _, window, cx| {
+                        let spaces = view.shared.snapshot().map_or(&[][..], |s| &s.spaces);
+                        let choices = confirmed(&view.suggestions, spaces);
+                        view.request(
+                            Command::ConfirmRepositorySuggestions { choices },
+                            window,
+                            cx,
+                        )
+                    })),
+                ),
+            ),
+        )
+    }
+
+    /// A repository just added, with its owner's suggested Space to confirm, change or refuse.
+    fn adding_card(
+        &self,
+        adding: &Adding,
+        snapshot: &Snapshot,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let repository = adding.repository.clone();
+        let owner = repository_owner(&repository).to_owned();
+        let picked =
+            (adding.pick.as_ref()).and_then(|id| snapshot.spaces.iter().find(|s| &s.id == id));
+        let why = suggestion_reason(&snapshot.spaces, adding.suggested.as_ref(), &owner);
+        let spaces: Vec<(SpaceId, String)> = (snapshot.spaces.iter())
+            .map(|s| (s.id.clone(), s.name.clone()))
+            .collect();
+        let (weak, key) = (cx.weak_entity(), repository.clone());
+        let picker = button(SharedString::from(format!("adding-{repository}")))
+            .xsmall()
+            .outline()
+            .label(picked.map_or("No Space".into(), |s| s.name.clone()))
+            .dropdown_caret(true)
+            .dropdown_menu(move |mut menu, _, _| {
+                for (id, name) in &spaces {
+                    let (weak, id, key) = (weak.clone(), id.clone(), key.clone());
+                    menu = menu.item(PopupMenuItem::new(name.clone()).on_click(move |_, _, cx| {
+                        let (id, key) = (id.clone(), key.clone());
+                        let _ = weak.update(cx, |view, cx| {
+                            if let Some(adding) =
+                                view.adding.iter_mut().find(|a| a.repository == key)
+                            {
+                                adding.pick = Some(id);
+                            }
+                            cx.notify();
+                        });
+                    }));
+                }
+                menu
+            });
+        let dismissed = repository.clone();
+        let added = (repository.clone(), adding.pick.clone());
+        card(p)
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(format!("Adding {repository}")),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(hint("Suggested Space:", p))
+                    .child(picker)
+                    .child(hint(why, p)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        button(SharedString::from(format!("adding-none-{repository}")))
+                            .ghost()
+                            .label("No Space")
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.adding.retain(|a| a.repository != dismissed);
+                                cx.notify();
+                            })),
+                    )
+                    .children(picked.map(|space| {
+                        let (repository, pick) = added.clone();
+                        ui::gated(
+                            button(SharedString::from(format!("adding-to-{repository}")))
+                                .primary()
+                                .label(format!("Add to {}", space.name)),
+                            &self.shared.host,
+                        )
+                        .on_click(cx.listener(
+                            move |view, _, window, cx| {
+                                view.adding.retain(|a| a.repository != repository);
+                                let spaces = pick.clone().into_iter().collect();
+                                view.set_spaces(repository.clone(), spaces, window, cx);
+                            },
+                        ))
+                    })),
+            )
     }
 
     fn body(&self, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -168,21 +530,70 @@ impl RepositoriesPage {
             "Every project uses all of these unless it chooses its own set in its Overview.",
             p,
         ));
-        let mut list = div().flex().flex_col();
-        for repository in &snapshot.repositories {
-            let projects = snapshot
-                .projects
-                .iter()
-                .filter(|project| project.uses(&repository.id))
-                .count();
-            let in_use = in_use.contains(repository.id.as_str());
-            let id = repository.id.clone();
-            let missing = snapshot.missing_repositories.contains(&repository.id);
-            let kept = kept_label(repository, &snapshot.allowed_owners, &snapshot.keeper);
-            let checks = self.checks_field(repository, kept == Some("kept"), p, cx);
-            let base_editor = self.base_editor(repository, p, cx);
-            let edit_id = id.clone();
-            let row = div()
+        if let Some(card) = self.suggestions_card(snapshot, p, cx) {
+            body = body.child(card);
+        }
+        for adding in &self.adding {
+            body = body.child(self.adding_card(adding, snapshot, p, cx));
+        }
+        let mut shown = std::collections::HashSet::new();
+        for (at, (space, repositories)) in grouped(&snapshot.spaces, &snapshot.repositories)
+            .into_iter()
+            .enumerate()
+        {
+            let label = match space {
+                Some(space) => div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(spaces_view::space_mark(spaces_view::space_color(
+                        &snapshot.spaces,
+                        &space.id,
+                        p,
+                    )))
+                    .child(eyebrow(space.name.to_uppercase(), p)),
+                None => eyebrow("NO SPACE", p),
+            };
+            let mut list = div().flex().flex_col().child(div().pt_2().child(label));
+            for repository in repositories {
+                let chips = self.space_chips(at, repository, snapshot, p, cx);
+                // A repository in several Spaces is drawn in full under the first.
+                list = list.child(match shown.insert(repository.id.as_str()) {
+                    true => {
+                        let in_use = in_use.contains(repository.id.as_str());
+                        self.full_row(snapshot, repository, in_use, chips, p, cx)
+                    }
+                    false => compact_row(snapshot, repository, space, chips, p),
+                });
+            }
+            body = body.child(list);
+        }
+        body.child(self.repository_roots(snapshot, p, cx))
+    }
+
+    /// A repository's row: its name, path, counts, rules, base and checks, with `chips` for its
+    /// Spaces.
+    fn full_row(
+        &self,
+        snapshot: &Snapshot,
+        repository: &Repository,
+        in_use: bool,
+        chips: Div,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let projects = snapshot
+            .projects
+            .iter()
+            .filter(|project| project.uses(&repository.id))
+            .count();
+        let id = repository.id.clone();
+        let missing = snapshot.missing_repositories.contains(&repository.id);
+        let kept = kept_label(repository, &snapshot.allowed_owners, &snapshot.keeper);
+        let checks = self.checks_field(repository, kept == Some("kept"), p, cx);
+        let base_editor = self.base_editor(repository, p, cx);
+        let edit_id = id.clone();
+        let row = div()
                     .flex()
                     .items_center()
                     .gap_3()
@@ -261,19 +672,15 @@ impl RepositoriesPage {
                                 )
                             })),
                     );
-            // The checks line takes the row's whole width, in line with the name.
-            list = list.child(
-                div()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(p.edge.opacity(edge::HAIRLINE))
-                    .child(row)
-                    .children(base_editor)
-                    .child(checks.pl(px(28.))),
-            );
-        }
-        body.child(list)
-            .child(self.repository_roots(snapshot, p, cx))
+        // The checks line takes the row's whole width, in line with the name.
+        div()
+            .py_2()
+            .border_b_1()
+            .border_color(p.edge.opacity(edge::HAIRLINE))
+            .child(row)
+            .children(base_editor)
+            .child(checks.pl(px(28.)))
+            .child(chips.pl(px(28.)).pt_1())
     }
 
     /// The owners the human allows to have pull requests opened without asking: one chip per
@@ -869,6 +1276,155 @@ impl RepositoriesPage {
     }
 }
 
+const SUGGESTED: &str = "After the update, Wiffletree suggests a Space for each repository: the Space whose projects use its owner’s repositories most, or Personal for your own. Nothing joins a Space until you confirm.";
+
+/// The Spaces that list the repository named `identity`, in their order.
+fn spaces_of<'a>(spaces: &'a [Space], identity: &str) -> impl Iterator<Item = &'a Space> {
+    let identity = identity.to_owned();
+    (spaces.iter()).filter(move |s| {
+        s.repositories
+            .iter()
+            .any(|i| i.eq_ignore_ascii_case(&identity))
+    })
+}
+
+/// The page's sections: each Space with the workspace repositories it lists, in the Spaces'
+/// order and leaving out a Space with none here, then No Space with the rest.
+fn grouped<'a>(
+    spaces: &'a [Space],
+    repositories: &'a [Repository],
+) -> Vec<(Option<&'a Space>, Vec<&'a Repository>)> {
+    let listed = |space: &Space, r: &Repository| space.repositories.iter().any(|i| r.is_github(i));
+    let mut sections: Vec<(Option<&Space>, Vec<&Repository>)> = (spaces.iter())
+        .map(|space| {
+            (
+                Some(space),
+                repositories.iter().filter(|r| listed(space, r)).collect(),
+            )
+        })
+        .filter(|(_, listed): &(_, Vec<_>)| !listed.is_empty())
+        .collect();
+    let none: Vec<&Repository> = (repositories.iter())
+        .filter(|r| !spaces.iter().any(|space| listed(space, r)))
+        .collect();
+    if !none.is_empty() {
+        sections.push((None, none));
+    }
+    sections
+}
+
+/// The Spaces a repository is in with `space` added, or taken out when it is in it.
+fn toggled(member: &[SpaceId], space: &SpaceId) -> Vec<SpaceId> {
+    match member.contains(space) {
+        true => member.iter().filter(|m| *m != space).cloned().collect(),
+        false => member.iter().chain([space]).cloned().collect(),
+    }
+}
+
+/// The pick the host's suggestion makes.
+fn suggested_pick(suggestion: &RepositorySuggestion) -> Pick {
+    match &suggestion.space {
+        Some(SuggestedSpace::Space(id)) => Pick::Space(id.clone()),
+        Some(SuggestedSpace::NewPersonal) => Pick::NewPersonal,
+        None => Pick::NoSpace,
+    }
+}
+
+/// The host's latest suggestions, each picked as suggested unless the human picked otherwise
+/// for that repository before.
+fn with_picks(
+    before: &[(RepositorySuggestion, Pick)],
+    latest: Vec<RepositorySuggestion>,
+) -> Vec<(RepositorySuggestion, Pick)> {
+    (latest.into_iter())
+        .map(|suggestion| {
+            let chosen = (before.iter())
+                .find(|(old, _)| old.repository_id == suggestion.repository_id)
+                .filter(|(old, pick)| *pick != suggested_pick(old))
+                .map(|(_, pick)| pick.clone());
+            let pick = chosen.unwrap_or_else(|| suggested_pick(&suggestion));
+            (suggestion, pick)
+        })
+        .collect()
+}
+
+/// The upgrade's suggestions as the human picked them, to confirm: each adds its pick to the
+/// Spaces the repository is in now, so a chip edited meanwhile stays.
+fn confirmed(
+    suggestions: &[(RepositorySuggestion, Pick)],
+    spaces: &[Space],
+) -> Vec<RepositorySpaces> {
+    (suggestions.iter())
+        .map(|(suggestion, pick)| {
+            let mut space_ids: Vec<SpaceId> = spaces_of(spaces, &suggestion.repository)
+                .map(|s| s.id.clone())
+                .collect();
+            if let Pick::Space(id) = pick
+                && !space_ids.contains(id)
+            {
+                space_ids.push(id.clone());
+            }
+            RepositorySpaces {
+                repository: suggestion.repository.clone(),
+                space_ids,
+                new_personal: *pick == Pick::NewPersonal,
+            }
+        })
+        .collect()
+}
+
+fn pick_label(pick: &Pick, spaces: &[Space]) -> String {
+    match pick {
+        Pick::Space(id) => (spaces.iter())
+            .find(|s| &s.id == id)
+            .map_or("No Space".into(), |s| s.name.clone()),
+        Pick::NewPersonal => format!("{} (new)", workspace_core::PERSONAL),
+        Pick::NoSpace => "No Space".into(),
+    }
+}
+
+/// Why the owner suggests what it does; it only ever suggests.
+fn suggestion_reason(spaces: &[Space], suggested: Option<&SpaceId>, owner: &str) -> String {
+    match suggested.and_then(|id| spaces.iter().find(|s| &s.id == id)) {
+        Some(space) => format!(
+            "because {}’s repositories are owned by {owner}. The owner only suggests; nothing joins a Space until you confirm.",
+            space.name
+        ),
+        None => format!("No Space lists a repository owned by {owner}, so none is suggested."),
+    }
+}
+
+/// A repository drawn in full under another Space: its name, where else it is, and its chips.
+fn compact_row(
+    snapshot: &Snapshot,
+    repository: &Repository,
+    space: Option<&Space>,
+    chips: Div,
+    p: Palette,
+) -> Div {
+    let identity = repository.github_identity().unwrap_or_default();
+    let elsewhere: Vec<&str> = spaces_of(&snapshot.spaces, &identity)
+        .filter(|s| Some(&s.id) != space.map(|s| &s.id))
+        .map(|s| s.name.as_str())
+        .collect();
+    div()
+        .py_2()
+        .flex()
+        .items_center()
+        .gap_3()
+        .border_b_1()
+        .border_color(p.edge.opacity(edge::HAIRLINE))
+        .child(icon("folder").text_color(p.subtle))
+        .child(
+            div()
+                .font_weight(FontWeight::MEDIUM)
+                .child(repository.name.clone()),
+        )
+        .child(hint(format!("also in {}", elsewhere.join(", ")), p))
+        .child(div().flex_1())
+        .child(chips)
+}
+
 fn fixes_are_on(keeper: &KeeperSettings) -> bool {
     keeper.conflicts && keeper.checks
 }
@@ -1020,6 +1576,9 @@ impl Requests for RepositoriesPage {
             Ok(_) if matches!(command, Command::SetOwnerAllowed { allowed: true, .. }) => self
                 .owner_input
                 .update(cx, |input, cx| input.set_value("", window, cx)),
+            Ok(_) if matches!(command, Command::ConfirmRepositorySuggestions { .. }) => {
+                self.suggestions.clear()
+            }
             Ok(_) => {}
         }
     }
@@ -1043,8 +1602,9 @@ impl Render for RepositoriesPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        BASE_HINT, NEVER, UNTIL_GITHUB_ANSWERS, WITHOUT_ASKING, checks_summary, fixes_are_on,
-        held_lines, partly_on_hint, pr_check_status, refused_base, repository_counts, with_fixes,
+        BASE_HINT, NEVER, Pick, UNTIL_GITHUB_ANSWERS, WITHOUT_ASKING, checks_summary, confirmed,
+        fixes_are_on, grouped, held_lines, partly_on_hint, pr_check_status, refused_base,
+        repository_counts, suggestion_reason, toggled, with_fixes, with_picks,
     };
     use crate::ui;
     use workspace_core::*;
@@ -1347,6 +1907,163 @@ mod tests {
         assert_eq!(
             held_lines(&[held(KEEPER_TRIES), held(KEEPER_TRIES), "Another.".into()]),
             [held(KEEPER_TRIES), "Another.".into()]
+        );
+    }
+
+    fn space(name: &str, repositories: &[&str]) -> Space {
+        Space {
+            id: SpaceId(name.to_lowercase()),
+            name: name.into(),
+            description: String::new(),
+            instructions: String::new(),
+            brain: None,
+            storage: SpaceStorage {
+                repository: StorageRepository::Local { id: name.into() },
+                folder: name.to_lowercase(),
+            },
+            repositories: repositories.iter().map(|r| (*r).to_owned()).collect(),
+            models: SpaceModels::default(),
+            sources: vec![],
+            extra: Extra::new(),
+        }
+    }
+
+    #[test]
+    fn repositories_are_grouped_by_space_with_one_in_two_spaces_under_each() {
+        let repositories = [
+            on_github("Sage-Social/api", false, false),
+            on_github("Vyttle-LLC/site", false, false),
+            on_github("octo/scratch", false, true),
+        ];
+        let spaces = [
+            space("Sage", &["sage-social/API"]),
+            space("Sage Watch", &["Sage-Social/api"]),
+            space("Vyttle", &["Vyttle-LLC/site"]),
+            space("Personal", &["MHohlios/dotfiles"]),
+        ];
+        let sections: Vec<(Option<&str>, Vec<&str>)> = grouped(&spaces, &repositories)
+            .into_iter()
+            .map(|(space, listed)| {
+                let names = listed.iter().map(|r| r.name.as_str()).collect();
+                (space.map(|s| s.name.as_str()), names)
+            })
+            .collect();
+        assert_eq!(
+            sections,
+            [
+                (Some("Sage"), vec!["api"]),
+                (Some("Sage Watch"), vec!["api"]),
+                (Some("Vyttle"), vec!["site"]),
+                (None, vec!["scratch"]),
+            ],
+            "Personal lists nothing cloned here, so it has no section"
+        );
+    }
+
+    #[test]
+    fn a_chip_adds_or_removes_one_space_and_keeps_the_others() {
+        let (sage, watch) = (SpaceId("sage".into()), SpaceId("watch".into()));
+        let both = [sage.clone(), watch.clone()];
+        assert_eq!(toggled(&both, &sage), both[1..]);
+        assert_eq!(toggled(&both[1..], &sage), [watch, sage.clone()]);
+        assert_eq!(
+            toggled(&both[..1], &sage),
+            Vec::<SpaceId>::new(),
+            "No Space"
+        );
+    }
+
+    #[test]
+    fn confirming_the_upgrades_suggestions_sends_each_pick() {
+        let suggestion = |repository: &str, space| RepositorySuggestion {
+            repository_id: repository.into(),
+            repository: repository.into(),
+            space,
+        };
+        let sage = SpaceId("sage".into());
+        let picks = [
+            (
+                suggestion("Sage-Social/api", Some(SuggestedSpace::Space(sage.clone()))),
+                Pick::Space(sage.clone()),
+            ),
+            (
+                suggestion("MHohlios/dotfiles", Some(SuggestedSpace::NewPersonal)),
+                Pick::NewPersonal,
+            ),
+            (
+                suggestion("Sage-Social/web", Some(SuggestedSpace::Space(sage.clone()))),
+                Pick::NoSpace,
+            ),
+        ];
+        let choices = confirmed(&picks, &[]);
+        assert_eq!(choices[0].space_ids, [sage]);
+        assert!(choices[1].new_personal && choices[1].space_ids.is_empty());
+        assert!(!choices[2].new_personal && choices[2].space_ids.is_empty());
+    }
+
+    #[test]
+    fn a_chip_edit_before_confirm_stays() {
+        let suggestion = RepositorySuggestion {
+            repository_id: "api".into(),
+            repository: "Sage-Social/api".into(),
+            space: Some(SuggestedSpace::Space(SpaceId("sage".into()))),
+        };
+        // The human put api in Vyttle with a chip, and leaves the suggestion at No Space.
+        let spaces = [space("Sage", &[]), space("Vyttle", &["Sage-Social/api"])];
+        let kept = confirmed(&[(suggestion.clone(), Pick::NoSpace)], &spaces);
+        assert_eq!(kept[0].space_ids, [SpaceId("vyttle".into())]);
+        let both = confirmed(
+            &[(suggestion, Pick::Space(SpaceId("sage".into())))],
+            &spaces,
+        );
+        assert_eq!(
+            both[0].space_ids,
+            [SpaceId("vyttle".into()), SpaceId("sage".into())]
+        );
+    }
+
+    #[test]
+    fn the_owner_only_suggests_a_space() {
+        let spaces = [space("Sage", &["Sage-Social/api"])];
+        assert_eq!(
+            suggestion_reason(&spaces, Some(&SpaceId("sage".into())), "Sage-Social"),
+            "because Sage’s repositories are owned by Sage-Social. The owner only suggests; nothing joins a Space until you confirm."
+        );
+        assert_eq!(
+            suggestion_reason(&spaces, None, "octo"),
+            "No Space lists a repository owned by octo, so none is suggested."
+        );
+    }
+
+    #[test]
+    fn suggestions_asked_again_follow_the_host_but_keep_the_humans_picks() {
+        let suggestion = |id: &str, space| RepositorySuggestion {
+            repository_id: id.into(),
+            repository: format!("o/{id}"),
+            space,
+        };
+        let sage = SpaceId("sage".into());
+        let before = [
+            (suggestion("dotfiles", None), Pick::NoSpace),
+            (suggestion("api", None), Pick::Space(sage.clone())),
+        ];
+        let latest = vec![
+            suggestion("dotfiles", Some(SuggestedSpace::NewPersonal)),
+            suggestion("api", Some(SuggestedSpace::NewPersonal)),
+            suggestion("web", Some(SuggestedSpace::Space(sage.clone()))),
+        ];
+        let picks: Vec<Pick> = with_picks(&before, latest)
+            .into_iter()
+            .map(|(_, p)| p)
+            .collect();
+        assert_eq!(
+            picks,
+            [
+                Pick::NewPersonal,
+                Pick::Space(sage.clone()),
+                Pick::Space(sage)
+            ],
+            "the login's Personal arrives, and the human's pick for api stays"
         );
     }
 }
