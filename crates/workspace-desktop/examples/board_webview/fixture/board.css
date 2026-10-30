@@ -1,0 +1,4 @@
+:root { color-scheme: light dark; }
+body { font: 14px -apple-system, sans-serif; margin: 24px; }
+canvas { border: 1px solid #8884; border-radius: 6px; }
+input { font: inherit; padding: 4px 8px; width: 240px; }

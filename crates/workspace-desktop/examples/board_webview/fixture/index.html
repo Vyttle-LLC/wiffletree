@@ -1,0 +1,40 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Fixture board</title>
+<link rel="stylesheet" href="board.css">
+</head>
+<body>
+<h1>Fixture board</h1>
+<p>A chart drawn by an inline script, a script and a stylesheet served by the board scheme, and
+three loads that must fail: a fetch over the network, an image over the network, and a
+<code>file://</code> image.</p>
+<canvas id="chart" width="480" height="160"></canvas>
+<p><input id="field" placeholder="Click here and type"></p>
+<pre id="results"></pre>
+<script>
+  window.probe = { inline: true, served: false, fetch: "pending", remote: "pending", local: "pending" };
+  const chart = document.getElementById("chart").getContext("2d");
+  [40, 90, 65, 120, 80, 140, 110].forEach((value, index) => {
+    chart.fillStyle = `hsl(${150 + index * 12}, 45%, 50%)`;
+    chart.fillRect(16 + index * 64, 160 - value, 48, value);
+  });
+  fetch("https://example.com/data.json").then(
+    () => { probe.fetch = "loaded"; },
+    () => { probe.fetch = "blocked"; },
+  );
+  const images = {
+    remote: "https://example.com/favicon.ico",
+    local: "file:///System/Library/CoreServices/Finder.app/Contents/Resources/Finder.icns",
+  };
+  for (const [id, source] of Object.entries(images)) {
+    const image = new Image();
+    image.onload = () => { probe[id] = "loaded"; };
+    image.onerror = () => { probe[id] = "blocked"; };
+    image.src = source;
+  }
+</script>
+<script src="board.js"></script>
+</body>
+</html>

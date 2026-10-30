@@ -129,6 +129,42 @@ GPUI paints the whole window into one Metal layer, so a web view has to be a nat
 
 The risks are the overlay rule, which needs every GPUI overlay to report itself, and keeping the frame in step during window resizes. Both are covered by the stage 4 prototype task before the Boards UI is built on it.
 
+#### Prototype findings (task 4.1, October 29, 2026)
+The approach works. The prototype is `crates/workspace-desktop/examples/board_webview/`, a development example that the app does not include. `cargo run -p workspace-desktop --example board_webview -- --probe` posts real AppKit clicks and keys to the application's queue, checks each requirement and prints the measurements. All 20 checks passed in five runs on a debug build.
+
+- **Crates.** `wry` `=0.57.1`, with default features off because they are Linux-only. It uses `raw-window-handle` 0.6 and `objc2` 0.6, the same versions GPUI 0.3.8 already uses, so `build_as_child(window)` takes GPUI's `Window` directly and no `objc` fallback is needed. `objc2` `=0.6.5`, `objc2-foundation`, `objc2-app-kit` and `objc2-web-kit` `=0.3.2` and `block2` `=0.6.2` are the versions already in the lock. They make the calls `wry` does not wrap: the snapshot, the first responder and the event monitor. In the prototype these are dev-dependencies only.
+- **What worked.**
+  - *Placement.* A zero-size `canvas` painted last in the window places the web view, or hides it when the placeholder did not paint in that frame. The web view followed a window resize and a pane move, hid on another page and came back.
+  - *Overlays.* The snapshot (`takeSnapshotWithConfiguration`, read as TIFF into a GPUI `Image`) took 52–248 ms on a loaded machine. The menu waits for it and then draws over the still image, and the live board returns when the menu closes.
+  - *Focus.* One `NSEvent` local monitor moves focus in on a click inside the web view, and gives it back on a click elsewhere in the window or on Escape, which it consumes. Typed keys reached the page. ⌘W and ⌘, reached GPUI while the page had focus.
+  - *Loading.* The minimal scheme handler served the fixture with the policy above. Its inline script and a served script ran. A fetch over the network, an image over the network and a `file://` image all failed. The handler resolves symbolic links, so `..`, a link out of the folder and another board's id get 404.
+- **What did not work as designed.**
+  - *Shortcuts.* GPUI handles window shortcuts first because the web view is a subview of GPUI's own view, and GPUI's view answers `performKeyEquivalent:` before its subviews. The web view's key equivalent handler plays no part. `wry` makes a child web view decline every key equivalent (tauri-apps/tauri#9426), so ⌘A and ⌘C never reached the page until the prototype added an Edit menu. That menu's Copy and Select All are `OsAction` items, which AppKit sends to the first responder.
+  - *Blur.* Calling `window.blur()` while the page has focus broke shortcuts. GPUI then dispatches from the root dispatch node, which holds none of the view's action handlers, so ⌘W did nothing.
+  - *Process release.* A closed board does not release every WebKit process at once. Its WebContent and Networking processes ended 340–440 ms after ⌘W. WebKit's GPU process, shared by every web view in the app, fell to about 18 MiB and was still running 3 s later in four of five runs.
+  - *Rounding.* `wry`'s `set_bounds` rounds to whole points, so a placeholder at y = 62.5 gets a frame at 63.
+- **Memory**, measured as physical footprint on a debug build with one fixture board:
+
+  | | Before opening | Board open | 3 s after closing |
+  |---|---|---|---|
+  | App process | 94–104 MiB | 131–133 MiB | 80–81 MiB |
+  | WebKit GPU | none | 69–72 MiB | about 18 MiB (gone in one run) |
+  | WebKit WebContent | none | 33–35 MiB | ended |
+  | WebKit Networking | none | 4.4–5.5 MiB | ended |
+
+  One open board costs about 140 MiB in total: about 30 MiB in the app and 110 MiB in WebKit processes. One run that started at 56 MiB is left out of the app figures as an outlier. The first board after login took about 6 s to load while WebKit started its processes, and later boards took 0.4–0.8 s.
+- **Not verified.** Screen captures failed because the screen was locked, so the snapshot's pixels and any one-frame lag during a live drag-resize were not checked by eye. The probe checks frames only after a resize settles. Dark mode is also untested.
+- **Rules for 4.2 and 4.4.**
+  - The board pane's placeholder must paint in every frame that shows it. It must not sit inside a cached view, because a cached view reuses its last paint without running the placeholder's paint callback, and the web view would be hidden.
+  - Snap the placeholder to whole points, or set the frame through `objc2` instead of `set_bounds`.
+  - While the page has focus, GPUI's focus moves to a focus handle on the board pane, below the window's root and with no text bindings. GPUI's focus must never be cleared.
+  - Window shortcuts are window-level GPUI bindings. The app needs an Edit menu with `OsAction` Copy and Select All, and Cut, Paste, Undo and Redo once boards take input, or editing shortcuts never reach the page.
+  - Escape always belongs to Wiffletree, so a board cannot use Escape itself.
+  - Every overlay opens only after the snapshot arrives, which takes a few frames. The overlay registry should start the snapshot as soon as the overlay is asked for.
+  - The prototype uses `with_incognito(true)` for the non-persistent store, a navigation handler that allows only `wiffletree-board://`, and `NewWindowResponse::Deny`. Task 4.2 replaces these with the content rule list and full delegates. It must keep the scheme handler's resolve-then-check confinement, and it must not add an IPC bridge.
+  - The private `_webProcessIdentifier` is for the probe only and never for the app.
+  - "A closed board holds no WebKit process" applies to the board's WebContent process. The shared GPU process may linger for some seconds after the last board closes.
+
 ### 7. Jobs and their runs
 A recipe is a YAML file in the Space's storage (`jobs/<slug>.yaml`): name, prompt, schedule (cron fields and an IANA timezone, with the plain-words form the assistant showed), Space, model (optional), sources, output (title and file type, optional), sharing (`one-runner` or `everyone`), runner (GitHub login and machine name) and enabled. The scheduler keeps each job's next run, last run and run history in the database. At a due time it checks the runner, the sources and the provider, starts a fresh thread of role `JobRun`, sends the prompt, and when the turn ends records the outcome and the outputs the run saved with `save_output`. Missed slots fold into one catch-up run at the first moment the host is running after them, as coordinator timers do, but the two share no code path the human can see: timers belong to coordinators, jobs to the user.
 

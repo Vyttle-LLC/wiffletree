@@ -34,3 +34,17 @@ sha2 = "0.11"
 workspace-host.workspace = true
 tempfile = "3.23"
 rusqlite = { version = "0.40", features = ["bundled"] }
+# The board web view prototype (examples/board_webview/): wry places a WKWebView over a GPUI
+# element, and the objc2 crates (the versions wry and GPUI already use) reach the WebKit and
+# AppKit calls wry does not wrap: snapshots, first responder and synthetic input.
+wry = { version = "=0.57.1", default-features = false }
+objc2 = "=0.6.5"
+objc2-foundation = { version = "=0.3.2", features = ["NSData", "NSError", "NSGeometry", "NSString"] }
+objc2-app-kit = { version = "=0.3.2", features = ["block2", "NSApplication", "NSEvent", "NSGraphicsContext", "NSImage", "NSResponder", "NSView", "NSWindow"] }
+objc2-web-kit = { version = "=0.3.2", features = ["block2", "objc2-app-kit", "WKSnapshotConfiguration", "WKWebView"] }
+block2 = "=0.6.2"
+
+[[example]]
+name = "board_webview"
+# Runs the board scheme's tests with the others.
+test = true
