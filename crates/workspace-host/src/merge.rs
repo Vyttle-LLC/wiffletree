@@ -78,7 +78,7 @@ struct PullRequestNow {
 }
 /// What protects the base on GitHub now, and how it allows merging.
 struct GitHubNow {
-    default_branch: Option<String>,
+    default_branch: String,
     methods: Vec<MergeMethod>,
     /// Classic branch protection applies to the base.
     protected: bool,
@@ -233,7 +233,10 @@ fn read_github(job: &Job, tools: &Tools) -> Result<GitHubNow> {
         rulesets.push(0);
     }
     Ok(GitHubNow {
-        default_branch: repository["default_branch"].as_str().map(str::to_owned),
+        default_branch: repository["default_branch"]
+            .as_str()
+            .context("GitHub did not report the default branch")?
+            .to_owned(),
         methods: (methods.into_iter())
             .filter(|(field, _)| repository[field].as_bool() == Some(true))
             .map(|(_, method)| method)
@@ -265,7 +268,7 @@ fn decide(job: &Job, pr: &PullRequestNow, github: &GitHubNow) -> Decided {
         ));
     }
     let stored = ProtectedBranches::of(&job.repository);
-    let protection = (stored.with_default_branch(github.default_branch.as_deref()))
+    let protection = (stored.with_default_branch(Some(&github.default_branch)))
         .why(&pr.base)
         .or_else(|| (github.protected).then(|| "GitHub branch protection protects it".to_owned()))
         .or_else(|| {
@@ -330,7 +333,7 @@ fn recheck_stored(job: &Job) -> Result<()> {
         .context("Ticket not found")?;
     let running = ticket.merging.as_ref().is_some_and(|request| {
         request.id == job.request.id
-            && request.stage == MergeStage::Merging
+            && matches!(request.stage, MergeStage::Merging | MergeStage::Rechecking)
             && request.head == job.request.head
     });
     ensure!(running, "This merge request was withdrawn");
@@ -670,6 +673,10 @@ impl Host {
                 return self.wait_for_checks(&mut ticket, request);
             }
             Decided::Refused(why) => why,
+            // A request that waited for its checks waits again: the next pass decides it anew.
+            Decided::Unfinished if request.stage == MergeStage::Rechecking => {
+                return self.wait_for_checks(&mut ticket, request);
+            }
             Decided::Unfinished => format!(
                 "gh pr merge was cut short, by its time limit or a restart, and GitHub reports PR #{} still open. Call merge_ticket again",
                 request.number
@@ -982,7 +989,7 @@ impl Host {
                 continue;
             }
             ticket.merging = Some(MergeRequest {
-                stage: MergeStage::Merging,
+                stage: MergeStage::Rechecking,
                 ..request
             });
             self.save_ticket(&ticket)?;
@@ -1057,7 +1064,9 @@ impl Host {
             let interrupted = match &request.stage {
                 MergeStage::Checking => true,
                 MergeStage::WaitingForHuman { item } => !self.is_unanswered(item)?,
-                MergeStage::Merging | MergeStage::WaitingForChecks => false,
+                MergeStage::Merging | MergeStage::Rechecking | MergeStage::WaitingForChecks => {
+                    false
+                }
             };
             if interrupted {
                 let notice = format!(
@@ -1074,7 +1083,9 @@ impl Host {
     pub(crate) fn interrupted_merges(&self) -> Result<Vec<Job>> {
         let mut jobs = vec![];
         for ticket in self.tickets()? {
-            if (ticket.merging.as_ref()).is_some_and(|r| r.stage == MergeStage::Merging) {
+            let running =
+                |r: &MergeRequest| matches!(r.stage, MergeStage::Merging | MergeStage::Rechecking);
+            if ticket.merging.as_ref().is_some_and(running) {
                 let repository = self.ticket_repository(&ticket)?;
                 jobs.push(Job {
                     recover: true,
@@ -1655,6 +1666,20 @@ mod tests {
             result,
             "GitHub could not be read, so nothing was merged",
         );
+
+        // A read that leaves out the default branch is a failed read, not the stored one.
+        let (mut f, fake) = ready();
+        (fake.github.lock().unwrap().repository)
+            .as_object_mut()
+            .unwrap()
+            .remove("default_branch");
+        let result = merge(&mut f, &fake, None);
+        refused(
+            &f,
+            &fake,
+            result,
+            "GitHub did not report the default branch",
+        );
     }
 
     #[test]
@@ -2185,6 +2210,32 @@ mod tests {
         assert_eq!(told.len(), 1);
         assert!(told[0].starts_with("Merged PR #180"), "{told:?}");
         assert!(f.ticket().merging.is_none());
+    }
+
+    #[test]
+    fn a_waiting_merge_decided_again_when_the_host_stopped_waits_on_after_the_restart() {
+        let (mut f, fake) = ready();
+        fake.set(180, "statusCheckRollup", json!([{"state": "PENDING"}]));
+        merge(&mut f, &fake, None).unwrap();
+        // A pass starts its decision, and the host stops before it reports back.
+        let repository = repository_of(&f);
+        assert_eq!(f.host.merges_due(&repository).unwrap().len(), 1);
+        let mut f = restart(f);
+        let jobs = f.host.interrupted_merges().unwrap();
+        f.host
+            .record_merge(run(&jobs[0], &fake.tools), false)
+            .unwrap();
+        assert_eq!(
+            f.ticket().merging.unwrap().stage,
+            MergeStage::WaitingForChecks
+        );
+        assert!(messages(&f.host).is_empty());
+        assert!(fake.merges().is_empty());
+
+        // The next pass merges once the checks pass.
+        fake.set(180, "statusCheckRollup", json!([{"state": "SUCCESS"}]));
+        pass(&mut f, &fake);
+        assert_eq!(f.ticket().state, TicketState::Accepted);
     }
 
     #[test]

@@ -95,9 +95,6 @@ pub(crate) struct Job {
     pub checks: Option<RepositoryChecks>,
     /// A conflict gets a try: the rebase is left stopped in the checkout.
     pub tries: bool,
-    /// The parent's last pushed head once a stacked ticket's parent merged: when the head holds
-    /// it, only the commits after it are replayed, since the merge replaced the parent's own.
-    pub upstream: Option<String>,
 }
 pub(crate) struct Outcome {
     pub ticket_id: String,
@@ -597,7 +594,9 @@ pub(crate) fn fetch(job: &Fetch, git: &publish::GitTool) -> Fetched {
 
 fn rebase_in_checkout(job: &Job) -> Result<Rebased> {
     let checkout = &job.checkout;
-    let upstream = (job.upstream.as_deref())
+    // Once a stacked ticket's parent merged, only the commits after the parent's last pushed
+    // head are replayed, since the merge replaced the parent's own.
+    let upstream = (job.base.merged_parent_head())
         .filter(|parent| publish::is_ancestor(checkout, parent, &job.head))
         .unwrap_or(&job.base_commit);
     // No hooks, no recorded resolutions, and no other branch moved along with the commits.
@@ -1225,14 +1224,11 @@ impl Host {
                     .is_ok()
         });
         let tries = self.would_try(ticket, repository, KeeperProblem::Conflict);
-        let ticket_base = self.ticket_base(ticket)?;
-        let upstream = ticket_base.merged_parent_head().map(Into::into);
         self.keeper.running.insert(ticket.id.clone());
         due.rebases.push(Job {
             ticket_id: ticket.id.clone(),
             repository: path.into(),
-            base: ticket_base,
-            upstream,
+            base: self.ticket_base(ticket)?,
             pr_base: format!("origin/{}", pr.base),
             base_commit: base,
             head: pr.head.clone(),

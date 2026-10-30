@@ -49,27 +49,35 @@ impl Base {
     /// new review.
     pub(crate) fn same_patch(&self, worktree: &Path, one: &str, other: &str) -> Result<bool> {
         Ok(
-            worktrees::patch_id(worktree, self.built_on(worktree, one), one)?
-                == worktrees::patch_id(worktree, self.built_on(worktree, other), other)?,
+            worktrees::patch_id(worktree, &self.built_on(worktree, one), one)?
+                == worktrees::patch_id(worktree, &self.built_on(worktree, other), other)?,
         )
     }
-    /// The measured ref, except for a commit rebased onto its parent's base after the parent's
-    /// pull request merged: that one holds the base's tip, which holds the parent's changes
-    /// however they were merged, and is measured against it. A tip the parent's head already
-    /// holds, as before the merge was fetched, is not past the parent's changes.
-    fn built_on(&self, worktree: &Path, commit: &str) -> &str {
-        match self {
-            Self::Stacked {
-                repository,
-                pushed: Some(parent_head),
-                merged: true,
-                ..
-            } if publish::is_ancestor(worktree, repository, commit)
-                && !publish::is_ancestor(worktree, repository, parent_head) =>
+    /// The measured ref, except once the parent's pull request merged: then the newer of the
+    /// commit's merge-bases with the parent's branch and with the parent's base. A commit still
+    /// on the parent's branch is measured from the parent's head; one rebased onto the base,
+    /// which holds the parent's changes however they were merged, from where it left the base,
+    /// however far the base has moved since.
+    fn built_on(&self, worktree: &Path, commit: &str) -> String {
+        let measured = self.measured();
+        let Self::Stacked {
+            repository,
+            merged: true,
+            ..
+        } = self
+        else {
+            return measured.to_owned();
+        };
+        match (
+            worktrees::merge_base(worktree, measured, commit),
+            worktrees::merge_base(worktree, repository, commit),
+        ) {
+            (Ok(parent), Ok(base))
+                if parent != base && publish::is_ancestor(worktree, &parent, &base) =>
             {
-                repository
+                base
             }
-            _ => self.measured(),
+            _ => measured.to_owned(),
         }
     }
     /// The parent's last pushed head, once the parent's pull request merged: a rebase of the
@@ -473,7 +481,7 @@ mod tests {
     }
 
     /// The parent merges into main, which gained an unrelated commit first, as a squash or a
-    /// merge commit; the keeper rebases the reviewed child onto main.
+    /// merge commit; the keeper rebases the reviewed child onto main, which then moves on.
     fn rebased_off_merged_parent(squash: bool) {
         let mut f = fixture();
         let mut parent = f.ticket();
@@ -482,7 +490,7 @@ mod tests {
         let child = reviewed_child(&mut f);
         let worktree = Path::new(&child.worktree);
         let reviewed = git(worktree, &["rev-parse", "HEAD"]);
-        let repository = &f.repository;
+        let repository = &f.repository.clone();
         git(
             repository,
             &["checkout", "-q", "-b", "merged", "origin/main"],
@@ -520,7 +528,6 @@ mod tests {
         let job = crate::keeper::Job {
             ticket_id: child.id.clone(),
             repository: f.repository.clone(),
-            upstream: base.merged_parent_head().map(Into::into),
             base,
             pr_base: "origin/main".into(),
             base_commit: main_tip.clone(),
@@ -540,6 +547,18 @@ mod tests {
             main_tip
         );
         git(worktree, &["reset", "-q", "--hard", &rebased]);
+        f.host.check_verified_head(&child, &reviewed, None).unwrap();
+
+        // The base moves on past the rebase with another unrelated commit: the review stands.
+        git(repository, &["checkout", "-q", "merged"]);
+        fs::write(repository.join("v.txt"), "later\n").unwrap();
+        git(repository, &["add", "."]);
+        git(repository, &["commit", "-q", "-m", "Later"]);
+        git(
+            repository,
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        );
+        git(repository, &["checkout", "-q", "main"]);
         f.host.check_verified_head(&child, &reviewed, None).unwrap();
     }
 }

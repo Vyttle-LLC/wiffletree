@@ -1997,6 +1997,9 @@ pub enum MergeStage {
     /// GitHub is being read for a request that merges if every check holds: `gh pr merge` may
     /// have been sent.
     Merging,
+    /// As `Merging`, for a request that waited for its checks: after a restart it waits again
+    /// unless GitHub reports it merged.
+    Rechecking,
     /// It waits for the pull request's checks to finish, or for GitHub to work out whether it
     /// can be merged.
     WaitingForChecks,
