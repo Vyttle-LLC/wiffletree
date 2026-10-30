@@ -34,6 +34,12 @@ impl TokenTotals {
     pub fn total(&self) -> u64 {
         self.input.saturating_add(self.output)
     }
+    /// Input that was neither read from nor written to the cache.
+    pub fn uncached_input(&self) -> u64 {
+        self.input
+            .saturating_sub(self.cache_read)
+            .saturating_sub(self.cache_write)
+    }
     pub fn add(&mut self, other: &Self) {
         self.input += other.input;
         self.output += other.output;
@@ -43,6 +49,47 @@ impl TokenTotals {
         self.requests += other.requests;
         self.partial_requests += other.partial_requests;
     }
+}
+/// What tokens would cost at their model's public API list price, in US dollars, by kind.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Cost {
+    pub input: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+    pub output: f64,
+}
+impl Cost {
+    pub fn total(&self) -> f64 {
+        self.input + self.cache_read + self.cache_write + self.output
+    }
+    pub fn add(&mut self, other: &Self) {
+        self.input += other.input;
+        self.cache_read += other.cache_read;
+        self.cache_write += other.cache_write;
+        self.output += other.output;
+    }
+}
+/// One model's tokens, with their estimated cost; `None` when the model has no known price.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelUsage {
+    pub provider: Provider,
+    pub model: String,
+    pub counts: TokenTotals,
+    pub cost: Option<Cost>,
+}
+impl ModelUsage {
+    pub fn add(&mut self, counts: &TokenTotals, price: Option<Cost>) {
+        self.counts.add(counts);
+        if let Some(price) = price {
+            self.cost.get_or_insert_default().add(&price);
+        }
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DailyModelUsage {
+    pub date: String,
+    #[serde(flatten)]
+    pub usage: ModelUsage,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DailyTokens {
@@ -58,6 +105,9 @@ pub struct CoordinatorUsage {
     pub project: String,
     pub own: TokenTotals,
     pub workers: TokenTotals,
+    /// Own and workers' requests on priced models.
+    #[serde(default)]
+    pub cost: Cost,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QuotaWindow {
@@ -103,4 +153,18 @@ pub struct UsageReport {
     pub daily: Vec<DailyTokens>,
     pub coordinators: Vec<CoordinatorUsage>,
     pub quota_trends: Vec<QuotaTrend>,
+    /// The period's requests on priced models.
+    #[serde(default)]
+    pub cost: Cost,
+    /// Requests whose model has no known price, which `cost` leaves out.
+    #[serde(default)]
+    pub unpriced_requests: u64,
+    /// Every model used in the period, most expensive first and unpriced ones last.
+    #[serde(default)]
+    pub models: Vec<ModelUsage>,
+    /// Each day's tokens by model, for days with any.
+    #[serde(default)]
+    pub daily_models: Vec<DailyModelUsage>,
+    #[serde(default)]
+    pub prices_as_of: String,
 }

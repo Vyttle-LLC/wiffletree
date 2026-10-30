@@ -527,7 +527,8 @@ Provide a global Usage destination and scoped Usage views for projects, tickets,
 | View | Required visual |
 | --- | --- |
 | Provider capacity | Separate Claude and Codex meters for every available quota window, with reset labels |
-| Usage over time | Daily stacked bars for input and output tokens, with provider breakdown and exact values on selection |
+| Usage over time | Daily bars stacked by model, with each model's tokens and estimated cost on hover and exact values on selection |
+| Usage by model | Each model's share of the estimated cost, its tokens by kind and its cost, with the cost's parts on hover |
 | Usage by work | Ranked horizontal bars by project, repository, feature or task, with drilldown to individual agent sessions |
 | Weekday patterns | Monday through Sunday bars showing total tokens and average per observed calendar occurrence |
 | Detailed totals | Input, output and combined tokens for the selected period, including orchestration and review |
@@ -535,6 +536,8 @@ Provide a global Usage destination and scoped Usage views for projects, tickets,
 Default period is the last 7 calendar days; offer today, last 30 days and a custom range. Support provider, model, project and role filters. Weekday patterns default to 30 days so multiple weeks can be compared. Show the covered dates, reporting timezone and incomplete collection periods. Include observed zero-use days in weekday averages; do not include days without telemetry as zeros. Label the current incomplete day. Calendar bucketing uses a consistent user-selected timezone, initially America/New_York, and handles daylight saving changes.
 
 Token totals show input and output separately. Preserve uncached input, cache-read input, cache-write input, and reasoning output when providers report them. Normalize totals using documented provider semantics: cache and reasoning subsets must not be added twice. Expose the breakdown on demand and identify unavailable fields. Cross-provider token totals describe activity; different tokenizers and quota rules mean they are not equal units of cost or subscription capacity.
+
+The page also estimates what the recorded work would cost at public API list prices (decided October 30, 2026; approved design study `openspec/changes/archive/2026-10-30-usage-cost-by-model/ui/mockups.html`). A built-in price table, keyed by model id and dated, prices each request from its own counts: uncached input, cache reads, Claude cache writes by lifetime (5 minutes or 1 hour), output, fast-mode rates when Claude reports fast mode, and a long-prompt tier where the provider documents one and the request's size is known. Codex reports a turn's tokens rather than each request's, so its long-context tier is not applied. The estimate appears as a tile, by model, on each day and on each coordinator, and follows the same filters. A model with no known price shows “—”, is left out of every total, and the page says how many requests that is. A note says subscriptions are billed differently.
 
 Separate directly consumed tokens from rolled-up descendant totals. A project total includes its orchestrator and each descendant session exactly once. The coordinator's own usage remains distinguishable from worker usage, and repository totals aggregate the tasks attached to that repository without double counting. Include failed and interrupted requests whenever usage was incurred and reported.
 

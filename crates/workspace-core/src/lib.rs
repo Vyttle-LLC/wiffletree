@@ -15,6 +15,7 @@ mod messages;
 mod models;
 mod owners;
 pub mod pairing;
+pub mod pricing;
 mod process;
 mod progress;
 mod publishing;

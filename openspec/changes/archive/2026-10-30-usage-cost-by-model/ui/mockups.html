@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<title>Usage · models and estimated cost — static study</title>
+<style>
+  :root {
+    --base:#F3F2ED; --surface:#FFFDF7; --overlay:#E4E9E3; --text:#1A262D; --subtle:#526865;
+    --muted:#748781; --edge:#C4CFCA; --accent:#902818; --cyan:#2D5A5A; --blue:#365E78;
+    --magenta:#765074; --green:#326348; --yellow:#77551C;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--base); color:var(--text); font:13px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif; }
+  main { max-width:1080px; margin:0 auto; padding:28px 32px 60px; display:flex; flex-direction:column; gap:22px; }
+  .study { background:var(--overlay); border-radius:8px; padding:12px 14px; color:var(--subtle); }
+  .study b { color:var(--text); }
+  h1 { font-size:18px; font-weight:600; margin:0; }
+  .section { font-size:11px; letter-spacing:.08em; color:var(--subtle); font-weight:600; }
+  .eyebrow { font-size:10.5px; letter-spacing:.08em; color:var(--subtle); font-weight:600; margin-bottom:10px; }
+  .hint { color:var(--subtle); font-size:12px; }
+  .filters { display:flex; flex-wrap:wrap; gap:8px 20px; }
+  .filter { display:flex; align-items:center; gap:8px; }
+  .seg { display:flex; gap:4px; }
+  .seg span { padding:3px 9px; border-radius:6px; border:1px solid var(--edge); background:var(--surface); font-size:12px; }
+  .seg span.on { background:var(--overlay); border-color:var(--cyan); font-weight:600; }
+  .tiles { display:flex; flex-wrap:wrap; gap:12px; }
+  .card { background:var(--surface); border:1px solid var(--edge); border-radius:10px; padding:14px 16px; }
+  .tile { flex:1; min-width:150px; display:flex; flex-direction:column; gap:3px; }
+  .tile .figure { font-size:22px; font-weight:600; }
+  .tile.new { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset; }
+  .new-tag { display:inline-block; font-size:10px; font-weight:600; color:var(--accent); border:1px solid var(--accent); border-radius:4px; padding:0 4px; margin-left:6px; vertical-align:1px; }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  th { text-align:right; font-weight:500; color:var(--subtle); font-size:11.5px; padding:6px 8px; border-bottom:1px solid var(--edge); }
+  td { text-align:right; padding:8px; border-bottom:1px solid color-mix(in srgb, var(--edge) 55%, transparent); }
+  th:first-child, td:first-child { text-align:left; }
+  tr.total td { border-bottom:none; font-weight:600; }
+  td.cost { font-weight:600; }
+  .model { display:flex; align-items:center; gap:8px; }
+  .dot { width:9px; height:9px; border-radius:3px; flex:none; }
+  .prov { color:var(--subtle); font-size:11.5px; }
+  .share { height:8px; border-radius:4px; display:flex; overflow:hidden; background:var(--overlay); margin:4px 0 14px; }
+  .share i { display:block; height:100%; }
+  .legend { display:flex; flex-wrap:wrap; gap:6px 16px; font-size:12px; color:var(--subtle); }
+  .legend span { display:flex; align-items:center; gap:6px; }
+  .split { display:flex; flex-wrap:wrap; gap:12px; }
+  .split > .chart { flex:1; min-width:360px; }
+  .split > .day { width:280px; flex:none; }
+  .bars { display:flex; align-items:flex-end; gap:6px; height:110px; padding-top:6px; }
+  .bars .stack { flex:1; height:100%; display:flex; flex-direction:column; justify-content:flex-end; }
+  .bars .stack i { display:block; width:100%; }
+  .bars .stack i:first-child { border-radius:3px 3px 0 0; }
+  .bars .stack.sel { outline:2px solid var(--text); outline-offset:2px; border-radius:3px; }
+  .prop { display:flex; justify-content:space-between; padding:3px 0; }
+  .prop span:first-child { color:var(--subtle); }
+  .prop.cost span:last-child { font-weight:600; }
+  .sub { color:var(--subtle); font-size:11.5px; }
+  .dash { color:var(--muted); }
+  .note { border-left:3px solid var(--yellow); padding:6px 10px; background:color-mix(in srgb, var(--yellow) 8%, var(--surface)); border-radius:0 6px 6px 0; }
+</style>
+</head>
+<body>
+<main>
+  <div class="study">
+    <b>Static study, Usage page.</b> The new parts are outlined in rust. The tiles and the By model table are rounded from your own last 30 days of recorded usage, priced at public API list prices; the day detail and coordinator rows are invented. Nothing here reads live data. The daily chart now stacks by model. Account limits, quota charts and filters stay as they are today and are drawn only for orientation.
+  </div>
+
+  <h1>Usage</h1>
+  <div class="section">RECORDED IN THIS APP</div>
+  <div class="filters">
+    <div class="filter"><span class="hint">Scope</span><div class="seg"><span class="on">All projects</span><span>wiffletree: Estimated Costs</span></div></div>
+    <div class="filter"><span class="hint">Period</span><div class="seg"><span>Today</span><span>7 days</span><span class="on">30 days</span></div></div>
+    <div class="filter"><span class="hint">Provider</span><div class="seg"><span class="on">Both</span><span>Claude</span><span>Codex</span></div></div>
+  </div>
+
+  <div class="tiles">
+    <div class="card tile"><span class="hint">Tokens</span><span class="figure">10.6B</span><span class="hint">Oct 1 → Oct 30</span></div>
+    <div class="card tile"><span class="hint">Input</span><span class="figure">10.5B</span><span class="hint">10.2B from cache</span></div>
+    <div class="card tile"><span class="hint">Output</span><span class="figure">38.0M</span><span class="hint">1.2M reasoning</span></div>
+    <div class="card tile"><span class="hint">Requests</span><span class="figure">47,872</span><span class="hint">12 partial</span></div>
+    <div class="card tile new"><span class="hint">Estimated API cost<span class="new-tag">NEW</span></span><span class="figure">$4,069</span><span class="hint">4 models · Claude Opus 5.5 is 89%</span></div>
+  </div>
+
+  <div class="card new" style="border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset;">
+    <div class="eyebrow">BY MODEL <span class="new-tag">NEW</span></div>
+    <div class="share">
+      <i style="width:89.4%; background:var(--accent)"></i>
+      <i style="width:6.4%; background:var(--blue)"></i>
+      <i style="width:4.1%; background:var(--green)"></i>
+      <i style="width:0.1%; background:var(--magenta)"></i>
+    </div>
+    <table>
+      <thead>
+        <tr><th>Model</th><th>Requests</th><th>Input</th><th>Cache read</th><th>Cache write</th><th>Output</th><th>Est. cost</th><th>Share</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><div class="model"><span class="dot" style="background:var(--accent)"></span><div>Claude Opus 5.5<div class="prov">Claude · claude-opus-5-5</div></div></div></td>
+          <td>41,641</td><td>849k</td><td>8.89B</td><td>152M</td><td>32.0M</td><td class="cost">$3,639.43</td><td>89.4%</td>
+        </tr>
+        <tr>
+          <td><div class="model"><span class="dot" style="background:var(--blue)"></span><div>GPT-6.1 Sol<div class="prov">Codex · gpt-6.1-sol</div></div></div></td>
+          <td>887</td><td>63.2M</td><td>979M</td><td><span class="dash">—</span></td><td>3.7M</td><td class="cost">$260.84</td><td>6.4%</td>
+        </tr>
+        <tr>
+          <td><div class="model"><span class="dot" style="background:var(--green)"></span><div>Claude Sonnet 5.5<div class="prov">Claude · claude-sonnet-5-5</div></div></div></td>
+          <td>5,284</td><td>12k</td><td>372M</td><td>17.5M</td><td>2.3M</td><td class="cost">$167.16</td><td>4.1%</td>
+        </tr>
+        <tr>
+          <td><div class="model"><span class="dot" style="background:var(--magenta)"></span><div>Claude Sonnet 5<div class="prov">Claude · claude-sonnet-5</div></div></div></td>
+          <td>60</td><td>&lt;1k</td><td>4.4M</td><td>81k</td><td>20k</td><td class="cost">$1.39</td><td>0.03%</td>
+        </tr>
+        <tr class="total"><td>All models</td><td>47,872</td><td>63.2M</td><td>10.2B</td><td>170M</td><td>38.0M</td><td class="cost">$4,068.82</td><td></td></tr>
+      </tbody>
+    </table>
+    <p class="hint" style="margin:10px 0 0">Input here is input that was neither read from nor written to the cache. Hover a cost to see its parts, for example Claude Opus 5.5: cache read $1,777.98 · cache write $1,217.44 · output $640.61 · input $3.40.</p>
+  </div>
+
+  <div class="split">
+    <div class="card chart" style="border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset;">
+      <div class="eyebrow">DAILY TOKENS BY MODEL <span class="new-tag">CHANGED</span></div>
+      <div class="hint">Peak 1,410,220,118 tokens · tap a day for exact totals</div>
+      <div class="bars">
+        <div class="stack"><i style="height:2%;background:var(--green)"></i><i style="height:2%;background:var(--blue)"></i><i style="height:32%;background:var(--accent)"></i></div><div class="stack"><i style="height:3%;background:var(--green)"></i><i style="height:3%;background:var(--blue)"></i><i style="height:45%;background:var(--accent)"></i></div><div class="stack"><i style="height:2%;background:var(--green)"></i><i style="height:3%;background:var(--blue)"></i><i style="height:30%;background:var(--accent)"></i></div><div class="stack"><i style="height:3%;background:var(--green)"></i><i style="height:6%;background:var(--blue)"></i><i style="height:52%;background:var(--accent)"></i></div><div class="stack"><i style="height:3%;background:var(--green)"></i><i style="height:4%;background:var(--blue)"></i><i style="height:44%;background:var(--accent)"></i></div><div class="stack"><i style="height:6%;background:var(--green)"></i><i style="height:8%;background:var(--blue)"></i><i style="height:87%;background:var(--accent)"></i></div><div class="stack"><i style="height:3%;background:var(--green)"></i><i style="height:3%;background:var(--blue)"></i><i style="height:37%;background:var(--accent)"></i></div><div class="stack"><i style="height:6%;background:var(--green)"></i><i style="height:8%;background:var(--blue)"></i><i style="height:94%;background:var(--accent)"></i></div><div class="stack"><i style="height:5%;background:var(--green)"></i><i style="height:4%;background:var(--blue)"></i><i style="height:60%;background:var(--accent)"></i></div><div class="stack sel"><i style="height:7%;background:var(--green)"></i><i style="height:8%;background:var(--blue)"></i><i style="height:69%;background:var(--accent)"></i></div>
+      </div>
+      <div class="legend" style="margin-top:8px">
+        <span><i class="dot" style="background:var(--accent)"></i>Claude Opus 5.5</span>
+        <span><i class="dot" style="background:var(--blue)"></i>GPT-6.1 Sol</span>
+        <span><i class="dot" style="background:var(--green)"></i>Claude Sonnet 5.5</span>
+        <span><i class="dot" style="background:var(--magenta)"></i>Claude Sonnet 5</span>
+      </div>
+      <p class="hint" style="margin:6px 0 0">Each bar stacks the day's tokens by model, in the By model colors. Hovering a bar lists each model's input, output and estimated cost for that day. Baseline: zero or no coverage.</p>
+    </div>
+    <div class="card day">
+      <div class="eyebrow">DAY · 2026-10-29</div>
+      <div class="prop"><span>Input</span><span>412,883,190</span></div>
+      <div class="prop"><span>Output</span><span>1,502,114</span></div>
+      <div class="prop"><span>Cache read</span><span>401,005,662</span></div>
+      <div class="prop"><span>Cache write</span><span>6,310,447</span></div>
+      <div class="prop"><span>Reasoning</span><span>48,201</span></div>
+      <div class="prop cost" style="border-top:1px solid var(--edge); margin-top:6px; padding-top:8px"><span>Est. cost <span class="new-tag">NEW</span></span><span>$162.37</span></div>
+      <div class="sub">Opus 5.5 $147.10 · Sol $9.86 · Sonnet 5.5 $5.41</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="eyebrow">BY COORDINATOR</div>
+    <table>
+      <thead><tr><th>Coordinator</th><th>Own tokens</th><th>Workers' tokens</th><th>Est. cost <span class="new-tag">NEW</span></th></tr></thead>
+      <tbody>
+        <tr><td>wiffletree: Spaces<div class="prov">wiffletree</div></td><td>612M</td><td>2.41B</td><td class="cost">$1,184.20</td></tr>
+        <tr><td>Sage: notification retries<div class="prov">sagechat-notification-orchestrator</div></td><td>288M</td><td>1.06B</td><td class="cost">$522.75</td></tr>
+        <tr><td>wiffletree: Estimated Costs<div class="prov">wiffletree</div></td><td>41M</td><td><span class="dash">—</span></td><td class="cost">$18.06</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="hint note">Estimated cost prices each request at the public API list price of its model, as of October 30, 2026. Your subscription is billed differently; this shows what the same work would cost on the API. Claude cache writes are priced by their lifetime (1 hour or 5 minutes) and fast-mode requests at fast-mode rates. A model with no known price shows “—” and is left out of the total, with a note saying how many requests that is.</p>
+</main>
+</body>
+</html>

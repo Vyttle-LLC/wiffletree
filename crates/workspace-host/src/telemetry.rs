@@ -168,9 +168,32 @@ impl ClaudeRequests {
                         .get("output_tokens")
                         .is_some_and(|v| v.as_u64().is_some());
                     for (field, value) in update {
-                        if value.is_number() {
+                        if value.is_number()
+                            || ["speed", "cache_creation"].contains(&field.as_str())
+                        {
                             current.insert(field.clone(), value.clone());
                         }
+                    }
+                    // A delta can give each cache write's lifetime only per iteration, which
+                    // pricing needs.
+                    let iterations = update.get("iterations").and_then(Value::as_array);
+                    if let Some(iterations) =
+                        iterations.filter(|_| !update.contains_key("cache_creation"))
+                        && iterations.iter().any(|i| i["cache_creation"].is_object())
+                    {
+                        let written = |lifetime: &str| {
+                            iterations
+                                .iter()
+                                .filter_map(|i| i["cache_creation"][lifetime].as_u64())
+                                .sum::<u64>()
+                        };
+                        current.insert(
+                            "cache_creation".into(),
+                            json!({
+                                "ephemeral_5m_input_tokens": written("ephemeral_5m_input_tokens"),
+                                "ephemeral_1h_input_tokens": written("ephemeral_1h_input_tokens"),
+                            }),
+                        );
                     }
                 }
                 Some(ProviderEvent::Usage {
@@ -220,6 +243,26 @@ mod tests {
         assert_eq!(reading.windows.len(), 2);
         assert_eq!(reading.windows[0].used_percent, Some(25.));
         assert_eq!(reading.windows[1].used_percent, Some(75.));
+    }
+    #[test]
+    fn a_recorded_stream_keeps_each_requests_cache_lifetimes() {
+        let mut stream = ClaudeRequests::default();
+        let mut hour = BTreeMap::new();
+        for line in include_str!("../tests/fixtures/streams/claude-recorded.jsonl").lines() {
+            if let Some(ProviderEvent::Usage {
+                request_id, usage, ..
+            }) = stream.event(&serde_json::from_str(line).unwrap())
+            {
+                hour.insert(
+                    request_id,
+                    usage["cache_creation"]["ephemeral_1h_input_tokens"]
+                        .as_u64()
+                        .unwrap_or(0),
+                );
+            }
+        }
+        assert_eq!(hour["msg_011CfoMZnWDn5jWJA1yi8beX"], 21_787);
+        assert_eq!(hour.values().sum::<u64>(), 26_006);
     }
     #[test]
     fn initial_output_placeholder_and_missing_delta_remain_partial() {

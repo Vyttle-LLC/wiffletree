@@ -4,6 +4,7 @@ use chrono::{Days, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
 use rusqlite::functions::FunctionFlags;
 use std::collections::BTreeMap;
+use workspace_core::pricing::{self, BilledTokens};
 
 fn optional_count(value: Option<&Value>) -> Option<u64> {
     match value {
@@ -516,17 +517,107 @@ impl Host {
         )?;
         let columns = "COALESCE(SUM(input),0),COALESCE(SUM(output),0),COALESCE(SUM(cache_read),0),COALESCE(SUM(cache_write),0),COALESCE(SUM(reasoning),0),COUNT(*),COALESCE(SUM(1-complete),0)";
         let filter = "recorded_at>=?1 AND recorded_at<=?2 AND (?3 IS NULL OR project_id=?3) AND (?4 IS NULL OR provider=?4)";
-        let totals = self.db.query_row(
-            &format!("SELECT {columns} FROM usage_requests WHERE {filter}"),
-            params![start, timestamp, project, provider_tag],
-            |r| row_totals(r, 0),
+        self.db.create_scalar_function(
+            "usage_long_prompt",
+            2,
+            FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| {
+                Ok(pricing::is_long_prompt(
+                    &ctx.get::<String>(0)?,
+                    ctx.get::<i64>(1)? as u64,
+                ))
+            },
         )?;
-        let rows=self.db.prepare(&format!("SELECT usage_day(recorded_at),provider,{columns} FROM usage_requests WHERE {filter} GROUP BY usage_day(recorded_at),provider"))?
-            .query_map(params![start,timestamp,project,provider_tag],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,row_totals(r,2)?)))?
+        // One row per day, model and coordinator, split further by what sets a request's price:
+        // Claude's fast mode, a long prompt, and how much of its cache write lasts an hour.
+        let groups = self.db.prepare(&format!("SELECT usage_day(recorded_at),provider,model,coordinator_id,session_id=coordinator_id,
+                COALESCE(json_extract(native,'$.speed')='fast',0),usage_long_prompt(model,input),{columns},
+                COALESCE(SUM(MIN(cache_write,COALESCE(json_extract(native,'$.cache_creation.ephemeral_1h_input_tokens'),0))),0)
+            FROM usage_requests WHERE {filter} GROUP BY 1,2,3,4,5,6,7"))?
+            .query_map(params![start,timestamp,project,provider_tag],|r|Ok(PriceGroup{
+                date:r.get(0)?,provider:r.get(1)?,model:r.get(2)?,coordinator:r.get(3)?,own:r.get(4)?,
+                fast:r.get(5)?,long_prompt:r.get(6)?,counts:row_totals(r,7)?,cache_write_1h:r.get(14)?}))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut measured: BTreeMap<(String, String), TokenTotals> = rows
+        let mut totals = TokenTotals::default();
+        let mut cost = Cost::default();
+        let mut unpriced_requests = 0;
+        let mut measured: BTreeMap<(String, Provider), TokenTotals> = BTreeMap::new();
+        let mut models: BTreeMap<(Provider, String), ModelUsage> = BTreeMap::new();
+        let mut daily_models: BTreeMap<(String, Provider, String), ModelUsage> = BTreeMap::new();
+        let mut coordinators: BTreeMap<String, CoordinatorUsage> = BTreeMap::new();
+        for group in groups {
+            let provider: Provider = serde_json::from_value(Value::String(group.provider))?;
+            let counts = &group.counts;
+            let price = pricing::estimate(
+                &group.model,
+                &BilledTokens {
+                    uncached_input: counts.uncached_input(),
+                    cache_read: counts.cache_read,
+                    cache_write_5m: counts.cache_write - group.cache_write_1h,
+                    cache_write_1h: group.cache_write_1h,
+                    output: counts.output,
+                    fast: group.fast,
+                    long_prompt: group.long_prompt,
+                },
+            );
+            totals.add(counts);
+            match &price {
+                Some(price) => cost.add(price),
+                None => unpriced_requests += counts.requests,
+            }
+            measured
+                .entry((group.date.clone(), provider))
+                .or_default()
+                .add(counts);
+            let usage = || ModelUsage {
+                provider,
+                model: group.model.clone(),
+                counts: TokenTotals::default(),
+                cost: None,
+            };
+            models
+                .entry((provider, group.model.clone()))
+                .or_insert_with(usage)
+                .add(counts, price);
+            daily_models
+                .entry((group.date.clone(), provider, group.model.clone()))
+                .or_insert_with(usage)
+                .add(counts, price);
+            if !coordinators.contains_key(&group.coordinator) {
+                let session = self.session(&group.coordinator)?;
+                coordinators.insert(
+                    group.coordinator.clone(),
+                    CoordinatorUsage {
+                        id: group.coordinator.clone(),
+                        name: session.name,
+                        project: self.project(&session.project_id)?.name,
+                        own: TokenTotals::default(),
+                        workers: TokenTotals::default(),
+                        cost: Cost::default(),
+                    },
+                );
+            }
+            let entry = coordinators.get_mut(&group.coordinator).unwrap();
+            if group.own {
+                entry.own.add(counts);
+            } else {
+                entry.workers.add(counts);
+            }
+            if let Some(price) = &price {
+                entry.cost.add(price);
+            }
+        }
+        let mut models: Vec<_> = models.into_values().collect();
+        models.sort_by(|a, b| {
+            let cost = |usage: &ModelUsage| usage.cost.map(|cost| cost.total());
+            cost(b)
+                .partial_cmp(&cost(a))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.counts.total().cmp(&a.counts.total()))
+        });
+        let daily_models = daily_models
             .into_iter()
-            .map(|(date, provider, counts)| ((date, provider), counts))
+            .map(|((date, _, _), usage)| DailyModelUsage { date, usage })
             .collect();
         let mut daily = Vec::new();
         let mut dates = Vec::new();
@@ -541,40 +632,13 @@ impl Host {
                 .into_iter()
                 .filter(|p| provider.is_none_or(|selected| *p == selected))
             {
-                let counts = measured
-                    .remove(&(label.clone(), tag(&p)?))
-                    .unwrap_or_default();
+                let counts = measured.remove(&(label.clone(), p)).unwrap_or_default();
                 daily.push(DailyTokens {
                     date: label.clone(),
                     provider: p,
                     covered: day_end > tracking || counts.requests > 0,
                     counts,
                 });
-            }
-        }
-        let work=self.db.prepare(&format!("SELECT coordinator_id,session_id=coordinator_id,{columns} FROM usage_requests WHERE {filter} GROUP BY coordinator_id,session_id=coordinator_id"))?
-            .query_map(params![start,timestamp,project,provider_tag],|r|Ok((r.get::<_,String>(0)?,r.get::<_,bool>(1)?,row_totals(r,2)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut coordinators: BTreeMap<String, CoordinatorUsage> = BTreeMap::new();
-        for (id, own, counts) in work {
-            if !coordinators.contains_key(&id) {
-                let session = self.session(&id)?;
-                coordinators.insert(
-                    id.clone(),
-                    CoordinatorUsage {
-                        id: id.clone(),
-                        name: session.name,
-                        project: self.project(&session.project_id)?.name,
-                        own: TokenTotals::default(),
-                        workers: TokenTotals::default(),
-                    },
-                );
-            }
-            let entry = coordinators.get_mut(&id).unwrap();
-            if own {
-                entry.own.add(&counts);
-            } else {
-                entry.workers.add(&counts);
             }
         }
         let mut coordinators: Vec<_> = coordinators.into_values().collect();
@@ -640,8 +704,25 @@ impl Host {
             daily,
             coordinators,
             quota_trends: trends,
+            cost,
+            unpriced_requests,
+            models,
+            daily_models,
+            prices_as_of: pricing::PRICES_AS_OF.into(),
         })
     }
+}
+/// One grouped row of the report's query: requests that are priced alike.
+struct PriceGroup {
+    date: String,
+    provider: String,
+    model: String,
+    coordinator: String,
+    own: bool,
+    fast: bool,
+    long_prompt: bool,
+    counts: TokenTotals,
+    cache_write_1h: u64,
 }
 fn row_totals(row: &Row<'_>, offset: usize) -> rusqlite::Result<TokenTotals> {
     Ok(TokenTotals {
@@ -1187,6 +1268,161 @@ mod tests {
             .usage_report(7, None, Some(Provider::Codex), "America/New_York")
             .unwrap();
         assert_eq!(codex.totals.total(), 35);
+    }
+    #[test]
+    fn each_model_is_priced_from_its_own_requests_and_unpriced_ones_stay_out_of_the_cost() {
+        const M: u64 = 1_000_000;
+        let directory = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(directory.path()).unwrap();
+        let main = root(&mut host, "Project");
+        let other = root(&mut host, "Other");
+        let worker = Session {
+            id: new_id(),
+            parent_id: Some(main.id.clone()),
+            provider: Provider::Codex,
+            role: Role::Implementer,
+            name: "Worker".into(),
+            ..main.clone()
+        };
+        host.db
+            .execute(
+                "INSERT INTO sessions VALUES(?1,?2,?3,?4,?5)",
+                params![
+                    worker.id,
+                    worker.project_id,
+                    worker.parent_id,
+                    tag(&worker.role).unwrap(),
+                    encode(&worker).unwrap()
+                ],
+            )
+            .unwrap();
+        let time = now() - 1000;
+        let requests = [
+            (
+                &main,
+                "cached",
+                "claude-opus-5-5",
+                json!({"input_tokens":M,"cache_read_input_tokens":M,"cache_creation_input_tokens":2*M,
+                "cache_creation":{"ephemeral_5m_input_tokens":M,"ephemeral_1h_input_tokens":M},"output_tokens":M,"speed":"standard"}),
+            ),
+            (
+                &main,
+                "fast",
+                "claude-opus-5-5",
+                json!({"input_tokens":0,"output_tokens":M,"speed":"fast"}),
+            ),
+            (
+                &main,
+                "unknown",
+                "unreported",
+                json!({"input_tokens":100,"output_tokens":5}),
+            ),
+            (
+                &worker,
+                "codex",
+                "gpt-6.1-sol",
+                json!({"input_tokens":2*M,"cached_input_tokens":M,"output_tokens":M,"reasoning_output_tokens":10}),
+            ),
+            (
+                &other,
+                "other",
+                "claude-sonnet-5-5",
+                json!({"input_tokens":M,"output_tokens":0}),
+            ),
+        ];
+        for (session, id, model, usage) in requests {
+            run(&host, session, id, time, Value::Null);
+            host.record_usage(id, id, Some(model), &usage, true, time)
+                .unwrap();
+        }
+        let close = |a: f64, b: f64| assert!((a - b).abs() < 1e-9, "{a} != {b}");
+        let priced =
+            |model, tokens: BilledTokens| pricing::estimate(model, &tokens).unwrap().total();
+        let opus = priced(
+            "claude-opus-5-5",
+            BilledTokens {
+                uncached_input: M,
+                cache_read: M,
+                cache_write_5m: M,
+                cache_write_1h: M,
+                output: M,
+                ..Default::default()
+            },
+        ) + priced(
+            "claude-opus-5-5",
+            BilledTokens {
+                output: M,
+                fast: true,
+                ..Default::default()
+            },
+        );
+        let sol = priced(
+            "gpt-6.1-sol",
+            BilledTokens {
+                uncached_input: M,
+                cache_read: M,
+                output: M,
+                ..Default::default()
+            },
+        );
+        let sonnet = priced(
+            "claude-sonnet-5-5",
+            BilledTokens {
+                uncached_input: M,
+                ..Default::default()
+            },
+        );
+
+        let all = host
+            .usage_report(7, None, None, "America/New_York")
+            .unwrap();
+        let models: Vec<_> = all.models.iter().map(|m| m.model.as_str()).collect();
+        assert_eq!(
+            models,
+            [
+                "claude-opus-5-5",
+                "gpt-6.1-sol",
+                "claude-sonnet-5-5",
+                "unreported"
+            ]
+        );
+        close(all.models[0].cost.unwrap().total(), opus);
+        assert_eq!(all.models[0].counts.uncached_input(), M);
+        close(all.models[1].cost.unwrap().total(), sol);
+        assert!(all.models[3].cost.is_none());
+        assert_eq!(all.unpriced_requests, 1);
+        close(all.cost.total(), opus + sol + sonnet);
+        let today: f64 = all
+            .daily_models
+            .iter()
+            .filter_map(|day| day.usage.cost)
+            .map(|cost| cost.total())
+            .sum();
+        close(today, all.cost.total());
+        let coordinator = |report: &UsageReport, id: &str| {
+            report
+                .coordinators
+                .iter()
+                .find(|c| c.id == id)
+                .unwrap()
+                .cost
+                .total()
+        };
+        close(coordinator(&all, &main.id), opus + sol);
+        close(coordinator(&all, &other.id), sonnet);
+
+        let project = host
+            .usage_report(7, Some(&main.project_id), None, "America/New_York")
+            .unwrap();
+        close(project.cost.total(), opus + sol);
+        assert_eq!(project.unpriced_requests, 1);
+        let codex = host
+            .usage_report(7, None, Some(Provider::Codex), "America/New_York")
+            .unwrap();
+        close(codex.cost.total(), sol);
+        assert_eq!(codex.unpriced_requests, 0);
+        assert_eq!(codex.daily_models.len(), 1);
+        close(coordinator(&codex, &main.id), sol);
     }
     #[test]
     fn migration_backfills_codex_once_but_does_not_sum_legacy_claude_session_totals() {
