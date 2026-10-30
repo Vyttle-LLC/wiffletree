@@ -635,6 +635,8 @@ Acceptance: Michael coordinates a change spanning two repositories, talks to eac
 
 Extend the project coordinator with multiple worker PRs into a managed feature branch, integration ordering, combined tests and review, and final PR handoff. Add explicitly enabled idle branch updates with conflict handling and downstream worker refresh.
 
+**Proposed: the host merges into feature branches, never into protected ones** ([protected-branches-host-merges](../openspec/changes/protected-branches-host-merges/proposal.md); approved study [protected-branches.html](../design/mockups/current/protected-branches.html)). Each repository has a list of protected branches on this machine, exact names and globs; its default branch on GitHub, its base and every branch GitHub's protection or rulesets cover are always protected. The coordinator's `merge_ticket` has the host merge a ticket's PR only into a branch that is not protected, in an allowed owner's repository, at the reviewed head, with passing checks and no conflict, using the first method GitHub allows and `--match-head-commit`; it waits for running checks, asks the human after any blocked review, accepts the ticket and retargets stacked children to the merged PR's base for the PR keeper to rebase. Every merge into a protected branch, including the feature branch into `main`, stays the human's. Until it is implemented, the host merges nothing.
+
 Acceptance: two worker PRs integrate into a feature branch; a base update triggers an ordered refresh; changed heads invalidate previous checks; conflicting work pauses with a clear owner; the final PR reflects the verified integrated branch.
 
 ### Headless hosts and remote control
