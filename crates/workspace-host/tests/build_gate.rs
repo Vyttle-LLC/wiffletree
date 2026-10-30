@@ -24,12 +24,13 @@ impl Gate {
             home.path().join("wiffletree-build-gate"),
         )
         .unwrap();
-        // A compiler that logs when it starts, then runs until its release file appears.
+        // A compiler that logs when it starts, then runs until its release file appears, or
+        // until a failed test's folder is gone.
         let rustc = home.path().join("rustc");
         fs::write(
             &rustc,
             format!(
-                "#!/bin/sh\necho $$ > {home}/pid-$2\necho \"start $2\" >> {home}/log\nwhile [ ! -f {home}/release-$2 ]; do sleep 0.02; done\necho \"end $2\" >> {home}/log\n",
+                "#!/bin/sh\necho $$ > {home}/pid-$2\necho \"start $2\" >> {home}/log\nwhile [ -d {home} ] && [ ! -f {home}/release-$2 ]; do sleep 0.02; done\necho \"end $2\" >> {home}/log\n",
                 home = home.path().display()
             ),
         )
