@@ -288,7 +288,7 @@ impl Actor {
             .collect::<Result<Vec<_>>>()?;
         Ok(busy(&ticket, session, running.iter()))
     }
-    /// Starts the queued cycles that now have a slot, then each verification round that can
+    /// Starts any cycle left queued by an earlier host, then each verification round that can
     /// start. A round's verifiers start together or not at all, so they are never scheduled one
     /// by one; returns them all.
     pub(super) fn admit_rounds(&mut self) -> Result<HashSet<String>> {

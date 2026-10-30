@@ -42,7 +42,8 @@ fn missing_thread_caps(host_sets: impl Fn(&str) -> bool) -> Vec<(&'static str, S
 
 pub(crate) trait LowPriority {
     /// Runs the child, and so everything it starts, at `AGENT_NICENESS`, with Cargo and nextest
-    /// capped to half the cores unless the host's own environment already sets their caps. A
+    /// capped to half the cores unless the host's own environment already sets their caps, and
+    /// with builds sent through the build gate once the host installed it. A
     /// niceness and the environment are inherited across fork and exec, so they reach tool
     /// commands that lead their own process group or session too.
     fn at_low_priority(&mut self) -> &mut Self;
@@ -50,6 +51,11 @@ pub(crate) trait LowPriority {
 impl LowPriority for Command {
     fn at_low_priority(&mut self) -> &mut Self {
         self.envs(missing_thread_caps(|cap| std::env::var_os(cap).is_some()));
+        self.envs(
+            crate::build_gate::agent_env()
+                .iter()
+                .map(|(name, value)| (name, value)),
+        );
         // SAFETY: `setpriority` is async-signal-safe. Its failure is ignored: it fails only for a
         // host already running nicer than this, which the child then inherits.
         unsafe {

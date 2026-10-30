@@ -948,23 +948,9 @@ impl Host {
                 let level = args["level"]
                     .as_str()
                     .with_context(|| self.settings().verification.name_a_level())?;
-                let ticket = self.verify_ticket(&ticket.id, level, small)?;
-                let mut result = serde_json::to_value(&ticket)?;
-                if ticket.queued_since().is_some() {
-                    let slots = self.verification_slots()?;
-                    let why = if slots.taken >= verification::VERIFICATION_SLOTS {
-                        format!(
-                            "All {} verification slots on this machine are taken",
-                            verification::VERIFICATION_SLOTS
-                        )
-                    } else {
-                        "Another verification cycle is already waiting for a slot".to_owned()
-                    };
-                    result["queued"] = json!(format!(
-                        "{why}, so this one is queued. It starts by itself, oldest first, at the worktree's HEAD then, when a slot frees; until then its verifiers get nothing."
-                    ));
-                }
-                Ok(result)
+                Ok(serde_json::to_value(
+                    self.verify_ticket(&ticket.id, level, small)?,
+                )?)
             }
             "triage_findings" => {
                 let ticket = self.owned_ticket(id, string("ticket_id")?)?;

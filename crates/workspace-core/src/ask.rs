@@ -215,6 +215,9 @@ pub fn settings() -> Ask<HostSettings> {
 pub fn set_workspaces_dir(path: String) -> Ask<HostSettings> {
     Ask::new(Command::SetWorkspacesDir { path })
 }
+pub fn set_builds_at_once(builds: usize) -> Ask<HostSettings> {
+    Ask::new(Command::SetBuildsAtOnce { builds })
+}
 pub fn remote_access() -> Ask<RemoteAccess> {
     Ask::new(Command::RemoteAccess)
 }

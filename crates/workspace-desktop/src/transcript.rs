@@ -1,10 +1,11 @@
 //! The selected session's transcript: its messages, prepared as rows when a page arrives, the
-//! older pages, and the live activity row while the agent works.
+//! older pages, and the live work after the last message while the agent works.
 use super::*;
-use activity::{Card, RunActivity, STEP_PACE, StepFetch, paced_reply};
+use activity::{LinkedNarration, LiveStatus, RunActivity, STEP_PACE, StepFetch, paced_reply};
 use conversation::COLUMN;
 use file_links::Linked;
 use gpui_component::button::ButtonVariants;
+use live_work::{FeedContext, FeedRow};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use ui::{brand_image, icon, pill, session_icon};
 use wording::{age, counted, humanize};
@@ -669,6 +670,16 @@ fn peer_line_row(
         })
 }
 
+/// A transcript row's content, centered in the reading column.
+fn centered(content: AnyElement) -> Div {
+    div()
+        .w_full()
+        .px_6()
+        .flex()
+        .justify_center()
+        .child(div().w_full().max_w(px(COLUMN)).child(content))
+}
+
 /// A page of messages being prepared: which ask it answers, for which session and page.
 struct PageAsk {
     number: u64,
@@ -718,7 +729,7 @@ impl MessageRevisions {
     }
 }
 
-/// The selected session's messages, a page at a time, and its live activity.
+/// The selected session's messages, a page at a time, and its live work.
 pub(super) struct Transcript {
     bridge: Bridge,
     shared: Shared,
@@ -737,9 +748,16 @@ pub(super) struct Transcript {
     preparing: u64,
     /// The latest preparation that finished, shown or not.
     finished: u64,
-    /// The selected session's latest run, shown as the activity card while it works.
+    /// The selected session's latest run, shown after the last message while it works.
     activity: Option<RunActivity>,
     step_fetch: StepFetch,
+    /// The live work's rows, which follow the messages in the list; none when it is collapsed.
+    feed: Vec<FeedRow>,
+    /// The preference that collapses the live work to the status line.
+    collapsed: bool,
+    narration: LinkedNarration,
+    /// Live rows the reader opened, by their first step's id.
+    open_live: BTreeSet<String>,
     activity_clock: bool,
     /// The open turn history, which follows step changes while it is shown.
     history: Option<WeakEntity<history_sheet::HistorySheet>>,
@@ -758,21 +776,24 @@ impl Transcript {
             view.back_to_latest(window, cx)
         })
         .detach();
-        let mut minimized = cx.global::<Preferences>().minimize_activity;
-        cx.observe_global::<Preferences>(move |view, cx| {
-            let now = cx.global::<Preferences>().minimize_activity;
-            if std::mem::replace(&mut minimized, now) != now {
-                view.activity_resized(cx);
+        cx.observe_global::<Preferences>(|view, cx| {
+            let collapsed = cx.global::<Preferences>().minimize_activity;
+            if std::mem::replace(&mut view.collapsed, collapsed) != collapsed {
+                view.sync_transcript_rows();
+                cx.notify();
             }
         })
         .detach();
+        let list = ListState::new(0, ListAlignment::Bottom, px(300.));
+        // New work is followed only while the reader is at the bottom.
+        list.set_follow_mode(FollowMode::Tail);
         Self {
             bridge,
             shared: Shared::default(),
             input,
             shown: Loaded::default(),
             open_peers: Rc::default(),
-            list: ListState::new(0, ListAlignment::Bottom, px(300.)),
+            list,
             cached_pages: BTreeMap::new(),
             cache_order: VecDeque::new(),
             page: None,
@@ -781,6 +802,10 @@ impl Transcript {
             finished: 0,
             activity: None,
             step_fetch: StepFetch::default(),
+            feed: vec![],
+            collapsed: cx.global::<Preferences>().minimize_activity,
+            narration: LinkedNarration::default(),
+            open_live: BTreeSet::new(),
             activity_clock: false,
             history: None,
             run_summaries: Rc::default(),
@@ -814,10 +839,11 @@ impl Transcript {
         };
         self.shown = self.cached_pages.get(&id).cloned().unwrap_or_default();
         self.page = None;
+        self.activity = None;
+        self.feed.clear();
         self.list.reset(self.transcript_rows());
         self.revisions = MessageRevisions::default();
         self.reload_if_moved(window, cx);
-        self.activity = None;
         self.fetch_steps(window, cx);
         self.sync_activity_clock(window, cx);
     }
@@ -834,18 +860,54 @@ impl Transcript {
             .count()
     }
 
-    /// Transcript rows are the loaded messages plus a trailing activity row while the agent works.
+    /// Transcript rows are the loaded messages plus the live work's rows.
     fn transcript_rows(&self) -> usize {
-        self.shown.messages.len() + usize::from(self.selected_working())
+        self.shown.messages.len() + self.feed.len()
     }
 
+    /// The live work's rows: the selected session's current run, unless collapsed.
+    fn live_feed(&self) -> Vec<FeedRow> {
+        match self.live_run() {
+            Some(run) if !self.collapsed => live_work::feed(&run.steps),
+            _ => vec![],
+        }
+    }
+
+    fn live_run(&self) -> Option<&RunActivity> {
+        (self.activity.as_ref())
+            .filter(|a| a.running && self.shared.selected.as_ref() == Some(&a.session_id))
+            .filter(|_| self.selected_working())
+    }
+
+    /// Brings the live rows up to date. A row still in its place, such as a run that grew, is
+    /// measured again, which keeps a scrolled-up reader's place; only the rows after the first
+    /// that moved are spliced.
     fn sync_transcript_rows(&mut self) {
-        let (messages, rows) = (self.shown.messages.len(), self.transcript_rows());
+        let feed = self.live_feed();
+        let messages = self.shown.messages.len();
         let shown = self.list.item_count();
+        let kept = if shown == messages + self.feed.len() {
+            self.feed
+                .iter()
+                .zip(&feed)
+                .take_while(|(a, b)| a.same_place(b))
+                .count()
+        } else {
+            0
+        };
+        for (row, (old, new)) in self.feed.iter().zip(&feed).take(kept).enumerate() {
+            if old != new {
+                self.list
+                    .remeasure_items(messages + row..messages + row + 1);
+            }
+        }
+        self.feed = feed;
+        let rows = self.transcript_rows();
         if shown < messages {
             self.list.reset(rows);
-        } else if shown != rows {
-            self.list.splice(messages..shown, rows - messages);
+        } else if shown != rows || kept < self.feed.len() {
+            self.list
+                .splice(messages + kept..shown, rows - messages - kept);
         }
     }
 
@@ -982,6 +1044,8 @@ impl Transcript {
     /// Splices only what a refresh changed, so a reader scrolled up keeps their place.
     fn replace_page(&mut self, page: Loaded) {
         let shown = std::mem::replace(&mut self.shown, page);
+        // The live rows follow the messages and are spliced with whatever changed among them.
+        self.feed = self.live_feed();
         let Some((dropped, unchanged)) = transcript_overlap(&shown.messages, &self.shown.messages)
         else {
             self.list.reset(self.transcript_rows());
@@ -1068,13 +1132,26 @@ impl Transcript {
             Ok(page) if self.shared.selected.as_deref() == Some(session_id) => {
                 // A page with nothing new redraws nothing.
                 let changed = match &mut self.activity {
-                    Some(activity) if activity.session_id == session_id => activity.merge(page),
+                    Some(activity) if activity.session_id == session_id => {
+                        let run = activity.run_id.clone();
+                        let changed = activity.merge(page);
+                        if activity.run_id != run {
+                            self.open_live.clear();
+                        }
+                        changed
+                    }
                     other => {
                         other.insert(RunActivity::new(session_id)).merge(page);
+                        self.open_live.clear();
                         true
                     }
                 };
                 if changed {
+                    let bases: Arc<[PathBuf]> = self.shared.link_bases(session_id).into();
+                    if let Some(run) = &self.activity {
+                        (self.narration).update(&run.steps, &bases, &self.bridge, cx);
+                    }
+                    self.sync_transcript_rows();
                     cx.notify();
                 }
             }
@@ -1118,11 +1195,11 @@ impl Transcript {
             && (self.shared.selected_session()).is_some_and(|s| s.status == Status::Working)
     }
 
-    fn activity_card(&self) -> Card {
+    fn live_status(&self) -> LiveStatus {
         self.activity
             .as_ref()
             .filter(|a| self.shared.selected.as_ref() == Some(&a.session_id))
-            .map(RunActivity::card)
+            .map(RunActivity::status)
             .unwrap_or_default()
     }
 
@@ -1198,12 +1275,26 @@ impl Transcript {
         set_minimize_activity(!minimized, cx);
     }
 
-    /// The activity card changed height, here or from Settings; the list measures it again.
-    fn activity_resized(&mut self, cx: &mut Context<Self>) {
-        let shown = self.shown.messages.len();
-        if self.list.item_count() > shown {
-            self.list.splice(shown..shown + 1, 1);
+    /// Opens or closes a live row: a folded run, an edit's full diff or a step's output.
+    pub(super) fn toggle_live(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.open_live.remove(id) {
+            self.open_live.insert(id.to_owned());
         }
+        let first =
+            |row: &FeedRow| (self.activity.as_ref()).and_then(|a| a.steps.get(row.steps.start));
+        if let Some(row) = self
+            .feed
+            .iter()
+            .position(|r| first(r).is_some_and(|s| s.id == id))
+        {
+            let row = self.shown.messages.len() + row;
+            self.list.remeasure_items(row..row + 1);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
+        self.list.set_follow_mode(FollowMode::Tail);
         cx.notify();
     }
 
@@ -1322,15 +1413,12 @@ impl Transcript {
             )
     }
 
-    fn transcript(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {
+    fn transcript(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let Loaded { messages, rows, .. } = self.shown.clone();
-        let card = self.activity_card();
         let summaries = self.run_summaries.clone();
-        let minimized = cx.global::<Preferences>().minimize_activity;
         let view = cx.entity().downgrade();
-        let role = session.role;
         let open = self.open_peers.clone();
-        let transcript = list(self.list.clone(), move |ix, _, _| {
+        let transcript = list(self.list.clone(), move |ix, _, cx| {
             let content = match (messages.get(ix), rows.get(ix)) {
                 (Some(message), Some(row)) => match (row.placement, row.shape) {
                     // A run draws in its head's row; the rest of its rows stay empty.
@@ -1360,26 +1448,18 @@ impl Transcript {
                         }
                     }
                 },
-                // The row after the last message appears only while the agent works.
-                _ => div()
-                    .w_full()
-                    .flex()
-                    .gap_3()
-                    .child(avatar(session_icon(role), p.accent))
-                    .child(div().flex_1().min_w_0().child(activity::activity_row(
-                        &card,
-                        minimized,
-                        p,
-                        view.clone(),
-                    ))),
+                // The rows after the last message are the live work, while the agent works.
+                _ => {
+                    let live = view.upgrade().and_then(|transcript| {
+                        let transcript = transcript.read(cx);
+                        transcript.live_row(ix - messages.len(), p, view.clone())
+                    });
+                    return centered(live.unwrap_or_else(|| div().into_any_element()))
+                        .into_any_element();
+                }
             };
-            div()
-                .w_full()
-                .px_6()
+            centered(content.into_any_element())
                 .py_3()
-                .flex()
-                .justify_center()
-                .child(div().w_full().max_w(px(COLUMN)).child(content))
                 .into_any_element()
         })
         .size_full();
@@ -1389,6 +1469,36 @@ impl Transcript {
             .min_h_0()
             .child(transcript)
             .vertical_scrollbar(&self.list)
+    }
+
+    /// The live work's row `index`, on a rule that runs down the side of the whole feed.
+    fn live_row(&self, index: usize, p: Palette, view: WeakEntity<Self>) -> Option<AnyElement> {
+        let row = self.feed.get(index)?;
+        let feed = FeedContext {
+            steps: &self.live_run()?.steps,
+            narration: &self.narration,
+            open: &self.open_live,
+            view,
+        };
+        let last = index + 1 == self.feed.len();
+        Some(
+            div()
+                .ml(px(38.))
+                .pl_3()
+                .py(px(3.))
+                .when(last, |d| d.mb_3())
+                .border_l_2()
+                .border_color(p.edge.opacity(edge::SOFT))
+                .child(live_work::feed_row(row, &feed, p))
+                .into_any_element(),
+        )
+    }
+
+    /// The status line between the transcript and the composer while the agent works.
+    fn status_line(&self, p: Palette, view: WeakEntity<Self>) -> Div {
+        let following = self.list.is_following_tail();
+        let line = activity::status_line(&self.live_status(), self.collapsed, following, p, view);
+        centered(line.into_any_element()).pt_1()
     }
 
     fn pagination(&self, p: Palette, cx: &mut Context<Self>) -> Option<Div> {
@@ -1450,7 +1560,10 @@ impl Render for Transcript {
                 self.empty_conversation(session.role, p, cx)
                     .into_any_element()
             } else {
-                self.transcript(&session, p, cx).into_any_element()
+                self.transcript(p, cx).into_any_element()
+            })
+            .when(self.selected_working(), |d| {
+                d.child(self.status_line(p, cx.entity().downgrade()))
             })
     }
 }

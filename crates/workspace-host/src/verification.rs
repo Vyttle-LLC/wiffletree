@@ -9,9 +9,6 @@ use std::collections::BTreeSet;
 
 const WORKTREE_CHANGED: &str = "worktree changed during verification";
 const UNCOMMITTED: &str = "The worktree has uncommitted or untracked files; ask the implementer to commit or discard them";
-/// How many verification cycles may hold a slot at once across the host, so concurrent
-/// verifiers do not overload the machine. A further cycle queues; see `start_queued_cycles`.
-pub(crate) const VERIFICATION_SLOTS: usize = 2;
 /// Bounds on a finding's fields; they keep a ticket's ledger small in `workspace_context`.
 const FINDING_LINE_BYTES: usize = 256;
 const FINDING_TEXT_BYTES: usize = 2048;
@@ -371,24 +368,17 @@ fn paragraphs(parts: Vec<String>) -> String {
         .join("\n\n")
 }
 
-/// How a ticket's cycle stands for verification slots.
+/// How a ticket's running cycle stands.
 enum Standing {
     /// No running cycle, or one that cannot make progress for now: its ticket is closed, or
     /// its project is paused or archived.
     Idle,
-    /// Started and holding a slot, between rounds included.
-    Holding,
+    Started,
+    /// Queued for a verification slot by a host from before builds were gated instead; it
+    /// starts at the next pass.
     Queued,
     /// It needs a verifier that was archived, so it can never end by itself; why.
     Stalled(String),
-}
-
-/// How full the verification slots are.
-pub(crate) struct Slots {
-    pub taken: usize,
-    /// Queued cycles, oldest first.
-    pub queued: Vec<Ticket>,
-    pub stalled: Vec<(Ticket, String)>,
 }
 
 /// Who starts a cycle: the coordinator, asking for small work or not, or the host for the PR
@@ -428,9 +418,8 @@ impl Host {
         }
     }
     /// Starts a cycle at the review level named `level`: pins HEAD and sends every verifier of
-    /// that level one message naming it. When every verification slot is taken, or another
-    /// cycle already waits for one, the cycle queues instead: its verifiers are chosen now and
-    /// sent nothing until `start_queued_cycles` starts it. A re-check starts only on a ticket whose latest cycle
+    /// that level one message naming it, at once; the build gate, not the cycle, bounds how many
+    /// of their builds run. A re-check starts only on a ticket whose latest cycle
     /// passed, no level may leave out a configured verifier that has an open finding, and only
     /// full reviews count against the cycle cap. Each verifier of the level resolves its row in
     /// Who runs what, for small work when `small`; a new verifier is pinned to what it resolves
@@ -538,9 +527,6 @@ impl Host {
         let chosen = self.verifier_picks(&ticket, level, &level_verifiers, small)?;
         let keeper = review.is_some();
         let commit = self.checkout_head(&ticket)?;
-        // A cycle queues behind every slot holder and every cycle queued before it.
-        let slots = self.verification_slots()?;
-        let queued_at = (slots.taken >= VERIFICATION_SLOTS || !slots.queued.is_empty()).then(now);
         let mut replaced = vec![];
         let started = self.atomically(|host| {
             let (mut verifiers, mut skipped) = (vec![], vec![]);
@@ -619,24 +605,17 @@ impl Host {
                     commit,
                     verifiers,
                 }],
-                queued_at,
+                queued_at: None,
                 small,
                 keeper,
                 skipped,
             });
-            let milestone = if queued_at.is_some() {
-                ticket.state = TicketState::Verifying;
-                host.save_ticket(&ticket)?;
-                "verification_queued"
-            } else {
-                host.start_round(&mut ticket)?;
-                "verification_started"
-            };
+            host.start_round(&mut ticket)?;
             Self::event(
                 &host.db,
                 &coordinator.project_id,
                 Some(&ticket.coordinator_id),
-                milestone,
+                "verification_started",
                 &format!("{}; cycle {cycle}", ticket.id),
             )?;
             Ok(ticket)
@@ -646,9 +625,9 @@ impl Host {
         self.stop_archived(&replaced);
         Ok(started)
     }
-    /// How a ticket's cycle stands. Only a cycle that can make progress holds or takes a slot:
-    /// its ticket is open, its project live with its coordinator not archived, and none of the
-    /// verifiers it still needs, pending or due to re-check a fix, archived.
+    /// How a ticket's cycle stands. Only a cycle that can make progress counts as started or
+    /// queued: its ticket is open, its project live with its coordinator not archived, and none
+    /// of the verifiers it still needs, pending or due to re-check a fix, archived.
     fn standing(&self, ticket: &Ticket, live: &[String]) -> Result<Standing> {
         let Some(cycle) = ticket.running_cycle().filter(|_| ticket.is_open()) else {
             return Ok(Standing::Idle);
@@ -667,45 +646,30 @@ impl Host {
         }
         Ok(match cycle.queued_at {
             Some(_) => Standing::Queued,
-            None => Standing::Holding,
+            None => Standing::Started,
         })
     }
-    pub(crate) fn verification_slots(&self) -> Result<Slots> {
+    /// Ends stalled cycles, then starts every cycle a host from before builds were gated left
+    /// queued for a verification slot, oldest first. The scheduler calls it on every pass. A
+    /// starting cycle is pinned to the worktree's HEAD then. One that cannot start, such as one
+    /// whose worktree has uncommitted files, ends blocked and tells the coordinator instead of
+    /// stopping the pass. Returns whether any cycle changed.
+    pub fn start_queued_cycles(&mut self) -> Result<bool> {
         let live = self.live_projects()?;
-        let mut slots = Slots {
-            taken: 0,
-            queued: vec![],
-            stalled: vec![],
-        };
+        let (mut stalled, mut queued) = (vec![], vec![]);
         for ticket in self.running_verifications()? {
             match self.standing(&ticket, &live)? {
-                Standing::Idle => {}
-                Standing::Holding => slots.taken += 1,
-                Standing::Queued => slots.queued.push(ticket),
-                Standing::Stalled(why) => slots.stalled.push((ticket, why)),
+                Standing::Idle | Standing::Started => {}
+                Standing::Queued => queued.push(ticket),
+                Standing::Stalled(why) => stalled.push((ticket, why)),
             }
         }
-        slots.queued.sort_by_key(Ticket::queued_since);
-        Ok(slots)
-    }
-    /// Ends stalled cycles, then starts the oldest queued cycles while slots are free, so a
-    /// queued cycle starts once a running one passes, is blocked or its ticket closes. The
-    /// scheduler calls it on every pass, and the queue is stored with the tickets, so it
-    /// survives a restart. A starting cycle is pinned to the worktree's HEAD then. One that
-    /// cannot start, such as one whose worktree has uncommitted files, ends blocked and tells
-    /// the coordinator instead of stopping the pass. Returns whether any cycle changed.
-    pub fn start_queued_cycles(&mut self) -> Result<bool> {
-        let slots = self.verification_slots()?;
-        let mut changed = !slots.stalled.is_empty();
-        for (ticket, why) in slots.stalled {
+        queued.sort_by_key(Ticket::queued_since);
+        let changed = !stalled.is_empty() || !queued.is_empty();
+        for (ticket, why) in stalled {
             self.end_unstartable(&ticket.id, &why)?;
         }
-        let mut free = VERIFICATION_SLOTS.saturating_sub(slots.taken);
-        for mut ticket in slots.queued {
-            if free == 0 {
-                break;
-            }
-            changed = true;
+        for mut ticket in queued {
             let mut replaced = vec![];
             let started = self.atomically(|host| {
                 ensure!(is_clean(&ticket)?, UNCOMMITTED);
@@ -727,10 +691,7 @@ impl Host {
                 )
             });
             match started {
-                Ok(()) => {
-                    free -= 1;
-                    self.stop_archived(&replaced);
-                }
+                Ok(()) => self.stop_archived(&replaced),
                 Err(error) => self.end_unstartable(&ticket.id, &format!("{error:#}"))?,
             }
         }

@@ -2,6 +2,7 @@
 mod agent_processes;
 pub mod attachments;
 mod brains;
+pub mod build_gate;
 mod checkout;
 pub mod compaction;
 pub mod context;
@@ -1848,6 +1849,9 @@ impl Host {
             }
             Command::SetVerification { verification } => {
                 serde_json::to_value(self.set_verification(verification)?)?
+            }
+            Command::SetBuildsAtOnce { builds } => {
+                serde_json::to_value(self.set_builds_at_once(builds)?)?
             }
             Command::SetCheckIns {
                 child_turns,
