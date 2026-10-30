@@ -61,7 +61,7 @@ Each Space's storage SHALL be a Git repository holding `spaces/<space>/space.yam
 - **THEN** it is refused, saying it is the Sage Space's brain, and nothing is written
 
 ### Requirement: A storage repository is also the Space's tracker
-A storage repository SHALL be its Spaces' tracker: it SHALL hold `wiffletree-issues.yaml` and `issues/` at its root, beside `spaces/` (see `shared-issues`). Every Space stored in one repository SHALL share its issues and its prefix. A local storage repository SHALL be a local tracker that is never pushed. There SHALL be no other list of trackers and no tracker setting outside a Space. The first commit to a new storage repository, local or on GitHub, SHALL add `wiffletree-issues.yaml` with a prefix of 2 to 5 capital letters, which the Space form SHALL propose from the Space's name and the user MAY change. A prefix SHALL be unique among the storage repositories on this Mac, and SHALL change only while its tracker has no issue. A storage repository added without `wiffletree-issues.yaml` SHALL offer Set up issues on the Space's page, which SHALL ask for a prefix, ask first, and commit only that file.
+A storage repository SHALL be its Spaces' tracker: it SHALL hold `wiffletree-issues.yaml` and `issues/` at its root, beside `spaces/` (see `shared-issues`). Every Space stored in one repository SHALL share its issues and its prefix. A local storage repository SHALL be a local tracker that is never pushed. There SHALL be no other list of trackers and no tracker setting outside a Space. The first commit to a new storage repository, local or on GitHub, SHALL add `wiffletree-issues.yaml` with a prefix of 2 to 5 capital letters, which the Space form SHALL propose from the Space's name and the user MAY change. A prefix SHALL be unique among the storage repositories on this Mac. A GitHub tracker's prefix SHALL change only while it has no issue. A local tracker's prefix SHALL be renamable on its Space's page at any time, and renaming SHALL rewrite its issue IDs, folders and every reference to them in its own issues, because nothing outside this Mac refers to them. A storage repository added without `wiffletree-issues.yaml` SHALL offer Set up issues on the Space's page, which SHALL ask for a prefix, ask first, and commit only that file.
 
 #### Scenario: Two Spaces, one storage repository
 - **WHEN** Sage and Sage Watch are both stored in `Sage-Social/wiffletree-storage`, whose prefix is SAGE
@@ -140,11 +140,15 @@ A Space whose storage repository is on GitHub SHALL keep its definition in that 
 - **THEN** `spaces/sage/space.yaml` in that repository holds the Space's definition, and the Spaces page marks Sage as shared
 
 ### Requirement: Joining a shared Space
-"Add Space → From a repository" SHALL take a GitHub repository, check it as for a storage repository, list the Spaces it holds and add the ones the user ticks. For each, the user SHALL say where the brain and each code repository are cloned on this Mac, or leave them missing. A model the definition names that this Mac lacks or may not use SHALL fall back to this Mac's Who runs what choice, with a note on the Space's page naming both. Joining SHALL be refused when the repository's prefix is used by another storage repository on this Mac, naming it.
+"Add Space → From a repository" SHALL take a GitHub repository, check it as for a storage repository, list the Spaces it holds and add the ones the user ticks. For each, the user SHALL say where the brain and each code repository are cloned on this Mac, or leave them missing. A model the definition names that this Mac lacks or may not use SHALL fall back to this Mac's Who runs what choice, with a note on the Space's page naming both. Joining SHALL be refused when the repository's prefix is used by another storage repository on this Mac, naming it; when that one is a local tracker, the refusal SHALL tell the human to rename its prefix and offer to open its Space's page.
 
 #### Scenario: A teammate joins
 - **WHEN** a teammate adds `Sage-Social/wiffletree-storage` and ticks Sage
 - **THEN** their Mac gets Sage's description, instructions and the SAGE issues, and asks where `sagehaven-docs` and each Sage repository are cloned
+
+#### Scenario: A local prefix clashes with a shared one
+- **WHEN** Personal's local tracker uses SAGE with 12 issues, and the human adds `Sage-Social/wiffletree-storage`, whose prefix is also SAGE
+- **THEN** joining is refused, telling the human to rename Personal's prefix; after renaming it to ME, Personal's issues are ME-1 to ME-12 with their links rewritten, and joining succeeds
 
 #### Scenario: A model this Mac lacks
 - **WHEN** the Sage definition names Opus · high for jobs and the teammate has only Codex signed in
