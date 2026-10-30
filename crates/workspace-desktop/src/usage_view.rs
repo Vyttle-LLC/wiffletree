@@ -25,6 +25,42 @@ fn compact(n: u64) -> String {
         n.to_string()
     }
 }
+fn dollars(amount: f64) -> String {
+    let cents = (amount * 100.).round() as u64;
+    format!("${}.{:02}", number(cents / 100), cents % 100)
+}
+/// A cost, or a dash for a model with no known price.
+fn estimated(cost: Option<Cost>) -> String {
+    cost.map_or_else(|| "—".into(), |cost| dollars(cost.total()))
+}
+fn cost_parts(cost: &Cost) -> String {
+    format!(
+        "Input {} · cache read {} · cache write {} · output {}",
+        dollars(cost.input),
+        dollars(cost.cache_read),
+        dollars(cost.cache_write),
+        dollars(cost.output)
+    )
+}
+/// Each model keeps its color wherever it appears on the page.
+fn model_color(model: &str, p: Palette) -> Hsla {
+    match model {
+        "claude-opus-5-5" => p.accent,
+        "gpt-6.1-sol" => p.blue,
+        "claude-sonnet-5-5" => p.green,
+        "claude-sonnet-5" => p.magenta,
+        "claude-fable-5-1" => p.focus,
+        "claude-haiku-5-5" => p.yellow,
+        _ => p.subtle,
+    }
+}
+fn swatch(color: Hsla) -> Div {
+    div().size(px(9.)).flex_none().rounded(px(3.)).bg(color)
+}
+/// A right-aligned table cell.
+fn cell(text: impl Into<SharedString>) -> Div {
+    div().w(px(78.)).flex_none().text_right().child(text.into())
+}
 fn timestamp(at: i64) -> String {
     wording::local_time(at, "America/New_York").unwrap_or_else(|| "Unknown".into())
 }
@@ -191,6 +227,26 @@ impl UsagePage {
             )
             .child(hint(detail, p))
     }
+    fn cost_tile(report: &UsageReport, p: Palette) -> Div {
+        let total = report.cost.total();
+        let priced: Vec<_> = report.models.iter().filter(|m| m.cost.is_some()).collect();
+        let detail = match priced.first() {
+            Some(top) if total > 0. => format!(
+                "{} model{} · {} is {:.0}%",
+                priced.len(),
+                if priced.len() == 1 { "" } else { "s" },
+                pricing::model_name(&top.model),
+                top.cost.map_or(0., |cost| cost.total()) / total * 100.
+            ),
+            _ => "No priced requests".into(),
+        };
+        let figure = if total >= 100. {
+            format!("${}", number(total.round() as u64))
+        } else {
+            dollars(total)
+        };
+        Self::tile("Estimated API cost", figure, detail, p)
+    }
     fn day_detail(&self, report: &UsageReport, p: Palette) -> Div {
         let date = self.day.as_deref().unwrap_or(&report.end_date);
         let mut detail = card(p).child(eyebrow(format!("DAY · {date}"), p));
@@ -221,13 +277,52 @@ impl UsagePage {
                 .child(property("Cache write", number(day.counts.cache_write), p))
                 .child(property("Reasoning", number(day.counts.reasoning), p));
         }
+        let models: Vec<_> = report
+            .daily_models
+            .iter()
+            .filter(|day| day.date == date)
+            .map(|day| &day.usage)
+            .collect();
+        let cost: f64 = models
+            .iter()
+            .filter_map(|usage| usage.cost)
+            .map(|cost| cost.total())
+            .sum();
+        let split = models
+            .iter()
+            .map(|usage| {
+                format!(
+                    "{} {}",
+                    pricing::model_name(&usage.model),
+                    estimated(usage.cost)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        detail = detail
+            .child(
+                div()
+                    .mt_1()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(p.edge.opacity(edge::SEPARATOR))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(property("Est. cost", dollars(cost), p)),
+            )
+            .when(!split.is_empty(), |d| d.child(hint(split, p)));
         detail.child(hint(
             "Cache is part of input; reasoning is part of output.",
             p,
         ))
     }
     fn coordinator_usage(&self, report: &UsageReport, p: Palette, cx: &mut Context<Self>) -> Div {
-        let mut work = card(p).child(eyebrow("BY COORDINATOR", p));
+        let mut work = card(p).child(
+            div()
+                .flex()
+                .justify_between()
+                .child(eyebrow("BY COORDINATOR", p))
+                .child(eyebrow("EST. COST", p)),
+        );
         let largest = report
             .coordinators
             .iter()
@@ -262,7 +357,11 @@ impl UsagePage {
                                         coordinator.name, coordinator.project
                                     )),
                             )
-                            .child(div().flex_none().child(compact(total))),
+                            .child(div().flex_none().child(compact(total)))
+                            .child(
+                                cell(dollars(coordinator.cost.total()))
+                                    .font_weight(FontWeight::SEMIBOLD),
+                            ),
                     )
                     .child(meter(total as f64 / largest as f64 * 100., p.focus, p))
                     .child(hint(
@@ -279,6 +378,140 @@ impl UsagePage {
             work = work.child(hint("No recorded requests in this period.", p));
         }
         work
+    }
+    /// Every model used in the period: its share of the cost, its tokens by kind and its cost.
+    fn model_usage(report: &UsageReport, p: Palette) -> Div {
+        let total = report.cost.total();
+        let mut share = div()
+            .w_full()
+            .h(px(8.))
+            .rounded(px(4.))
+            .flex()
+            .overflow_hidden()
+            .bg(p.overlay);
+        let mut table = div().flex().flex_col().text_size(px(font::SMALL)).child(
+            div()
+                .flex()
+                .gap_2()
+                .pb_1()
+                .border_b_1()
+                .border_color(p.edge.opacity(edge::SEPARATOR))
+                .text_color(p.subtle)
+                .child(div().flex_1().min_w_0().child("Model"))
+                .children(
+                    [
+                        "Requests",
+                        "Input",
+                        "Cache read",
+                        "Cache write",
+                        "Output",
+                        "Est. cost",
+                        "Share",
+                    ]
+                    .map(cell),
+                ),
+        );
+        let row = || {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .py_1p5()
+                .border_b_1()
+                .border_color(p.edge.opacity(edge::SEPARATOR))
+        };
+        let mut all = TokenTotals::default();
+        for usage in &report.models {
+            let color = model_color(&usage.model, p);
+            let cost = usage.cost.map(|cost| cost.total());
+            if let Some(cost) = cost.filter(|cost| *cost > 0.) {
+                share = share.child(div().h_full().w(relative((cost / total) as f32)).bg(color));
+            }
+            all.add(&usage.counts);
+            let parts = usage.cost.as_ref().map(cost_parts);
+            table = table.child(
+                row()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(swatch(color))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .child(pricing::model_name(&usage.model).to_owned())
+                                    .child(hint(
+                                        format!("{} · {}", usage.provider.label(), usage.model),
+                                        p,
+                                    )),
+                            ),
+                    )
+                    .child(cell(number(usage.counts.requests)))
+                    .child(cell(compact(usage.counts.uncached_input())))
+                    .child(cell(compact(usage.counts.cache_read)))
+                    // Codex reports no cache writes.
+                    .child(cell(if usage.provider == Provider::Codex {
+                        "—".into()
+                    } else {
+                        compact(usage.counts.cache_write)
+                    }))
+                    .child(cell(compact(usage.counts.output)))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("model-cost-{}", usage.model)))
+                            .child(cell(estimated(usage.cost)).font_weight(FontWeight::SEMIBOLD))
+                            .when_some(parts, |d, parts| {
+                                d.tooltip(move |w, c| Tooltip::new(parts.clone()).build(w, c))
+                            }),
+                    )
+                    .child(cell(cost.map_or_else(
+                        || "—".into(),
+                        |cost| format!("{:.1}%", cost / total.max(f64::MIN_POSITIVE) * 100.),
+                    ))),
+            );
+        }
+        table = table.child(
+            row()
+                .border_b_0()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(div().flex_1().child("All models"))
+                .child(cell(number(all.requests)))
+                .child(cell(compact(all.uncached_input())))
+                .child(cell(compact(all.cache_read)))
+                .child(cell(compact(all.cache_write)))
+                .child(cell(compact(all.output)))
+                .child(cell(dollars(total)))
+                .child(cell("")),
+        );
+        let mut card = card(p)
+            .child(eyebrow("BY MODEL", p))
+            .child(share)
+            .child(table)
+            .child(hint(
+                "Input here is input that was neither read from nor written to the cache. Hover a cost to see its parts.",
+                p,
+            ));
+        if report.unpriced_requests > 0 {
+            card = card.child(
+                hint(
+                    format!(
+                        "Left out of the total: {} request{} on models with no known price.",
+                        number(report.unpriced_requests),
+                        if report.unpriced_requests == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    ),
+                    p,
+                )
+                .text_color(p.yellow),
+            );
+        }
+        card
     }
     fn quota_trend(report: &UsageReport, trend: &QuotaTrend, p: Palette) -> Div {
         let largest = trend
@@ -397,8 +630,10 @@ impl UsagePage {
                         number(totals.requests),
                         format!("{} partial", totals.partial_requests),
                         p,
-                    )),
+                    ))
+                    .child(Self::cost_tile(report, p)),
             )
+            .child(Self::model_usage(report, p))
             .child(
                 div()
                     .flex()
@@ -434,57 +669,62 @@ impl UsagePage {
             ),
             p,
         ))
+        .child(hint(
+            format!(
+                "Estimated cost prices each request at the public API list price of its model, as of {}. Your subscription is billed differently; this shows what the same work would cost on the API. Claude cache writes are priced by their lifetime (1 hour or 5 minutes) and fast-mode requests at fast-mode rates. A model with no known price shows “—” and is left out of the total.",
+                report.prices_as_of
+            ),
+            p,
+        ))
     }
     fn daily_chart(&self, report: &UsageReport, p: Palette, cx: &mut Context<Self>) -> Div {
-        let mut days: BTreeMap<String, (TokenTotals, TokenTotals, bool)> = BTreeMap::new();
+        // Each day's models in the By model order, so the costliest sits at the bottom.
+        let mut days: BTreeMap<&str, (Vec<&ModelUsage>, bool)> = BTreeMap::new();
         for day in &report.daily {
-            let (claude, codex, covered) = days.entry(day.date.clone()).or_default();
-            if day.provider == Provider::Claude {
-                claude.add(&day.counts);
-            } else {
-                codex.add(&day.counts);
-            }
-            *covered |= day.covered;
+            days.entry(&day.date).or_default().1 |= day.covered;
         }
+        for model in &report.models {
+            for day in report.daily_models.iter().filter(|day| {
+                day.usage.model == model.model && day.usage.provider == model.provider
+            }) {
+                days.entry(&day.date).or_default().0.push(&day.usage);
+            }
+        }
+        let day_total =
+            |models: &[&ModelUsage]| models.iter().map(|m| m.counts.total()).sum::<u64>();
         let max = days
             .values()
-            .map(|(a, b, _)| a.total() + b.total())
+            .map(|(models, _)| day_total(models))
             .max()
             .unwrap_or(1)
             .max(1);
         let mut chart = div().w_full().h(px(150.)).flex().items_end().gap_1();
         let count = days.len();
-        for (index, (date, (claude, codex, covered))) in days.into_iter().enumerate() {
-            let tooltip = format!(
-                "{date}\nClaude input {} · output {}\nCodex input {} · output {}{}",
-                number(claude.input),
-                number(claude.output),
-                number(codex.input),
-                number(codex.output),
-                if covered {
-                    ""
-                } else {
-                    "\nNo collection coverage"
-                }
-            );
-            let click_date = date.clone();
-            let mut stack = div().w_full().flex().flex_col().justify_end().min_h(px(2.));
-            for (tokens, color) in [
-                (codex.output, p.accent),
-                (codex.input, p.accent.opacity(0.45)),
-                (claude.output, p.focus),
-                (claude.input, p.focus.opacity(0.45)),
-            ] {
-                if tokens > 0 {
-                    stack = stack.child(
-                        div()
-                            .w_full()
-                            .h(px(tokens as f32 / max as f32 * 118.))
-                            .bg(color),
-                    );
-                }
+        for (index, (date, (models, covered))) in days.into_iter().enumerate() {
+            let mut tooltip = date.to_owned();
+            for usage in &models {
+                tooltip.push_str(&format!(
+                    "\n{}: input {} · output {} · {}",
+                    pricing::model_name(&usage.model),
+                    number(usage.counts.input),
+                    number(usage.counts.output),
+                    estimated(usage.cost)
+                ));
             }
-            if claude.total() + codex.total() == 0 {
+            if !covered {
+                tooltip.push_str("\nNo collection coverage");
+            }
+            let click_date = date.to_owned();
+            let mut stack = div().w_full().flex().flex_col().justify_end().min_h(px(2.));
+            for usage in models.iter().rev() {
+                stack = stack.child(
+                    div()
+                        .w_full()
+                        .h(px(usage.counts.total() as f32 / max as f32 * 118.))
+                        .bg(model_color(&usage.model, p)),
+                );
+            }
+            if day_total(&models) == 0 {
                 stack = stack.child(div().w_full().h(px(2.)).bg(if covered {
                     p.subtle
                 } else {
@@ -521,24 +761,33 @@ impl UsagePage {
                     })),
             );
         }
+        let mut legend = div()
+            .flex()
+            .gap_x_4()
+            .gap_y_1()
+            .flex_wrap()
+            .text_size(px(font::CAPTION))
+            .text_color(p.subtle);
+        for usage in &report.models {
+            legend = legend.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .child(swatch(model_color(&usage.model, p)))
+                    .child(pricing::model_name(&usage.model).to_owned()),
+            );
+        }
         card(p)
-            .child(eyebrow("DAILY TOKENS", p))
+            .child(eyebrow("DAILY TOKENS BY MODEL", p))
             .child(hint(
                 format!("Peak {} tokens · tap a day for exact totals", number(max)),
                 p,
             ))
             .child(chart)
-            .child(
-                div()
-                    .flex()
-                    .gap_3()
-                    .flex_wrap()
-                    .text_size(px(font::CAPTION))
-                    .child(div().text_color(p.focus).child("Claude"))
-                    .child(div().text_color(p.accent).child("Codex")),
-            )
+            .child(legend)
             .child(hint(
-                "Light: input · Solid: output · Baseline: zero or no coverage",
+                "Each bar stacks the day's tokens by model · Baseline: zero or no coverage",
                 p,
             ))
     }
