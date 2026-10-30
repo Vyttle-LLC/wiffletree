@@ -75,7 +75,7 @@ pub(crate) fn migrate(host: &mut Host) -> Result<()> {
 /// The GitHub repository, `owner/name`, that the folder's `origin` names.
 fn origin_repository(folder: &Path) -> Option<String> {
     let answer = runtime::git_answer(folder, &["remote", "get-url", "origin"]).ok()?;
-    let url = Some(answer.output.trim()).filter(|_| answer.status.success())?;
+    let url = answer.status.success().then_some(answer.output.trim())?;
     pr_watch::github_repository(url).map(|(owner, name)| format!("{owner}/{name}"))
 }
 
@@ -253,8 +253,12 @@ pub(crate) struct Work {
     worktree: PathBuf,
     /// The commit GitHub has on the batch branch from this host.
     pushed: Option<String>,
-    /// The human chose to discard it.
+    /// The commit the host last made in the worktree; any other head is not the host's.
+    written: Option<String>,
+    /// The human chose to discard it; cleared once it is.
     discard: bool,
+    /// The discard was chosen before the pass started, so the pass owns clearing it.
+    discard_requested: bool,
 }
 
 /// What a pass found and did.
@@ -268,6 +272,8 @@ pub(crate) struct Passed {
     /// `None` when the pass did not get as far as checking.
     held: Option<Option<BrainHold>>,
     config: Option<BrainConfigReading>,
+    /// The gate checks `main` does not require, when the pass could write and read them.
+    missing_checks: Option<Vec<String>>,
     problem: Option<String>,
     work: Vec<Work>,
 }
@@ -285,6 +291,7 @@ pub(crate) fn pass(mut pass: Pass, tools: &Tools) -> Passed {
         head: None,
         held: None,
         config: None,
+        missing_checks: None,
         problem: None,
         work: vec![],
     };
@@ -350,20 +357,31 @@ fn run_pass(pass: &mut Pass, passed: &mut Passed, tools: &Tools) -> Result<()> {
     passed.held = Some(held);
     passed.head = Some(fetched.clone());
     passed.config = Some(read_config(checkout, &fetched)?);
+    let missing = match writing {
+        true => missing_gate_checks(tools, &pass.home, &pass.repository)?,
+        false => vec![],
+    };
+    passed.missing_checks = writing.then(|| missing.clone());
     for work in &mut pass.work {
-        if work.batch.pull_request.is_some() {
+        if work.batch.pull_request.is_some() && !work.batch.is_finished() {
             watch(tools, &pass.home, &pass.repository, &mut work.batch)?;
         }
-        if !writing || work.batch.is_finished() {
+        if !writing {
             continue;
         }
+        // A discard cut short after closing the PR still deletes the branch.
         if work.discard {
-            discard(tools, &pass.home, &url, &pass.repository, work)?;
-        } else if publish_batch(
+            discard(tools, (&pass.home, checkout), &url, &pass.repository, work)?;
+            continue;
+        }
+        if work.batch.is_finished() {
+            continue;
+        }
+        if publish_batch(
             (&pass.home, &pass.repository, &url),
             work,
             tools,
-            &mut passed.login,
+            (&mut passed.login, &missing),
         )? {
             watch(tools, &pass.home, &pass.repository, &mut work.batch)?;
         }
@@ -388,12 +406,14 @@ fn clone(home: &Path, checkout: &Path, url: &str, repository: &str, git: &GitToo
 }
 
 /// Pushes the batch's commits, opens its PR and turns on auto-merge, each when not done yet.
-/// `false` when GitHub refused the push, so the batch failed and has nothing new to watch.
+/// `false` when the batch's worktree changed outside Wiffletree or GitHub refused the push, so
+/// the batch failed and has nothing new to watch. Auto-merge waits while `missing` names a gate
+/// check `main` does not require.
 fn publish_batch(
     (home, repository, url): (&Path, &str, &str),
     work: &mut Work,
     tools: &Tools,
-    login: &mut Option<String>,
+    (login, missing): (&mut Option<String>, &[String]),
 ) -> Result<bool> {
     let login = match login {
         Some(login) => login.clone(),
@@ -412,6 +432,11 @@ fn publish_batch(
     let head = runtime::git_output(&work.worktree, &["rev-parse", "HEAD"])?
         .trim()
         .to_owned();
+    if work.written.as_deref() != Some(&head) || !changed_files(&work.worktree)?.is_empty() {
+        batch.stage = BrainStage::Failed;
+        batch.problem = Some(BrainProblem::ChangedOutside);
+        return Ok(false);
+    }
     if work.pushed.as_deref() != Some(&head) {
         match push_branch(&tools.git, &work.worktree, url, &head, &branch) {
             Ok(()) => work.pushed = Some(head),
@@ -435,7 +460,12 @@ fn publish_batch(
             number
         }
     };
-    if batch.pull_request.as_ref().is_some_and(|pr| !pr.auto_merge) {
+    let waiting = batch.pull_request.as_ref().is_some_and(|pr| !pr.auto_merge);
+    if waiting && !missing.is_empty() {
+        batch.problem = Some(BrainProblem::GateNotRequired {
+            missing: missing.to_vec(),
+        });
+    } else if waiting {
         let number = number.to_string();
         let args = [
             "pr", "merge", &number, "--repo", repository, "--auto", "--squash",
@@ -626,7 +656,12 @@ fn watch(tools: &Tools, home: &Path, repository: &str, batch: &mut BrainBatch) -
                     | BrainCheckConclusion::Skipped
             )
         });
-    let refused = (batch.problem.take()).filter(|p| *p == BrainProblem::AutoMergeRefused);
+    let refused = (batch.problem.take()).filter(|p| {
+        matches!(
+            p,
+            BrainProblem::AutoMergeRefused | BrainProblem::GateNotRequired { .. }
+        )
+    });
     (batch.stage, batch.problem) = if !failed.is_empty() {
         (
             BrainStage::Failed,
@@ -645,13 +680,22 @@ fn watch(tools: &Tools, home: &Path, repository: &str, batch: &mut BrainBatch) -
     Ok(())
 }
 
-/// Closes the batch's PR and deletes the branch the host pushed, unless GitHub merged it first.
-fn discard(tools: &Tools, home: &Path, url: &str, repository: &str, work: &mut Work) -> Result<()> {
+/// Closes the batch's PR unless it is closed already, and deletes the branch the host pushed,
+/// unless GitHub merged it first. Git runs in the checkout, as the batch's worktree may be gone.
+fn discard(
+    tools: &Tools,
+    (home, checkout): (&Path, &Path),
+    url: &str,
+    repository: &str,
+    work: &mut Work,
+) -> Result<()> {
     if work.batch.stage == BrainStage::Merged {
         work.discard = false;
         return Ok(());
     }
-    if let Some(pr) = &work.batch.pull_request {
+    if let Some(pr) =
+        (work.batch.pull_request.as_ref()).filter(|_| work.batch.stage != BrainStage::Discarded)
+    {
         let number = pr.number.to_string();
         let answer = (tools.gh)(home, &["pr", "close", &number, "--repo", repository])?;
         ensure!(
@@ -661,9 +705,9 @@ fn discard(tools: &Tools, home: &Path, url: &str, repository: &str, work: &mut W
         );
     }
     if let (Some(branch), Some(_)) = (&work.batch.branch, &work.pushed)
-        && remote_head(&work.worktree, url, branch, &tools.git)?.is_some()
+        && remote_head(checkout, url, branch, &tools.git)?.is_some()
     {
-        delete_branch(&tools.git, &work.worktree, url, branch)?;
+        delete_branch(&tools.git, checkout, url, branch)?;
     }
     work.batch.stage = BrainStage::Discarded;
     work.batch.problem = None;
@@ -707,7 +751,48 @@ fn item_prompt(batch: &BrainBatch, problem: &BrainProblem) -> String {
             batch.repository,
             GATE_CHECKS.join(", ")
         ),
+        BrainProblem::GateNotRequired { missing } => format!(
+            "{about} stays open without auto-merge: main of {} does not require the brain gate's {} check{}. Protect main with all seven, as the Repository settings in the gate's README say, then Sync now.",
+            batch.repository,
+            missing.join(", "),
+            if missing.len() == 1 { "" } else { "s" }
+        ),
+        BrainProblem::ChangedOutside => format!(
+            "Something other than Wiffletree changed {about}'s worktree, so the host does not push it. Discard the batch so its entries can go in a new one."
+        ),
     }
+}
+
+/// The gate's checks that `main` does not require, from its branch protection and rulesets, read
+/// with GETs. With no protection, all seven are missing.
+fn missing_gate_checks(tools: &Tools, home: &Path, repository: &str) -> Result<Vec<String>> {
+    let branch = gh_json(tools, home, &format!("repos/{repository}/branches/{MAIN}"))?;
+    let protection = &branch["protection"]["required_status_checks"];
+    let mut required: Vec<String> = (protection["contexts"].as_array().into_iter().flatten())
+        .chain(
+            (protection["checks"].as_array().into_iter().flatten()).map(|check| &check["context"]),
+        )
+        .filter_map(|context| context.as_str().map(str::to_owned))
+        .collect();
+    // Rulesets may require them instead; an older GitHub without them has none.
+    if let Ok(rules) = gh_json(
+        tools,
+        home,
+        &format!("repos/{repository}/rules/branches/{MAIN}"),
+    ) {
+        for rule in rules.as_array().into_iter().flatten() {
+            let checks = &rule["parameters"]["required_status_checks"];
+            required.extend(
+                (checks.as_array().into_iter().flatten())
+                    .filter_map(|check| check["context"].as_str().map(str::to_owned)),
+            );
+        }
+    }
+    Ok(GATE_CHECKS
+        .iter()
+        .filter(|check| !required.iter().any(|r| r == *check))
+        .map(|check| check.to_string())
+        .collect())
 }
 
 /// What a batch's Inbox item says, so a change in it replaces the item.
@@ -878,6 +963,7 @@ impl Host {
                 problem: None,
                 held: None,
                 config: BrainConfigReading::Unread,
+                missing_checks: vec![],
                 legacy_pointer: false,
             };
             self.db.execute(
@@ -1215,9 +1301,10 @@ impl Host {
             created_at: at,
             updated_at: at,
         };
+        let written = runtime::git_output(&worktree, &["rev-parse", "HEAD"])?;
         self.db.execute(
-            "INSERT INTO brain_batches(id,repository,data) VALUES (?1,?2,?3)",
-            params![batch.id, batch.repository, encode(&batch)?],
+            "INSERT INTO brain_batches(id,repository,written,data) VALUES (?1,?2,?3,?4)",
+            params![batch.id, batch.repository, written.trim(), encode(&batch)?],
         )?;
         self.brains_now = true;
         Ok(batch)
@@ -1355,8 +1442,8 @@ impl Host {
                 _ => "been discarded",
             }
         );
-        let (pushed, _): (Option<String>, bool) = self.db.query_row(
-            "SELECT pushed,discard FROM brain_batches WHERE id=?1",
+        let (pushed, written): (Option<String>, Option<String>) = self.db.query_row(
+            "SELECT pushed,written FROM brain_batches WHERE id=?1",
             [id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
@@ -1404,6 +1491,11 @@ impl Host {
             );
         }
         let worktree = self.batch_folder(id);
+        let head = runtime::git_output(&worktree, &["rev-parse", "HEAD"])?;
+        ensure!(
+            written.as_deref() == Some(head.trim()) && changed_files(&worktree)?.is_empty(),
+            "Something other than Wiffletree changed this batch's worktree; discard the batch"
+        );
         let file = worktree.join(path);
         let content = fs::read_to_string(&file)?;
         let mut lines: Vec<String> = content.split('\n').map(str::to_owned).collect();
@@ -1427,6 +1519,11 @@ impl Host {
             repos::commit_staged(&worktree, &message, git)?,
             "The amendment changes nothing"
         );
+        let written = runtime::git_output(&worktree, &["rev-parse", "HEAD"])?;
+        self.db.execute(
+            "UPDATE brain_batches SET written=?2 WHERE id=?1",
+            params![id, written.trim()],
+        )?;
         self.brains_now = true;
         Ok(batch)
     }
@@ -1469,22 +1566,26 @@ impl Host {
             self.save_brain(&brain)?;
             return Ok(None);
         }
-        let rows: Vec<(String, Option<String>, bool)> = self
+        type Row = (String, Option<String>, Option<String>, bool);
+        let rows: Vec<Row> = self
             .db
-            .prepare("SELECT id,pushed,discard FROM brain_batches WHERE repository=?1")?
+            .prepare("SELECT id,pushed,written,discard FROM brain_batches WHERE repository=?1")?
             .query_map([&brain.repository], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
             })?
             .collect::<rusqlite::Result<_>>()?;
         let mut work = vec![];
-        for (id, pushed, discard) in rows {
+        for (id, pushed, written, discard) in rows {
             let batch = self.brain_batch(&id)?;
-            if !batch.is_finished() {
+            // A discard cut short keeps its batch in the pass until its branch is deleted.
+            if !batch.is_finished() || discard {
                 work.push(Work {
                     worktree: self.batch_folder(&id),
                     batch,
                     pushed,
+                    written,
                     discard,
+                    discard_requested: discard,
                 });
             }
         }
@@ -1520,6 +1621,9 @@ impl Host {
         if let Some(config) = passed.config {
             brain.config = config;
         }
+        if let Some(missing) = passed.missing_checks {
+            brain.missing_checks = missing;
+        }
         self.save_brain(&brain)?;
         let checkout = PathBuf::from(&brain.checkout);
         let mut merged = false;
@@ -1527,16 +1631,27 @@ impl Host {
             let Ok(before) = self.brain_batch(&work.batch.id) else {
                 continue;
             };
+            let published = work.batch.pull_request.is_some() || work.pushed.is_some();
+            if before.is_finished() && !work.discard_requested {
+                // The human discarded it here while the pass ran. Had the pass published it
+                // meanwhile, the next pass closes its PR and deletes its branch.
+                if published && !work.batch.is_finished() {
+                    self.save_batch(&work.batch, work.pushed.as_deref(), true)?;
+                }
+                continue;
+            }
             merged |= work.batch.stage == BrainStage::Merged && before.stage != BrainStage::Merged;
             // A discard chosen while the pass ran waits for the next one.
-            let discard: bool = self.db.query_row(
-                "SELECT discard FROM brain_batches WHERE id=?1",
-                [&work.batch.id],
-                |r| r.get(0),
-            )?;
-            let discard = discard && !work.batch.is_finished();
+            let discard = match work.discard_requested {
+                true => work.discard,
+                false => self.db.query_row(
+                    "SELECT discard FROM brain_batches WHERE id=?1",
+                    [&work.batch.id],
+                    |r| r.get(0),
+                )?,
+            };
             self.save_batch(&work.batch, work.pushed.as_deref(), discard)?;
-            if work.batch.is_finished() {
+            if work.batch.is_finished() && !discard {
                 self.remove_batch_worktree(&checkout, &work.batch.id);
             }
             self.sync_item(&work.batch)?;
@@ -1641,6 +1756,8 @@ mod tests {
         prs: Mutex<Vec<FakePr>>,
         check_runs: Mutex<Value>,
         annotations: Mutex<Value>,
+        /// The checks `main`'s branch protection requires.
+        required: Mutex<Vec<&'static str>>,
     }
     impl GitHub {
         fn new(folder: &Path) -> Arc<Self> {
@@ -1670,6 +1787,7 @@ mod tests {
                 prs: Mutex::default(),
                 check_runs: Mutex::new(json!({"check_runs": []})),
                 annotations: Mutex::new(json!([])),
+                required: Mutex::new(GATE_CHECKS.to_vec()),
             })
         }
         fn tools(self: &Arc<Self>) -> Tools {
@@ -1790,6 +1908,14 @@ mod tests {
                     "auto_merge": auto_merge,
                     "head": {"sha": head},
                 }));
+            }
+            if rest == "branches/main" {
+                let required = self.required.lock().unwrap().clone();
+                return Some(json!({"name": "main", "protected": true,
+                    "protection": {"required_status_checks": {"contexts": required}}}));
+            }
+            if rest == "rules/branches/main" {
+                return Some(json!([]));
             }
             if rest.starts_with("commits/") {
                 return Some(self.check_runs.lock().unwrap().clone());
@@ -2821,6 +2947,170 @@ mod tests {
         fs::write(&pointer, own.to_str().unwrap()).unwrap();
         assert!(host.brain_pass(REPO).unwrap().is_some());
         assert!(host.brains_page().unwrap().brains[0].legacy_pointer);
+    }
+
+    #[test]
+    fn a_discard_made_while_a_pass_runs_is_kept_and_a_batch_published_meanwhile_is_closed() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = GitHub::new(folder.path());
+        let tools = github.tools();
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, _) = host_with_brain(home.path());
+        run(&mut host, &tools);
+        // Not granted: the pass returns the batch as it was.
+        let quiet = queue_log(&mut host, &tools, BrainSource::BrainsPage);
+        let pass = host.brain_pass(REPO).unwrap().unwrap();
+        host.amend_brain_batch(&quiet.id, &BrainAmendment::Discard, &tools.git)
+            .unwrap();
+        host.finish_brain_pass(super::pass(pass, &tools)).unwrap();
+        assert_eq!(
+            host.brain_batch(&quiet.id).unwrap().stage,
+            BrainStage::Discarded
+        );
+
+        // Granted: the pass publishes it while the human discards it here.
+        host.confirm_brain(REPO).unwrap();
+        let raced = queue_log(&mut host, &tools, BrainSource::BrainsPage);
+        let pass = host.brain_pass(REPO).unwrap().unwrap();
+        let passed = super::pass(pass, &tools);
+        host.amend_brain_batch(&raced.id, &BrainAmendment::Discard, &tools.git)
+            .unwrap();
+        host.finish_brain_pass(passed).unwrap();
+        let branch = format!("wiffletree/brain/mhohlios/{}", raced.id);
+        assert!(github.head(&branch).is_some(), "published meanwhile");
+        run(&mut host, &tools);
+        assert_eq!(
+            host.brain_batch(&raced.id).unwrap().stage,
+            BrainStage::Discarded
+        );
+        assert!(github.prs.lock().unwrap()[0].closed);
+        assert_eq!(github.head(&branch), None);
+    }
+
+    #[test]
+    fn a_discard_cut_short_after_closing_the_pr_still_deletes_the_branch() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = GitHub::new(folder.path());
+        let tools = github.tools();
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, _) = host_with_brain(home.path());
+        run(&mut host, &tools);
+        host.confirm_brain(REPO).unwrap();
+        let batch = queue_log(&mut host, &tools, BrainSource::BrainsPage);
+        run(&mut host, &tools);
+        host.amend_brain_batch(&batch.id, &BrainAmendment::Discard, &tools.git)
+            .unwrap();
+        // An earlier try closed the PR, then lost GitHub before deleting the branch.
+        github.prs.lock().unwrap()[0].closed = true;
+        let branch = format!("wiffletree/brain/mhohlios/{}", batch.id);
+        run(&mut host, &tools);
+        assert_eq!(
+            host.brain_batch(&batch.id).unwrap().stage,
+            BrainStage::Discarded
+        );
+        assert_eq!(
+            github.head(&branch),
+            None,
+            "the branch is deleted on the retry"
+        );
+        assert!(!home.path().join(BATCHES).join(&batch.id).exists());
+    }
+
+    #[test]
+    fn auto_merge_waits_while_main_does_not_require_every_gate_check() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = GitHub::new(folder.path());
+        let tools = github.tools();
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, sage) = host_with_brain(home.path());
+        let project = host.create_project_in("Calls", &sage).unwrap();
+        run(&mut host, &tools);
+        host.confirm_brain(REPO).unwrap();
+        github
+            .required
+            .lock()
+            .unwrap()
+            .retain(|c| *c != "sensitive-info");
+        let batch = queue_log(&mut host, &tools, BrainSource::Project(project.id.clone()));
+        run(&mut host, &tools);
+        run(&mut host, &tools);
+        let waiting = host.brain_batch(&batch.id).unwrap();
+        assert_eq!(waiting.stage, BrainStage::PrOpen);
+        let missing = vec!["sensitive-info".to_owned()];
+        assert_eq!(
+            waiting.problem,
+            Some(BrainProblem::GateNotRequired {
+                missing: missing.clone()
+            })
+        );
+        assert_eq!(host.brain(REPO).unwrap().missing_checks, missing);
+        assert!(
+            github.gh_calls("pr").iter().all(|c| c[1] != "merge"),
+            "no auto-merge"
+        );
+        let items = host.open_attention(&project.id).unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(
+            items[0]
+                .prompt
+                .contains("does not require the brain gate's sensitive-info")
+        );
+
+        *github.required.lock().unwrap() = GATE_CHECKS.to_vec();
+        run(&mut host, &tools);
+        let merging = host.brain_batch(&batch.id).unwrap();
+        assert!(merging.pull_request.unwrap().auto_merge);
+        assert_eq!(merging.problem, None);
+        assert!(host.open_attention(&project.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_commit_or_edit_made_outside_wiffletree_in_a_batch_worktree_is_never_pushed() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = GitHub::new(folder.path());
+        let tools = github.tools();
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, _) = host_with_brain(home.path());
+        run(&mut host, &tools);
+        host.confirm_brain(REPO).unwrap();
+        let batch = queue_log(&mut host, &tools, BrainSource::BrainsPage);
+        let worktree = home.path().join(BATCHES).join(&batch.id);
+        fs::write(worktree.join("outside.md"), "Not Wiffletree's.\n").unwrap();
+        git(&worktree, &["add", "outside.md"]);
+        git(&worktree, &["commit", "-q", "-m", "Outside"]);
+        run(&mut host, &tools);
+        let refused = host.brain_batch(&batch.id).unwrap();
+        assert_eq!(refused.problem, Some(BrainProblem::ChangedOutside));
+        assert_eq!(github.assert_pushes_are_batch_branches_only(), 0);
+        assert!(github.gh_calls("pr").is_empty());
+
+        // An uncommitted edit is refused too, and never swept into an amendment.
+        let second = queue_log(&mut host, &tools, BrainSource::BrainsPage);
+        run(&mut host, &tools);
+        let file = second.files[0].clone();
+        let worktree = home.path().join(BATCHES).join(&second.id);
+        fs::write(
+            worktree.join(&file),
+            "Edited outside.\n- changed: x\n- why: y\n",
+        )
+        .unwrap();
+        let amend = BrainAmendment::Redact {
+            path: file,
+            line: 3,
+            rule: "phone".into(),
+        };
+        let error = host
+            .amend_brain_batch(&second.id, &amend, &tools.git)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("Something other than Wiffletree"));
+        run(&mut host, &tools);
+        let second = host.brain_batch(&second.id).unwrap();
+        assert_eq!(second.problem, Some(BrainProblem::ChangedOutside));
+        assert_eq!(
+            github.assert_pushes_are_batch_branches_only(),
+            1,
+            "only its first push"
+        );
     }
 
     #[test]

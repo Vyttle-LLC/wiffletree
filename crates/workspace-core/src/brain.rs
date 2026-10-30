@@ -32,6 +32,10 @@ pub struct Brain {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held: Option<BrainHold>,
     pub config: BrainConfigReading,
+    /// The gate's checks `main` does not require, as the last pass that could write read them;
+    /// auto-merge waits while any is missing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_checks: Vec<String>,
     /// The legacy pointer `~/.config/claude-second-brain` names the human's clone of this brain,
     /// whose safety-net must open pull requests instead of pushing to `main`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -218,6 +222,10 @@ pub enum BrainProblem {
     Conflict,
     /// GitHub refused auto-merge: it is off for the repository, or `main` requires no checks.
     AutoMergeRefused,
+    /// `main` does not require these gate checks, so the host does not turn on auto-merge.
+    GateNotRequired { missing: Vec<String> },
+    /// Something other than the host changed the batch's worktree, so it is not pushed.
+    ChangedOutside,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
