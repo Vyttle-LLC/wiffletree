@@ -276,6 +276,10 @@ pub(crate) trait RuleSet {
     /// `compare` failed: this pass commits nothing of this rule set, and leaves its files as
     /// they are, while the other rule sets go on.
     fn failed(&mut self, error: anyhow::Error);
+    /// The files of its commit to hold back with those a scan `held`, which belong together.
+    fn also_held(&self, _held: &[scan::Held]) -> Vec<scan::Held> {
+        vec![]
+    }
 }
 
 /// The only URL and branch a clone is fetched from and pushed to.
@@ -330,15 +334,16 @@ pub(crate) fn pass(
     let owner = |path: &str| rule_sets.iter().position(|rule_set| rule_set.claims(path));
     take_other_files(clone, previous, &head, &|path| owner(path).is_some())?;
     runtime::git_output(clone, &["reset", "--quiet", &head])?;
-    let commits: Vec<_> = (rule_sets.iter_mut().zip(compared))
-        .filter(|(_, compared)| *compared)
-        .filter_map(|(rule_set, _)| rule_set.commit())
+    let commits: Vec<_> = (rule_sets.iter_mut().zip(compared).enumerate())
+        .filter(|(_, (_, compared))| *compared)
+        .filter_map(|(at, (rule_set, _))| Some((at, rule_set.commit()?)))
         .collect();
     let mut held = vec![];
     let mut scanned_commits = vec![];
-    for (mut files, message) in commits {
+    for (at, (mut files, message)) in commits {
         if let Some(scanner) = scanner {
-            let found = scanner.scan(clone, &head, &files);
+            let mut found = scanner.scan(clone, &head, &files);
+            found.extend(rule_sets[at].also_held(&found));
             files.retain(|(path, _)| !found.iter().any(|held| &held.path == path));
             held.extend(found);
         }
@@ -628,8 +633,8 @@ const MAX_BACKOFF_MS: i64 = 1_800_000;
 pub(crate) const PUSH_DELAY_MS: i64 = 5_000;
 
 /// When a repository's next pass is due: every `every` milliseconds, the shortest cadence of
-/// its rule sets, backing off to thirty minutes while GitHub cannot be reached, and five seconds
-/// after the last write, so a burst of saves is one commit. One runs at a time.
+/// its rule sets, backing off to thirty minutes while GitHub cannot be reached, and a rule set's
+/// delay after the last write, so a burst of saves is one commit. One runs at a time.
 pub(crate) struct Pace {
     every: i64,
     pull_at: i64,
@@ -660,9 +665,10 @@ impl Pace {
         }
         self.every = every;
     }
-    /// While GitHub cannot be reached, a save waits for the next try.
-    pub(crate) fn wrote(&mut self, at: i64) {
-        self.push_at = Some(at + PUSH_DELAY_MS);
+    /// Pushes `delay` milliseconds after a write at `at`. While GitHub cannot be reached, a
+    /// save waits for the next try.
+    pub(crate) fn wrote(&mut self, at: i64, delay: i64) {
+        self.push_at = Some(at + delay);
     }
     pub(crate) fn sync_now(&mut self) {
         self.pull_at = 0;

@@ -1482,6 +1482,22 @@ impl Actor {
                     .for_each(repos::Pace::sync_now);
                 let _ = reply.try_send(Ok(Value::Null));
             }
+            Command::SyncIssues { space_id } => {
+                let settings = self.host.settings_key();
+                for key in self.host.issue_sync_keys(space_id.as_ref())? {
+                    match self.storage_paces.get_mut(&key) {
+                        _ if Some(&key) == settings.as_ref() => self.sync_pace.sync_now(),
+                        Some(pace) => pace.sync_now(),
+                        None => {}
+                    }
+                }
+                // A login found since launch lets the human write issues, a local tracker's too.
+                if self.host.gh_login.is_none() {
+                    let (tools, home) = (self.publish_tools.clone(), self.host.home.clone());
+                    spawn_gh_login_read(self.sender.clone(), tools, home);
+                }
+                let _ = reply.try_send(Ok(Value::Null));
+            }
             Command::RefreshCodexQuota => {
                 let (sender, reply) = (self.sender.clone(), reply.clone());
                 std::thread::spawn(move || {
@@ -1665,7 +1681,7 @@ impl Actor {
     /// `true` when a pass started, which the sync status shows.
     fn refresh_settings_sync(&mut self, at: i64) -> bool {
         if self.host.shared_written.take() {
-            self.sync_pace.wrote(at);
+            self.sync_pace.wrote(at, repos::PUSH_DELAY_MS);
         }
         match self.host.settings_cadence() {
             Ok(every) => self.sync_pace.set_every(every),
@@ -1742,14 +1758,21 @@ impl Actor {
 
     /// Starts a pass of each GitHub storage repository that syncs on its own when one is due,
     /// and arms a wake-up for the next; `true` when a pass started. A write to the settings
-    /// repository's clone makes its own pass due instead.
+    /// repository's clone makes its own pass due instead. An issue's change is pushed sooner
+    /// than a Space's, as issues are a conversation.
     fn refresh_storage_sync(&mut self, at: i64) -> bool {
         let settings = self.host.settings_key();
-        for key in std::mem::take(&mut *self.host.storage_written.borrow_mut()) {
-            match self.storage_paces.get_mut(&key) {
-                _ if Some(&key) == settings.as_ref() => self.sync_pace.wrote(at),
-                Some(pace) => pace.wrote(at),
-                None => {}
+        let written = [
+            (&self.host.storage_written, repos::PUSH_DELAY_MS),
+            (&self.host.issues_written, issues_sync::PUSH_DELAY_MS),
+        ];
+        for (written, delay) in written {
+            for key in std::mem::take(&mut *written.borrow_mut()) {
+                match self.storage_paces.get_mut(&key) {
+                    _ if Some(&key) == settings.as_ref() => self.sync_pace.wrote(at, delay),
+                    Some(pace) => pace.wrote(at, delay),
+                    None => {}
+                }
             }
         }
         let cadences = self.host.storage_cadences().unwrap_or_else(|e| {
@@ -1888,8 +1911,8 @@ impl Actor {
         }
     }
 
-    /// Reads the human's `gh` login off the host thread while the upgrade's Space suggestions
-    /// wait on it, so answering them runs no `gh`.
+    /// Reads the human's `gh` login off the host thread while the upgrade's Space suggestions or
+    /// the human's issues wait on it, so answering them runs no `gh`.
     fn read_gh_login(&mut self) {
         match self.host.wants_gh_login() {
             Ok(true) => spawn_gh_login_read(

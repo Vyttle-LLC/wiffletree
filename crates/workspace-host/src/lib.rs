@@ -14,6 +14,7 @@ mod files;
 mod flatten;
 mod github_access;
 pub mod host_files;
+mod issues_sync;
 mod keeper;
 pub mod keychain;
 mod legacy_logs;
@@ -53,6 +54,7 @@ mod sync;
 mod telemetry;
 #[cfg(test)]
 mod test_support;
+mod tracker;
 mod updates;
 pub mod usage;
 mod verification;
@@ -109,7 +111,8 @@ pub struct Host {
     pub(crate) db: Connection,
     /// Files remote devices are uploading, kept while the host runs.
     uploads: remote::uploads::Uploads,
-    /// The human's `gh` login, once a read found it, for the upgrade's Space suggestions.
+    /// The human's `gh` login, once a read found it, for the upgrade's Space suggestions and as
+    /// the author of the human's issues.
     gh_login: Option<String>,
     _lock: StoreLock,
     pub home: PathBuf,
@@ -150,6 +153,8 @@ pub struct Host {
     /// The GitHub storage repositories, by `repos::key`, the host wrote to since their sync took
     /// this; see `storage`.
     pub(crate) storage_written: std::cell::RefCell<std::collections::BTreeSet<String>>,
+    /// Likewise for writes to their issues, whose push is due sooner; see `tracker`.
+    pub(crate) issues_written: std::cell::RefCell<std::collections::BTreeSet<String>>,
     /// By `repos::key`, what the latest pass of each storage repository that syncs on its own
     /// did; see `storage`.
     pub(crate) storage_synced: std::collections::BTreeMap<String, storage::Synced>,
@@ -319,6 +324,7 @@ impl Host {
         db.execute_batch(include_str!("selection.sql"))?;
         db.execute_batch(include_str!("sync.sql"))?;
         repos::migrate_records(&db, &home)?;
+        db.execute_batch(include_str!("issues.sql"))?;
         db.execute_batch(include_str!("skills.sql"))?;
         repositories::migrate_to_workspace(&db)?;
         attachments::migrate(&db)?;
@@ -356,6 +362,7 @@ impl Host {
             sync_passes: Default::default(),
             sync: Default::default(),
             storage_written: Default::default(),
+            issues_written: Default::default(),
             storage_synced: Default::default(),
             scan_path: None,
             skill_histories: Default::default(),
@@ -381,6 +388,7 @@ impl Host {
         brains::migrate(&mut host)?;
         // After the brains, as an unexported entry is queued for its Space's brain.
         memory::migrate(&mut host)?;
+        host.rebuild_issue_index()?;
         host.clear_uploads()?;
         host.recover()?;
         host.end_interrupted_publishes()?;
@@ -545,7 +553,7 @@ impl Host {
                 record.space
             })
             .collect();
-        Ok(Snapshot { projects: self.projects()?, spaces, space_locals, repositories: self.repositories()?, sessions: self.live_sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} OR id IN (SELECT json_extract(data,'$.ticket_id') FROM runtimes WHERE session_id IN ({in_turn})) ORDER BY rowid", tickets_listed(true)), [&turning])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id NOT IN (SELECT id FROM sessions WHERE {}) OR session_id IN ({in_turn}) ORDER BY rowid", sessions_where(false)), [&turning])?, archive_stamp: self.archive_stamp()?, message_revisions: self.message_revisions()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, core_instructions: provider::core_instructions(), still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held() })
+        Ok(Snapshot { projects: self.projects()?, spaces, space_locals, issue_trackers: self.issue_trackers()?, repositories: self.repositories()?, sessions: self.live_sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} OR id IN (SELECT json_extract(data,'$.ticket_id') FROM runtimes WHERE session_id IN ({in_turn})) ORDER BY rowid", tickets_listed(true)), [&turning])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id NOT IN (SELECT id FROM sessions WHERE {}) OR session_id IN ({in_turn}) ORDER BY rowid", sessions_where(false)), [&turning])?, archive_stamp: self.archive_stamp()?, message_revisions: self.message_revisions()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, core_instructions: provider::core_instructions(), still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held() })
     }
     /// The snapshot's sessions: the live ones, then archived ones still in a turn, which show as
     /// working until it ends.
@@ -1984,6 +1992,22 @@ impl Host {
             Command::SetUpIssues { space_id, prefix } => {
                 serde_json::to_value(self.set_up_issues(&space_id, &prefix)?)?
             }
+            Command::SyncIssues { space_id } => {
+                self.sync_issues(space_id.as_ref(), &publish::Tools::default())?;
+                Value::Null
+            }
+            Command::Issues { space_id } => {
+                serde_json::to_value(self.list_issues(space_id.as_ref())?)?
+            }
+            Command::Issue { id } => serde_json::to_value(self.read_issue(&id)?)?,
+            Command::CreateIssue { space_id, issue } => {
+                serde_json::to_value(self.create_issue(&space_id, issue)?)?
+            }
+            Command::EditIssue { issue } => serde_json::to_value(self.edit_issue(*issue)?)?,
+            Command::Comment { id, body } => {
+                serde_json::to_value(self.comment_on_issue(&id, &body)?)?
+            }
+            Command::MoveIssue { id, state } => serde_json::to_value(self.move_issue(&id, state)?)?,
             Command::SyncNow => {
                 self.sync_now(&publish::Tools::default())?;
                 Value::Null

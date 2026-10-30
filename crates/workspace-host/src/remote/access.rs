@@ -62,7 +62,9 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::BrainStatus { .. }
         | Command::SearchBrain { .. }
         | Command::SuggestSpaceBrain { .. }
-        | Command::OriginBranches { .. } => Row::Read,
+        | Command::OriginBranches { .. }
+        | Command::Issues { .. }
+        | Command::Issue { .. } => Row::Read,
         Command::ResolvePaths { .. } | Command::ReadFile { .. } | Command::ListFolder { .. } => {
             Row::HostPath
         }
@@ -114,6 +116,11 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::ImportLegacyLogs { .. }
         | Command::FixHeldLog { .. }
         | Command::ReleaseHeldLog { .. }
+        | Command::SyncIssues { .. }
+        | Command::CreateIssue { .. }
+        | Command::EditIssue { .. }
+        | Command::Comment { .. }
+        | Command::MoveIssue { .. }
         | Command::SetWorkspacesDir { .. }
         | Command::SetVerification { .. }
         | Command::SetBuildsAtOnce { .. }

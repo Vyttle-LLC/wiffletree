@@ -232,6 +232,29 @@ pub fn set_tracker_prefix(space_id: SpaceId, prefix: String) -> Ask<TrackerConfi
 pub fn set_up_issues(space_id: SpaceId, prefix: String) -> Ask<TrackerConfig> {
     Ask::new(Command::SetUpIssues { space_id, prefix })
 }
+pub fn sync_issues(space_id: Option<SpaceId>) -> Ask<()> {
+    Ask::new(Command::SyncIssues { space_id })
+}
+pub fn issues(space_id: Option<SpaceId>) -> Ask<Vec<IssueListing>> {
+    Ask::new(Command::Issues { space_id })
+}
+pub fn issue(id: IssueId) -> Ask<IssueRecord> {
+    Ask::new(Command::Issue { id })
+}
+pub fn create_issue(space_id: SpaceId, issue: NewIssue) -> Ask<Issue> {
+    Ask::new(Command::CreateIssue { space_id, issue })
+}
+pub fn edit_issue(issue: Issue) -> Ask<Issue> {
+    Ask::new(Command::EditIssue {
+        issue: Box::new(issue),
+    })
+}
+pub fn comment_on_issue(id: IssueId, body: String) -> Ask<Comment> {
+    Ask::new(Command::Comment { id, body })
+}
+pub fn move_issue(id: IssueId, state: IssueState) -> Ask<Issue> {
+    Ask::new(Command::MoveIssue { id, state })
+}
 pub fn new_project_defaults(space_id: Option<SpaceId>) -> Ask<SpaceRepositories> {
     Ask::new(Command::NewProjectDefaults { space_id })
 }

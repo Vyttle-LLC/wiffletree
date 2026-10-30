@@ -463,7 +463,9 @@ impl Host {
                 (host.spaces()?.iter()).any(|r| r.space.storage.repository.key() == storage);
             if !shared {
                 host.db
-                    .execute("DELETE FROM trackers WHERE storage=?1", [storage])?;
+                    .execute("DELETE FROM trackers WHERE storage=?1", [&storage])?;
+                host.db
+                    .execute("DELETE FROM issue_index WHERE storage=?1", [&storage])?;
             }
             Ok(())
         })
@@ -665,10 +667,15 @@ impl Host {
             })
             .collect())
     }
-    /// Whether the upgrade's suggestions wait on the human's `gh` login, which no read has
-    /// found yet.
+    /// Whether the upgrade's suggestions or the human's issues in a tracker on GitHub, which
+    /// this Mac reaches through `gh`, wait on the human's `gh` login, which no read has found
+    /// yet. Sync issues reads it for a local tracker.
     pub(crate) fn wants_gh_login(&self) -> Result<bool> {
-        Ok(self.gh_login.is_none() && !self.found_repositories()?.is_empty())
+        let on_github = (self.spaces()?.iter()).any(|r| {
+            matches!(r.space.storage.repository, StorageRepository::GitHub { .. })
+                && self.tracker(&r.space).is_ok()
+        });
+        Ok(self.gh_login.is_none() && (on_github || !self.found_repositories()?.is_empty()))
     }
     /// Keeps the human's `gh` login for the host's lifetime, once one is found.
     pub(crate) fn record_gh_login(&mut self, login: Option<String>) {

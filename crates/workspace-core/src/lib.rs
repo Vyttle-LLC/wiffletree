@@ -12,6 +12,7 @@ mod files;
 mod host;
 pub mod host_copy;
 mod index;
+mod issues;
 mod launch;
 mod merging;
 mod messages;
@@ -40,6 +41,7 @@ pub use context::*;
 pub use files::*;
 pub use host::*;
 pub use index::WorkspaceIndex;
+pub use issues::*;
 pub use launch::*;
 pub use merging::*;
 pub use messages::*;
@@ -778,6 +780,10 @@ pub struct Snapshot {
     /// credential, so an agent's shell cannot read them.
     #[serde(default)]
     pub space_locals: BTreeMap<SpaceId, SpaceLocal>,
+    /// Each Space's tracker, in the order of `spaces`. Spaces sharing a storage repository
+    /// each have an entry with the same counts.
+    #[serde(default)]
+    pub issue_trackers: Vec<IssueTracker>,
     pub repositories: Vec<Repository>,
     /// The sessions that are not archived and open tickets' archived agents, in the order they
     /// were created, then archived sessions still in a turn.
@@ -3208,6 +3214,42 @@ pub enum Command {
         space_id: SpaceId,
         prefix: String,
     },
+    /// Runs a pass of the Space's tracker now, or of every tracker without `space_id`.
+    SyncIssues {
+        #[serde(default)]
+        space_id: Option<SpaceId>,
+    },
+    /// Read-only: the issues of the Space's tracker, or of every tracker on this Mac without
+    /// `space_id`, as `IssueListing`s ordered by tracker and ID.
+    Issues {
+        #[serde(default)]
+        space_id: Option<SpaceId>,
+    },
+    /// Read-only: one issue with its comments and events, as an `IssueRecord`.
+    Issue {
+        id: IssueId,
+    },
+    /// Files an issue in the Space's tracker, numbered at once in a local tracker and with a
+    /// temporary ID until it is pushed to a GitHub one; answered with the `Issue`.
+    CreateIssue {
+        space_id: SpaceId,
+        issue: NewIssue,
+    },
+    /// Replaces an issue's fields; its ID, state, author and creation stay as they are, and a
+    /// changed priority or assignee is recorded as an event. Answered with the `Issue`.
+    EditIssue {
+        issue: Box<Issue>,
+    },
+    /// Adds the human's comment to an issue; answered with the `Comment`.
+    Comment {
+        id: IssueId,
+        body: String,
+    },
+    /// Moves an issue to `state`, recorded as an event; answered with the `Issue`.
+    MoveIssue {
+        id: IssueId,
+        state: IssueState,
+    },
     /// Replaces a Space's definition; its id and storage stay as they are.
     UpdateSpace {
         space: Box<Space>,
@@ -3672,6 +3714,8 @@ impl Command {
             | Self::SearchBrain { .. }
             | Self::SuggestSpaceBrain { .. }
             | Self::OriginBranches { .. }
+            | Self::Issues { .. }
+            | Self::Issue { .. }
             | Self::RemoteAccess => true,
             Self::ImportRepositories { .. }
             | Self::RefreshRepositories
@@ -3719,6 +3763,11 @@ impl Command {
             | Self::ImportLegacyLogs { .. }
             | Self::FixHeldLog { .. }
             | Self::ReleaseHeldLog { .. }
+            | Self::SyncIssues { .. }
+            | Self::CreateIssue { .. }
+            | Self::EditIssue { .. }
+            | Self::Comment { .. }
+            | Self::MoveIssue { .. }
             | Self::SetWorkspacesDir { .. }
             | Self::SetVerification { .. }
             | Self::SetBuildsAtOnce { .. }
@@ -3763,7 +3812,9 @@ impl Command {
     /// Spaces are the human's: creating, editing or removing one, setting its brain, moving a
     /// project into one and choosing which repositories it lists, and reading where its storage
     /// is on this Mac. So are brains: the push grant, forgetting one, Set up, the compiler,
-    /// amending a batch, Send now and the legacy import, and fixing or releasing a held entry. Remote access is the human's too: its state carries the pairing code.
+    /// amending a batch, Send now and the legacy import, and fixing or releasing a held entry.
+    /// Every write to a tracker is the human's; reading issues is not. Remote access is the
+    /// human's too: its state carries the pairing code.
     pub fn is_human_only(&self) -> bool {
         matches!(
             self,
@@ -3784,6 +3835,10 @@ impl Command {
                 | Self::JoinSpaces { .. }
                 | Self::SetTrackerPrefix { .. }
                 | Self::SetUpIssues { .. }
+                | Self::CreateIssue { .. }
+                | Self::EditIssue { .. }
+                | Self::Comment { .. }
+                | Self::MoveIssue { .. }
                 | Self::SetSpaceBrain { .. }
                 | Self::SpaceStorage { .. }
                 | Self::ConfirmBrain { .. }

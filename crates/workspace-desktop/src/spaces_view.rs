@@ -15,6 +15,7 @@ use wording::{age, counted};
 
 const SCANS: &str = "Before pushing issues/ or spaces/, Wiffletree runs the brain gate’s personal-data and secret scans on this Mac and holds a file that fails, instead of pushing it.";
 const ROUTER: &str = "The router reads this to decide where a message goes.";
+const ISSUES_PAGE_LATER: &str = "The Issues page comes in a later release.";
 const ALSO_SETTINGS: &str =
     "Your settings repository. Settings, the Space and issues each sync only their own folders.";
 const SOURCES_FORMAT: &str =
@@ -1050,18 +1051,32 @@ impl SpacesPage {
         facts = facts.child(fact("On this Mac", mono(status.path.clone(), p), p));
         let mut box_ = card(p).child(head).child(facts);
         if is_shared(space) {
-            box_ =
-                box_.child(hint(SCANS, p)).child(
-                    div().flex().justify_end().child(
-                        ui::gated(
-                            button("space-sync-now").label("Sync now"),
-                            &self.shared.host,
-                        )
-                        .on_click(cx.listener(|view, _, window, cx| {
-                            view.request(Command::SyncNow, window, cx)
-                        })),
-                    ),
-                );
+            box_ = box_.child(hint(SCANS, p));
+        }
+        // The Issues page arrives with shared issues' phase 2; until then the button says so.
+        let open_issues = status.prefix.is_some().then(|| {
+            button("space-open-issues")
+                .ghost()
+                .label("Open Issues")
+                .disabled(true)
+                .tooltip(ISSUES_PAGE_LATER)
+        });
+        let sync_now = is_shared(space).then(|| {
+            ui::gated(
+                button("space-sync-now").label("Sync now"),
+                &self.shared.host,
+            )
+            .on_click(cx.listener(|view, _, window, cx| view.request(Command::SyncNow, window, cx)))
+        });
+        if open_issues.is_some() || sync_now.is_some() {
+            box_ = box_.child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .children(open_issues)
+                    .children(sync_now),
+            );
         }
         box_
     }

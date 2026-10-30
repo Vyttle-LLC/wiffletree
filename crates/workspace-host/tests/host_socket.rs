@@ -819,6 +819,66 @@ fn space_commands_need_the_apps_credential_and_reads_do_not() {
 }
 
 #[test]
+fn tracker_writes_need_the_apps_credential_and_reading_issues_does_not() {
+    let filed = std::cell::OnceCell::new();
+    let fixture = Fixture::new(|host| {
+        let personal = host.spaces().unwrap().remove(0).space;
+        let prefix = host.tracker(&personal).unwrap().prefix;
+        let id = IssueId::parse(&format!("{prefix}-1")).unwrap();
+        let folder = (host.home.join("repos"))
+            .join(personal.storage.repository.key())
+            .join("issues")
+            .join(id.to_string());
+        std::fs::create_dir_all(&folder).unwrap();
+        let issue = format!(
+            "---\nid: {id}\ntitle: Renew the passport\nstate: triage\nauthor: jlin\ncreated: 2026-10-29T14:02:11Z\n---\n"
+        );
+        std::fs::write(folder.join("issue.md"), &issue).unwrap();
+        filed.set((personal, id, folder, issue)).unwrap();
+    });
+    let (personal, id, folder, issue) = filed.get().unwrap();
+    let mut agent = fixture.welcomed(None);
+    let listed = agent.request(PROTOCOL_VERSION, Command::Issues { space_id: None });
+    assert_eq!(listed.error, None, "reading issues is answered");
+    let read = agent.result(Command::Issue { id: id.clone() });
+    assert_eq!(read["issue"]["title"], "Renew the passport");
+    let writes = [
+        Command::CreateIssue {
+            space_id: personal.id.clone(),
+            issue: NewIssue {
+                title: "Book the dentist".into(),
+                ..NewIssue::default()
+            },
+        },
+        Command::Comment {
+            id: id.clone(),
+            body: "Take the old one along.".into(),
+        },
+        Command::MoveIssue {
+            id: id.clone(),
+            state: IssueState::Todo,
+        },
+    ];
+    for command in writes.clone() {
+        let refused = agent.request(PROTOCOL_VERSION, command);
+        assert!(refused.error.unwrap().contains("client credential"));
+    }
+    assert_eq!(
+        std::fs::read_to_string(folder.join("issue.md")).unwrap(),
+        *issue
+    );
+    assert_eq!(
+        std::fs::read_dir(folder.parent().unwrap()).unwrap().count(),
+        1
+    );
+    // The app passes the credential; this host has no `gh` login, so nothing is written either.
+    let mut app = fixture.welcomed(Some(fixture.credential()));
+    let refused = app.request(PROTOCOL_VERSION, writes[1].clone());
+    assert!(refused.error.unwrap().contains("Sign gh in"));
+    assert!(!folder.join("comments").exists());
+}
+
+#[test]
 fn a_message_from_the_human_needs_the_apps_credential() {
     let coordinator = std::cell::OnceCell::new();
     let fixture = Fixture::new(|host| {

@@ -1538,7 +1538,7 @@ pub(crate) mod tests {
 
     /// A local bare repository standing in for GitHub, the answers a fake `gh` gives, and every
     /// command each tool was sent. No test reaches GitHub.
-    type Hook = (&'static str, Box<dyn FnOnce() + Send>);
+    pub(crate) type Hook = (&'static str, Box<dyn FnOnce() + Send>);
 
     pub(crate) struct GitHub {
         pub(crate) bare: PathBuf,
@@ -1548,7 +1548,7 @@ pub(crate) mod tests {
         gh: Mutex<Vec<Vec<String>>>,
         git: Mutex<Vec<Vec<String>>>,
         /// Git cannot reach GitHub.
-        offline: AtomicBool,
+        pub(crate) offline: AtomicBool,
         /// The Git protocol gh is configured with.
         protocol: Mutex<&'static str>,
         /// The beginnings of URLs Git cannot read the repository by, as without an SSH key or
@@ -1556,7 +1556,7 @@ pub(crate) mod tests {
         unreadable: Mutex<Vec<&'static str>>,
         /// Runs before the next Git command of that name, as another machine's push or a
         /// save made meanwhile would.
-        before: Mutex<Option<Hook>>,
+        pub(crate) before: Mutex<Option<Hook>>,
     }
     impl GitHub {
         pub(crate) fn new(folder: &Path, readme: bool) -> Self {
@@ -3382,8 +3382,8 @@ pub(crate) mod tests {
         let mut pace = repos::Pace::every(&[CADENCE_MS]);
         assert!(pace.start(0));
         pace.finish(0, true);
-        pace.wrote(1_000);
-        pace.wrote(4_000);
+        pace.wrote(1_000, repos::PUSH_DELAY_MS);
+        pace.wrote(4_000, repos::PUSH_DELAY_MS);
         assert!(!pace.start(8_999));
         assert!(pace.start(9_000));
         pace.finish(9_000, true);
@@ -3449,7 +3449,7 @@ pub(crate) mod tests {
             assert_eq!(pace.next_due(), Some(at + minutes * 60_000));
             at += minutes * 60_000;
         }
-        pace.wrote(at - 60_000);
+        pace.wrote(at - 60_000, repos::PUSH_DELAY_MS);
         assert!(!pace.start(at - 60_000 + repos::PUSH_DELAY_MS));
         pace.sync_now();
         assert!(pace.start(at - 60_000 + repos::PUSH_DELAY_MS));

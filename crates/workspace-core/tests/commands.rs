@@ -400,6 +400,56 @@ fn space_commands_are_the_humans() {
 }
 
 #[test]
+fn every_tracker_write_is_the_humans_and_reading_issues_is_not() {
+    let id = IssueId::parse("CEL-151").unwrap();
+    let issue = Issue {
+        id: id.clone(),
+        title: text(),
+        state: IssueState::Triage,
+        priority: Priority::None,
+        assignee: None,
+        labels: vec![],
+        repositories: vec![],
+        blocks: vec![],
+        blocked_by: vec![],
+        related: vec![],
+        duplicate_of: None,
+        author: text(),
+        created: text(),
+        description: text(),
+        extra: Default::default(),
+    };
+    let writes = [
+        Command::CreateIssue {
+            space_id: space().id,
+            issue: NewIssue::default(),
+        },
+        Command::EditIssue {
+            issue: Box::new(issue),
+        },
+        Command::Comment {
+            id: id.clone(),
+            body: text(),
+        },
+        Command::MoveIssue {
+            id: id.clone(),
+            state: IssueState::Todo,
+        },
+    ];
+    for command in writes {
+        assert!(command.is_human_only() && !command.is_read(), "{command:?}");
+    }
+    for command in [Command::Issues { space_id: None }, Command::Issue { id }] {
+        assert!(!command.is_human_only() && command.is_read(), "{command:?}");
+    }
+    let sync = Command::SyncIssues { space_id: None };
+    assert!(
+        !sync.is_human_only() && !sync.is_read(),
+        "it pushes only what the human wrote"
+    );
+}
+
+#[test]
 fn a_snapshot_from_a_host_older_than_spaces_still_reads() {
     let old = serde_json::json!({
         "projects": [{"id": "p", "name": "Calls", "brain": "/Users/m/dev/brain"}],
