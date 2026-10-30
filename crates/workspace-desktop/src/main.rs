@@ -149,10 +149,10 @@ struct ArchiveDemand<'a> {
 }
 
 /// The archive is out of date and something shown needs it: Show archived, the Tickets, Agents or
-/// Events panel, the Repositories page, the brain browser, a ticket table's done list or a publish
-/// or merge request,
-/// or a selected session or message sender
-/// that the snapshot does not list, which only the archive holds.
+/// Events panel, the Repositories page, the Issues page, whose Work box lists accepted and closed
+/// tickets, the brain browser, a ticket table's done list or a publish or merge request, or a
+/// selected session or message sender that the snapshot does not list, which only the archive
+/// holds.
 fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
     let snapshot = index.snapshot();
     let live: BTreeSet<&str> = snapshot.sessions.iter().map(|s| s.id.as_str()).collect();
@@ -163,7 +163,7 @@ fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
                 shown.panel,
                 Some(Panel::Team | Panel::Agents | Panel::Events)
             )
-            || shown.page == Page::Repositories
+            || matches!(shown.page, Page::Repositories | Page::Issues)
             // Logs links this Mac's entries to their tickets and conversations, finished ones too.
             || shown.page == Page::BrainBrowser
             || shown.done_tickets
@@ -1716,6 +1716,11 @@ mod tests {
             // The ticket table's done list names tickets only the archive holds.
             ArchiveDemand {
                 done_tickets: true,
+                ..shown("live")
+            },
+            // The Work box lists a linked project's accepted and closed tickets.
+            ArchiveDemand {
+                page: Page::Issues,
                 ..shown("live")
             },
             // An archived session already in the held archive, whose status may have moved.

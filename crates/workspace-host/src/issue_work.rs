@@ -168,8 +168,19 @@ impl Host {
         let at = schedules::rfc3339(now());
         self.atomically(|host| {
             if host.insert_link(&space, id, project, ticket)? {
-                let started = work_started(&by, &at);
-                host.follow_work(&space, id, &at, vec![started], "work started")?;
+                // The PRs the newly linked tickets already have, which no watcher pass will
+                // announce again.
+                let link = IssueLink {
+                    tracker: space.storage.repository.key(),
+                    issue: id.clone(),
+                    project_id: project.into(),
+                    ticket_id: ticket.map(Into::into),
+                };
+                let mut events = vec![work_started(&by, &at)];
+                for (linked, _) in host.linked_tickets(&[link])? {
+                    events.extend((linked.pull_request.iter()).map(|pr| pr_event(&by, &at, pr)));
+                }
+                host.follow_work(&space, id, &at, events, "work started")?;
             }
             Ok(())
         })?;
@@ -1091,5 +1102,63 @@ mod tests {
         host.unlink_issue(&id, &project.id, None).unwrap();
         host.link_issue(&id, &project.id, None).unwrap();
         assert_eq!(state(&host, &id), IssueState::InProgress);
+    }
+
+    #[test]
+    fn a_link_announces_the_prs_its_tickets_already_have() {
+        let (_home, mut host, ticket) = host_with_ticket();
+        let open = open_pr(MergeState::Clean);
+        (host.record_pull_requests(&ticket.repository_id, &found(&ticket, open.clone()), 0, 0))
+            .unwrap();
+        let space = personal(&host);
+        let issue = file(&mut host, &space, &[], "");
+        let project = host.session(&ticket.coordinator_id).unwrap().project_id;
+        host.link_issue(&issue.id, &project, None).unwrap();
+        let expected = json!({"url":open.url,"status":"open"});
+        assert_eq!(
+            events(&host, &issue.id, "pr"),
+            [expected.as_object().unwrap().clone()]
+        );
+        assert_eq!(state(&host, &issue.id), IssueState::InReview);
+    }
+
+    #[test]
+    fn a_new_ticket_in_a_linked_project_takes_its_issue_out_of_done() {
+        let (_home, mut host, ticket) = host_with_ticket();
+        let space = personal(&host);
+        let issue = file(&mut host, &space, &[], "");
+        let project = host.session(&ticket.coordinator_id).unwrap().project_id;
+        host.link_issue(&issue.id, &project, None).unwrap();
+        let merged = PullRequest {
+            state: PrState::Merged,
+            ..open_pr(MergeState::Clean)
+        };
+        (host.record_pull_requests(&ticket.repository_id, &found(&ticket, merged), 0, 0)).unwrap();
+        host.close_ticket(&ticket.id).unwrap();
+        assert_eq!(state(&host, &issue.id), IssueState::Done);
+        (host.create_ticket(&ticket.coordinator_id, &ticket.repository_id, "Next", "Do")).unwrap();
+        assert_eq!(state(&host, &issue.id), IssueState::InProgress);
+    }
+
+    #[test]
+    fn renaming_a_local_trackers_prefix_keeps_its_issues_links_and_derived_states() {
+        let (_home, mut host) = crate::storage::tests::host();
+        let space = personal(&host);
+        let issue = file(&mut host, &space, &[], "");
+        host.start_project_from_issue(&issue.id, &space.id).unwrap();
+        host.set_tracker_prefix(&space.id, "HOME").unwrap();
+        let IssueId::Numbered { number, .. } = issue.id else {
+            panic!("a local tracker numbers at once")
+        };
+        let renamed = IssueId::Numbered {
+            prefix: "HOME".into(),
+            number,
+        };
+        assert_eq!(host.read_issue(&renamed).unwrap().links.len(), 1);
+        let storage = space.storage.repository.key();
+        assert_eq!(
+            host.derived_state(&storage, &renamed).unwrap(),
+            Some(IssueState::InProgress)
+        );
     }
 }

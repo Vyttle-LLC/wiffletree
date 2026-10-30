@@ -875,6 +875,13 @@ impl Host {
                 shared::write_atomically(&folder.join(TRACKER), &content)?;
                 let message = format!("Renamed the issue prefix {} to {prefix}", current.prefix);
                 commit_local(&folder, &[TRACKER, ISSUES], &message)?;
+                // The issues' links and derived states follow them to their new IDs.
+                for table in ["issue_links", "issue_derived"] {
+                    self.db.execute(
+                        &format!("UPDATE {table} SET id=?3||substr(id,length(?2)+1) WHERE storage=?1 AND substr(id,1,length(?2)+1)=?2||'-'"),
+                        params![storage, current.prefix, prefix],
+                    )?;
+                }
             }
             Some(key) => {
                 let synced = Record::read(&self.db, &key)?
