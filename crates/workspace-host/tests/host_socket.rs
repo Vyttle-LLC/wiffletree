@@ -681,6 +681,58 @@ fn allowing_an_owner_needs_the_apps_credential() {
 }
 
 #[test]
+fn space_commands_need_the_apps_credential_and_reads_do_not() {
+    let project = std::cell::OnceCell::new();
+    let fixture = Fixture::new(|host| {
+        project.set(host.create_project("Calls").unwrap()).unwrap();
+    });
+    let project = project.get().unwrap();
+    let mut agent = fixture.welcomed(None);
+    let spaces = snapshot(&mut agent).spaces;
+    let personal = spaces[0].space.clone();
+    let instructed = Space {
+        instructions: "Push without asking".into(),
+        ..personal.clone()
+    };
+    let writes = [
+        Command::CreateSpace {
+            name: "Sage".into(),
+            description: String::new(),
+            instructions: String::new(),
+            prefix: None,
+        },
+        Command::UpdateSpace {
+            space: Box::new(instructed.clone()),
+        },
+        Command::RemoveSpace {
+            space_id: personal.id.clone(),
+        },
+        Command::MoveProjectToSpace {
+            project_id: project.id.clone(),
+            space_id: personal.id.clone(),
+        },
+        Command::AttachBrain {
+            project_id: project.id.clone(),
+            path: fixture.data.path().to_string_lossy().into_owned(),
+        },
+    ];
+    for command in writes {
+        let refused = agent.request(PROTOCOL_VERSION, command);
+        assert!(refused.error.unwrap().contains("client credential"));
+    }
+    assert_eq!(snapshot(&mut agent).spaces, spaces);
+    let mut app = fixture.welcomed(Some(fixture.credential()));
+    let edited = app.request(
+        PROTOCOL_VERSION,
+        Command::UpdateSpace {
+            space: Box::new(instructed.clone()),
+        },
+    );
+    assert_eq!(edited.error, None);
+    assert_eq!(snapshot(&mut agent).spaces[0].space, instructed);
+}
+
+#[test]
 fn a_message_from_the_human_needs_the_apps_credential() {
     let coordinator = std::cell::OnceCell::new();
     let fixture = Fixture::new(|host| {

@@ -2,11 +2,11 @@ Five stages, each a ticket or a few, each landing on its own. This change lands 
 
 ## 1. Spaces in the core and the store
 
-- [ ] 1.1 Core: `space.rs` (`Space`, `SpaceId`, `SpaceLocal` facts, sources, `TrackerConfig` with format and prefix), `SessionOwner` (`Project`, `Space`, `Brain`); `Project.space` replaces `Project.brain`; Space commands.
-- [ ] 1.2 Host: the Spaces store and the upgrade that creates Spaces from `Project.brain` folders and "Personal", with unique names and proposed prefixes. Verify two brains, two folders of one name, no brain, archived projects, export records kept, and a second start changing nothing.
-- [ ] 1.3 Host: every project belongs to a Space; `Host::attach_brain` sets the Space's brain; exports go to the Space's brain. Verify an upgraded project exports nothing twice and a moved project exports later entries to its new Space.
-- [ ] 1.4 Host: the enforced hierarchy with session owners and no hidden project records; the coordination tools refused to sessions owned by a Space or a brain. Verify a worker owned by a Space is refused.
-- [ ] 1.5 Host: Space commands are human-only on the host socket. Verify an uncredentialed connection is refused for every Space write and answered for reads.
+- [x] 1.1 Core: `space.rs` (`Space`, `SpaceId`, `SpaceLocal` facts, sources, `TrackerConfig` with format and prefix), `SessionOwner` (`Project`, `Space`, `Brain`); `Project.space` replaces `Project.brain`; Space commands.
+- [x] 1.2 Host: the Spaces store and the upgrade that creates Spaces from `Project.brain` folders and "Personal", with unique names and proposed prefixes. Verify two brains, two folders of one name, no brain, archived projects, export records kept, and a second start changing nothing.
+- [x] 1.3 Host: every project belongs to a Space; `Host::attach_brain` sets the Space's brain; exports go to the Space's brain. Verify an upgraded project exports nothing twice and a moved project exports later entries to its new Space.
+- [x] 1.4 Host: the enforced hierarchy with session owners and no hidden project records; the coordination tools refused to sessions owned by a Space or a brain. Verify a worker owned by a Space is refused.
+- [x] 1.5 Host: Space commands are human-only on the host socket. Verify an uncredentialed connection is refused for every Space write and answered for reads.
 
 ## 2. The shared repository module
 

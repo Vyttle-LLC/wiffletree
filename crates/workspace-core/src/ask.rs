@@ -149,7 +149,10 @@ pub fn git_history(repository_id: String, skip: usize, limit: usize) -> Ask<GitH
     })
 }
 pub fn create_project(name: String) -> Ask<Project> {
-    Ask::new(Command::CreateProject { name })
+    Ask::new(Command::CreateProject {
+        name,
+        space_id: None,
+    })
 }
 pub fn rename_project(project_id: String, name: String) -> Ask<Project> {
     Ask::new(Command::RenameProject { project_id, name })

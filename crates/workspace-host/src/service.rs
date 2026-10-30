@@ -2014,6 +2014,10 @@ impl Actor {
                     .map(|(id, _)| id.clone());
                 let result = (|| -> Result<Option<Value>> {
                     let id = identity.context("Expired or invalid session credential")?;
+                    ensure!(
+                        self.host.session(&id)?.owner().offers_coordination_tools(),
+                        "{name} is for project work, and this session is owned by a Space or a brain"
+                    );
                     match name.as_str() {
                         "stop_agents" => return self.stop_agents(&id, &args).map(Some),
                         "resume_agent" => return self.resume_agent(&id, &args).map(Some),

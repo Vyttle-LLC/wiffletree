@@ -23,6 +23,7 @@ pub mod remote_client;
 pub mod remote_launch;
 mod selection;
 pub mod skills;
+mod space;
 mod steps;
 mod suggestion;
 mod usage;
@@ -42,6 +43,7 @@ pub use publishing::*;
 pub use remote::*;
 pub use selection::*;
 use serde::{Deserialize, Serialize};
+pub use space::*;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -323,7 +325,8 @@ impl Status {
 pub struct Project {
     pub id: String,
     pub name: String,
-    pub brain: Option<String>,
+    /// The Space it belongs to; it logs to that Space's brain.
+    pub space: SpaceId,
     /// The workspace repositories this project may use; `None` means all of them.
     #[serde(default)]
     pub repositories: Option<Vec<String>>,
@@ -461,6 +464,12 @@ pub struct Session {
     /// Hidden from the working tree and never scheduled; everything it owns is preserved.
     #[serde(default)]
     pub archived: bool,
+}
+impl Session {
+    /// Every stored session is project work: no role is admitted to run outside a project yet.
+    pub fn owner(&self) -> SessionOwner {
+        SessionOwner::Project(self.project_id.clone())
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -634,6 +643,9 @@ pub struct MaintenanceRun {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Snapshot {
     pub projects: Vec<Project>,
+    /// Every Space, in the order they were created.
+    #[serde(default)]
+    pub spaces: Vec<SpaceRecord>,
     pub repositories: Vec<Repository>,
     /// The sessions that are not archived and open tickets' archived agents, in the order they
     /// were created, then archived sessions still in a turn.
@@ -2778,8 +2790,11 @@ pub enum Command {
         #[serde(default)]
         focus: Option<String>,
     },
+    /// Creates a project in `space_id`, or in the Space last used for a new project.
     CreateProject {
         name: String,
+        #[serde(default)]
+        space_id: Option<SpaceId>,
     },
     RenameProject {
         project_id: String,
@@ -2882,9 +2897,34 @@ pub enum Command {
         before: Option<i64>,
         limit: usize,
     },
+    /// Sets the brain of the project's Space to a local folder.
     AttachBrain {
         project_id: String,
         path: String,
+    },
+    /// Creates a Space with local storage and a local tracker; without `prefix`, the one
+    /// proposed from its name.
+    CreateSpace {
+        name: String,
+        #[serde(default)]
+        description: String,
+        #[serde(default)]
+        instructions: String,
+        #[serde(default)]
+        prefix: Option<String>,
+    },
+    /// Replaces a Space's definition; its id and storage stay as they are.
+    UpdateSpace {
+        space: Box<Space>,
+    },
+    /// Removes a Space with no open project, moving its archived projects to Personal.
+    RemoveSpace {
+        space_id: SpaceId,
+    },
+    /// Moves a project to another Space: its later entries go to that Space's brain.
+    MoveProjectToSpace {
+        project_id: String,
+        space_id: SpaceId,
     },
     ExportLogs {
         project_id: String,
@@ -3214,6 +3254,10 @@ impl Command {
             | Self::DismissAttention { .. }
             | Self::AppendLog { .. }
             | Self::AttachBrain { .. }
+            | Self::CreateSpace { .. }
+            | Self::UpdateSpace { .. }
+            | Self::RemoveSpace { .. }
+            | Self::MoveProjectToSpace { .. }
             | Self::ExportLogs { .. }
             | Self::SetWorkspacesDir { .. }
             | Self::SetVerification { .. }
@@ -3253,7 +3297,8 @@ impl Command {
     /// credential. They send a message as the human, answer the Inbox, which also approves a
     /// publish, or grant publish or push authority without it: owners whose PRs open without
     /// asking, the PR keeper's rebases and pushes, and a settings repository the host pushes to.
-    /// Remote access is the human's too: its state carries the pairing code.
+    /// Spaces are the human's: creating, editing or removing one, setting its brain and moving a
+    /// project into one. Remote access is the human's too: its state carries the pairing code.
     pub fn is_human_only(&self) -> bool {
         matches!(
             self,
@@ -3264,6 +3309,11 @@ impl Command {
                 | Self::SetKeeper { .. }
                 | Self::SetUpSettingsRepository { .. }
                 | Self::JoinSettingsRepository { .. }
+                | Self::CreateSpace { .. }
+                | Self::UpdateSpace { .. }
+                | Self::RemoveSpace { .. }
+                | Self::MoveProjectToSpace { .. }
+                | Self::AttachBrain { .. }
                 | Self::RemoteAccess
                 | Self::SetRemoteAccess { .. }
                 | Self::OpenPairing

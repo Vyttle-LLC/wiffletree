@@ -1,14 +1,18 @@
-//! Project memory: captured decisions and observations, and the attached Markdown brain.
+//! Project memory: captured decisions and observations, and its Space's Markdown brain.
 use super::*;
 use gpui_component::button::ButtonVariants;
 use ui::{card, empty_state, hint, icon, mono, pill, section, segment};
 use wording::age;
 
 impl Inspector {
+    /// Where the brain of the project's Space is on this Mac.
     fn project_brain(&self) -> Option<String> {
         let project = self.shared.project_id();
         let index = self.shared.index.as_ref()?;
-        index.project(project.as_ref()?)?.brain.clone()
+        let space = &index.project(project.as_ref()?)?.space;
+        let record = (index.snapshot().spaces.iter()).find(|r| &r.space.id == space)?;
+        record.space.brain.as_ref()?;
+        record.local.brain_path.clone()
     }
 
     fn choose_brain(&mut self, window: &mut Window, cx: &mut Context<Self>) {

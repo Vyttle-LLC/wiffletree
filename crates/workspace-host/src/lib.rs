@@ -38,6 +38,7 @@ mod settings;
 pub(crate) mod shared;
 pub mod skills;
 pub mod socket;
+mod spaces;
 mod stacks;
 mod steps;
 mod stream;
@@ -272,7 +273,7 @@ impl Host {
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
         )?;
         let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        ensure!(version <= 8, "Store schema is newer than this application");
+        ensure!(version <= 9, "Store schema is newer than this application");
         if version == 0 {
             db.execute_batch(&format!(
                 "BEGIN IMMEDIATE; {} COMMIT;",
@@ -296,6 +297,7 @@ impl Host {
         order::migrate(&db)?;
         remote::uploads::migrate(&db)?;
         remote::devices::migrate(&db)?;
+        spaces::migrate(&db)?;
         let mut host = Self {
             db,
             _lock: lock,
@@ -483,7 +485,7 @@ impl Host {
         // Archived sessions still in a turn keep their runtime and ticket until it ends.
         let turning = serde_json::to_string(&self.in_turn)?;
         let in_turn = "SELECT value FROM json_each(?1)";
-        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.live_sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} OR id IN (SELECT json_extract(data,'$.ticket_id') FROM runtimes WHERE session_id IN ({in_turn})) ORDER BY rowid", tickets_listed(true)), [&turning])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id NOT IN (SELECT id FROM sessions WHERE {}) OR session_id IN ({in_turn}) ORDER BY rowid", sessions_where(false)), [&turning])?, archive_stamp: self.archive_stamp()?, message_revisions: self.message_revisions()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, core_instructions: provider::core_instructions(), still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held() })
+        Ok(Snapshot { projects: self.projects()?, spaces: self.spaces()?, repositories: self.repositories()?, sessions: self.live_sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} OR id IN (SELECT json_extract(data,'$.ticket_id') FROM runtimes WHERE session_id IN ({in_turn})) ORDER BY rowid", tickets_listed(true)), [&turning])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id NOT IN (SELECT id FROM sessions WHERE {}) OR session_id IN ({in_turn}) ORDER BY rowid", sessions_where(false)), [&turning])?, archive_stamp: self.archive_stamp()?, message_revisions: self.message_revisions()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, core_instructions: provider::core_instructions(), still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held() })
     }
     /// The snapshot's sessions: the live ones, then archived ones still in a turn, which show as
     /// working until it ends.
@@ -537,12 +539,18 @@ impl Host {
         // Through each session's outbox index rather than a scan of every message.
         Ok(self.db.prepare("SELECT m.recipient,SUM(m.receipt='held'),SUM(m.receipt='queued' AND m.quiet=0) FROM sessions s CROSS JOIN messages m ON m.recipient=s.id AND m.receipt IN ('held','queued') GROUP BY m.recipient")?.query_map([], |r| Ok(UndeliveredInput { session_id: r.get(0)?, held: r.get(1)?, queued: r.get(2)? }))?.collect::<rusqlite::Result<_>>()?)
     }
+    /// A project in the Space last used for a new project.
     pub fn create_project(&mut self, name: &str) -> Result<Project> {
-        Ok(self.insert_project(name, None)?.0)
+        let space = self.default_space()?;
+        self.create_project_in(name, &space)
     }
-    /// A coordinator's `create_project`: the new project takes `repositories` as its selection,
-    /// or every workspace repository, and starts at once on `brief`, which its coordinator
-    /// receives as the creating coordinator's words. All of it happens, or none of it.
+    pub fn create_project_in(&mut self, name: &str, space: &SpaceId) -> Result<Project> {
+        Ok(self.insert_project(name, space, None)?.0)
+    }
+    /// A coordinator's `create_project`: the new project joins the creator's Space, takes
+    /// `repositories` as its selection, or every workspace repository, and starts at once on
+    /// `brief`, which its coordinator receives as the creating coordinator's words. All of it
+    /// happens, or none of it.
     pub fn create_project_from(
         &mut self,
         creator: &str,
@@ -575,6 +583,7 @@ impl Host {
         self.atomically(|host| {
             let (mut project, coordinator) = host.insert_project(
                 name,
+                &from.space,
                 Some(ProjectCreator {
                     project_id: from.id.clone(),
                     session_id: creator.id.clone(),
@@ -613,13 +622,15 @@ impl Host {
     fn insert_project(
         &mut self,
         name: &str,
+        space: &SpaceId,
         created_by: Option<ProjectCreator>,
     ) -> Result<(Project, Session)> {
         text(name, 128)?;
+        self.space(space)?;
         let project = Project {
             id: new_id(),
             name: name.trim().into(),
-            brain: None,
+            space: space.clone(),
             repositories: None,
             home: Some(self.new_project_home(name)?),
             slug: None,
@@ -652,6 +663,7 @@ impl Host {
             params![project.id, encode(&project)?, order::top(&tx)?],
         )?;
         Self::insert_session(&tx, &session)?;
+        Self::mark_space_used(&tx, space)?;
         Self::event(
             &tx,
             &project.id,
@@ -688,6 +700,28 @@ impl Host {
         Self::event(&tx, id, Some(&root.id), "project_renamed", &project.name)?;
         tx.commit()?;
         Ok(project)
+    }
+    /// A session under `owner`. A Space or a brain owns no session yet: no role is admitted
+    /// outside projects, so such a creation is refused and nothing is stored, least of all a
+    /// project record to hold it.
+    pub fn create_owned_session(
+        &mut self,
+        owner: &SessionOwner,
+        parent: &str,
+        repository: Option<&str>,
+        name: &str,
+        role: Role,
+        provider: Provider,
+    ) -> Result<Session> {
+        match owner {
+            SessionOwner::Project(project) => {
+                self.create_session(project, parent, repository, name, role, provider)
+            }
+            SessionOwner::Space(_) | SessionOwner::Brain(_) => bail!(
+                "{} cannot run outside a project: no role runs under a Space or a brain",
+                role.label()
+            ),
+        }
     }
     pub fn create_session(
         &mut self,
@@ -1487,7 +1521,13 @@ impl Host {
             )?)?,
             Command::Snapshot => serde_json::to_value(self.snapshot()?)?,
             Command::Archive => serde_json::to_value(self.archive()?)?,
-            Command::CreateProject { name } => serde_json::to_value(self.create_project(&name)?)?,
+            Command::CreateProject { name, space_id } => {
+                let space = match space_id {
+                    Some(space) => space,
+                    None => self.default_space()?,
+                };
+                serde_json::to_value(self.create_project_in(&name, &space)?)?
+            }
             Command::RenameProject { project_id, name } => {
                 serde_json::to_value(self.rename_project(&project_id, &name)?)?
             }
@@ -1538,8 +1578,8 @@ impl Host {
                 role,
                 profile,
             } => {
-                let session = self.create_session(
-                    &project_id,
+                let session = self.create_owned_session(
+                    &SessionOwner::Project(project_id),
                     &parent_id,
                     repository_id.as_deref(),
                     &name,
@@ -1626,6 +1666,26 @@ impl Host {
                 self.attach_brain(&project_id, &path)?;
                 json!({"saved":true})
             }
+            Command::CreateSpace {
+                name,
+                description,
+                instructions,
+                prefix,
+            } => serde_json::to_value(self.create_space(
+                &name,
+                &description,
+                &instructions,
+                prefix.as_deref(),
+            )?)?,
+            Command::UpdateSpace { space } => serde_json::to_value(self.update_space(*space)?)?,
+            Command::RemoveSpace { space_id } => {
+                self.remove_space(&space_id)?;
+                json!({"removed":true})
+            }
+            Command::MoveProjectToSpace {
+                project_id,
+                space_id,
+            } => serde_json::to_value(self.move_project_to_space(&project_id, &space_id)?)?,
             Command::ExportLogs { project_id } => {
                 serde_json::to_value(self.export_logs(&project_id)?)?
             }
