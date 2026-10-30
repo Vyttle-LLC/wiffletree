@@ -2622,6 +2622,15 @@ impl Actor {
                     self.pr_watch.check_now(&ticket.repository_id);
                 }
                 let recorded = self.host.record_merge(*outcome, reply.is_some());
+                let recorded = match recorded {
+                    Ok((status, next)) => {
+                        if let Some(job) = next {
+                            self.run_merge_job(job, None);
+                        }
+                        Ok(status)
+                    }
+                    Err(error) => Err(error),
+                };
                 match reply {
                     Some(reply) => {
                         let _ = reply.try_send(recorded.map_err(|error| format!("{error:#}")));

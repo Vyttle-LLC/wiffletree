@@ -114,8 +114,10 @@ fn decide_and_merge(job: &Job, tools: &Tools) -> Decided {
             "GitHub could not be read, so nothing was merged: {error:#}"
         )),
     };
+    // A waiting request's re-decision sends nothing: the host thread records that a merge may be
+    // sent before the job that sends it starts, so a restart can tell the two apart.
     let method = match decided {
-        Decided::Ready(method) if job.request.may_merge() => method,
+        Decided::Ready(method) if job.request.stage == MergeStage::Merging => method,
         other => return other,
     };
     if let Err(changed) = recheck_stored(job) {
@@ -333,7 +335,7 @@ fn recheck_stored(job: &Job) -> Result<()> {
         .context("Ticket not found")?;
     let running = ticket.merging.as_ref().is_some_and(|request| {
         request.id == job.request.id
-            && matches!(request.stage, MergeStage::Merging | MergeStage::Rechecking)
+            && request.stage == MergeStage::Merging
             && request.head == job.request.head
     });
     ensure!(running, "This merge request was withdrawn");
@@ -642,10 +644,48 @@ impl Host {
             .collect())
     }
 
-    /// Records a job's decision. With `answering`, the tool call waits for it: a request that
-    /// ends is its error and sends no message. Otherwise the request's caller gets one message
-    /// when it ends.
-    pub(crate) fn record_merge(&mut self, outcome: Outcome, answering: bool) -> Result<Value> {
+    /// Records a job's decision, and returns the job that merges when a waiting request is
+    /// ready. With `answering`, the tool call waits for it: a request that ends is its error and
+    /// sends no message. Otherwise the request's caller gets one message when it ends.
+    pub(crate) fn record_merge(
+        &mut self,
+        outcome: Outcome,
+        answering: bool,
+    ) -> Result<(Value, Option<Job>)> {
+        if let Some(job) = self.start_waited_merge(&outcome)? {
+            return Ok((json!({"status": "merging"}), Some(job)));
+        }
+        self.record_decision(outcome, answering)
+            .map(|status| (status, None))
+    }
+
+    /// For a waiting request whose re-decision found every check holding: records that a merge
+    /// may now be sent, so a restart ends it rather than waiting again, and returns the job that
+    /// checks GitHub once more and sends it.
+    fn start_waited_merge(&mut self, outcome: &Outcome) -> Result<Option<Job>> {
+        let Decided::Ready(_) = outcome.result else {
+            return Ok(None);
+        };
+        let mut ticket = self.ticket(&outcome.ticket_id)?;
+        let ready = (ticket.merging.clone()).filter(|request| {
+            request.id == outcome.request_id
+                && request.stage == MergeStage::Rechecking
+                && ticket.is_open()
+                && ticket.verification.as_ref().map(|v| v.cycle) == Some(request.cycle)
+        });
+        let Some(request) = ready else {
+            return Ok(None);
+        };
+        ticket.merging = Some(MergeRequest {
+            stage: MergeStage::Merging,
+            ..request
+        });
+        self.save_ticket(&ticket)?;
+        let repository = self.ticket_repository(&ticket)?;
+        self.merge_job(&ticket, &repository).map(Some)
+    }
+
+    fn record_decision(&mut self, outcome: Outcome, answering: bool) -> Result<Value> {
         let mut ticket = self.ticket(&outcome.ticket_id)?;
         let current = (ticket.merging.clone()).filter(|request| request.id == outcome.request_id);
         let Some(mut request) = current else {
@@ -673,7 +713,7 @@ impl Host {
                 return self.wait_for_checks(&mut ticket, request);
             }
             Decided::Refused(why) => why,
-            // A request that waited for its checks waits again: the next pass decides it anew.
+            // A re-decision cut short by a restart sent no merge: the next pass decides it anew.
             Decided::Unfinished if request.stage == MergeStage::Rechecking => {
                 return self.wait_for_checks(&mut ticket, request);
             }
@@ -1194,6 +1234,8 @@ mod tests {
         merge_error: Option<String>,
         /// `gh pr merge` merges and is then stopped at its deadline.
         stalls: bool,
+        /// `gh pr merge` is stopped at its deadline before GitHub merged.
+        times_out: bool,
         merges: Vec<Vec<String>>,
         edits: Vec<Vec<String>>,
     }
@@ -1227,6 +1269,7 @@ mod tests {
             unreadable: false,
             merge_error: None,
             stalls: false,
+            times_out: false,
             merges: vec![],
             edits: vec![],
         }));
@@ -1300,6 +1343,9 @@ mod tests {
                     if let Some(error) = gh.merge_error.clone() {
                         return fail(&error);
                     }
+                    if gh.times_out {
+                        bail!("gh was stopped at its deadline");
+                    }
                     let stalls = gh.stalls;
                     let pr = gh.prs.get_mut(&number.parse().unwrap()).unwrap();
                     if pr["headRefOid"] != *head {
@@ -1370,16 +1416,24 @@ mod tests {
     /// Calls `merge_ticket` as `caller` and records the first decision as the tool's answer.
     fn merge_as(f: &mut Fixture, fake: &Fake, caller: &str, waived: Option<&str>) -> Result<Value> {
         let job = f.host.merge_ticket(caller, &f.ticket.clone(), waived)?;
-        f.host.record_merge(run(&job, &fake.tools), true)
+        settle(f, fake, &job, true)
     }
     fn merge(f: &mut Fixture, fake: &Fake, waived: Option<&str>) -> Result<Value> {
         merge_as(f, fake, &coordinator(f), waived)
+    }
+    /// Runs `job` and records it, then each merge job that follows, as the service does.
+    fn settle(f: &mut Fixture, fake: &Fake, job: &Job, answering: bool) -> Result<Value> {
+        let (status, mut next) = f.host.record_merge(run(job, &fake.tools), answering)?;
+        while let Some(job) = next {
+            next = f.host.record_merge(run(&job, &fake.tools), false)?.1;
+        }
+        Ok(status)
     }
     /// Runs the decisions due after a PR watcher pass, as the service does.
     fn pass(f: &mut Fixture, fake: &Fake) {
         let repository = f.ticket().repository_id;
         for job in f.host.merges_due(&repository).unwrap() {
-            f.host.record_merge(run(&job, &fake.tools), false).unwrap();
+            settle(f, fake, &job, false).unwrap();
         }
     }
     /// Every merge message sent so far.
@@ -1578,7 +1632,7 @@ mod tests {
         let item = f.open_items().remove(0);
         f.host.resolve_attention(&item.id, "approved").unwrap();
         let job = f.host.answer_merge(&item.id, true).unwrap().unwrap();
-        f.host.record_merge(run(&job, &fake.tools), false).unwrap();
+        settle(&mut f, &fake, &job, false).unwrap();
         assert!(fake.merges().is_empty());
         assert!(f.ticket().merging.is_none());
         let told = messages(&f.host);
@@ -1850,7 +1904,7 @@ mod tests {
         }
         f.host.resolve_attention(&items[0].id, "approved").unwrap();
         let job = f.host.answer_merge(&items[0].id, true).unwrap().unwrap();
-        f.host.record_merge(run(&job, &fake.tools), false).unwrap();
+        settle(&mut f, &fake, &job, false).unwrap();
         let ticket = f.ticket();
         assert_eq!(ticket.state, TicketState::Accepted);
         assert_eq!(ticket.waiver.as_deref(), Some(APPROVED_WAIVER));
@@ -1932,7 +1986,7 @@ mod tests {
         let item = f.open_items().remove(0);
         f.host.resolve_attention(&item.id, "approved").unwrap();
         let job = f.host.answer_merge(&item.id, true).unwrap().unwrap();
-        f.host.record_merge(run(&job, &fake.tools), false).unwrap();
+        settle(&mut f, &fake, &job, false).unwrap();
         assert_eq!(
             f.ticket().merging.unwrap().stage,
             MergeStage::WaitingForChecks
@@ -1976,7 +2030,7 @@ mod tests {
             .merge_ticket(&coordinator(&f), &f.ticket.clone(), None)
             .unwrap();
         fs::write(f.worktree.join("stray.txt"), "untracked\n").unwrap();
-        let merged = f.host.record_merge(run(&job, &fake.tools), true).unwrap();
+        let merged = settle(&mut f, &fake, &job, true).unwrap();
         assert_eq!(merged["accepted"], false);
         let result = merged["result"].as_str().unwrap();
         assert!(result.contains("The ticket was not accepted"), "{result}");
@@ -2146,10 +2200,7 @@ mod tests {
                 .merge_ticket(&coordinator(&f), &f.ticket.clone(), None)
                 .unwrap();
             change(&mut f);
-            let error = f
-                .host
-                .record_merge(run(&job, &fake.tools), true)
-                .unwrap_err();
+            let error = settle(&mut f, &fake, &job, true).unwrap_err();
             assert!(format!("{error:#}").contains(reason), "{error:#}");
             assert!(fake.merges().is_empty());
         }
@@ -2236,6 +2287,42 @@ mod tests {
         fake.set(180, "statusCheckRollup", json!([{"state": "SUCCESS"}]));
         pass(&mut f, &fake);
         assert_eq!(f.ticket().state, TicketState::Accepted);
+    }
+
+    #[test]
+    fn a_waited_merge_cut_short_after_it_was_sent_ends_once_and_is_not_sent_again() {
+        // gh pr merge times out with the pull request still open.
+        let (mut f, fake) = ready();
+        fake.set(180, "statusCheckRollup", json!([{"state": "PENDING"}]));
+        merge(&mut f, &fake, None).unwrap();
+        fake.set(180, "statusCheckRollup", json!([{"state": "SUCCESS"}]));
+        fake.github.lock().unwrap().times_out = true;
+        pass(&mut f, &fake);
+        pass(&mut f, &fake);
+        assert_eq!(fake.merges().len(), 1, "sent once");
+        assert!(f.ticket().merging.is_none());
+        let told = messages(&f.host);
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(told[0].contains("Call merge_ticket again"), "{told:?}");
+
+        // The host stops once the merge may have been sent: the restart ends it.
+        let (mut f, fake) = ready();
+        fake.set(180, "statusCheckRollup", json!([{"state": "PENDING"}]));
+        merge(&mut f, &fake, None).unwrap();
+        fake.set(180, "statusCheckRollup", json!([{"state": "SUCCESS"}]));
+        let repository = repository_of(&f);
+        let rechecking = f.host.merges_due(&repository).unwrap().remove(0);
+        let (_, sending) = (f.host)
+            .record_merge(run(&rechecking, &fake.tools), false)
+            .unwrap();
+        assert!(sending.is_some(), "the merge job follows the re-decision");
+        assert_eq!(f.ticket().merging.unwrap().stage, MergeStage::Merging);
+        let mut f = restart(f);
+        let jobs = f.host.interrupted_merges().unwrap();
+        settle(&mut f, &fake, &jobs[0], false).unwrap();
+        assert!(f.ticket().merging.is_none());
+        assert!(messages(&f.host)[0].contains("Call merge_ticket again"));
+        assert!(fake.merges().is_empty());
     }
 
     #[test]
