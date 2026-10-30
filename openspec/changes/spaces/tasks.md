@@ -26,11 +26,13 @@ Five stages, each a ticket or a few, each landing on its own. This change lands 
 
 - [ ] 4.1 Host: `create_project` puts the project in its creator's Space and, without `repository_ids`, uses the Space's repositories on this Mac, naming the ones not here. Verify both and that `repository_ids` still wins.
 - [ ] 4.2 Host: New project's default Space (last used) and default repositories, as one command the desktop calls.
+- [ ] 4.4 Host: Space membership of repositories by `owner/name` (several Spaces or none), changed only by human commands that edit `space.yaml`; the owner suggestion when a repository is added; the upgrade's suggestions by the projects that use each owner's repositories, held until confirmed. Verify a repository in two Spaces, No Space, a refused agent call, and that confirming nothing writes nothing.
 - [ ] 4.3 Host: run `brain-gate`'s `sensitive-info` and `secret-scan` (its tasks 1–2) on changed files under `spaces/`, `issues/` and `wiffletree-issues.yaml` before a push; hold failing files and files a check could not scan, with a workspace note that never shows the match. Verify a phone number, a token, a `gate:allow` marker, a missing gitleaks and a local repository that is never scanned.
 
 ## 5. Desktop and docs
 
 - [ ] 5.1 Desktop: Settings › Spaces (list, page, New, From a repository, edit, remove, sources), with the Storage and issues box (repository, folder, prefix, issue count, readers, Spaces sharing it, settings repository, sync status, Sync now, Set up issues), following `ui/mockups.html`.
 - [ ] 5.2 Desktop: New project's Space picker and ticked repositories; the Space in the project Overview, with Move to another Space.
+- [ ] 5.5 Desktop: the Repositories page grouped by Space with a No Space section, one Space chip per Space on each row to add or remove Spaces, the suggested Space when adding a repository, and the upgrade's suggestions to confirm on first open, following screen 4 of `ui/mockups.html`.
 - [ ] 5.3 Docs: README on Spaces, storage repositories as trackers, who can read and change a shared Space, and the scans before a push; PRD's project model and storage.
 - [ ] 5.4 Run `openspec validate --strict`, the store, sync and migration tests, then the full suite once before ready_for_testing.

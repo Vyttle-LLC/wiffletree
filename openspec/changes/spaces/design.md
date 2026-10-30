@@ -1,6 +1,6 @@
 ## Context
 
-See proposal.md for why and `ui/mockups.html` for the proposed look. The mockup copies #163's Space page, which Michael approved on October 29, 2026, and adds the tracker and New project; the additions await his approval.
+See proposal.md for why and `ui/mockups.html` for the look. The mockup copies #163's Space page and adds the tracker, New project and the Repositories page grouped by Space; Michael approved all four screens on October 29, 2026.
 
 At origin/main 110bc339 none of the open changes is implemented:
 - A project's brain is `Project.brain`, a local folder set by `Host::attach_brain` (`workspace-host/src/memory.rs`); exports go there and are recorded in `log_exports`.
@@ -27,6 +27,7 @@ Michael approved #163's mockup and the reconciliation plan. Each decision is spe
 | 3 | One assistant: the issue assistant becomes an issue thread, with web fetch and search off; no `Role::IssueAssistant`, hidden `tracker` project or Issue assistant row | assistant-spaces-jobs-boards assistant "Issue threads"; shared-issues proposal |
 | 4 | Routing follows the Space: New issue, the Issues filter, Start project from issue, New project and `create_project`, and issues proposed from a thread | spaces "Every project belongs to a Space"; workspace-host "Coordinators create projects"; shared-issues "The Issues page", "New issue…", "Starting a project from an issue links them"; assistant "Issue threads" |
 | 5 | Sessions outside projects belong to a Space (threads, job runs, issue threads) or a brain (compile); compiles are a built-in, host-owned job kind on #163's scheduler with their own Brain compiler row | workspace-host "Enforced hierarchy" here, restated in assistant-spaces-jobs-boards and brain-compile; scheduled-jobs "Built-in host jobs"; brain-compile "Compile runs start on schedule, on demand and after a ruling" |
+| 6 | The Repositories page is grouped by Space (Sage, Vyttle, Personal, No Space), with one clickable Space chip per Space on each row; repositories stay a record on each Mac and a Space lists them by `owner/name`; a repository may be in several Spaces; adding one suggests a Space from its GitHub owner, which only suggests; only the human changes membership; the upgrade suggests Spaces for existing repositories for the human to confirm | spaces "Repositories belong to Spaces by identity", "Existing projects get Spaces on upgrade" |
 
 ### Smaller calls, recommended — for Michael to confirm in this PR
 
@@ -46,6 +47,7 @@ Each is the smallest choice that keeps the decisions above consistent; the coord
 6. **A Space's repositories not cloned on this Mac are skipped.** New project ticks the Space's repositories that match a workspace repository by GitHub name and lists the rest as "not cloned here"; `create_project` does the same and says which it skipped.
 7. **The scans ship with the app.** The host runs the two checks from the `gate/` folder at the version this release bundles, with the gate's default rules and its inline `gate:allow` marker. A check that cannot run holds the file too, saying why.
 8. **The upgrade keeps local brain folders.** A Space created from a `Project.brain` folder names that folder as a local brain, so exports keep going where they went. `brain-registry-sync` later turns a folder whose `origin` is on GitHub into that repository, after the human confirms the grant.
+9. **The upgrade's owner suggestion uses the projects.** Right after the upgrade no Space lists a repository yet, so "a Space whose repositories share that owner" has nothing to match. The upgrade instead suggests, per GitHub owner, the Space whose projects use that owner's repositories most, Personal for the human's own `gh` login, and otherwise No Space. Every suggestion waits for the human on the Repositories page's first open.
 
 ## Decisions
 

@@ -91,7 +91,7 @@ Every Wiffletree project SHALL belong to exactly one Space, shown and changeable
 - **THEN** the Sage repositories are unticked and Personal's are ticked
 
 ### Requirement: Existing projects get Spaces on upgrade
-At the first start of this release, the host SHALL create one Space for each distinct brain folder attached to a project, named after the folder, with that folder as a local brain and local storage, and SHALL put each such project in it. Space names SHALL be unique: when two brain folders have the same name, or a folder is named "Personal", each such Space SHALL be named "‹parent folder›/‹folder›", and when that is still not unique, a number SHALL follow it. Projects with no brain SHALL go to a Space named "Personal" with no brain. Archived projects SHALL be included. Each Space created SHALL list no repositories and SHALL get a proposed prefix. The upgrade SHALL push nothing, SHALL keep each project's export records so nothing is exported twice, and SHALL run once.
+At the first start of this release, the host SHALL create one Space for each distinct brain folder attached to a project, named after the folder, with that folder as a local brain and local storage, and SHALL put each such project in it. Space names SHALL be unique: when two brain folders have the same name, or a folder is named "Personal", each such Space SHALL be named "‹parent folder›/‹folder›", and when that is still not unique, a number SHALL follow it. Projects with no brain SHALL go to a Space named "Personal" with no brain. Archived projects SHALL be included. Each Space created SHALL get a proposed prefix and SHALL list no repositories until the human confirms them. The upgrade SHALL suggest a Space for each existing workspace repository by its GitHub owner: the Space whose projects use that owner's repositories most, or Personal for the owner that is the human's own `gh` login, or No Space. The Repositories page SHALL show these suggestions on its first open after the upgrade, for the human to confirm or change; nothing SHALL be written to a Space's repositories before that. The upgrade SHALL push nothing, SHALL keep each project's export records so nothing is exported twice, and SHALL run once.
 
 #### Scenario: Two brains
 - **WHEN** three projects use `~/dev/sage/team-brain`, one uses `~/dev/vyttle/vyttle-brain` and two have none
@@ -104,6 +104,33 @@ At the first start of this release, the host SHALL create one Space for each dis
 #### Scenario: A second start
 - **WHEN** the host starts again after the upgrade ran
 - **THEN** no Space is created or changed
+
+#### Scenario: Repositories after the upgrade
+- **WHEN** after the upgrade three Sage projects use `Sage-Social/mobile-app` and `Sage-Social/api`, and the human's `gh` login is `MHohlios`, which owns `MHohlios/dotfiles`
+- **THEN** the first open of the Repositories page suggests Sage for both Sage-Social repositories and Personal for dotfiles, and no Space lists them until the human confirms
+
+### Requirement: Repositories belong to Spaces by identity
+Workspace repositories SHALL stay a separate record kept on this Mac, with their clone path, base and checks commands; Spaces SHALL NOT hold them. A Space SHALL list its repositories by `owner/name` only, in `space.yaml`, and that list SHALL be the one shared fact about which Spaces a repository is in. A repository MAY be in several Spaces, or in none. The Repositories page SHALL group repositories into one section per Space and a "No Space" section, listing a repository in several Spaces under each, and each row SHALL show one chip per Space it is in. Clicking a chip SHALL let the human add or remove Spaces, editing the same list as the Space page's Code repositories. Adding a repository SHALL suggest a Space from its GitHub owner, which the human SHALL confirm or change: a Space whose repositories share that owner, or No Space when none does. The owner SHALL only suggest, as it does for a Space's brain, and SHALL never decide. Only the human SHALL change which Spaces a repository is in, on either page; no agent, thread or workspace tool SHALL.
+
+#### Scenario: Grouped by Space
+- **WHEN** `Sage-Social/api` is in Sage and Sage Watch, `Vyttle-LLC/site` in Vyttle, and `octo/scratch` in no Space
+- **THEN** the Repositories page lists api under Sage and under Sage Watch with both chips, site under Vyttle, and scratch under No Space
+
+#### Scenario: Adding a repository
+- **WHEN** the human adds `Sage-Social/watch-app` while Sage lists other `Sage-Social` repositories
+- **THEN** the add form suggests Sage, and the repository joins Sage only when the human confirms
+
+#### Scenario: No match
+- **WHEN** the human adds `octo/scratch` and no Space lists an `octo` repository
+- **THEN** the suggestion is No Space
+
+#### Scenario: A chip edits the Space
+- **WHEN** the human removes the Sage chip from `Sage-Social/api` on the Repositories page
+- **THEN** Sage's Code repositories no longer list it, the change is a commit to Sage's `space.yaml`, and the repository's clone path, base and checks are unchanged
+
+#### Scenario: An agent cannot move a repository
+- **WHEN** any agent calls any workspace tool
+- **THEN** no tool adds a repository to a Space or removes one
 
 ### Requirement: Shared Spaces live in their storage repository
 A Space whose storage repository is on GitHub SHALL keep its definition in that repository's `space.yaml`, so that every Mac that adds it reads the same name, description, instructions, brain, repositories, default models and sources. Everything SHALL run on each user's own Mac; there SHALL be no cloud or headless host. A Space whose storage other people can read SHALL be shown as shared.

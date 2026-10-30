@@ -7,13 +7,14 @@
 <title>Wiffletree · Spaces study</title>
 <!--
   Static study for the spaces change. No script, no network.
-  AWAITING THE HUMAN'S APPROVAL: nothing here is approved yet.
+  APPROVED by Michael on 2026-10-29: screens 1–3 as drawn, and screen 4, which he asked for that day.
   Copied from assistant-spaces-jobs-boards/ui/mockups.html, study 6 (approved on 2026-10-29), and amended:
   the Space page shows its storage repository's tracker, and New project shows the Space and its default repositories.
   The theme switch at the top is a CSS-only radio group. Names, times and figures are drawn by hand.
   1. Settings › Spaces › Sage: a shared Space whose storage repository is also its tracker.
   2. Settings › Spaces › Personal: local storage and a local tracker.
   3. New project, with the Space and its default repositories.
+  4. The Repositories page grouped by Space, with a chip per Space on each row.
 -->
 <style>
 .light,:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
@@ -91,8 +92,8 @@ ul.legend li{margin:3px 0}
 <div class="intro">
   <div class="eyebrow">Wiffletree · design study</div>
   <h1>Spaces: storage, tracker and new projects</h1>
-  <span class="pending">Awaiting the human's approval — not approved</span>
-  <p>A static study for <code>openspec/changes/spaces</code>. It copies the approved Space settings page from <code>assistant-spaces-jobs-boards</code> and adds two things: the Space's storage repository is also its tracker, and New project starts in a Space with that Space's repositories. Nothing here runs: no repository is cloned, pushed or set up. Sage, Vyttle and Personal are sample Spaces; names, times and figures are drawn by hand.</p>
+  <span class="pending">Approved by Michael, October 29, 2026</span>
+  <p>A static study for <code>openspec/changes/spaces</code>. It copies the approved Space settings page from <code>assistant-spaces-jobs-boards</code> and adds three things: the Space's storage repository is also its tracker, New project starts in a Space with that Space's repositories, and the Repositories page is grouped by Space. Nothing here runs: no repository is cloned, pushed or set up. Sage, Vyttle and Personal are sample Spaces; names, times and figures are drawn by hand.</p>
   <div class="switch">
     <span>Appearance:</span>
     <input type="radio" name="theme" id="force-system" checked><label for="force-system">System</label>
@@ -202,6 +203,44 @@ ul.legend li{margin:3px 0}
   <p class="caption"><b>New project starts in a Space, with that Space's repositories.</b> The Space is the one last used for a new project; changing it replaces the ticked repositories with the new Space's. Repositories from other Spaces are added only by hand. A coordinator's <code>create_project</code> does the same in its own project's Space.</p>
 </section>
 
+<!-- 4. Repositories grouped by Space -->
+<section class="study wide">
+  <div class="eyebrow">4 · Repositories, grouped by Space</div>
+  <div class="frame">
+    <div class="page">
+      <div style="display:flex;align-items:center;gap:10px"><h2>Repositories</h2><span class="btn" style="margin-left:auto">＋ Add repositories</span></div>
+      <div class="label"><span class="sp sage" style="display:inline-block;margin-right:6px"></span>Sage</div>
+      <div class="repos">
+        <div class="rep"><b>Sage-Social/mobile-app</b><span class="note">~/dev/sage/mobile-app · base origin/main</span><span class="r"><span class="chip"><span class="sp sage"></span>Sage ▾</span></span></div>
+        <div class="rep"><b>Sage-Social/api</b><span class="note">~/dev/sage/api · base origin/main</span><span class="r"><span class="chip"><span class="sp sage"></span>Sage ▾</span> <span class="chip"><span class="sp sage"></span>Sage Watch ▾</span></span></div>
+      </div>
+      <div class="label"><span class="sp sage" style="display:inline-block;margin-right:6px"></span>Sage Watch</div>
+      <div class="repos">
+        <div class="rep"><b>Sage-Social/watch-app</b><span class="note">~/dev/sage/watch-app · base origin/main</span><span class="r"><span class="chip"><span class="sp sage"></span>Sage Watch ▾</span></span></div>
+        <div class="rep"><b>Sage-Social/api</b><span class="note">also in Sage</span><span class="r"><span class="chip"><span class="sp sage"></span>Sage ▾</span> <span class="chip"><span class="sp sage"></span>Sage Watch ▾</span></span></div>
+      </div>
+      <div class="label"><span class="sp vyttle" style="display:inline-block;margin-right:6px"></span>Vyttle</div>
+      <div class="repos">
+        <div class="rep"><b>Vyttle-LLC/site</b><span class="note">~/dev/vyttle/site · base origin/main</span><span class="r"><span class="chip"><span class="sp vyttle"></span>Vyttle ▾</span></span></div>
+      </div>
+      <div class="label"><span class="sp personal" style="display:inline-block;margin-right:6px"></span>Personal</div>
+      <div class="repos">
+        <div class="rep"><b>MHohlios/dotfiles</b><span class="note">~/.config/dotfiles · base origin/main</span><span class="r"><span class="chip"><span class="sp personal"></span>Personal ▾</span></span></div>
+      </div>
+      <div class="label">No Space</div>
+      <div class="repos">
+        <div class="rep"><b>octo/scratch</b><span class="note">~/dev/scratch · base main</span><span class="r"><span class="chip">＋ Space ▾</span></span></div>
+      </div>
+      <div class="group">
+        <h3>Adding <code>Sage-Social/billing</code></h3>
+        <p class="note">Suggested Space: <span class="chip"><span class="sp sage"></span>Sage ▾</span> because Sage's repositories are owned by Sage-Social. The owner only suggests; nothing joins a Space until you confirm.</p>
+        <div class="actions"><span class="btn quiet">No Space</span><span class="btn primary">Add to Sage</span></div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>One list, two places to edit it.</b> A chip edits the Space's Code repositories, the same list as the Space page, stored in <code>space.yaml</code> by <code>owner/name</code>. Clone path, base and checks stay on this Mac. A repository may be in several Spaces, with one chip each, or in none. Only you change membership; agents cannot.</p>
+</section>
+
 </div>
 
 <div style="margin-top:26px">
@@ -210,7 +249,8 @@ ul.legend li{margin:3px 0}
     <li>A Space's storage repository holds its definition, its jobs and boards, and its issues. Several Spaces may share one storage repository, and then share its issues and prefix.</li>
     <li>Wiffletree keeps one clone and one sync per GitHub repository, under <code>repos/</code> in its data folder. Each folder in it keeps its own rules: settings and Spaces pause edits made outside Wiffletree; issues merge field by field and accept them.</li>
     <li>The brain stays a separate repository with its own pull-request flow.</li>
-    <li>This study is static and awaits the human's approval. It is not the GPUI implementation.</li>
+    <li>Repositories stay a record on this Mac (clone path, base, checks). A Space lists them by <code>owner/name</code> only, and that list is what both the Space page and the Repositories page edit.</li>
+    <li>This study is static and was approved by Michael on October 29, 2026. It is not the GPUI implementation.</li>
   </ul>
 </div>
 </body>
