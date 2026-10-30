@@ -1,9 +1,14 @@
 //! The issue rule set of a storage repository's sync engine (OpenSpec change `shared-issues`,
-//! task 1.4): `wiffletree-issues.yaml` and `issues/`, merged as whole files against what this
-//! Mac last synced until the per-field merge exists. Changes from anyone are pulled, and a file
-//! that does not parse is taken as it is; a file here that Wiffletree did not write is paused
-//! and never pushed. New issues carry a temporary ID until a pass numbers them on top of
-//! GitHub's head, in the content it commits; the host renames them here once they are pushed.
+//! tasks 1.4 and 5.2): `wiffletree-issues.yaml` and `issues/`, merged against what this Mac last
+//! synced. Changes from anyone are pulled. An `issue.md` both sides changed is merged three-way
+//! one front matter field and the description at a time: a part changed on both sides to
+//! different values pauses alone, keeping this Mac's value here and pushing the other side's,
+//! while the rest of the file syncs. `events.jsonl` takes the union of both sides' lines. Any
+//! other file both sides changed, a comment among them, and an `issue.md` whose versions do not
+//! all parse pause whole. A file that does not parse is taken as it is; a file here that
+//! Wiffletree did not write is paused and never pushed. New issues carry a temporary ID until a
+//! pass numbers them on top of GitHub's head, in the content it commits; the host renames them
+//! here once they are pushed.
 use crate::*;
 use repos::{Content, RuleSet};
 use std::collections::BTreeMap;
@@ -80,7 +85,7 @@ fn parts(content: &[u8]) -> Result<BTreeMap<String, serde_yaml::Value>> {
 }
 
 /// A part's value as written: the description's text, or a field's YAML.
-pub(crate) fn part_text(part: &str, value: &serde_yaml::Value) -> String {
+fn part_text(part: &str, value: &serde_yaml::Value) -> String {
     match (part, value) {
         (DESCRIPTION, serde_yaml::Value::String(text)) => text.clone(),
         _ => (serde_yaml::to_string(value).unwrap_or_default().trim_end()).to_owned(),
@@ -88,7 +93,7 @@ pub(crate) fn part_text(part: &str, value: &serde_yaml::Value) -> String {
 }
 
 /// The value `part_text` wrote.
-pub(crate) fn part_value(part: &str, text: &str) -> Result<serde_yaml::Value> {
+fn part_value(part: &str, text: &str) -> Result<serde_yaml::Value> {
     Ok(match part {
         DESCRIPTION => serde_yaml::Value::String(text.to_owned()),
         _ => serde_yaml::from_str(text)?,
@@ -125,7 +130,7 @@ fn render(parts: &BTreeMap<String, serde_yaml::Value>) -> Result<Vec<u8>> {
 /// side's value; one changed on both sides to different values, or `paused` before and still
 /// different, keeps this Mac's value here and pushes the other side's. A file is written anew
 /// only where its parts changed, so an untouched one keeps its bytes.
-pub(crate) fn merge_issue(
+fn merge_issue(
     base: Option<&[u8]>,
     mine: &[u8],
     theirs: &[u8],
@@ -169,7 +174,7 @@ pub(crate) fn merge_issue(
 
 /// `events.jsonl` as the union of both sides' lines, each once, ordered by their `at`; a line
 /// that does not parse keeps its place among those before it.
-pub(crate) fn union_events(mine: &[u8], theirs: &[u8]) -> Vec<u8> {
+fn union_events(mine: &[u8], theirs: &[u8]) -> Vec<u8> {
     let (mine, theirs) = (
         String::from_utf8_lossy(mine),
         String::from_utf8_lossy(theirs),
@@ -1206,6 +1211,38 @@ mod tests {
         assert_eq!(lines.len(), 2, "{events}");
         assert_eq!(lines[0], early, "ordered by time");
         assert_eq!(record.events.len(), 2);
+    }
+
+    #[test]
+    fn a_comment_edited_on_both_sides_pauses_whole_and_names_a_teammate() {
+        let (_folder, github, _home, mut host) = sage_with_an_issue();
+        let comment = host
+            .comment_on_issue(&id("SAGE-1"), "Seen on two watches.")
+            .unwrap();
+        sync(&mut host, &github).unwrap();
+        let path = format!("issues/SAGE-1/comments/{}", comment.file);
+        let sage = space_named(&host, "Sage");
+        let mine = github.show(&path).unwrap().replace("two", "three");
+        let files = vec![(path.clone(), mine.clone().into_bytes())];
+        let (id, did) = (id("SAGE-1"), "edited".into());
+        host.write_issue_files(&sage, tracker::Write { id, files, did })
+            .unwrap();
+        teammate_edits(&github, &path, "two", "four");
+        sync(&mut host, &github).unwrap();
+        assert!(github.show(&path).unwrap().contains("four"), "theirs stays");
+        assert_eq!(
+            fs::read_to_string(clone_of(&host).join(&path)).unwrap(),
+            mine
+        );
+        let notes = issue_notes(&host);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(
+            notes[0].text,
+            "Paused: you and a teammate both changed a comment"
+        );
+        let paused = notes[0].paused.as_ref().unwrap();
+        assert_eq!(paused.path, path, "the whole file, not a part");
+        assert!(matches!(paused.paused, Paused::TwoMachines { .. }));
     }
 
     #[test]

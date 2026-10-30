@@ -1599,7 +1599,7 @@ impl Actor {
         }
         self.refresh_overlaps(now());
         self.refresh_pull_requests(now(), dirty);
-        self.watch_gh_account();
+        self.watch_gh_account(spaces::gh_account_stamp());
         // Storage first, as a write to a Space stored in the settings clone makes its pass due.
         let storing = self.refresh_storage_sync(now());
         let syncing = self.refresh_settings_sync(now()) || storing;
@@ -1934,9 +1934,9 @@ impl Actor {
     }
 
     /// Reads the human's login again once `gh`'s account file changed, as signing in, out or to
-    /// another account does, so tracker writes use the account `gh` has now.
-    fn watch_gh_account(&mut self) {
-        let stamp = spaces::gh_account_stamp();
+    /// another account does, so tracker writes use the account `gh` has now. `stamp` is the
+    /// file's, from `spaces::gh_account_stamp`.
+    fn watch_gh_account(&mut self, stamp: Option<std::time::SystemTime>) {
         if stamp != self.gh_account_seen {
             self.gh_account_seen = stamp;
             let (tools, home) = (self.publish_tools.clone(), self.host.home.clone());
@@ -5349,6 +5349,90 @@ mod tests {
         assert!(matches!(&event, Event::GitHub(Some(reading)) if reading.error.is_none()));
         assert!(!actor.handle(event));
         assert!(!actor.github_reading && events.try_recv().is_err());
+    }
+
+    /// An idle actor whose fake `gh` is signed in as `jlin` and counts reads of the account. Its
+    /// events arrive on the receiver.
+    fn login_actor(host: Host) -> (Actor, Receiver<Event>, Arc<AtomicUsize>) {
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(8);
+        actor.sender = sender;
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counted = reads.clone();
+        actor.publish_tools.gh = Arc::new(move |_, args| {
+            assert_eq!(args, ["api", "--hostname", "github.com", "user"]);
+            counted.fetch_add(1, Ordering::Relaxed);
+            Ok(runtime::GhAnswer {
+                status: publish::tests::exit(0),
+                output: r#"{"login":"jlin"}"#.into(),
+                error: String::new(),
+            })
+        });
+        (actor, events, reads)
+    }
+
+    /// Takes the login read the actor started.
+    fn login_read(actor: &mut Actor, events: &Receiver<Event>) {
+        let event = events.recv_blocking().unwrap();
+        assert!(matches!(event, Event::GhLogin(_)));
+        actor.handle(event);
+        assert_eq!(actor.host.gh_login.as_deref(), Some("jlin"));
+    }
+
+    #[test]
+    fn joining_a_storage_repository_reads_the_login() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = storage::tests::shared_storage(folder.path(), Some("SAGE"));
+        let (_home, host) = storage::tests::host();
+        let staged = storage::stage(&host.home, sync::tests::NAME, &github.tools(), &[]);
+        let (mut actor, events, reads) = login_actor(host);
+        let (reply, replies) = async_channel::bounded(1);
+        let then = StorageChoice::Join(vec![JoinSpace {
+            folder: "sage".into(),
+            brain_path: None,
+            clones: vec![],
+        }]);
+        actor.handle(Event::StorageStaged {
+            staged,
+            then,
+            reply,
+        });
+        assert!(replies.try_recv().unwrap().is_ok());
+        login_read(&mut actor, &events);
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_change_to_ghs_account_file_reads_the_login_and_no_change_does_not() {
+        let (_home, host) = storage::tests::host();
+        let (mut actor, events, reads) = login_actor(host);
+        let signed_in = std::time::SystemTime::UNIX_EPOCH;
+        actor.gh_account_seen = Some(signed_in);
+        actor.watch_gh_account(Some(signed_in));
+        let switched = signed_in + std::time::Duration::from_secs(60);
+        actor.watch_gh_account(Some(switched));
+        login_read(&mut actor, &events);
+        actor.watch_gh_account(Some(switched));
+        assert_eq!(reads.load(Ordering::Relaxed), 1, "one read per change");
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_tracker_write_refused_for_want_of_a_login_reads_it() {
+        let (_home, host) = storage::tests::host();
+        let personal = host.spaces().unwrap().remove(0).space;
+        let (mut actor, events, reads) = login_actor(host);
+        let create = Command::CreateIssue {
+            space_id: personal.id,
+            issue: NewIssue {
+                title: "Theme".into(),
+                ..NewIssue::default()
+            },
+        };
+        let refused = command(&mut actor, create).unwrap_err();
+        assert!(refused.contains("Sign gh in"), "{refused}");
+        login_read(&mut actor, &events);
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
     }
 
     /// An actor over a reviewed ticket in `allowed-org/app`, which is allowed, with a local bare

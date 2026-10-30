@@ -120,7 +120,7 @@ impl Host {
         (self.gh_login.as_deref()).is_some_and(|me| me.eq_ignore_ascii_case(login))
     }
     /// The name on `login`'s GitHub profile when read, else the login.
-    pub(crate) fn display_name(&self, login: &str) -> String {
+    fn display_name(&self, login: &str) -> String {
         let name: Option<String> = (self.db)
             .query_row(
                 "SELECT name FROM issue_profiles WHERE login=?1",
@@ -515,9 +515,10 @@ impl Host {
                     format!("Paused: you and {machine} both changed {what}"),
                     format!("Your version is kept on this Mac until you choose. The rest of {id} keeps syncing."),
                 ),
+                // The other side of an issue file is a teammate, not another of the human's Macs.
                 Paused::TwoMachines { .. } => (
-                    format!("Paused: {what} changed here and on another Mac"),
-                    format!("This Mac keeps its version until you choose. The rest of {id} keeps syncing."),
+                    format!("Paused: you and a teammate both changed {what}"),
+                    format!("Keep mine pushes your version; Use theirs takes the teammate’s. Until you choose, this Mac keeps yours and the rest of {id} keeps syncing."),
                 ),
                 Paused::OutsideWiffletree => (
                     format!("{} was changed outside Wiffletree on this Mac", capitalized(&what)),
