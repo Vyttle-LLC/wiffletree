@@ -33,6 +33,7 @@ impl World {
             provider: Provider::Claude,
             status,
             archived: false,
+            owner: None,
         });
         self.runtimes.push(SessionRuntime {
             session_id: id.into(),

@@ -37,6 +37,7 @@ fn insert_team(db: &Connection, id: &str, main: &Session, repository: &str, arch
         provider: Provider::Codex,
         status: Status::Ready,
         archived,
+        owner: None,
     };
     db.execute(
         "INSERT INTO sessions VALUES (?1,?2,?3,'task_orchestrator',?4)",

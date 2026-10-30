@@ -874,6 +874,7 @@ mod tests {
                 provider: Provider::Claude,
                 status: Status::Ready,
                 archived: false,
+                owner: None,
             },
             profile: ModelProfile {
                 provider: Provider::Claude,
@@ -1035,6 +1036,7 @@ mod tests {
                 provider,
                 status: Status::Ready,
                 archived: false,
+                owner: None,
             },
             profile: ModelProfile {
                 provider,

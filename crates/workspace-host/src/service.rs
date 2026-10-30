@@ -4826,31 +4826,42 @@ mod tests {
         let mut turn = active_turn("run", vec![]);
         turn.token = coordinator.id.clone();
         actor.active.insert(coordinator.id.clone(), turn);
-        // No role runs outside projects yet, so the session is given its owner directly.
-        for owner in [
-            SessionOwner::Space(project.space.clone()),
-            SessionOwner::Brain("Sage-Social/sagehaven-docs".into()),
-        ] {
-            actor
-                .host
-                .db
-                .execute(
-                    "UPDATE sessions SET data=json_set(data,'$.owner',json(?2)) WHERE id=?1",
-                    params![coordinator.id, serde_json::to_string(&owner).unwrap()],
-                )
-                .unwrap();
+        let refused_every_tool = |actor: &mut Actor| {
             for tool in [
                 "workspace_context",
                 "create_ticket",
                 "send_message",
                 "stop_agents",
             ] {
-                let refused = call_tool(&mut actor, &coordinator.id, tool, json!({})).unwrap_err();
+                let refused = call_tool(actor, &coordinator.id, tool, json!({})).unwrap_err();
                 assert!(
                     refused.contains("owned by a Space or a brain"),
                     "{tool}: {refused}"
                 );
             }
+        };
+        for owner in [
+            SessionOwner::Space(project.space.clone()),
+            SessionOwner::Brain("Sage-Social/sagehaven-docs".into()),
+        ] {
+            // No role runs outside projects yet, so the session is given its owner directly.
+            let owned = Session {
+                owner: Some(owner.clone()),
+                ..coordinator.clone()
+            };
+            actor
+                .host
+                .db
+                .execute(
+                    "UPDATE sessions SET data=?2 WHERE id=?1",
+                    params![owned.id, encode(&owned).unwrap()],
+                )
+                .unwrap();
+            refused_every_tool(&mut actor);
+            // A change that rewrites the stored session keeps its owner.
+            actor.host.set_status(&owned.id, Status::Paused).unwrap();
+            assert_eq!(actor.host.session(&owned.id).unwrap().owner, Some(owner));
+            refused_every_tool(&mut actor);
         }
     }
     /// Complete one logical job, including its returned local checkout inspection.

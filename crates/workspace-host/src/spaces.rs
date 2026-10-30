@@ -36,7 +36,6 @@ pub(crate) fn migrate(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// The prefixes of the trackers on this Mac.
 fn prefixes(db: &Connection) -> Result<Vec<String>> {
     Ok(db
         .prepare("SELECT json_extract(data,'$.prefix') FROM trackers")?
@@ -269,23 +268,13 @@ impl Host {
             )
             .optional()?)
     }
-    /// Who owns a session: its project, unless it records a Space or a brain as `owner`. No
-    /// role runs outside projects yet, so no session the host creates records one.
+    /// Who owns a session: its project, unless it records a Space or a brain.
     pub fn session_owner(&self, id: &str) -> Result<SessionOwner> {
-        let (project, owner): (String, Option<String>) = self
-            .db
-            .query_row(
-                "SELECT project_id,json_extract(data,'$.owner') FROM sessions WHERE id=?1",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .context("Session not found")?;
-        Ok(match owner {
-            Some(owner) => serde_json::from_str(&owner)?,
-            None => SessionOwner::Project(project),
-        })
+        let session = self.session(id)?;
+        Ok(session
+            .owner
+            .unwrap_or(SessionOwner::Project(session.project_id)))
     }
-    /// The tracker of a Space's storage repository.
     pub fn tracker(&self, space: &Space) -> Result<TrackerConfig> {
         self.db
             .query_row(

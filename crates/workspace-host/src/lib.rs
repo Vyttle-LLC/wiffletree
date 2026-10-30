@@ -656,6 +656,7 @@ impl Host {
             provider: pick.profile.provider,
             status: Status::Ready,
             archived: false,
+            owner: None,
         };
         let detail = match &project.created_by {
             None => project.name.clone(),
@@ -781,6 +782,7 @@ impl Host {
             provider,
             status: Status::Ready,
             archived: false,
+            owner: None,
         };
         // A savepoint, so assigning a ticket agent can include this in its own change.
         let tx = self.db.savepoint()?;

@@ -604,6 +604,7 @@ mod tests {
             provider: Provider::Claude,
             status: Status::Ready,
             archived,
+            owner: None,
         };
         let coordinator = session("pm", "harbor", Role::ProjectOrchestrator, false);
         let tester = session("tester", "harbor", Role::Tester, false);

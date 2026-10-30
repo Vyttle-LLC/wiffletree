@@ -465,6 +465,10 @@ pub struct Session {
     /// Hidden from the working tree and never scheduled; everything it owns is preserved.
     #[serde(default)]
     pub archived: bool,
+    /// The Space or brain that owns a session that is not project work; `None` for project
+    /// work, which every session is until a role runs outside projects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<SessionOwner>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

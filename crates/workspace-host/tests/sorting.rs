@@ -59,6 +59,7 @@ fn sort(folder: &std::path::Path, body: &str) -> (Vec<ProviderEvent>, anyhow::Re
             provider: Provider::Claude,
             status: Status::Working,
             archived: false,
+            owner: None,
         },
         profile: ModelProfile {
             provider: Provider::Claude,
