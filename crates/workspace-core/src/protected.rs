@@ -167,9 +167,14 @@ impl<'a> ProtectedBranches<'a> {
             || (self.rulesets().iter()).any(|r| r.applies(branch, self.default_branch))
             || (self.protection_rules().iter()).any(|rule| branch_matches(rule, branch))
     }
-    /// A ruleset protects every branch, so the host can merge nothing in the repository.
+    /// A ruleset, a branch protection rule or an entry protects every branch, so the host can
+    /// merge nothing in the repository.
     pub fn every_branch(&self) -> bool {
+        // Only stars, `**` among them, match every name.
+        let all = |pattern: &String| pattern.contains("**") && pattern.chars().all(|c| c == '*');
         self.rulesets().iter().any(BranchRuleset::covers_all)
+            || self.protection_rules().iter().any(all)
+            || self.entries.iter().any(all)
     }
     /// The rows in the order the page lists them: always protected, GitHub's, then the human's.
     pub fn rows(&self) -> Vec<ProtectedRow> {
@@ -583,6 +588,22 @@ mod tests {
         let allowed = ["Sage-Social".to_owned()];
         assert_eq!(Merging::of(&all, &allowed), Merging::EveryBranchProtected);
         assert_eq!(Merging::of(&cortex, &allowed), Merging::IntoUnprotected);
+        // An entry or a classic rule of `**` protects every branch too; `release/**` does not.
+        let starred = repository("origin/main", on_github("main", vec![]), &["**"]);
+        assert_eq!(
+            Merging::of(&starred, &allowed),
+            Merging::EveryBranchProtected
+        );
+        let mut rule = on_github("main", vec![]);
+        rule.as_mut().unwrap().protection_rules = Some(vec!["***".into()]);
+        let ruled = repository("origin/main", rule, &["release/**"]);
+        assert_eq!(Merging::of(&ruled, &allowed), Merging::EveryBranchProtected);
+        let some = repository(
+            "origin/main",
+            on_github("main", vec![]),
+            &["release/**", "*"],
+        );
+        assert_eq!(Merging::of(&some, &allowed), Merging::IntoUnprotected);
         assert_eq!(Merging::of(&cortex, &[]), Merging::NotAllowed);
     }
 

@@ -1707,7 +1707,7 @@ fn merges_nothing(repository: &Repository, allowed: &[String]) -> Option<String>
     Some(match Merging::of(repository, allowed) {
         Merging::IntoUnprotected => return None,
         Merging::EveryBranchProtected => {
-            "A GitHub ruleset protects all branches, so Wiffletree can merge nothing here while it applies".into()
+            "Every branch is protected, so Wiffletree can merge nothing here".into()
         }
         Merging::NotAllowed => match owner_entry(repository) {
             _ if origin_branch(&repository.base).is_none() => {
@@ -2148,8 +2148,9 @@ mod tests {
         let everything = serde_json::json!([{"name": "All", "include": ["~ALL"]}]);
         let all = wiffletree(everything, &[]);
         assert!(
-            protected_summary(&all, &allowed)
-                .contains("all branches · A GitHub ruleset protects all branches")
+            protected_summary(&all, &allowed).contains(
+                "all branches · Every branch is protected, so Wiffletree can merge nothing"
+            )
         );
         assert!(method_line(&listed).contains(
             "GitHub reports no branch protection or rulesets here · a merge would use squash"
