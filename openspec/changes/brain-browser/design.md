@@ -61,7 +61,7 @@ The PRD's memory budget is a fixture of 100,000 log entries and 10,000 notes, wi
    - Arrow keys move, Enter opens the note or the entry in Logs, Tab cycles the scope chips, and Esc closes and returns focus to where it was.
 9. **`query_brain`:**
    - It takes `question` (free text), and optionally `scope` (`project`, the default, or `brain`). The brain is the session's project's Space's brain, never chosen by the agent.
-   - It is offered to the coordinator, implementers, testers and reviewers, because reading is safe. It is not offered to the compile session, which receives its input directly.
+   - It is offered to the coordinator, implementers, testers and reviewers, and to assistant threads, issue threads and job runs, which `assistant-spaces-jobs-boards` already lists it for, because reading is safe. A thread's brain is its own Space's, and its scope is always the whole brain, because a thread has no project. It is not offered to the compile session, which receives its input directly.
    - It walks the ladder, stopping when the budget of about 4,000 characters is filled or the ladder ends:
      1. STATUS excerpts that match;
      2. INDEX lines that match;
@@ -104,21 +104,21 @@ These are merged on `main`:
 - PR #163 (`assistant-spaces-jobs-boards`), as 419a55ef;
 - PR #164 (`create_project`), as a8dded2d.
 
-#162's and #163's changes are open there, not yet archived; #164's is archived. Where they change the same thing as this change, this change goes after them.
+#162's and #163's changes are open there, not yet archived; #164's is archived. `spaces`, carved out of #163 on October 29, 2026, ships before all of them. Where they change the same thing as this change, this change goes after them.
 
 | Shared concept | Where else | Share or align | Open question |
 | --- | --- | --- | --- |
 | A SQLite index rebuilt from files | #162 indexes each tracker in `issues.sql` for its list, search and unread marks; this change indexes each brain with FTS5 | **Share** the pattern: a rebuildable projection, reindexed by content hash after each fetch. A common indexing helper is worth extracting. | One FTS facility for both, or one per feature? |
-| Search UI | ⌘K brain search here; #162's Issues page has its own search | **Align** on one ⌘K overlay with a source chip (Brain, Issues) that never mixes organizations in one result list. | Should ⌘K also search issues once #162 ships, and how does "never across organizations" map to trackers that are per team rather than per owner? |
-| Agent read tools | #162's assistant has `list_issues`, `read_issue` and `search_repositories`; agents here get `query_brain` | **Align** on read-only tools with bounded excerpts and authorship marked. | Should coordinators get both, and should `query_brain` results be marked as untrusted context the way issue text is? (Recommended: yes.) |
-| Workspace pages | The Brains page here; #162's Issues page | **Align** with `brain-registry-sync`'s question on one Shared repositories page versus separate pages. | See `brain-registry-sync`. |
+| Search UI | ⌘K brain search here; #162's Issues page has its own search | **Align** on one ⌘K overlay with a source chip (Brain, Issues) that never mixes organizations in one result list. | Should ⌘K also search issues once #162 ships? The scope is settled: **decided by Michael, 2026-10-29,** a tracker is a Space's storage repository, so issue search follows the Space, as brain search does. |
+| Agent read tools | #163's issue threads have `list_issues`, `read_issue` and `search_repositories`; agents here get `query_brain` | **Align** on read-only tools with bounded excerpts and authorship marked. | Should coordinators get both, and should `query_brain` results be marked as untrusted context the way issue text is? (Recommended: yes.) |
+| Workspace pages | The Brains page here; #162's Issues page | **Align** with `brain-registry-sync`. | None. **Decided by Michael, 2026-10-29:** trackers are shown on their Space's page, not a shared-repositories page; Brains and Issues stay separate Workspace pages. |
 | Inspector rail | `files-panel` and `processes-panel` | **Align**: the Memory panel keeps its place after Git, Files and Processes. Its new summary does not change the rail. | None. |
 | Rendering Markdown | Issue descriptions and comments (#162); notes and STATUS here | **Share** one Markdown renderer with wikilink and footnote support. | None. |
 | Libraries of rendered Markdown with history | #163 (merged): Boards lists outputs, renders Markdown natively, and keeps each output's Git history | **Share** the Markdown renderer and the history view. Brain notes stay in the brain browser, because Boards holds outputs, not knowledge. | Should Boards link to the brain notes a job cites? |
-| Search | #163 (merged): the assistant's search finds threads by title and text, filtered by Space; here, ⌘K searches one brain's notes and logs | **Align** on one ⌘K overlay with source chips (Brain, Threads and, from #162, Issues). It never mixes organizations or Spaces in one result list. | **Open:** one overlay for all three? Is a search scope an organization (brain) or a Space? |
-| Threads reading the brain | #163: threads read their Space's brain and add entries to it; the router never sees brains | **Align**: give threads `query_brain`, which is read-only and so within thread authority, instead of letting them read brain files directly. | **Open:** give threads `query_brain`? |
-| Where the browser sits | #163 pins the assistant and Boards above Projects and edits Spaces in Settings; here, Brains is a Workspace page and the Memory panel opens it | **Align** with `brain-registry-sync`'s navigation question. | See `brain-registry-sync`. |
-| Projects created by a coordinator | #164 (merged) | **Settled by Michael's Space decision (2026-10-29):** a created project joins its creator's Space, so its Memory panel shows that Space's one brain. | None. |
+| Search | #163 (merged): the assistant's search finds threads by title and text, filtered by Space; here, ⌘K searches one brain's notes and logs | **Align** on one ⌘K overlay with source chips (Brain, Threads and, from #162, Issues). It never mixes organizations or Spaces in one result list. | One overlay for all three? The scope is settled: **decided by Michael, 2026-10-29,** a search runs in the current Space, over that Space's one brain, its threads and its tracker. |
+| Threads reading the brain | #163: threads read their Space's brain and add entries to it, and list `query_brain` among their tools; the router never sees brains | **Share**: threads, issue threads and job runs get `query_brain` on their own Space's brain, which is read-only and so within thread authority (decision 9). | None. |
+| Where the browser sits | #163 pins the assistant and Boards above Projects; `spaces` edits Spaces in Settings; here, Brains is a Workspace page and the Memory panel opens it | **Align** with `brain-registry-sync`'s navigation. | None. A Space's settings choose its brain; the Brains page and browser show it. |
+| Projects created by a coordinator | #164 (merged) | **Decided by Michael, 2026-10-29:** a created project joins its creator's Space (`spaces`), so its Memory panel shows that Space's one brain. | None. |
 
 ## Open Questions
 

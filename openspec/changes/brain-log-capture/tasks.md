@@ -12,7 +12,7 @@ Depends on `brain-registry-sync`.
 - [ ] 2.3 `mcp.rs`: the `log_work` tool for the coordinator and implementer only. Test the tool lists per role and that `ref`, `author` and `id` cannot be supplied.
 
 - [ ] 2.4 Give assistant threads `log_work` (`assistant-spaces-jobs-boards` thread tools): entries in `logs/assistant/YYYY/MM/` with `repo: assistant` and `ref: —`, thread id and Space in the store, never `logs/assistant.md`. Job runs get no `log_work`. Test a thread entry against the gate fixtures.
-- [ ] 2.5 Before archiving, check that `assistant-spaces-jobs-boards` is archived, so that this change's REMOVED "Brain pushes from several people" applies.
+- [ ] 2.5 Before archiving, check that `spaces` is archived, so that this change's REMOVED "Safe Markdown export" removes `spaces`' version.
 
 ## 3. Batches and prompts
 

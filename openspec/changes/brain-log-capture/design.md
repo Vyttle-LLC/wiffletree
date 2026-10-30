@@ -120,7 +120,7 @@ These are merged on `main`:
 - PR #163 (`assistant-spaces-jobs-boards`), as 419a55ef;
 - PR #164 (`create_project`), as a8dded2d.
 
-#162's and #163's changes are open there, not yet archived; #164's is archived. Where they change the same thing as this change, this change goes after them.
+#162's and #163's changes are open there, not yet archived; #164's is archived. `spaces`, carved out of #163 on October 29, 2026, ships before all of them. Where they change the same thing as this change, this change goes after them.
 
 | Shared concept | Where else | Share or align | Open question |
 | --- | --- | --- | --- |
@@ -128,13 +128,13 @@ These are merged on `main`:
 | Identity and author | #162 uses gh's `login` for authors; entries' `author` is the same login | **Share** the cached identity from `brain-registry-sync`. | None. |
 | One-time imports | #162's Linear import (one commit per 100 issues); the legacy log import here (log PRs of at most 200 files, deterministic ids) | **Align** on idempotent, batched imports that never write back to the source. | None. |
 | The entry contract | `brain-gate` owns it, with the fixtures in `gate/tests/fixtures/` | **Share**: the renderer is tested against the gate's fixtures and writes the contract of the brain's pinned gate version. | When the gate's contract gets a new major version, does Wiffletree write both versions during the transition, or refuse to log to a brain still on the old gate? (`brain-gate` holds the brain's batches.) |
-| Fixed core instructions | `quiet-findings` bumps the coordinator core to v5; #162 changes the fixed core for issue reading; this change adds the log rules to the coordinator and implementer cores | **Align** the order. #162 is merged on `main`, so this change goes after it and after `quiet-findings`: it rebases its wording on theirs and bumps the core versions again. | None, beyond ordering. |
+| Fixed core instructions | `quiet-findings` bumps the coordinator core to v5; #162 changes the coordinator's fixed core for issue reading; this change adds the log rules to the coordinator and implementer cores | **Align** the order. #162 is merged on `main`, so this change goes after it and after `quiet-findings`: it rebases its wording on theirs and bumps the core versions again. | None, beyond ordering. |
 | Where follow-ups go | `quiet-findings` lists a ticket's `follow_up` findings in its PR description; #162 adds issues | **Align**: a follow-up is work to do, which belongs in an issue rather than a log entry. Logging stays for decisions and state. | Once #162 ships, should the coordinator file follow-ups as issues instead of only listing them in the PR? |
 | Tool results that prompt for more work | Milestone prompts here; `quiet-findings` changes the cycle-outcome message's closing line | **Align**: the log prompt is one line appended after the host's existing text, so the two do not conflict. | None. |
 | The capture surface | `files-panel` records `Step.paths` per step | None now. A later change could suggest a log entry's `changed` from the files a ticket touched. | Not in scope. |
 | Where the assistant's entries go | #163 (merged): a thread's log entries go to its Space's brain in the rolling file `logs/assistant.md`, each with the thread's id and Space | **Decided by Michael, 2026-10-29:** threads log through `log_work` into per-entry files in `logs/assistant/YYYY/MM/…` with `repo: assistant`, with the thread id and Space kept in the host store. #163's assistant delta now says so too. Job runs do not log (decision 3). | None. |
-| The `project-memory` spec | #163 MODIFIES "Safe Markdown export" (Space brains) and ADDS "Brain pushes from several people"; this change REMOVES "Safe Markdown export" | **Decided by Michael, 2026-10-29:** PR-gated writes supersede #163's decision (c). This change archives after #163 and REMOVES both "Safe Markdown export" (in #163's version) and "Brain pushes from several people". | None. |
-| Which brain an entry goes to | #163: the project's or thread's Space | **Decided by Michael, 2026-10-29:** the Space decides; the repository mapping is dropped (decision 3). | None. |
+| The `project-memory` spec | `spaces` MODIFIES "Safe Markdown export" (Space brains), moved there from #163; this change REMOVES it. #163 no longer ADDS "Brain pushes from several people" | **Decided by Michael, 2026-10-29:** PR-gated writes supersede #163's decision (c). Delta order: 1 `spaces` → 2 this change, which REMOVES "Safe Markdown export" in `spaces`' version. | None. |
+| Which brain an entry goes to | `spaces`: the project's Space; #163: the thread's Space | **Decided by Michael, 2026-10-29:** the Space decides; the repository mapping is dropped (decision 3). | None. |
 | Fixed core versions | #164 (merged) moved the coordinator core to v6 | **Align**: the log rules are written against v6 and bump it again. | None. |
 | Projects created by a coordinator | #164: a created project's first message is a brief, and `created_by` records the creator | **Align**: no milestone prompt for creating a project. The creator may log a planning entry about it with `log_work`. | None. |
 

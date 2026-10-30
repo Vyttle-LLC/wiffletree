@@ -1,13 +1,13 @@
-Depends on `brain-registry-sync` and `brain-log-capture`.
+Depends on `brain-registry-sync`, `brain-log-capture`, and `assistant-spaces-jobs-boards` stage 3 (the scheduler and its built-in host jobs). Session owners come from `spaces`.
 
 ## 1. Routing
 
-- [ ] 1.1 Add the optional Brain compiler row to Who runs what (`policies.rs`, `selection.sql`), with no skip and no small-work line. Tables saved before it load unchanged. Extend the table tests with the new refusals and the load case. Because `shared-issues` and `assistant-spaces-jobs-boards` (both merged before this change) also modify "Who runs what", restate their Issue assistant, Assistant, Router and Job rows in this change's `model-routing` delta before archiving.
+- [ ] 1.1 Add the optional Brain compiler row to Who runs what (`policies.rs`, `selection.sql`), with no skip and no small-work line. Tables saved before it load unchanged. Extend the table tests with the new refusals and the load case. This change's `model-routing` delta already restates `assistant-spaces-jobs-boards`' Assistant, Router and Job rows; check before archiving that #163 is archived and that the restated text still matches it. There is no Issue assistant row.
 - [ ] 1.2 Models page: the Brain compiler row with No model.
 
 ## 2. Scheduling and the cursor
 
-- [ ] 2.1 `compile.rs`: due times from the config's time and timezone, one catch-up run after missed times, Run now, and starting a run when a fetched `main` adds a `Ruling on conflict` entry. Only on the configured compiler host, with one run and one open compile PR per brain. Test sleep across a due time, a daylight-saving change, another host and an open PR.
+- [ ] 2.1 `compile.rs`: register one built-in compile job per brain on #163's scheduler, owned by the brain, with its due time from the config's time and timezone; catch-up and Run now come from the scheduler; add the trigger that starts a run when a fetched `main` adds a `Ruling on conflict` entry. Only on the configured compiler host, with one run and one open compile PR per brain. Test sleep across a due time, a daylight-saving change, another host and an open PR.
 - [ ] 2.2 Read and write the `compiled-through` / `compiled-after` cursor in `notes/INDEX.md`, compute the pending set with the 200-entry bound, and handle the first compile with the import's compiled ids. Test same-day entries, a late batch, a failed run and the bound.
 - [ ] 2.3 The idle path: no pending entries means no model call and no write. Test that the row is not resolved.
 
@@ -18,7 +18,7 @@ Depends on `brain-registry-sync` and `brain-log-capture`.
 ## 4. The compile session
 
 - [ ] 4.1 Bundle `skills/procedures/compile.md` with a version, restating the fold and queue rules. Build the bounded input (60,000 characters of notes).
-- [ ] 4.2 Start a host-owned session on the Brain compiler row in a worktree, with the `queue_conflict` and `finish_compile` tools only and a 30-minute timeout. Record usage under the brain.
+- [ ] 4.2 Start a session owned by the brain (`SessionOwner::Brain`; the "Enforced hierarchy" delta here) on the Brain compiler row in a worktree, with the `queue_conflict` and `finish_compile` tools only and a 30-minute timeout. Record usage under the brain.
 - [ ] 4.3 Check the result before pushing (paths, frontmatter, wikilinks, source ids), then write the cursor and `reconcile-queue.md` and hand the branch to the batch flow as a compile run. Test a change under `logs/`, a broken wikilink and a timeout, each leaving the cursor unchanged.
 
 ## 5. Conflicts and rulings

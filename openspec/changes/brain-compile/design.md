@@ -58,12 +58,13 @@ The gate allows a compile PR to change only `second-brain/notes/**`, `second-bra
    - **claimed:** a commit exists but is not on the default branch, or the PR is open.
    - **unverified:** the `ref` is `—` or `<branch> @ —`, the anchor is not found, or the repository is not on this machine.
    - The browser uses the same function to show verification on any install, so the result never has to be written into logs.
-3. **The model run is a host-owned agent session.**
+3. **The model run is a session owned by the brain** (decided by Michael, 2026-10-29: sessions outside projects belong to a Space or a brain).
+   - Its owner is the brain it compiles (`SessionOwner::Brain`, from `spaces`), not a project or a Space, because several Spaces may name one brain. `workspace-host`'s "Enforced hierarchy" admits it, as the third delta after `spaces` and `assistant-spaces-jobs-boards`.
    - It uses the Brain compiler row, resolved like any agent start, and works in a worktree of the brain checkout on a compile batch branch.
    - Its input is bounded: the bundled procedure, STATUS, INDEX, the pending entries with their verification states, and the notes the entries name or link to, capped at 60,000 characters of notes.
    - It edits files only under the wiki paths. It reports conflicts with `queue_conflict` and ends with `finish_compile`. These two tools exist only for this session, and it has no other write tool.
    - The run has a timeout (30 minutes) and is recorded with its procedure version.
-   - Its usage is recorded in the ledger under a host-owned scope for the brain, shown in usage reports as "Brain compile · <brain>". The implementation may need an internal record that holds this session; it is never shown in the sidebar.
+   - Its usage is recorded in the ledger under its owner, the brain, shown in usage reports as "Brain compile · <brain>". No project record holds it, so nothing has to be hidden from the sidebar.
 4. **The fold and queue rules are today's skill rules**, restated in the bundled procedure:
    - Queue only a contradiction of a `kind: decision` note, a disagreement between two authors (or agents) about the same fact, or a destructive or deprecating change.
    - Fold everything else.
@@ -96,13 +97,13 @@ The gate allows a compile PR to change only `second-brain/notes/**`, `second-bra
 
    A ruling entry's author is the human, its repository is the claim's, and its `state` begins `Ruling on conflict <id>:`. The host opens its batch at once rather than waiting.
 8. **A ruling starts a compile when its entry merges.** The compiler host starts a run whenever a fetched `main` adds an entry whose `state` begins `Ruling on conflict`. Rulings made on any install, by any teammate, therefore start a compile on the compiler. A ruling made on the compiler host also shows "Compile starts when the ruling merges".
-9. **Missed runs and time:**
+9. **Missed runs and time come from #163's scheduler** (decided by Michael, 2026-10-29). Compile is a built-in host job of `assistant-spaces-jobs-boards`' scheduler ("Built-in host jobs"): one per registered brain, owned by the brain, due only on the compiler host. The scheduler supplies the rules below; this change adds the ruling trigger (decision 8), the open-PR wait (decision 10) and the idle path.
    - A run is due at the config's local time each day.
    - On start or wake, a host that missed one or more due times runs once.
    - Due times are computed in the config's timezone, so a daylight-saving change never yields two runs for one date.
    - Run now starts a run unless one is running or a compile PR is open, in which case it says why.
 10. **One open compile PR per brain.** While one is open, scheduled runs are skipped and recorded as "waiting for PR #NN". A compile PR that fails a check raises an Inbox item on the Brains page through `brain-registry-sync`. The human can discard it, and the next run computes the pending set again from the unchanged cursor.
-11. **The Brain compiler row** is optional, with no skip and no small-work line, and only the human's client changes it. Unlike the PR keeper's sorting, it may run on any provider. With no row, the compile job is held and the Brains page says to choose a model in Models.
+11. **The Brain compiler row** is optional, with no skip and no small-work line, and only the human's client changes it. It is its own row, not #163's Job row, because compiles write a brain while jobs only read (decided by Michael, 2026-10-29). Unlike the PR keeper's sorting, it may run on any provider. With no row, the compile job is held and the Brains page says to choose a model in Models.
 
 ### Options considered
 
@@ -132,9 +133,9 @@ These are merged on `main`:
 - PR #163 (`assistant-spaces-jobs-boards`), as 419a55ef;
 - PR #164 (`create_project`), as a8dded2d.
 
-#162's and #163's changes are open there, not yet archived; #164's is archived. Where they change the same requirement as this change, this change goes after them.
+#162's and #163's changes are open there, not yet archived; #164's is archived. `spaces`, carved out of #163 on October 29, 2026, ships before all of them. Where they change the same requirement as this change, this change goes after them: "Who runs what" is #163 → this change; "Enforced hierarchy" is `spaces` → #163 → this change.
 
-**Recommended alignment with #163's scheduled jobs (open for Michael).** #163 already specifies:
+**Alignment with #163's scheduled jobs — decided by Michael, 2026-10-29, as recommended here.** #163 already specifies:
 - a host scheduler with schedules in an IANA timezone;
 - daylight-saving handling: a skipped time runs at the next valid minute, and a repeated time runs once;
 - missed runs coming back as one catch-up run;
@@ -149,20 +150,20 @@ It stays a separate kind because #163's jobs:
 
 A compile instead writes the brain through a gated PR, runs only on the brain's compiler host, starts after a ruling merges and makes no model call when nothing is pending.
 
-So the recommendation is to reuse the scheduler and run records and keep the compile-specific rules here. If Michael agrees, the "Compile runs start on schedule, on demand and after a ruling" requirement shrinks to the compile-specific triggers, and #163's scheduled-jobs spec gains a sentence admitting built-in host jobs. Until he decides, this change keeps its own scheduling requirements as written.
+So compiles reuse the scheduler and run records and keep the compile-specific rules here. "Compile runs start on schedule, on demand and after a ruling" now names compile as a built-in host job, and #163's scheduled-jobs spec gained "Built-in host jobs". Compiles keep their own Brain compiler row.
 
 | Shared concept | Where else | Share or align | Open question |
 | --- | --- | --- | --- |
-| Optional rows in Who runs what | #162 (merged on `main`) adds an Issue assistant row (Claude only, no then choice); this change adds a Brain compiler row (any provider) | **Align** on the optional-row pattern, as with the PR keeper. Both changes MODIFY the same `model-routing` requirement, "Who runs what". | This change now goes second. Before it archives, its "Who runs what" delta must restate the Issue assistant row as `shared-issues` archived it (task 1.1). |
-| A host-owned session outside any project | #162 (merged on `main`) decision 9 gives each tracker a hidden project record of kind `tracker` and modifies `workspace-host`'s "Enforced hierarchy"; the compile session needs the same (decision 3) | **Share**: add a `brain` kind to the same record. Sessions, messages and the usage ledger then work unchanged, and usage shows "Brain compile · <brain>". | This change now goes second: it adds `brain` to the record's kind and a delta to "Enforced hierarchy" that restates `shared-issues`' version. Whether to share the record at all is still open. |
-| Running a model with narrow tools | #162's assistant runs with built-in tools off, so Claude only; the compile session edits files in a worktree, so it needs file tools and keeps any provider | **Align** on tool-limited host sessions, but the needs differ. The compile session's limit is the host's diff check, not tools off. | Should the compile session also run tools-off, receiving notes as input and returning edits through a tool? That would be safer, but Claude only. |
+| Optional rows in Who runs what | #162 no longer adds an Issue assistant row (its issue assistant became #163's issue threads); this change adds a Brain compiler row (any provider) | **Align** on the optional-row pattern, as with the PR keeper. | None. **Decided by Michael, 2026-10-29:** the table ends with Assistant, Router, Job and Brain compiler. |
+| A host-owned session outside any project | #162 proposed a hidden project record of kind `tracker`; the compile session needs an owner (decision 3) | **Share** `spaces`' session owners: a session belongs to a project, a Space or a brain. | None. **Decided by Michael, 2026-10-29:** a compile session is owned by its brain, and there are no hidden project records. |
+| Running a model with narrow tools | Issue threads run with web off (#163); the compile session edits files in a worktree, so it needs file tools and keeps any provider | **Align** on tool-limited host sessions, but the needs differ. The compile session's limit is the host's diff check, not tools off. | Should the compile session also run tools-off, receiving notes as input and returning edits through a tool? That would be safer, but Claude only. |
 | Inbox decision cards | Conflict cards here; #162 phase 5 paused-field and mention items; `quiet-findings` keeps noted findings out of the Inbox | **Align** the card shape: title, evidence, a recommended action and buttons, with one card per source. | None. |
 | Untrusted text | #162 decision 10: issue text written by others is context, never instructions | **Align**: log entries are written by agents and teammates, so the compile procedure treats entry text as data. The conflict tools accept only structured fields. | Should the fixed-core wording for untrusted text be shared between issues and brain content? |
 | Auto-applied state from evidence | #162 derives issue states from linked PRs; here refs are verified against repositories and PRs | **Share** the PR read path (`pr-watch` and `verify_refs`) where possible. | None. |
 | The gate on compile PRs | `brain-gate`'s path ownership and wikilink checks | **Share**: the host's pre-push checks mirror the gate's so failures surface before a PR. | Should the host run the gate's checks locally from `gate/` before pushing, instead of re-implementing them? This is recommended once `brain-gate` ships. |
-| Scheduling, catch-up and Run now | #163 (merged): scheduled jobs with timezones, daylight-saving rules, one catch-up run, Run now, pause and run history | **Share** the scheduler and run records (recommended alignment above); keep the compile-specific rules. | **Open for Michael:** run compiles on #163's scheduler as a built-in job kind? |
-| Who runs what | #163 (merged) adds Assistant, Router and an optional Job row; #162 adds Issue assistant; this change adds Brain compiler | **Align**: this change goes after both and restates all their rows in its "Who runs what" delta (task 1.1). | Should compiles use #163's Job row instead of their own Brain compiler row? |
-| A session outside any project | #163 (merged) admits Assistant and JobRun sessions that belong to a Space, in `workspace-host` "Enforced hierarchy"; #162 uses a hidden `tracker` record | **Align**: a compile session could be a JobRun-like session in the Space whose brain it compiles, instead of a new hidden record. | **Open:** which mechanism hosts the compile session, given that several Spaces may name one brain? |
+| Scheduling, catch-up and Run now | #163 (merged): scheduled jobs with timezones, daylight-saving rules, one catch-up run, Run now, pause and run history | **Share** the scheduler and run records (alignment above); keep the compile-specific rules. | None. **Decided by Michael, 2026-10-29:** compiles run on #163's scheduler as a built-in, host-owned job kind. |
+| Who runs what | #163 adds Assistant, Router and an optional Job row; this change adds Brain compiler | **Align**: this change goes after #163 and restates its rows in its "Who runs what" delta (task 1.1). | None. **Decided by Michael, 2026-10-29:** compiles keep their own Brain compiler row, not the Job row. |
+| A session outside any project | `spaces` gives sessions outside projects an owner, a Space or a brain; #163 admits threads, issue threads and job runs owned by a Space | **Share** the owner type: the compile session is owned by the brain it compiles, so several Spaces naming one brain is no problem. | None. **Decided by Michael, 2026-10-29:** sessions outside projects belong to a Space or a brain; compile belongs to the brain. |
 | Provider restrictions | #163 runs threads and job runs outside YOLO, with tools limited by the provider | **Align**: a compile session needs file writes in its worktree only; #163's Claude allow-list pattern (writes limited to one folder) fits it. | Should the compile session use #163's restricted launch, with writes limited to its worktree's wiki paths? |
 | Projects created by a coordinator | #164 (merged) | None: compiles are per brain, not per project. | None. |
 

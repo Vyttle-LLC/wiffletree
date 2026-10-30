@@ -12,7 +12,7 @@ A host SHALL compile a brain only when `wiffletree-brain.json` on that brain's `
 - **THEN** no run starts, and the run is recorded as waiting for PR #212
 
 ### Requirement: Compile runs start on schedule, on demand and after a ruling
-The compiler host SHALL start a run each day at the config's compile time in the config's timezone. After sleep, downtime or a quit that missed one or more due times, it SHALL start exactly one catch-up run. Due times SHALL be computed in the config's timezone, so a daylight-saving change never yields two runs for one date. The human SHALL be able to start a run with Run now on the Brains page or the brain's Status view, which SHALL say why when a run is in progress or a compile PR is open. The compiler host SHALL start a run when a fetched `main` adds an entry whose `state` begins `Ruling on conflict`.
+Brain compile SHALL be a built-in host job of the scheduler (see `scheduled-jobs`, "Built-in host jobs"), owned by its brain, with one job per brain registered on this Mac, and SHALL take its due times, catch-up, Run now and run records from that scheduler. Only on the compiler host SHALL it be due: each day at the config's compile time in the config's timezone. After sleep, downtime or a quit that missed one or more due times, it SHALL start exactly one catch-up run. Due times SHALL be computed in the config's timezone, so a daylight-saving change never yields two runs for one date. The human SHALL be able to start a run with Run now on the Brains page or the brain's Status view, which SHALL say why when a run is in progress or a compile PR is open. The compiler host SHALL start a run when a fetched `main` adds an entry whose `state` begins `Ruling on conflict`.
 
 #### Scenario: Asleep at 2:00
 - **WHEN** Michael's Mac sleeps from 1:00 to 7:00 and the compile time is 02:00
@@ -78,7 +78,7 @@ The procedure SHALL queue an entry, with `queue_conflict`, only when it contradi
 - **THEN** the note keeps 5, and one conflict is queued with the claim, the decision, the evidence and a recommended ruling
 
 ### Requirement: The compile session can only change the wiki
-The compile model SHALL run as a host-owned session in a worktree of the brain checkout, on a compile batch branch. It SHALL have `queue_conflict` and `finish_compile` and no other write tool, and SHALL have a 30-minute timeout. Before anything is pushed, the host SHALL check:
+The compile model SHALL run as a session owned by its brain (see `workspace-host`, "Enforced hierarchy"), in no project or Space and with no hidden project record, in a worktree of the brain checkout, on a compile batch branch. It SHALL have `queue_conflict` and `finish_compile` and no other write tool, and SHALL have a 30-minute timeout. Before anything is pushed, the host SHALL check:
 - only `notes/**`, `STATUS.md` and `reconcile-queue.md` under the brain folder changed;
 - every note has its frontmatter;
 - every `[[wikilink]]` resolves;

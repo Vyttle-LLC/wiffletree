@@ -1,13 +1,13 @@
 ## 1. Core types and storage
 
-Depends on `assistant-spaces-jobs-boards`' Spaces (stage 1), which name each Space's brain.
+Depends on `spaces`, which names each Space's brain and provides `github_access.rs` and the clone root.
 
 - [ ] 1.1 Add `Brain`, `BrainConfig` (`wiffletree-brain.json` v1) and `BrainBatch` (kind, source project or thread, branch, PR, stage, checks) to `crates/workspace-core/src/lib.rs`.
-- [ ] 1.2 Add `crates/workspace-host/src/brains.sql`: `brains` (with each brain's push grant), `brain_batches`, `brain_batch_checks`. Hook the `spaces` upgrade so an earlier `Project.brain` with a GitHub `origin` becomes its Space's brain, waiting for the grant. Test the upgrade with and without a GitHub `origin`.
+- [ ] 1.2 Add `crates/workspace-host/src/brains.sql`: `brains` (with each brain's push grant), `brain_batches`, `brain_batch_checks`. At first start, turn each Space's local brain folder that the `spaces` upgrade left (an earlier `Project.brain`) with a GitHub `origin` into that repository as its Space's brain, waiting for the grant. Test the upgrade with and without a GitHub `origin`.
 
 ## 2. Registry and config
 
-- [ ] 2.1 `brains.rs`: build the registry from the brains this machine's Spaces name. A brain is confirmed (granted) by the human only, and leaves the registry with its clone when no Space names it. Find the push URL as the settings repository does, and clone into `<workspaces folder>/brains/<name>` with the managed marker. Refuse a path named by the legacy pointer. Test that agents have no tool for any of these, and that two Spaces naming one brain register it once.
+- [ ] 2.1 `brains.rs`: build the registry from the brains this machine's Spaces name. A brain is confirmed (granted) by the human only, and leaves the registry with its clone when no Space names it. Find the push URL through `github_access.rs`, and clone into `<data folder>/repos/<owner>-<name>/` with the managed marker; refuse a brain that is a storage or settings repository here. Refuse a path named by the legacy pointer. Test that agents have no tool for any of these, and that two Spaces naming one brain register it once.
 - [ ] 2.2 Resolve a project's brain from its Space, a thread's or job run's from its own Space, and a `create_project` project's from its creator's Space. Suggest a brain from the code repositories' GitHub owner when a Space is created, pre-filled only. Test the resolution cases and that personal repositories suggest no brain.
 - [ ] 2.3 Read `wiffletree-brain.json` from `main` only. Validate the JSON, the folder and the version. Set up opens one PR with the config file and `brain-gate`'s caller, `gate` config and `CODEOWNERS` lines (`brain-gate` task 4.1). Compiler changes open a config-only batch, keeping unknown keys. Test the missing, invalid and newer-version cases.
 

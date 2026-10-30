@@ -31,7 +31,7 @@ Confirming a brain for a Space SHALL be what allows the host to push to that rep
 - **THEN** the publish follows `ticket-publishing`'s rules for its owner, unchanged by the brain
 
 ### Requirement: The host owns a separate checkout of each brain
-The host SHALL keep its own clone of each brain at `<workspaces folder>/brains/<name>` and SHALL NOT use a folder the human chose as that checkout. In that checkout the host SHALL only fetch and fast-forward `main`, and SHALL make every change on a batch branch in a worktree of it. It SHALL write a `.git/wiffletree-managed` marker in the checkout. One host process SHALL write to a checkout at a time. When the checkout's `main` cannot be fast-forwarded, or a file in it differs from what the host last wrote or fetched, the host SHALL stop writing to that brain, keep the change, and raise one item on the Brains page. It SHALL NOT reset, stash or overwrite.
+The host SHALL keep its own clone of each brain at `<data folder>/repos/<owner>-<name>/`, under the one root of `shared-repositories`, and SHALL NOT use a folder the human chose as that checkout. A brain SHALL NOT also be a storage or settings repository on this Mac, and the checkout SHALL NOT be synced by that module's engine. In that checkout the host SHALL only fetch and fast-forward `main`, and SHALL make every change on a batch branch in a worktree of it. It SHALL write a `.git/wiffletree-managed` marker in the checkout. One host process SHALL write to a checkout at a time. When the checkout's `main` cannot be fast-forwarded, or a file in it differs from what the host last wrote or fetched, the host SHALL stop writing to that brain, keep the change, and raise one item on the Brains page. It SHALL NOT reset, stash or overwrite.
 
 #### Scenario: Fetch after a merge
 - **WHEN** a batch PR merges on GitHub
@@ -40,6 +40,10 @@ The host SHALL keep its own clone of each brain at `<workspaces folder>/brains/<
 #### Scenario: An edit in the host's checkout
 - **WHEN** a file in the host's checkout of `sagehaven-docs` is changed outside Wiffletree
 - **THEN** the host stops writing to that brain, leaves the file as it is, and the Brains page names the file and says writing is held
+
+#### Scenario: Where the checkout lives
+- **WHEN** the Sage Space's brain `Sage-Social/sagehaven-docs` is registered
+- **THEN** the host's checkout is `<data folder>/repos/Sage-Social-sagehaven-docs/`, beside the storage clones
 
 #### Scenario: The human's own clone
 - **WHEN** the human edits `~/dev/sagehaven/sagehaven-docs` in Obsidian
@@ -132,10 +136,10 @@ The host SHALL mark its checkout as managed with `.git/wiffletree-managed`, and 
 
 #### Scenario: Pointer to the human's clone
 - **WHEN** the legacy pointer names `~/dev/sagehaven/sagehaven-docs` and `sagehaven-docs` is registered
-- **THEN** the Brains page shows the warning, and the host's checkout under the workspaces folder is unaffected
+- **THEN** the Brains page shows the warning, and the host's checkout under `<data folder>/repos/` is unaffected
 
 ### Requirement: Earlier brain attachments are migrated
-When the `spaces` upgrade turns each earlier `Project.brain` folder into a Space's brain, a folder whose `origin` names a GitHub repository SHALL become that Space's brain repository. The host SHALL NOT push to it until the human confirms the grant on the Brains page. A folder without a GitHub `origin` SHALL leave its Space with no brain, and the Brains page SHALL say why. `attach_brain` SHALL be removed from the host's commands.
+At the first start of this release, each Space whose brain is a local folder, as the `spaces` change's upgrade left an earlier `Project.brain`, SHALL be resolved: a folder whose `origin` names a GitHub repository SHALL become that Space's brain repository. The host SHALL NOT push to it until the human confirms the grant on the Brains page. A folder without a GitHub `origin` SHALL leave its Space with no brain, and the Brains page SHALL say why. `attach_brain` SHALL be removed from the host's commands.
 
 #### Scenario: An attached project
 - **WHEN** a stored project has the brain `~/dev/vyttle/vyttle-docs`, whose origin is `Vyttle-LLC/vyttle-docs`
