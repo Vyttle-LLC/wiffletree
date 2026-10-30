@@ -130,6 +130,21 @@ fn about(skill: Skill) -> About {
             ],
             decides: &["How to resolve a conflict", "How to fix failed checks"],
         },
+        Skill::Assisting => About {
+            roles: "Assistant threads",
+            gets: "Assistant threads get",
+            enforced: &[
+                "Read-only, plus their own scratch folder, held by the provider",
+                "Only their Space's sources, and no coordination tool",
+                "Space instructions cannot widen a thread's authority",
+                "Code work goes through Make this a project, which you confirm",
+            ],
+            decides: &[
+                "How long an answer is",
+                "Where to look first",
+                "When to draft a file and save it as an output",
+            ],
+        },
     }
 }
 
@@ -796,6 +811,9 @@ fn core_tab(part: &CoreInstructions) -> String {
         "implementers" => "Implementer",
         "testers and reviewers" => "Verifier",
         "the PR keeper" => "PR keeper",
+        // Threads get a contract of their own and the Assistant core.
+        "assistant threads" if part.name.contains("contract") => "Thread contract",
+        "assistant threads" => "Assistant",
         _ => &part.name,
     };
     format!("{label} {}", part.version)
@@ -2413,7 +2431,7 @@ mod tests {
     }
 
     #[test]
-    fn opening_the_page_lists_the_four_skills_with_their_states() {
+    fn opening_the_page_lists_the_five_skills_with_their_states() {
         let home = tempfile::tempdir().unwrap();
         let host = Host::open(home.path()).unwrap();
         host.skills()
@@ -2429,6 +2447,7 @@ mod tests {
                 ("Implementing", "Stock and 3 of your rules".into()),
                 ("Reviewing", "Stock".into()),
                 ("Keeping a PR", "Stock".into()),
+                ("Assisting", "Stock".into()),
             ]
         );
     }
@@ -2452,7 +2471,9 @@ mod tests {
                 "Coordinator v12",
                 "Implementer v4",
                 "Verifier v2",
-                "PR keeper v1"
+                "PR keeper v1",
+                "Thread contract v1",
+                "Assistant v1"
             ]
         );
     }
@@ -2843,13 +2864,14 @@ mod tests {
                 "Rewritten · updated",
                 "Stock",
                 "Rewritten · needs you",
+                "Stock",
                 "Stock"
             ]
         );
         // The sidebar's Skills row shows its dot for any rewrite out of date, as one with a
         // question is, and for no merge note.
         let dotted: Vec<_> = skills.iter().map(out_of_date).collect();
-        assert_eq!(dotted, [false, false, true, false]);
+        assert_eq!(dotted, [false, false, true, false, false]);
         assert_eq!(
             list_who(&skills[2]),
             "Testers and reviewers · v1 and your rewrite disagree about one passage"

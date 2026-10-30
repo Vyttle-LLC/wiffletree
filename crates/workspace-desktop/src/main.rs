@@ -1,6 +1,7 @@
 mod activity;
 mod agents_panel;
 mod assets;
+mod assistant_view;
 mod attachment_chips;
 mod automation;
 mod background;
@@ -219,6 +220,8 @@ enum Page {
     Brains,
     /// One brain's Status, Wiki, Logs and Conflicts, opened from Brains or a Memory panel.
     BrainBrowser,
+    /// The assistant and its thread tabs.
+    Assistant,
 }
 
 struct Workspace {
@@ -245,6 +248,7 @@ struct Workspace {
     brain_browser: Entity<brain_browser_view::BrainBrowser>,
     brain_search: Entity<brain_search::BrainSearch>,
     issues: Entity<issues_view::IssuesPage>,
+    assistant: Entity<assistant_view::AssistantPage>,
     usage: Entity<usage_view::UsagePage>,
     sidebar: Entity<sidebar::Sidebar>,
     inspector: Entity<Inspector>,
@@ -305,6 +309,8 @@ impl Workspace {
         cx.observe(&brain_search, |_, _, cx| cx.notify()).detach();
         let issues = cx.new(|cx| issues_view::IssuesPage::new(bridge.clone(), window, cx));
         Self::adopt(&issues, window, cx);
+        let assistant = cx.new(|cx| assistant_view::AssistantPage::new(bridge.clone(), window, cx));
+        Self::adopt(&assistant, window, cx);
         let sidebar = cx.new(|cx| sidebar::Sidebar::new(bridge.clone(), window, cx));
         Self::adopt(&sidebar, window, cx);
         let usage = cx.new(|_| usage_view::UsagePage::new(bridge.clone()));
@@ -331,6 +337,7 @@ impl Workspace {
             brain_browser,
             brain_search,
             issues,
+            assistant,
             usage,
             sidebar,
             inspector,
@@ -495,6 +502,12 @@ impl Workspace {
                 title,
                 defaults,
             } => self.open_issue_project(id.clone(), title.clone(), defaults.clone(), window, cx),
+            Intent::SuggestSpace { name, description } => {
+                self.open_page(Page::Spaces, window, cx);
+                self.spaces.update(cx, |spaces, cx| {
+                    spaces.suggested(name, description, window, cx)
+                });
+            }
         }
         self.share(window, cx);
         cx.notify();
@@ -521,6 +534,9 @@ impl Workspace {
             .update(cx, |browser, cx| browser.share(shared.clone(), window, cx));
         self.issues
             .update(cx, |issues, cx| issues.share(shared.clone(), window, cx));
+        self.assistant.update(cx, |assistant, cx| {
+            assistant.share(shared.clone(), window, cx)
+        });
         self.models
             .update(cx, |models, cx| models.share(shared.clone(), window, cx));
         self.skills
@@ -1004,6 +1020,9 @@ impl Workspace {
             Page::Skills => self.skills.update(cx, |skills, cx| {
                 skills.open_skill(skills_view::SkillView::List, window, cx)
             }),
+            Page::Assistant => self
+                .assistant
+                .update(cx, |assistant, cx| assistant.opened(window, cx)),
             _ => {}
         }
         self.share(window, cx);

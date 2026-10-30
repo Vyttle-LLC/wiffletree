@@ -2,13 +2,13 @@ Six stages, each a ticket or a few, each landing on its own. Every stage needs `
 
 ## 1. Assistant threads, choosing the Space by hand
 
-- [ ] 1.1 Core: `assistant.rs` (`Thread`), `Role::Assistant`, `Job::Assistant`; thread commands.
-- [ ] 1.2 Host: thread sessions owned by their Space (`SessionOwner::Space`), with scratch folders and the restricted launch for Claude and Codex; check the tools and MCP servers a run reports. Verify a denied shell write, a refused write outside scratch, a scratch write and an unexpected MCP server.
-- [ ] 1.3 Host: the Assistant core, the Assisting skill and Space instructions; thread workspace tools (`save_output`, `suggest_space`, the project brief); the brain tools come in 1.8. Verify instruction order and that coordination tools are not offered.
-- [ ] 1.4 Host: Make this a project, in the thread's Space with its repositories; the private board store for `save_output`.
-- [ ] 1.5 Models: the Assistant row, its upgrade copy, and Space default models with fallback notes.
-- [ ] 1.6 Desktop: sidebar's pinned assistant row; assistant view with tabs, Space chip in the composer, idle threads leaving the strip, search, delete; the assistant's name in Settings.
-- [ ] 1.7 Docs: README and DEVELOPMENT notes on threads' authority.
+- [x] 1.1 Core: `assistant.rs` (`Thread`), `Role::Assistant`, `Job::Assistant`; thread commands.
+- [x] 1.2 Host: thread sessions owned by their Space (`SessionOwner::Space`), with scratch folders and the restricted launch for Claude and Codex; check the tools and MCP servers a run reports. Verify a denied shell write, a refused write outside scratch, a scratch write and an unexpected MCP server.
+- [x] 1.3 Host: the Assistant core, the Assisting skill and Space instructions; thread workspace tools (`save_output`, `suggest_space`, the project brief); the brain tools come in 1.8. Verify instruction order and that coordination tools are not offered.
+- [x] 1.4 Host: Make this a project, in the thread's Space with its repositories; the private board store for `save_output`.
+- [x] 1.5 Models: the Assistant row, its upgrade copy, and Space default models with fallback notes.
+- [x] 1.6 Desktop: sidebar's pinned assistant row; assistant view with tabs, Space chip in the composer, idle threads leaving the strip, search, delete; the assistant's name in Settings.
+- [x] 1.7 Docs: README and DEVELOPMENT notes on threads' authority.
 - [ ] 1.8 Host: the brain tools, each once its change has landed, so stage 1 does not wait for them: `log_work` to the Space's brain after `brain-log-capture` (task 7.1, moved here from its task 2.4), and `query_brain` on the Space's brain after `brain-browser` (task 8.1, moved here from its task 2.1). Until then a thread asked to remember something says it cannot yet. Verify the instruction order and tool list before and after each lands.
 
 ## 2. The router

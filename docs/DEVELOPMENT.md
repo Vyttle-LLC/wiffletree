@@ -420,6 +420,23 @@ Last checked on October 19, 2026, on macOS 27.0.1 (26A434), signed with *Apple D
 
 Repeat the check with the Developer ID before the first launchd release.
 
+## Assistant threads
+
+An assistant thread is a session of role `Assistant` that a Space owns (`SessionOwner::Space`), with no project, parent or ticket. Its `sessions`, `messages`, `activity` and `usage_requests` rows have a NULL `project_id`; the upgrade rebuilds those four tables to allow it. Its record is in `threads`, its scratch folder is `<data folder>/assistant/threads/<thread-id>/`, its attachments are under `<data folder>/assistant/attachments/`, and what `save_output` keeps is in the local Git repository `<data folder>/boards/`, with a folder per Space. None of it is in a snapshot's sessions or the archive, a connection without the app's credential gets no `threads`, and every thread command is the human's.
+
+Threads are the one kind of turn, besides comment sorting, that does not run in YOLO mode (`crates/workspace-host/src/provider/restricted.rs`):
+
+- **Claude**: `--permission-mode dontAsk`, `--setting-sources ""`, so no user, project or scratch settings file can allow more, `--tools` limited to `Read`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, `Write` and `Edit`, plus `Bash` only for a CLI source, and `--allowedTools` with writes only under `//<scratch>/**`, the thread tools, each source's MCP tools and `Bash(<prefix>:*)` per CLI prefix. `--strict-mcp-config` loads only the thread's workspace server (`workspace-host thread-mcp`) and its Space's MCP sources, from `~/.claude.json`.
+- **Codex**: `exec --sandbox workspace-write --cd <scratch>` with `--ignore-user-config` and `--ignore-rules`, approvals `never`, shell network off, `exclude_slash_tmp` and `exclude_tmpdir_env_var` true, no writable roots, `web_search="live"`, the features that act outside the sandbox or start agents turned off, and only the workspace server and the Space's MCP sources, from `config.toml`, each limited with `enabled_tools`.
+
+The host reads what a run reports: Claude's `init` must list no MCP server, tool or permission mode it was not given, and a Codex MCP call must name a given server; otherwise the turn stops, and the thread shows why. `tests/assistant.rs` checks the launch and the stop with a fake provider. `tests/thread_authority.rs` runs the real CLIs and needs both signed in, so it is ignored by default:
+
+```sh
+cargo nextest run -p workspace-host --test thread_authority --run-ignored only
+```
+
+It checks that Claude denies a shell commit in a repository and a write outside the scratch folder and allows one in it, and that Codex refuses writes to a repository, `/tmp` and `$TMPDIR` and allows one in the scratch folder. It passed on October 30, 2026, with Claude Code 2.1.310 and codex-cli 0.160.0.
+
 ## Current limits
 
 - Acceptance preserves the tested branch. **Merging into a protected branch is manual**: Wiffletree pushes a ticket's branch and opens its pull request through `publish_ticket`, and merges a ticket's pull request only through `merge_ticket`, only into a branch that is not protected and only in an allowed owner's repository (see [repository owners and publishing](#repository-owners-and-publishing)). It never merges into a protected branch and never approves, closes or comments on a pull request. No dependency rebase or combined integration testing is implemented, and conflict fixing is limited to the PR keeper's one checked try. The PR watcher reads PR status and tells the coordinator when a PR merges, but accepting the ticket stays the coordinator's call.

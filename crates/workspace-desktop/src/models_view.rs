@@ -986,6 +986,7 @@ fn job_label(job: &Job, verifiers: &[VerifierConfig]) -> (String, String) {
         Job::Implementer => ("Implementer".into(), "Writes the change".into()),
         Job::Tester => ("Tester".into(), "Runs build, lint, tests".into()),
         Job::Keeper => ("PR keeper".into(), "Fixes conflicts, sorts comments".into()),
+        Job::Assistant => ("Assistant".into(), "Answers in your threads".into()),
         Job::Verifier { focus } => {
             let verifier = (verifiers.iter()).find(|v| v.focus.eq_ignore_ascii_case(focus));
             let role = verifier.map_or(Role::Reviewer, |v| v.role);

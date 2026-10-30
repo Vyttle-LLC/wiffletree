@@ -232,6 +232,21 @@ impl SpacesPage {
         self.show(Shown::Space(space), window, cx);
     }
 
+    /// Opens New filled in with what a thread suggested; nothing is created until Save.
+    pub(super) fn suggested(
+        &mut self,
+        name: &str,
+        description: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show(Shown::New, window, cx);
+        self.name
+            .update(cx, |input, cx| input.set_value(name.to_owned(), window, cx));
+        self.description.update(cx, |input, cx| {
+            input.set_value(description.to_owned(), window, cx)
+        });
+    }
     fn show(&mut self, shown: Shown, window: &mut Window, cx: &mut Context<Self>) {
         self.error = None;
         self.refused_by = None;
@@ -937,7 +952,20 @@ impl SpacesPage {
     }
 
     fn models_field(&self, local: Option<&SpaceLocal>, p: Palette, cx: &mut Context<Self>) -> Div {
-        let notes = local.map_or(&[][..], |l| &l.notes);
+        let selection = self.shared.snapshot().map(|s| &s.model_selection);
+        // Jobs follow the Assistant row until a Job row exists.
+        let row = selection.and_then(|s| s.row(&Job::Assistant));
+        let fallbacks = [
+            ("threads", &self.models.threads),
+            ("jobs", &self.models.jobs),
+        ]
+        .into_iter()
+        .filter_map(|(which, model)| {
+            fallback_note(which, model.as_ref(), local, &self.shared.detection, row)
+        });
+        let notes: Vec<String> = (local.map_or(&[][..], |l| &l.notes).iter().cloned())
+            .chain(fallbacks)
+            .collect();
         div()
             .flex()
             .flex_col()
@@ -1567,6 +1595,40 @@ fn place(named: String, at: String, choose: Button, p: Palette) -> Div {
         .child(choose)
 }
 
+/// What a Space's default model for `which`, threads or jobs, falls back to on this Mac when this
+/// Mac cannot run it: its provider is signed out here, or this Mac's list for the Space leaves
+/// it out. Then they start on the Assistant row's first choice this Mac can run.
+fn fallback_note(
+    which: &str,
+    model: Option<&SpaceModel>,
+    local: Option<&SpaceLocal>,
+    detection: &Detection,
+    row: Option<&JobRow>,
+) -> Option<String> {
+    let model = model?.profile();
+    let signed_in = |p: Provider| detection.get(&p).is_none_or(ProviderStatus::usable);
+    let allowed = (local.and_then(|l| l.models.as_ref())).is_none_or(|models| {
+        models
+            .iter()
+            .any(|m| m.provider == model.provider && m.model == model.model)
+    });
+    if signed_in(model.provider) && allowed {
+        return None;
+    }
+    let fallback = row.and_then(|row| row.main.choices().find(|p| signed_in(p.provider)));
+    Some(match fallback {
+        Some(fallback) => format!(
+            "{} is not available here; {which} use {}.",
+            model.short(),
+            fallback.short()
+        ),
+        None => format!(
+            "{} is not available here, and neither is the Assistant row in Who runs what.",
+            model.short()
+        ),
+    })
+}
+
 pub(super) fn space_mark(color: Hsla) -> Div {
     div().size(px(8.)).flex_none().rounded(px(2.)).bg(color)
 }
@@ -1887,9 +1949,9 @@ impl Render for SpacesPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        Joining, brain_after_choosing, brain_label, format_sources, holds_draft, issues_line,
-        join_choices, join_refused_by, merged, new_storage_line, parse_sources, prefix_question,
-        readers_line, repository_line, shared_with, storage_banner, sync_line,
+        Joining, brain_after_choosing, brain_label, fallback_note, format_sources, holds_draft,
+        issues_line, join_choices, join_refused_by, merged, new_storage_line, parse_sources,
+        prefix_question, readers_line, repository_line, shared_with, storage_banner, sync_line,
     };
     use workspace_core::*;
 
@@ -1930,6 +1992,64 @@ mod tests {
             synced_at: None,
             error: None,
         }
+    }
+
+    #[test]
+    fn a_default_model_this_mac_cannot_run_says_what_threads_and_jobs_use_instead() {
+        let profile = |provider, model: &str, effort: &str| ModelProfile {
+            provider,
+            model: model.into(),
+            effort: effort.into(),
+        };
+        let opus = SpaceModel::from(profile(Provider::Claude, "opus", "high"));
+        let row = JobRow {
+            job: Job::Assistant,
+            main: Line {
+                first: profile(Provider::Claude, "sonnet", "medium"),
+                then: Then::Model(profile(Provider::Codex, "gpt-6.1-sol", "medium")),
+            },
+            small: None,
+        };
+        let status = |signed_in| ProviderStatus {
+            installed: true,
+            signed_in,
+            plan: None,
+        };
+        let both: Detection = [
+            (Provider::Claude, status(true)),
+            (Provider::Codex, status(true)),
+        ]
+        .into();
+        assert_eq!(
+            fallback_note("jobs", Some(&opus), None, &both, Some(&row)),
+            None
+        );
+        assert_eq!(fallback_note("jobs", None, None, &both, Some(&row)), None);
+        let no_claude: Detection = [
+            (Provider::Claude, status(false)),
+            (Provider::Codex, status(true)),
+        ]
+        .into();
+        assert_eq!(
+            fallback_note("jobs", Some(&opus), None, &no_claude, Some(&row)).unwrap(),
+            "Opus · high is not available here; jobs use GPT 6.1 Sol · medium."
+        );
+        // This Mac's list for the Space leaves the model out.
+        let only_sonnet = SpaceLocal {
+            models: Some(vec![profile(Provider::Claude, "sonnet", "medium")]),
+            ..SpaceLocal::default()
+        };
+        assert_eq!(
+            fallback_note(
+                "threads",
+                Some(&opus),
+                Some(&only_sonnet),
+                &both,
+                Some(&row)
+            )
+            .unwrap(),
+            "Opus · high is not available here; threads use Sonnet · medium."
+        );
     }
 
     #[test]

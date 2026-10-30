@@ -42,6 +42,10 @@ pub(super) struct Settings {
     remote_error: Option<String>,
     /// The page is looking again on a timer.
     watching_remote: bool,
+    /// The assistant's name while the user renames it.
+    assistant_input: Entity<InputState>,
+    renaming_assistant: bool,
+    assistant_error: Option<String>,
 }
 
 /// A check-in threshold's presets, the unit they count and how a choice sets it.
@@ -146,7 +150,15 @@ impl Settings {
                 let repository_input = cx.new(|cx| {
                     InputState::new(window, cx).placeholder("owner/name or a GitHub URL")
                 });
+                let assistant_input =
+                    cx.new(|cx| InputState::new(window, cx).placeholder("Dot, Sage, Assistant"));
                 let view = cx.new(|cx| {
+                    cx.subscribe(&assistant_input, |view: &mut Self, _, event, cx| {
+                        if matches!(event, InputEvent::PressEnter { .. }) {
+                            view.save_assistant_name(cx);
+                        }
+                    })
+                    .detach();
                     let mut view = Self {
                         bridge,
                         driving,
@@ -166,6 +178,9 @@ impl Settings {
                         remote: None,
                         remote_error: None,
                         watching_remote: false,
+                        assistant_input,
+                        renaming_assistant: false,
+                        assistant_error: None,
                     };
                     view.ask_host(ask::settings(), cx);
                     view.ask_remote_here(cx);
@@ -454,6 +469,88 @@ impl Settings {
             ))
     }
 
+    /// The assistant's name, which every Mac sharing these settings shows.
+    fn assistant_section(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        let name = self.host.as_ref().map(|h| h.assistant_name.clone());
+        let control = match self.renaming_assistant {
+            true => div()
+                .flex()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(200.))
+                        .child(Input::new(&self.assistant_input).small()),
+                )
+                .child(
+                    button("save-assistant-name")
+                        .primary()
+                        .small()
+                        .label("Save")
+                        .on_click(cx.listener(|v, _, _, c| v.save_assistant_name(c))),
+                ),
+            false => div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(name.clone().unwrap_or_default())
+                .child(
+                    button("rename-assistant")
+                        .small()
+                        .label("Rename")
+                        .disabled(name.is_none())
+                        .on_click(cx.listener(move |v, _, w, c| {
+                            v.renaming_assistant = true;
+                            let current = name.clone().unwrap_or_default();
+                            v.assistant_input.update(c, |input, c| {
+                                input.set_value(current, w, c);
+                                input.focus(w, c);
+                            });
+                            c.notify();
+                        })),
+                ),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(section("ASSISTANT", p))
+            .child(setting(
+                "Name",
+                control,
+                "Shown in the sidebar and the composer. Your other Macs get it with the shared settings.",
+                p,
+            ))
+            .children(
+                (self.assistant_error.clone()).map(|error| hint(error, p).text_color(p.red)),
+            )
+    }
+    fn save_assistant_name(&mut self, cx: &mut Context<Self>) {
+        let name = self.assistant_input.read(cx).value().to_string();
+        let answer = match self.bridge.ask(ask::set_assistant_name(name)) {
+            Ok(answer) => answer,
+            Err(error) => {
+                self.assistant_error = Some(error);
+                return cx.notify();
+            }
+        };
+        cx.spawn(async move |this, cx| {
+            let answer = answer.await;
+            let _ = this.update(cx, |view, cx| {
+                match answer {
+                    Ok(name) => {
+                        view.renaming_assistant = false;
+                        view.assistant_error = None;
+                        if let Some(host) = &mut view.host {
+                            host.assistant_name = name;
+                        }
+                    }
+                    Err(error) => view.assistant_error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
     fn check_in_section(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let mut section_body = div()
             .flex()
@@ -643,6 +740,8 @@ impl Render for Settings {
                     ))
                     .children(self.driving.changes_refused().map(|reason| hint(reason, p)))
                     .child(self.folder_section(p, cx))
+                    .child(rule())
+                    .child(ui::locked(self.assistant_section(p, cx), &self.driving, p))
                     .child(rule())
                     .child(self.check_in_section(p, cx))
                     .child(rule())

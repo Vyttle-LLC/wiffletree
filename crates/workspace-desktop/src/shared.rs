@@ -253,6 +253,11 @@ pub(super) enum Intent {
         title: String,
         defaults: IssueProjectDefaults,
     },
+    /// Opens a new Space's form filled in as a thread suggested; nothing is saved yet.
+    SuggestSpace {
+        name: String,
+        description: String,
+    },
 }
 
 /// A change to the snapshot the host has confirmed.

@@ -509,6 +509,7 @@ impl Sidebar {
                             .on_click(cx.listener(|v, _, w, c| v.new_project(w, c))),
                     ),
             )
+            .child(self.assistant_row(p, cx))
             .child(
                 div()
                     .px_4()
@@ -602,6 +603,39 @@ impl Sidebar {
                 self.sidebar_footer(p, cx)
                     .relative()
                     .children(self.update_card(p, cx)),
+            )
+    }
+
+    /// The assistant, pinned above Projects by the name the user gave it, with a working mark
+    /// while any thread is in a turn. Dragging projects never moves it.
+    fn assistant_row(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        let snapshot = self.shared.snapshot();
+        let working = snapshot.is_some_and(|s| assistant_view::any_working(&s.threads));
+        let selected = self.shared.page == Page::Assistant;
+        div()
+            .flex_none()
+            .px_2()
+            .pt_2()
+            .pb_1()
+            .border_b_1()
+            .border_color(p.edge.opacity(edge::LIGHT))
+            .child(
+                self.row("assistant-row".into(), selected, p)
+                    .on_click(cx.listener(|_, _, _, c| c.emit(Intent::OpenPage(Page::Assistant))))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(if selected { p.text } else { p.subtle })
+                            .child(icon("people").size(px(14.))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(assistant_view::assistant_name(snapshot)),
+                    )
+                    .when(working, |d| {
+                        d.child(ui::Spinner::new().xsmall().color(p.accent))
+                    }),
             )
     }
 

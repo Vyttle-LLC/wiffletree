@@ -927,6 +927,8 @@ impl Render for Workspace {
             Page::Brains => self.brains.clone().cached(full()).into_any_element(),
             Page::BrainBrowser => self.brain_browser.clone().cached(full()).into_any_element(),
             Page::Issues => self.issues.clone().cached(full()).into_any_element(),
+            // Not cached: its tabs' working marks turn on the animation clock.
+            Page::Assistant => self.assistant.clone().into_any_element(),
             Page::Conversation if self.shared.selected_session().is_some() => {
                 // Not cached: GPUI draws every view inside a cached view that renders again,
                 // so the transcript is cached only below an uncached conversation.
