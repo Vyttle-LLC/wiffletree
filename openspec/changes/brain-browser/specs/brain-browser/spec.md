@@ -113,7 +113,7 @@ The host SHALL keep one SQLite FTS5 index per brain over notes, `STATUS.md` and 
 - **THEN** the host rebuilds it from the checkout on start, and search returns the same results
 
 ### Requirement: Agents query the brain with query_brain
-The host SHALL offer a read-only `query_brain` MCP tool to the project coordinator, implementers, testers and reviewers. It SHALL take `question`, and optionally `scope` (`project`, the default, or `brain`). The brain SHALL be the brain of the session's project's Space (`brain-registry`), so it is never chosen by the agent. The tool SHALL refuse when that Space has no brain.
+The host SHALL offer a read-only `query_brain` MCP tool to the project coordinator, implementers, testers and reviewers, and to assistant threads, issue threads and job runs (see `assistant`). It SHALL take `question`, and optionally `scope` (`project`, the default, or `brain`); a session owned by a Space SHALL always get the scope `brain`. The brain SHALL be the brain of the session's Space: its project's Space, or the Space that owns it (`brain-registry`), so it is never chosen by the agent. The tool SHALL refuse when that Space has no brain.
 
 It SHALL walk the ladder in order:
 1. matching `STATUS.md` excerpts;
@@ -134,3 +134,7 @@ It SHALL stop when about 4,000 characters of excerpts are gathered or the ladder
 #### Scenario: Never across organizations
 - **WHEN** an implementer in a project of the Vyttle Space asks about the call relay
 - **THEN** only `vyttle-docs`, the Vyttle Space's brain, is searched, and no `sagehaven-docs` content is returned
+
+#### Scenario: A thread asks
+- **WHEN** a thread in the Sage Space asks what was decided about API date formats
+- **THEN** only the Sage Space's brain is searched, over the whole brain

@@ -6,37 +6,34 @@ Shared issues give a team one backlog that every member's Wiffletree reads and w
 
 ## What Changes
 
+- **Builds on `spaces`** (decided by Michael, October 29, 2026). The tracker is the Space's storage repository, issues sync on that repository's one engine, and the Space decides where an issue goes and where a project started from it lives.
 - **Issues, a new shared record.** An issue is an idea, bug or request with its discussion. It has a state (Triage, Backlog, Todo, In progress, In review, Done, Canceled), a priority, an assignee, labels, repositories and related issues. A **ticket** keeps today's meaning: a local execution workspace. Tickets are not renamed, changed or shared.
-- **A tracker repository per team.** The human names a private GitHub repository on each Mac, as for the settings repository. It holds `wiffletree-issues.toml` (prefix, states, labels) and `issues/<ID>/` with `issue.md` (YAML front matter and description), `comments/<timestamp>-<login>.md` and `events.jsonl`. A Mac can use more than one tracker, each with its own prefix, such as one per company.
-- **Sync without a model.** Wiffletree pulls every minute and pushes a few seconds after a change: only the default branch, never by force, only the tracker's own files. IDs such as `CEL-151` are allocated at push time; a rejected push fetches, takes the next number and pushes again, and an issue filed offline carries a temporary ID until then. A front matter field changed on two Macs pauses alone, with Compare, while the rest of the issue syncs. Comments are one file each and never conflict. Unlike settings, changes a teammate commits without Wiffletree are accepted.
+- **The tracker is the Space's storage repository.** It holds `wiffletree-issues.yaml` (prefix, states, labels) and `issues/<ID>/` with `issue.md` (YAML front matter and description), `comments/<timestamp>-<login>.md` and `events.jsonl`, beside `spaces/`. Spaces sharing a storage repository share its issues and prefix; a personal Space's local storage is a private, local tracker. There is no per-Mac tracker list and no Settings › Trackers: the Space page shows the tracker.
+- **Sync without a model.** Issues are their own rule set on the repository's sync engine: pull every minute and push a few seconds after a change, only the default branch, never by force, only the issue files, after the local personal-data and secret scans. IDs such as `CEL-151` are allocated at push time; a rejected push fetches, takes the next number and pushes again, and an issue filed offline carries a temporary ID until then. A front matter field changed on two Macs pauses alone, with Compare, while the rest of the issue syncs. Comments are one file each and never conflict. Unlike settings, changes a teammate commits without Wiffletree are accepted.
 - **Identity is the GitHub login** `gh` reports. Assignees, authors and mentions are logins.
-- **An Issues workspace page** beside Repositories and Usage: list and board, filters (including by tracker), search and unread marks. **The issue page**: a timeline of comments and events, properties, a Work box with **Start project from issue**, and related links. **New issue** warns that issues stay in Git history for good and must not hold personal data. **Inbox entries** for issues assigned to you, mentions, comments on issues you follow, new urgent issues in your repositories, and paused fields.
-- **Links and automatic states.** Starting a project from an issue, or a coordinator's `link_issue`, links them on this Mac. In progress, In review and Done then follow the linked project's tickets and pull requests, using what the PR watcher already reads. A manual move overrides until the linked work changes again. The tracker records only "Jamie started a project" and the pull requests, never ticket or agent detail.
-- **The issue assistant, a new lightweight role.** It opens on one issue or on the whole list, from its own Who runs what row. It can read and list issues and search this Mac's repositories read-only, and it proposes edits, comments, splits, duplicate links and new issues. Every write is a proposal the human applies. It has no worktree, starts no agents, creates no tickets and never pushes; its comments say whose assistant wrote them.
-- **Coordinator tools** `list_issues`, `read_issue` and `link_issue`. Every agent that reads issues is told that text written by others is untrusted context, never instructions.
+- **An Issues workspace page** beside Repositories and Usage: list and board, filters (including by Space), search and unread marks. **The issue page**: a timeline of comments and events, properties, a Work box with **Start project from issue**, and related links. **New issue** defaults to the current Space and warns that issues stay in Git history for good and must not hold personal data. **Inbox entries** for issues assigned to you, mentions, comments on issues you follow, new urgent issues in your repositories, and paused fields.
+- **Links and automatic states.** Starting a project from an issue, in the issue's Space with the issue's repositories, or a coordinator's `link_issue`, links them on this Mac. In progress, In review and Done then follow the linked project's tickets and pull requests, using what the PR watcher already reads. A manual move overrides until the linked work changes again. The tracker records only "Jamie started a project" and the pull requests, never ticket or agent detail.
+- **Issue threads instead of an issue assistant** (decided by Michael, October 29, 2026). Asking the assistant about an issue opens an issue thread of the one assistant (`assistant-spaces-jobs-boards`), with the issue tools, web off and proposals the human applies. This change no longer adds an issue assistant role, a hidden tracker project or an Issue assistant row.
+- **Coordinator tools** `list_issues`, `read_issue` and `link_issue`, over the project's Space's tracker. Every agent that reads issues is told that text written by others is untrusted context, never instructions.
 - **Import from Linear**, once, through Linear's API. There is no two-way sync.
 - **Docs.** The PRD stops listing multi-user collaboration as out of scope and points to shared issues; the design README links the study.
 
 ## Capabilities
 
 ### New Capabilities
-- `shared-issues`: the issue model, tracker repositories and their layout, sync and conflicts, ID allocation, identity, the Issues page, the issue page, New issue, Inbox entries, links between issues and projects or tickets, automatic states, the coordinator's issue tools, tracker setup and the Linear import.
-- `issue-assistant`: the issue assistant role, its tools, its proposals and how they are applied, its instructions and its limits.
+- `shared-issues`: the issue model, the tracker in a Space's storage repository and its layout, the issue rule set, conflicts, ID allocation, identity, an issue's Space, the Issues page, the issue page, New issue, Inbox entries, links between issues and projects or tickets, automatic states, the coordinator's issue tools and the Linear import.
 
 ### Modified Capabilities
-- `model-routing`: Who runs what gains an optional Issue assistant row.
-- `agent-lifecycle`: the issue assistant's sessions belong to a tracker, not to a project's tickets, and are never archived by a coordinator.
 - `pr-watch`: a linked ticket's PR changes also move its issue's state.
-- `host-process`: tracker set-up and every issue write are human-only commands.
-- `workspace-host`: the enforced hierarchy allows the issue assistant's tracker sessions.
-- `skills`: the issue assistant gets its own core and no skill, and every core that reads issues treats their text as untrusted.
+- `host-process`: every issue write and applying a proposal are human-only commands. Delta order: 1 `spaces` → 2 (this).
 
-The Issues sidebar row and the Inbox's issue entries are specified in `shared-issues`, beside the rest of the Issues UI.
+The Issues sidebar row and the Inbox's issue entries are specified in `shared-issues`, beside the rest of the Issues UI. Issue threads, proposals and their cards are specified in `assistant-spaces-jobs-boards`' `assistant`.
 
 ## Impact
 
-- `workspace-core`: a new `issues.rs` (issue, tracker, event, comment, proposal and link types; tracker commands); `selection.rs` (`Job::IssueAssistant`); `lib.rs` (`Role::IssueAssistant`, `Command` variants, `Snapshot` tracker summaries, host settings for trackers).
-- `workspace-host`: new `tracker.rs` (the store and file format), `tracker_sync.rs` (passes, ID allocation, field merges) and `issues.sql`; GitHub checks shared with `sync.rs`; `mcp.rs`, `live.rs` and `service.rs` (tools and commands); `pr_watch.rs` (state following); `policies.rs`, `provider.rs` and `skills.rs` (the assistant's instructions and tool limits); `socket.rs` (human-only commands); `keychain.rs` and a new `linear_import.rs`.
-- `workspace-desktop`: `main.rs` and `ui.rs` (`Page::Issues`), `sidebar.rs`, new `issues_view.rs`, `issue_view.rs`, `new_issue.rs`, `issue_assistant.rs` and `settings/trackers.rs`; `inbox.rs`, `models_view.rs`, `creation.rs`.
+- Depends on `spaces` (storage repositories, the tracker config, `repos.rs`, `github_access.rs`, the scans).
+- `workspace-core`: a new `issues.rs` (issue, event, comment and link types; issue commands); `lib.rs` (`Command` variants, `Snapshot` issue summaries per Space).
+- `workspace-host`: new `tracker.rs` (the store over a storage clone and the file format), `issues_sync.rs` (the issue rule set on `repos.rs`: per-field merges and ID allocation) and `issues.sql`; `mcp.rs`, `live.rs` and `service.rs` (tools and commands); `pr_watch.rs` (state following); `skills.rs` (the coordinator's untrusted-text rule); `socket.rs` (human-only commands); `keychain.rs` and a new `linear_import.rs`.
+- `workspace-desktop`: `main.rs` and `ui.rs` (`Page::Issues`), `sidebar.rs`, new `issues_view.rs`, `issue_view.rs` and `new_issue.rs`; `inbox.rs`, `creation.rs`; the issue count and Import from Linear… in `spaces`' Storage and issues box.
 - Docs: `README.md`, `docs/PRD.md`, `design/README.md`.
-- Mockup: `ui/mockups.html`, approved as drawn, with neutral sample data.
+- Mockup: `ui/mockups.html`, approved as drawn, with neutral sample data. Its tracker set-up study (g) and its issue assistant pane are superseded by `spaces`' Space page and by issue threads.

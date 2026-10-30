@@ -1,4 +1,4 @@
-No dependency on the other brain changes for steps 1–3. Step 4 needs `brain-registry-sync`.
+No dependency on the other brain changes, or on `spaces`, for steps 1–3, which may start now. `spaces` task 4.4 runs `sensitive-info` and `secret-scan` from `gate/` on this Mac, so it needs steps 1–2. Step 4 needs `brain-registry-sync`.
 
 ## 1. Move the gate into Wiffletree
 

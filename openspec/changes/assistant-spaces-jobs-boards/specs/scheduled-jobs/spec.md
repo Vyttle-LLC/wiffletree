@@ -12,7 +12,7 @@ A job SHALL be a recipe with a name, a prompt, a schedule with an IANA timezone,
 - **THEN** a new read-only thread starts in Personal with the recipe's prompt, and no earlier run's conversation
 
 ### Requirement: Only the user saves a job
-The user SHALL create a job by asking the assistant in plain words. The thread SHALL answer with a recipe card showing every field of the recipe, its schedule in plain words with its next three run times, and each source with its tools or commands. Only the user's Save on that card, or on the job's page, SHALL save or change a job; saving SHALL be a command only the user's client can send. No tool, thread, job run, brain note, log, output, file, issue, pull request comment or message SHALL create, change, enable or schedule a job. A job run SHALL NOT offer a recipe card.
+The user SHALL create a job by asking the assistant in plain words. The thread SHALL answer with a recipe card showing every field of the recipe, its schedule in plain words with its next three run times, and each source with its tools or commands. Only the user's Save on that card, or on the job's page, SHALL save or change a job; saving SHALL be a command only the user's client can send. No tool, thread, job run, brain note, log, output, file, issue, pull request comment or message SHALL create, change, enable or schedule a job. Built-in host jobs are not saved at all (see "Built-in host jobs"). A job run SHALL NOT offer a recipe card.
 
 #### Scenario: Asking for a brief
 - **WHEN** the user writes "every weekday at 7, give me a brief of my calendar, Sage PRs and Sentry issues"
@@ -107,3 +107,17 @@ A job run SHALL have no time limit. A run that has run 30 minutes, and every 30 
 #### Scenario: A failed brief
 - **WHEN** the morning brief did not start because gh was signed out
 - **THEN** the assistant's row shows one item needing attention, which opens the job's page with the reason
+
+### Requirement: A runner's output pushes without comparing
+In a storage repository on GitHub, the files under `spaces/<space>/boards/` SHALL be their own rule set of the repository's sync engine (see `shared-repositories`). An output written by its job's runner on this Mac SHALL push without being compared against other machines, because only the runner writes it, and a push refused because the remote moved SHALL fetch and push again. Another machine's output that lands while this Mac has a local change to the same file SHALL pause like a Space file.
+
+#### Scenario: The runner pushes
+- **WHEN** the release dashboard's runner saves a new version while a teammate's Mac pulled the previous one
+- **THEN** the runner's Mac pushes it without a pause, and the teammate's Mac shows it at its next pull
+
+### Requirement: Built-in host jobs
+The scheduler SHALL also run built-in host jobs, which Wiffletree defines and no one saves, such as brain compile (see `brain-compile`). A built-in job SHALL use the scheduler's due times in an IANA timezone, its daylight-saving rules, one catch-up run after missed times, Run now and run records, and SHALL add its own triggers and conditions. It SHALL belong to its owner, a brain for brain compile, not to a Space; it SHALL NOT be a recipe, SHALL NOT appear in a Space's Jobs list, and SHALL NOT be created, changed or deleted by any user, tool, thread or job run. Its runs SHALL follow its own rules for sessions and models, not the thread authority rules.
+
+#### Scenario: A compile after sleep
+- **WHEN** a brain's compile is due at 02:00 America/New_York and the compiler's Mac sleeps from 01:00 to 07:00
+- **THEN** the scheduler starts one catch-up compile run at 07:00, and no Space's Jobs list shows it

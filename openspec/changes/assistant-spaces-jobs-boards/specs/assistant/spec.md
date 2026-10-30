@@ -71,7 +71,7 @@ The user SHALL NOT have to choose where to file anything. Each thread SHALL belo
 - **THEN** the second message goes to a Vyttle thread, and its log entries go to the Vyttle brain, not the personal brain
 
 ### Requirement: Make this a project
-A thread SHALL offer Make this a project. It SHALL ask the thread to write a project brief from the conversation and show it to the user, who SHALL be able to edit it and SHALL confirm it. Confirming SHALL create a Wiffletree project in the thread's Space, whose first human message is the brief with a link back to the thread, and whose conversation files are copies of the scratch files the user ticks. The thread SHALL stay open and read-only, and SHALL show a link to the project.
+A thread SHALL offer Make this a project. It SHALL ask the thread to write a project brief from the conversation and show it to the user, who SHALL be able to edit it and SHALL confirm it. Confirming SHALL create a Wiffletree project in the thread's Space, with that Space's repositories as New project ticks them (see `spaces`), whose first human message is the brief with a link back to the thread, and whose conversation files are copies of the scratch files the user ticks. The thread SHALL stay open and read-only, and SHALL show a link to the project.
 
 #### Scenario: A thread becomes a project
 - **WHEN** the user confirms Make this a project in a Sage thread about a sign-in bug
@@ -104,3 +104,62 @@ A thread SHALL have a `save_output` tool that takes a file in its scratch folder
 #### Scenario: Saving a chart
 - **WHEN** a thread calls `save_output` for `scratch/costs.html` titled "AWS costs"
 - **THEN** Boards lists "AWS costs" in the thread's Space as only on this Mac, and the file is not pushed anywhere
+
+### Requirement: Issue threads
+The issue page SHALL offer Ask the assistant, which opens the issue thread of that issue, and the Issues page's Ask the assistant SHALL open the list thread of its tracker. The Space SHALL be the issue's Space when the thread is opened (see `shared-issues`, "An issue's Space"). Each issue SHALL have at most one issue thread per Space on this Mac, and each tracker one list thread per Space, resumed when reopened in the same Space; opening it in another Space that shares the tracker SHALL open that Space's own thread, and a thread SHALL never change its Space. An issue thread SHALL be an assistant thread owned by its Space, with the thread authority rules, its Space's instructions and the Assistant row, listed among the assistant's threads with the issue's ID or "Issues" in its title. A message sent in its pane SHALL go to it without the router. Beside the tools every thread has, it SHALL have `list_issues` and `read_issue` over its Space's tracker; `search_repositories` and `read_repository_file`, which search and read its Space's repositories on this Mac at their base branch's fetched head, read-only and never in a worktree; and `propose_edit`, `propose_comment`, `propose_split` and `propose_duplicate`. Because issue text is untrusted, an issue thread SHALL run with web search and web fetch off: Claude SHALL NOT be allowed `WebSearch` or `WebFetch`, and Codex SHALL run with its `web_search` tool off. It SHALL NOT have `link_issue`, `create_ticket`, `assign_ticket` or any tool that writes to a repository or tracker.
+
+#### Scenario: Opening on an issue
+- **WHEN** the human opens the assistant on SAGE-151, closes it, and opens it again
+- **THEN** the same thread resumes in the Sage Space, and its pane names SAGE-151 and the thread's model
+
+#### Scenario: A tracker two Spaces share
+- **WHEN** Sage and Sage Watch share a storage repository, the human opens SAGE-151's issue thread under the Sage filter, then opens it again under the Sage Watch filter
+- **THEN** the second opens a separate Sage Watch thread with Sage Watch's instructions and brain, and the Sage thread stays in Sage, unchanged, for the next time SAGE-151 is opened in Sage
+
+#### Scenario: No web in an issue thread
+- **WHEN** SAGE-151's description asks the reader to fetch a URL with the conversation in it
+- **THEN** the issue thread has no web tool, and nothing is fetched
+
+#### Scenario: Searching a repository
+- **WHEN** an issue thread calls `search_repositories` for "delivery" in `Sage-Social/watch-app`
+- **THEN** the host returns matching lines from the base branch's fetched head, and no worktree or branch is created or changed
+
+#### Scenario: On Codex
+- **WHEN** the Assistant row's first choice is a Codex model and the human opens an issue thread
+- **THEN** the thread runs on Codex in its sandbox with `web_search` off
+
+### Requirement: A thread may propose an issue in its Space
+Every assistant thread, issue threads included, SHALL have `propose_issue`, which drafts an issue for its own Space's tracker. Job runs SHALL NOT have it. A proposed issue SHALL be applied like any other proposal, and SHALL be filed only in the thread's Space's tracker.
+
+#### Scenario: From a conversation to an issue
+- **WHEN** a Sage thread about a watch crash proposes an issue and the human applies it
+- **THEN** the issue is filed in Sage's tracker as the human, and the human can then Start project from issue
+
+### Requirement: Every issue change is a proposal the human applies
+Each `propose_*` call SHALL store a proposal and show it as a card in the thread: an edit as a diff of the fields and description it changes, a comment as its text, a split as the new issues and the edit to the original, a duplicate link as the two issues, and a new issue as its draft. Nothing SHALL reach the tracker until the human chooses Apply. The card SHALL also offer Edit, which opens the proposal in the matching form, and Discard. Applying SHALL be the human's own command and SHALL write as the human. A proposal whose issue changed since it was made SHALL say so and show the diff against the current version before Apply.
+
+#### Scenario: Applying an edit
+- **WHEN** an issue thread proposes acceptance criteria for SAGE-151's description and the human chooses Apply
+- **THEN** SAGE-151's description gains them in one commit authored by the human, and the card shows it was applied
+
+#### Scenario: Discarding
+- **WHEN** the human discards a proposal
+- **THEN** nothing is written to the tracker
+
+#### Scenario: The issue moved on
+- **WHEN** a teammate edits SAGE-151's description after the thread proposed an edit to it
+- **THEN** the card says the description changed since the proposal and shows the proposal against the teammate's version
+
+### Requirement: The assistant's comments say whose assistant wrote them
+A comment applied from a proposal SHALL have the human's login as `author` and as `assistant_for`, and every Mac SHALL show it as written by "Assistant for ‹name›", styled apart from people's comments. An issue filed from a proposal SHALL show it was filed by the assistant for the human.
+
+#### Scenario: A comment from the assistant
+- **WHEN** Jamie applies a proposed comment on SAGE-151
+- **THEN** Priya's Mac shows it as written by "Assistant for Jamie"
+
+### Requirement: Issue threads treat issue text as context
+An issue thread's pane SHALL show a notice naming the people who wrote the issue and its comments. Tool results that carry issue text SHALL mark each passage with its author, as `shared-issues` says, and the thread SHALL act only on the human's messages in its pane.
+
+#### Scenario: A request inside an issue
+- **WHEN** SAGE-151's description asks the reader to close every other issue
+- **THEN** the thread does not propose closing them unless the human asks, and the pane's notice names who wrote the description

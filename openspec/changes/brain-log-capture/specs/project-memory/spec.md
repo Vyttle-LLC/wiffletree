@@ -13,17 +13,15 @@ Logs SHALL carry project, ticket, session, milestone identity, type, title, refe
 
 ## REMOVED Requirements
 
+<!-- Delta order for "Safe Markdown export": 1 spaces (exports to the Space's brain) → 2 brain-log-capture (this), which removes it. -->
+
 ### Requirement: Safe Markdown export
 **Reason**: Writing newest-first into shared `logs/<repo>.md` files conflicts between machines and people. Brains are now team-shared and change only through PRs, so the host writes one new file per entry and never edits an existing file.
-**Migration**: The requirements "Entries follow the per-entry file contract" and "Entries reach the brain in batches" replace it. Rows already exported to a legacy file are brought over by the legacy import, and `log_exports` is dropped after migrating.
+**Migration**: The requirements "Entries follow the per-entry file contract" and "Entries reach the brain in batches" replace it, in the version `spaces` left, which exports to the project's Space's brain. Rows already exported to a legacy file are brought over by the legacy import, and `log_exports` is dropped after migrating.
 
 ### Requirement: Inspectable maintenance
 **Reason**: The export it describes is removed, and with it the maintenance runs. Compilation becomes scheduled compile runs on the brain's compiler host, specified in the `brain-compile` change.
 **Migration**: `maintenance_runs` is dropped after migrating. `brain-compile` specifies compile runs, their history and the rule that a run with nothing pending makes no model call.
-
-### Requirement: Brain pushes from several people
-**Reason**: Michael decided on October 29, 2026 that PR-gated writes supersede `assistant-spaces-jobs-boards`' defaulted decision (c). Brain writes reach `main` only through gated PRs, with one file per entry, so the host never fetches, rebases and pushes `main`, and never merges shared log files as a union.
-**Migration**: The requirements "Entries follow the per-entry file contract" and "Entries reach the brain in batches" here, and `brain-registry`'s batch flow, replace it. This removal applies once `assistant-spaces-jobs-boards` has been archived with the requirement.
 
 ## ADDED Requirements
 

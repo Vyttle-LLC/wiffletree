@@ -9,7 +9,7 @@ Depends on `brain-registry-sync` and `brain-log-capture`. Status and Conflicts b
 
 ## 2. query_brain
 
-- [ ] 2.1 `mcp.rs`: `query_brain` for the coordinator, implementers, testers and reviewers. Resolve the brain and refuse as specified, walk the ladder with the 4,000-character budget, and report freshness and "nothing on this". Test each refusal, the ladder order, a cross-organization attempt and the empty case.
+- [ ] 2.1 `mcp.rs`: `query_brain` for the coordinator, implementers, testers and reviewers, and, once `assistant-spaces-jobs-boards` stage 1 has landed, for threads, issue threads and job runs on their own Space's brain with the whole-brain scope. Resolve the brain and refuse as specified, walk the ladder with the 4,000-character budget, and report freshness and "nothing on this". Test each refusal, the ladder order, a cross-organization attempt and the empty case.
 - [ ] 2.2 Mention `query_brain` in the fixed core instructions, and assert it in `contracts.rs`.
 
 ## 3. Desktop
