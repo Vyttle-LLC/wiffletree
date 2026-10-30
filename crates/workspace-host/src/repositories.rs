@@ -327,15 +327,17 @@ fn github_query(repositories: usize) -> String {
                  parent {{ nameWithOwner }} owner {{ __typename }} defaultBranchRef {{ name }} \
                  squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed \
                  rulesets(first: 100, includeParents: true) {{ nodes {{ name enforcement target \
-                 conditions {{ refName {{ include exclude }} }} }} }} }}"
+                 conditions {{ refName {{ include exclude }} }} }} }} \
+                 branchProtectionRules(first: 100) {{ nodes {{ pattern }} }} }}"
             )
         })
         .collect();
     format!("query({}) {{{aliases} }}", variables.join(", "))
 }
 
-/// The default branch, merge methods and active branch rulesets in a repository's answer. A
-/// rulesets field GitHub would not fill is `null`, which leaves them unread.
+/// The default branch, merge methods, active branch rulesets and classic branch protection
+/// patterns in a repository's answer. A list GitHub would not fill is `null`, which leaves it
+/// unread.
 fn github_branches(node: &Value) -> GitHubBranches {
     let strings = |list: &Value| -> Vec<String> {
         (list.as_array().into_iter().flatten())
@@ -365,6 +367,11 @@ fn github_branches(node: &Value) -> GitHubBranches {
         .map(|(_, method)| method)
         .collect(),
         rulesets,
+        protection_rules: (node["branchProtectionRules"]["nodes"].as_array()).map(|rules| {
+            (rules.iter())
+                .filter_map(|rule| rule["pattern"].as_str().map(str::to_owned))
+                .collect()
+        }),
     }
 }
 
@@ -1206,6 +1213,7 @@ mod tests {
                 ]}),
                 _ => Value::Null,
             };
+            node["branchProtectionRules"] = json!({"nodes": [{"pattern": "hotfix/*"}]});
             Some(node)
         };
         let calls = RefCell::new(vec![]);
@@ -1219,6 +1227,7 @@ mod tests {
         let rulesets = branches.rulesets.unwrap();
         assert_eq!(rulesets.len(), 1, "only active rulesets on branches count");
         assert_eq!(rulesets[0].include, ["refs/heads/release/**"]);
+        assert_eq!(branches.protection_rules.unwrap(), ["hotfix/*"]);
         let unread = facts(&reading, "r1").unwrap().branches.unwrap();
         assert_eq!(unread.rulesets, None);
     }

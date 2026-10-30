@@ -15,6 +15,9 @@ pub struct GitHubBranches {
     /// The active rulesets that target branches; `None` when GitHub would not list them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rulesets: Option<Vec<BranchRuleset>>,
+    /// The patterns of classic branch protection rules; `None` when GitHub would not list them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection_rules: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -78,6 +81,8 @@ pub enum Protection {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         except: Vec<String>,
     },
+    /// A classic branch protection rule on GitHub; changed only there.
+    GitHubRule,
     /// An entry of the human's own.
     Entry,
 }
@@ -107,6 +112,9 @@ impl ProtectedRow {
                 };
                 format!("GitHub ruleset “{ruleset}”{except} · read from GitHub, change it there")
             }
+            Protection::GitHubRule => {
+                "GitHub branch protection · read from GitHub, change it there".into()
+            }
             Protection::Entry => "Added by you".into(),
         }
     }
@@ -119,6 +127,7 @@ pub struct ProtectedBranches<'a> {
     base: Option<&'a str>,
     /// `None` until GitHub has listed the repository's rulesets.
     rulesets: Option<&'a [BranchRuleset]>,
+    protection_rules: Option<&'a [String]>,
     entries: &'a [String],
 }
 impl<'a> ProtectedBranches<'a> {
@@ -132,12 +141,16 @@ impl<'a> ProtectedBranches<'a> {
             default_branch: branches.and_then(|b| b.default_branch.as_deref()),
             base: origin_branch(&repository.base),
             rulesets: branches.and_then(|b| b.rulesets.as_deref()),
+            protection_rules: branches.and_then(|b| b.protection_rules.as_deref()),
             entries: &repository.protected_branches,
         }
     }
     /// Whether GitHub has told which branches it protects; until then the page says so.
     pub fn github_read(&self) -> bool {
-        self.rulesets.is_some()
+        self.rulesets.is_some() && self.protection_rules.is_some()
+    }
+    fn protection_rules(&self) -> &'a [String] {
+        self.protection_rules.unwrap_or_default()
     }
     fn always(&self, branch: &str) -> bool {
         self.default_branch == Some(branch) || self.base == Some(branch)
@@ -152,6 +165,7 @@ impl<'a> ProtectedBranches<'a> {
                 .iter()
                 .any(|entry| branch_matches(entry, branch))
             || (self.rulesets().iter()).any(|r| r.applies(branch, self.default_branch))
+            || (self.protection_rules().iter()).any(|rule| branch_matches(rule, branch))
     }
     /// A ruleset protects every branch, so the host can merge nothing in the repository.
     pub fn every_branch(&self) -> bool {
@@ -188,6 +202,10 @@ impl<'a> ProtectedBranches<'a> {
                 },
             }));
         }
+        rows.extend(self.protection_rules().iter().map(|rule| ProtectedRow {
+            branches: rule.clone(),
+            protection: Protection::GitHubRule,
+        }));
         rows.extend(self.entries.iter().map(|entry| ProtectedRow {
             branches: entry.clone(),
             protection: Protection::Entry,
@@ -363,30 +381,56 @@ fn parse(pattern: &str) -> Result<Vec<Token>, &'static str> {
 /// protection patterns. A pattern that cannot be read matches nothing.
 pub fn branch_matches(pattern: &str, branch: &str) -> bool {
     let branch: Vec<char> = branch.chars().collect();
-    parse(pattern).is_ok_and(|tokens| matches_at(&tokens, &branch))
+    parse(pattern).is_ok_and(|tokens| Matcher::new(&tokens, &branch).at(0, 0))
 }
 
-fn matches_at(tokens: &[Token], name: &[char]) -> bool {
-    let Some((token, rest)) = tokens.split_first() else {
-        return name.is_empty();
-    };
-    let one = |test: &dyn Fn(char) -> bool| {
-        name.first()
-            .is_some_and(|c| *c != '/' && test(*c) && matches_at(rest, &name[1..]))
-    };
-    match token {
-        Token::Char(c) => name.first() == Some(c) && matches_at(rest, &name[1..]),
-        Token::One => one(&|_| true),
-        Token::Class { negated, ranges } => {
-            one(&|c| ranges.iter().any(|(a, b)| (*a..=*b).contains(&c)) != *negated)
+/// Matches tokens against a name, remembering each (token, character) position it has decided,
+/// so stars in a row take polynomial time rather than exponential.
+struct Matcher<'a> {
+    tokens: &'a [Token],
+    name: &'a [char],
+    decided: Vec<Option<bool>>,
+}
+impl<'a> Matcher<'a> {
+    fn new(tokens: &'a [Token], name: &'a [char]) -> Self {
+        let decided = vec![None; (tokens.len() + 1) * (name.len() + 1)];
+        Self {
+            tokens,
+            name,
+            decided,
         }
-        Token::Star => (0..=name.len())
-            .take_while(|&i| i == 0 || name[i - 1] != '/')
-            .any(|i| matches_at(rest, &name[i..])),
-        // `**/` also stands for no folder at all, so `qa/**/*` matches `qa/foo`.
-        Token::DeepStar => {
-            matches!(rest.split_first(), Some((Token::Char('/'), after)) if matches_at(after, name))
-                || (0..=name.len()).any(|i| matches_at(rest, &name[i..]))
+    }
+    fn at(&mut self, token: usize, at: usize) -> bool {
+        let slot = token * (self.name.len() + 1) + at;
+        if let Some(decided) = self.decided[slot] {
+            return decided;
+        }
+        let matched = self.decide(token, at);
+        self.decided[slot] = Some(matched);
+        matched
+    }
+    fn decide(&mut self, token: usize, at: usize) -> bool {
+        let (tokens, name) = (self.tokens, self.name);
+        let Some(current) = tokens.get(token) else {
+            return at == name.len();
+        };
+        let next = name.get(at).copied();
+        let one = |test: &dyn Fn(char) -> bool| next.is_some_and(|c| c != '/' && test(c));
+        match current {
+            Token::Char(c) => next == Some(*c) && self.at(token + 1, at + 1),
+            Token::One => one(&|_| true) && self.at(token + 1, at + 1),
+            Token::Class { negated, ranges } => {
+                one(&|c| ranges.iter().any(|(a, b)| (*a..=*b).contains(&c)) != *negated)
+                    && self.at(token + 1, at + 1)
+            }
+            Token::Star => (at..=name.len())
+                .take_while(|&i| i == at || name[i - 1] != '/')
+                .any(|i| self.at(token + 1, i)),
+            // `**/` also stands for no folder at all, so `qa/**/*` matches `qa/foo`.
+            Token::DeepStar => {
+                (tokens.get(token + 1) == Some(&Token::Char('/')) && self.at(token + 2, at))
+                    || (at..=name.len()).any(|i| self.at(token + 1, i))
+            }
         }
     }
 }
@@ -445,6 +489,12 @@ mod tests {
             }
         }
         assert!(!branch_matches("release/[0-9", "release/[0-9"));
+        // Stars in a row that cannot match decide at once rather than backtracking.
+        let stars = format!("{}b", "*a".repeat(24));
+        let started = std::time::Instant::now();
+        assert!(!branch_matches(&stars, &"a".repeat(48)));
+        assert!(branch_matches(&"**a".repeat(40), &"a/".repeat(60)[..119]));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
     fn repository(base: &str, branches: Option<GitHubBranches>, entries: &[&str]) -> Repository {
@@ -477,6 +527,7 @@ mod tests {
             default_branch: Some(default.into()),
             merge_methods: vec![MergeMethod::Rebase, MergeMethod::Squash],
             rulesets: Some(rulesets),
+            protection_rules: Some(vec![]),
         })
     }
     fn ruleset(name: &str, include: &[&str], exclude: &[&str]) -> BranchRuleset {
@@ -576,6 +627,17 @@ mod tests {
         for accepted in ["hotfix/*", "release/**", "demo", "v[0-9]*", "feature/a.b"] {
             assert_eq!(protected.refusal(accepted, &remotes), None, "{accepted}");
         }
+    }
+
+    #[test]
+    fn a_classic_branch_protection_rule_protects_what_it_matches() {
+        let mut branches = on_github("main", vec![]);
+        branches.as_mut().unwrap().protection_rules = Some(vec!["release/*".into()]);
+        let cortex = repository("origin/main", branches, &[]);
+        let protected = ProtectedBranches::of(&cortex);
+        assert!(protected.protects("release/2026.11") && !protected.protects("feature/x"));
+        assert_eq!(protected.rows()[1].protection, Protection::GitHubRule);
+        assert!(protected.github_read());
     }
 
     #[test]

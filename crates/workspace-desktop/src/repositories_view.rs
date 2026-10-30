@@ -813,7 +813,7 @@ impl RepositoriesPage {
         for row in protected.rows() {
             let mark = match row.protection {
                 Protection::Always { .. } => Some("lock"),
-                Protection::GitHub { .. } => Some("github"),
+                Protection::GitHub { .. } | Protection::GitHubRule => Some("github"),
                 Protection::Entry => None,
             };
             let reason = match row.protection {
@@ -1779,15 +1779,17 @@ fn method_line(repository: &Repository) -> String {
     let protected = ProtectedBranches::of(repository);
     let github = match protected.github_read() {
         false if repository.github.is_none() => "Not on GitHub",
-        false => "GitHub could not be read, so its rulesets are not shown",
-        true if protected
-            .rows()
-            .iter()
-            .any(|r| matches!(r.protection, Protection::GitHub { .. })) =>
+        false => "GitHub could not be read, so its protection is not shown",
+        true if protected.rows().iter().any(|r| {
+            matches!(
+                r.protection,
+                Protection::GitHub { .. } | Protection::GitHubRule
+            )
+        }) =>
         {
             "Rows with the GitHub mark are read from GitHub daily"
         }
-        true => "GitHub reports no rulesets here",
+        true => "GitHub reports no branch protection or rulesets here",
     };
     match next_merge_method(repository) {
         Some(method) => format!(
@@ -2129,6 +2131,7 @@ mod tests {
         let facts = repository.github.as_mut().unwrap().facts.as_mut().unwrap();
         facts.branches = serde_json::from_value(serde_json::json!({
             "default_branch": "main", "merge_methods": ["merge", "squash"], "rulesets": rulesets,
+            "protection_rules": [],
         }))
         .unwrap();
         repository.protected_branches = entries.iter().map(|e| e.to_string()).collect();
@@ -2153,10 +2156,9 @@ mod tests {
             protected_summary(&all, &allowed)
                 .contains("all branches · A GitHub ruleset protects all branches")
         );
-        assert!(
-            method_line(&listed)
-                .contains("GitHub reports no rulesets here · a merge would use squash")
-        );
+        assert!(method_line(&listed).contains(
+            "GitHub reports no branch protection or rulesets here · a merge would use squash"
+        ));
         let unread = wiffletree(serde_json::Value::Null, &[]);
         assert!(method_line(&unread).starts_with("GitHub could not be read"));
         assert_eq!(protected_summary(&unread, &allowed), "Protected: main");
