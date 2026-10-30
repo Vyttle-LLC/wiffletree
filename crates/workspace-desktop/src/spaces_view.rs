@@ -276,27 +276,36 @@ impl SpacesPage {
         else {
             return;
         };
-        let edited = match self.edited(&from, cx) {
-            Ok(form) => merged(&read, &form, &latest),
+        let form = match self.edited(&from, cx) {
+            Ok(form) => form,
             Err(error) => {
                 self.error = Some(error);
                 return cx.notify();
             }
         };
+        let edited = merged(&read, &form, &latest);
         self.busy = true;
         self.error = None;
         self.ask(
             ask::update_space(edited),
             window,
             cx,
-            |view, saved, window, cx| {
+            move |view, saved, window, cx| {
                 view.busy = false;
+                // Only the form still holding the draft that was saved takes the reply; edits
+                // made since, or another Space's draft, stay as they are.
+                let same_draft = (view.loaded.as_ref()).is_some_and(|(shown, _)| {
+                    holds_draft(shown, &view.edited(shown, cx), &from, &form)
+                });
                 match saved {
                     Ok(record) => {
-                        view.load(&record.space, window, cx);
+                        if same_draft {
+                            view.load(&record.space, window, cx);
+                        }
                         toast(format!("Saved {}", record.space.name), window, cx);
                     }
-                    Err(error) => view.error = Some(error),
+                    Err(error) if same_draft => view.error = Some(error),
+                    Err(error) => toast_error(error, window, cx),
                 }
             },
         );
@@ -1413,6 +1422,12 @@ fn brain_after_choosing(form: &Option<SpaceBrain>, loaded: &Space) -> Option<Spa
     form.clone().or_else(|| loaded.brain.clone())
 }
 
+/// Whether the form, showing `shown` and reading `now`, still holds `saved`, the draft Save sent
+/// for `from`.
+fn holds_draft(shown: &Space, now: &Result<Space, String>, from: &Space, saved: &Space) -> bool {
+    shown.id == from.id && now.as_ref() == Ok(saved)
+}
+
 /// `latest` with each field the form changed from `read`, how it read when filled, set to
 /// the form's value.
 fn merged(read: &Space, form: &Space, latest: &Space) -> Space {
@@ -1809,9 +1824,9 @@ impl Render for SpacesPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        Joining, brain_after_choosing, brain_label, format_sources, issues_line, join_choices,
-        join_refused_by, merged, new_storage_line, parse_sources, prefix_question, readers_line,
-        repository_line, shared_with, storage_banner, sync_line,
+        Joining, brain_after_choosing, brain_label, format_sources, holds_draft, issues_line,
+        join_choices, join_refused_by, merged, new_storage_line, parse_sources, prefix_question,
+        readers_line, repository_line, shared_with, storage_banner, sync_line,
     };
     use workspace_core::*;
 
@@ -2118,6 +2133,25 @@ mod tests {
             )
             .brain,
             read.brain
+        );
+    }
+
+    #[test]
+    fn a_save_reply_reloads_only_the_draft_it_saved() {
+        let sage = sage();
+        let mut saved = sage.clone();
+        saved.instructions = "Treat production as read-only.".into();
+        assert!(holds_draft(&sage, &Ok(saved.clone()), &sage, &saved));
+        let mut typed_on = saved.clone();
+        typed_on.instructions.push_str(" Never log names.");
+        assert!(
+            !holds_draft(&sage, &Ok(typed_on), &sage, &saved),
+            "typing after Save keeps the newer text"
+        );
+        let personal = personal();
+        assert!(
+            !holds_draft(&personal, &Ok(saved.clone()), &sage, &saved),
+            "another Space's draft is left alone"
         );
     }
 }
