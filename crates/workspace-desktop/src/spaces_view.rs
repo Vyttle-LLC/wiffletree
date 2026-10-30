@@ -1489,7 +1489,6 @@ fn place(named: String, at: String, choose: Button, p: Palette) -> Div {
         .child(choose)
 }
 
-/// A Space's square, in its color.
 pub(super) fn space_mark(color: Hsla) -> Div {
     div().size(px(8.)).flex_none().rounded(px(2.)).bg(color)
 }
