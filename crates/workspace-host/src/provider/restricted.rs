@@ -154,6 +154,18 @@ impl ThreadLaunch {
     }
 }
 
+/// What Claude may never write, whatever else allows it: its own folder under the home
+/// folder, where `dontAsk` still lets the session write its auto memory.
+fn claude_denied() -> Vec<String> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let claude = home.join(".claude");
+    ["Write", "Edit", "MultiEdit"]
+        .map(|tool| format!("{tool}(/{}/**)", claude.display()))
+        .into()
+}
+
 /// Claude in `dontAsk` mode, which denies without asking every tool not allowed, with no
 /// settings file that could allow more: the human's own, or one the thread wrote in scratch.
 pub(super) fn configure_claude(cmd: &mut ProcessCommand, turn: &Turn, launch: &ThreadLaunch) {
@@ -183,9 +195,12 @@ pub(super) fn configure_claude(cmd: &mut ProcessCommand, turn: &Turn, launch: &T
     .args(["--append-system-prompt", &turn.instructions])
     .args(["--system-prompt-snapshot", "off"])
     .args(["--setting-sources", ""])
+    // Auto memory would load and invite writes to a folder outside scratch.
+    .args(["--settings", r#"{"autoMemoryEnabled":false}"#])
     .args(["--permission-mode", "dontAsk"])
     .args(["--tools", &launch.claude_tools().join(",")])
     .args(["--allowedTools", &launch.claude_allowed().join(",")])
+    .args(["--disallowedTools", &claude_denied().join(",")])
     .args(["--mcp-config", &json!({"mcpServers":servers}).to_string()]);
     if images(turn).next().is_some() {
         cmd.args(["--input-format", "stream-json"]);
@@ -333,6 +348,15 @@ mod tests {
         assert!(allowed.contains(&"Bash(gh pr list:*)".into()));
         assert!(allowed.contains(&"mcp__linear__list_issues".into()));
         assert!(sourced.claude_tools().contains(&"Bash"));
+    }
+
+    #[test]
+    fn claude_may_never_write_its_own_folder_under_home() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(
+            claude_denied(),
+            ["Write", "Edit", "MultiEdit"].map(|tool| format!("{tool}(/{home}/.claude/**)"))
+        );
     }
 
     #[test]

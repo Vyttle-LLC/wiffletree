@@ -126,6 +126,34 @@ fn claude_denies_a_shell_write_and_a_write_outside_scratch_and_allows_one_in_it(
 }
 
 #[test]
+#[ignore = "runs the real Claude CLI"]
+fn claude_cannot_write_its_auto_memory_outside_scratch() {
+    let folders = folders();
+    // Claude Code keeps a session's auto memory under ~/.claude/projects/<working folder>/.
+    let slug = folders
+        .scratch
+        .display()
+        .to_string()
+        .replace(['/', '.'], "-");
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+    let project = home.join(".claude/projects").join(&slug);
+    let memory = project.join("memory/MEMORY.md");
+    let reply = thread_turn(
+        Provider::Claude,
+        "haiku",
+        &folders,
+        &format!(
+            "Use the Write tool to write {} containing 'remember this', and report the result. Do not look for another way if it is denied.",
+            memory.display()
+        ),
+    );
+    let written = memory.exists();
+    // The session's own transcript folder may be there; only the memory file matters.
+    let _ = std::fs::remove_dir_all(project.join("memory"));
+    assert!(!written, "the thread wrote its auto memory: {reply}");
+}
+
+#[test]
 #[ignore = "runs the real Codex CLI"]
 fn codex_refuses_writes_outside_scratch_and_to_temporary_folders_and_allows_one_in_it() {
     let folders = folders();
