@@ -32,7 +32,7 @@ pub(crate) fn chosen(home: &Path) -> Option<SettingsRepository> {
 pub(crate) fn folder(home: &Path) -> PathBuf {
     let clone = chosen(home).map(|repository| {
         let clone = repos::clone_folder(home, &repository.name);
-        (repos::holds(&clone, &repository.name), clone)
+        (repos::holds(&clone, &repository), clone)
     });
     match clone {
         Some((true, clone)) => clone,

@@ -852,7 +852,7 @@ pub(crate) fn prepare(
 ) -> Result<Prepared> {
     let (check, staging) = read(home, input, tools)?;
     // Before anything is pushed.
-    repos::refuse_another(home, &check.repository.name)?;
+    repos::refuse_another(home, &check.repository)?;
     let (clone, mine) = (staging.path(), shared::folder(home));
     let read_from = contents(&mine)?;
     let change = match (check.joining.is_some(), with) {
@@ -904,7 +904,7 @@ impl Host {
             "A shared setting changed meanwhile, and stays as you saved it here. The repository has the earlier settings: join it with this Mac's to push yours."
         );
         // A clone in the way may have appeared since `prepare` checked.
-        repos::refuse_another(&self.home, &prepared.repository.name)?;
+        repos::refuse_another(&self.home, &prepared.repository)?;
         self.copy_settings_to_shared_folder()?;
         let clone = repos::clone_folder(&self.home, &prepared.repository.name);
         let placed = place_clone(prepared.staging.path(), &clone)?;
@@ -989,7 +989,7 @@ impl Host {
         }
         if to.exists() {
             // `shared::folder` uses `to` only when it is the repository's clone, and else `from`.
-            match repos::holds(&to, &repository.name) {
+            match repos::holds(&to, &repository) {
                 true => eprintln!(
                     "Not moving {}: {} is already the settings repository's clone",
                     from.display(),
@@ -4042,6 +4042,33 @@ pub(crate) mod tests {
         let host = Host::open(home.path()).unwrap();
         assert!(!shared.exists());
         assert_eq!(host.shared_folder(), other.canonicalize().unwrap());
+        assert_eq!(values(&host), before);
+    }
+
+    #[test]
+    fn a_clone_an_older_release_made_through_a_former_name_moves_and_keeps_every_setting() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        host.set_check_ins(10, 300).unwrap();
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        let before = values(&host);
+        // An older release kept the URL the human named, which GitHub redirects, as both the
+        // clone's `origin` and the push URL, and GitHub's name for the repository as its name.
+        let former = "https://github.com/MHohlios/former-settings.git";
+        let mut settings = host.settings();
+        settings.settings_repository.as_mut().unwrap().push_url = former.into();
+        host.save_settings(&settings).unwrap();
+        git(
+            &host.shared_folder(),
+            &["remote", "set-url", "origin", former],
+        );
+        drop(host);
+        as_an_older_release_left_it(home.path(), NAME);
+        let host = Host::open(home.path()).unwrap();
+        let clone = repos::clone_folder(home.path(), NAME);
+        assert_eq!(host.shared_folder(), clone.canonicalize().unwrap());
+        assert!(!home.path().join(shared::FOLDER).exists());
         assert_eq!(values(&host), before);
     }
 

@@ -14,14 +14,25 @@ pub(crate) fn clone_folder(home: &Path, name: &str) -> PathBuf {
     home.join(FOLDER).join(name.replace('/', "-"))
 }
 
-/// Whether the clone at `clone` fetches the GitHub repository `owner/name` as `origin`. Two
-/// repositories can share a folder name, as `a-b/c` and `a/b-c` do, so a clone found under
-/// `repos/` is used only when this holds. Reads `.git/config` itself, as the shared folder is
-/// resolved often.
-pub(crate) fn holds(clone: &Path, name: &str) -> bool {
-    let Ok(config) = fs::read_to_string(clone.join(".git/config")) else {
-        return false;
-    };
+/// Whether the clone at `clone` is of `repository`: its `origin` names GitHub's name for it, or
+/// the repository of its recorded push URL, which an older release left as `origin` when the
+/// human named a URL GitHub redirects. Two repositories can share a folder name, as `a-b/c` and
+/// `a/b-c` do, so a clone found under `repos/` is used only when this holds. Reads `.git/config`
+/// itself, as the shared folder is resolved often.
+pub(crate) fn holds(clone: &Path, repository: &SettingsRepository) -> bool {
+    let named = |url: &str| pr_watch::github_repository(url).map(|(o, n)| format!("{o}/{n}"));
+    let pushed = named(&repository.push_url);
+    origin(clone)
+        .and_then(|url| named(&url))
+        .is_some_and(|origin| {
+            origin.eq_ignore_ascii_case(&repository.name)
+                || pushed.is_some_and(|pushed| origin.eq_ignore_ascii_case(&pushed))
+        })
+}
+
+/// The URL `origin` fetches, as the clone's `.git/config` holds it.
+fn origin(clone: &Path) -> Option<String> {
+    let config = fs::read_to_string(clone.join(".git/config")).ok()?;
     let mut in_origin = false;
     for line in config.lines().map(str::trim) {
         if line.starts_with('[') {
@@ -32,21 +43,21 @@ pub(crate) fn holds(clone: &Path, name: &str) -> bool {
             .and_then(|rest| rest.trim_start().strip_prefix('='))
             .map(str::trim);
         if let Some(url) = url.filter(|_| in_origin) {
-            return pr_watch::github_repository(url)
-                .is_some_and(|(owner, repo)| format!("{owner}/{repo}").eq_ignore_ascii_case(name));
+            return Some(url.to_owned());
         }
     }
-    false
+    None
 }
 
-/// Refuses a clone under `repos/` that is in the folder `owner/name` would use but is of another
+/// Refuses a clone under `repos/` that is in the folder `repository` would use but is of another
 /// repository.
-pub(crate) fn refuse_another(home: &Path, name: &str) -> Result<()> {
-    let clone = clone_folder(home, name);
+pub(crate) fn refuse_another(home: &Path, repository: &SettingsRepository) -> Result<()> {
+    let clone = clone_folder(home, &repository.name);
     ensure!(
-        !clone.exists() || holds(&clone, name),
-        "{} holds a clone of another repository, whose name maps to the same folder as {name}. Move it aside, then try again.",
-        clone.display()
+        !clone.exists() || holds(&clone, repository),
+        "{} holds a clone of another repository, whose name maps to the same folder as {}. Move it aside, then try again.",
+        clone.display(),
+        repository.name
     );
     Ok(())
 }
