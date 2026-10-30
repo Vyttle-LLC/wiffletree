@@ -6,7 +6,8 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// Empty for a project from a host older than Spaces, which shows as "No Space".
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SpaceId(pub String);
 impl SpaceId {
@@ -159,13 +160,6 @@ pub struct TrackerConfig {
 }
 impl TrackerConfig {
     pub const FORMAT: u32 = 1;
-    pub fn new(prefix: String) -> Result<Self> {
-        validate_prefix(&prefix)?;
-        Ok(Self {
-            format: Self::FORMAT,
-            prefix,
-        })
-    }
 }
 
 /// The owner of a session: a project, or, for sessions that are not project work, a Space or a

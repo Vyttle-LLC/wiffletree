@@ -325,7 +325,8 @@ impl Status {
 pub struct Project {
     pub id: String,
     pub name: String,
-    /// The Space it belongs to; it logs to that Space's brain.
+    /// The Space it belongs to; it logs to that Space's brain. Empty from an older host.
+    #[serde(default)]
     pub space: SpaceId,
     /// The workspace repositories this project may use; `None` means all of them.
     #[serde(default)]
@@ -464,12 +465,6 @@ pub struct Session {
     /// Hidden from the working tree and never scheduled; everything it owns is preserved.
     #[serde(default)]
     pub archived: bool,
-}
-impl Session {
-    /// Every stored session is project work: no role is admitted to run outside a project yet.
-    pub fn owner(&self) -> SessionOwner {
-        SessionOwner::Project(self.project_id.clone())
-    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -645,7 +640,11 @@ pub struct Snapshot {
     pub projects: Vec<Project>,
     /// Every Space, in the order they were created.
     #[serde(default)]
-    pub spaces: Vec<SpaceRecord>,
+    pub spaces: Vec<Space>,
+    /// This Mac's facts about each Space, by id. Left out for a connection without the app's
+    /// credential, so an agent's shell cannot read them.
+    #[serde(default)]
+    pub space_locals: BTreeMap<SpaceId, SpaceLocal>,
     pub repositories: Vec<Repository>,
     /// The sessions that are not archived and open tickets' archived agents, in the order they
     /// were created, then archived sessions still in a turn.

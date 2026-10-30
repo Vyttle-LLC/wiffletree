@@ -12,7 +12,7 @@ A Space SHALL have a name; a description of what belongs in it; instructions add
 - **THEN** projects in both log to that one brain
 
 ### Requirement: Only the user creates or edits a Space
-Spaces SHALL be created, edited and removed only on the Spaces page of Settings, by the user, apart from the Spaces the host creates at upgrade and the default "Personal" Space. No agent, thread, job run, router or workspace tool SHALL create, change or remove a Space or read its machine-local facts. Removing a Space SHALL ask first, SHALL be refused while a non-archived project belongs to it or when it is the last Space, SHALL move its archived projects to the "Personal" Space, creating it if it was removed, and SHALL leave its storage and brain repositories unchanged.
+Spaces SHALL be created, edited and removed only on the Spaces page of Settings, by the user, apart from the Spaces the host creates at upgrade and the default "Personal" Space. No agent, thread, job run, router or workspace tool SHALL create, change or remove a Space or read its machine-local facts. Removing a Space SHALL ask first, SHALL be refused while a non-archived project belongs to it or when it is the last Space, SHALL move its archived projects to the "Personal" Space, creating it if it was removed, and SHALL leave its storage and brain repositories unchanged. Removing "Personal" itself SHALL be refused while archived projects belong to it, because they would have nowhere to go.
 
 #### Scenario: A fresh install
 - **WHEN** Wiffletree starts with no Space, on a new Mac or after an upgrade with no projects
@@ -33,6 +33,10 @@ Spaces SHALL be created, edited and removed only on the Spaces page of Settings,
 #### Scenario: Removing a Space with only archived projects
 - **WHEN** the user removes the Woodworking Space, whose two projects are archived, and confirms
 - **THEN** the Space is removed, both archived projects belong to Personal, and restoring one later puts it in Personal
+
+#### Scenario: Removing Personal with archived projects
+- **WHEN** the user removes Personal, which holds one archived project, while Sage also exists
+- **THEN** the removal is refused, saying its archived projects would have nowhere to go, and nothing changes
 
 ### Requirement: The Spaces page
 Settings SHALL have a Spaces section listing every Space with its name, whether it is shared, its storage and brain, and its repositories. A Space's page SHALL edit every field of the Space and SHALL show a Storage and issues box with the storage repository, the Space's folder in it, the tracker's prefix and issue count, who can read the storage repository and therefore its issues, the other Spaces on this Mac that share the storage repository, whether it is also this Mac's settings repository, its sync status and Sync now. For a shared Space the page SHALL say "Anyone who can push to ‹repository› can change these instructions for everyone in this Space". The section SHALL offer Add Space with "New" and "From a repository".

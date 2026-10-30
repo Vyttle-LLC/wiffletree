@@ -333,6 +333,8 @@ impl Session {
                 Err("Too many requests are waiting for a reply".into()),
             );
         }
+        // A Space's machine-local facts are the human's, like the commands that change them.
+        let hides_space_locals = local && !human && matches!(command, Command::Snapshot);
         let sent = match &self.peer {
             Peer::Local { .. } => self.requests.request(command),
             Peer::Device { id } => self.requests.request_from(id, command),
@@ -348,9 +350,15 @@ impl Session {
         let (replying, read_at) = (self.replying.clone(), self.read_at);
         replying.fetch_add(1, Ordering::Relaxed);
         std::thread::spawn(move || {
-            let result = receive
+            let mut result = receive
                 .recv_blocking()
                 .unwrap_or_else(|_| Err("Workspace stopped".into()));
+            if hides_space_locals
+                && let Ok(snapshot) = &mut result
+                && let Some(fields) = snapshot.as_object_mut()
+            {
+                fields.remove("space_locals");
+            }
             let mut answer = response(version, id, result);
             answer.host_ms = Some(read_at.elapsed().as_millis() as u64);
             if let Ok(message) = serde_json::to_vec(&answer) {

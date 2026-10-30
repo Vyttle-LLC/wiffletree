@@ -11,7 +11,8 @@ ALTER TABLE work_logs ADD COLUMN space_id TEXT;
 
 /// Creates the Spaces store and, in the same transaction, a Space for each distinct brain folder
 /// attached to a project and "Personal" for projects without one, or for a store with no
-/// project. Runs once: a store that has the `spaces` table is left alone. Pushes nothing.
+/// project. Runs once: a store that has the `spaces` table is left alone, unless it holds no
+/// Space, when it gets "Personal" so a new project has somewhere to go. Pushes nothing.
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
     let present: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='spaces')",
@@ -24,8 +25,23 @@ pub(crate) fn migrate(db: &Connection) -> Result<()> {
         upgrade(&tx)?;
         tx.commit()?;
     }
+    let empty: bool = db.query_row("SELECT NOT EXISTS(SELECT 1 FROM spaces)", [], |r| r.get(0))?;
+    if empty {
+        let tx = db.unchecked_transaction()?;
+        let (space, tracker) = new_space(PERSONAL, &mut prefixes(&tx)?);
+        insert_space(&tx, &space, &SpaceLocal::default(), &tracker)?;
+        tx.commit()?;
+    }
     db.execute_batch("PRAGMA user_version = 9;")?;
     Ok(())
+}
+
+/// The prefixes of the trackers on this Mac.
+fn prefixes(db: &Connection) -> Result<Vec<String>> {
+    Ok(db
+        .prepare("SELECT json_extract(data,'$.prefix') FROM trackers")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
 }
 
 fn upgrade(db: &Connection) -> Result<()> {
@@ -253,6 +269,22 @@ impl Host {
             )
             .optional()?)
     }
+    /// Who owns a session: its project, unless it records a Space or a brain as `owner`. No
+    /// role runs outside projects yet, so no session the host creates records one.
+    pub fn session_owner(&self, id: &str) -> Result<SessionOwner> {
+        let (project, owner): (String, Option<String>) = self
+            .db
+            .query_row(
+                "SELECT project_id,json_extract(data,'$.owner') FROM sessions WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .context("Session not found")?;
+        Ok(match owner {
+            Some(owner) => serde_json::from_str(&owner)?,
+            None => SessionOwner::Project(project),
+        })
+    }
     /// The tracker of a Space's storage repository.
     pub fn tracker(&self, space: &Space) -> Result<TrackerConfig> {
         self.db
@@ -290,13 +322,6 @@ impl Host {
         ensure!(!clash, "Another Space is named {}", name.trim());
         Ok(())
     }
-    fn prefixes(&self) -> Result<Vec<String>> {
-        Ok(self
-            .db
-            .prepare("SELECT json_extract(data,'$.prefix') FROM trackers")?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?)
-    }
     /// A new Space with local storage and a local tracker. Without `prefix` its tracker gets the
     /// one proposed from its name.
     pub fn create_space(
@@ -307,7 +332,7 @@ impl Host {
         prefix: Option<&str>,
     ) -> Result<SpaceRecord> {
         self.ensure_unused_name(name, None)?;
-        let mut prefixes = self.prefixes()?;
+        let mut prefixes = prefixes(&self.db)?;
         if let Some(prefix) = prefix {
             validate_prefix(prefix)?;
             ensure!(
@@ -477,6 +502,22 @@ mod tests {
 
     fn names(brains: &[&str]) -> Vec<String> {
         upgraded_names(&brains.iter().map(|b| b.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn a_project_is_refused_when_no_space_exists() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        host.db.execute("DELETE FROM spaces", []).unwrap();
+        let error = host.create_project("Calls").unwrap_err();
+        assert!(format!("{error:#}").contains("Create a Space first"));
+        let error = (host.execute(Command::CreateProject {
+            name: "Calls".into(),
+            space_id: None,
+        }))
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("Create a Space first"));
+        assert!(host.projects().unwrap().is_empty());
     }
 
     #[test]

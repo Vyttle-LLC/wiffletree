@@ -269,7 +269,8 @@ fn a_moved_project_exports_later_entries_to_its_new_space() {
         .unwrap();
     let exported = host.append_log(log(&session.id, "one")).unwrap();
     assert_eq!(host.export_logs(&project.id).unwrap().exported, 1);
-    // Logged before the move, exported after it.
+    // The reading chosen: an entry belongs to the Space its project was in when it was logged,
+    // so one logged before the move and exported after it still goes to the old Space's brain.
     let pending = host.append_log(log(&session.id, "two")).unwrap();
 
     let vyttle = host.create_space("Vyttle", "", "", None).unwrap().space;
@@ -292,6 +293,87 @@ fn a_moved_project_exports_later_entries_to_its_new_space() {
             (in_old, in_new)
         );
     }
+}
+
+/// A project in Personal with `old` as its brain, moved to a new Space "Vyttle" with no brain.
+fn moved_from(host: &mut Host, old: &Path) -> (Project, Session) {
+    let project = host.create_project("Calls").unwrap();
+    let session = coordinator(host, &project.id);
+    host.attach_brain(&project.id, old.to_str().unwrap())
+        .unwrap();
+    let vyttle = host.create_space("Vyttle", "", "", None).unwrap().space;
+    host.append_log(log(&session.id, "before")).unwrap();
+    host.move_project_to_space(&project.id, &vyttle.id).unwrap();
+    (project, session)
+}
+
+fn entries(brain: &Path) -> String {
+    std::fs::read_to_string(brain.join("second-brain/logs/project.md")).unwrap_or_default()
+}
+
+#[test]
+fn a_space_with_nothing_pending_is_never_touched() {
+    let (home, folders) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (old, new) = (folders.path().join("old"), folders.path().join("new"));
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::create_dir_all(&new).unwrap();
+    let mut host = Host::open_set_up(home.path()).unwrap();
+    let (project, session) = moved_from(&mut host, &old);
+    // The entry logged before the move reaches the old brain, which is then renamed away.
+    assert_eq!(host.export_logs(&project.id).unwrap().exported, 1);
+    std::fs::rename(&old, folders.path().join("gone")).unwrap();
+    host.attach_brain(&project.id, new.to_str().unwrap())
+        .unwrap();
+    let later = host.append_log(log(&session.id, "after")).unwrap();
+    let run = host.export_logs(&project.id).unwrap();
+    assert_eq!(run.exported, 1);
+    assert!(entries(&new).contains(&format!("workspace-entry:{}", later.id)));
+}
+
+#[test]
+fn one_spaces_missing_brain_leaves_the_others_entries_delivered() {
+    let (home, folders) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (old, new) = (folders.path().join("old"), folders.path().join("new"));
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::create_dir_all(&new).unwrap();
+    let mut host = Host::open_set_up(home.path()).unwrap();
+    // The entry logged before the move waits for a brain that is no longer there.
+    let (project, session) = moved_from(&mut host, &old);
+    std::fs::remove_dir(&old).unwrap();
+    host.attach_brain(&project.id, new.to_str().unwrap())
+        .unwrap();
+    let later = host.append_log(log(&session.id, "after")).unwrap();
+    let error = format!("{:#}", host.export_logs(&project.id).unwrap_err());
+    assert!(error.starts_with("Personal: "), "{error}");
+    assert!(!error.contains("Vyttle"), "{error}");
+    assert!(entries(&new).contains(&format!("workspace-entry:{}", later.id)));
+    let run = &host.runs(&project.id).unwrap()[0];
+    assert_eq!(run.exported, 1);
+    assert!(run.outcome.starts_with("failed: Personal: "));
+}
+
+#[test]
+fn entries_for_the_previous_spaces_brain_export_when_the_current_space_has_none() {
+    let (home, brain) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut host = Host::open_set_up(home.path()).unwrap();
+    let (project, _) = moved_from(&mut host, brain.path());
+    assert_eq!(host.export_logs(&project.id).unwrap().exported, 1);
+    assert!(entries(brain.path()).contains("workspace-entry:"));
+}
+
+#[test]
+fn a_start_with_no_space_creates_personal() {
+    let home = tempfile::tempdir().unwrap();
+    drop(Host::open_set_up(home.path()).unwrap());
+    let db = Connection::open(home.path().join("workspace.sqlite3")).unwrap();
+    db.execute_batch("DELETE FROM spaces; DELETE FROM trackers;")
+        .unwrap();
+    drop(db);
+    let host = Host::open_set_up(home.path()).unwrap();
+    let names: Vec<String> = (host.spaces().unwrap().into_iter())
+        .map(|r| r.space.name)
+        .collect();
+    assert_eq!(names, [PERSONAL]);
 }
 
 #[test]
@@ -411,6 +493,21 @@ fn removing_a_space_keeps_one_and_moves_archived_projects_to_personal() {
 }
 
 #[test]
+fn personal_is_not_removed_while_it_holds_archived_projects() {
+    let home = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(home.path()).unwrap();
+    let personal = host.spaces().unwrap()[0].space.id.clone();
+    let old = host.create_project_in("Old", &personal).unwrap();
+    host.set_archived(&coordinator(&host, &old.id).id, true)
+        .unwrap();
+    host.create_space("Sage", "", "", None).unwrap();
+    let error = host.remove_space(&personal).unwrap_err();
+    assert!(format!("{error:#}").contains("nowhere else to go"));
+    assert_eq!(host.spaces().unwrap().len(), 2);
+    assert_eq!(host.project(&old.id).unwrap().space, personal);
+}
+
+#[test]
 fn a_worker_owned_by_a_space_or_a_brain_is_refused_and_nothing_is_stored() {
     let home = tempfile::tempdir().unwrap();
     let mut host = Host::open_set_up(home.path()).unwrap();
@@ -439,5 +536,8 @@ fn a_worker_owned_by_a_space_or_a_brain_is_refused_and_nothing_is_stored() {
             Provider::Claude,
         )
         .unwrap();
-    assert_eq!(owned.owner(), SessionOwner::Project(project.id));
+    assert_eq!(
+        host.session_owner(&owned.id).unwrap(),
+        SessionOwner::Project(project.id)
+    );
 }

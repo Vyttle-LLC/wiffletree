@@ -156,51 +156,87 @@ impl Host {
     }
     pub fn export_logs(&mut self, project_id: &str) -> Result<MaintenanceRun> {
         let project = self.project(project_id)?;
-        let result = self.export_batch(&project);
+        let (exported, failure) = match self.export_batch(&project) {
+            Ok((exported, failures)) => (
+                exported,
+                (!failures.is_empty()).then(|| failures.join("; ")),
+            ),
+            Err(error) => (0, Some(format!("{error:#}"))),
+        };
         let run = MaintenanceRun {
             id: new_id(),
             project_id: project_id.into(),
-            outcome: match &result {
-                Ok(0) => "skipped: no pending input".into(),
-                Ok(_) => "completed: source logs exported; semantic compilation unavailable".into(),
-                Err(e) => format!("failed: {e:#}"),
+            outcome: match (&failure, exported) {
+                (Some(failure), _) => format!("failed: {failure}"),
+                (None, 0) => "skipped: no pending input".into(),
+                (None, _) => {
+                    "completed: source logs exported; semantic compilation unavailable".into()
+                }
             },
-            exported: result.as_ref().copied().unwrap_or(0),
+            exported,
             created_at: now(),
         };
         self.db.execute(
             "INSERT INTO maintenance_runs(project_id,data) VALUES (?1,?2)",
             params![project_id, encode(&run)?],
         )?;
-        result?;
+        if let Some(failure) = failure {
+            bail!(failure);
+        }
         Ok(run)
     }
     /// Exports each entry to the brain of the Space the project was in when it was logged, so a
-    /// moved project's later entries go to its new Space and its earlier ones stay put.
-    fn export_batch(&mut self, project: &Project) -> Result<usize> {
-        ensure!(
-            self.space(&project.space)?.space.brain.is_some(),
-            "This project's Space has no brain; attach one before exporting logs"
-        );
+    /// moved project's later entries go to its new Space and its earlier ones stay put. Each
+    /// Space is exported on its own: one with nothing pending is never touched, and one that
+    /// fails leaves the others' entries delivered. Answers how many entries were exported and
+    /// each failure, naming its Space.
+    fn export_batch(&mut self, project: &Project) -> Result<(usize, Vec<String>)> {
         let spaces: Vec<String> = (self.db.prepare(
             "SELECT space_id FROM work_logs WHERE project_id=?1 AND space_id IS NOT NULL GROUP BY space_id ORDER BY MIN(sequence)",
         )?)
         .query_map([&project.id], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
-        let mut exported = 0;
+        let (mut exported, mut failures) = (0, vec![]);
         for space in spaces {
             // A removed Space's entries have nowhere to go.
             let Some(SpaceRecord { space, local }) = self.find_space(&SpaceId(space))? else {
                 continue;
             };
-            let Some(brain) = space.brain else {
+            let path = space.brain.as_ref().and(local.brain_path.as_deref());
+            if self.pending_entries(project, &space.id, path)? == 0 {
                 continue;
+            }
+            let result = match (&space.brain, path) {
+                (None, _) if space.id == project.space => Err(anyhow::anyhow!(
+                    "This project's Space has no brain; attach one before exporting logs"
+                )),
+                // An earlier Space without a brain keeps its entries.
+                (None, _) => continue,
+                (Some(_), None) => Err(anyhow::anyhow!("its brain is not on this Mac")),
+                (Some(brain), Some(path)) => {
+                    self.export_to_brain(project, &space.id, path, &brain.folder)
+                }
             };
-            let path = (local.brain_path.as_deref())
-                .with_context(|| format!("The brain of {} is not on this Mac", space.name))?;
-            exported += self.export_to_brain(project, &space.id, path, &brain.folder)?;
+            match result {
+                Ok(count) => exported += count,
+                Err(error) => failures.push(format!("{}: {error:#}", space.name)),
+            }
         }
-        Ok(exported)
+        Ok((exported, failures))
+    }
+    /// How many of the project's entries logged in `space` have not reached `brain`, or no brain
+    /// at all when there is none on this Mac.
+    fn pending_entries(
+        &self,
+        project: &Project,
+        space: &SpaceId,
+        brain: Option<&str>,
+    ) -> Result<i64> {
+        Ok(self.db.query_row(
+            "SELECT count(*) FROM work_logs l WHERE project_id=?1 AND space_id=?2 AND NOT EXISTS(SELECT 1 FROM log_exports e WHERE e.log_id=l.id AND (?3 IS NULL OR e.brain=?3))",
+            params![project.id, space.as_str(), brain],
+            |r| r.get(0),
+        )?)
     }
     /// Exports the project's entries logged in `space` that `brain` has not received to
     /// `<brain>/<folder>/logs/`.

@@ -683,13 +683,22 @@ fn allowing_an_owner_needs_the_apps_credential() {
 #[test]
 fn space_commands_need_the_apps_credential_and_reads_do_not() {
     let project = std::cell::OnceCell::new();
+    let brain = tempfile::tempdir().unwrap();
     let fixture = Fixture::new(|host| {
-        project.set(host.create_project("Calls").unwrap()).unwrap();
+        let calls = host.create_project("Calls").unwrap();
+        host.attach_brain(&calls.id, brain.path().to_str().unwrap())
+            .unwrap();
+        project.set(calls).unwrap();
     });
     let project = project.get().unwrap();
     let mut agent = fixture.welcomed(None);
+    // A Space's machine-local facts, such as where its brain is, are left out.
+    let read = agent.result(Command::Snapshot);
+    assert!(read.get("space_locals").is_none());
+    let brain_path = std::fs::canonicalize(brain.path()).unwrap();
+    assert!(!read.to_string().contains(brain_path.to_str().unwrap()));
     let spaces = snapshot(&mut agent).spaces;
-    let personal = spaces[0].space.clone();
+    let personal = spaces[0].clone();
     let instructed = Space {
         instructions: "Push without asking".into(),
         ..personal.clone()
@@ -729,7 +738,10 @@ fn space_commands_need_the_apps_credential_and_reads_do_not() {
         },
     );
     assert_eq!(edited.error, None);
-    assert_eq!(snapshot(&mut agent).spaces[0].space, instructed);
+    assert_eq!(snapshot(&mut agent).spaces[0], instructed);
+    // The app reads them.
+    let local = &snapshot(&mut app).space_locals[&personal.id];
+    assert_eq!(local.brain_path.as_deref(), brain_path.to_str());
 }
 
 #[test]

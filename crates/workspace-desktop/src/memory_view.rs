@@ -5,14 +5,25 @@ use ui::{card, empty_state, hint, icon, mono, pill, section, segment};
 use wording::age;
 
 impl Inspector {
+    /// The project's Space, which a project from a host older than Spaces has none of.
+    fn project_space(&self) -> Option<&Space> {
+        let project = self.shared.project_id()?;
+        let index = self.shared.index.as_ref()?;
+        let space = &index.project(&project)?.space;
+        index.snapshot().spaces.iter().find(|s| &s.id == space)
+    }
+
     /// Where the brain of the project's Space is on this Mac.
     fn project_brain(&self) -> Option<String> {
-        let project = self.shared.project_id();
+        let space = self.project_space()?;
+        space.brain.as_ref()?;
         let index = self.shared.index.as_ref()?;
-        let space = &index.project(project.as_ref()?)?.space;
-        let record = (index.snapshot().spaces.iter()).find(|r| &r.space.id == space)?;
-        record.space.brain.as_ref()?;
-        record.local.brain_path.clone()
+        index
+            .snapshot()
+            .space_locals
+            .get(&space.id)?
+            .brain_path
+            .clone()
     }
 
     fn choose_brain(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -91,11 +102,16 @@ impl Inspector {
     fn brain_section(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let brain = self.project_brain();
         let attached = brain.is_some();
+        let space = match self.project_space() {
+            Some(space) => format!("The {} Space's brain, shared by its projects.", space.name),
+            None => "No Space".into(),
+        };
         div()
             .flex()
             .flex_col()
             .gap_2()
             .child(section("MARKDOWN BRAIN", p))
+            .child(hint(space, p))
             .child(match brain {
                 Some(path) => div()
                     .flex()

@@ -349,3 +349,16 @@ fn space_commands_are_the_humans() {
     }
     assert!(!Command::Snapshot.is_human_only());
 }
+
+#[test]
+fn a_snapshot_from_a_host_older_than_spaces_still_reads() {
+    let old = serde_json::json!({
+        "projects": [{"id": "p", "name": "Calls", "brain": "/Users/m/dev/brain"}],
+        "repositories": [],
+        "sessions": [],
+        "attention": [],
+    });
+    let snapshot: Snapshot = serde_json::from_value(old).unwrap();
+    assert_eq!(snapshot.projects[0].space, SpaceId::default());
+    assert!(snapshot.spaces.is_empty() && snapshot.space_locals.is_empty());
+}

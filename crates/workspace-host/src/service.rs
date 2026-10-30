@@ -2015,7 +2015,7 @@ impl Actor {
                 let result = (|| -> Result<Option<Value>> {
                     let id = identity.context("Expired or invalid session credential")?;
                     ensure!(
-                        self.host.session(&id)?.owner().offers_coordination_tools(),
+                        self.host.session_owner(&id)?.offers_coordination_tools(),
                         "{name} is for project work, and this session is owned by a Space or a brain"
                     );
                     match name.as_str() {
@@ -4814,6 +4814,44 @@ mod tests {
             actor.sender = original;
         }
         replies.try_recv().unwrap()
+    }
+
+    #[test]
+    fn a_session_owned_by_a_space_or_a_brain_gets_no_workspace_tool() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let project = host.create_project("Calls").unwrap();
+        let coordinator = host.sessions().unwrap().remove(0);
+        let (mut actor, _, _) = idle_actor(host);
+        let mut turn = active_turn("run", vec![]);
+        turn.token = coordinator.id.clone();
+        actor.active.insert(coordinator.id.clone(), turn);
+        // No role runs outside projects yet, so the session is given its owner directly.
+        for owner in [
+            SessionOwner::Space(project.space.clone()),
+            SessionOwner::Brain("Sage-Social/sagehaven-docs".into()),
+        ] {
+            actor
+                .host
+                .db
+                .execute(
+                    "UPDATE sessions SET data=json_set(data,'$.owner',json(?2)) WHERE id=?1",
+                    params![coordinator.id, serde_json::to_string(&owner).unwrap()],
+                )
+                .unwrap();
+            for tool in [
+                "workspace_context",
+                "create_ticket",
+                "send_message",
+                "stop_agents",
+            ] {
+                let refused = call_tool(&mut actor, &coordinator.id, tool, json!({})).unwrap_err();
+                assert!(
+                    refused.contains("owned by a Space or a brain"),
+                    "{tool}: {refused}"
+                );
+            }
+        }
     }
     /// Complete one logical job, including its returned local checkout inspection.
     fn complete_job(actor: &mut Actor, events: &Receiver<Event>) -> bool {
