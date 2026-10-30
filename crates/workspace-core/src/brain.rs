@@ -226,6 +226,8 @@ pub enum BrainProblem {
     GateNotRequired { missing: Vec<String> },
     /// Something other than the host changed the batch's worktree, so it is not pushed.
     ChangedOutside,
+    /// Git or `gh` failed on this batch, with its reason; the brain's other batches went on.
+    Error { reason: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
