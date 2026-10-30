@@ -105,9 +105,9 @@ pub struct CoordinatorUsage {
     pub project: String,
     pub own: TokenTotals,
     pub workers: TokenTotals,
-    /// Own and workers' requests on priced models.
+    /// Own and workers' requests on priced models; `None` when none of them was priced.
     #[serde(default)]
-    pub cost: Cost,
+    pub cost: Option<Cost>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QuotaWindow {
