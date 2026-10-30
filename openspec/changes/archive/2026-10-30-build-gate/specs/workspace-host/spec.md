@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Builds take turns across the host
-The host SHALL let at most "Builds at once" builds compile or run tests at a time across every agent it runs, whatever the agent's project or role. It SHALL give each provider process `RUSTC_WRAPPER` and `GOFLAGS` with `-toolexec` and `-exec`, each naming the build gate, unless the host's own environment already sets that hook; it SHALL NOT set a Cargo target runner, so a repository's own runner keeps working. A call's build SHALL be the outermost Cargo, Go or Rust tool among its ancestors below the host, so nested Cargo shares its slot. A build SHALL take a slot at its first compile (a rustc or clippy-driver call naming a crate that does not read standard input or only print, or a Go tool other than its `-V` query) or Go test binary, waiting until one is free, and SHALL hold it until that process ends or becomes another program, so its test binaries, doctests and docs run inside it. `cargo run` SHALL leave no slot held by its running app, and neither SHALL `go run`. Every other call SHALL run at once. The gate SHALL end by executing the program in its own place, so signals reach the program. Waiting builds SHALL take free slots oldest first. A waiting Cargo build SHALL print "Waiting for a build slot (N in use)" once on rustc's standard output, which Cargo shows without replaying it from its cache, and a waiting Go test SHALL print it on standard error; a Go compile SHALL wait silently, since Go replays a tool's cached output. When the gate cannot keep its state, or the host cannot install it, builds SHALL run ungated. A repository's own `build.rustc-wrapper`, such as sccache, SHALL be overridden for agents; a build that compiles nothing, such as tests re-run on an unchanged tree, SHALL take no slot.
+The host SHALL let at most "Builds at once" builds compile or run tests at a time across every agent it runs, whatever the agent's project or role. It SHALL give each provider process `RUSTC_WRAPPER`, `CARGO_TARGET_<host triple>_RUNNER` and `GOFLAGS` with `-toolexec`, each naming the build gate, unless the host's own environment already sets that hook. A call's build SHALL be the outermost `cargo` or `go` among its ancestors below the host whose subcommand builds (Cargo's build, check, clippy, test, nextest, bench, doc, rustc, rustdoc, install, run and fix, with their aliases; Go's build, test, vet, install and run), so nested Cargo shares its slot and a wrapper such as `cargo watch` holds none; with no such ancestor, its parent. A build SHALL take a slot at its first compile (a rustc or clippy-driver call naming a crate that does not read standard input or only print, or a Go tool other than its `-V` query) or test binary (one Cargo or nextest runs from a `deps` folder), waiting until one is free, and SHALL hold it until that process ends or becomes another program, so its test binaries, doctests and docs run inside it, a cached re-run included. A `go run` SHALL hold its slot only while one of its compiles or its link runs and for two seconds after the last one started. The app `cargo run` starts SHALL run at once and hold no slot. Every other call SHALL run at once. The gate SHALL end by executing the program in its own place, so signals reach the program. Waiting builds SHALL take free slots oldest first. A waiting compile SHALL print "Waiting for a build slot (N in use)" once on rustc's standard output, which Cargo shows without replaying it from its cache, and a waiting test binary on standard error; a Go compile SHALL wait silently, since Go replays a tool's cached output. When the gate cannot keep its state, or the host cannot install it, builds SHALL run ungated. A repository's own `build.rustc-wrapper`, such as sccache, and its own target runner SHALL be overridden for agents. A `go test` whose binary is cached but whose result is not SHALL run its tests without a slot.
 
 #### Scenario: One build at once
 - **WHEN** "Builds at once" is 1 and two agents in different projects each start a Cargo build
@@ -16,16 +16,24 @@ The host SHALL let at most "Builds at once" builds compile or run tests at a tim
 - **THEN** it runs at once
 
 #### Scenario: A Go test
-- **WHEN** a `go test` holds the only slot and its tests run for minutes after the last compile
+- **WHEN** a `go test` that compiled holds the only slot and its tests run for minutes after the last compile
 - **THEN** another build waits until the `go test` ends
 
 #### Scenario: A running app
 - **WHEN** an agent's `cargo run` app is running, another build starts, and later the agent kills the `cargo run` process
 - **THEN** the build does not wait, and the kill stops the app
 
-#### Scenario: A repository's own runner
-- **WHEN** a repository's `.cargo/config.toml` sets a target runner
-- **THEN** `cargo run` and `cargo test` use it as without the gate
+#### Scenario: A cached test re-run
+- **WHEN** a build holds the only slot and another agent re-runs `cargo test` on a tree it already built, so nothing compiles
+- **THEN** its test binaries wait for the slot, and its output says "Waiting for a build slot (1 in use)"
+
+#### Scenario: A cargo watch
+- **WHEN** an agent's `cargo watch` waits between the `cargo test` runs it starts
+- **THEN** it holds no slot, and another agent's build starts
+
+#### Scenario: A go run
+- **WHEN** an agent's `go run` program is running after its build
+- **THEN** another build starts without waiting for the program to end
 
 #### Scenario: Nix shell
 - **WHEN** an agent runs `nix develop --command cargo test`, whose shell puts the Nix toolchain first on PATH

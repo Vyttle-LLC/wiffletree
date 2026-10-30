@@ -212,37 +212,150 @@ fn cargo_commands_that_build_nothing_run_while_a_build_holds_the_only_slot() {
     assert!(finish(holder).status.success());
 }
 
+/// `CARGO_TARGET_<host triple>_RUNNER`, as the host sets it.
+fn runner_variable() -> String {
+    let arch = std::env::consts::ARCH;
+    let triple = match std::env::consts::OS {
+        "macos" => format!("{arch}-apple-darwin"),
+        os => format!("{arch}-unknown-{os}-gnu"),
+    };
+    format!(
+        "CARGO_TARGET_{}_RUNNER",
+        triple.to_uppercase().replace('-', "_")
+    )
+}
+
 #[test]
-fn a_go_test_holds_its_slot_until_its_tests_end() {
+fn a_cached_cargo_test_rerun_that_compiles_nothing_still_waits_for_a_slot() {
+    let gate = Gate::new(1);
+    let folder = fresh_crate(gate.home.path());
+    fs::write(folder.join("src/lib.rs"), "#[test]\nfn passes() {}\n").unwrap();
+    let cargo = std::env::var_os("CARGO").unwrap_or("cargo".into());
+    let cargo_test = |extra: &[&str]| {
+        let mut command = gate.command(&cargo);
+        command
+            .arg("test")
+            .args(extra)
+            .current_dir(&folder)
+            .env("RUSTC_WRAPPER", gate.path("wiffletree-build-gate"))
+            .env(runner_variable(), gate.path("wiffletree-build-gate"))
+            .env("CARGO_TARGET_DIR", gate.path("target"));
+        command
+    };
+    assert!(cargo_test(&["--no-run"]).status().unwrap().success());
+    let holder = gate.compile("a");
+    gate.wait_for_log("start a");
+
+    let rerun = cargo_test(&[]).spawn().unwrap();
+    gate.wait_for_a_waiter();
+    gate.release("a");
+    let rerun = finish(rerun);
+    assert!(rerun.status.success());
+    // The test binary waited, through the runner; nothing was compiled, so rustc never did.
+    let said = |bytes: &[u8]| String::from_utf8_lossy(bytes).contains("Waiting for a build slot");
+    assert!(
+        said(&rerun.stderr),
+        "{}",
+        String::from_utf8_lossy(&rerun.stderr)
+    );
+    assert!(!said(&rerun.stdout));
+    assert!(finish(holder).status.success());
+}
+
+#[test]
+fn a_cargo_watch_style_parent_holds_no_slot_between_the_builds_it_starts() {
+    let gate = Gate::new(1);
+    // A program named `cargo` that runs `<subcommand>.sh` beside it and waits for it: as
+    // `cargo watch` it starts two `cargo build`s, waiting between them.
+    let tools = gate.path("tools");
+    fs::create_dir(&tools).unwrap();
+    let cargo = tools.join("cargo");
+    fs::write(
+        tools.join("cargo.rs"),
+        "fn main() {\n    let args: Vec<String> = std::env::args().collect();\n    let script = std::path::Path::new(&args[0]).with_file_name(format!(\"{}.sh\", args[1]));\n    let status = std::process::Command::new(\"/bin/sh\").arg(script).status().unwrap();\n    std::process::exit(status.code().unwrap_or(1));\n}\n",
+    )
+    .unwrap();
+    let built = Command::new("rustc")
+        .arg("-o")
+        .arg(&cargo)
+        .arg(tools.join("cargo.rs"))
+        .status()
+        .unwrap();
+    assert!(built.success());
+    let home = gate.home.path().display();
+    let script = |name: &str, body: String| {
+        fs::write(tools.join(format!("{name}.sh")), body).unwrap();
+    };
+    script(
+        "build",
+        format!("{home}/wiffletree-build-gate {home}/rustc --crate-name $NAME"),
+    );
+    script(
+        "watch",
+        format!(
+            "NAME=w1 {cargo} build\ntouch {home}/between\nwhile [ -d {home} ] && [ ! -f {home}/go-on ]; do sleep 0.02; done\nNAME=w2 {cargo} build",
+            cargo = cargo.display()
+        ),
+    );
+    let watch = gate
+        .command(&cargo)
+        .arg("watch")
+        .current_dir(&tools)
+        .spawn()
+        .unwrap();
+    gate.wait_for_log("start w1");
+    gate.release("w1");
+    wait_until("the watch between builds", || gate.path("between").exists());
+
+    let other = gate.compile("b");
+    gate.wait_for_log("start b");
+    gate.release("b");
+    assert!(finish(other).status.success());
+    fs::write(gate.path("go-on"), "").unwrap();
+    gate.wait_for_log("start w2");
+    gate.release("w2");
+    assert!(finish(watch).status.success());
+}
+
+/// A Go module whose `name` program, or test, writes `go-started` and runs until `release-go`
+/// appears.
+fn go_module(gate: &Gate, file: &str, code: &str) -> Option<PathBuf> {
     if Command::new("go").arg("version").output().is_err() {
         eprintln!("go is not installed; skipped");
-        return;
+        return None;
     }
-    let gate = Gate::new(1);
     let module = gate.path("module");
     fs::create_dir_all(&module).unwrap();
     fs::write(module.join("go.mod"), "module gated\n\ngo 1.21\n").unwrap();
-    fs::write(
-        module.join("gated_test.go"),
-        format!(
-            "package gated\n\nimport (\n\t\"os\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestRunsUntilReleased(t *testing.T) {{\n\tos.WriteFile({started:?}, nil, 0o644)\n\tfor {{\n\t\tif _, err := os.Stat({release:?}); err == nil {{\n\t\t\treturn\n\t\t}}\n\t\ttime.Sleep(20 * time.Millisecond)\n\t}}\n}}\n",
-            started = gate.path("go-started").display().to_string(),
-            release = gate.path("release-go").display().to_string(),
-        ),
-    )
-    .unwrap();
-    // Only `-exec`, so the test binary goes through the gate without Go rebuilding its
-    // standard library for `-toolexec`.
-    let go_test = gate
-        .command("go")
-        .args(["test", "-count=1", "./..."])
-        .current_dir(&module)
+    let wait = format!(
+        "\tos.WriteFile({started:?}, nil, 0o644)\n\tfor {{\n\t\tif _, err := os.Stat({release:?}); err == nil {{\n\t\t\treturn\n\t\t}}\n\t\ttime.Sleep(20 * time.Millisecond)\n\t}}\n",
+        started = gate.path("go-started").display().to_string(),
+        release = gate.path("release-go").display().to_string(),
+    );
+    fs::write(module.join(file), code.replace("WAIT", &wait)).unwrap();
+    Some(module)
+}
+
+fn go(gate: &Gate, module: &Path, args: &[&str]) -> Child {
+    gate.command("go")
+        .args(args)
+        .current_dir(module)
         .env(
             "GOFLAGS",
-            format!("-exec={}", gate.path("wiffletree-build-gate").display()),
+            format!("-toolexec={}", gate.path("wiffletree-build-gate").display()),
         )
         .spawn()
-        .unwrap();
+        .unwrap()
+}
+
+#[test]
+fn a_go_test_holds_its_slot_until_its_tests_end() {
+    let gate = Gate::new(1);
+    let test = "package gated\n\nimport (\n\t\"os\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestRunsUntilReleased(t *testing.T) {\nWAIT}\n";
+    let Some(module) = go_module(&gate, "gated_test.go", test) else {
+        return;
+    };
+    let go_test = go(&gate, &module, &["test", "-count=1", "./..."]);
     wait_until("the Go test running", || gate.path("go-started").exists());
     let compile = gate.compile("b");
     gate.wait_for_a_waiter();
@@ -250,11 +363,26 @@ fn a_go_test_holds_its_slot_until_its_tests_end() {
     gate.release("go");
     gate.wait_for_log("start b");
     gate.release("b");
-    let go_test = finish(go_test);
-    assert!(
-        go_test.status.success(),
-        "{}",
-        String::from_utf8_lossy(&go_test.stdout)
-    );
+    assert!(finish(go_test).status.success());
     assert!(finish(compile).status.success());
+}
+
+#[test]
+fn a_go_run_frees_its_slot_once_its_program_runs() {
+    let gate = Gate::new(1);
+    let program = "package main\n\nimport (\n\t\"os\"\n\t\"time\"\n)\n\nfunc main() {\nWAIT}\n";
+    let Some(module) = go_module(&gate, "main.go", program) else {
+        return;
+    };
+    let go_run = go(&gate, &module, &["run", "."]);
+    wait_until("the Go program running", || {
+        gate.path("go-started").exists()
+    });
+    // It would wait for the program, which is released only afterwards.
+    let compile = gate.compile("b");
+    gate.wait_for_log("start b");
+    gate.release("b");
+    assert!(finish(compile).status.success());
+    gate.release("go");
+    assert!(finish(go_run).status.success());
 }
