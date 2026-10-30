@@ -1724,6 +1724,7 @@ mod tests {
     }
 
     /// Runs `act` while `file` is locked, as `chflags uchg` locks it on macOS.
+    #[cfg(target_os = "macos")]
     fn while_locked<T>(file: &Path, act: impl FnOnce() -> T) -> T {
         let chflags = |flag: &str| {
             let status = std::process::Command::new("chflags")
@@ -1749,6 +1750,7 @@ mod tests {
         result
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn marking_up_to_date_with_a_locked_rewrite_changes_nothing() {
         let (_home, host) = host();

@@ -2,9 +2,9 @@ mod common;
 use common::git_output as git;
 use serde_json::json;
 use std::{fs, path::Path, process::Command};
-use workspace_core::{
-    Job, PROCESS_NOTICE_PREFIX, Provider, Receipt, Role, Session, Status, Ticket, TicketState,
-};
+#[cfg(target_os = "macos")]
+use workspace_core::{Job, PROCESS_NOTICE_PREFIX};
+use workspace_core::{Provider, Receipt, Role, Session, Status, Ticket, TicketState};
 use workspace_host::Host;
 
 fn succeed(path: &Path, args: &[&str]) {
@@ -622,6 +622,7 @@ fn a_failed_close_keeps_the_ticket_its_agents_and_worktree_and_a_retry_closes_it
     assert!(!Path::new(&ticket.worktree).exists());
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn a_close_that_fails_after_stopping_processes_says_so_and_tells_the_agent() {
     let directory = tempfile::tempdir().unwrap();
@@ -847,7 +848,9 @@ fn archiving_while_only_an_orphan_runs_defers_removal_whatever_its_run_outcome()
 
 /// A process an agent started with a tool and left running, in a group of its own, recorded
 /// against the agent as the host records what its watcher sees.
+#[cfg(target_os = "macos")]
 struct Started(std::process::Child);
+#[cfg(target_os = "macos")]
 impl Started {
     fn by(db: &rusqlite::Connection, agent: &Session) -> Self {
         use std::os::unix::process::CommandExt;
@@ -890,6 +893,7 @@ impl Started {
         )
     }
 }
+#[cfg(target_os = "macos")]
 impl Drop for Started {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -897,15 +901,18 @@ impl Drop for Started {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn archived() -> (bool, Option<String>) {
     (true, Some("archived".into()))
 }
 
+#[cfg(target_os = "macos")]
 fn implementer(host: &Host) -> Session {
     let mut sessions = host.sessions().unwrap().into_iter();
     sessions.find(|s| s.role == Role::Implementer).unwrap()
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn accepting_a_ticket_stops_what_its_agents_started_and_then_removes_the_worktree() {
     let directory = tempfile::tempdir().unwrap();
@@ -929,6 +936,7 @@ fn accepting_a_ticket_stops_what_its_agents_started_and_then_removes_the_worktre
     assert!(host.pending_worktree_removals().unwrap().is_empty());
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn closing_a_ticket_stops_what_its_agents_started() {
     let directory = tempfile::tempdir().unwrap();
@@ -952,6 +960,7 @@ fn closing_a_ticket_stops_what_its_agents_started() {
     assert!(!Path::new(&ticket.worktree).exists());
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn archive_agent_stops_what_the_agent_started() {
     let directory = tempfile::tempdir().unwrap();
@@ -978,6 +987,7 @@ fn archive_agent_stops_what_the_agent_started() {
     );
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn a_verifier_retired_by_its_cycle_has_what_it_started_stopped() {
     let directory = tempfile::tempdir().unwrap();
@@ -998,6 +1008,7 @@ fn a_verifier_retired_by_its_cycle_has_what_it_started_stopped() {
 /// A verifier that passed the first review, was restored by the human and has left a process
 /// running since, with the arguments for a next review that chooses another model for it. A
 /// fresh session takes that choice and the restored one is archived in its place.
+#[cfg(target_os = "macos")]
 fn to_be_replaced(
     host: &mut Host,
     db: &rusqlite::Connection,
@@ -1025,6 +1036,7 @@ fn to_be_replaced(
     (verifier, left, review)
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn a_verifier_replaced_at_another_model_has_what_it_started_stopped() {
     let directory = tempfile::tempdir().unwrap();
@@ -1041,6 +1053,7 @@ fn a_verifier_replaced_at_another_model_has_what_it_started_stopped() {
     assert_eq!(left.stopped(&db), archived());
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn a_review_that_fails_after_replacing_a_verifier_leaves_what_it_started_running() {
     let directory = tempfile::tempdir().unwrap();
@@ -1077,6 +1090,7 @@ fn a_review_that_fails_after_replacing_a_verifier_leaves_what_it_started_running
     assert_eq!(left.stopped(&db), archived());
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn archiving_a_project_stops_what_every_agent_in_it_started() {
     let directory = tempfile::tempdir().unwrap();
@@ -1097,6 +1111,7 @@ fn archiving_a_project_stops_what_every_agent_in_it_started() {
     assert!(!Path::new(&ticket.worktree).exists());
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn a_refused_archive_stops_nothing() {
     let directory = tempfile::tempdir().unwrap();

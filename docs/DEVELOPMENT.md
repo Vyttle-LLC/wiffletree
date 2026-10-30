@@ -295,7 +295,7 @@ Each part of the window is its own view, and a cached view draws again only when
 
 ## Releases and updates
 
-Every pull request runs `.github/workflows/ci.yml`: formatting, warnings-as-errors Clippy, all Rust tests and the deterministic communication tests. A pull request must be up to date with `main` before it merges, so nothing reruns on `main` after the merge, and merging does not release anything. The Release workflow reruns the checks on the tagged commit. Both workflows run on GitHub-hosted macOS runners (`macos-15`).
+Every pull request runs `.github/workflows/ci.yml`: formatting, warnings-as-errors Clippy, all Rust tests and the deterministic communication tests. The core and host tests are built once on Linux (`ubuntu-latest`) and run in four parallel shards. In parallel, macOS jobs (`macos-15`) run formatting and Clippy, and the desktop tests, the core and host tests that only build on macOS, and the communication tests. A `check` job, the one branch protection requires, passes only when every other job did, and fails if a core or host test runs in no pull-request job. A pull request must be up to date with `main` before it merges, so nothing reruns on `main` after the merge, and merging does not release anything. The Release workflow reruns the checks on the tagged commit, and there the whole suite also runs on macOS. Its signing and publishing run on `macos-15`.
 
 To release, tag a commit on `main` with its version and push the tag:
 
@@ -419,6 +419,8 @@ bash scripts/package_macos.sh
 ```
 
 The tests run with cargo-nextest: install it with `cargo install cargo-nextest --locked` or `brew install cargo-nextest`.
+
+The core and host tests also pass on Linux, where pull requests run most of them. A test that depends on macOS, such as one that needs the host to read the process table, launchd or `chflags`, is gated with `#[cfg(target_os = "macos")]`, and must be added to the `mac` profile's filter in `.config/nextest.toml` so that the macOS job of a pull request runs it; `cargo nextest run --profile mac --workspace` runs that set with the desktop tests. CI's `check` job fails and names any core or host test that macOS builds, Linux does not, and the profile misses. To run the Linux suite locally, use Docker, for example a `rust` image with the checkout mounted, run as a user other than root.
 
 `test_communications.py` uses explicit fake provider CLIs with the real host, MCP subprocess, socket, SQLite and Git worktrees. It covers cross-provider handoff, permission/answer routing, coordinator timers, exact-session resume, cancellation, restart and held-input reconciliation without inference.
 

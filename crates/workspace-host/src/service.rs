@@ -7953,6 +7953,7 @@ mod tests {
         fn group(&self) -> i64 {
             i64::from(self.0.id())
         }
+        #[cfg(target_os = "macos")]
         fn started(&self) -> i64 {
             processes::process_start(self.0.id() as i32).unwrap()
         }
@@ -8044,6 +8045,7 @@ mod tests {
         stopped_at
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn startup_stops_the_process_an_unfinished_run_left_running() {
         use std::os::unix::process::ExitStatusExt;
@@ -8073,6 +8075,7 @@ mod tests {
         assert!(resume.contains(&expected), "{resume}");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn startup_signals_no_process_it_cannot_confirm_and_holds_its_session_until_it_exits() {
         // The run kept no start time, or the id now belongs to a process started at another time.
@@ -8110,6 +8113,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn startup_says_what_it_signalled_when_part_of_a_stopped_providers_group_survives() {
         // The provider exits on SIGTERM, starting a helper as it goes that ignores the signal.
@@ -8173,6 +8177,7 @@ mod tests {
         assert!(open.is_empty(), "{open:?}");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_turn_that_outlasts_the_quit_wait_stays_unfinished_for_the_next_start() {
         use std::os::unix::process::ExitStatusExt;
@@ -8224,6 +8229,7 @@ mod tests {
         assert_eq!(recorded(&actor, &run)[0].3.as_deref(), Some("dismissed"));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn startup_raises_nothing_for_a_process_that_already_exited() {
         let process = LeftoverProcess::spawn();
@@ -8285,6 +8291,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn what_an_older_version_recorded_on_a_run_is_carried_into_the_record_once() {
         use std::os::unix::process::ExitStatusExt;
@@ -8340,6 +8347,7 @@ mod tests {
     }
 
     /// Records `process` as something the session's run started with a tool.
+    #[cfg(target_os = "macos")]
     fn started_by(actor: &mut Actor, session: &str, run: &str, process: &LeftoverProcess) {
         let process = processes::read(process.0.id() as i32).unwrap();
         let seen = [processes::Sighting::Member(process)];
@@ -8347,6 +8355,7 @@ mod tests {
     }
 
     /// Whether the host has stopped `process`, and the reason its record gives.
+    #[cfg(target_os = "macos")]
     fn stopped(actor: &Actor, process: &mut LeftoverProcess) -> (bool, Option<String>) {
         use std::os::unix::process::ExitStatusExt;
         let reason: Option<String> = actor
@@ -8370,6 +8379,7 @@ mod tests {
         (terminated, reason)
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn stop_agents_stops_what_a_child_started_and_its_stopped_turns_end_stops_the_rest() {
         let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
@@ -8395,6 +8405,7 @@ mod tests {
 
     /// Gives the session's running turn a run id no other test's turn has, as every real run
     /// has: the watcher is shared by the whole process and finds a run's tree by that id.
+    #[cfg(target_os = "macos")]
     fn own_run(
         actor: &mut Actor,
         session: &Session,
@@ -8406,6 +8417,7 @@ mod tests {
     }
 
     /// The Wiffletree process notices in the session's conversation, oldest first.
+    #[cfg(target_os = "macos")]
     fn process_notices(actor: &Actor, session: &Session) -> Vec<String> {
         let messages = actor.host.messages(&session.id, None, 100).unwrap();
         let notices = messages
@@ -8414,6 +8426,7 @@ mod tests {
         notices.map(|m| m.body).collect()
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_stop_finds_what_a_finishing_turn_left_while_its_last_sightings_are_on_their_way() {
         let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
@@ -8485,6 +8498,7 @@ mod tests {
         assert_eq!(running, 0);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_turn_that_finishes_as_its_agent_is_stopped_has_what_it_started_stopped() {
         let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
@@ -8509,6 +8523,7 @@ mod tests {
         assert!(notices[0].starts_with("Stopped 1 process "), "{notices:?}");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_stop_reaches_a_tool_whose_sighting_has_not_reached_the_store() {
         let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
@@ -8559,6 +8574,7 @@ mod tests {
         assert_eq!(ended.as_deref(), Some("stopped"));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_tool_stopped_at_startup_does_not_say_its_runs_provider_kept_running() {
         // The provider went down with the host; only a tool it had started outlived both.
@@ -8581,6 +8597,7 @@ mod tests {
 
     /// A child whose project runs and that is compacting, with one process an earlier turn of
     /// its own left running and one its compaction's provider started, such as a tool server.
+    #[cfg(target_os = "macos")]
     fn compacting_with_processes() -> (
         tempfile::TempDir,
         Actor,
@@ -8601,6 +8618,7 @@ mod tests {
         (home, actor, parent, child, run, left, helper)
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_stop_spares_what_a_running_compaction_started_until_the_compaction_ends() {
         let (_home, mut actor, parent, child, run, mut left, mut helper) =
@@ -8625,6 +8643,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn what_a_compaction_leaves_running_stays_when_its_agent_was_not_stopped() {
         let (_home, mut actor, _, child, run, mut left, mut helper) = compacting_with_processes();
@@ -8643,6 +8662,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_group_id_given_out_again_gets_a_record_and_a_notice_of_its_own() {
         let (_home, mut actor, _, tester, _) = ticket_in_turn();
@@ -8684,6 +8704,7 @@ mod tests {
         assert!(notices[0].contains(&group), "{notices:?}");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_sighting_in_a_busy_group_costs_the_same_however_many_processes_it_has_had() {
         let (_home, mut actor, _, tester, _) = ticket_in_turn();
@@ -8730,6 +8751,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn an_agent_archived_in_its_turn_keeps_its_processes_until_the_turn_ends() {
         let (_home, mut actor, ticket, tester, _) = ticket_in_turn();
@@ -8750,6 +8772,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_failed_turn_leaves_what_it_started_running() {
         let (_home, mut actor, _, tester, _) = ticket_in_turn();
@@ -9620,6 +9643,7 @@ mod tests {
         (home, actor, session, run)
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn startup_stops_a_compaction_the_last_host_left_running_and_never_runs_it_again() {
         use std::os::unix::process::ExitStatusExt;
@@ -9699,6 +9723,7 @@ mod tests {
         assert_eq!(compaction_lines(&actor, &child), ["Compaction interrupted"]);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn recovering_a_compaction_twice_settles_it_once() {
         let process = LeftoverProcess::spawn();

@@ -445,7 +445,11 @@ impl Process {
         if unsafe { libc::waitid(libc::P_PID, self.child.id(), &mut info, options) } != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
-        Ok(info.si_pid != 0)
+        #[cfg(target_os = "macos")]
+        let pid = info.si_pid;
+        #[cfg(not(target_os = "macos"))]
+        let pid = unsafe { info.si_pid() };
+        Ok(pid != 0)
     }
     /// Stops the provider's group, after the watcher's last look at it, and only then reaps
     /// the leader. Later calls return its status without signalling again.
@@ -821,6 +825,8 @@ fn without_terminal_codes(text: &str) -> String {
 mod tests {
     use super::*;
 
+    // Linux lets a group of zombies be signalled; macOS answers EPERM.
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_leader_stays_unreaped_until_its_group_has_been_signalled() {
         let mut process = Process {
@@ -1283,7 +1289,7 @@ mod tests {
         // thread caps.
         fs::write(
             &script,
-            "#!/bin/sh\nps -o nice= -p $$\nset -m\nsh -c 'echo $(ps -o pid=,pgid=,nice= -p $$) $CARGO_BUILD_JOBS $NEXTEST_TEST_THREADS' &\nwait\n",
+            "#!/bin/bash\nps -o nice= -p $$\nset -m\nsh -c 'echo $(ps -o pid=,pgid=,nice= -p $$) $CARGO_BUILD_JOBS $NEXTEST_TEST_THREADS' &\nwait\n",
         )
         .unwrap();
         // A cap the test's own environment sets, as `NEXTEST_TEST_THREADS` may, is passed on.
@@ -1316,7 +1322,8 @@ mod tests {
     }
 
     /// A stand-in provider that prints the descriptors it holds, one per line. `ls` lists its
-    /// own table: everything the provider passed on, plus the two it opens to read `/dev/fd`.
+    /// own table: everything the provider passed on, plus those it opens to read `/dev/fd`,
+    /// two on macOS and one on Linux.
     fn descriptor_lister(dir: &Path) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let script = dir.join("provider");
@@ -1377,7 +1384,11 @@ mod tests {
             .map(|output| String::from_utf8(output.unwrap().stdout).unwrap())
             .collect();
         assert_eq!(held.len(), PROVIDERS * ROUNDS);
-        let own = "0\n1\n2\n3\n4\n";
+        let own = if cfg!(target_os = "macos") {
+            "0\n1\n2\n3\n4\n"
+        } else {
+            "0\n1\n2\n3\n"
+        };
         let leaked: Vec<_> = held.iter().filter(|held| *held != own).collect();
         assert!(
             leaked.is_empty(),

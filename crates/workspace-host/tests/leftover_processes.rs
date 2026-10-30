@@ -4,7 +4,9 @@
 //! process an earlier host left running, and a session starts no turn beside one it could not
 //! confirm. Also how the host ends, by Stop agents and quit or an idle restart, and its power
 //! assertion while turns run. Kept in its own test binary because it sets the provider
-//! environment for the process.
+//! environment for the process. macOS only: elsewhere the host reads no process table, so it
+//! confirms and stops nothing.
+#![cfg(target_os = "macos")]
 mod common;
 use common::{request, snapshot, until_snapshot as until};
 use serde_json::Value;

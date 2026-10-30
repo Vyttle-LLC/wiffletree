@@ -514,16 +514,14 @@ fn the_child_hosts_credential_is_in_no_environment_and_no_file() {
     let fixture = Fixture::new(|_| {});
     let credential = fixture.credential();
     let pid = fixture.host.as_ref().unwrap().id().to_string();
-    // `ps -E` shows a process's environment after its command line.
+    // `ps -E` on macOS, and `ps e` on Linux, show a process's environment after its command line.
+    let with_environment = if cfg!(target_os = "macos") { "-E" } else { "e" };
     let ps = process::Command::new("/bin/ps")
-        .args(["-E", "-ww", "-o", "command=", "-p", &pid])
+        .args([with_environment, "-ww", "-o", "command=", "-p", &pid])
         .output()
         .unwrap();
     let shown = String::from_utf8_lossy(&ps.stdout);
-    assert!(
-        shown.contains("SHELL="),
-        "ps shows the environment: {shown}"
-    );
+    assert!(shown.contains("PATH="), "ps shows the environment: {shown}");
     assert!(!shown.contains(&credential));
     // Nothing in the data folder holds it.
     assert_eq!(
@@ -768,6 +766,7 @@ fn answer<R: serde::de::DeserializeOwned>(client: &HostClient, ask: ask::Ask<R>)
 
 /// The labels of the Wiffletree host jobs launchd has loaded for this user, such as
 /// `LaunchdJob::label()`; the running apps' own `application.…` entries are not jobs.
+#[cfg(target_os = "macos")]
 fn wiffletree_jobs() -> Vec<String> {
     let list = process::Command::new("/bin/launchctl")
         .arg("list")
@@ -790,6 +789,7 @@ fn short_tempdir() -> tempfile::TempDir {
     tempfile::Builder::new().tempdir_in("/tmp").unwrap()
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn an_unsigned_app_on_its_default_data_folder_starts_a_child_host_and_no_launchd_job() {
     let home = short_tempdir();

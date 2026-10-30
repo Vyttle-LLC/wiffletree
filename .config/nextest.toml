@@ -1,0 +1,51 @@
+# `--profile mac` runs the desktop tests and the core and host tests gated with
+# `#[cfg(target_os = "macos")]`, which pull requests otherwise run on Linux. A newly gated test
+# goes here too; CI's `check` job names any it finds missing.
+[profile.mac]
+default-filter = '''
+package(workspace-desktop)
+| binary_id(workspace-host::leftover_processes)
+| (binary_id(workspace-host) & (
+    test(/^processes::tests::/)
+    | test(/^remote::bonjour::tests::/)
+    | test(=agent_processes::tests::lazy_confirmation_prunes_an_exited_identity_but_keeps_a_live_member_outside_the_group)
+    | test(=provider::tests::the_leader_stays_unreaped_until_its_group_has_been_signalled)
+    | test(=skills::tests::marking_up_to_date_with_a_locked_rewrite_changes_nothing)
+    | test(=service::tests::a_failed_turn_leaves_what_it_started_running)
+    | test(=service::tests::a_group_id_given_out_again_gets_a_record_and_a_notice_of_its_own)
+    | test(=service::tests::a_sighting_in_a_busy_group_costs_the_same_however_many_processes_it_has_had)
+    | test(=service::tests::a_stop_finds_what_a_finishing_turn_left_while_its_last_sightings_are_on_their_way)
+    | test(=service::tests::a_stop_reaches_a_tool_whose_sighting_has_not_reached_the_store)
+    | test(=service::tests::a_stop_spares_what_a_running_compaction_started_until_the_compaction_ends)
+    | test(=service::tests::a_tool_stopped_at_startup_does_not_say_its_runs_provider_kept_running)
+    | test(=service::tests::a_turn_that_finishes_as_its_agent_is_stopped_has_what_it_started_stopped)
+    | test(=service::tests::a_turn_that_outlasts_the_quit_wait_stays_unfinished_for_the_next_start)
+    | test(=service::tests::an_agent_archived_in_its_turn_keeps_its_processes_until_the_turn_ends)
+    | test(=service::tests::recovering_a_compaction_twice_settles_it_once)
+    | test(=service::tests::startup_raises_nothing_for_a_process_that_already_exited)
+    | test(=service::tests::startup_says_what_it_signalled_when_part_of_a_stopped_providers_group_survives)
+    | test(=service::tests::startup_signals_no_process_it_cannot_confirm_and_holds_its_session_until_it_exits)
+    | test(=service::tests::startup_stops_a_compaction_the_last_host_left_running_and_never_runs_it_again)
+    | test(=service::tests::startup_stops_the_process_an_unfinished_run_left_running)
+    | test(=service::tests::stop_agents_stops_what_a_child_started_and_its_stopped_turns_end_stops_the_rest)
+    | test(=service::tests::what_a_compaction_leaves_running_stays_when_its_agent_was_not_stopped)
+    | test(=service::tests::what_an_older_version_recorded_on_a_run_is_carried_into_the_record_once)
+  ))
+| (binary_id(workspace-host::archive) & (
+    test(=a_close_that_fails_after_stopping_processes_says_so_and_tells_the_agent)
+    | test(=a_refused_archive_stops_nothing)
+    | test(=a_review_that_fails_after_replacing_a_verifier_leaves_what_it_started_running)
+    | test(=a_verifier_replaced_at_another_model_has_what_it_started_stopped)
+    | test(=a_verifier_retired_by_its_cycle_has_what_it_started_stopped)
+    | test(=accepting_a_ticket_stops_what_its_agents_started_and_then_removes_the_worktree)
+    | test(=archive_agent_stops_what_the_agent_started)
+    | test(=archiving_a_project_stops_what_every_agent_in_it_started)
+    | test(=closing_a_ticket_stops_what_its_agents_started)
+  ))
+| (binary_id(workspace-host::compaction) & (
+    test(=a_helper_given_an_earlier_groups_id_is_recorded_as_the_compactions_and_spared)
+    | test(=what_a_codex_compactions_server_starts_is_recorded_spared_by_a_pause_and_stopped_at_a_quit)
+  ))
+| (binary_id(workspace-host::host_socket)
+    & test(=an_unsigned_app_on_its_default_data_folder_starts_a_child_host_and_no_launchd_job))
+'''

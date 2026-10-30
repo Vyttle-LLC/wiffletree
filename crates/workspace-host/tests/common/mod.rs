@@ -37,6 +37,7 @@ pub fn one_tester(host: &mut Host) {
 }
 
 /// A process's start time in microseconds, as the kernel reports it.
+#[cfg(target_os = "macos")]
 pub fn process_started(pid: i32) -> i64 {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;

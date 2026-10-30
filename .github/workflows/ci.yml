@@ -1,4 +1,7 @@
 # Runs the validation suite on pull requests, which must be up to date with main to merge; the release workflow reuses it before publishing.
+# The core and host tests are built once on Linux and run in four shards. macOS jobs lint, run the desktop tests, the tests that
+# only build on macOS (the `mac` nextest profile) and the communication tests. Outside pull requests, as in a release, the whole
+# suite also runs on macOS. The `check` job, which branch protection requires, passes only when every other job did.
 name: CI
 
 on:
@@ -10,16 +13,63 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
+  linux-build:
+    runs-on: ubuntu-latest
+    env:
+      # Full debug info would make the archive each shard downloads about a gigabyte; line tables keep backtraces readable.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+
+      - name: Build the core and host tests
+        run: cargo nextest archive --locked -p workspace-core -p workspace-host --archive-file tests.tar.zst
+
+      - name: List them
+        run: cargo nextest list --archive-file tests.tar.zst --workspace-remap . --message-format oneline > linux-tests.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-tests
+          path: tests.tar.zst
+          retention-days: 1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-test-list
+          path: linux-tests.txt
+          retention-days: 1
+
+  linux-tests:
+    needs: linux-build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      # The tests read fixtures from the checkout.
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@nextest
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-tests
+
+      # Extracting into the checkout puts the binaries where the build job left them, so paths compiled into the tests resolve.
+      - name: Run shard ${{ matrix.shard }} of 4
+        run: >-
+          cargo nextest run --archive-file tests.tar.zst --workspace-remap . --extract-to . --extract-overwrite
+          --partition count:${{ matrix.shard }}/4
+
+  mac-lint:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@nextest
 
       - name: Ensure the Metal toolchain
         run: xcrun --find metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
@@ -30,10 +80,75 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
-      - name: Rust tests
-        run: cargo nextest run --locked --workspace
+  mac-tests:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+
+      - name: Ensure the Metal toolchain
+        run: xcrun --find metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+
+      - name: Desktop and macOS-only tests
+        run: cargo nextest run --locked --workspace --profile mac
+
+      # Every core and host test macOS builds, and those the `mac` profile runs, for the `check` job's coverage check.
+      - name: List them
+        run: |
+          cargo nextest list --locked -p workspace-core -p workspace-host --message-format oneline > mac-tests.txt
+          cargo nextest list --locked -p workspace-core -p workspace-host --profile mac --message-format oneline > mac-only-tests.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mac-test-lists
+          path: |
+            mac-tests.txt
+            mac-only-tests.txt
+          retention-days: 1
 
       - name: Communication tests
         run: |
           cargo build --locked -p workspace-host
           python3 scripts/test_communications.py
+
+  mac-full-suite:
+    if: github.event_name != 'pull_request'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+
+      - name: Ensure the Metal toolchain
+        run: xcrun --find metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+
+      - name: Rust tests
+        run: cargo nextest run --locked --workspace
+
+  check:
+    needs: [linux-build, linux-tests, mac-lint, mac-tests, mac-full-suite]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job passed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: '*-test-list*'
+          merge-multiple: true
+
+      # A core or host test macOS builds but Linux does not runs only if the `mac` profile selects it.
+      - name: Every core and host test runs on a pull request
+        run: |
+          sort -u linux-tests.txt mac-only-tests.txt > covered.txt
+          sort mac-tests.txt | comm -23 - covered.txt > uncovered.txt
+          if [ -s uncovered.txt ]; then
+            echo "Only macOS builds these tests, and the mac profile in .config/nextest.toml does not select them:"
+            cat uncovered.txt
+            exit 1
+          fi
