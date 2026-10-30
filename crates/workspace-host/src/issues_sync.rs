@@ -188,38 +188,44 @@ impl RuleSet for IssueRules {
     fn failed(&mut self, error: anyhow::Error) {
         self.files.failed(error);
     }
-    /// A new issue whose `issue.md` a scan holds stays wholly on this Mac, unnumbered, and so
-    /// does every file that would name its number.
+    /// A new issue whose `issue.md` is held, or that a held file names, stays wholly on this
+    /// Mac, unnumbered, and so does every file that would name its number. Holding those may
+    /// hold more new issues in turn, so this repeats until nothing more is held.
     fn also_held(&self, held: &[scan::Held]) -> Vec<scan::Held> {
         let found = &self.files.found;
+        let names = |path: &str, number: &IssueId| {
+            (self.references.iter()).any(|(named, ids)| named == path && ids.contains(number))
+        };
         let mut also: Vec<scan::Held> = vec![];
-        for (_, number) in &found.numbered {
-            let file = format!("{}/issue.md", issue_folder(number));
-            let Some(cause) = held.iter().find(|held| held.path == file) else {
-                continue;
+        let mut kept: Vec<&IssueId> = vec![];
+        loop {
+            let all = || held.iter().chain(&also);
+            let next = found.numbered.iter().find_map(|(_, number)| {
+                let file = format!("{}/issue.md", issue_folder(number));
+                let cause = all().find(|h| h.path == file || names(&h.path, number))?;
+                (!kept.contains(&number)).then(|| (number, cause.check.clone()))
+            });
+            let Some((number, check)) = next else {
+                return also;
             };
+            kept.push(number);
             let folder = format!("{}/", issue_folder(number));
-            let names = |path: &String| {
-                (self.references.iter()).any(|(named, ids)| named == path && ids.contains(number))
-            };
             for (path, _) in &found.committed {
-                let (own, naming) = (path.starts_with(&folder), names(path));
-                let listed = held.iter().chain(&also).any(|h| &h.path == path);
-                if (own || naming) && !listed {
+                let (own, naming) = (path.starts_with(&folder), names(path, number));
+                if (own || naming) && !held.iter().chain(&also).any(|h| &h.path == path) {
                     let reason = match own {
-                        true => "its issue’s issue.md is held",
+                        true => "its new issue is held",
                         false => "it names a new issue that is held",
                     };
                     also.push(scan::Held {
                         path: path.clone(),
-                        check: cause.check.clone(),
+                        check: check.clone(),
                         rule: None,
                         reason: Some(reason.into()),
                     });
                 }
             }
         }
-        also
     }
 }
 
@@ -669,6 +675,46 @@ mod tests {
         );
         let here = host.read_issue(&id("SAGE-1")).unwrap().issue.unwrap();
         assert_eq!(here.related, ["CEL-148".to_owned(), filed.id.to_string()]);
+    }
+
+    #[test]
+    fn holds_reach_every_new_issue_a_held_file_names_and_every_file_naming_those() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        github.commit("issues/SAGE-1/issue.md", theirs("SAGE-1"));
+        let (_home, mut host, sage) = sage_here(&github);
+        let phone = "Call the parent at (415) 555-0134 tonight.";
+        let b = file(&mut host, &sage, "Watch app drops replies", phone);
+        let mut a = file(&mut host, &sage, "Replies need a retry", "");
+        a.related.push(b.id.to_string());
+        host.edit_issue(a.clone()).unwrap();
+        host.comment_on_issue(&a.id, "Seen on two watches.").unwrap();
+        let mut first = host.read_issue(&id("SAGE-1")).unwrap().issue.unwrap();
+        first.related.push(a.id.to_string());
+        host.edit_issue(first).unwrap();
+        let commits = github.log("%H").len();
+        sync(&mut host, &github).unwrap();
+        assert_eq!(github.log("%H").len(), commits, "nothing reaches GitHub");
+        let there = github.show("issues/SAGE-1/issue.md").unwrap();
+        assert!(!there.contains("SAGE-2") && !there.contains("SAGE-3"), "{there}");
+        let mut held: Vec<String> = (host.held_notes().unwrap().into_iter())
+            .map(|note| match note {
+                WorkspaceNote::Held(held) => held.path,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        held.sort();
+        let (a, b) = (issue_folder(&a.id), issue_folder(&b.id));
+        let mut expected = vec![
+            "issues/SAGE-1/issue.md".to_owned(),
+            format!("{a}/issue.md"),
+            format!("{b}/issue.md"),
+        ];
+        let comments = clone_of(&host).join(&a).join("comments");
+        let comment = fs::read_dir(comments).unwrap().next().unwrap().unwrap();
+        expected.push(format!("{a}/comments/{}", comment.file_name().to_str().unwrap()));
+        expected.sort();
+        assert_eq!(held, expected, "each held under the ID this Mac shows");
     }
 
     #[test]

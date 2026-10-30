@@ -104,7 +104,7 @@ pub(crate) fn issue_md(issue: &Issue) -> Result<Vec<u8>> {
     with_front(&front, &issue.description)
 }
 
-pub(crate) fn parse_issue(content: &[u8]) -> Result<Issue> {
+fn parse_issue(content: &[u8]) -> Result<Issue> {
     let (front, body) = split_front(content)?;
     let front: IssueFront = serde_yaml::from_str(front).context("The front matter is not valid")?;
     Ok(Issue {
@@ -151,7 +151,7 @@ fn parse_comment(file: &str, content: &[u8]) -> Result<Comment> {
 }
 
 /// The lines of `events.jsonl` that parse, in file order; others are skipped, never rewritten.
-pub(crate) fn parse_events(content: &[u8]) -> Vec<IssueEvent> {
+fn parse_events(content: &[u8]) -> Vec<IssueEvent> {
     String::from_utf8_lossy(content)
         .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
