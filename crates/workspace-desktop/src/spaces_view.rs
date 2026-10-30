@@ -1406,6 +1406,13 @@ fn new_storage_line(check: &StorageCheck) -> String {
     )
 }
 
+/// The form's brain once a brain was chosen, which changes only where it is on this Mac or,
+/// for a Space with none, gives it one: an edited brain stays as the form has it, and No brain
+/// gives way to the brain the Space had, so Save keeps the one just chosen.
+fn brain_after_choosing(form: &Option<SpaceBrain>, loaded: &Space) -> Option<SpaceBrain> {
+    form.clone().or_else(|| loaded.brain.clone())
+}
+
 /// `latest` with each field the form changed from `read`, how it read when filled, set to
 /// the form's value.
 fn merged(read: &Space, form: &Space, latest: &Space) -> Space {
@@ -1759,12 +1766,12 @@ impl Requests for SpacesPage {
                 self.loaded = None;
                 self.error = None;
             }
-            // The brain just chosen is the Space's now: the form leaves its brain unedited, so
-            // Save keeps it and a form with no other edit reloads with it.
             Ok(_) if matches!(command, Command::SetSpaceBrain { .. }) => {
                 self.error = None;
-                if let Some((from, _)) = &self.loaded {
-                    self.brain = from.brain.clone();
+                if self.brain.is_none()
+                    && let Some((from, _)) = &self.loaded
+                {
+                    self.brain = brain_after_choosing(&self.brain, from);
                     let folder = (from.brain.as_ref()).map_or(String::new(), |b| b.folder.clone());
                     self.brain_folder
                         .update(cx, |input, cx| input.set_value(folder, window, cx));
@@ -1803,9 +1810,9 @@ impl Render for SpacesPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        Joining, brain_label, format_sources, issues_line, join_choices, join_refused_by, merged,
-        new_storage_line, parse_sources, prefix_question, readers_line, repository_line,
-        shared_with, storage_banner, sync_line,
+        Joining, brain_after_choosing, brain_label, format_sources, issues_line, join_choices,
+        join_refused_by, merged, new_storage_line, parse_sources, prefix_question, readers_line,
+        repository_line, shared_with, storage_banner, sync_line,
     };
     use workspace_core::*;
 
@@ -2078,5 +2085,40 @@ mod tests {
         );
         assert!(line.contains("anyone who can push to it can change its instructions"));
         assert!(line.ends_with("shares its prefix SAGE."));
+    }
+
+    #[test]
+    fn choosing_a_brains_clone_keeps_an_unsaved_folder_edit() {
+        let mut read = sage();
+        read.brain = Some(SpaceBrain {
+            repository: BrainRepository::GitHub {
+                owner: "Sage-Social".into(),
+                name: "sagehaven-docs".into(),
+                extra: Extra::new(),
+            },
+            folder: "second-brain".into(),
+            extra: Extra::new(),
+        });
+        // The human changes the folder, then chooses where the brain is cloned.
+        let mut form = read.clone();
+        form.brain.as_mut().unwrap().folder = "team-brain".into();
+        form.brain = brain_after_choosing(&form.brain, &read);
+        // The reply changed only this Mac's clone path; the definition is as read.
+        let saved = merged(&read, &form, &read);
+        assert_eq!(saved.brain.unwrap().folder, "team-brain");
+        // After No brain, the brain the Space has stays, and Save keeps it.
+        let none = brain_after_choosing(&None, &read);
+        assert_eq!(
+            merged(
+                &read,
+                &Space {
+                    brain: none,
+                    ..read.clone()
+                },
+                &read
+            )
+            .brain,
+            read.brain
+        );
     }
 }
