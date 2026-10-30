@@ -29,7 +29,7 @@ Michael approved #163's mockup and the reconciliation plan. Each decision is spe
 | 5 | Sessions outside projects belong to a Space (threads, job runs, issue threads) or a brain (compile); compiles are a built-in, host-owned job kind on #163's scheduler with their own Brain compiler row | workspace-host "Enforced hierarchy" here, restated in assistant-spaces-jobs-boards and brain-compile; scheduled-jobs "Built-in host jobs"; brain-compile "Compile runs start on schedule, on demand and after a ruling" |
 | 6 | The Repositories page is grouped by Space (Sage, Vyttle, Personal, No Space), with one clickable Space chip per Space on each row; repositories stay a record on each Mac and a Space lists them by `owner/name`; a repository may be in several Spaces; adding one suggests a Space from its GitHub owner, which only suggests; only the human changes membership; the upgrade suggests Spaces for existing repositories for the human to confirm | spaces "Repositories belong to Spaces by identity", "Existing projects get Spaces on upgrade" |
 
-### Smaller calls, recommended — for Michael to confirm in this PR
+### Smaller calls — confirmed by Michael, 2026-10-29
 
 - **YAML for the tracker config**, `wiffletree-issues.yaml`, to match `space.yaml`. `wiffletree.json` and `wiffletree-brain.json` stay JSON: they already exist in that form and are read by other tools. *Specified in spaces "A storage repository is also the Space's tracker" and shared-issues "A tracker's files".*
 - **Scans before pushing `issues/` or `spaces/`.** The host runs the gate's `sensitive-info` and `secret-scan` on this Mac and holds a failing file (fail closed), because storage repositories have no PR gate. *Specified in shared-repositories "Files are scanned before they are pushed".*
@@ -37,10 +37,10 @@ Michael approved #163's mockup and the reconciliation plan. Each decision is spe
 
 ## Decided while writing
 
-Each is the smallest choice that keeps the decisions above consistent; the coordinator should list them for Michael.
+Each is the smallest choice that keeps the decisions above consistent. All nine were confirmed by Michael, 2026-10-29.
 
 1. **A repository has one role on a Mac: brain, or storage and settings.** A brain changes only through gated PRs, while storage and settings push their default branch directly; one clone cannot follow both. Setting a brain to a repository that is a storage or settings repository on this Mac, or the reverse, is refused, naming the other use. This also keeps `<owner>-<name>` unique under `repos/`. A storage repository may also be the settings repository, as #163 already allowed.
-2. **Without a settings repository, the shared folder stays `<data folder>/shared/`.** It is a plain folder, not a clone. Setting up or joining a settings repository makes its clone under `repos/` the shared folder and moves `<data folder>/shared/` to `backups/`, as joining already did. Stop syncing copies the settings files back to `<data folder>/shared/` and keeps using them there, while the clone keeps syncing its Space and issue files when it is also storage. `spaces` restates the settings repository's set-up, join and stop requirements to say so.
+2. **Without a settings repository, the shared folder stays `<data folder>/shared/`.** It is a plain folder, not a clone. Setting up or joining a settings repository makes its clone under `repos/` the shared folder and moves the settings files of `<data folder>/shared/` to `backups/`, as joining already did. Switching from one settings repository to another first runs Stop syncing for the old one, so its clone, which may still be a Space's storage, stays and keeps syncing; no clone is ever moved to `backups/`. Stop syncing copies the settings files back to `<data folder>/shared/` and keeps using them there, while the clone keeps syncing its Space and issue files when it is also storage. `spaces` restates the settings repository's set-up, join and stop requirements to say so.
 3. **The prefix is chosen with the storage.** A new storage repository, local or on GitHub, gets `wiffletree-issues.yaml` in its first commit. The Space form proposes a prefix from the Space's name (its first letters, 2 to 5 capitals) and the human may change it. Prefixes are unique among the storage repositories on this Mac. A prefix can change only while its tracker has no issue. A storage repository joined without a tracker config offers Set up issues, which asks for a prefix and commits the config.
 4. **One commit per rule set.** The engine commits each rule set's changes separately (settings, a Space, issues, a board), so every commit touches only one rule set's paths and the settings repository's "a commit holds changes only to `wiffletree.json`, `settings/` and `skills/`" stays true. A repository is fetched at the shortest cadence of the rule sets it holds: every minute once it holds a tracker.
 5. **Sessions outside projects have an owner, not a hidden project.** `SessionOwner` is `Project`, `Space` or `Brain`. Messages and the usage ledger key on the owner, so usage reports can show "Assistant · Sage" or "Brain compile · sagehaven-docs" without a project record the sidebar must hide.
@@ -91,7 +91,7 @@ New project shows the Space, defaulting to the last used, and ticks its reposito
 
 ## Order of changes and of shared requirements
 
-Implementation order: `spaces` first. Then in parallel: the brain track (`brain-gate` can start now; `brain-registry-sync`, `brain-log-capture` and `brain-browser` after `spaces`; `brain-compile` also after #163 stage 3, for the scheduler); `shared-issues` phases 1–3, 5 and 6; #163 stages 1–5, with issue threads (#163 stage 6) after #163 stage 1 and `shared-issues` phase 3.
+Implementation order: `spaces` first. Then in parallel: the brain track (`brain-gate` can start now; `brain-registry-sync`, `brain-log-capture` and `brain-browser` after `spaces`; `brain-compile` also after #163 stage 3, for the scheduler); `shared-issues` phases 1–3, 5 and 6; #163 stages 1–5, with issue threads (#163 stage 6) after #163 stage 1 and `shared-issues` phase 3. #163 stage 1 ships threads without brain tools, so it does not wait for the brain track: its task 1.8 adds `log_work` once `brain-log-capture` lands and `query_brain` once `brain-browser` lands. This split was chosen over ordering the brain track first because it keeps the three tracks parallel.
 
 Archive order, which decides who restates a requirement that several changes modify: `spaces`, `shared-issues`, `assistant-spaces-jobs-boards`, `brain-registry-sync`, `brain-log-capture`, `brain-compile`, `brain-browser`; `brain-gate` modifies no main requirement and may archive at any time. Each later delta restates the requirement with every earlier addition:
 
@@ -104,7 +104,7 @@ Archive order, which decides who restates a requirement that several changes mod
 | settings-repository "Shared settings live in one folder on every machine" | 1 `spaces` (clone root) → 2 `assistant-spaces-jobs-boards` (`settings/assistant.json`) |
 | settings-repository "The human chooses the settings repository on each machine", "A second machine joins", "Stopping sync" | 1 `spaces` (the shared folder moves to and from the clone under `repos/`) |
 | host-process "Human-only commands need the app's credential" | 1 `spaces` (Space commands) → 2 `shared-issues` (issue writes, proposals) |
-| skills "Instructions are a fixed core and a skill" | 1 `shared-issues` (untrusted issue text) → 2 `assistant-spaces-jobs-boards` (Assisting, Space instructions, issue threads) |
+| skills "Instructions are a fixed core and a skill" | 1 `assistant-spaces-jobs-boards` (Assisting, Space instructions, issue threads), the only delta; `shared-issues` keeps its untrusted-text rule in its own spec |
 | model-routing "Who runs what" | 1 `assistant-spaces-jobs-boards` (Assistant, Router, Job) → 2 `brain-compile` (Brain compiler) |
 
 ## Risks / Trade-offs
@@ -123,4 +123,4 @@ Archive order, which decides who restates a requirement that several changes mod
 
 ## Open Questions
 
-None. The smaller calls above await Michael's confirmation in this PR, and each changes only the requirement named.
+None. The smaller calls and the decisions made while writing were confirmed by Michael, 2026-10-29.

@@ -35,4 +35,4 @@ On October 29, 2026 Michael approved one answer: the Space is the one home. Each
 - `workspace-desktop`: `settings/spaces.rs` (list, page, New, From a repository, Storage and issues), `creation.rs` (Space and repositories in New project), the project Overview's Space.
 - Docs: `README.md`, `docs/PRD.md`.
 - Mockup: `ui/mockups.html`, copied from #163's approved Space page and amended; approved by Michael on October 29, 2026, with the Repositories page he added that day.
-- Depends on `brain-gate` tasks 1–2 for the scans (task 4.3 here). Every other open change listed in design.md builds on this one.
+- Depends on `brain-gate` tasks 1–2 for the scans (task 4.4 here). Every other open change listed in design.md builds on this one.
