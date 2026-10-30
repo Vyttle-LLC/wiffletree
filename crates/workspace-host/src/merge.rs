@@ -835,7 +835,8 @@ impl Host {
 
     /// Records the merge the host made, accepts the ticket and tells the caller. The request is
     /// kept until its message is queued, so a restart in between finishes it again, and while
-    /// GitHub has not reported the merge commit, so the next start reads it again.
+    /// GitHub has not reported the merge commit, so the next start reads it again. Acceptance and
+    /// the result's stable message id make repeating a finished step harmless.
     fn merged(
         &mut self,
         mut ticket: Ticket,
@@ -846,32 +847,19 @@ impl Host {
         answering: bool,
     ) -> Result<Value> {
         let named = named(&ticket, &request);
-        let recorded = (ticket.pull_request.as_mut()).filter(|pr| pr.number == request.number);
-        if let Some(pr) = recorded
-            && pr.merged_by_host.is_some()
-        {
-            // Finished before, but for the merge commit, which this read may now have.
-            let Some(commit) = commit.filter(|_| pr.merge_commit.is_none()) else {
-                return Ok(json!({"status": "merged"}));
-            };
-            pr.merge_commit = Some(commit.clone());
-            self.save_ticket(&ticket)?;
-            let notice = format!(
-                "{named} merged into {} as {}; GitHub had not reported its merge commit before.",
-                request.base,
-                short_sha(&commit)
-            );
-            let id = format!("{MERGE_PREFIX}{}:commit", request.id);
-            if let Err(error) = self.send_publish_result(&id, &request.caller, &notice)
-                && !self.message_exists(&id)?
-            {
-                eprintln!("Workspace merge: {error:#}");
+        // A restart re-enters here; each step skips what an earlier entry already did.
+        let mut late_commit = None;
+        let pr = (ticket.pull_request.as_mut()).filter(|pr| pr.number == request.number);
+        if let Some(pr) = pr.filter(|pr| pr.merged_by_host.is_some()) {
+            // Recorded before, but perhaps without the merge commit this read found.
+            if pr.merge_commit.is_none() && commit.is_some() {
+                pr.merge_commit = commit.clone();
+                late_commit = commit.clone();
+                self.save_ticket(&ticket)?;
             }
-            let mut ticket = self.ticket(&ticket.id)?;
-            self.drop_merge(&mut ticket)?;
-            return Ok(json!({"status": "merged", "merge_commit": commit}));
-        }
-        if let Some(pr) = (ticket.pull_request.as_mut()).filter(|pr| pr.number == request.number) {
+        } else if let Some(pr) =
+            (ticket.pull_request.as_mut()).filter(|pr| pr.number == request.number)
+        {
             pr.state = PrState::Merged;
             pr.head = request.head.clone();
             pr.merge_commit = commit.clone();
@@ -897,6 +885,10 @@ impl Host {
                 &detail,
             )?;
         }
+        let commit = (ticket.pull_request.as_ref())
+            .filter(|pr| pr.number == request.number)
+            .and_then(|pr| pr.merge_commit.clone())
+            .or(commit);
         let accepted = self.accept_ticket(&ticket.id, request.waived.as_deref());
         let stacked = self.record_retargets(&request, &children)?;
         let method_words = method.map_or(String::new(), |m| format!(" with {}", m.label()));
@@ -930,6 +922,22 @@ impl Host {
             "base": request.base, "method": method.map(MergeMethod::label),
             "head": request.head, "merge_commit": commit, "accepted": accepted.is_ok(),
             "result": result});
+        // The result already went out without the commit: one follow-up names it.
+        if let Some(late) = late_commit
+            && self.message_exists(&format!("{MERGE_PREFIX}{}", request.id))?
+        {
+            let notice = format!(
+                "{named} merged into {} as {}; GitHub had not reported its merge commit before.",
+                request.base,
+                short_sha(&late)
+            );
+            let id = format!("{MERGE_PREFIX}{}:commit", request.id);
+            if let Err(error) = self.send_publish_result(&id, &request.caller, &notice)
+                && !self.message_exists(&id)?
+            {
+                return Err(error);
+            }
+        }
         let mut ticket = self.ticket(&ticket.id)?;
         match (answering, commit.is_some()) {
             (true, true) => self.drop_merge(&mut ticket)?,
@@ -2339,6 +2347,40 @@ mod tests {
         assert_eq!(told.len(), 1);
         assert!(told[0].starts_with("Merged PR #180"), "{told:?}");
         assert!(f.ticket().merging.is_none());
+    }
+
+    #[test]
+    fn a_restart_after_the_merge_was_recorded_still_accepts_tells_and_clears() {
+        for accepted_before in [false, true] {
+            let (mut f, fake) = ready();
+            ready_to_send(&mut f, &fake);
+            fake.set(180, "state", json!("MERGED"));
+            fake.set(180, "mergeCommit", json!({"oid": MERGE_COMMIT}));
+            // The host stopped after merged() saved the merge, and perhaps accepted the ticket.
+            let mut ticket = f.ticket();
+            let pr = ticket.pull_request.as_mut().unwrap();
+            pr.state = PrState::Merged;
+            pr.merge_commit = Some(MERGE_COMMIT.into());
+            pr.merged_by_host = Some(HostMerge {
+                method: Some(MergeMethod::Squash),
+                head: pr.head.clone(),
+                approved: false,
+            });
+            f.host.save_ticket(&ticket).unwrap();
+            if accepted_before {
+                f.host.accept_ticket(&f.ticket.clone(), None).unwrap();
+            }
+            let mut f = restart(f);
+            let jobs = f.host.interrupted_merges().unwrap();
+            settle(&mut f, &fake, &jobs[0], false).unwrap();
+            let ticket = f.ticket();
+            assert_eq!(ticket.state, TicketState::Accepted);
+            assert!(ticket.merging.is_none());
+            let told = messages(&f.host);
+            assert_eq!(told.len(), 1, "{told:?}");
+            assert!(told[0].starts_with("Merged PR #180"), "{told:?}");
+            assert!(f.host.interrupted_merges().unwrap().is_empty());
+        }
     }
 
     #[test]
