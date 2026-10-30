@@ -95,6 +95,15 @@ pub(super) fn day_and_time(at: i64) -> String {
     }
 }
 
+/// What a conversation says while a turn that failed on a usage limit waits to be retried.
+pub(super) fn limit_retry(provider: &str, resets_at: Option<i64>) -> String {
+    let when = match resets_at {
+        Some(at) => day_and_time(at),
+        None => "once a reading shows it has".into(),
+    };
+    format!("Waiting for {provider}'s usage limit to reset. Retries automatically {when}.")
+}
+
 /// "Today 08:00", "Yesterday 17:30" or "13 Oct 10:15".
 pub(super) fn when(at: DateTime<Local>, today: NaiveDate) -> String {
     match at.date_naive() {

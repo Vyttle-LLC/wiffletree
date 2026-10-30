@@ -136,6 +136,7 @@ impl Actor {
                 eprintln!("Workspace compaction: {error:#}");
             }
         }
+        self.retry_after_limits(now())?;
         let in_rounds = self.admit_rounds()?;
         // Quiet messages ride along with the next turn but never start one. Each recipient's
         // oldest due message stands for it, so a long queue cannot hide other sessions.
@@ -174,6 +175,50 @@ impl Actor {
             }
             if let Err(error) = self.start_turn(session.clone(), input) {
                 self.start_failed(&session, &message, &error)?;
+            }
+        }
+        Ok(())
+    }
+    /// Queues again the held input of each turn that failed on a usage limit, once that limit
+    /// has reset: at the reset when it was known, else at the first reading since the failure
+    /// that no longer says it is reached. The retry is the human's Retry, so the input carries
+    /// its interrupted-turn note. A session paused meanwhile waits for the human.
+    pub(super) fn retry_after_limits(&mut self, at: i64) -> Result<()> {
+        for mut runtime in self.host.runtimes()? {
+            let Some(retry) = runtime.limit_retry.clone() else {
+                continue;
+            };
+            let session = self.host.session(&runtime.session_id)?;
+            if session.status != Status::Disconnected || self.active.contains_key(&session.id) {
+                continue;
+            }
+            if let Some(spent) = self.host.limit_reached(session.provider, at)? {
+                // A later reading may move the reset; the conversation shows the latest.
+                if spent.until != retry.resets_at {
+                    runtime.limit_retry = Some(LimitRetry {
+                        resets_at: spent.until,
+                        ..retry
+                    });
+                    self.host.save_runtime(&runtime)?;
+                    self.state_changed();
+                }
+                if let Some(until) = spent.until {
+                    self.wake(until);
+                }
+                continue;
+            }
+            let read_since = (self.host.quotas()?.iter())
+                .any(|q| q.provider == session.provider && q.observed_at > retry.failed_at);
+            if retry.resets_at.is_some_and(|reset| reset <= at) || read_since {
+                self.host.reconcile_session(&session.id, true)?;
+                Host::event(
+                    &self.host.db,
+                    &session.project_id,
+                    Some(&session.id),
+                    "limit_retried",
+                    "Held input retried after the usage limit reset",
+                )?;
+                self.state_changed();
             }
         }
         Ok(())

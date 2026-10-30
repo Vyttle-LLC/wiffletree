@@ -2591,6 +2591,10 @@ pub struct SessionRuntime {
     /// not. Cleared when a turn starts.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub waiting: bool,
+    /// Its last turn failed on its provider's usage limit: the held input is retried by itself
+    /// once the limit resets. Cleared by that retry, Retry, Skip or the next turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_retry: Option<LimitRetry>,
     /// Who stopped the session, while it stays paused or interrupted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped_by: Option<Stopper>,
@@ -2602,6 +2606,14 @@ pub struct SessionRuntime {
     /// How the last compaction ended, until it is dismissed or another is requested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_compaction: Option<CompactionOutcome>,
+}
+
+/// A turn that failed on a usage limit and waits for it to reset.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LimitRetry {
+    pub failed_at: i64,
+    /// When the provider said the limit resets; `None` waits for its next reading.
+    pub resets_at: Option<i64>,
 }
 
 /// A request to replace a session's conversation with the provider's summary of it.

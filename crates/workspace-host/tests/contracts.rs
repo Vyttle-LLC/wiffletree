@@ -252,7 +252,9 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = core(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator core — v6"));
+    assert!(coordinator.contains("Project coordinator core — v7"));
+    // A limit failure retries by itself; the coordinator is not asked to resume it.
+    assert!(coordinator.contains("usage limit needs nothing from you"));
     // Noted findings need no decision, and one is pulled into a fix with fix_now.
     for phrase in [
         "Non-blocking and pre-existing findings are noted: they need no decision before accepting or publishing",

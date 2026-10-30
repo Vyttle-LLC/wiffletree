@@ -85,7 +85,8 @@ impl Host {
         self.save_runtime(&runtime)
     }
     /// Releases a paused or interrupted session: its held input is queued again or dropped.
-    /// Both the human's Retry and Skip and a coordinator's resume_agent come through here.
+    /// Both the human's Retry and Skip and a coordinator's resume_agent come through here, as
+    /// does the automatic retry after a usage limit resets, which either of them cancels.
     pub fn reconcile_session(&mut self, id: &str, retry: bool) -> Result<()> {
         let session = self.session(id)?;
         ensure!(
@@ -108,6 +109,7 @@ impl Host {
         }
         runtime.last_error = None;
         runtime.stopped_by = None;
+        runtime.limit_retry = None;
         self.save_runtime(&runtime)?;
         self.set_status(id, Status::Ready)
     }

@@ -445,13 +445,12 @@ impl Conversation {
                     ),
             );
         }
-        if let Some(error) = self
-            .shared
-            .runtime(&session.id)
-            .and_then(|r| r.last_error.as_deref())
-        {
-            // Pausing is the user's own action, so it does not read as a failure.
-            let tone = if session.status == Status::Paused {
+        let runtime = self.shared.runtime(&session.id);
+        if let Some(error) = runtime.and_then(|r| r.last_error.as_deref()) {
+            let limit_retry = runtime.and_then(|r| r.limit_retry.as_ref());
+            // Pausing is the user's own action, and a usage limit retries by itself, so
+            // neither reads as a failure.
+            let tone = if session.status == Status::Paused || limit_retry.is_some() {
                 p.yellow
             } else {
                 p.red
@@ -468,6 +467,15 @@ impl Conversation {
                             .flex_col()
                             .gap_1()
                             .child(first_line(error, 180))
+                            .children(limit_retry.map(|retry| {
+                                hint(
+                                    wording::limit_retry(
+                                        session.provider.label(),
+                                        retry.resets_at,
+                                    ),
+                                    p,
+                                )
+                            }))
                             .child(hint(
                                 "The last input is held. Inspect the worktree before retrying: interrupted tools may already have run.",
                                 p,
@@ -483,7 +491,7 @@ impl Conversation {
                     .child(
                         button("retry-held")
                             .label("Retry")
-                            .tooltip("Retry the held input")
+                            .tooltip("Retry the held input now")
                             .on_click(cx.listener(|v, _, w, c| v.reconcile(true, w, c))),
                     ),
             );

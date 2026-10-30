@@ -76,7 +76,7 @@ pub fn tools() -> Value {
         ),
         tool(
             "resume_agent",
-            "Resume a direct child that is paused or interrupted: stopped by you, by the human or by a host restart or failure. Resume a child the human stopped only when the human says so. If it has held input from an interrupted turn, inspect its worktree first, then pass held: retry to redeliver it with a note that the turn was interrupted, or skip to drop it. message is delivered as new input. A turn starts when it has input; the result says who stopped the child. Refused while the child is working, not stopped or archived, and then nothing changes.",
+            "Resume a direct child that is paused or interrupted: stopped by you, by the human or by a host restart or failure. Resume a child the human stopped only when the human says so. If it has held input from an interrupted turn, inspect its worktree first, then pass held: retry to redeliver it with a note that the turn was interrupted, or skip to drop it. Input held by a usage limit is retried by itself at the reset; retry runs it sooner and skip cancels that. message is delivered as new input. A turn starts when it has input; the result says who stopped the child. Refused while the child is working, not stopped or archived, and then nothing changes.",
             json!({"session_id":string,"held":{"type":"string","enum":["retry","skip"]},"message":string}),
             vec!["session_id"]
         ),

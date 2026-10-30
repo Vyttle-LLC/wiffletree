@@ -89,6 +89,13 @@ pub fn turn_error_body(name: &str, error: &str) -> String {
         "{name}{TURN_ERROR}{error}. Inspect its worktree, then resume it with resume_agent, choosing held: retry or skip."
     )
 }
+/// A child's turn that failed on its provider's usage limit, told to its coordinator. It is
+/// no failure to act on: the host retries the held input itself `when`.
+pub fn turn_limit_body(name: &str, provider: &str, when: &str) -> String {
+    format!(
+        "{name} hit {provider}'s usage limit. Its held input is retried automatically {when}, with a note that the turn was interrupted; nothing is needed from you. resume_agent with held: retry runs it now, held: skip drops it."
+    )
+}
 /// A child's turn that ended without a report, told to its coordinator with its reply.
 pub fn turn_finished_body(name: &str, output: &str) -> String {
     format!("{name} finished a turn. This is not ticket acceptance.\n{output}")
