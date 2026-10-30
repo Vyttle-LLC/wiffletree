@@ -153,28 +153,8 @@ fn seed_detecting(
 }
 fn git_repo() -> std::path::PathBuf {
     let dir = tempfile::tempdir().unwrap().keep();
-    for args in [
-        vec!["init", "-q"],
-        vec![
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "Initial",
-        ],
-    ] {
-        assert!(
-            std::process::Command::new("git")
-                .current_dir(&dir)
-                .args(args)
-                .status()
-                .unwrap()
-                .success()
-        );
-    }
+    common::git(&dir, &["init", "-q"]);
+    common::git(&dir, &["commit", "--allow-empty", "-qm", "Initial"]);
     dir
 }
 fn stored(home: &Path) -> (String, Vec<String>, Vec<String>) {

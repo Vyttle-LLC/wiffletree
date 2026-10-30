@@ -12,7 +12,8 @@ root=Path(__file__).resolve().parents[1]
 fake=root/'crates/workspace-host/tests/fixtures/provider.py'
 with tempfile.TemporaryDirectory(prefix='workspace-protocol-test-') as tmp:
     tmp=Path(tmp);repo=tmp/'repo';repo.mkdir()
-    for args in [['init'],['-c','user.name=Workspace Test','-c','user.email=test@example.invalid','commit','--allow-empty','-m','Fixture']]:
+    # No background maintenance, which may repack the fixture while the host reads it.
+    for args in [['init'],['config','maintenance.auto','false'],['config','gc.auto','0'],['-c','user.name=Workspace Test','-c','user.email=test@example.invalid','commit','--allow-empty','-m','Fixture']]:
         subprocess.run(['git',*args],cwd=repo,check=True,capture_output=True)
     (tmp/'usage').mkdir();prompts=tmp/'prompts';prompts.mkdir()
     env={**os.environ,'WORKSPACE_TEST_USAGE_DIR':str(tmp/'usage'),'WORKSPACE_TEST_PROMPT_DIR':str(prompts),'WORKSPACE_CODEX_BIN':str(fake),'WORKSPACE_CLAUDE_BIN':str(fake)}
