@@ -16,6 +16,17 @@ pub(crate) const GUIDE: &str = "settings/model-guide.md";
 pub(crate) const CHECK_INS: &str = "settings/check-ins.json";
 pub(crate) const KEEPER: &str = "settings/pr-keeper.json";
 pub(crate) const MODELS: &str = "settings/models.json";
+pub(crate) const ASSISTANT: &str = "settings/assistant.json";
+
+/// The assistant's shared settings as `settings/assistant.json` holds them.
+#[derive(Serialize, Deserialize)]
+struct Assistant {
+    #[serde(default = "default_assistant_name")]
+    name: String,
+}
+fn default_assistant_name() -> String {
+    workspace_core::assistant::DEFAULT_NAME.into()
+}
 
 /// The settings repository chosen on the machine whose data folder is `home`, as its host
 /// settings record it.
@@ -145,6 +156,11 @@ pub(crate) fn check(path: &str, content: &[u8]) -> Result<()> {
             );
             Ok(())
         }
+        ASSISTANT => {
+            let name = serde_json::from_str::<Assistant>(text)?.name;
+            workspace_core::assistant::validate_name(&name)?;
+            Ok(())
+        }
         FORMAT => {
             let format = format(content)?;
             ensure!(
@@ -255,6 +271,17 @@ impl SharedStore<'_> {
     }
     pub(crate) fn set_switch_at(&self, switch_at: u32) -> Result<()> {
         self.write_json(MODELS, &Models { switch_at })
+    }
+    /// What the user named the assistant; "Assistant" until then.
+    pub(crate) fn assistant_name(&self) -> String {
+        let saved: Option<Assistant> = self.read_json(ASSISTANT);
+        (saved.map(|a| a.name))
+            .filter(|name| workspace_core::assistant::validate_name(name).is_ok())
+            .unwrap_or_else(default_assistant_name)
+    }
+    pub(crate) fn set_assistant_name(&self, name: &str) -> Result<()> {
+        let name = workspace_core::assistant::validate_name(name)?.into();
+        self.write_json(ASSISTANT, &Assistant { name })
     }
     /// `None` when no guide was saved; an empty guide is a saved one.
     pub(crate) fn guide(&self) -> Option<String> {

@@ -85,6 +85,15 @@ fn turn_prompt(
     )
 }
 
+/// A thread's turn is the human's messages alone: a thread has no team to be told about.
+fn thread_prompt(input: &[Message]) -> String {
+    input
+        .iter()
+        .map(|m| format!("{}{}", m.body, provider::attachment_list(&m.attachments)))
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n")
+}
+
 /// Lists the coordinator's unsettled inbox questions so each turn can close the ones it resolved.
 fn open_questions_reminder(questions: &[Attention]) -> String {
     if questions.is_empty() {
@@ -2488,7 +2497,7 @@ impl Actor {
                         }
                     }
                     // Speaking to a project, retrying its work or answering its coordinator
-                    // starts it; there is no separate step to go live.
+                    // starts it; there is no separate step to go live. A thread is no project's.
                     let started = match &command {
                         Command::Send {
                             sender: None,
@@ -2498,7 +2507,8 @@ impl Actor {
                         | Command::ReconcileSession {
                             session_id,
                             retry: true,
-                        } => Some(self.host.session(session_id)?.project_id),
+                        } => Some(self.host.session(session_id)?.project_id)
+                            .filter(|project| !project.is_empty()),
                         Command::ResolveAttention { .. } => {
                             response["project_id"].as_str().map(str::to_owned)
                         }
@@ -2590,6 +2600,11 @@ impl Actor {
                     .map(|(id, _)| id.clone());
                 let result = (|| -> Result<Option<Value>> {
                     let id = identity.context("Expired or invalid session credential")?;
+                    // A thread is offered its own tools, and only those.
+                    let session = self.host.session(&id)?;
+                    if session.role == Role::Assistant {
+                        return self.host.thread_tool(&session, &name, &args).map(Some);
+                    }
                     ensure!(
                         self.host.session_owner(&id)?.offers_coordination_tools(),
                         "{name} is for project work, and this session is owned by a Space or a brain"
@@ -4205,6 +4220,7 @@ impl Actor {
             token: format!("{}{}", new_id(), new_id()),
             helper: self.helper.clone(),
             instructions: role_instructions,
+            thread: None,
         };
         self.run_provider(turn, cancel);
         Ok(())
@@ -4490,7 +4506,15 @@ impl Actor {
         let token = format!("{}{}", new_id(), new_id());
         let (prompt, sorted) = match sort {
             Some((prompt, sorted)) => (prompt, Some(sorted)),
+            None if session.role == Role::Assistant => (thread_prompt(&input), None),
             None => (self.prompt(&session, &input)?, None),
+        };
+        let (instructions, thread) = match session.role {
+            Role::Assistant => (
+                self.host.thread_instructions(&session)?,
+                Some(self.host.thread_launch(&session)?),
+            ),
+            role => (self.host.instructions(role), None),
         };
         let started_at = now();
         let detail = json!({"profile":profile,"provider_session_id":runtime.provider_session_id,"skill_version":1,"selection":runtime.selection,"model_selection_revision":self.host.model_selection()?.revision});
@@ -4519,7 +4543,8 @@ impl Actor {
             socket: self.socket.clone(),
             token: token.clone(),
             helper: self.helper.clone(),
-            instructions: self.host.instructions(session.role),
+            instructions,
+            thread,
         };
         let mut active = Active::new(
             run.clone(),

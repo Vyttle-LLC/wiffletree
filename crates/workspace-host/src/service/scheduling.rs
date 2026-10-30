@@ -139,8 +139,9 @@ impl Actor {
         self.retry_after_limits(now())?;
         let in_rounds = self.admit_rounds()?;
         // Quiet messages ride along with the next turn but never start one. Each recipient's
-        // oldest due message stands for it, so a long queue cannot hide other sessions.
-        let messages=self.host.db.prepare(&format!("SELECT m.*,MIN(m.sequence) AS first FROM messages m JOIN live_projects p ON p.project_id=m.project_id AND p.enabled=1 JOIN sessions s ON s.id=m.recipient WHERE m.receipt='queued' AND m.quiet=0 AND COALESCE(json_extract(s.data,'$.archived'),0)=0 AND {} AND NOT EXISTS (SELECT 1 FROM messages h WHERE h.recipient=m.recipient AND h.receipt='held') GROUP BY m.recipient ORDER BY s.role<>'project_orchestrator',first", is_turn_input("m")))?.query_map([],Host::message_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        // oldest due message stands for it, so a long queue cannot hide other sessions. A
+        // thread belongs to no project, so no project's live switch holds it.
+        let messages=self.host.db.prepare(&format!("SELECT m.*,MIN(m.sequence) AS first FROM messages m LEFT JOIN live_projects p ON p.project_id=m.project_id JOIN sessions s ON s.id=m.recipient WHERE (p.enabled=1 OR s.role='assistant') AND m.receipt='queued' AND m.quiet=0 AND COALESCE(json_extract(s.data,'$.archived'),0)=0 AND {} AND NOT EXISTS (SELECT 1 FROM messages h WHERE h.recipient=m.recipient AND h.receipt='held') GROUP BY m.recipient ORDER BY s.role<>'project_orchestrator',first", is_turn_input("m")))?.query_map([],Host::message_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         for message in messages {
             if in_rounds.contains(&message.recipient) {
                 continue;

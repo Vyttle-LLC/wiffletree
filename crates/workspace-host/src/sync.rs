@@ -517,6 +517,7 @@ fn names(paths: &[String]) -> Vec<String> {
             shared::CHECK_INS => "Check-ins",
             shared::KEEPER => "PR keeper",
             shared::MODELS => "Switch threshold",
+            shared::ASSISTANT => "Assistant",
             path => Skill::ALL
                 .into_iter()
                 .find(|skill| path.starts_with(&format!("skills/{}/", skill.folder())))

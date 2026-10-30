@@ -119,6 +119,7 @@ impl Host {
             checkin_child_turns,
             checkin_human_turns,
             keeper,
+            assistant_name: shared.assistant_name(),
             ..local
         }
     }

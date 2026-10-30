@@ -1,5 +1,6 @@
 //! Single-writer durable host, independent of graphics and provider inference.
 mod agent_processes;
+mod assistant;
 pub mod attachments;
 mod brain_index;
 mod brains;
@@ -104,12 +105,15 @@ fn sessions_where(live: bool) -> String {
         "id IN (SELECT session_id FROM runtimes WHERE json_extract(data,'$.ticket_id') IN (SELECT id FROM tickets WHERE {}))",
         tickets_where(true)
     );
+    // Threads are listed only as the assistant's, never as a project's sessions.
     if live {
-        format!("({ARCHIVED_FLAG}=0 OR {on_open_ticket})")
+        format!("({NOT_THREAD} AND ({ARCHIVED_FLAG}=0 OR {on_open_ticket}))")
     } else {
-        format!("({ARCHIVED_FLAG}=1 AND NOT {on_open_ticket})")
+        format!("({NOT_THREAD} AND {ARCHIVED_FLAG}=1 AND NOT {on_open_ticket})")
     }
 }
+/// SQL condition on `sessions` for a session that is not an assistant thread.
+const NOT_THREAD: &str = "role<>'assistant'";
 pub struct Host {
     pub(crate) db: Connection,
     /// Files remote devices are uploading, kept while the host runs.
@@ -165,12 +169,12 @@ pub struct Host {
     /// when `None`. Tests give one with stand-in tools.
     pub(crate) scan_path: Option<std::ffi::OsString>,
     /// By skill, in `Skill::ALL`'s order, what its history says beyond its files.
-    skill_histories: [skills::Recalled; 4],
+    skill_histories: [skills::Recalled; Skill::ALL.len()],
     /// With a settings repository, the merges due at start wait for this launch's first sync
     /// pass to end, since it may bring another Mac's.
     pub(crate) merges_wait_for_sync: bool,
     /// By skill, the merge this Mac is running or tried since it started.
-    merge_tries: [Option<skills::Tried>; 4],
+    merge_tries: [Option<skills::Tried>; Skill::ALL.len()],
     /// Model runs of merges, for the service to start off the host thread.
     merge_runs: Vec<skills::MergeRun>,
     /// By provider, whether detection last found its CLI installed and signed in.
@@ -324,6 +328,9 @@ impl Host {
         }
         db.execute_batch(include_str!("live.sql"))?;
         db.execute_batch(include_str!("usage.sql"))?;
+        // Before anything attaches this connection's temporary triggers to the tables it
+        // rebuilds, which a rebuild would drop.
+        assistant::migrate(&db)?;
         db.execute_batch(include_str!("steps.sql"))?;
         db.execute_batch(include_str!("schedules.sql"))?;
         db.execute_batch(include_str!("selection.sql"))?;
@@ -491,7 +498,7 @@ impl Host {
         kind: &str,
         detail: &str,
     ) -> Result<()> {
-        db.execute("INSERT INTO activity(project_id,session_id,kind,detail,created_at) VALUES (?1,?2,?3,?4,?5)", params![project, session, kind, detail, now()])?;
+        db.execute("INSERT INTO activity(project_id,session_id,kind,detail,created_at) VALUES (?1,?2,?3,?4,?5)", params![assistant::project_column(project), session, kind, detail, now()])?;
         Ok(())
     }
     /// In the order the human arranged them, topmost first.
@@ -551,7 +558,9 @@ impl Host {
         let skills = self.skill_states()?;
         // Archived sessions still in a turn keep their runtime and ticket until it ends.
         let turning = serde_json::to_string(&self.in_turn)?;
-        let in_turn = "SELECT value FROM json_each(?1)";
+        let in_turn = format!(
+            "SELECT value FROM json_each(?1) WHERE value IN (SELECT id FROM sessions WHERE {NOT_THREAD})"
+        );
         let mut space_locals = std::collections::BTreeMap::new();
         let spaces = (self.spaces()?.into_iter())
             .map(|record| {
@@ -559,7 +568,7 @@ impl Host {
                 record.space
             })
             .collect();
-        Ok(Snapshot { projects: self.projects()?, spaces, space_locals, issue_trackers: self.issue_trackers()?, last_filed_space: self.last_filed_space()?, linear_import: self.linear.status.clone(), repositories: self.repositories()?, sessions: self.live_sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} OR id IN (SELECT json_extract(data,'$.ticket_id') FROM runtimes WHERE session_id IN ({in_turn})) ORDER BY rowid", tickets_listed(true)), [&turning])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id NOT IN (SELECT id FROM sessions WHERE {}) OR session_id IN ({in_turn}) ORDER BY rowid", sessions_where(false)), [&turning])?, archive_stamp: self.archive_stamp()?, message_revisions: self.message_revisions()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, core_instructions: provider::core_instructions(), still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held() })
+        Ok(Snapshot { projects: self.projects()?, spaces, space_locals, issue_trackers: self.issue_trackers()?, last_filed_space: self.last_filed_space()?, linear_import: self.linear.status.clone(), repositories: self.repositories()?, sessions: self.live_sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} OR id IN (SELECT json_extract(data,'$.ticket_id') FROM runtimes WHERE session_id IN ({in_turn})) ORDER BY rowid", tickets_listed(true)), [&turning])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id IN (SELECT id FROM sessions WHERE {}) OR session_id IN ({in_turn}) ORDER BY rowid", sessions_where(true)), [&turning])?, archive_stamp: self.archive_stamp()?, message_revisions: self.message_revisions()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, core_instructions: provider::core_instructions(), still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held(), assistant_name: self.assistant_name(), threads: self.thread_tabs(now())? })
     }
     /// The snapshot's sessions: the live ones, then archived ones still in a turn, which show as
     /// working until it ends.
@@ -576,7 +585,10 @@ impl Host {
             .collect();
         turning.sort();
         for id in turning {
-            sessions.push(self.session(id)?);
+            let session = self.session(id)?;
+            if session.role != Role::Assistant {
+                sessions.push(session);
+            }
         }
         Ok(sessions.into_iter().map(|s| self.shown(s)).collect())
     }
@@ -584,9 +596,10 @@ impl Host {
     /// tickets' agents, and accepted and closed tickets. Tickets take no state change once settled, so `shown_ticket` is not needed.
     pub fn archive(&self) -> Result<Archive> {
         let ids = |table: &str| -> Result<Vec<String>> {
-            Ok((self
-                .db
-                .prepare(&format!("SELECT id FROM {table} ORDER BY rowid"))?)
+            let only = if table == "sessions" { NOT_THREAD } else { "1" };
+            Ok((self.db.prepare(&format!(
+                "SELECT id FROM {table} WHERE {only} ORDER BY rowid"
+            ))?)
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?)
         };
@@ -611,7 +624,7 @@ impl Host {
     }
     fn undelivered(&self) -> Result<Vec<UndeliveredInput>> {
         // Through each session's outbox index rather than a scan of every message.
-        Ok(self.db.prepare("SELECT m.recipient,SUM(m.receipt='held'),SUM(m.receipt='queued' AND m.quiet=0) FROM sessions s CROSS JOIN messages m ON m.recipient=s.id AND m.receipt IN ('held','queued') GROUP BY m.recipient")?.query_map([], |r| Ok(UndeliveredInput { session_id: r.get(0)?, held: r.get(1)?, queued: r.get(2)? }))?.collect::<rusqlite::Result<_>>()?)
+        Ok(self.db.prepare(&format!("SELECT m.recipient,SUM(m.receipt='held'),SUM(m.receipt='queued' AND m.quiet=0) FROM sessions s CROSS JOIN messages m ON m.recipient=s.id AND m.receipt IN ('held','queued') WHERE s.{NOT_THREAD} GROUP BY m.recipient"))?.query_map([], |r| Ok(UndeliveredInput { session_id: r.get(0)?, held: r.get(1)?, queued: r.get(2)? }))?.collect::<rusqlite::Result<_>>()?)
     }
     /// A project in the Space last used for a new project.
     pub fn create_project(&mut self, name: &str) -> Result<Project> {
@@ -784,9 +797,9 @@ impl Host {
         tx.commit()?;
         Ok(project)
     }
-    /// A session under `owner`. A Space or a brain owns no session yet: no role is admitted
-    /// outside projects, so such a creation is refused and nothing is stored, least of all a
-    /// project record to hold it.
+    /// A session under `owner`. The only sessions a Space owns are assistant threads, which
+    /// `start_thread` starts, and a brain owns none yet, so any other creation outside a
+    /// project is refused and nothing is stored, least of all a project record to hold it.
     pub fn create_owned_session(
         &mut self,
         owner: &SessionOwner,
@@ -801,7 +814,7 @@ impl Host {
                 self.create_session(project, parent, repository, name, role, provider)
             }
             SessionOwner::Space(_) | SessionOwner::Brain(_) => bail!(
-                "{} cannot run outside a project: no role runs under a Space or a brain",
+                "{} cannot run outside a project: only assistant threads run under a Space",
                 role.label()
             ),
         }
@@ -834,6 +847,7 @@ impl Host {
             Role::TaskOrchestrator => {
                 bail!("Repository coordinators were removed; create a ticket for the repository")
             }
+            Role::Assistant => bail!("An assistant thread belongs to a Space, not a project"),
             _ => ensure!(
                 owner.role == Role::ProjectOrchestrator,
                 "Agents belong to their project's coordinator"
@@ -1107,7 +1121,8 @@ impl Host {
         Ok(Message {
             sequence: row.get(0)?,
             id: row.get(1)?,
-            project_id: row.get(2)?,
+            // A thread's messages belong to no project.
+            project_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
             sender: row.get(3)?,
             recipient: row.get(4)?,
             body: row.get(5)?,
@@ -1261,10 +1276,16 @@ impl Host {
             queued < 1024 || delivery == Delivery::PastCap,
             "Recipient queue is full; accepted messages are preserved"
         );
+        if target.role == Role::Assistant {
+            self.thread_receives(&target, sender)?;
+        }
         if files.is_empty() {
             self.insert_message(id, &target, sender, body, &[], uploads, quiet)?;
         } else {
-            let directory = attachments::directory(&self.home, &target.project_id, id)?;
+            let directory = match target.role {
+                Role::Assistant => assistant::attachments_folder(&self.home, id)?,
+                _ => attachments::directory(&self.home, &target.project_id, id)?,
+            };
             let stored = attachments::store(&directory, files)?;
             if let Err(error) =
                 self.insert_message(id, &target, sender, body, &stored, uploads, quiet)
@@ -1290,7 +1311,7 @@ impl Host {
     ) -> Result<()> {
         let recipient = target.id.as_str();
         let tx = self.db.savepoint()?;
-        tx.execute("INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at,attachments,quiet) VALUES (?1,?2,?3,?4,?5,'queued',?6,?7,?8)", params![id, target.project_id, sender, recipient, body, now(), encode(&attachments)?, quiet])?;
+        tx.execute("INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at,attachments,quiet) VALUES (?1,?2,?3,?4,?5,'queued',?6,?7,?8)", params![id, assistant::project_column(&target.project_id), sender, recipient, body, now(), encode(&attachments)?, quiet])?;
         remote::uploads::record_message_uploads(&tx, id, uploads)?;
         Self::event(
             &tx,
@@ -1638,6 +1659,52 @@ impl Host {
                 project_ids,
                 before,
             } => serde_json::to_value(self.move_projects(&project_ids, before.as_deref())?)?,
+            Command::StartThread {
+                id,
+                space_id,
+                body,
+                attachments,
+                profile,
+            } => serde_json::to_value(self.start_thread(
+                &id,
+                &space_id,
+                &body,
+                &attachments,
+                profile,
+            )?)?,
+            Command::RenameThread { thread_id, title } => {
+                serde_json::to_value(self.rename_thread(&thread_id, &title)?)?
+            }
+            Command::SetThreadOpen { thread_id, open } => {
+                serde_json::to_value(self.set_thread_open(&thread_id, open)?)?
+            }
+            Command::OrderThreads { thread_ids } => {
+                self.order_threads(&thread_ids)?;
+                Value::Null
+            }
+            Command::DeleteThread { thread_id } => {
+                self.delete_thread(&thread_id)?;
+                Value::Null
+            }
+            Command::SearchThreads { query, space_id } => {
+                serde_json::to_value(self.search_threads(&query, space_id.as_ref())?)?
+            }
+            Command::DraftProjectBrief { thread_id } => {
+                serde_json::to_value(self.draft_project_brief(&thread_id)?)?
+            }
+            Command::MakeProject {
+                thread_id,
+                name,
+                brief,
+                files,
+            } => serde_json::to_value(self.make_project(&thread_id, &name, &brief, &files)?)?,
+            Command::ScratchFiles { thread_id } => {
+                serde_json::to_value(self.scratch_files(&thread_id)?)?
+            }
+            Command::DismissThreadCard { thread_id, card_id } => {
+                serde_json::to_value(self.dismiss_thread_card(&thread_id, &card_id)?)?
+            }
+            Command::SetAssistantName { name } => json!(self.set_assistant_name(&name)?),
             Command::AttachRepository {
                 project_id,
                 path,

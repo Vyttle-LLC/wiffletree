@@ -26,6 +26,7 @@ pub fn stock(skill: Skill) -> &'static str {
         Skill::Implementing => include_str!("../skills/stock/implementing.md"),
         Skill::Reviewing => include_str!("../skills/stock/reviewing.md"),
         Skill::KeepingAPr => include_str!("../skills/stock/keeping-a-pr.md"),
+        Skill::Assisting => include_str!("../skills/stock/assisting.md"),
     }
 }
 pub fn stock_version(skill: Skill) -> &'static str {

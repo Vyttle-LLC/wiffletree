@@ -211,8 +211,34 @@ fn result_text(mut result: Value) -> String {
         None => result.to_string(),
     }
 }
-/// Serves a session's MCP tools; `role` is the session's, as its launch names it.
-pub fn serve_stdio(role: Option<Role>) -> Result<()> {
+/// An assistant thread's tools: no coordination tool, and nothing that writes to a repository
+/// or changes a Space, a setting or membership.
+pub fn thread_tools() -> Value {
+    let string = json!({"type":"string"});
+    let tool = |name: &str, description: &str, properties: Value, required: Vec<&str>| json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}});
+    json!([
+        tool(
+            "save_output",
+            "Save a file from your scratch folder as an output the human keeps, under a title. The host copies it to this Mac's private board store in your Space, where the human finds it as only on this Mac; nothing is pushed anywhere. Saving again under the same title adds a version. path is relative to your scratch folder.",
+            json!({"path":string,"title":string}),
+            vec!["path", "title"]
+        ),
+        tool(
+            "suggest_space",
+            "Suggest a new Space to the human, with a name and a description of what belongs in it, when what they talk about fits none of their Spaces. It shows a card that opens Settings › Spaces filled in; nothing is created until the human saves there.",
+            json!({"name":string,"description":string}),
+            vec!["name", "description"]
+        ),
+        tool(
+            "project_brief",
+            "Show the human a project brief for Make this a project, with a short project name. The human edits and confirms it; confirming creates a project in your Space whose first message is the brief. Use it when the work needs code changes or anything else a thread cannot do.",
+            json!({"name":string,"brief":string}),
+            vec!["name", "brief"]
+        )
+    ])
+}
+/// Serves a session's MCP `tools`: `tools_for` its role, or a thread's `thread_tools`.
+pub fn serve_stdio(tools: Value) -> Result<()> {
     let socket = std::env::var("WORKSPACE_SOCKET").context("Missing workspace endpoint")?;
     let token = std::env::var("WORKSPACE_TOKEN").context("Missing session credential")?;
     let mut input = std::io::stdin().lock();
@@ -227,7 +253,7 @@ pub fn serve_stdio(role: Option<Role>) -> Result<()> {
                     json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"wiffletree","version":"0.2.0"}})
                 }
                 "ping" => json!({}),
-                "tools/list" => json!({"tools":tools_for(role)}),
+                "tools/list" => json!({"tools":tools}),
                 "tools/call" => {
                     let mut stream =
                         UnixStream::connect(&socket).context("Workspace host unavailable")?;
