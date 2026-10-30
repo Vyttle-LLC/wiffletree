@@ -3,6 +3,7 @@ use std::io::{self, BufRead, Read, Write};
 use workspace_core::*;
 
 fn main() -> Result<()> {
+    workspace_host::build_gate::run_if_called();
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("serve") {
         return serve(&args[1..]);
@@ -60,8 +61,9 @@ fn main() -> Result<()> {
         );
         return Ok(());
     }
-    let service =
-        workspace_host::service::Service::start(args[1].clone().into(), std::env::current_exe()?)?;
+    let data = std::path::PathBuf::from(&args[1]);
+    workspace_host::build_gate::install(&data, &std::env::current_exe()?)?;
+    let service = workspace_host::service::Service::start(data, std::env::current_exe()?)?;
     let mut reader = io::stdin().lock();
     let mut output = io::stdout().lock();
     loop {
@@ -143,6 +145,7 @@ fn serve(args: &[String]) -> Result<()> {
     let data = std::fs::canonicalize(&data)?;
     workspace_host::socket::socket_path(&data)?;
     let binary = std::env::current_exe()?;
+    workspace_host::build_gate::install(&data, &binary)?;
     let credential = if child {
         workspace_host::socket::read_credential(&mut io::stdin().lock())?
     } else {

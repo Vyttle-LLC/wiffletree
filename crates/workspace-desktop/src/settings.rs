@@ -1,6 +1,6 @@
 //! The Settings window, in two parts (design 10 of `remote-hosts`): this Mac's app, with its
 //! appearance, layout, finding other Macs and the computers it is paired with, and the host the window drives, with its
-//! workspace folder, check-in thresholds and settings repository, and on This Mac its remote
+//! workspace folder, check-in thresholds, builds at once and settings repository, and on This Mac its remote
 //! access. A setting belongs to the Mac whose agents it runs.
 mod remote_access;
 mod repository;
@@ -23,6 +23,7 @@ pub(super) struct Settings {
     host: Option<HostSettings>,
     folder_error: Option<String>,
     check_in_error: Option<String>,
+    builds_error: Option<String>,
     choosing_folder: bool,
     scroll: ScrollHandle,
     repository_input: Entity<InputState>,
@@ -152,6 +153,7 @@ impl Settings {
                         host: None,
                         folder_error: None,
                         check_in_error: None,
+                        builds_error: None,
                         choosing_folder: false,
                         scroll: ScrollHandle::new(),
                         repository_input,
@@ -239,11 +241,10 @@ impl Settings {
     fn ask_host(&mut self, ask: Ask<HostSettings>, cx: &mut Context<Self>) {
         let command = ask.command().clone();
         let origin = self.host_id();
-        let check_ins = matches!(command, Command::SetCheckIns { .. });
         let answer = match self.bridge.ask(ask) {
             Ok(answer) => answer,
             Err(error) => {
-                self.show_error(check_ins, error);
+                self.show_error(&command, error);
                 self.choosing_folder = false;
                 return;
             }
@@ -260,8 +261,9 @@ impl Settings {
                         view.host = Some(settings);
                         view.folder_error = None;
                         view.check_in_error = None;
+                        view.builds_error = None;
                     }
-                    Err(error) => view.show_error(check_ins, error),
+                    Err(error) => view.show_error(&command, error),
                 }
                 view.choosing_folder = false;
                 cx.notify();
@@ -270,12 +272,14 @@ impl Settings {
         .detach();
     }
 
-    fn show_error(&mut self, check_ins: bool, error: String) {
-        if check_ins {
-            self.check_in_error = Some(error);
-        } else {
-            self.folder_error = Some(error);
-        }
+    /// Shows an error beside the setting `command` saves.
+    fn show_error(&mut self, command: &Command, error: String) {
+        let shown = match command {
+            Command::SetCheckIns { .. } => &mut self.check_in_error,
+            Command::SetBuildsAtOnce { .. } => &mut self.builds_error,
+            _ => &mut self.folder_error,
+        };
+        *shown = Some(error);
     }
 
     fn appearance_section(&self, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -488,6 +492,40 @@ impl Settings {
     }
 }
 
+impl Settings {
+    /// How many builds agents may run at once on the host, across every project.
+    fn builds_section(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        let mut body = div().flex().flex_col().gap_2().child(section("BUILDS", p));
+        if let Some(host) = &self.host {
+            let mut segments = div().flex().gap_1();
+            for n in 1..=MAX_BUILDS_AT_ONCE {
+                segments = segments.child(
+                    segment(
+                        SharedString::from(format!("builds-at-once-{n}")),
+                        n.to_string(),
+                        n == host.builds_at_once,
+                    )
+                    .map(|b| ui::gated(b, &self.driving))
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        view.ask_host(ask::set_builds_at_once(n), cx)
+                    })),
+                );
+            }
+            body = body.child(setting(
+                "Builds at once",
+                segments,
+                "How many agent builds and test runs may run at once, across every project. Each uses half the cores; the rest wait their turn.",
+                p,
+            ));
+        }
+        body.children(
+            self.builds_error
+                .clone()
+                .map(|error| hint(error, p).text_color(p.red)),
+        )
+    }
+}
+
 /// The heading of one part of the window: whose settings follow, and what they are.
 fn part(title: &str, holds: &'static str, p: Palette) -> Div {
     div()
@@ -600,13 +638,15 @@ impl Render for Settings {
                             Some(host) => format!("{host} · the host you're driving"),
                             None => "This Mac · the host".into(),
                         },
-                        "Spaces · models · repositories and checks · workspace folder · PR owners allowed · check-ins · reviews · skills · settings repository",
+                        "Spaces · models · repositories and checks · workspace folder · PR owners allowed · check-ins · builds at once · reviews · skills · settings repository",
                         p,
                     ))
                     .children(self.driving.changes_refused().map(|reason| hint(reason, p)))
                     .child(self.folder_section(p, cx))
                     .child(rule())
                     .child(self.check_in_section(p, cx))
+                    .child(rule())
+                    .child(self.builds_section(p, cx))
                     .child(rule())
                     .child(ui::locked(self.repository_section(p, cx), &self.driving, p))
                     .child(rule())

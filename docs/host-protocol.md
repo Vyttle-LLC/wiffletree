@@ -219,6 +219,7 @@ Every `Command`, by `type`. A read changes nothing in the store, so no event fol
 | `settings` | — | read | Answered with `HostSettings`. |
 | `set_workspaces_dir` | `path: String` | change | Checks the folder can be created and written to, saves it and answers with `HostSettings`. Only projects and tickets created afterwards use it. |
 | `set_verification` | `verification: VerificationSettings` | change | Validates and saves the verification setting; answers with `HostSettings`. |
+| `set_builds_at_once` | `builds: usize` | change | Validates (1–4) and saves "Builds at once" on this machine; answers with `HostSettings`. |
 | `set_check_ins` | `child_turns: u32`, `human_turns: u32` | change | Validates and saves both check-in thresholds; answers with `HostSettings`. |
 | `set_owner_allowed` | `entry: String`, `allowed: bool` | change, human only | Allows an owner, or a single fork as `owner/name`, to have PRs opened without asking, or stops allowing it; answers with `HostSettings`. Only the human's client sends it. |
 | `set_keeper` | `keeper: KeeperSettings` | change, human only | Validates and saves the PR keeper's settings; answers with `HostSettings`. Only the human's client sends it. |

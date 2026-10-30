@@ -2963,27 +2963,6 @@ fn ready_ticket(f: &mut Fixture, coordinator: &str, repository: &str, title: &st
     f.host.ticket(&ticket.id).unwrap()
 }
 
-/// Verifies `ticket` and checks that its cycle queued: the coordinator is told, and its
-/// verifier has nothing to take.
-fn queue(host: &mut Host, coordinator: &str, ticket: &str) {
-    let args = common::verify_args(ticket);
-    let result = host.agent_tool(coordinator, "verify_ticket", args).unwrap();
-    let note = result["queued"].as_str().unwrap();
-    assert!(note.contains("verification slot"), "{note}");
-    assert_queued(host, ticket);
-}
-
-fn assert_queued(host: &Host, ticket: &str) {
-    let ticket = host.ticket(ticket).unwrap();
-    assert_eq!(ticket.state, TicketState::Verifying);
-    assert!(ticket.queued_since().is_some());
-    let run = &ticket.verification.unwrap().rounds[0].verifiers[0];
-    assert!(
-        host.message(&run.message_id).is_err(),
-        "no round message yet"
-    );
-}
-
 fn assert_started(host: &Host, ticket: &str) {
     let ticket = host.ticket(ticket).unwrap();
     assert_eq!(ticket.state, TicketState::Verifying);
@@ -2993,124 +2972,6 @@ fn assert_started(host: &Host, ticket: &str) {
         host.message(&run.message_id).unwrap().receipt,
         Receipt::Queued
     );
-}
-
-#[test]
-fn a_third_cycle_queues_until_a_running_one_passes_is_blocked_or_closes() {
-    for end in ["passed", "blocked", "closed"] {
-        let (mut f, tickets) = two_cycles_running();
-        let coordinator = f.coordinator.id.clone();
-        queue(&mut f.host, &coordinator, &tickets[2].id);
-        // Nothing frees a slot yet.
-        assert!(!f.host.start_queued_cycles().unwrap());
-        assert_queued(&f.host, &tickets[2].id);
-
-        match end {
-            "passed" => {
-                let tester = f.verifier("Tests");
-                f.report(&tester, "pass", "passed").unwrap();
-            }
-            "blocked" => {
-                let implementer = f.implementer.id.clone();
-                f.report(&implementer, "stuck", "blocked").unwrap();
-            }
-            _ => {
-                f.host.close_ticket(&tickets[0].id).unwrap();
-            }
-        }
-
-        assert!(f.host.start_queued_cycles().unwrap(), "{end}");
-        assert_started(&f.host, &tickets[2].id);
-        assert!(
-            !f.host.start_queued_cycles().unwrap(),
-            "{end}: nothing left"
-        );
-    }
-}
-
-#[test]
-fn a_queued_cycles_verifiers_resolve_their_rows_when_it_starts() {
-    let (mut f, tickets) = two_cycles_running();
-    let coordinator = f.coordinator.id.clone();
-    queue(&mut f.host, &coordinator, &tickets[2].id);
-    let queued = |host: &Host| {
-        let ticket = host.ticket(&tickets[2].id).unwrap();
-        ticket.verification.unwrap().rounds[0].verifiers[0]
-            .session_id
-            .clone()
-    };
-    let chosen_then = queued(&f.host);
-    assert_eq!(
-        f.host.session(&chosen_then).unwrap().provider,
-        Provider::Claude
-    );
-    // Claude passes the threshold while the cycle waits for a slot.
-    spend(&f.host, Provider::Claude, 96.);
-    let tester = f.verifier("Tests");
-    f.report(&tester, "pass", "passed").unwrap();
-
-    assert!(f.host.start_queued_cycles().unwrap());
-
-    assert_started(&f.host, &tickets[2].id);
-    let started = queued(&f.host);
-    assert_ne!(
-        started, chosen_then,
-        "a fresh verifier on the other provider"
-    );
-    assert_eq!(f.host.session(&started).unwrap().provider, Provider::Codex);
-    let reason = (f.host.session_runtime(&started).unwrap().selection.unwrap()).reason;
-    assert!(
-        reason.starts_with("Started on Codex: Claude's weekly limit was at 96%"),
-        "{reason}"
-    );
-    assert!(f.host.session(&chosen_then).unwrap().archived);
-}
-
-#[test]
-fn a_cycle_rerunning_after_a_failed_round_keeps_its_slot() {
-    let (mut f, tickets) = two_cycles_running();
-    let tester = f.verifier("Tests");
-    f.fail(&tester, "busy line").unwrap();
-    assert_eq!(f.current().state, TicketState::Failed);
-    let coordinator = f.coordinator.id.clone();
-    queue(&mut f.host, &coordinator, &tickets[2].id);
-
-    f.commit("fix.txt", "two");
-    let implementer = f.implementer.id.clone();
-    f.report(&implementer, "again", "ready_for_testing")
-        .unwrap();
-
-    assert_eq!(f.round().round, 2, "the re-run starts at once");
-    assert!(!f.host.start_queued_cycles().unwrap());
-    assert_queued(&f.host, &tickets[2].id);
-}
-
-#[test]
-fn a_queued_cycle_survives_a_restart_and_starts_when_a_slot_frees() {
-    let (mut f, tickets) = two_cycles_running();
-    let coordinator = f.coordinator.id.clone();
-    queue(&mut f.host, &coordinator, &tickets[2].id);
-    let tester = f.verifier("Tests");
-    let Fixture {
-        _directory, host, ..
-    } = f;
-    let home = host.home.clone();
-    drop(host);
-
-    // Reopened as the app reopens it, with its CLIs found signed in.
-    let mut host = Host::open_set_up(&home).unwrap();
-    assert!(!host.start_queued_cycles().unwrap());
-    assert_queued(&host, &tickets[2].id);
-    take_input(&mut host, &tester);
-    host.agent_tool(
-        &tester,
-        "report",
-        json!({"message_id":"pass","kind":"passed","body":"Passed"}),
-    )
-    .unwrap();
-
-    assert!(host.start_queued_cycles().unwrap());
-    assert_started(&host, &tickets[2].id);
 }
 
 /// A live second project with one ready ticket; returns its coordinator and the ticket.
@@ -3137,85 +2998,27 @@ fn other_project(f: &mut Fixture) -> (Session, Ticket) {
 }
 
 #[test]
-fn an_archived_project_neither_holds_nor_takes_a_verification_slot() {
+fn every_cycle_starts_at_once_whatever_else_is_verifying() {
     let (mut f, tickets) = two_cycles_running();
     let coordinator = f.coordinator.id.clone();
-    queue(&mut f.host, &coordinator, &tickets[2].id);
-    let (other, billing) = other_project(&mut f);
-
-    f.host.set_archived(&coordinator, true).unwrap();
-
-    let args = common::verify_args(&billing.id);
-    let result = f.host.agent_tool(&other.id, "verify_ticket", args).unwrap();
-    assert!(result.get("queued").is_none(), "{result}");
-    assert_started(&f.host, &billing.id);
-    assert!(
-        !f.host.start_queued_cycles().unwrap(),
-        "the archived project's queue stays"
-    );
-}
-
-#[test]
-fn a_queued_cycle_that_cannot_start_ends_blocked_without_stopping_the_queue() {
-    let (mut f, tickets) = two_cycles_running();
-    let coordinator = f.coordinator.id.clone();
-    queue(&mut f.host, &coordinator, &tickets[2].id);
-    let waiting = f
+    let args = common::verify_args(&tickets[2].id);
+    let result = f
         .host
-        .ticket(&tickets[2].id)
-        .unwrap()
-        .verification
-        .unwrap()
-        .rounds[0]
-        .verifiers[0]
-        .session_id
-        .clone();
-    f.host.set_archived(&waiting, true).unwrap();
-    let tester = f.verifier("Tests");
-    f.report(&tester, "pass", "passed").unwrap();
-
-    assert!(f.host.start_queued_cycles().unwrap());
-
-    let ticket = f.host.ticket(&tickets[2].id).unwrap();
-    assert_eq!(ticket.state, TicketState::Blocked);
-    assert_eq!(
-        ticket.verification.unwrap().outcome,
-        VerificationOutcome::Blocked
-    );
-    let told = f.waking(&coordinator);
-    assert!(
-        told.iter().any(|m| m.body.contains("was archived")),
-        "{told:?}"
-    );
-    assert!(!f.host.start_queued_cycles().unwrap());
-}
-
-#[test]
-fn a_paused_project_neither_holds_nor_takes_a_slot_until_it_is_live_again() {
-    let (mut f, tickets) = two_cycles_running();
-    let coordinator = f.coordinator.id.clone();
-    queue(&mut f.host, &coordinator, &tickets[2].id);
-    let (other, billing) = other_project(&mut f);
-    let project = f.coordinator.project_id.clone();
-    f.host.set_live(&project, false).unwrap();
-
-    let args = common::verify_args(&billing.id);
-    let result = f.host.agent_tool(&other.id, "verify_ticket", args).unwrap();
+        .agent_tool(&coordinator, "verify_ticket", args)
+        .unwrap();
     assert!(result.get("queued").is_none(), "{result}");
-    assert!(!f.host.start_queued_cycles().unwrap());
-    assert_queued(&f.host, &tickets[2].id);
-
-    // Live again, its cycles and Billing's fill every slot; the third still waits.
-    f.host.set_live(&project, true).unwrap();
-    assert!(!f.host.start_queued_cycles().unwrap());
-    assert_queued(&f.host, &tickets[2].id);
+    assert_started(&f.host, &tickets[2].id);
+    let (other, billing) = other_project(&mut f);
+    let args = common::verify_args(&billing.id);
+    f.host.agent_tool(&other.id, "verify_ticket", args).unwrap();
+    assert_started(&f.host, &billing.id);
+    assert!(!f.host.start_queued_cycles().unwrap(), "nothing waits");
 }
 
 #[test]
-fn a_running_cycle_whose_verifier_was_archived_ends_blocked_and_frees_its_slot() {
+fn a_running_cycle_whose_verifier_was_archived_ends_blocked() {
     let (mut f, tickets) = two_cycles_running();
     let coordinator = f.coordinator.id.clone();
-    queue(&mut f.host, &coordinator, &tickets[2].id);
     let tester = f.verifier("Tests");
     f.host.set_archived(&tester, true).unwrap();
 
@@ -3232,50 +3035,61 @@ fn a_running_cycle_whose_verifier_was_archived_ends_blocked_and_frees_its_slot()
         told.iter().any(|m| m.body.contains("was archived")),
         "{told:?}"
     );
-    assert_started(&f.host, &tickets[2].id);
+    assert_started(&f.host, &tickets[1].id);
+    assert!(!f.host.start_queued_cycles().unwrap());
+}
+
+/// Rewrites the ticket's running cycle as a host from before builds were gated stored a cycle
+/// queued for a verification slot: marked queued, its round message never sent.
+fn queue_as_an_earlier_host(home: &Path, ticket: &str) {
+    let db = rusqlite::Connection::open(home.join("workspace.sqlite3")).unwrap();
+    db.execute(
+        "UPDATE tickets SET data=json_set(data,'$.verification.queued_at',1,'$.verification.rounds[0].verifiers[0].message_id',json_extract(data,'$.verification.rounds[0].verifiers[0].message_id')||':queued') WHERE id=?1",
+        [ticket],
+    )
+    .unwrap();
 }
 
 #[test]
-fn a_queued_cycle_starts_at_the_current_head_and_only_on_a_clean_worktree() {
+fn a_cycle_an_earlier_host_queued_starts_after_the_upgrade_at_the_current_head_if_clean() {
     for dirty in [false, true] {
-        let (mut f, tickets) = two_cycles_running();
-        let coordinator = f.coordinator.id.clone();
-        queue(&mut f.host, &coordinator, &tickets[2].id);
-        let worktree = Path::new(&tickets[2].worktree);
+        let (f, tickets) = two_cycles_running();
+        let Fixture {
+            _directory, host, ..
+        } = f;
+        let home = host.home.clone();
+        drop(host);
+        queue_as_an_earlier_host(&home, &tickets[1].id);
+        let worktree = Path::new(&tickets[1].worktree);
         std::fs::write(worktree.join("fix.txt"), "later").unwrap();
         git(worktree, &["commit", "-qam", "Later"]);
         let later = git(worktree, &["rev-parse", "HEAD"]);
         if dirty {
             std::fs::write(worktree.join("draft.txt"), "draft").unwrap();
         }
-        let tester = f.verifier("Tests");
-        f.report(&tester, "pass", "passed").unwrap();
 
-        assert!(f.host.start_queued_cycles().unwrap());
+        // Reopened as the app reopens it, with its CLIs found signed in.
+        let mut host = Host::open_set_up(&home).unwrap();
+        assert!(
+            host.ticket(&tickets[1].id)
+                .unwrap()
+                .queued_since()
+                .is_some()
+        );
+        assert!(host.start_queued_cycles().unwrap());
 
-        let ticket = f.host.ticket(&tickets[2].id).unwrap();
+        let ticket = host.ticket(&tickets[1].id).unwrap();
         let verification = ticket.verification.clone().unwrap();
         if dirty {
             assert_eq!(ticket.state, TicketState::Blocked);
             assert_eq!(verification.outcome, VerificationOutcome::Blocked);
             assert_eq!(verification.rounds.len(), 1, "no failed round");
-            let told = f.waking(&coordinator);
-            assert!(
-                told.iter()
-                    .any(|m| m.body.contains("uncommitted or untracked")),
-                "{told:?}"
-            );
         } else {
-            assert_started(&f.host, &tickets[2].id);
+            assert_started(&host, &tickets[1].id);
             assert_eq!(verification.rounds[0].commit, later);
             let run = &verification.rounds[0].verifiers[0];
-            assert!(
-                f.host
-                    .message(&run.message_id)
-                    .unwrap()
-                    .body
-                    .contains(&later)
-            );
+            assert!(host.message(&run.message_id).unwrap().body.contains(&later));
         }
+        assert!(!host.start_queued_cycles().unwrap());
     }
 }
