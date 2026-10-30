@@ -173,6 +173,19 @@ impl Host {
             host.set_model_selection(selection)
         })
     }
+    /// Saves "Builds at once" on this machine. Waiting builds read it as they next check.
+    pub fn set_builds_at_once(&mut self, builds: usize) -> Result<HostSettings> {
+        ensure!(
+            (1..=MAX_BUILDS_AT_ONCE).contains(&builds),
+            "Builds at once must be 1–{MAX_BUILDS_AT_ONCE}"
+        );
+        let settings = HostSettings {
+            builds_at_once: builds,
+            ..self.settings()
+        };
+        self.save_settings(&settings)?;
+        Ok(settings)
+    }
     /// Saves the check-in thresholds. An invalid pair is refused and the saved one stays.
     pub fn set_check_ins(&mut self, child_turns: u32, human_turns: u32) -> Result<HostSettings> {
         HostSettings::validate_check_ins(child_turns, human_turns)?;

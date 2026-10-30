@@ -101,6 +101,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::ExportLogs { .. }
         | Command::SetWorkspacesDir { .. }
         | Command::SetVerification { .. }
+        | Command::SetBuildsAtOnce { .. }
         | Command::SetCheckIns { .. }
         | Command::SetOwnerAllowed { .. }
         | Command::SetKeeper { .. }

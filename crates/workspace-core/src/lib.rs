@@ -1003,6 +1003,10 @@ pub struct HostSettings {
     /// "Let other devices use this Mac's Wiffletree". Kept on this machine only.
     #[serde(default)]
     pub remote_access: bool,
+    /// "Builds at once": how many builds agents may compile or test at a time across this
+    /// machine; the rest wait. Kept on this machine only.
+    #[serde(default = "default_builds_at_once")]
+    pub builds_at_once: usize,
 }
 /// A private GitHub repository the shared folder syncs with, as this machine recorded it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1158,6 +1162,14 @@ pub enum JoinWith {
     /// This machine's, pushed over the repository's in one commit.
     ThisMachine,
 }
+fn default_builds_at_once() -> usize {
+    DEFAULT_BUILDS_AT_ONCE
+}
+/// "Builds at once" when it was never set: each build gets half the cores, so one leaves the
+/// other half to the human.
+pub const DEFAULT_BUILDS_AT_ONCE: usize = 1;
+/// The most "Builds at once" the settings accept.
+pub const MAX_BUILDS_AT_ONCE: usize = 4;
 fn default_checkin_child_turns() -> u32 {
     25
 }
@@ -1180,6 +1192,7 @@ impl HostSettings {
             keeper: KeeperSettings::default(),
             settings_repository: None,
             remote_access: false,
+            builds_at_once: DEFAULT_BUILDS_AT_ONCE,
         }
     }
     pub fn validate_check_ins(child_turns: u32, human_turns: u32) -> Result<()> {
@@ -1992,7 +2005,7 @@ impl Ticket {
         (self.waived_commits.last().map(String::as_str))
             .or_else(|| self.verification.as_ref()?.verified_commit())
     }
-    /// When the running cycle of this open ticket was queued, while it waits for a slot.
+    /// When the running cycle of this open ticket was queued, until the host starts it.
     pub fn queued_since(&self) -> Option<i64> {
         self.running_cycle()
             .filter(|_| self.is_open())
@@ -2274,8 +2287,8 @@ pub struct Verification {
     pub max_rounds: u32,
     pub outcome: VerificationOutcome,
     pub rounds: Vec<VerificationRound>,
-    /// When the cycle was queued for a verification slot. Until the host starts it, its first
-    /// round's verifiers have been chosen but sent nothing.
+    /// When a host from before builds were gated queued the cycle for a verification slot. Its
+    /// first round's verifiers were chosen but sent nothing; the host now starts it at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queued_at: Option<i64>,
     /// The coordinator asked for small work, so a queued cycle's verifiers resolve their
@@ -3080,6 +3093,10 @@ pub enum Command {
     SetVerification {
         verification: VerificationSettings,
     },
+    /// Validates and saves "Builds at once"; answers with `HostSettings`.
+    SetBuildsAtOnce {
+        builds: usize,
+    },
     /// Validates and saves both check-in thresholds; answers with `HostSettings`.
     SetCheckIns {
         child_turns: u32,
@@ -3404,6 +3421,7 @@ impl Command {
             | Self::ExportLogs { .. }
             | Self::SetWorkspacesDir { .. }
             | Self::SetVerification { .. }
+            | Self::SetBuildsAtOnce { .. }
             | Self::SetCheckIns { .. }
             | Self::SetOwnerAllowed { .. }
             | Self::SetKeeper { .. }

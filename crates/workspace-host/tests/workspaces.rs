@@ -317,6 +317,31 @@ fn check_in_thresholds_default_for_old_settings_and_refuse_out_of_range_values()
 }
 
 #[test]
+fn builds_at_once_defaults_to_one_and_is_saved_on_this_machine_within_bounds() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
+    assert_eq!(host.settings().builds_at_once, 1);
+
+    let saved: HostSettings = serde_json::from_value(
+        host.execute(Command::SetBuildsAtOnce { builds: 3 })
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved.builds_at_once, 3);
+    for builds in [0, 5] {
+        assert!(host.set_builds_at_once(builds).is_err(), "{builds}");
+    }
+    drop(host);
+    let host = Host::open_set_up(directory.path()).unwrap();
+    assert_eq!(host.settings(), saved);
+    // The build gate reads it from this machine's settings file.
+    let raw: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(directory.path().join("settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(raw["builds_at_once"], 3);
+}
+
+#[test]
 fn unusable_workspace_folders_are_refused_and_keep_the_saved_setting() {
     let directory = tempfile::tempdir().unwrap();
     let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
