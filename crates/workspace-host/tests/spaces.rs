@@ -670,7 +670,6 @@ fn a_repository_may_be_in_several_spaces_or_none() {
         listed(&host),
         [vec![], vec!["Sage-Social/mobile-app".to_string()], vec![]]
     );
-    // The workspace repository's own record is unchanged.
     assert_eq!(host.repository(&api).unwrap(), repository);
 
     // A refusal changes no Space.

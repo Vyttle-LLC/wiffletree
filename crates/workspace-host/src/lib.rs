@@ -1719,9 +1719,7 @@ impl Host {
             Command::SuggestRepositorySpace { repository } => {
                 serde_json::to_value(self.suggest_repository_space(&repository)?)?
             }
-            Command::RepositorySuggestions => {
-                serde_json::to_value(self.repository_suggestions(&publish::Tools::default())?)?
-            }
+            Command::RepositorySuggestions => serde_json::to_value(self.repository_suggestions()?)?,
             Command::ConfirmRepositorySuggestions { choices } => {
                 self.confirm_repository_suggestions(&choices)?;
                 json!({"confirmed":true})

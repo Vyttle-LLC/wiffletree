@@ -197,6 +197,11 @@ fn insert_space(
     Ok(())
 }
 
+/// Personal is found by its name in any casing, so a renamed `personal` is never doubled.
+fn is_personal(space: &Space) -> bool {
+    space.name.eq_ignore_ascii_case(PERSONAL)
+}
+
 /// The login `gh` is signed in to GitHub as, or `None` when it cannot say.
 pub(crate) fn gh_login(tools: &publish::Tools, home: &Path) -> Option<String> {
     let user = github_access::gh_json(tools, home, "user").ok()?;
@@ -415,7 +420,6 @@ impl Host {
             removed.name,
             open.join(", ")
         );
-        let is_personal = |space: &Space| space.name == PERSONAL;
         ensure!(
             projects.is_empty() || !is_personal(&removed),
             "Personal holds archived projects, which have nowhere else to go"
@@ -564,12 +568,9 @@ impl Host {
     }
     /// The upgrade's suggestions for the repositories it found that are still here and on
     /// GitHub, by owner: the Space whose projects use that owner's repositories most, else
-    /// Personal for the human's own `gh` login, else No Space. They change nothing; the login is
-    /// read only while none is known.
-    pub(crate) fn repository_suggestions(
-        &mut self,
-        tools: &publish::Tools,
-    ) -> Result<Vec<RepositorySuggestion>> {
+    /// Personal for the human's own `gh` login, else No Space. They change nothing and run no
+    /// `gh`: until the read at start has found the login, there is no Personal suggestion.
+    pub(crate) fn repository_suggestions(&self) -> Result<Vec<RepositorySuggestion>> {
         let found = self.found_repositories()?;
         let workspace = self.repositories()?;
         let suggested: Vec<(&Repository, String)> = (workspace.iter())
@@ -589,13 +590,10 @@ impl Host {
             .filter_map(|(space, repository)| Some((space, owner_of(&repository)?)))
             .collect();
         let spaces = self.spaces()?;
-        let personal = match spaces.iter().find(|r| r.space.name == PERSONAL) {
+        let personal = match spaces.iter().find(|r| is_personal(&r.space)) {
             Some(record) => SuggestedSpace::Space(record.space.id.clone()),
             None => SuggestedSpace::NewPersonal,
         };
-        if self.gh_login.is_none() {
-            self.gh_login = gh_login(tools, &self.home);
-        }
         let login = self.gh_login.as_ref();
         Ok(suggested
             .into_iter()
@@ -635,10 +633,7 @@ impl Host {
             for choice in choices {
                 let mut spaces = choice.space_ids.clone();
                 if choice.new_personal {
-                    let personal = host
-                        .spaces()?
-                        .into_iter()
-                        .find(|r| r.space.name == PERSONAL);
+                    let personal = host.spaces()?.into_iter().find(|r| is_personal(&r.space));
                     spaces.push(match personal {
                         Some(record) => record.space.id,
                         None => host.create_space(PERSONAL, "", "", None)?.space.id,
@@ -741,11 +736,7 @@ mod tests {
         repository
     }
 
-    /// A `gh` signed in as `login`.
-    fn signed_in(login: &'static str) -> publish::Tools {
-        counted_signed_in(login, Default::default())
-    }
-    /// `signed_in`, counting its calls in `calls`.
+    /// A `gh` signed in as `login`, counting its calls in `calls`.
     fn counted_signed_in(
         login: &'static str,
         calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -797,8 +788,9 @@ mod tests {
             )
             .unwrap();
         let before = host.spaces().unwrap();
+        host.record_gh_login(Some("mhohlios".into()));
 
-        let suggestions = host.repository_suggestions(&signed_in("mhohlios")).unwrap();
+        let suggestions = host.repository_suggestions().unwrap();
         let suggested = |repository: &Repository| {
             (suggestions.iter())
                 .find(|s| s.repository_id == repository.id)
@@ -826,11 +818,7 @@ mod tests {
         }])
         .unwrap();
         assert_eq!(host.spaces().unwrap(), before);
-        assert!(
-            host.repository_suggestions(&signed_in("mhohlios"))
-                .unwrap()
-                .is_empty()
-        );
+        assert!(host.repository_suggestions().unwrap().is_empty());
     }
 
     #[test]
@@ -845,12 +833,13 @@ mod tests {
                 [&dotfiles.id],
             )
             .unwrap();
-        // Without a gh login there is no Personal suggestion.
+        // A signed-out gh leaves no login, so there is no Personal suggestion.
         let signed_out = publish::Tools {
             gh: std::sync::Arc::new(|_, _| anyhow::bail!("gh is not installed")),
             ..publish::Tools::default()
         };
-        let suggestions = host.repository_suggestions(&signed_out).unwrap();
+        host.record_gh_login(gh_login(&signed_out, home.path()));
+        let suggestions = host.repository_suggestions().unwrap();
         assert_eq!(suggestions[0].space, None);
         assert_eq!(suggestions[0].repository, "MHohlios/dotfiles");
 
@@ -864,11 +853,11 @@ mod tests {
             host.space(&personal).unwrap().space.repositories,
             ["MHohlios/dotfiles"]
         );
-        assert!(host.repository_suggestions(&signed_out).unwrap().is_empty());
+        assert!(host.repository_suggestions().unwrap().is_empty());
     }
 
     #[test]
-    fn the_gh_login_is_read_once_for_the_hosts_lifetime() {
+    fn suggestions_run_no_gh_and_use_the_login_the_read_at_start_found() {
         let home = tempfile::tempdir().unwrap();
         let mut host = Host::open_set_up(home.path()).unwrap();
         let dotfiles = on_github(&host, "MHohlios/dotfiles");
@@ -878,14 +867,57 @@ mod tests {
                 [&dotfiles.id],
             )
             .unwrap();
-        assert!(host.wants_gh_login().unwrap());
         let calls = std::sync::Arc::default();
         let gh = counted_signed_in("MHohlios", std::sync::Arc::clone(&calls));
+        let calls = || calls.load(std::sync::atomic::Ordering::SeqCst);
+        let personal = Some(SuggestedSpace::Space(host.default_space().unwrap()));
+        assert!(host.wants_gh_login().unwrap());
+        // Before the login is known: no gh, and no Personal suggestion.
         for _ in 0..2 {
-            host.repository_suggestions(&gh).unwrap();
+            assert_eq!(host.repository_suggestions().unwrap()[0].space, None);
         }
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(calls(), 0);
+
+        // The service's read at start, off the host thread.
+        host.record_gh_login(gh_login(&gh, home.path()));
+        assert_eq!(calls(), 1);
+        for _ in 0..2 {
+            assert_eq!(host.repository_suggestions().unwrap()[0].space, personal);
+        }
+        assert_eq!(calls(), 1);
         assert!(!host.wants_gh_login().unwrap());
+    }
+
+    #[test]
+    fn personal_is_found_in_any_casing() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let mut personal = host.spaces().unwrap().remove(0).space;
+        personal.name = "personal".into();
+        host.update_space(personal.clone()).unwrap();
+        let dotfiles = on_github(&host, "MHohlios/dotfiles");
+        host.db
+            .execute(
+                "INSERT INTO repository_suggestions VALUES (?1)",
+                [&dotfiles.id],
+            )
+            .unwrap();
+        host.record_gh_login(Some("MHohlios".into()));
+
+        let suggestions = host.repository_suggestions().unwrap();
+        assert_eq!(
+            suggestions[0].space,
+            Some(SuggestedSpace::Space(personal.id.clone()))
+        );
+        host.confirm_repository_suggestions(&[RepositorySpaces {
+            repository: "MHohlios/dotfiles".into(),
+            space_ids: vec![],
+            new_personal: true,
+        }])
+        .unwrap();
+        let spaces = host.spaces().unwrap();
+        assert_eq!(spaces.len(), 1, "no second Personal");
+        assert_eq!(spaces[0].space.repositories, ["MHohlios/dotfiles"]);
     }
 
     #[test]
@@ -917,8 +949,9 @@ mod tests {
                 .collect()
         };
         assert_eq!(names(&host), ["brain"]);
+        host.record_gh_login(Some("MHohlios".into()));
 
-        let suggestions = host.repository_suggestions(&signed_in("MHohlios")).unwrap();
+        let suggestions = host.repository_suggestions().unwrap();
         assert_eq!(suggestions[0].space, Some(SuggestedSpace::NewPersonal));
         assert_eq!(
             names(&host),
