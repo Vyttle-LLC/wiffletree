@@ -10,27 +10,38 @@ use wording::humanize;
 /// Planned tickets without an open PR are neither: their work has not started.
 pub(super) struct TicketTable<'a> {
     pub in_progress: Vec<&'a Ticket>,
+    /// The done tickets held: those still in the snapshot, and the archive's once it is read.
     pub done: Vec<&'a Ticket>,
+    /// How many tickets are done, from the snapshot's count of tickets owned, so it is right
+    /// before the archive that lists most of them is read.
+    pub done_count: usize,
 }
 impl<'a> TicketTable<'a> {
-    pub(super) fn of(tickets: impl IntoIterator<Item = &'a Ticket>) -> Self {
+    /// `owned` is how many tickets the coordinator owns, open or not.
+    pub(super) fn of(tickets: impl IntoIterator<Item = &'a Ticket>, owned: usize) -> Self {
         let mut table = Self {
             in_progress: vec![],
             done: vec![],
+            done_count: 0,
         };
+        let mut open = 0;
         for ticket in tickets {
             let pr_open =
                 (ticket.pull_request.as_ref()).is_some_and(|pr| pr.state == PrState::Open);
             if !ticket.is_open() {
                 table.done.push(ticket);
-            } else if ticket.state != TicketState::Planned || pr_open {
+                continue;
+            }
+            open += 1;
+            if ticket.state != TicketState::Planned || pr_open {
                 table.in_progress.push(ticket);
             }
         }
+        table.done_count = owned.saturating_sub(open).max(table.done.len());
         table
     }
     fn is_empty(&self) -> bool {
-        self.in_progress.is_empty() && self.done.is_empty()
+        self.in_progress.is_empty() && self.done_count == 0
     }
 }
 
@@ -74,12 +85,16 @@ impl Conversation {
         if session.role != Role::ProjectOrchestrator {
             return None;
         }
-        let table = TicketTable::of(index.tickets_owned_by(&session.id));
+        let owned = index.snapshot().tickets_owned.get(&session.id).copied();
+        let table = TicketTable::of(
+            index.tickets_owned_by(&session.id),
+            owned.unwrap_or_default() as usize,
+        );
         if table.is_empty() {
             return None;
         }
         let collapsed = cx.global::<Preferences>().collapse_ticket_table;
-        let summary = match (table.in_progress.len(), table.done.len()) {
+        let summary = match (table.in_progress.len(), table.done_count) {
             (0, done) => format!("{done} done"),
             (open, 0) => format!("{open} in progress"),
             (open, done) => format!("{open} in progress, {done} done"),
@@ -122,7 +137,7 @@ impl Conversation {
             .child(head);
         if !collapsed {
             body = body.children(table.in_progress.iter().map(|t| ticket_row(t, p)));
-            if !table.done.is_empty() {
+            if table.done_count > 0 {
                 let open = self.done_tickets_open;
                 body = body.child(
                     div()
@@ -141,9 +156,13 @@ impl Conversation {
                             })
                             .size(px(12.)),
                         )
-                        .child(format!("{} done", table.done.len()))
+                        .child(format!("{} done", table.done_count))
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.done_tickets_open = !view.done_tickets_open;
+                            // Most done tickets are only in the archive.
+                            if view.done_tickets_open {
+                                cx.emit(Intent::DoneTicketsShown);
+                            }
                             cx.notify();
                         })),
                 );
@@ -240,13 +259,25 @@ mod tests {
             ticket("passed", TicketState::Passed),
             planned_with_pr,
         ];
-        let table = TicketTable::of(&tickets);
+        let table = TicketTable::of(&tickets, tickets.len());
         let ids = |list: &[&Ticket]| list.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
         assert_eq!(
             ids(&table.in_progress),
             ["implementing", "blocked", "passed", "planned-pr"]
         );
         assert_eq!(ids(&table.done), ["accepted", "closed"]);
+        assert_eq!(table.done_count, 2);
+    }
+
+    #[test]
+    fn done_tickets_only_the_archive_holds_are_counted_before_it_is_read() {
+        // The snapshot lists the open ticket; the owned count also has two settled ones that
+        // only the archive holds, such as a planned ticket closed without agents.
+        let tickets = [ticket("open", TicketState::Planned)];
+        let table = TicketTable::of(&tickets, 3);
+        assert!(table.in_progress.is_empty() && table.done.is_empty());
+        assert_eq!(table.done_count, 2);
+        assert!(!table.is_empty());
     }
 
     #[test]

@@ -136,10 +136,13 @@ struct ArchiveDemand<'a> {
     page: Page,
     selected: Option<&'a str>,
     messages: &'a [Message],
+    /// A coordinator's ticket table lists its done tickets.
+    done_tickets: bool,
 }
 
 /// The archive is out of date and something shown needs it: Show archived, the Tickets, Agents or
-/// Events panel, the Repositories page or a publish request, or a selected session or message sender
+/// Events panel, the Repositories page, a ticket table's done list or a publish request, or a
+/// selected session or message sender
 /// that the snapshot does not list, which only the archive holds.
 fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
     let snapshot = index.snapshot();
@@ -152,6 +155,7 @@ fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
                 Some(Panel::Team | Panel::Agents | Panel::Events)
             )
             || shown.page == Page::Repositories
+            || shown.done_tickets
             || snapshot.attention.iter().any(Attention::is_publish)
             || shown.selected.is_some_and(archived)
             || shown
@@ -400,7 +404,9 @@ impl Workspace {
                 self.sync_archive(window, cx);
             }
             // Only the archive may know who sent them.
-            Intent::MessagesShown => return self.sync_archive(window, cx),
+            Intent::MessagesShown | Intent::DoneTicketsShown => {
+                return self.sync_archive(window, cx);
+            }
             Intent::RefreshQuotas => self.refresh_quota(window, cx),
             Intent::Archived { archived, affected } => {
                 self.archived(*archived, affected, window, cx)
@@ -742,7 +748,10 @@ impl Workspace {
     }
     /// Reads the archive again when what is shown needs it and the one held is out of date.
     fn sync_archive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let transcript = self.conversation.read(cx).transcript.read(cx);
+        let conversation = self.conversation.read(cx);
+        let transcript = conversation.transcript.read(cx);
+        let coordinator =
+            (self.shared.selected_session()).is_some_and(|s| s.role == Role::ProjectOrchestrator);
         let wanted = self.shared.index.as_ref().is_some_and(|index| {
             let shown = ArchiveDemand {
                 show_archived: self.shared.show_archived,
@@ -750,6 +759,7 @@ impl Workspace {
                 page: self.shared.page,
                 selected: self.shared.selected.as_deref(),
                 messages: transcript.messages(),
+                done_tickets: coordinator && conversation.done_tickets_open,
             };
             wants_archive(index, &shown)
         });
@@ -1462,6 +1472,7 @@ mod tests {
             page: Page::Conversation,
             selected: Some(selected),
             messages: &[],
+            done_tickets: false,
         }
     }
 
@@ -1489,6 +1500,11 @@ mod tests {
             },
             ArchiveDemand {
                 page: Page::Repositories,
+                ..shown("live")
+            },
+            // The ticket table's done list names tickets only the archive holds.
+            ArchiveDemand {
+                done_tickets: true,
                 ..shown("live")
             },
             // An archived session already in the held archive, whose status may have moved.

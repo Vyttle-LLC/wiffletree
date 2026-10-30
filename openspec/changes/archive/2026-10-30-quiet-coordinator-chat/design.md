@@ -15,7 +15,7 @@ Every role already calls `set_plan` during a turn, so the coordinator marks a re
 
 ### Facts are compared, not words
 `ProjectFacts` is what the host records about the coordinator's project:
-- each ticket the coordinator owns: state, branch head for open tickets (`git rev-parse --verify refs/heads/<branch>` in the repository; unreadable reads as unknown and is never a change), the latest cycle's number, outcome, round count and each verifier's result, ledger entry ids with their status, and the PR's number, state, checks and unresolved threads;
+- each ticket the coordinator owns: state, branch head for open tickets (`git rev-parse --verify refs/heads/<branch>` in the repository; unreadable reads as unknown, and an unknown head in either snapshot keeps the reply full, since it proves nothing unchanged), the latest cycle's number, outcome, round count and each verifier's result, ledger entry ids with their status, and the PR's number, state, checks and unresolved threads;
 - the project's open questions, leaving out the host's own check-in notes;
 - the project's unarchived agents other than the coordinator, each with whether it is stopped (paused or disconnected) or has held input.
 
@@ -42,7 +42,7 @@ Trouble is any input that a folded run would count in red: a failed or blocked r
 `placements` treats the session's own reply with `update == unchanged` as a peer message, so it joins the run of agent messages around it. The run's heading adds "N replies, no change", leaves the coordinator out of the sender names, and the opened run starts with a muted line saying Wiffletree found no change. Each such reply's line shows the coordinator's name, a "No change" pill and its first line, and opens to the full reply as any line does. A `changed` reply draws as before with a muted "Since last update:" line above its text.
 
 ### The pinned table
-`ticket_table.rs` draws it between the header and the transcript, for the selected coordinator only. Rows come from `tickets_owned_by`: in progress means open and not `planned`, or with an open PR; accepted and closed count as done. Status is the Tickets inspector's state wording, with "· round N" while a cycle runs; the PR column reads "#N open", "#N merged" or "#N closed", linked to the PR, and "Not published" otherwise. The done line opens to the same rows. The collapse choice is `collapse_ticket_table` in `desktop-preferences.json`. The table redraws when the conversation does on a new snapshot; it adds no fetch.
+`ticket_table.rs` draws it between the header and the transcript, for the selected coordinator only. Rows come from `tickets_owned_by`: in progress means open and not `planned`, or with an open PR; accepted and closed count as done. Status is the Tickets inspector's state wording, with "· round N" while a cycle runs; the PR column reads "#N open", "#N merged" or "#N closed", linked to the PR, and "Not published" otherwise. The done line's count comes from the snapshot's `tickets_owned` less the open tickets, because most settled tickets are only in the archive; opening it asks for the archive, as the Tickets panel does, and lists its rows. The collapse choice is `collapse_ticket_table` in `desktop-preferences.json`. The table redraws when the conversation does on a new snapshot; it adds no fetch.
 
 ### Instructions
 Coordinating v5 adds the routine-update paragraph and limits the per-ticket table to finished, accepted, published or ready tickets and to status requests. The coordinator core v8 says what folds and how to mark news. The communication contract stays at v10: its `set_plan` paragraph is still true for every role, and the mark concerns only coordinators.
@@ -50,7 +50,7 @@ Coordinating v5 adds the routine-update paragraph and limits the per-ticket tabl
 ## Risks / Trade-offs
 
 - [A coordinator writes something important in an unchanged turn] → it can mark news, the reply stays one click away, and nothing is hidden from the record or agents.
-- [A Git read per open ticket at each coordinator turn end] → one `rev-parse` each, bounded by the host's Git timeout; a failure is unknown, never a change.
+- [A Git read per open ticket at each coordinator turn end] → one `rev-parse` each, bounded by the host's Git timeout; a failure is unknown and keeps the reply full.
 - [Verifier start and archive count as agent changes] → they coincide with cycle changes, which are news anyway.
 
 ## Migration Plan

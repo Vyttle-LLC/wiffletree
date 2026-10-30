@@ -213,6 +213,8 @@ pub(super) enum Intent {
     ShowArchived(bool),
     /// The transcript shows a new page of messages.
     MessagesShown,
+    /// The coordinator's ticket table opened its "N done" list.
+    DoneTicketsShown,
     RefreshQuotas,
     /// The host archived or restored these sessions.
     Archived {

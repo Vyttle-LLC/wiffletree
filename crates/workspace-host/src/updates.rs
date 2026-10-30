@@ -32,6 +32,12 @@ pub(crate) struct ProjectFacts {
     /// The project's agents other than the coordinator, by id.
     agents: BTreeMap<String, AgentFacts>,
 }
+impl ProjectFacts {
+    /// Whether Git could not read an open ticket's branch head, so its commits are unknown.
+    fn head_unknown(&self) -> bool {
+        (self.tickets.iter()).any(|ticket| ticket.state.is_open() && ticket.head.is_none())
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct TicketFacts {
     id: String,
@@ -174,9 +180,11 @@ impl Host {
         let update = match baseline {
             Some(baseline) if !started_by_human => {
                 let changes = changes(&baseline, &facts);
+                // An unread head proves nothing, so the reply shows in full.
+                let unknown = baseline.head_unknown() || facts.head_unknown();
                 match changes.is_empty() {
                     false => Some(ReplyUpdate::Changed { changes }),
-                    true if trouble || news => None,
+                    true if trouble || news || unknown => None,
                     true => Some(ReplyUpdate::Unchanged),
                 }
             }
@@ -479,6 +487,25 @@ mod tests {
         assert_eq!(reply(&mut f, &[id], false), None);
         let input = check_in(&mut f);
         assert_eq!(reply(&mut f, &input, true), None);
+        let input = check_in(&mut f);
+        assert_eq!(reply(&mut f, &input, false), Some(ReplyUpdate::Unchanged));
+    }
+
+    #[test]
+    fn an_unreadable_branch_head_never_reads_as_unchanged() {
+        let mut f = baselined();
+        // The repository is unavailable, so the head cannot be read.
+        let moved = f.repository.with_extension("away");
+        std::fs::rename(&f.repository, &moved).unwrap();
+        let input = check_in(&mut f);
+        assert_eq!(reply(&mut f, &input, false), None);
+        let input = check_in(&mut f);
+        assert_eq!(reply(&mut f, &input, false), None);
+        // Back with a new commit: the baseline knew no head, so this proves nothing either.
+        std::fs::rename(&moved, &f.repository).unwrap();
+        f.commit("c.txt", "three\n");
+        let input = check_in(&mut f);
+        assert_eq!(reply(&mut f, &input, false), None);
         let input = check_in(&mut f);
         assert_eq!(reply(&mut f, &input, false), Some(ReplyUpdate::Unchanged));
     }
