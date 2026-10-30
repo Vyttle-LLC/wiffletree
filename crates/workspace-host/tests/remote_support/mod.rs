@@ -59,6 +59,8 @@ impl Studio {
         no_providers();
         let data = tempfile::tempdir().unwrap();
         let mut host = Host::open_set_up(data.path()).unwrap();
+        host.set_workspaces_dir(data.path().join("workspaces").to_str().unwrap())
+            .unwrap();
         let project = host.create_project("Tide alerts").unwrap();
         host.set_live(&project.id, false).unwrap();
         let coordinator = (host.sessions().unwrap().into_iter())

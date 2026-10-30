@@ -6248,6 +6248,8 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let session = {
             let mut host = Host::open_set_up(home.path()).unwrap();
+            host.set_workspaces_dir(home.path().join("workspaces").to_str().unwrap())
+                .unwrap();
             host.create_project("Monitor").unwrap();
             let session = host.sessions().unwrap().remove(0);
             let args = json!({"label":"check","prompt":"Check","every":"30m"});
@@ -8835,6 +8837,8 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let (session, run, timer) = {
             let mut host = Host::open_set_up(home.path()).unwrap();
+            host.set_workspaces_dir(home.path().join("workspaces").to_str().unwrap())
+                .unwrap();
             host.create_project("Monitor").unwrap();
             let session = host.sessions().unwrap().remove(0);
             let args =

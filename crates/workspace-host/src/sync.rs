@@ -2564,6 +2564,9 @@ pub(crate) mod tests {
         let (_second_home, mut second) = joined(&github);
         let tools = github.tools();
         save_rules(&mut first, Skill::Implementing, "From the first.");
+        // History entries are named by the millisecond, so two machines saving in the same one
+        // would also conflict over the entry.
+        std::thread::sleep(std::time::Duration::from_millis(2));
         save_rules(&mut second, Skill::Implementing, "From the second.");
         second.set_check_ins(40, 400).unwrap();
         first.sync_now(&tools).unwrap();

@@ -8,6 +8,8 @@ const MINUTE: i64 = 60_000;
 
 fn project(home: &tempfile::TempDir) -> (Host, Session) {
     let mut host = Host::open_set_up(home.path()).unwrap();
+    host.set_workspaces_dir(home.path().join("workspaces").to_str().unwrap())
+        .unwrap();
     host.create_project("Monitor").unwrap();
     let root = host.sessions().unwrap().remove(0);
     (host, root)
