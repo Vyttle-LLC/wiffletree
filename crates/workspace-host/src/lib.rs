@@ -1,6 +1,7 @@
 //! Single-writer durable host, independent of graphics and provider inference.
 mod agent_processes;
 pub mod attachments;
+mod brains;
 mod checkout;
 pub mod compaction;
 pub mod context;
@@ -157,6 +158,10 @@ pub struct Host {
     merge_runs: Vec<skills::MergeRun>,
     /// By provider, whether detection last found its CLI installed and signed in.
     pub(crate) detected: std::collections::BTreeMap<Provider, bool>,
+    /// The legacy pointer file `~/.config/claude-second-brain`; tests name another.
+    pub(crate) legacy_pointer: PathBuf,
+    /// A brain command queued, amended or granted something, so every brain's pass is due now.
+    pub(crate) brains_now: bool,
 }
 /// A report that set its ticket's state while the reporter's turn ran.
 pub(crate) struct MidTurnReport {
@@ -205,13 +210,16 @@ pub(crate) const TURN_COUNT: &str = "turn-count:";
 /// not confirm and so did not stop; the rest is the id of its `process_groups` record. Reserved
 /// like `CHECK_IN`. While the note of a provider's own group is open, its session starts no turn.
 pub(crate) const LEFTOVER_PROCESS: &str = "leftover-process:";
+/// Prefix of a brain batch's Inbox item: the batch's id and the item's number. Reserved like
+/// `CHECK_IN`.
+pub(crate) const BRAIN_NOTICE_PREFIX: &str = "brain:";
 /// SQL condition for a `provider_runs` row that is a turn. A compaction's row has a `kind`
 /// and must not count as the session's turn: not for check-ins, not as its latest turn.
 pub(crate) const IS_TURN_RUN: &str =
     "CASE WHEN json_valid(detail) THEN json_extract(detail,'$.kind') END IS NULL";
-/// Whether an inbox item is a host check-in rather than an agent's question.
+/// Whether an inbox item is a host check-in or brain batch item rather than an agent's question.
 pub(crate) fn is_check_in(operation: &str) -> bool {
-    [CHECK_IN, TURN_COUNT, LEFTOVER_PROCESS]
+    [CHECK_IN, TURN_COUNT, LEFTOVER_PROCESS, BRAIN_NOTICE_PREFIX]
         .iter()
         .any(|prefix| operation.starts_with(prefix))
 }
@@ -222,6 +230,7 @@ fn ensure_unreserved(operation: &str) -> Result<()> {
         CHECK_IN,
         TURN_COUNT,
         LEFTOVER_PROCESS,
+        BRAIN_NOTICE_PREFIX,
         PUBLISH_PREFIX,
         PERMISSION_PREFIX,
     ] {
@@ -344,12 +353,20 @@ impl Host {
             detected: Default::default(),
             uploads: Default::default(),
             gh_login: None,
+            legacy_pointer: std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default()
+                .join(brains::LEGACY_POINTER),
+            brains_now: false,
         };
         // Before anything reads or writes a shared setting, so the shared folder is in place:
         // clones an earlier release named `<owner>-<name>` first, then one still in `shared/`.
         repos::migrate_clone_folders(&host.db, &host.home)?;
         host.move_settings_clone()?;
         host.ensure_local_storage()?;
+        // After local storage is in place, as turning a brain folder into its repository writes
+        // the Space's file.
+        brains::migrate(&mut host)?;
         host.clear_uploads()?;
         host.recover()?;
         host.end_interrupted_publishes()?;
@@ -1762,6 +1779,36 @@ impl Host {
                 self.confirm_repository_suggestions(&choices)?;
                 json!({"confirmed":true})
             }
+            Command::Brains => serde_json::to_value(self.brains_page()?)?,
+            Command::SuggestSpaceBrain { repositories } => {
+                serde_json::to_value(self.suggest_space_brain(&repositories)?)?
+            }
+            Command::ConfirmBrain { repository } => {
+                serde_json::to_value(self.confirm_brain(&repository)?)?
+            }
+            Command::ForgetBrain { repository } => {
+                self.forget_brain(&repository)?;
+                json!({"forgotten":true})
+            }
+            Command::SetUpBrain { repository } => serde_json::to_value(
+                self.set_up_brain(&repository, &publish::Tools::default().git)?,
+            )?,
+            Command::SetBrainCompiler {
+                repository,
+                compiler,
+            } => serde_json::to_value(self.set_brain_compiler(
+                &repository,
+                &compiler,
+                &publish::Tools::default().git,
+            )?)?,
+            Command::AmendBrainBatch {
+                batch_id,
+                amendment,
+            } => serde_json::to_value(self.amend_brain_batch(
+                &batch_id,
+                &amendment,
+                &publish::Tools::default().git,
+            )?)?,
             Command::ExportLogs { project_id } => {
                 serde_json::to_value(self.export_logs(&project_id)?)?
             }
