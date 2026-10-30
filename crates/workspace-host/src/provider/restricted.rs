@@ -126,6 +126,11 @@ impl ThreadLaunch {
             "Stopped: the run started in permission mode {} instead of denying what is not allowed",
             init["permissionMode"]
         );
+        // Auto memory lives outside scratch and carries into later sessions.
+        ensure!(
+            init["memory_paths"]["auto"].is_null(),
+            "Stopped: the run started with auto memory on, which writes outside the scratch folder"
+        );
         Ok(())
     }
     /// Refuses a Codex tool call on an MCP server the thread was not given.
@@ -195,8 +200,10 @@ pub(super) fn configure_claude(cmd: &mut ProcessCommand, turn: &Turn, launch: &T
     .args(["--append-system-prompt", &turn.instructions])
     .args(["--system-prompt-snapshot", "off"])
     .args(["--setting-sources", ""])
-    // Auto memory would load and invite writes to a folder outside scratch.
+    // Auto memory would load and invite writes to a folder outside scratch; the setting and
+    // the variable each turn it off in Claude Code 2.1.310.
     .args(["--settings", r#"{"autoMemoryEnabled":false}"#])
+    .env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
     .args(["--permission-mode", "dontAsk"])
     .args(["--tools", &launch.claude_tools().join(",")])
     .args(["--allowedTools", &launch.claude_allowed().join(",")])
@@ -390,9 +397,13 @@ mod tests {
                 .to_string()
                 .contains("tools a thread is not given (Bash)")
         );
-        let mut bypass = init(ours, json!([]));
+        let mut bypass = init(ours.clone(), json!([]));
         bypass["permissionMode"] = json!("bypassPermissions");
         assert!(launch.check_claude_start(&bypass).is_err());
+        let mut remembering = init(ours, json!([]));
+        remembering["memory_paths"] = json!({"auto": "/Users/x/.claude/projects/-scratch/memory/"});
+        let refused = launch.check_claude_start(&remembering).unwrap_err();
+        assert!(refused.to_string().contains("auto memory on"));
     }
 
     #[test]
