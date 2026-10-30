@@ -922,6 +922,8 @@ impl Host {
             return Ok(());
         }
         let (clone, shared) = (self.shared_folder(), self.home.join(shared::FOLDER));
+        // Gone once the clone moved out of it at the first start.
+        fs::create_dir_all(&shared)?;
         for path in SHARED_PATHS {
             remove_path(&shared.join(path))?;
             if fs::symlink_metadata(clone.join(path)).is_ok() {
@@ -3878,6 +3880,15 @@ pub(crate) mod tests {
         );
         assert_eq!(git(&clone, &["rev-parse", "HEAD"]), head);
         assert_eq!(values(&host), before);
+        // Stopping after the move recreates `shared/` with every setting.
+        let mut host = host;
+        host.stop_settings_sync().unwrap();
+        assert_eq!(
+            host.shared_folder(),
+            home.path().join(shared::FOLDER).canonicalize().unwrap()
+        );
+        assert_eq!(values(&host), before);
+        assert!(clone.join(".git").exists());
     }
 
     #[test]
