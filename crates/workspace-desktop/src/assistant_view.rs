@@ -24,7 +24,6 @@ pub(super) fn assistant_name(snapshot: Option<&Snapshot>) -> String {
         _ => DEFAULT_NAME.into(),
     }
 }
-/// What the empty composer says, by the assistant's name, as "Ask Dot…".
 fn composer_placeholder(name: &str) -> String {
     format!("Ask {name}…")
 }
@@ -345,7 +344,6 @@ impl AssistantPage {
             }
         });
     }
-    /// What the search box asks for now: its query and the Space it is limited to.
     fn search_asked(&self, cx: &App) -> SearchAsked {
         SearchAsked {
             query: self.search.read(cx).value().trim().to_string(),
