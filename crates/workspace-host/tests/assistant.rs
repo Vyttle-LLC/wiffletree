@@ -375,3 +375,27 @@ fn the_router_sends_each_message_where_it_answers_and_holds_it_when_unsure() {
     assert!(snapshot.held.is_empty());
     assert_eq!(turns(&fixture).len(), ran + 1);
 }
+
+/// The hook before a job run's shell command exits 2, the only refusal Claude honours, for
+/// anything but an explicit allow.
+#[test]
+fn the_job_shell_hook_refuses_with_exit_2_unless_it_allows() {
+    use std::io::Write;
+    let hook = |input: &[u8]| {
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_workspace-host"))
+            .arg("job-bash-check")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        let output = child.wait_with_output().unwrap();
+        (output.status.code(), !output.stderr.is_empty())
+    };
+    let command = |text: &str| serde_json::json!({"tool_input":{"command":text}}).to_string();
+    assert_eq!(hook(command("gh pr list").as_bytes()), (Some(0), false));
+    for refused in [command("gh pr list > x"), String::new(), "not json".into()] {
+        assert_eq!(hook(refused.as_bytes()), (Some(2), true), "{refused}");
+    }
+}

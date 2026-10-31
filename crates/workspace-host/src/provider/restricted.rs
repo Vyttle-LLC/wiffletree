@@ -507,7 +507,10 @@ mod tests {
                 "{command}"
             );
         }
-        assert!(shell_text_refused(b"not json").is_some());
+        // Input that could not be read reaches it as nothing, and is refused.
+        for unreadable in [&b"not json"[..], b"", b"{}"] {
+            assert!(shell_text_refused(unreadable).is_some());
+        }
         // Only a job's run with a CLI source gets the hook, which runs Wiffletree's helper.
         let helper = Path::new("/Apps/Wiffle tree/workspace-host");
         let mut run = launch(vec![gh()]);

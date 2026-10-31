@@ -16,12 +16,17 @@ fn main() -> Result<()> {
     if args.first().map(String::as_str) == Some("thread-mcp") {
         return workspace_host::mcp::serve_stdio(workspace_host::mcp::thread_tools());
     }
-    // Claude's hook before a job run's shell command: exit 2 refuses it, with the reason.
+    // Claude's hook before a job run's shell command. Exit 2 is the only refusal Claude
+    // honours; any other failure would let the command run. So input that cannot be read is
+    // refused as unreadable, the reason is written without a panic, and the only exit 0 is an
+    // explicit allow.
     if args.first().map(String::as_str) == Some("job-bash-check") {
         let mut input = vec![];
-        io::stdin().read_to_end(&mut input)?;
+        if io::stdin().read_to_end(&mut input).is_err() {
+            input.clear();
+        }
         if let Some(why) = workspace_host::provider::shell_text_refused(&input) {
-            eprintln!("{why}");
+            let _ = writeln!(io::stderr(), "{why}");
             std::process::exit(2);
         }
         return Ok(());
