@@ -517,6 +517,10 @@ fn until_tool_recorded(home: &Path, session: &Session, provider: &Provider, coun
 }
 
 /// Waits until a group one of the agent's tools started is recorded as running, and returns it.
+/// It timed out once on CI with nothing recorded although the tool had started, so a timeout
+/// says what the record held and what the process table showed. Where to look: the watcher
+/// never reads a process id again once two scans in a row could not read it, and a tree whose
+/// root could not be read at spawn follows nothing.
 fn until_tool_running(home: &Path, session: &Session) -> i32 {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -524,9 +528,84 @@ fn until_tool_running(home: &Path, session: &Session) -> i32 {
         if let Some(tool) = running.iter().find(|r| !r.provider && r.ended.is_none()) {
             return tool.group;
         }
-        assert!(Instant::now() < deadline, "timed out: a tool process");
+        assert!(
+            Instant::now() < deadline,
+            "timed out: a tool process\n{}",
+            tool_diagnosis(home, session)
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// What the record holds for the agent and what the process table shows of the processes the
+/// test knows: process ids, groups, executable names and times only. A provider's arguments
+/// hold its prompt, so `ps` is asked for the executable (`comm`), never the command line.
+fn tool_diagnosis(home: &Path, session: &Session) -> String {
+    let db = store(home);
+    let mut report = String::from("process_groups (process_group, provider, ended, ended_at):\n");
+    let mut groups = db
+        .prepare("SELECT id,process_group,provider,ended,ended_at FROM process_groups WHERE session_id=?1 ORDER BY rowid")
+        .unwrap();
+    let rows = groups
+        .query_map([&session.id], |r| {
+            let (ended, ended_at): (Option<String>, Option<i64>) = (r.get(3)?, r.get(4)?);
+            Ok((
+                r.get::<_, String>(0)?,
+                format!(
+                    "  {} provider={} ended={ended:?} ended_at={ended_at:?}\n",
+                    r.get::<_, i32>(1)?,
+                    r.get::<_, bool>(2)?
+                ),
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let mut known: Vec<i32> = vec![];
+    let mut members = db
+        .prepare(
+            "SELECT pid,started,command FROM process_group_members WHERE group_id=?1 ORDER BY pid",
+        )
+        .unwrap();
+    for (id, line) in rows {
+        report += &line;
+        let listed = members
+            .query_map([id], |r| {
+                Ok((
+                    r.get::<_, i32>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .unwrap();
+        for member in listed {
+            let (pid, started, command) = member.unwrap();
+            report += &format!("    member pid={pid} started={started} command={command:?}\n");
+            known.push(pid);
+        }
+    }
+    for var in ["WORKSPACE_TEST_GROUPS", "WORKSPACE_TEST_PIDS"] {
+        known.extend(std::env::var_os(var).map_or(vec![], |file| ids(Path::new(&file))));
+    }
+    let table = std::process::Command::new("ps")
+        .args(["-ax", "-o", "pid,ppid,pgid,lstart,comm"])
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        .unwrap_or_default();
+    report += "ps (pid ppid pgid lstart comm), for the known pids and their groups:\n";
+    for line in table.lines() {
+        let fields: Vec<i32> = line
+            .split_whitespace()
+            .take(3)
+            .filter_map(|field| field.parse().ok())
+            .collect();
+        if let [pid, _, group] = fields[..]
+            && (known.contains(&pid) || known.contains(&group))
+        {
+            report += &format!("  {line}\n");
+        }
+    }
+    report
 }
 
 /// One process group the record holds for an agent.

@@ -829,10 +829,14 @@ pub(crate) mod tests {
 
     /// A provider that, when told to stop, starts a helper that ignores SIGTERM and exits: the
     /// helper joins the group after the host confirmed it. It lives until the child's input
-    /// closes. Returns once the provider waits on its own child, so a signal finds it settled.
+    /// closes. Returns once the provider waits for its input, so a signal finds it settled.
+    /// It waits on input, not on its `sleep`: a shell whose last child dies on the group's
+    /// SIGTERM can finish before it handles that SIGTERM itself, and start no helper. The
+    /// provider ignores SIGTERM before it forks the helper, which is born ignoring it: the
+    /// group's signal can still be on its way to members when the helper joins the group.
     pub(crate) fn with_late_survivor() -> Child {
         let child = in_own_group(
-            "exec 3<&0; trap '(trap \"\" TERM; exec cat <&3) >/dev/null & exit 0' TERM; sleep 30 & echo ready; wait",
+            "exec 3<&0; trap 'trap \"\" TERM; cat <&3 >/dev/null & exit 0' TERM; sleep 30 & echo ready; read _ <&3",
         );
         until("the provider's child to be exec'd", || {
             let members = group_members(child.id() as i32);
@@ -882,7 +886,8 @@ pub(crate) mod tests {
     fn a_group_left_frozen_is_stopped_with_sigterm() {
         // A provider that handles SIGTERM, as Claude Code does. macOS ends a stopped process
         // on a SIGTERM it does not handle, but a handler runs only once the process continues.
-        let mut child = in_own_group("trap 'exit 3' TERM; echo ready; sleep 30 & wait");
+        // It waits for input, not on its `sleep`, which the group's SIGTERM ends too.
+        let mut child = in_own_group("trap 'exit 3' TERM; echo ready; sleep 30 & read _");
         let pid = child.id() as i32;
         let _started = Started(vec![pid]);
         until("the provider's child to be exec'd", || {
