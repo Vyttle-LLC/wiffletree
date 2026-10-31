@@ -55,6 +55,12 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::RepositorySuggestions
         | Command::SpaceStorage { .. }
         | Command::Brains
+        | Command::BrainLogs { .. }
+        | Command::BrainNotes { .. }
+        | Command::BrainNote { .. }
+        | Command::BrainConflicts { .. }
+        | Command::BrainStatus { .. }
+        | Command::SearchBrain { .. }
         | Command::SuggestSpaceBrain { .. }
         | Command::OriginBranches { .. } => Row::Read,
         Command::ResolvePaths { .. } | Command::ReadFile { .. } | Command::ListFolder { .. } => {

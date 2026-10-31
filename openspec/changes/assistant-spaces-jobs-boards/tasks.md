@@ -9,7 +9,7 @@ Six stages, each a ticket or a few, each landing on its own. Every stage needs `
 - [ ] 1.5 Models: the Assistant row, its upgrade copy, and Space default models with fallback notes.
 - [ ] 1.6 Desktop: sidebar's pinned assistant row; assistant view with tabs, Space chip in the composer, idle threads leaving the strip, search, delete; the assistant's name in Settings.
 - [ ] 1.7 Docs: README and DEVELOPMENT notes on threads' authority.
-- [ ] 1.8 Host: the brain tools, each once its change has landed, so stage 1 does not wait for them: `log_work` to the Space's brain after `brain-log-capture` (task 7.1, moved here from its task 2.4), and `query_brain` on the Space's brain after `brain-browser` (its task 2.1). Until then a thread asked to remember something says it cannot yet. Verify the instruction order and tool list before and after each lands.
+- [ ] 1.8 Host: the brain tools, each once its change has landed, so stage 1 does not wait for them: `log_work` to the Space's brain after `brain-log-capture` (task 7.1, moved here from its task 2.4), and `query_brain` on the Space's brain after `brain-browser` (task 8.1, moved here from its task 2.1). Until then a thread asked to remember something says it cannot yet. Verify the instruction order and tool list before and after each lands.
 
 ## 2. The router
 
@@ -55,3 +55,7 @@ Six stages, each a ticket or a few, each landing on its own. Every stage needs `
 ## 7. Assistant threads log work (moved from brain-log-capture)
 
 - [ ] 7.1 Give assistant threads `log_work` (`project-memory` delta here): entries in `logs/assistant/YYYY/MM/` with `repo: assistant` and `ref: —`, a `repository` or `ticket_id` refused, the thread's id and Space in the store, never `logs/assistant.md`. Batch a thread's entries per brain and thread, and close the batch when the thread is deleted. Job runs get no `log_work`. Test a thread entry against the gate fixtures in `gate/tests/fixtures/`, and the batch closing on deletion.
+
+## 8. Assistant threads query the brain (moved from brain-browser)
+
+- [ ] 8.1 Give assistant threads, issue threads and job runs `query_brain` (`brain-browser` delta here) on their own Space's brain, always with the whole-brain scope, since a thread has no project: `tools_for` and `brain_index::queries_brain` list them, and the brain resolves through `owner_brain` for a Space-owned session. A `scope` of `project` from a thread is answered over the whole brain. The search overlay in a thread searches the thread's Space's brain, and a thread whose Space has no brain gets the "no brain" overlay. Test that a thread in one Space never reads another Space's brain, and the thread's scope.

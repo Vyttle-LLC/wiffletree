@@ -1,6 +1,7 @@
 //! Single-writer durable host, independent of graphics and provider inference.
 mod agent_processes;
 pub mod attachments;
+mod brain_index;
 mod brains;
 pub mod build_gate;
 mod checkout;
@@ -55,6 +56,7 @@ mod test_support;
 mod updates;
 pub mod usage;
 mod verification;
+mod verify_refs;
 mod worktrees;
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -1804,6 +1806,40 @@ impl Host {
                 json!({"confirmed":true})
             }
             Command::Brains => serde_json::to_value(self.brains_page()?)?,
+            Command::BrainLogs {
+                repository,
+                project_id,
+                filter,
+                from,
+            } => serde_json::to_value(self.brain_logs(
+                &repository,
+                project_id.as_deref(),
+                &filter,
+                &from,
+            )?)?,
+            Command::BrainNotes {
+                repository,
+                project_id,
+            } => serde_json::to_value(self.brain_notes(&repository, project_id.as_deref())?)?,
+            Command::BrainNote { repository, path } => {
+                serde_json::to_value(self.brain_note(&repository, &path)?)?
+            }
+            Command::BrainConflicts {
+                repository,
+                project_id,
+            } => serde_json::to_value(self.brain_conflicts(&repository, project_id.as_deref())?)?,
+            Command::BrainStatus { repository } => {
+                serde_json::to_value(self.brain_status(&repository)?)?
+            }
+            Command::SearchBrain {
+                repository,
+                project_id,
+                query,
+            } => serde_json::to_value(self.search_brain(
+                &repository,
+                project_id.as_deref(),
+                &query,
+            )?)?,
             Command::SuggestSpaceBrain { repositories } => {
                 serde_json::to_value(self.suggest_space_brain(&repositories)?)?
             }

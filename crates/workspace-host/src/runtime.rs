@@ -138,9 +138,24 @@ fn git_run(command: Command, timeout: Duration, input: Option<Vec<u8>>) -> Resul
 
 /// A Git query's output as bytes, as file contents are, with `input` on its standard input.
 pub fn git_bytes(path: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
+    git_bytes_within(path, args, input, (GIT_TIMEOUT, OUTPUT_BOUND))
+}
+
+/// `git_bytes` for a whole tree's listing or contents, such as a brain index's rebuild reads.
+pub(crate) fn git_bytes_large(path: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
+    git_bytes_within(path, args, input, (LARGE_TIMEOUT, LARGE_OUTPUT_BOUND))
+}
+
+fn git_bytes_within(
+    path: &Path,
+    args: &[&str],
+    input: &[u8],
+    (timeout, bound): (Duration, u64),
+) -> Result<Vec<u8>> {
     let mut command = git_command(path, args);
     command.env("GIT_OPTIONAL_LOCKS", "0");
-    let (status, output, error) = bounded_output(command, GIT_TIMEOUT, Some(input.to_vec()))?;
+    let (status, output, error) =
+        bounded_output_within(command, timeout, Some(input.to_vec()), bound)?;
     ensure!(
         status.success(),
         "git {} failed: {}",
@@ -214,13 +229,24 @@ const GH_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const GIT_TIMEOUT: Duration = Duration::from_secs(15);
 const PUSH_TIMEOUT: Duration = Duration::from_secs(600);
 const OUTPUT_BOUND: u64 = 4 * 1024 * 1024;
+const LARGE_TIMEOUT: Duration = Duration::from_secs(120);
+const LARGE_OUTPUT_BOUND: u64 = 512 * 1024 * 1024;
 
 /// Runs the command with one deadline for its output and its exit; a command still running
 /// at the deadline is killed and reaped.
 pub(crate) fn bounded_output(
+    command: Command,
+    timeout: Duration,
+    input: Option<Vec<u8>>,
+) -> Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
+    bounded_output_within(command, timeout, input, OUTPUT_BOUND)
+}
+
+fn bounded_output_within(
     mut command: Command,
     timeout: Duration,
     input: Option<Vec<u8>>,
+    bound: u64,
 ) -> Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
     let deadline = Instant::now() + timeout;
     let stdin = if input.is_some() {
@@ -245,10 +271,7 @@ pub(crate) fn bounded_output(
         let (sender, receiver) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
-            let result = pipe
-                .take(OUTPUT_BOUND + 1)
-                .read_to_end(&mut bytes)
-                .map(|_| bytes);
+            let result = pipe.take(bound + 1).read_to_end(&mut bytes).map(|_| bytes);
             let _ = sender.send(result);
         });
         Ok(receiver)
@@ -259,10 +282,7 @@ pub(crate) fn bounded_output(
     let output = stdout
         .recv_timeout(remaining())
         .context("Git query timed out")??;
-    ensure!(
-        output.len() as u64 <= OUTPUT_BOUND,
-        "Git output exceeds bound"
-    );
+    ensure!(output.len() as u64 <= bound, "Git output exceeds bound");
     let status = loop {
         if let Some(status) = child.0.try_wait()? {
             break status;

@@ -263,6 +263,9 @@ pub(crate) struct Pass {
     granted: bool,
     login: Option<String>,
     work: Vec<Work>,
+    /// The brain's index, refreshed after the fetch, and the clones it verifies refs against.
+    index: PathBuf,
+    clones: verify_refs::Clones,
 }
 
 /// A batch the pass may push, open, watch or discard.
@@ -317,12 +320,45 @@ pub(crate) fn pass(mut pass: Pass, tools: &Tools) -> Passed {
         work: vec![],
     };
     let result = run_pass(&mut pass, &mut passed, tools);
+    if let Err(error) = refresh_index(&pass, &passed) {
+        eprintln!("Brain index of {}: {error:#}", pass.repository);
+    }
     passed.work = pass.work;
     match result {
         Ok(()) => passed.reached = true,
         Err(error) => passed.problem = Some(format!("{error:#}")),
     }
     passed
+}
+
+/// Brings the brain's index to the `main` the pass fetched or, when it fetched nothing and the
+/// index is missing, to the checkout's `main`, so a deleted index is rebuilt offline too.
+fn refresh_index(pass: &Pass, passed: &Passed) -> Result<()> {
+    let checkout = &pass.checkout;
+    let commit = match &passed.head {
+        Some(head) => head.clone(),
+        None if !pass.index.exists() && checkout.join(".git").exists() => {
+            runtime::git_output(checkout, &["rev-parse", "--verify", "refs/heads/main"])?
+                .trim()
+                .to_owned()
+        }
+        None => return Ok(()),
+    };
+    let config = match &passed.config {
+        Some(config) => config.clone(),
+        None => read_config(checkout, &commit)?,
+    };
+    let brain_dir = (config.config())
+        .map(|config| config.brain_dir.clone())
+        .unwrap_or_else(|| "second-brain".to_owned());
+    brain_index::refresh(brain_index::Refresh {
+        index: &pass.index,
+        checkout,
+        commit: &commit,
+        brain_dir: &brain_dir,
+        clones: &pass.clones,
+    })?;
+    Ok(())
 }
 
 fn run_pass(pass: &mut Pass, passed: &mut Passed, tools: &Tools) -> Result<()> {
@@ -1709,6 +1745,8 @@ impl Host {
         }
         Ok(Some(Pass {
             home: self.home.clone(),
+            index: brain_index::index_file(&self.home, &brain.repository),
+            clones: verify_refs::Clones::of(&self.repositories()?),
             repository: brain.repository,
             checkout,
             push_url: brain.push_url,
@@ -2099,14 +2137,21 @@ pub(crate) mod tests {
         /// A teammate's commit of `file` with `content` pushed straight to `main`; answers its
         /// SHA.
         pub(crate) fn commit_file_on_main(&self, file: &str, content: &str) -> String {
+            self.commit_files_on_main(&[(file, content)], "A teammate's change")
+        }
+        /// One commit of `files` pushed straight to `main`, with `message` as its subject;
+        /// answers its SHA.
+        pub(crate) fn commit_files_on_main(&self, files: &[(&str, &str)], message: &str) -> String {
             let work = self.folder.join(format!("teammate-{}", new_id()));
             let bare = self.bare.to_str().unwrap();
             git(&self.folder, &["clone", "-q", bare, work.to_str().unwrap()]);
-            let path = work.join(file);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, content).unwrap();
+            for (file, content) in files {
+                let path = work.join(file);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, content).unwrap();
+            }
             git(&work, &["add", "."]);
-            git(&work, &["commit", "-q", "-m", "A teammate's change"]);
+            git(&work, &["commit", "-q", "-m", message]);
             git(&work, &["push", "-q", "origin", "main"]);
             git(&work, &["rev-parse", "HEAD"]).trim().to_owned()
         }
@@ -2426,9 +2471,10 @@ pub(crate) mod tests {
             assert!(!command.is_read(), "{command:?}");
         }
         let tools = mcp::tools();
+        // `query_brain` only reads the caller's own Space's brain.
         for tool in tools.as_array().unwrap() {
             let name = tool["name"].as_str().unwrap();
-            assert!(!name.contains("brain"), "{name}");
+            assert!(!name.contains("brain") || name == "query_brain", "{name}");
         }
         assert!(
             ensure_unreserved("brain:01j:1").is_err(),
