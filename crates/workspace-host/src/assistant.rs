@@ -786,6 +786,9 @@ impl Host {
             "propose_issue" | "propose_edit" | "propose_comment" | "propose_split"
             | "propose_duplicate" => self.propose_change(&mut thread, name, args),
             "list_issues" | "read_issue" => self.issue_tool(session, name, args),
+            "log_work" if thread.attached.is_some() => {
+                bail!("An issue thread writes to no repository, so it has no log_work")
+            }
             "log_work" => self.log_work(session, args),
             "query_brain" => self.query_brain(session, args),
             other => bail!("{other} is not one of a thread's tools"),

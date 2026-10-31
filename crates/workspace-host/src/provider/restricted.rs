@@ -14,15 +14,14 @@ pub(crate) const THREAD_TOOLS: [&str; 7] = [
     "log_work",
     "query_brain",
 ];
-/// An issue thread's tools: a thread's, then its tracker's and repositories' reads and its
-/// proposals.
-pub(crate) const ISSUE_THREAD_TOOLS: [&str; 15] = [
+/// An issue thread's tools: a thread's but `log_work`, as it has no tool that writes to a
+/// repository, then its tracker's and repositories' reads and its proposals.
+pub(crate) const ISSUE_THREAD_TOOLS: [&str; 14] = [
     "save_output",
     "suggest_space",
     "project_brief",
     "propose_job",
     "propose_issue",
-    "log_work",
     "query_brain",
     "list_issues",
     "read_issue",

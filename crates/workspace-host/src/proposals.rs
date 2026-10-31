@@ -537,6 +537,9 @@ mod tests {
             );
         }
         assert!(host.read_issue(&issue.id).unwrap().links.is_empty());
+        let args = json!({"type":"decision","title":"x","changed":"x","why":"x","state":"x"});
+        let refused = call(&mut host, &session, "log_work", args).unwrap_err();
+        assert!(refused.to_string().contains("no log_work"), "{refused}");
         let launch = host.thread_launch(&session).unwrap();
         assert!(launch.issue_thread && launch.sources.is_empty());
         // Its turns name the attached issue, by ID only.
@@ -790,6 +793,38 @@ mod tests {
             "the teammate's change stays"
         );
         assert!(after.description.ends_with("## Done when"));
+    }
+
+    #[test]
+    fn a_broad_search_is_cut_short_and_a_large_file_is_too_large_not_missing() {
+        let (home, mut host, sage, issue) = sage_here();
+        let folder = home.path().join("watch-app");
+        let repository = clone_here(&mut host, &folder, "Sage-Social/watch-app");
+        host.set_repository_spaces("Sage-Social/watch-app", std::slice::from_ref(&sage.id))
+            .unwrap();
+        let lines: String = (0..20).map(|n| format!("delivery {n}\n")).collect();
+        for file in 0..30 {
+            fs::write(folder.join(format!("delivery-{file}.rs")), &lines).unwrap();
+        }
+        fs::write(folder.join("big.json"), "x".repeat(5 * 1024 * 1024)).unwrap();
+        git(&folder, &["add", "."]);
+        git(&folder, &["commit", "-q", "-m", "Many"]);
+        host.set_repository_base(&repository.id, "main").unwrap();
+        let (_, session) = issue_thread(&mut host, &issue);
+        let read = |args: Value, tool: &str| host.repository_read(&session, tool, &args)?.run();
+        let found = read(json!({"query": "delivery"}), "search_repositories").unwrap();
+        assert_eq!(found["matches"].as_array().unwrap().len(), 200);
+        assert_eq!(found["cut_short"], true);
+        let large = read(
+            json!({"repository": "watch-app", "path": "big.json"}),
+            "read_repository_file",
+        );
+        assert!(large.unwrap_err().to_string().contains("too large to read"));
+        let missing = read(
+            json!({"repository": "watch-app", "path": "gone.rs"}),
+            "read_repository_file",
+        );
+        assert!(missing.unwrap_err().to_string().contains("is not a file"));
     }
 
     #[test]

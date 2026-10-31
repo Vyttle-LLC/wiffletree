@@ -63,31 +63,29 @@ impl AssistantPage {
         let (thread, attached) = (tab.thread.id.clone(), tab.thread.attached.clone());
         let space = Some(tab.thread.space_id.clone());
         let key = (thread.clone(), proposals_key(&tab.thread.proposals));
-        if self.proposals_read.as_ref() != Some(&key) {
-            self.proposals_read = Some(key.clone());
-            self.ask(
-                ask::proposals(thread.clone()),
-                window,
-                cx,
-                move |view, views, _, cx| {
-                    if view.proposals_read.as_ref() == Some(&key) {
-                        match views {
-                            Ok(views) => view.proposal_views = views,
-                            Err(_) => view.proposals_read = None,
-                        }
-                        cx.notify();
-                    }
-                },
-            );
-        }
-        if self
-            .authors
-            .as_ref()
-            .is_some_and(|(read, _)| *read == thread)
-        {
+        // The authors are read again with the cards, as a new comment may add one.
+        if self.proposals_read.as_ref() == Some(&key) {
             return;
         }
-        self.authors = Some((thread.clone(), vec![]));
+        self.proposals_read = Some(key.clone());
+        self.ask(
+            ask::proposals(thread.clone()),
+            window,
+            cx,
+            move |view, views, _, cx| {
+                if view.proposals_read.as_ref() == Some(&key) {
+                    match views {
+                        Ok(views) => view.proposal_views = views,
+                        Err(_) => view.proposals_read = None,
+                    }
+                    cx.notify();
+                }
+            },
+        );
+        // Another thread's authors give way at once; this one's stay shown until the new read.
+        if !(self.authors.as_ref()).is_some_and(|(read, _)| *read == thread) {
+            self.authors = Some((thread.clone(), vec![]));
+        }
         let keep = move |view: &mut Self, authors: Vec<String>, cx: &mut Context<Self>| {
             if view
                 .authors
@@ -203,9 +201,13 @@ impl AssistantPage {
                 .as_deref()
                 .map(issue_view::ago)
                 .unwrap_or_default();
-            body = body.child(ui::banner(p.yellow).child(format!(
-                "Changed since this proposal: {who} edited it {when}. Below is the proposal against the current version."
-            )));
+            body = body.child(
+                ui::banner(p.yellow).child(div().flex_1().min_w_0().whitespace_normal().child(
+                    format!(
+                        "Changed since this proposal: {who} edited it {when}. Below is the proposal against the current version."
+                    ),
+                )),
+            );
         }
         body = match &proposal.change {
             ProposalChange::Comment { body: text, .. } => {
@@ -543,10 +545,16 @@ fn diff_lines(lines: &[DiffLine], p: Palette) -> Div {
             DiffLine::Removed(text) => ("− ", text, p.red),
             DiffLine::Added(text) => ("+ ", text, p.green),
         };
+        // Wrapped, never ellipsized: the human reads every changed line before applying it.
         shown = shown.child(
-            ui::mono(format!("{mark}{text}"), p)
+            div()
+                .min_w_0()
+                .font_family(".SystemMonoFont")
+                .text_size(px(font::CAPTION))
+                .whitespace_normal()
                 .text_color(color)
-                .when(matches!(line, DiffLine::Removed(_)), |d| d.line_through()),
+                .when(matches!(line, DiffLine::Removed(_)), |d| d.line_through())
+                .child(format!("{mark}{text}")),
         );
     }
     shown

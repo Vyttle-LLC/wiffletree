@@ -526,20 +526,41 @@ impl IssuesPage {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(title.text_ellipsis())
+                    // The title gives way first, ellipsized, as the docked thread narrows the list.
+                    .child(
+                        title
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis(),
+                    )
                     .when(listing.unread, |d| d.child(unread_dot(p))),
             )
-            .children(
-                listing
-                    .labels
-                    .iter()
-                    .map(|l| pill(l.clone(), label_color(l, p))),
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .gap_1()
+                    .children(
+                        listing
+                            .labels
+                            .iter()
+                            .map(|l| pill(l.clone(), label_color(l, p))),
+                    )
+                    .children(
+                        (listing.repositories.iter())
+                            .map(|r| pill(short_repository(r).to_owned(), p.subtle)),
+                    ),
             )
-            .children(
-                (listing.repositories.iter())
-                    .map(|r| pill(short_repository(r).to_owned(), p.subtle)),
+            .child(
+                hint(work_line(listing), p)
+                    .min_w_0()
+                    .max_w(px(200.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis(),
             )
-            .child(hint(work_line(listing), p).flex_none())
             .child(avatar(listing.assignee.as_deref(), me, p))
     }
 

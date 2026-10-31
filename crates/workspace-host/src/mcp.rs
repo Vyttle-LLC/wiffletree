@@ -284,6 +284,8 @@ pub fn issue_thread_tools() -> Value {
     fields["id"] = string.clone();
     let mut tools = thread_tools();
     let listed = tools.as_array_mut().expect("tools are a list");
+    // A brain is a repository, and an issue thread writes to none.
+    listed.retain(|tool| tool["name"] != "log_work");
     listed.extend([
         tool(
             "list_issues",
@@ -342,7 +344,8 @@ fn issue_fields() -> Value {
     let list = json!({"type":"array","items":{"type":"string"}});
     json!({"title":string,"description":string,"state":string,"priority":string,"assignee":string,"labels":list,"repositories":list})
 }
-/// A job run's one tool: it saves the run's result. A run offers no card and changes no job.
+/// A job run's tools: `save_output`, which saves the run's result, and `query_brain`. A run
+/// offers no card and changes no job.
 pub fn job_run_tools() -> Value {
     let string = json!({"type":"string"});
     json!([{

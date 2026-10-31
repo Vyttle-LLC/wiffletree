@@ -12,6 +12,8 @@ const MAX_MATCHES: usize = 200;
 const MAX_LINE_CHARS: usize = 300;
 /// The most of a file `read_repository_file` answers, in bytes.
 const MAX_FILE_BYTES: usize = 64 * 1024;
+/// The largest file `read_repository_file` reads the start of: a Git query's output bound.
+const MAX_SHOWN_BYTES: u64 = 4 * 1024 * 1024;
 /// The longest search text.
 const MAX_QUERY_CHARS: usize = 200;
 /// The most matching lines one file gives a search.
@@ -150,14 +152,27 @@ impl RepositoryRead {
             Request::Read { path } => {
                 let checkout = &self.checkouts[0];
                 let spec = format!("{}:{path}", checkout.commit);
+                let missing = || {
+                    format!(
+                        "{path} is not a file of {} at its base branch",
+                        checkout.name
+                    )
+                };
+                let size = runtime::git_answer(&checkout.folder, &["cat-file", "-s", &spec])?;
+                let size: u64 = match size.status.success() {
+                    true => size.output.trim().parse()?,
+                    false => bail!(missing()),
+                };
+                ensure!(
+                    size <= MAX_SHOWN_BYTES,
+                    "{path} is {} MB, too large to read; search it with search_repositories instead",
+                    size / (1024 * 1024)
+                );
                 let shown =
                     runtime::git_bytes_answer(&checkout.folder, &["show", "--no-textconv", &spec]);
                 let bytes = match shown {
                     Ok((status, bytes)) if status.success() => bytes,
-                    _ => bail!(
-                        "{path} is not a file of {} at its base branch",
-                        checkout.name
-                    ),
+                    _ => bail!(missing()),
                 };
                 let kept = &bytes[..bytes.len().min(MAX_FILE_BYTES)];
                 let text = String::from_utf8_lossy(kept);
@@ -210,17 +225,17 @@ fn grep(checkout: &Checkout, text: &str, limit: usize) -> Result<Vec<Value>> {
         &checkout.commit,
         "--",
     ];
-    let (status, output) = runtime::git_bytes_answer(&checkout.folder, &args)?;
-    // 1 is git grep's "nothing matched".
+    // Read as it streams and stopped at `limit`, so a broad search is cut short, never failed.
+    let (status, lines) = runtime::git_lines(&checkout.folder, &args, limit)?;
+    // 1 is git grep's "nothing matched"; no status is a search stopped at `limit`.
     ensure!(
-        status.success() || status.code() == Some(1),
+        status.is_none_or(|status| status.success() || status.code() == Some(1)),
         "Searching {} failed",
         checkout.name
     );
     let prefix = format!("{}:", checkout.commit);
-    Ok(String::from_utf8_lossy(&output)
-        .lines()
-        .take(limit)
+    Ok(lines
+        .iter()
         .filter_map(|line| {
             let line = line.strip_prefix(&prefix)?;
             let (path, rest) = line.split_once(':')?;
