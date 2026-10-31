@@ -171,6 +171,13 @@ The approach works. The prototype is `crates/workspace-desktop/examples/board_we
   - The private `_webProcessIdentifier` is for the probe only and never for the app.
   - "A closed board holds no WebKit process" applies to the board's WebContent process. The shared GPU process may linger for some seconds after the last board closes.
 
+#### Built in task 4.2 (October 31, 2026)
+Two choices made while building, both inside the boards spec:
+- *Open in browser* is a notice above the board, in the GPUI pane, not a toast: a toast is an overlay, which would hide the live board behind a still image while the offer shows.
+- The content rule list lets `data:` and `blob:` through beside `wiffletree-board:`, as the policy does for images and fonts; neither can reach anything outside the page. Every other scheme is blocked.
+
+wry's own UI delegate grants the camera and microphone and runs a file panel, so the board sets its own, which refuses both and every new window. A script's `window.open` is stopped by WebKit's popup blocker before any delegate sees it; a person's click on a new-window link reaches the delegate, which offers its address.
+
 ### 7. Jobs and their runs
 A recipe is a YAML file in the Space's storage (`jobs/<slug>.yaml`): name, prompt, schedule (cron fields and an IANA timezone, with the plain-words form the assistant showed), Space, model (optional), sources, output (title and file type, optional), sharing (`one-runner` or `everyone`), runner (GitHub login and machine name) and enabled. The scheduler keeps each job's next run, last run and run history in the database. At a due time it checks the runner, the sources and the provider, starts a fresh thread of role `JobRun`, sends the prompt, and when the turn ends records the outcome and the outputs the run saved with `save_output`. Missed slots fold into one catch-up run at the first moment the host is running after them, as coordinator timers do, but the two share no code path the human can see: timers belong to coordinators, jobs to the user.
 
