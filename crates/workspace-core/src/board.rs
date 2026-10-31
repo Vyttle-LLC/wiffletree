@@ -38,13 +38,11 @@ impl BoardOutput {
     pub fn kind(&self) -> FileKind {
         FileKind::of(&self.file)
     }
-    /// The output's file on this Mac.
     pub fn path(&self) -> std::path::PathBuf {
         std::path::Path::new(&self.folder).join(&self.file)
     }
 }
 
-/// Where an output is kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Keeping {
@@ -54,6 +52,13 @@ pub enum Keeping {
     LocalStorage,
     /// The Space's storage repository on GitHub, which its members read.
     SharedStorage,
+}
+
+/// Whether `name` can be an output's file: one plain name, never a path, `.` or `..`. An
+/// output's metadata is untrusted, so every reader checks the name it gives.
+pub fn plain_file_name(name: &str) -> bool {
+    !name.contains(['/', '\\', '\0'])
+        && std::path::Path::new(name).file_name() == Some(name.as_ref())
 }
 
 /// How Wiffletree opens an output.
@@ -108,6 +113,22 @@ pub struct BoardVersion {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_outputs_file_is_one_plain_name() {
+        assert!(plain_file_name("brief.md") && plain_file_name("report#1.html"));
+        for name in [
+            "",
+            ".",
+            "..",
+            "/etc/passwd",
+            "../secret.md",
+            "a/b.md",
+            "a\\b.md",
+        ] {
+            assert!(!plain_file_name(name), "{name}");
+        }
+    }
 
     #[test]
     fn an_output_opens_by_its_files_type() {

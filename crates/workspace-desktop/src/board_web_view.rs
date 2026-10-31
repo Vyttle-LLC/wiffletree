@@ -158,6 +158,8 @@ pub enum BoardEvent {
     Focus(bool),
     /// The page asked to go to a web address; the board stayed, and offers to open it.
     Link(String),
+    /// The page finished loading.
+    Loaded,
 }
 
 /// The board's compiled content rule list, or why WebKit could not compile it.
@@ -341,7 +343,7 @@ impl Board {
                 .addContentRuleList(rules);
             configuration
         };
-        let (start, links) = (url.clone(), on_event.clone());
+        let (start, links, loads) = (url.clone(), on_event.clone(), on_event.clone());
         let webview = WebViewBuilder::new()
             .with_webview_configuration(configuration)
             .with_custom_protocol(SCHEME.into(), move |_, request| {
@@ -349,6 +351,11 @@ impl Board {
             })
             .with_url(url)
             .with_visible(false)
+            .with_on_page_load_handler(move |event, _| {
+                if matches!(event, wry::PageLoadEvent::Finished) {
+                    loads(BoardEvent::Loaded);
+                }
+            })
             .with_navigation_handler(move |to| {
                 if same_document(&to, &start) {
                     return true;

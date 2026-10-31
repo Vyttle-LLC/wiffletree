@@ -18,17 +18,18 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use ui::{card, hint, icon, pill};
-use workspace_core::board::{BoardOutput, BoardVersion, FileKind, Keeping};
-use workspace_core::job::{JobKey, JobState, RunOutcome, Sharing};
+use workspace_core::board::{BoardOutput, BoardVersion, FileKind, Keeping, plain_file_name};
+use workspace_core::job::{JobKey, JobState, RunOutcome, Runner, Sharing};
 
 /// What the HTML viewer says about its sandbox, as the mockup words it.
 const SANDBOX: &str = "🔒 Scripts run · no network · can't navigate away";
 /// How long an overlay waits for the board's still image before it opens without one.
 const SNAPSHOT_LIMIT: Duration = Duration::from_millis(500);
+/// What the pane says in the board's place when an overlay opens before any still image.
+const HIDDEN: &str = "Hidden while this is open";
 /// How often a shown board's still image is taken again, so an overlay that opens with no
 /// warning, such as a shortcut's dialog or another view's menu, has a recent one to show.
 const STILL_EVERY: Duration = Duration::from_secs(2);
-/// The largest Markdown output rendered natively.
 const MAX_MARKDOWN_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -37,7 +38,6 @@ enum Tab {
     Jobs,
 }
 
-/// The job filter: every output, those from threads, or one job's.
 #[derive(Clone, PartialEq)]
 enum JobFilter {
     All,
@@ -138,7 +138,7 @@ fn source_label(output: &BoardOutput) -> String {
     match (&output.job, &output.job_name) {
         (None, _) => "From a thread".into(),
         (Some(_), Some(name)) => format!("{name} job"),
-        (Some(_), None) => "A job not on this Mac".into(),
+        (Some(_), None) => "From a deleted job".into(),
     }
 }
 
@@ -276,11 +276,12 @@ impl BoardsPage {
         });
         let id = output.id.clone();
         self.ask(
-            ask::board_versions(id),
+            ask::board_versions(id.clone()),
             window,
             cx,
-            |view, versions, window, cx| {
-                let Some(viewer) = &mut view.viewer else {
+            move |view, versions, window, cx| {
+                // A reply for an output the viewer has since left is dropped.
+                let Some(viewer) = view.viewer.as_mut().filter(|v| v.output.id == id) else {
                     return;
                 };
                 match versions {
@@ -293,8 +294,10 @@ impl BoardsPage {
                 cx.notify();
             },
         );
-        if matches!(output.kind(), FileKind::Image | FileKind::Pdf) {
-            quick_look(&output.path());
+        if matches!(output.kind(), FileKind::Image | FileKind::Pdf)
+            && let Some(path) = contained(&folder, &output.file)
+        {
+            quick_look(&path);
         }
         self.show_version(output, folder, window, cx);
     }
@@ -307,16 +310,27 @@ impl BoardsPage {
             viewer.output.file = version.file.clone();
         }
         viewer.version = Some(commit.clone());
-        let ask = ask::board_version_folder(viewer.output.id.clone(), commit);
-        self.ask(ask, window, cx, |view, folder, window, cx| match folder {
-            Ok(folder) => {
-                let Some(output) = view.viewer.as_ref().map(|v| v.output.clone()) else {
-                    return;
-                };
-                view.show_version(output, PathBuf::from(folder), window, cx);
-            }
-            Err(error) => toast_error(error, window, cx),
-        });
+        let id = viewer.output.id.clone();
+        let ask = ask::board_version_folder(id.clone(), commit.clone());
+        self.ask(
+            ask,
+            window,
+            cx,
+            move |view, folder, window, cx| match folder {
+                Ok(folder) => {
+                    // A reply for another output, or a version picked before the latest pick, is
+                    // dropped.
+                    let Some(output) = (view.viewer.as_ref())
+                        .filter(|v| v.output.id == id && v.version.as_ref() == Some(&commit))
+                        .map(|v| v.output.clone())
+                    else {
+                        return;
+                    };
+                    view.show_version(output, PathBuf::from(folder), window, cx);
+                }
+                Err(error) => toast_error(error, window, cx),
+            },
+        );
     }
     /// Shows the output's file from `folder` by its type.
     fn show_version(
@@ -328,9 +342,15 @@ impl BoardsPage {
     ) {
         self.close_web_view(window, cx);
         let body = match output.kind() {
-            FileKind::Markdown => match read_markdown(&folder.join(&output.file)) {
-                Ok(text) => Body::Markdown(text.into()),
-                Err(error) => Body::Failed(error),
+            _ if !plain_file_name(&output.file) => Body::Failed(
+                "This version names a file outside its folder, so it is not opened.".into(),
+            ),
+            FileKind::Markdown => match contained(&folder, &output.file) {
+                Some(path) => match read_markdown(&path) {
+                    Ok(text) => Body::Markdown(text.into()),
+                    Err(error) => Body::Failed(error),
+                },
+                None => Body::Failed("This version's file is not in its folder.".into()),
             },
             FileKind::Html => {
                 let events = self.events.clone();
@@ -378,6 +398,10 @@ impl BoardsPage {
     }
 
     fn pane_event(&mut self, event: PaneEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // The first still image, so an overlay that opens at once has one to show.
+        if matches!(event, PaneEvent::Board(BoardEvent::Loaded)) {
+            return self.take_still();
+        }
         let Some(Viewer {
             body: Body::Html(pane),
             output,
@@ -416,6 +440,7 @@ impl BoardsPage {
                 }
             }
             PaneEvent::Board(BoardEvent::Link(url)) => pane.offered = Some(url),
+            PaneEvent::Board(BoardEvent::Loaded) => {}
             PaneEvent::Snapshot(image) => {
                 pane.still = image;
                 if let Some(then) = pane.snapping.take() {
@@ -804,10 +829,7 @@ impl BoardsPage {
                             .text_color(p.subtle)
                             .child(pill(keeping_label(output, &space), p.subtle))
                             .when(output.stale, |d| d.child(pill("Stale", p.yellow)))
-                            .children(
-                                (output.runner.as_ref())
-                                    .map(|runner| format!("Runs on {}", runner.machine)),
-                            )
+                            .children((output.runner.as_ref()).map(Runner::label))
                             .when(matches!(kind, FileKind::Image | FileKind::Pdf), |d| {
                                 d.child(format!("{} · Quick Look", type_label(kind)))
                             })
@@ -865,7 +887,7 @@ impl BoardsPage {
             let runner = (job.recipe.sharing == Sharing::OneRunner)
                 .then_some(job.recipe.runner.as_ref())
                 .flatten()
-                .map(|runner| format!("Runs on {}", runner.machine));
+                .map(Runner::label);
             list = list.child(
                 card(p)
                     .id(SharedString::from(format!("boards-job-{}", key.as_str())))
@@ -907,18 +929,14 @@ impl BoardsPage {
         let spaces = self.spaces().to_vec();
         let when = wording::day_and_time(output.updated_at);
         let mut note = vec![space.clone()];
-        note.extend(
-            output
-                .runner
-                .as_ref()
-                .map(|r| format!("Runs on {}", r.machine)),
-        );
+        note.extend(output.runner.as_ref().map(Runner::label));
         note.push(match output.job {
             Some(_) => format!("last run {when}"),
             None => format!("{} · saved {when}", source_label(output)),
         });
-        let path = viewer.folder.join(&output.file);
-        let (reveal, open, shared) = (path.clone(), path.clone(), output.clone());
+        // Each opens the file only once it is confirmed to be in the version's folder.
+        let file = (viewer.folder.clone(), output.file.clone());
+        let (reveal, open, shared) = (file.clone(), file.clone(), output.clone());
         let run_job = (output.job.clone()).filter(|key| {
             self.jobs()
                 .iter()
@@ -969,13 +987,17 @@ impl BoardsPage {
                     .when(
                         matches!(output.kind(), FileKind::Image | FileKind::Pdf),
                         |d| {
-                            let looked = path.clone();
+                            let (folder, file) = file.clone();
                             d.child(
                                 button("boards-quick-look")
                                     .ghost()
                                     .xsmall()
                                     .label("Quick Look")
-                                    .on_click(move |_, _, _| quick_look(&looked)),
+                                    .on_click(move |_, _, _| {
+                                        if let Some(path) = contained(&folder, &file) {
+                                            quick_look(&path)
+                                        }
+                                    }),
                             )
                         },
                     )
@@ -984,14 +1006,22 @@ impl BoardsPage {
                             .ghost()
                             .xsmall()
                             .label("Reveal in Finder")
-                            .on_click(move |_, _, cx| cx.reveal_path(&reveal)),
+                            .on_click(move |_, _, cx| {
+                                if let Some(path) = contained(&reveal.0, &reveal.1) {
+                                    cx.reveal_path(&path)
+                                }
+                            }),
                     )
                     .child(
                         button("boards-default-app")
                             .ghost()
                             .xsmall()
                             .label("Open in default app")
-                            .on_click(move |_, _, cx| open_in_default_app(&open, cx)),
+                            .on_click(move |_, _, cx| {
+                                if let Some(path) = contained(&open.0, &open.1) {
+                                    open_in_default_app(&path, cx)
+                                }
+                            }),
                     )
                     .children(run_job.map(|key| {
                         button("boards-run-now")
@@ -1046,7 +1076,7 @@ impl BoardsPage {
                 ))
                 .into_any_element(),
             Body::Elsewhere => {
-                let path = viewer.folder.join(&output.file);
+                let (folder, file) = (viewer.folder.clone(), output.file.clone());
                 let kind = output.kind();
                 let (lead, act) = match kind {
                     FileKind::Image | FileKind::Pdf => (
@@ -1069,9 +1099,14 @@ impl BoardsPage {
                         button("boards-open-elsewhere")
                             .xsmall()
                             .label(act)
-                            .on_click(move |_, _, cx| match kind {
-                                FileKind::Image | FileKind::Pdf => quick_look(&path),
-                                _ => open_in_default_app(&path, cx),
+                            .on_click(move |_, _, cx| {
+                                let Some(path) = contained(&folder, &file) else {
+                                    return;
+                                };
+                                match kind {
+                                    FileKind::Image | FileKind::Pdf => quick_look(&path),
+                                    _ => open_in_default_app(&path, cx),
+                                }
                             }),
                     )
                     .into_any_element()
@@ -1089,12 +1124,13 @@ impl BoardsPage {
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
-        // A board never draws over an overlay: under one, the pane shows its still image.
-        // Menus and popovers, this page's or another view's, take GPUI's focus as they open;
-        // dialogs, sheets and notices are counted as well.
+        // A board never draws over an overlay. Every menu and popover, this page's or another
+        // view's, takes GPUI's focus as it opens; tooltips take none, so they are counted, as
+        // are dialogs, sheets and notices.
         let covered = window.has_active_dialog(cx)
             || window.has_active_sheet(cx)
             || !window.notifications(cx).is_empty()
+            || open_tooltips(cx) > 0
             || !self.focus.contains_focused(window, cx);
         let painted = pane.painted.clone();
         let placeholder = canvas(
@@ -1111,7 +1147,7 @@ impl BoardsPage {
             },
         )
         .size_full();
-        let still = covered.then(|| pane.still.clone()).flatten();
+        let shows = under_overlay(covered, pane.still.clone());
         let offered = pane.offered.clone();
         let url = format!("{}://{}/{}", board_web_view::SCHEME, output.id, output.file);
         div()
@@ -1177,8 +1213,27 @@ impl BoardsPage {
                     .relative()
                     .bg(p.surface)
                     .child(placeholder)
-                    .when_some(still, |d, image| {
-                        d.child(img(image).absolute().top_0().left_0().size_full())
+                    .map(|d| match shows {
+                        Shows::Live => d,
+                        Shows::Still(image) => {
+                            d.child(img(image).absolute().top_0().left_0().size_full())
+                        }
+                        Shows::Hidden => d.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .justify_center()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(output.title.clone()),
+                                )
+                                .child(hint(HIDDEN, p)),
+                        ),
                     }),
             )
     }
@@ -1230,6 +1285,54 @@ impl BoardsPage {
         }
         list
     }
+}
+
+/// What the board pane shows: the live board, or under an overlay its still image or, before
+/// it has one, a plain stand-in.
+enum Shows {
+    Live,
+    Still(Arc<Image>),
+    Hidden,
+}
+fn under_overlay(covered: bool, still: Option<Arc<Image>>) -> Shows {
+    match (covered, still) {
+        (false, _) => Shows::Live,
+        (true, Some(image)) => Shows::Still(image),
+        (true, None) => Shows::Hidden,
+    }
+}
+
+/// The tooltips open in the app, which GPUI draws above every view, a board's included, and
+/// which take no focus.
+struct OpenTooltips(Rc<Cell<usize>>);
+impl Global for OpenTooltips {}
+
+/// Counts tooltips from their creation to their release; call once, before any window opens.
+pub(super) fn count_tooltips(cx: &mut App) {
+    let open = Rc::new(Cell::new(0));
+    cx.set_global(OpenTooltips(open.clone()));
+    cx.observe_new::<gpui_component::tooltip::Tooltip>(move |_, _, cx| {
+        open.set(open.get() + 1);
+        let open = open.clone();
+        cx.on_release(move |_, _| open.set(open.get().saturating_sub(1)))
+            .detach();
+    })
+    .detach();
+}
+fn open_tooltips(cx: &App) -> usize {
+    cx.try_global::<OpenTooltips>()
+        .map_or(0, |open| open.0.get())
+}
+
+/// `file` in `folder`, when it is one plain name of a file there, links resolved, so a native
+/// read never leaves the output's folder.
+fn contained(folder: &Path, file: &str) -> Option<PathBuf> {
+    if !plain_file_name(file) {
+        return None;
+    }
+    let root = folder.canonicalize().ok()?;
+    let path = root.join(file).canonicalize().ok()?;
+    (path.starts_with(&root) && path.is_file()).then_some(path)
 }
 
 /// Opens a file in its default app, or shows it in Finder when opening it would run it.
@@ -1379,7 +1482,12 @@ impl Render for BoardsPage {
 
 #[cfg(test)]
 mod tests {
-    use super::{JobFilter, filtered, keeping_label, source_label, version_label};
+    use super::{
+        JobFilter, Shows, contained, filtered, keeping_label, source_label, under_overlay,
+        version_label,
+    };
+    use gpui::{Image, ImageFormat};
+    use std::sync::Arc;
     use workspace_core::SpaceId;
     use workspace_core::board::{BoardOutput, BoardVersion, Keeping};
     use workspace_core::job::JobKey;
@@ -1398,6 +1506,29 @@ mod tests {
             runner: None,
             stale: false,
             preview: None,
+        }
+    }
+
+    #[test]
+    fn an_overlay_before_the_first_still_hides_the_board_behind_a_stand_in() {
+        assert!(matches!(under_overlay(false, None), Shows::Live));
+        assert!(matches!(under_overlay(true, None), Shows::Hidden));
+        let still = Arc::new(Image::from_bytes(ImageFormat::Png, vec![]));
+        assert!(matches!(under_overlay(true, Some(still)), Shows::Still(_)));
+    }
+
+    #[test]
+    fn a_native_read_stays_in_the_versions_folder() {
+        let parent = tempfile::tempdir().unwrap();
+        let folder = parent.path().join("brief");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("brief.md"), "# Brief").unwrap();
+        std::fs::write(parent.path().join("secret.md"), "secret").unwrap();
+        std::os::unix::fs::symlink(parent.path().join("secret.md"), folder.join("link.md"))
+            .unwrap();
+        assert!(contained(&folder, "brief.md").is_some());
+        for file in ["../secret.md", "/etc/passwd", "link.md", "missing.md"] {
+            assert!(contained(&folder, file).is_none(), "{file}");
         }
     }
 
@@ -1440,6 +1571,9 @@ mod tests {
         let chart = output("Chart", "sage", None);
         assert_eq!(keeping_label(&chart, "Sage"), "Only on this Mac");
         assert_eq!(source_label(&chart), "From a thread");
+        let mut deleted = shared.clone();
+        deleted.job_name = None;
+        assert_eq!(source_label(&deleted), "From a deleted job");
         let version = BoardVersion {
             commit: "c".into(),
             saved_at: 0,

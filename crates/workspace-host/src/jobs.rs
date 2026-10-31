@@ -522,7 +522,7 @@ impl Host {
         }
         match &recipe.runner {
             Some(runner) if runner.machine == sync::machine_name() => None,
-            Some(runner) => Some(format!("Runs on {}", runner.machine)),
+            Some(runner) => Some(runner.label()),
             None => Some("No Mac is its runner".into()),
         }
     }

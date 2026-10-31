@@ -89,6 +89,12 @@ pub struct Runner {
     pub login: String,
     pub machine: String,
 }
+impl Runner {
+    /// "Runs on Jamie's Mac".
+    pub fn label(&self) -> String {
+        format!("Runs on {}", self.machine)
+    }
+}
 
 /// A job in the scheduler: `space/job` for a recipe, `built-in:<name>` for a built-in job.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

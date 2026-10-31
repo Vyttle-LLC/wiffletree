@@ -1604,6 +1604,7 @@ fn main() -> anyhow::Result<()> {
         cx.set_global(preferences);
         cx.set_global(attachment_chips::HostImages::new());
         cx.set_global(staging);
+        boards_view::count_tooltips(cx);
         apply_theme(cx);
         // Under the System appearance, macOS can switch modes while the app runs. The component
         // theme only changes when told, so every window re-applies it or keeps stale colours.

@@ -4,7 +4,7 @@
 use crate::*;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use workspace_core::board::{BoardOutput, BoardVersion, FileKind, Keeping};
+use workspace_core::board::{BoardOutput, BoardVersion, FileKind, Keeping, plain_file_name};
 use workspace_core::job::{Cron, JobKey, Recipe, Sharing};
 
 /// The folder of a Space's storage, beside its jobs' folders, that holds outputs the user
@@ -96,7 +96,11 @@ impl Shelves {
         let folder = shelf.repository.join(&found.folder);
         let file = found.about["file"].as_str()?.to_owned();
         let path = folder.join(&file);
-        if Path::new(&file).file_name() != Some(file.as_ref()) || !path.is_file() {
+        // A link, to the folder or its file, could point anywhere on this Mac.
+        let real = |path: &Path, file: bool| {
+            fs::symlink_metadata(path).is_ok_and(|m| if file { m.is_file() } else { m.is_dir() })
+        };
+        if !plain_file_name(&file) || !real(&folder, false) || !real(&path, true) {
             return None;
         }
         let recipe = (found.job.as_ref())
@@ -140,6 +144,11 @@ impl Shelves {
                 .ok()
                 .and_then(|text| serde_json::from_str(&text).ok())
                 .unwrap_or_default();
+            // An earlier commit's metadata is as untrusted as the latest's.
+            let file = about["file"].as_str().unwrap_or_default().to_owned();
+            if !plain_file_name(&file) {
+                continue;
+            }
             let run_id = about["run_id"].as_str().map(str::to_owned);
             versions.push(BoardVersion {
                 commit: commit.to_owned(),
@@ -150,7 +159,7 @@ impl Shelves {
                     .unwrap_or_default(),
                 run_id,
                 shared: about["shared"].as_bool().unwrap_or_default(),
-                file: about["file"].as_str().unwrap_or_default().to_owned(),
+                file,
             });
         }
         Ok(versions)
@@ -206,6 +215,12 @@ fn outputs_in<'a>(shelf: &'a Shelf, base: &str, job: Option<JobKey>) -> Vec<Foun
         let Some(slug) = name.strip_suffix(".json") else {
             continue;
         };
+        let folder = format!("{base}/{slug}");
+        let linked =
+            fs::symlink_metadata(shelf.repository.join(&folder)).is_ok_and(|m| !m.is_dir());
+        if linked {
+            continue;
+        }
         let Some(about) = (fs::read(entry.path()).ok())
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         else {
@@ -213,7 +228,7 @@ fn outputs_in<'a>(shelf: &'a Shelf, base: &str, job: Option<JobKey>) -> Vec<Foun
         };
         found.push(Found {
             shelf,
-            folder: format!("{base}/{slug}"),
+            folder,
             job: job.clone(),
             about,
         });
@@ -254,8 +269,12 @@ fn preview(path: &Path) -> Option<String> {
     (!shown.is_empty()).then(|| shown.chars().take(PREVIEW_CHARS).collect())
 }
 
-/// Two of the job's scheduled times passed since its output's last version.
+/// Two of the job's scheduled times passed since its output's last version; a paused job
+/// misses its times on purpose, so its output is never stale.
 fn stale(recipe: &Recipe, updated_at: i64, now: i64) -> bool {
+    if !recipe.enabled {
+        return false;
+    }
     let (Ok(cron), Ok(zone)) = (
         Cron::parse(&recipe.schedule.cron),
         jobs::timezone(&recipe.schedule.timezone),
@@ -519,6 +538,61 @@ mod tests {
     }
 
     #[test]
+    fn a_version_or_output_naming_a_path_or_a_link_is_left_out() {
+        let (home, host, personal) = host();
+        let store = assistant::board_store(home.path());
+        let space = personal.id.as_str();
+        let about = json!({"title":"Brief","thread_id":"t1","saved_at":1});
+        save(&store, space, "Brief", "brief.md", "# Brief", about);
+        // Two earlier commits whose metadata names a file outside the version's folder.
+        let metadata = store.join(space).join("brief.json");
+        for named in ["/etc/passwd", "../../secret.md"] {
+            let about = json!({"title":"Brief","file":named,"saved_at":1});
+            fs::write(&metadata, about.to_string()).unwrap();
+            git(
+                &store,
+                &[
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "commit",
+                    "-qam",
+                    named,
+                ],
+            );
+        }
+        let about = json!({"title":"Brief","file":"brief.md","saved_at":2});
+        fs::write(&metadata, about.to_string()).unwrap();
+        git(
+            &store,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qam",
+                "back",
+            ],
+        );
+        // And an output whose folder is a link to a folder elsewhere.
+        let elsewhere = tempfile::tempdir().unwrap();
+        fs::write(elsewhere.path().join("secret.md"), "secret").unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), store.join(space).join("linked")).unwrap();
+        let linked = json!({"title":"Linked","file":"secret.md","saved_at":3});
+        fs::write(store.join(space).join("linked.json"), linked.to_string()).unwrap();
+
+        let shelves = host.shelves().unwrap();
+        let outputs = shelves.list();
+        let titles: Vec<&str> = outputs.iter().map(|o| o.title.as_str()).collect();
+        assert_eq!(titles, ["Brief"]);
+        let versions = shelves.versions(&outputs[0].id).unwrap();
+        let files: Vec<&str> = versions.iter().map(|v| v.file.as_str()).collect();
+        assert_eq!(files, ["brief.md", "brief.md"]);
+    }
+
+    #[test]
     fn an_output_is_stale_after_two_scheduled_runs_without_a_version() {
         let mut recipe: Recipe = serde_json::from_value(json!({
             "id":"brief","name":"Brief","space_id":"s","prompt":"p",
@@ -530,6 +604,9 @@ mod tests {
         assert!(!stale(&recipe, saved, saved + day));
         assert!(stale(&recipe, saved, saved + 2 * day));
         recipe.schedule.cron = "0 7 * * 1".into();
+        assert!(!stale(&recipe, saved, saved + 2 * day));
+        recipe.schedule.cron = "0 7 * * *".into();
+        recipe.enabled = false;
         assert!(!stale(&recipe, saved, saved + 2 * day));
     }
 

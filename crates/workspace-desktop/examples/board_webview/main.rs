@@ -186,6 +186,7 @@ impl Prototype {
                 }
             }
             Event::Board(BoardEvent::Link(url)) => self.offered.push(url),
+            Event::Board(BoardEvent::Loaded) => {}
             Event::Snapshot(image) => {
                 if let Overlay::Opening(started) = self.menu {
                     self.snapshot_took = Some(started.elapsed());
