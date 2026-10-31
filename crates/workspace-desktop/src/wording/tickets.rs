@@ -598,9 +598,9 @@ pub(crate) fn finished_outcome(ticket: &Ticket) -> PrPart {
     PrPart { text, tone }
 }
 
-/// What an idle agent of an open ticket waits for: its ticket's next step, or, for a verifier
-/// that has not reported, its own turn. A verifier with a result has nothing to wait for here,
-/// and a finished ticket's agent is not waiting on the ticket.
+/// What an idle agent of an open ticket waits for: its ticket's next step. A verifier that has
+/// not reported owes its review, whether or not its turn has run. A verifier with a result has
+/// nothing to wait for here, and a finished ticket's agent is not waiting on the ticket.
 pub(crate) fn waiting_for(ticket: &Ticket, session_id: &str) -> Option<String> {
     if !ticket.is_open() {
         return None;
@@ -612,7 +612,7 @@ pub(crate) fn waiting_for(ticket: &Ticket, session_id: &str) -> Option<String> {
         Some(run.result)
     });
     Some(match result {
-        Some(VerifierResult::Pending) => "Waiting to start".into(),
+        Some(VerifierResult::Pending) => "Review pending".into(),
         Some(_) => return None,
         None if matches!(
             ticket.state,
@@ -1041,7 +1041,7 @@ mod tests {
         ticket.verification = Some(cycle.clone());
         assert_eq!(
             waiting_for(&ticket, "tester").as_deref(),
-            Some("Waiting to start")
+            Some("Review pending")
         );
         cycle.rounds[0].verifiers = vec![run(VerifierResult::Failed)];
         ticket.verification = Some(cycle);
