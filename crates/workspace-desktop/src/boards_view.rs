@@ -1447,14 +1447,17 @@ impl TooltipWatch {
     fn overlay_changed(&mut self) {
         self.changed = true;
     }
-    /// At the page's frame: whether a tooltip is open, and whether to draw another frame, as
-    /// one is needed to see what an overlay change, or a tooltip that came or went, now draws.
+    /// At the page's frame: whether a tooltip may be open, and whether to draw another frame,
+    /// as one is needed to see what an overlay change, or a tooltip that came or went, now
+    /// draws. A frame right after an overlay's notice counts as covered, since the overlay may
+    /// be about to draw a tooltip over the board after the page.
     fn frame(&mut self) -> (bool, bool) {
         let shown = self.built != self.seen;
         self.seen = self.built;
-        let again = std::mem::take(&mut self.changed) || shown != self.shown;
+        let changed = std::mem::take(&mut self.changed);
+        let again = changed || shown != self.shown;
         self.shown = shown;
-        (self.open > 0 || shown, again)
+        (self.open > 0 || shown || changed, again)
     }
 }
 struct Tooltips(Rc<RefCell<TooltipWatch>>);
@@ -1682,10 +1685,10 @@ mod tests {
     #[test]
     fn a_managed_tooltip_built_afresh_each_frame_covers_the_board_until_it_hides() {
         let mut watch = TooltipWatch::default();
-        // A button's tooltip shows: the page draws before the overlay builds it, so it looks
-        // again.
+        // A button's tooltip shows: the page draws before the overlay builds it, so the board is
+        // covered from that first frame, and it looks again.
         watch.overlay_changed();
-        assert_eq!(watch.frame(), (false, true));
+        assert_eq!(watch.frame(), (true, true));
         let draw_overlay = |watch: &mut TooltipWatch| {
             watch.tooltip_built();
             watch.tooltip_released();

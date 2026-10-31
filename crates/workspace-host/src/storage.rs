@@ -418,6 +418,8 @@ pub(crate) struct Input {
     pub(crate) preferred: BTreeMap<IssueId, u64>,
     /// The board folders of the jobs this Mac is the runner of.
     runs_here: Vec<String>,
+    /// The versions of runners' outputs saved here and replaced before a push, oldest first.
+    unpushed: Vec<(i64, Vec<(String, Content)>)>,
 }
 
 /// A part of an `issue.md` both sides changed to different values, which this Mac keeps and
@@ -457,6 +459,8 @@ pub(crate) struct Found {
     /// The `issue.md` files whose parts were merged, and the parts that paused.
     parts_compared: Vec<String>,
     parts: Vec<PausedPart>,
+    /// The newest unpushed version committed, which a push makes done.
+    unpushed_to: Option<i64>,
 }
 
 /// A rule set comparing whole files under `roots`, except those under `excluded`, with the
@@ -468,6 +472,8 @@ pub(crate) struct WholeFiles {
     roots: Vec<String>,
     excluded: Vec<String>,
     runs_here: Vec<String>,
+    /// Versions saved under `runs_here` and replaced before a push, committed before the latest.
+    unpushed: Vec<(i64, Vec<(String, Content)>)>,
     subject: String,
     pub(crate) synced: BTreeMap<String, Content>,
     written: BTreeMap<String, Content>,
@@ -500,6 +506,10 @@ impl WholeFiles {
                 .collect(),
             runs_here: (input.runs_here.iter())
                 .filter(|folder| compares(folder))
+                .cloned()
+                .collect(),
+            unpushed: (input.unpushed.iter())
+                .filter(|(_, files)| files.iter().all(|(path, _)| compares(path)))
                 .cloned()
                 .collect(),
             roots,
@@ -623,6 +633,13 @@ impl RuleSet for WholeFiles {
             (committed.clone(), message)
         })
     }
+    fn earlier(&mut self) -> Vec<(Vec<(String, Content)>, String)> {
+        let message = format!("{} · {}", self.subject, sync::machine_name());
+        self.found.unpushed_to = self.unpushed.last().map(|(version, _)| *version);
+        (self.unpushed.iter())
+            .map(|(_, files)| (files.clone(), message.clone()))
+            .collect()
+    }
     fn failed(&mut self, error: anyhow::Error) {
         self.found.failed.push(format!("{error:#}"));
         self.found.failed_roots.extend(self.roots.iter().cloned());
@@ -691,6 +708,7 @@ impl RuleSets {
             found.paused.append(&mut other.paused);
             found.failed.append(&mut other.failed);
             found.failed_roots.append(&mut other.failed_roots);
+            found.unpushed_to = found.unpushed_to.or(other.unpushed_to);
         }
         found.merged = issues.merged;
         found.parts_compared = issues.parts_compared;
@@ -1407,6 +1425,18 @@ impl Host {
             let (temporary, number): (String, u64) = row?;
             preferred.insert(IssueId::parse(&temporary)?, number);
         }
+        let rows: Vec<(i64, String, Content)> = (self.db.prepare(
+            "SELECT version, path, content FROM unpushed_versions WHERE repository=?1 ORDER BY version, path",
+        )?)
+        .query_map([key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+        let mut unpushed: Vec<(i64, Vec<(String, Content)>)> = vec![];
+        for (version, path, content) in rows {
+            match unpushed.last_mut() {
+                Some((last, files)) if *last == version => files.push((path, content)),
+                _ => unpushed.push((version, vec![(path, content)])),
+            }
+        }
         Ok(Some(Input {
             key: key.to_owned(),
             names,
@@ -1417,6 +1447,7 @@ impl Host {
             parts,
             preferred,
             runs_here,
+            unpushed,
         }))
     }
     /// The GitHub storage repositories that sync on their own, being no settings repository,
@@ -1617,6 +1648,12 @@ impl Host {
             tx.execute(
                 "INSERT INTO sync_held(repository,path,check_name,rule,reason) VALUES (?1,?2,?3,?4,?5)",
                 params![key, held.path, held.check, held.rule, held.reason],
+            )?;
+        }
+        if let Some(version) = found.unpushed_to.filter(|_| pushed) {
+            tx.execute(
+                "DELETE FROM unpushed_versions WHERE repository=?1 AND version<=?2",
+                params![key, version],
             )?;
         }
         tx.commit()?;

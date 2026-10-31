@@ -34,7 +34,8 @@ pub(crate) fn migrate(db: &Connection) -> Result<()> {
          CREATE TABLE IF NOT EXISTS job_due (key TEXT PRIMARY KEY, next_at INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS job_runs (id TEXT PRIMARY KEY, key TEXT NOT NULL, started_at INTEGER NOT NULL, data TEXT NOT NULL);
          CREATE INDEX IF NOT EXISTS job_runs_by_key ON job_runs(key, started_at);
-         CREATE TABLE IF NOT EXISTS job_approvals (key TEXT PRIMARY KEY, approved TEXT NOT NULL);",
+         CREATE TABLE IF NOT EXISTS job_approvals (key TEXT PRIMARY KEY, approved TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS unpushed_versions (version INTEGER NOT NULL, repository TEXT NOT NULL, path TEXT NOT NULL, content BLOB);",
     )?;
     Ok(())
 }
@@ -54,8 +55,7 @@ pub(crate) fn board_folder(folder: &str, id: &str) -> String {
 fn approval(recipe: &Recipe) -> String {
     use sha2::{Digest, Sha256};
     let approved = json!({"prompt": recipe.prompt, "sources": recipe.sources});
-    let digest = Sha256::digest(approved.to_string().as_bytes());
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    workspace_core::pairing::hex(&Sha256::digest(approved.to_string().as_bytes()))
 }
 
 /// A job Wiffletree defines, such as a brain's compile: it takes due times, catch-up, Run now
@@ -1282,13 +1282,60 @@ impl Host {
         about: Value,
     ) -> Result<u32> {
         let base = board_folder(&space.storage.folder, &recipe.id);
-        let message = format!("{}: saved an output of {}", space.name, recipe.name);
-        let folder = self.write_output(space, &base, file, bytes, about, &message)?;
         let storage = self.storage_folder(&space.storage.repository);
+        let title = about["title"].as_str().context("An output has a title")?;
+        let folder = format!(
+            "{base}/{}",
+            assistant::output_folder(&storage.join(&base), title)?
+        );
         let metadata = format!("{folder}.json");
+        let unpushed = self.keep_unpushed_version(space, &folder)?;
+        let message = format!("{}: saved an output of {}", space.name, recipe.name);
+        self.write_output(space, &base, file, bytes, about, &message)?;
         let pushed =
             runtime::git_output(&storage, &["rev-list", "--count", "HEAD", "--", &metadata]);
-        Ok(pushed.map_or(0, |count| count.trim().parse().unwrap_or(0)) + 1)
+        Ok(pushed.map_or(0, |count| count.trim().parse().unwrap_or(0)) + unpushed + 1)
+    }
+    /// Keeps the version of the output at `folder` that the next pass has not pushed yet, as
+    /// a save is about to replace it, so the pass commits it before the new one; returns how
+    /// many versions of it wait.
+    fn keep_unpushed_version(&self, space: &Space, folder: &str) -> Result<u32> {
+        let key = repos::key(&space.storage.repository.key());
+        let metadata = format!("{folder}.json");
+        let record = repos::Record::read(&self.db, &key)?.context("The storage has no record")?;
+        let inside = |path: &str| path == metadata || path.starts_with(&format!("{folder}/"));
+        let mut waiting: u32 = self.db.query_row(
+            "SELECT count(DISTINCT version) FROM unpushed_versions WHERE repository=?1 AND path=?2",
+            params![key, metadata],
+            |r| r.get(0),
+        )?;
+        let written = record.written.get(&metadata).cloned().flatten();
+        if written.is_none() || written == record.synced.get(&metadata).cloned().flatten() {
+            return Ok(waiting);
+        }
+        let storage = self.storage_folder(&space.storage.repository);
+        let mut files: std::collections::BTreeMap<String, repos::Content> = (record.synced.keys())
+            .filter(|path| inside(path))
+            .map(|path| (path.clone(), None))
+            .collect();
+        files.insert(metadata.clone(), written);
+        for entry in fs::read_dir(storage.join(folder))?.flatten() {
+            let path = format!("{folder}/{}", entry.file_name().to_string_lossy());
+            files.insert(path, Some(fs::read(entry.path())?));
+        }
+        let version: i64 = self.db.query_row(
+            "SELECT coalesce(max(version),0)+1 FROM unpushed_versions",
+            [],
+            |r| r.get(0),
+        )?;
+        for (path, content) in files {
+            self.db.execute(
+                "INSERT INTO unpushed_versions VALUES (?1,?2,?3,?4)",
+                params![version, key, path, content],
+            )?;
+        }
+        waiting += 1;
+        Ok(waiting)
     }
     /// Share or Keep private, for the latest output of `title` that waits for approval, which
     /// `run_id` saved. Share pushes it with its Space's storage, takes it out of the private
@@ -1303,23 +1350,23 @@ impl Host {
         );
         let recipe = self.recipe(&run.job)?;
         let space = self.space(&recipe.space_id)?.space;
+        let store = assistant::board_store(&self.home);
+        let base = private_folder(&space, &recipe);
+        let folder = format!(
+            "{base}/{}",
+            assistant::output_folder(&store.join(&base), title)?
+        );
+        let about: Value =
+            serde_json::from_slice(&fs::read(store.join(format!("{folder}.json")))?)?;
+        ensure!(
+            about["run_id"] == json!(run_id),
+            "A newer output replaced this one; answer that one"
+        );
         if share {
             ensure!(
                 runs_here(&recipe),
                 "This Mac no longer runs {}, so it cannot share its output",
                 recipe.name
-            );
-            let store = assistant::board_store(&self.home);
-            let base = private_folder(&space, &recipe);
-            let folder = format!(
-                "{base}/{}",
-                assistant::output_folder(&store.join(&base), title)?
-            );
-            let mut about: Value =
-                serde_json::from_slice(&fs::read(store.join(format!("{folder}.json")))?)?;
-            ensure!(
-                about["run_id"] == json!(run_id),
-                "A newer output replaced this one; answer that one"
             );
             let file = about["file"].as_str().unwrap_or_default().to_owned();
             let path = store.join(&folder).join(&file);
@@ -1327,7 +1374,6 @@ impl Host {
                 plain_file_name(&file) && fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()),
                 "The output's file is missing"
             );
-            about["approved"] = json!(true);
             self.push_job_output(&space, &recipe, &file, fs::read(&path)?, about)?;
             fs::remove_dir_all(store.join(&folder))?;
             fs::remove_file(store.join(format!("{folder}.json")))?;
@@ -2411,8 +2457,14 @@ mod tests {
             assert!(!s.host.job_run(&run.id).unwrap().outputs[0].waiting);
             s.sync();
             assert_eq!(s.github.show(OUTPUT), None);
+            let replaced = s.run_saving(&key, "<p>replaced</p>");
             let run = s.run_saving(&key, "<p>two</p>");
             assert!(run.outputs[0].waiting);
+            // An answer reaches only the latest output, which replaced the one before.
+            for share in [false, true] {
+                let refused = (s.host.approve_job_output(&replaced.id, TITLE, share)).unwrap_err();
+                assert!(format!("{refused:#}").contains("A newer output replaced"));
+            }
 
             // Share pushes it and moves it out of the private store.
             (s.host.approve_job_output(&run.id, TITLE, true)).unwrap();
@@ -2458,6 +2510,29 @@ mod tests {
             assert!(run.outputs[0].waiting);
             s.sync();
             assert_eq!(s.github.show(OUTPUT).as_deref(), Some("<p>four</p>"));
+
+            // And changed sources, with the prompt as it was.
+            (s.host.approve_job_output(&run.id, TITLE, true)).unwrap();
+            s.sync();
+            let bin = s.host.home.join("bin");
+            fs::create_dir_all(&bin).unwrap();
+            fs::write(bin.join("gh"), "#!/bin/sh\nexit 0\n").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(bin.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
+            s.host.source_env = Some(SourceEnv {
+                path: vec![bin],
+                home: s.host.home.join("user"),
+                mcp_limit: std::time::Duration::from_secs(2),
+            });
+            let sourced = Recipe {
+                sources: vec![gh()],
+                ..s.host.recipe(&key).unwrap()
+            };
+            s.host.save_job(sourced).unwrap();
+            let run = s.run_saving(&key, "<p>six</p>");
+            assert!(run.outputs[0].waiting, "{run:?}");
+            s.sync();
+            assert_eq!(s.github.show(OUTPUT).as_deref(), Some("<p>five</p>"));
         }
 
         /// The runner rule set, in a storage repository of its own and in one that is also the
@@ -2490,6 +2565,44 @@ mod tests {
         #[test]
         fn in_storage_that_is_the_settings_repository_a_runners_output_pushes_the_same() {
             a_runners_output_pushes_without_comparing_and_again_when_github_moves(true);
+        }
+
+        #[test]
+        fn every_version_saved_before_a_push_is_its_own_commit() {
+            let mut s = shared(false);
+            let key = s.approved();
+            let two = s.run_saving(&key, "<p>two</p>");
+            let three = s.run_saving(&key, "<p>three</p>");
+            assert_eq!((two.outputs[0].version, three.outputs[0].version), (2, 3));
+            s.sync();
+            let log = |path: &str| {
+                let log = crate::test_support::git(
+                    &s.github.bare,
+                    &["log", "--format=%H", "main", "--", path],
+                );
+                log.lines().map(str::to_owned).collect::<Vec<_>>()
+            };
+            let versions = log(OUTPUT);
+            assert_eq!(versions.len(), 3, "first, two and three");
+            let shown = |commit: &str| {
+                crate::test_support::git(&s.github.bare, &["show", &format!("{commit}:{OUTPUT}")])
+            };
+            assert_eq!(shown(&versions[0]), "<p>three</p>");
+            assert_eq!(shown(&versions[1]), "<p>two</p>");
+            let listed = s.boards();
+            assert_eq!(
+                s.host
+                    .shelves()
+                    .unwrap()
+                    .versions(&listed[0].id)
+                    .unwrap()
+                    .len(),
+                3
+            );
+            let waiting: i64 = (s.host.db)
+                .query_row("SELECT count(*) FROM unpushed_versions", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(waiting, 0);
         }
 
         #[test]
