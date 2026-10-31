@@ -381,7 +381,7 @@ pub fn merge_run(
         )
     };
     let mut run = constrained::Run::new("merge");
-    answer_run(claude, Provider::Claude, configure, input, limit, |value| {
+    answer_run(claude, configure, input, limit, |value| {
         let Some(result) = run.event(value)? else {
             return Ok(None);
         };
@@ -407,18 +407,17 @@ impl std::fmt::Display for TookTooLong {
 }
 impl std::error::Error for TookTooLong {}
 
-/// Runs `program`, set up by `configure`, of no session and in an empty temporary folder, with
-/// `input` on stdin, until `answer` finds the answer in its events and it exits, or until
-/// `limit`, when it is stopped.
+/// Runs Claude at `program`, set up by `configure`, of no session and in an empty temporary
+/// folder, with `input` on stdin, until `answer` finds the answer in its events and it exits,
+/// or until `limit`, when it is stopped.
 fn answer_run<T>(
     program: &Path,
-    provider: Provider,
     configure: impl FnOnce(&mut ProcessCommand, &Path),
     input: Vec<u8>,
     limit: Duration,
     mut answer: impl FnMut(&Value) -> Result<Option<T>>,
 ) -> Result<T> {
-    let who = provider.label();
+    let who = Provider::Claude.label();
     let folder = tempfile::tempdir()?;
     let mut cmd = ProcessCommand::new(program);
     cmd.current_dir(folder.path())

@@ -10,9 +10,9 @@ use std::ops::RangeInclusive;
 pub const DEFAULT_THRESHOLD: f64 = 0.8;
 pub const THRESHOLDS: RangeInclusive<f64> = 0.5..=1.0;
 /// The current thread's messages the router reads: at most six, of at most 1,500 characters.
-pub const MAX_LAST_MESSAGES: usize = 6;
-pub const MAX_LAST_CHARS: usize = 1500;
-pub const MAX_ALTERNATIVES: usize = 2;
+const MAX_LAST_MESSAGES: usize = 6;
+const MAX_LAST_CHARS: usize = 1500;
+const MAX_ALTERNATIVES: usize = 2;
 
 pub fn validate_threshold(threshold: f64) -> anyhow::Result<f64> {
     anyhow::ensure!(
@@ -119,8 +119,7 @@ pub struct RouterAnswer {
 }
 
 /// The answer's shape, as the router's run is told to return it. Every field is required and
-/// no other is allowed, as Codex's output schemas need; `thread_id` is empty unless `kind` is
-/// `switch`.
+/// no other is allowed; `thread_id` is empty unless `kind` is `switch`.
 pub const ANSWER_SCHEMA: &str = r##"{"type":"object","additionalProperties":false,"required":["thread","space","title"],"properties":{"thread":{"type":"object","additionalProperties":false,"required":["pick","confidence","alternatives"],"properties":{"pick":{"$ref":"#/$defs/thread_pick"},"confidence":{"type":"number"},"alternatives":{"type":"array","maxItems":2,"items":{"type":"object","additionalProperties":false,"required":["pick","confidence"],"properties":{"pick":{"$ref":"#/$defs/thread_pick"},"confidence":{"type":"number"}}}}}},"space":{"type":"object","additionalProperties":false,"required":["pick","confidence","alternatives"],"properties":{"pick":{"type":"string"},"confidence":{"type":"number"},"alternatives":{"type":"array","maxItems":2,"items":{"type":"object","additionalProperties":false,"required":["pick","confidence"],"properties":{"pick":{"type":"string"},"confidence":{"type":"number"}}}}}},"title":{"type":"string"}},"$defs":{"thread_pick":{"type":"object","additionalProperties":false,"required":["kind","thread_id"],"properties":{"kind":{"type":"string","enum":["continue","switch","new"]},"thread_id":{"type":"string"}}}}}"##;
 
 #[derive(Deserialize)]
@@ -265,7 +264,7 @@ impl RouterInput {
     fn knows_space(&self, id: &SpaceId) -> bool {
         self.spaces.iter().any(|s| &s.id == id)
     }
-    pub fn destination_space<'a>(&'a self, destination: &'a Destination) -> Option<&'a SpaceId> {
+    fn destination_space<'a>(&'a self, destination: &'a Destination) -> Option<&'a SpaceId> {
         match destination {
             Destination::Thread { thread_id } => self.thread_space(thread_id),
             Destination::NewThread { space_id } => Some(space_id),
