@@ -130,6 +130,11 @@ pub(crate) fn verify(
             commits.extend(anchors.commits.iter().map(String::as_str));
         }
     }
+    // Forgotten only between calls, so this call's answers are all still there when it reads
+    // them back below, however many it adds.
+    if cache.size > CACHE_LIMIT {
+        *cache = Cache::default();
+    }
     let mut heads: HashMap<&Path, String> = HashMap::new();
     for (path, (clone, commits)) in named {
         if commits.is_empty() {
@@ -138,9 +143,6 @@ pub(crate) fn verify(
         let Some(head) = default_head(clone) else {
             continue;
         };
-        if cache.size > CACHE_LIMIT {
-            *cache = Cache::default();
-        }
         let known = cache
             .found
             .entry((path.to_owned(), head.clone()))
@@ -417,5 +419,34 @@ mod tests {
             states.iter().all(|v| v.state == RefState::Claimed),
             "origin/main has not moved"
         );
+    }
+
+    #[test]
+    fn a_full_cache_keeps_every_answer_of_the_call_that_fills_it() {
+        let (first, second) = (relay(), relay());
+        let mut clones = first.clones.clone();
+        clones
+            .0
+            .insert("watch".into(), second.clones.0["relay"].clone());
+        let mut cache = Cache {
+            size: CACHE_LIMIT,
+            ..Cache::default()
+        };
+        let (one, two) = (
+            format!("main @ {}", first.merged),
+            format!("main @ {}", second.merged),
+        );
+        let refs = [("relay", one.as_str()), ("watch", two.as_str())];
+        let states: Vec<RefState> = (verify(&clones, &refs, &mut cache).into_iter())
+            .map(|v| v.state)
+            .collect();
+        assert_eq!(states, [RefState::Verified, RefState::Verified]);
+        let next = verify(&clones, &refs[..1], &mut cache);
+        assert_eq!(
+            next[0].state,
+            RefState::Verified,
+            "forgotten between calls only"
+        );
+        assert_eq!(cache.size, 1);
     }
 }
