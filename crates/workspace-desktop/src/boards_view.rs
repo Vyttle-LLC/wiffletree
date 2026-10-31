@@ -31,6 +31,18 @@ const HIDDEN: &str = "Hidden while this is open";
 /// warning, such as a shortcut's dialog or another view's menu, has a recent one to show.
 const STILL_EVERY: Duration = Duration::from_secs(2);
 const MAX_MARKDOWN_BYTES: u64 = 2 * 1024 * 1024;
+/// A shared job's output that waits for its runner, before its first push.
+pub(super) const WAITING: &str = "Waiting for your approval";
+pub(super) const TAKE_OVER: &str = "Take over running";
+
+/// A text action in a line of labels, as the mockup's links are.
+pub(super) fn link(id: String, label: &'static str, color: Hsla) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(id))
+        .cursor_pointer()
+        .text_color(color)
+        .child(label)
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
@@ -521,6 +533,35 @@ impl BoardsPage {
         .detach();
     }
 
+    /// Share or Keep private, for an output waiting for its runner's approval.
+    fn answer_output(
+        &mut self,
+        run: String,
+        title: String,
+        share: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ask = ask::approve_job_output(run, title, share);
+        self.ask(ask, window, cx, |view, done, window, cx| match done {
+            Ok(()) => view.read_outputs(window, cx),
+            Err(error) => toast_error(error, window, cx),
+        });
+    }
+    /// Whether this Mac may take over running the job.
+    fn takes_over(&self, key: &JobKey) -> bool {
+        (self.jobs().iter()).any(|job| &job.recipe.key() == key && job.can_take_over())
+    }
+    fn take_over(&mut self, key: JobKey, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(job) = self.jobs().iter().find(|job| job.recipe.key() == key) else {
+            return;
+        };
+        let ask = ask::take_over_job(job.recipe.space_id.clone(), job.recipe.id.clone());
+        self.ask(ask, window, cx, |view, done, window, cx| match done {
+            Ok(_) => view.read_outputs(window, cx),
+            Err(error) => toast_error(error, window, cx),
+        });
+    }
     /// Share to Space…: asks which Space, naming who can read its storage, then copies it.
     fn share_output(&mut self, output: BoardOutput, window: &mut Window, cx: &mut Context<Self>) {
         let spaces: Vec<Space> = (self.spaces().iter())
@@ -783,6 +824,23 @@ impl BoardsPage {
         let (opened, shared) = (output.clone(), output.clone());
         let when = wording::day_and_time(output.updated_at);
         let kind = output.kind();
+        let answer = |share: bool| {
+            let (run, title) = (output.run_id.clone(), output.title.clone());
+            cx.listener(move |v: &mut Self, _: &ClickEvent, w, c| {
+                c.stop_propagation();
+                if let Some(run) = &run {
+                    v.answer_output(run.clone(), title.clone(), share, w, c)
+                }
+            })
+        };
+        let take_over = (output.job.clone())
+            .filter(|key| output.stale && self.takes_over(key))
+            .map(|key| {
+                cx.listener(move |v: &mut Self, _: &ClickEvent, w, c| {
+                    c.stop_propagation();
+                    v.take_over(key.clone(), w, c)
+                })
+            });
         div()
             .id(SharedString::from(format!("board-{}", output.id)))
             .flex()
@@ -827,22 +885,47 @@ impl BoardsPage {
                             .gap(px(6.))
                             .text_size(px(font::META))
                             .text_color(p.subtle)
-                            .child(pill(keeping_label(output, &space), p.subtle))
+                            .when(!output.waiting, |d| {
+                                d.child(pill(keeping_label(output, &space), p.subtle))
+                            })
+                            .when(output.waiting, |d| {
+                                d.child(pill(WAITING, p.accent))
+                                    .child(
+                                        link(format!("approve-{}", output.id), "Share", p.accent)
+                                            .on_click(answer(true)),
+                                    )
+                                    .child("·")
+                                    .child(
+                                        link(
+                                            format!("keep-{}", output.id),
+                                            "Keep private",
+                                            p.subtle,
+                                        )
+                                        .on_click(answer(false)),
+                                    )
+                            })
                             .when(output.stale, |d| d.child(pill("Stale", p.yellow)))
                             .children((output.runner.as_ref()).map(Runner::label))
+                            .children(take_over.map(|take_over| {
+                                link(format!("take-over-{}", output.id), TAKE_OVER, p.accent)
+                                    .on_click(take_over)
+                            }))
                             .when(matches!(kind, FileKind::Image | FileKind::Pdf), |d| {
                                 d.child(format!("{} · Quick Look", type_label(kind)))
                             })
-                            .when(output.keeping == Keeping::Private, |d| {
+                            .when(output.keeping == Keeping::Private && !output.waiting, |d| {
                                 d.child(
-                                    div()
-                                        .id(SharedString::from(format!("share-{}", output.id)))
-                                        .text_color(p.accent)
-                                        .child("Share to Space…")
-                                        .on_click(cx.listener(move |v, _, w, c| {
+                                    link(
+                                        format!("share-{}", output.id),
+                                        "Share to Space…",
+                                        p.accent,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |v, _, w, c| {
                                             c.stop_propagation();
                                             v.share_output(shared.clone(), w, c)
-                                        })),
+                                        },
+                                    )),
                                 )
                             }),
                     ),
@@ -937,6 +1020,9 @@ impl BoardsPage {
         // Each opens the file only once it is confirmed to be in the version's folder.
         let file = (viewer.folder.clone(), output.file.clone());
         let (reveal, open, shared) = (file.clone(), file.clone(), output.clone());
+        let waiting = (output.run_id.clone())
+            .filter(|_| output.waiting)
+            .map(|run| (run, output.title.clone()));
         let run_job = (output.job.clone()).filter(|key| {
             self.jobs()
                 .iter()
@@ -973,7 +1059,7 @@ impl BoardsPage {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .when(output.keeping == Keeping::Private, |d| {
+                    .when(output.keeping == Keeping::Private && !output.waiting, |d| {
                         d.child(
                             button("boards-share")
                                 .ghost()
@@ -983,6 +1069,32 @@ impl BoardsPage {
                                     v.share_output(shared.clone(), w, c)
                                 })),
                         )
+                    })
+                    .when_some(waiting, |d, (run, title)| {
+                        let (kept_run, kept_title) = (run.clone(), title.clone());
+                        d.child(pill(WAITING, p.accent))
+                            .child(button("boards-approve").xsmall().label("Share").on_click(
+                                cx.listener(move |v, _, w, c| {
+                                    v.answer_output(run.clone(), title.clone(), true, w, c);
+                                    v.close_viewer(w, c);
+                                }),
+                            ))
+                            .child(
+                                button("boards-keep-private")
+                                    .ghost()
+                                    .xsmall()
+                                    .label("Keep private")
+                                    .on_click(cx.listener(move |v, _, w, c| {
+                                        v.answer_output(
+                                            kept_run.clone(),
+                                            kept_title.clone(),
+                                            false,
+                                            w,
+                                            c,
+                                        );
+                                        v.close_viewer(w, c);
+                                    })),
+                            )
                     })
                     .when(
                         matches!(output.kind(), FileKind::Image | FileKind::Pdf),
@@ -1553,6 +1665,8 @@ mod tests {
             keeping: Keeping::Private,
             runner: None,
             stale: false,
+            run_id: None,
+            waiting: false,
             preview: None,
         }
     }

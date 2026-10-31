@@ -3353,10 +3353,25 @@ pub enum Command {
     StopJobRun {
         run_id: String,
     },
-    /// The user opened a job's page: its failed and unstarted runs stop counting on the
-    /// assistant's row.
+    /// The user opened a job's page: its failed and unstarted runs, and its outputs waiting for
+    /// approval, stop counting on the assistant's row.
     SeeJobRuns {
         job: job::JobKey,
+    },
+    /// Take over running: makes this Mac the runner of a "One runner" job in a Space stored on
+    /// GitHub, as a commit to its recipe. Answered with the `JobState`.
+    TakeOverJob {
+        space_id: SpaceId,
+        job_id: String,
+    },
+    /// Answers a job output that waits for approval before its first push, or its first since
+    /// the recipe's prompt or sources changed: with `share`, Share pushes it into the Space's
+    /// storage and approves the prompt and sources its run had; without, Keep private leaves it
+    /// only on this Mac and the job unapproved.
+    ApproveJobOutput {
+        run_id: String,
+        title: String,
+        share: bool,
     },
     /// Every output on Boards, at its latest version. Answered with `Vec<BoardOutput>`.
     Boards,
@@ -4054,6 +4069,8 @@ impl Command {
             | Self::DeleteJob { .. }
             | Self::StopJobRun { .. }
             | Self::SeeJobRuns { .. }
+            | Self::TakeOverJob { .. }
+            | Self::ApproveJobOutput { .. }
             | Self::ShareBoard { .. }
             | Self::SetSpaceBrain { .. }
             | Self::CreateSpace { .. }
@@ -4164,6 +4181,8 @@ impl Command {
                 | Self::DeleteJob { .. }
                 | Self::StopJobRun { .. }
                 | Self::SeeJobRuns { .. }
+                | Self::TakeOverJob { .. }
+                | Self::ApproveJobOutput { .. }
                 | Self::Boards
                 | Self::BoardVersions { .. }
                 | Self::BoardVersionFolder { .. }

@@ -230,7 +230,7 @@ impl IssueRules {
     pub(crate) fn new(input: &Input) -> Self {
         let roots = vec![TRACKER.into(), ISSUES.into()];
         Self {
-            files: WholeFiles::new(input, roots, "Issues".into()),
+            files: WholeFiles::new(input, roots, vec![], "Issues".into()),
             prefix: input.prefix.clone(),
             compared: None,
             references: vec![],
@@ -387,6 +387,11 @@ impl RuleSet for IssueRules {
     }
     fn failed(&mut self, error: anyhow::Error) {
         self.files.failed(error);
+    }
+    fn reset(&mut self) {
+        self.files.reset();
+        self.compared = None;
+        self.references.clear();
     }
     /// A new issue whose `issue.md` is held, or that a held file names, stays wholly on this
     /// Mac, unnumbered, and so does every file that would name its number. Holding those may

@@ -30,6 +30,12 @@ pub struct BoardOutput {
     /// Two scheduled runs of its job passed without a new version.
     #[serde(default)]
     pub stale: bool,
+    /// The job run that saved its latest version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// Only on this Mac until its runner, this Mac, chooses Share or Keep private.
+    #[serde(default)]
+    pub waiting: bool,
     /// The first lines of a Markdown or text output, or an HTML output's title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,

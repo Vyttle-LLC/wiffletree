@@ -39,10 +39,10 @@ Six stages, each a ticket or a few, each landing on its own. Every stage needs `
 
 ## 5. Shared jobs and runners
 
-- [ ] 5.1 Host: the boards rule set on `spaces`' repository engine: runner outputs pushed without comparing, refetch on a moved remote, pause on a local change. Verify in a storage repository that is also the settings repository.
-- [ ] 5.2 Host: shared jobs, one runner or everyone; Take over running as a commit; staleness; first-push approval and re-approval after a prompt or sources change.
-- [ ] 5.3 Desktop: runner and approval in Boards and the job page.
-- [ ] 5.4 Docs: README on shared jobs, who can change instructions, and what agents' shells can still do.
+- [x] 5.1 Host: the boards rule set on `spaces`' repository engine: runner outputs pushed without comparing, refetch on a moved remote, pause on a local change. Verify in a storage repository that is also the settings repository.
+- [x] 5.2 Host: shared jobs, one runner or everyone; Take over running as a commit; staleness; first-push approval and re-approval after a prompt or sources change.
+- [x] 5.3 Desktop: runner and approval in Boards and the job page.
+- [x] 5.4 Docs: README on shared jobs, who can change instructions, and what agents' shells can still do.
 
 ## 6. Issue threads
 

@@ -152,11 +152,18 @@ pub struct JobRun {
     /// The user opened the job's page since it ended.
     #[serde(default)]
     pub seen: bool,
+    /// Its recipe's prompt and sources, fingerprinted when it started; sharing its output
+    /// approves them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approves: Option<String>,
 }
 impl JobRun {
-    /// A failed run or one that did not start counts on the assistant's row until seen.
+    /// A failed run, one that did not start, and one whose output waits for approval count on
+    /// the assistant's row until seen.
     pub fn needs_attention(&self) -> bool {
-        !self.seen && matches!(self.outcome, RunOutcome::Failed | RunOutcome::NotStarted)
+        !self.seen
+            && (matches!(self.outcome, RunOutcome::Failed | RunOutcome::NotStarted)
+                || self.outputs.iter().any(|output| output.waiting))
     }
     /// "catch-up for 3 missed runs", or nothing on time.
     pub fn catch_up_label(&self) -> Option<String> {
@@ -210,6 +217,10 @@ pub struct RunOutput {
     pub version: u32,
     /// Only on this Mac, or in the Space's storage.
     pub kept: String,
+    /// Kept only on this Mac until the runner shares it: the job's first output in a Space
+    /// stored on GitHub, or its first since its prompt or sources changed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub waiting: bool,
 }
 
 /// A job as the job page shows it. Its sources as last checked are in its newest run.
@@ -235,6 +246,16 @@ pub struct JobState {
     /// Why this Mac does not run it, such as another Mac being its runner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_here: Option<String>,
+    /// When its runner last saved an output: this Mac's newest run, or the newest version in
+    /// the Space's storage of a job another Mac runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_at: Option<i64>,
+}
+impl JobState {
+    /// A "One runner" job another Mac runs, or none does, which this Mac may take over.
+    pub fn can_take_over(&self) -> bool {
+        self.recipe.sharing == Sharing::OneRunner && self.not_here.is_some()
+    }
 }
 /// The runs a job's page shows.
 pub const MAX_RUNS_SHOWN: usize = 20;

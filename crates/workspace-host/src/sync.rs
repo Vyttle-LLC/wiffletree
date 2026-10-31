@@ -736,6 +736,15 @@ impl RuleSet for Settings {
     fn failed(&mut self, error: anyhow::Error) {
         self.passed.failed = Some(error);
     }
+    fn reset(&mut self) {
+        let passed = &mut self.passed;
+        passed.pulled.clear();
+        passed.alike.clear();
+        passed.committed.clear();
+        passed.paused.clear();
+        passed.failed = None;
+        self.refused = None;
+    }
 }
 
 /// Runs the settings repository's engine with its settings rule set and, when it is also a

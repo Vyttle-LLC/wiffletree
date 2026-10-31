@@ -1,8 +1,9 @@
 //! Storage repositories, where Spaces' definitions and their tracker live (OpenSpec change
 //! `spaces`, stage 3). Local storage is a Git repository at `repos/local-<id>/` with no remote,
 //! committed to on every change and never pushed. GitHub storage is a clone under `repos/` that
-//! its one sync engine runs with two rule sets: Spaces, over the folders of the Spaces this Mac
-//! added, and issues (`issues_sync`), over `wiffletree-issues.yaml` and `issues/`. The store
+//! its one sync engine runs with three rule sets: Spaces, over the folders of the Spaces this Mac
+//! added; boards, over their `boards/`, where the outputs of the jobs this Mac runs push without
+//! comparing; and issues (`issues_sync`), over `wiffletree-issues.yaml` and `issues/`. The store
 //! keeps each Space as the host uses it; the files are what travel.
 use crate::*;
 use issues_sync::IssueRules;
@@ -415,6 +416,8 @@ pub(crate) struct Input {
     pub(crate) parts: BTreeMap<String, Vec<String>>,
     /// The number each of this Mac's new issues would rather have, by its temporary ID.
     pub(crate) preferred: BTreeMap<IssueId, u64>,
+    /// The board folders of the jobs this Mac is the runner of.
+    runs_here: Vec<String>,
 }
 
 /// A part of an `issue.md` both sides changed to different values, which this Mac keeps and
@@ -456,11 +459,15 @@ pub(crate) struct Found {
     parts: Vec<PausedPart>,
 }
 
-/// A rule set comparing whole files under `roots` with the version last synced, as the settings
-/// rule set does: what changed on both sides, changed outside Wiffletree or arrived in a form
-/// this Mac cannot use is paused and kept here.
+/// A rule set comparing whole files under `roots`, except those under `excluded`, with the
+/// version last synced, as the settings rule set does: what changed on both sides, changed
+/// outside Wiffletree or arrived in a form this Mac cannot use is paused and kept here. A file
+/// under `runs_here` is a runner's output only this Mac writes, so what Wiffletree wrote here is
+/// pushed without comparing it with GitHub's.
 pub(crate) struct WholeFiles {
     roots: Vec<String>,
+    excluded: Vec<String>,
+    runs_here: Vec<String>,
     subject: String,
     pub(crate) synced: BTreeMap<String, Content>,
     written: BTreeMap<String, Content>,
@@ -471,10 +478,16 @@ pub(crate) struct WholeFiles {
     pub(crate) found: Found,
 }
 impl WholeFiles {
-    pub(crate) fn new(input: &Input, roots: Vec<String>, subject: String) -> Self {
+    pub(crate) fn new(
+        input: &Input,
+        roots: Vec<String>,
+        excluded: Vec<String>,
+        subject: String,
+    ) -> Self {
+        let compares = |path: &str| under(&roots, path) && !under(&excluded, path);
         let mine = |map: &BTreeMap<String, Content>| -> BTreeMap<String, Content> {
             (map.iter())
-                .filter(|(path, _)| under(&roots, path))
+                .filter(|(path, _)| compares(path))
                 .map(|(path, content)| (path.clone(), content.clone()))
                 .collect()
         };
@@ -482,17 +495,22 @@ impl WholeFiles {
             synced: mine(&input.synced),
             written: mine(&input.written),
             two_machines: (input.two_machines.iter())
-                .filter(|path| under(&roots, path))
+                .filter(|path| compares(path))
+                .cloned()
+                .collect(),
+            runs_here: (input.runs_here.iter())
+                .filter(|folder| compares(folder))
                 .cloned()
                 .collect(),
             roots,
+            excluded,
             subject,
             parts: None,
             found: Found::default(),
         }
     }
     fn compares(&self, path: &str) -> bool {
-        under(&self.roots, path)
+        under(&self.roots, path) && !under(&self.excluded, path)
     }
     fn here(&self, clone: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
         let mut files = BTreeMap::new();
@@ -575,6 +593,7 @@ impl RuleSet for WholeFiles {
                 .then(|| theirs.as_deref().and_then(|c| check(path, c).err()))
                 .flatten();
             let machine = || "another machine".to_owned();
+            let runs_here = under(&self.runs_here, path);
             let why = if outside {
                 Some(Paused::OutsideWiffletree)
             } else if let Some(error) = refused {
@@ -582,6 +601,8 @@ impl RuleSet for WholeFiles {
                     machine: machine(),
                     reason: format!("{error:#}"),
                 })
+            } else if runs_here {
+                None
             } else if mine != base && theirs != base || self.two_machines.contains(path) {
                 Some(Paused::TwoMachines { machine: machine() })
             } else {
@@ -606,6 +627,16 @@ impl RuleSet for WholeFiles {
         self.found.failed.push(format!("{error:#}"));
         self.found.failed_roots.extend(self.roots.iter().cloned());
     }
+    fn reset(&mut self) {
+        self.found = Found {
+            key: std::mem::take(&mut self.found.key),
+            ..Found::default()
+        };
+    }
+    /// A runner's output, which only this Mac writes, is pushed again on GitHub's new head.
+    fn pushes_again(&self) -> bool {
+        !self.runs_here.is_empty()
+    }
 }
 
 /// Whether `path` is one of `roots` or under one, hidden files aside.
@@ -614,41 +645,53 @@ fn under(roots: &[String], path: &str) -> bool {
         && (roots.iter()).any(|root| path == root || path.starts_with(&format!("{root}/")))
 }
 
-/// A storage repository's two rule sets for one pass.
+/// A storage repository's three rule sets for one pass: its Spaces' files, their boards and
+/// issues.
 pub(crate) struct RuleSets {
     spaces: WholeFiles,
+    boards: WholeFiles,
     issues: IssueRules,
 }
 impl RuleSets {
     pub(crate) fn new(input: Input) -> Self {
-        let roots = input
-            .names
-            .keys()
-            .map(|folder| format!("spaces/{folder}"))
-            .collect();
+        let folders = |under: &str| -> Vec<String> {
+            (input.names.keys())
+                .map(|folder| format!("spaces/{folder}{under}"))
+                .collect()
+        };
         let names: Vec<&str> = input.names.values().map(String::as_str).collect();
-        let subject = format!("{}: changed the Space", names.join(", "));
-        let spaces = WholeFiles::new(&input, roots, subject);
+        let names = names.join(", ");
+        let subject = format!("{names}: changed the Space");
+        let spaces = WholeFiles::new(&input, folders(""), folders("/boards"), subject);
+        let subject = format!("{names}: saved outputs");
+        let boards = WholeFiles::new(&input, folders("/boards"), vec![], subject);
         let mut issues = IssueRules::new(&input);
         issues.files.parts = Some(input.parts.clone());
-        let mut rule_sets = Self { spaces, issues };
+        let mut rule_sets = Self {
+            spaces,
+            boards,
+            issues,
+        };
         rule_sets.spaces.found.key = input.key;
         rule_sets
     }
-    pub(crate) fn as_mut(&mut self) -> [&mut dyn RuleSet; 2] {
-        [&mut self.spaces, &mut self.issues]
+    pub(crate) fn as_mut(&mut self) -> [&mut dyn RuleSet; 3] {
+        [&mut self.spaces, &mut self.boards, &mut self.issues]
     }
-    /// What both found, with the files `held` back from the push left out of what was
+    /// What all found, with the files `held` back from the push left out of what was
     /// committed, and a new issue held whole kept under its temporary ID.
     pub(crate) fn found(self, mut held: Vec<scan::Held>) -> Found {
-        let (mut found, mut issues) = (self.spaces.found, self.issues.files.found);
+        let (mut found, mut boards) = (self.spaces.found, self.boards.found);
+        let mut issues = self.issues.files.found;
         issues_sync::keep_held_unnumbered(&mut issues, &mut held);
-        found.pulled.extend(issues.pulled);
-        found.alike.extend(issues.alike);
-        found.committed.extend(issues.committed);
-        found.paused.extend(issues.paused);
-        found.failed.extend(issues.failed);
-        found.failed_roots.extend(issues.failed_roots);
+        for other in [&mut boards, &mut issues] {
+            found.pulled.append(&mut other.pulled);
+            found.alike.append(&mut other.alike);
+            found.committed.append(&mut other.committed);
+            found.paused.append(&mut other.paused);
+            found.failed.append(&mut other.failed);
+            found.failed_roots.append(&mut other.failed_roots);
+        }
         found.merged = issues.merged;
         found.parts_compared = issues.parts_compared;
         found.parts = issues.parts;
@@ -1333,6 +1376,13 @@ impl Host {
         };
         let prefix = self.tracker(first).ok().map(|tracker| tracker.prefix);
         let storage = first.storage.repository.key();
+        let mut runs_here = vec![];
+        for recipe in self.recipes()? {
+            let space = stored.iter().find(|space| space.id == recipe.space_id);
+            if let Some(space) = space.filter(|_| jobs::runs_here(&recipe)) {
+                runs_here.push(jobs::board_folder(&space.storage.folder, &recipe.id));
+            }
+        }
         let names: BTreeMap<String, String> = (stored.into_iter())
             .map(|space| (space.storage.folder, space.name))
             .collect();
@@ -1366,6 +1416,7 @@ impl Host {
             two_machines,
             parts,
             preferred,
+            runs_here,
         }))
     }
     /// The GitHub storage repositories that sync on their own, being no settings repository,
@@ -1833,7 +1884,7 @@ pub(crate) mod tests {
     }
 
     /// Runs the pass of the storage repository `NAME`.
-    fn sync(host: &mut Host, github: &Arc<GitHub>) {
+    pub(crate) fn sync(host: &mut Host, github: &Arc<GitHub>) {
         let key = repos::key(NAME);
         let pass = host.storage_pass(&key).unwrap().unwrap();
         host.finish_storage_pass(&key, self::pass(pass, &github.tools()))

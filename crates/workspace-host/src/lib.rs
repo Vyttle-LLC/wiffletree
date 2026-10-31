@@ -1775,6 +1775,17 @@ impl Host {
                 self.see_job_runs(&job)?;
                 Value::Null
             }
+            Command::TakeOverJob { space_id, job_id } => {
+                serde_json::to_value(self.take_over_job(&space_id, &job_id)?)?
+            }
+            Command::ApproveJobOutput {
+                run_id,
+                title,
+                share,
+            } => {
+                self.approve_job_output(&run_id, &title, share)?;
+                Value::Null
+            }
             // The service reads Boards off the host thread instead.
             Command::Boards => serde_json::to_value(self.shelves()?.list())?,
             Command::BoardVersions { board_id } => {

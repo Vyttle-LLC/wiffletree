@@ -92,6 +92,14 @@ The Space itself, `space.yaml`, the storage repository, its tracker and its clon
 ### 2. Space sync is in `spaces`; runner outputs are their own rule set
 Space files sync on the repository's one engine with the settings rules (`spaces`, `shared-repositories`). This change adds one rule set: an output under `boards/` written by its job's runner is not compared against other machines, because only the runner writes it; a push refused because the remote moved fetches and pushes again. Another machine's output that lands while this Mac had a local edit pauses like any file.
 
+#### Built in stage 5 (October 31, 2026)
+Choices made while building, inside the boards and scheduled-jobs specs:
+- The boards rule set is the Spaces folders' `boards/`, which the Spaces rule set leaves to it. Under a job this Mac runs, what Wiffletree wrote is committed whatever GitHub holds, and an edit made outside Wiffletree still pauses. Everywhere else in `boards/` it compares as Space files do.
+- Only a runner's boards commit fetches and pushes again in the same pass, up to three tries, and only those changes are pushed then. Every other rule set's changes wait for the next pass, which the settings repository's "The remote moved first" requires, also when storage is the settings repository.
+- "A shared Space" for approval is any Space stored on GitHub, a Space one user carries between their own Macs included, so nothing a job writes leaves a Mac without its runner's Share.
+- Approval is a fingerprint of the prompt and sources, kept on the runner's Mac and never synced, so no pushed file can approve a job. Each run records the fingerprint it started with, and Share approves that one. Taking over clears it, so a new runner's first output waits too.
+- An output waiting for approval waits in the private board store, and Share to Space… refuses it, so the only way out is Share.
+
 ### 3. The assistant is a session that belongs to a Space, not a project
 Each thread is a provider session with role `Assistant`, owned by a Space (`SessionOwner::Space`, from `spaces`), with a scratch folder `<data folder>/assistant/threads/<thread-id>/` and no project or ticket. Issue threads are assistant threads with an issue or a tracker's list attached. Job runs are the same with role `JobRun` and their job. The enforced hierarchy admits these roles outside projects; they have no parent coordinator, use no coordination tools, and they have no reports to send. The human is their only parent: a thread turn needs no check-in because the human is watching it, and a job run that has run 30 minutes puts a note on the assistant's sidebar row, every 30 minutes after, with Stop.
 

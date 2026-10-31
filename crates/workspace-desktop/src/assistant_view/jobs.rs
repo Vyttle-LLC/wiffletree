@@ -4,7 +4,7 @@
 use super::*;
 use ui::{needs_you_badge, pill};
 use workspace_core::job::{
-    JobKey, JobRun, JobState, Recipe, RecipePreview, RunOutcome, SourceCheck,
+    JobKey, JobRun, JobState, Recipe, RecipePreview, RunOutcome, Runner, Sharing, SourceCheck,
 };
 
 /// What the recipe card says a job may do, as the mockup words it.
@@ -229,6 +229,58 @@ impl AssistantPage {
         cx: &mut Context<Self>,
     ) {
         let ask = ask::set_job_enabled(recipe.space_id.clone(), recipe.id.clone(), enabled);
+        self.ask(ask, window, cx, |_, done, window, cx| {
+            if let Err(error) = done {
+                toast_error(error, window, cx);
+            }
+        });
+    }
+    /// "Runs on Jamie's Mac · last run Mon 08:00", with Take over running when this Mac may,
+    /// for a "One runner" job in a Space stored on GitHub.
+    fn runner_line(&self, job: &JobState, p: Palette, cx: &mut Context<Self>) -> Option<Div> {
+        let recipe = &job.recipe;
+        if !self.shared_space(&recipe.space_id) || recipe.sharing != Sharing::OneRunner {
+            return None;
+        }
+        let runs_on = (job.not_here.clone()).or_else(|| recipe.runner.as_ref().map(Runner::label));
+        let last = (job.last_run_at).map(|at| format!("last run {}", wording::day_and_time(at)));
+        let line: Vec<String> = runs_on.into_iter().chain(last).collect();
+        let taken = recipe.clone();
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(hint(line.join(" · "), p))
+                .when(job.can_take_over(), |d| {
+                    d.child(
+                        button("job-take-over")
+                            .ghost()
+                            .xsmall()
+                            .label(boards_view::TAKE_OVER)
+                            .on_click(cx.listener(move |v, _, w, c| v.take_over(&taken, w, c))),
+                    )
+                }),
+        )
+    }
+    fn take_over(&mut self, recipe: &Recipe, window: &mut Window, cx: &mut Context<Self>) {
+        let ask = ask::take_over_job(recipe.space_id.clone(), recipe.id.clone());
+        self.ask(ask, window, cx, |_, done, window, cx| {
+            if let Err(error) = done {
+                toast_error(error, window, cx);
+            }
+        });
+    }
+    /// Share or Keep private, for a run's output waiting for approval.
+    fn answer_output(
+        &mut self,
+        run: String,
+        title: String,
+        share: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ask = ask::approve_job_output(run, title, share);
         self.ask(ask, window, cx, |_, done, window, cx| {
             if let Err(error) = done {
                 toast_error(error, window, cx);
@@ -595,13 +647,44 @@ impl AssistantPage {
                         d.child(hint(run.reason.clone(), p))
                     })
                     .children(run.outputs.iter().map(|output| {
-                        hint(
+                        let saved = hint(
                             format!(
                                 "Saved “{}” · version {} · {}",
                                 output.title, output.version, output.kept
                             ),
                             p,
-                        )
+                        );
+                        if !output.waiting {
+                            return saved;
+                        }
+                        let answer = |share: bool| {
+                            let (run, title) = (run.id.clone(), output.title.clone());
+                            cx.listener(move |v: &mut Self, _: &ClickEvent, w, c| {
+                                v.answer_output(run.clone(), title.clone(), share, w, c)
+                            })
+                        };
+                        let id = |what: &str| {
+                            SharedString::from(format!("{what}-{}-{}", run.id, output.title))
+                        };
+                        saved
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(pill(boards_view::WAITING, p.accent))
+                            .child(
+                                button(id("approve"))
+                                    .xsmall()
+                                    .label("Share")
+                                    .on_click(answer(true)),
+                            )
+                            .child(
+                                button(id("keep"))
+                                    .ghost()
+                                    .xsmall()
+                                    .label("Keep private")
+                                    .on_click(answer(false)),
+                            )
                     }))
                     .children(run.profile.as_ref().map(|profile| {
                         hint(format!("{} · {}", profile.short(), run.model_reason), p)
@@ -626,11 +709,7 @@ impl AssistantPage {
                             .child(recipe.name.clone()),
                     ),
             )
-            .children(
-                job.not_here
-                    .as_ref()
-                    .map(|why| hint(format!("{why}; this Mac does not run it."), p)),
-            )
+            .children(self.runner_line(job, p, cx))
             .child(
                 card(p)
                     .gap_2()
@@ -746,6 +825,7 @@ mod tests {
             thread_id: None,
             long_minutes: None,
             seen: false,
+            approves: None,
         }
     }
     fn job(runs: Vec<JobRun>) -> JobState {
@@ -774,6 +854,7 @@ mod tests {
             attention: 0,
             attention_at: None,
             not_here: None,
+            last_run_at: None,
         }
     }
 

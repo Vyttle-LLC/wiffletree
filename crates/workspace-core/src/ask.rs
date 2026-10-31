@@ -501,6 +501,17 @@ pub fn stop_job_run(run_id: String) -> Ask<Value> {
 pub fn see_job_runs(job: job::JobKey) -> Ask<()> {
     Ask::new(Command::SeeJobRuns { job })
 }
+pub fn take_over_job(space_id: SpaceId, job_id: String) -> Ask<job::JobState> {
+    Ask::new(Command::TakeOverJob { space_id, job_id })
+}
+/// Share with `share`, else Keep private.
+pub fn approve_job_output(run_id: String, title: String, share: bool) -> Ask<()> {
+    Ask::new(Command::ApproveJobOutput {
+        run_id,
+        title,
+        share,
+    })
+}
 pub fn boards() -> Ask<Vec<board::BoardOutput>> {
     Ask::new(Command::Boards)
 }

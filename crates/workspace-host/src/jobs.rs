@@ -2,13 +2,16 @@
 //! host jobs on their due times, one catch-up run after missed ones, the check of a run's
 //! sources, and run records. A recipe is a file in its Space's storage; the store keeps each as
 //! the user saved it, or as sync pulled it from another member's save, and only that copy runs.
-//! Jobs belong to the user: no tool, thread or run saves, enables or changes one.
+//! Shared jobs (stage 5) run on their runner's Mac, or on every member's, and a runner's output
+//! is pushed only once this Mac approved the prompt and sources it ran with. Jobs belong to the
+//! user: no tool, thread or run saves, enables, takes over or approves one.
 use crate::*;
 use anyhow::anyhow;
 use chrono::{Datelike, Duration as Days, NaiveDate, NaiveTime, TimeZone};
 use chrono_tz::Tz;
 use serde::Deserialize;
 use workspace_core::assistant::{JobRunOf, Thread};
+use workspace_core::board::plain_file_name;
 use workspace_core::job::{
     Cron, JobKey, JobRun, JobState, MAX_RUNS_SHOWN, RECIPE_FORMAT, Recipe, RecipePreview,
     RunOutcome, RunOutput, Runner, Schedule, Sharing, SourceCheck, source_label,
@@ -30,9 +33,29 @@ pub(crate) fn migrate(db: &Connection) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS jobs (key TEXT PRIMARY KEY, space_id TEXT NOT NULL, data TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS job_due (key TEXT PRIMARY KEY, next_at INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS job_runs (id TEXT PRIMARY KEY, key TEXT NOT NULL, started_at INTEGER NOT NULL, data TEXT NOT NULL);
-         CREATE INDEX IF NOT EXISTS job_runs_by_key ON job_runs(key, started_at);",
+         CREATE INDEX IF NOT EXISTS job_runs_by_key ON job_runs(key, started_at);
+         CREATE TABLE IF NOT EXISTS job_approvals (key TEXT PRIMARY KEY, approved TEXT NOT NULL);",
     )?;
     Ok(())
+}
+
+/// Whether this Mac is the runner of a "One runner" job.
+pub(crate) fn runs_here(recipe: &Recipe) -> bool {
+    recipe.sharing == Sharing::OneRunner
+        && (recipe.runner.as_ref()).is_some_and(|runner| runner.machine == sync::machine_name())
+}
+
+/// `spaces/<folder>/boards/<id>`: a job's outputs, relative to its storage repository.
+pub(crate) fn board_folder(folder: &str, id: &str) -> String {
+    format!("spaces/{folder}/boards/{id}")
+}
+
+/// What the runner approves by sharing an output: the recipe's prompt and sources.
+fn approval(recipe: &Recipe) -> String {
+    use sha2::{Digest, Sha256};
+    let approved = json!({"prompt": recipe.prompt, "sources": recipe.sources});
+    let digest = Sha256::digest(approved.to_string().as_bytes());
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A job Wiffletree defines, such as a brain's compile: it takes due times, catch-up, Run now
@@ -521,10 +544,20 @@ impl Host {
             return None;
         }
         match &recipe.runner {
-            Some(runner) if runner.machine == sync::machine_name() => None,
+            _ if runs_here(recipe) => None,
             Some(runner) => Some(runner.label()),
             None => Some("No Mac is its runner".into()),
         }
+    }
+    /// The prompt and sources this Mac approved for a job by sharing one of its outputs.
+    fn approved(&self, key: &JobKey) -> Result<Option<String>> {
+        Ok((self.db)
+            .query_row(
+                "SELECT approved FROM job_approvals WHERE key=?1",
+                [key.as_str()],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
     /// The model a run of `recipe` starts on: the recipe's, else its Space's default for jobs
     /// when this Mac may use it, else Who runs what's Job row, or the Assistant row without
@@ -623,26 +656,58 @@ impl Host {
                 machine: sync::machine_name(),
             });
         }
-        let key = recipe.key();
-        let existed = self.recipe(&key).is_ok();
+        let existed = self.recipe(&recipe.key()).is_ok();
         let message = match existed {
             true => format!("{}: changed the job {}", record.space.name, recipe.name),
             false => format!("{}: added the job {}", record.space.name, recipe.name),
         };
+        self.store_recipe(&record.space, &recipe, &message)?;
+        self.job_state(&recipe)
+    }
+    /// Keeps a recipe in the store and writes its file to its Space's storage, to run from its
+    /// next time.
+    fn store_recipe(&mut self, space: &Space, recipe: &Recipe, message: &str) -> Result<()> {
+        let key = recipe.key();
         self.atomically(|host| {
             host.db.execute(
                 "INSERT INTO jobs VALUES (?1,?2,?3) ON CONFLICT(key) DO UPDATE SET data=excluded.data",
-                params![key.as_str(), recipe.space_id.as_str(), encode(&recipe)?],
+                params![key.as_str(), recipe.space_id.as_str(), encode(recipe)?],
             )?;
             host.db
                 .execute("DELETE FROM job_due WHERE key=?1", [key.as_str()])?;
-            host.write_recipe_file(
-                &record.space,
-                &recipe.id,
-                Some(&recipe_yaml(&recipe)?),
-                &message,
-            )
-        })?;
+            host.write_recipe_file(space, &recipe.id, Some(&recipe_yaml(recipe)?), message)
+        })
+    }
+    /// Take over running: this Mac becomes the runner of a "One runner" job in a Space stored on
+    /// GitHub, as a commit to its recipe, and runs it from its next time. Its first output here
+    /// waits for this Mac's approval, as a new job's does.
+    pub fn take_over_job(&mut self, space: &SpaceId, id: &str) -> Result<JobState> {
+        let mut recipe = self.recipe(&JobKey::recipe(space, id))?;
+        let record = self.space(space)?;
+        ensure!(
+            record.local.enabled,
+            "{} is off on this Mac",
+            record.space.name
+        );
+        ensure!(
+            recipe.sharing == Sharing::OneRunner && self.not_here(&recipe, &record.space).is_some(),
+            "This Mac already runs {}, or every member runs their own",
+            recipe.name
+        );
+        let machine = sync::machine_name();
+        recipe.runner = Some(Runner {
+            login: self.gh_login.clone().unwrap_or_default(),
+            machine: machine.clone(),
+        });
+        let message = format!(
+            "{}: {machine} took over running {}",
+            record.space.name, recipe.name
+        );
+        self.store_recipe(&record.space, &recipe, &message)?;
+        (self.db).execute(
+            "DELETE FROM job_approvals WHERE key=?1",
+            [recipe.key().as_str()],
+        )?;
         self.job_state(&recipe)
     }
     /// Refuses a new job whose name another job in its Space already has, so a card never
@@ -680,7 +745,7 @@ impl Host {
         let record = self.space(space)?;
         let message = format!("{}: removed the job {}", record.space.name, recipe.name);
         self.atomically(|host| {
-            for table in ["jobs", "job_due", "job_runs"] {
+            for table in ["jobs", "job_due", "job_runs", "job_approvals"] {
                 host.db
                     .execute(&format!("DELETE FROM {table} WHERE key=?1"), [key.as_str()])?;
             }
@@ -703,7 +768,7 @@ impl Host {
     ) -> Result<()> {
         let key = JobKey::recipe(&space.id, id);
         let Some(content) = content else {
-            for table in ["jobs", "job_due"] {
+            for table in ["jobs", "job_due", "job_approvals"] {
                 self.db
                     .execute(&format!("DELETE FROM {table} WHERE key=?1"), [key.as_str()])?;
             }
@@ -747,11 +812,18 @@ impl Host {
         };
         // Counted apart from the runs shown, so an old unseen failure still counts.
         let (attention, attention_at): (usize, Option<i64>) = self.db.query_row(
-            "SELECT count(*), max(started_at) FROM job_runs WHERE key=?1 AND json_extract(data,'$.seen')=0 AND json_extract(data,'$.outcome') IN ('failed','not_started')",
+            "SELECT count(*), max(started_at) FROM job_runs WHERE key=?1 AND json_extract(data,'$.seen')=0 AND (json_extract(data,'$.outcome') IN ('failed','not_started') OR EXISTS (SELECT 1 FROM json_each(data,'$.outputs') WHERE json_extract(value,'$.waiting')=1))",
             [recipe.key().as_str()],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
+        let runs = self.job_runs(&recipe.key(), MAX_RUNS_SHOWN)?;
+        let not_here = self.not_here(recipe, &space);
+        let last_run_at = match not_here {
+            None => runs.first().map(|run| run.started_at),
+            Some(_) => self.last_stored_output(recipe, &space),
+        };
         Ok(JobState {
+            last_run_at,
             attention,
             attention_at,
             schedule: schedule_words(&recipe.schedule),
@@ -760,10 +832,23 @@ impl Host {
                 false => vec![],
             },
             model,
-            runs: self.job_runs(&recipe.key(), MAX_RUNS_SHOWN)?,
-            not_here: self.not_here(recipe, &space),
+            runs,
+            not_here,
             recipe: recipe.clone(),
         })
+    }
+    /// When the newest output of a job in its Space's storage was saved, as its metadata says.
+    fn last_stored_output(&self, recipe: &Recipe, space: &Space) -> Option<i64> {
+        let storage = self.storage_folder(&space.storage.repository);
+        let folder = storage.join(board_folder(&space.storage.folder, &recipe.id));
+        (fs::read_dir(folder).ok()?.flatten())
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+            .filter_map(|entry| {
+                let about: Value = serde_json::from_slice(&fs::read(entry.path()).ok()?).ok()?;
+                about["saved_at"].as_i64()
+            })
+            .max()
     }
     /// Every saved job in a Space on this Mac, for the snapshot.
     pub(crate) fn job_states(&self) -> Result<Vec<JobState>> {
@@ -918,6 +1003,7 @@ impl Host {
             thread_id: None,
             long_minutes: None,
             seen: false,
+            approves: None,
         };
         if let Some(built_in) = self.built_in(key) {
             let (run_it, owner) = (built_in.run, built_in.owner.clone());
@@ -1024,6 +1110,7 @@ impl Host {
             run_id: run.id.clone(),
         };
         run.thread_id = Some(thread_id.clone());
+        run.approves = Some(approval(&recipe));
         self.atomically(|host| {
             host.save_run(run)?;
             let model = (profile, Chooser::Wiffletree, reason, waits);
@@ -1122,9 +1209,11 @@ impl Host {
         self.save_run(&run)?;
         Ok(None)
     }
-    /// Keeps an output a job's run saved at its stable path: in the Space's storage when it is
-    /// on this Mac only, and in this Mac's private board store for a Space stored on GitHub,
-    /// whose first push waits for the runner's approval (stage 5).
+    /// Keeps an output a job's run saved at its stable path. In a Space stored on this Mac only,
+    /// it is committed to the Space's storage. In one stored on GitHub, the runner's output is
+    /// pushed with the Space's storage once this Mac approved the prompt and sources its run
+    /// had, and until then waits in this Mac's private board store, as every member's own
+    /// output of an "Everyone runs their own" job stays.
     pub(crate) fn save_job_output(
         &mut self,
         thread: &Thread,
@@ -1134,32 +1223,148 @@ impl Host {
     ) -> Result<RunOutput> {
         let recipe = self.recipe(&job.job)?;
         let space = self.space(&thread.space_id)?.space;
-        let (repository, base, kept) = match space.storage.repository {
-            StorageRepository::Local { .. } => (
-                self.storage_folder(&space.storage.repository),
-                format!("spaces/{}/boards/{}", space.storage.folder, recipe.id),
-                format!("In {}'s storage", space.name),
-            ),
-            StorageRepository::GitHub { .. } => (
-                assistant::board_store(&self.home),
-                format!("{}/{}/{}", space.id, assistant::JOB_OUTPUTS, recipe.id),
-                "Only on this Mac".to_owned(),
-            ),
-        };
-        let about = json!({"title":title,"job":recipe.key(),"run_id":job.run_id,"saved_at":now()});
-        let (file, version) = assistant::store_output(&repository, &base, title, source, about)?;
-        let output = RunOutput {
-            title: title.into(),
-            file,
-            version,
-            kept,
-        };
         let mut run = self.job_run(&job.run_id)?;
+        let about = json!({"title":title,"job":recipe.key(),"run_id":job.run_id,"saved_at":now()});
+        let local = matches!(space.storage.repository, StorageRepository::Local { .. });
+        let shared = !local && runs_here(&recipe);
+        // A run from before approvals has nothing to compare, so it waits too.
+        let waiting =
+            shared && (run.approves.is_none() || self.approved(&recipe.key())? != run.approves);
+        let output = if local {
+            let storage = self.storage_folder(&space.storage.repository);
+            let base = board_folder(&space.storage.folder, &recipe.id);
+            let (file, version) = assistant::store_output(&storage, &base, title, source, about)?;
+            RunOutput {
+                title: title.into(),
+                file,
+                version,
+                kept: format!("In {}'s storage", space.name),
+                waiting: false,
+            }
+        } else if shared && !waiting {
+            let file = (source.file_name())
+                .context("Name a file")?
+                .to_string_lossy()
+                .into_owned();
+            let version = self.push_job_output(&space, &recipe, &file, fs::read(source)?, about)?;
+            RunOutput {
+                title: title.into(),
+                file,
+                version,
+                kept: format!("Shared in {}", space.name),
+                waiting: false,
+            }
+        } else {
+            let store = assistant::board_store(&self.home);
+            let base = private_folder(&space, &recipe);
+            let (file, version) = assistant::store_output(&store, &base, title, source, about)?;
+            RunOutput {
+                title: title.into(),
+                file,
+                version,
+                kept: "Only on this Mac".into(),
+                waiting,
+            }
+        };
         run.outputs.retain(|o| o.title != title);
         run.outputs.push(output.clone());
         self.save_run(&run)?;
         Ok(output)
     }
+    /// Writes a runner's output, which `about` titles, into its Space's storage on GitHub, for
+    /// the next pass to push; returns the version it will be.
+    fn push_job_output(
+        &mut self,
+        space: &Space,
+        recipe: &Recipe,
+        file: &str,
+        bytes: Vec<u8>,
+        about: Value,
+    ) -> Result<u32> {
+        let base = board_folder(&space.storage.folder, &recipe.id);
+        let message = format!("{}: saved an output of {}", space.name, recipe.name);
+        let folder = self.write_output(space, &base, file, bytes, about, &message)?;
+        let storage = self.storage_folder(&space.storage.repository);
+        let metadata = format!("{folder}.json");
+        let pushed =
+            runtime::git_output(&storage, &["rev-list", "--count", "HEAD", "--", &metadata]);
+        Ok(pushed.map_or(0, |count| count.trim().parse().unwrap_or(0)) + 1)
+    }
+    /// Share or Keep private, for the latest output of `title` that waits for approval, which
+    /// `run_id` saved. Share pushes it with its Space's storage, takes it out of the private
+    /// board store and approves the prompt and sources its run had, so later outputs push
+    /// without asking until those change. Keep private leaves it only on this Mac and the job
+    /// unapproved.
+    pub fn approve_job_output(&mut self, run_id: &str, title: &str, share: bool) -> Result<()> {
+        let run = self.job_run(run_id)?;
+        ensure!(
+            (run.outputs.iter()).any(|output| output.title == title && output.waiting),
+            "That output no longer waits for approval"
+        );
+        let recipe = self.recipe(&run.job)?;
+        let space = self.space(&recipe.space_id)?.space;
+        if share {
+            ensure!(
+                runs_here(&recipe),
+                "This Mac no longer runs {}, so it cannot share its output",
+                recipe.name
+            );
+            let store = assistant::board_store(&self.home);
+            let base = private_folder(&space, &recipe);
+            let folder = format!(
+                "{base}/{}",
+                assistant::output_folder(&store.join(&base), title)?
+            );
+            let mut about: Value =
+                serde_json::from_slice(&fs::read(store.join(format!("{folder}.json")))?)?;
+            ensure!(
+                about["run_id"] == json!(run_id),
+                "A newer output replaced this one; answer that one"
+            );
+            let file = about["file"].as_str().unwrap_or_default().to_owned();
+            let path = store.join(&folder).join(&file);
+            ensure!(
+                plain_file_name(&file) && fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()),
+                "The output's file is missing"
+            );
+            about["approved"] = json!(true);
+            self.push_job_output(&space, &recipe, &file, fs::read(&path)?, about)?;
+            fs::remove_dir_all(store.join(&folder))?;
+            fs::remove_file(store.join(format!("{folder}.json")))?;
+            let metadata = format!("{folder}.json");
+            storage::commit_local(&store, &[&folder, &metadata], &format!("Shared {folder}"))?;
+            let approves = run
+                .approves
+                .clone()
+                .context("The run has no recipe to approve")?;
+            self.db.execute(
+                "INSERT INTO job_approvals VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET approved=excluded.approved",
+                params![recipe.key().as_str(), approves],
+            )?;
+        }
+        // Every earlier output of the title is answered with the latest.
+        for mut earlier in self.job_runs(&run.job, usize::MAX)? {
+            let shared = share && earlier.id == run.id;
+            let waited = (earlier.outputs.iter_mut())
+                .filter(|output| output.title == title && output.waiting)
+                .map(|output| {
+                    output.waiting = false;
+                    if shared {
+                        output.kept = format!("Shared in {}", space.name);
+                    }
+                })
+                .count();
+            if waited > 0 {
+                self.save_run(&earlier)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Where a job's outputs kept only on this Mac are, in the private board store.
+fn private_folder(space: &Space, recipe: &Recipe) -> String {
+    format!("{}/{}/{}", space.id, assistant::JOB_OUTPUTS, recipe.id)
 }
 
 pub(crate) const STOPPED_BY_YOU: &str = "Stopped: you stopped the run.";
@@ -1436,6 +1641,15 @@ mod tests {
             },
             Command::StopJobRun { run_id: "r".into() },
             Command::SeeJobRuns { job: key },
+            Command::TakeOverJob {
+                space_id: s.personal.id.clone(),
+                job_id: "morning-brief".into(),
+            },
+            Command::ApproveJobOutput {
+                run_id: "r".into(),
+                title: "Brief".into(),
+                share: true,
+            },
         ] {
             assert!(command.is_human_only(), "{command:?}");
         }
@@ -2063,5 +2277,295 @@ mod tests {
         let ended = host.job_run(&run.id).unwrap();
         assert_eq!(ended.outcome, RunOutcome::Failed);
         assert_eq!(ended.reason, "Wiffletree stopped during the run.");
+    }
+
+    /// Shared jobs (stage 5), in Sage, stored on a local stand-in for GitHub.
+    mod shared {
+        use super::*;
+        use crate::storage::tests::{host, join_sage, shared_storage, space_named, sync};
+        use crate::sync::tests::{GitHub, NAME};
+        use std::sync::Arc;
+        use workspace_core::board::{BoardOutput, Keeping};
+
+        const OUTPUT: &str =
+            "spaces/sage/boards/release-dashboard/release-dashboard/dashboard.html";
+        const ABOUT: &str = "spaces/sage/boards/release-dashboard/release-dashboard.json";
+        const TITLE: &str = "Release dashboard";
+
+        struct Shared {
+            _folder: tempfile::TempDir,
+            _home: tempfile::TempDir,
+            host: Host,
+            github: Arc<GitHub>,
+            sage: Space,
+        }
+        /// This Mac with Sage joined; `settings` makes its storage the settings repository too.
+        fn shared(settings: bool) -> Shared {
+            let folder = tempfile::tempdir().unwrap();
+            let github = shared_storage(folder.path(), Some("SAGE"));
+            let (home, mut host) = host();
+            if settings {
+                (host.choose_settings_repository(NAME, None, &github.tools())).unwrap();
+            }
+            join_sage(&mut host, &github).unwrap();
+            let sage = space_named(&host, "Sage");
+            Shared {
+                _folder: folder,
+                _home: home,
+                host,
+                github,
+                sage,
+            }
+        }
+        impl Shared {
+            /// A pass of the storage, by the settings pass when it is the settings repository.
+            fn sync(&mut self) {
+                match self.host.settings_key() {
+                    Some(_) => self.host.sync_now(&self.github.tools()).unwrap(),
+                    None => sync(&mut self.host, &self.github),
+                }
+            }
+            /// Runs `key` now, saving `body` as its dashboard, to its end.
+            fn run_saving(&mut self, key: &JobKey, body: &str) -> JobRun {
+                let run = self.host.run_now(key).unwrap();
+                let thread = run.thread_id.clone().unwrap();
+                let scratch = assistant::scratch_folder(&self.host.home, &thread);
+                fs::write(scratch.join("dashboard.html"), body).unwrap();
+                let session = self.host.session(&thread).unwrap();
+                let args = json!({"path":"dashboard.html","title":TITLE});
+                (self.host.thread_tool(&session, "save_output", &args)).unwrap();
+                self.host.job_run_ended(&thread, RunEnd::Finished).unwrap();
+                self.host.job_run(&run.id).unwrap()
+            }
+            fn boards(&self) -> Vec<BoardOutput> {
+                self.host.shelves().unwrap().list()
+            }
+            fn paused(&self) -> Vec<String> {
+                (self
+                    .host
+                    .db
+                    .prepare("SELECT path FROM sync_paused")
+                    .unwrap())
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+            }
+            /// A version of the dashboard another Mac pushed, saved at `saved_at`.
+            fn pushed_elsewhere(&self, body: &str, saved_at: i64) {
+                self.github.commit(OUTPUT, body);
+                let about = json!({"title":TITLE,"file":"dashboard.html","saved_at":saved_at});
+                self.github.commit(ABOUT, about.to_string());
+            }
+            /// An approved runner here, its first output shared.
+            fn approved(&mut self) -> JobKey {
+                let key = (self.host.save_job(dashboard(&self.sage)))
+                    .unwrap()
+                    .recipe
+                    .key();
+                let run = self.run_saving(&key, "<p>first</p>");
+                (self.host.approve_job_output(&run.id, TITLE, true)).unwrap();
+                self.sync();
+                key
+            }
+        }
+        fn dashboard(sage: &Space) -> Recipe {
+            recipe(sage, TITLE, "0 8 * * 1")
+        }
+        fn jamies(sage: &Space) -> Recipe {
+            Recipe {
+                runner: Some(Runner {
+                    login: "jamie".into(),
+                    machine: "Jamie's Mac".into(),
+                }),
+                ..dashboard(sage)
+            }
+        }
+
+        #[test]
+        fn a_first_output_waits_for_the_runner_and_later_ones_push_until_the_prompt_changes() {
+            let mut s = shared(false);
+            let saved = s.host.save_job(dashboard(&s.sage)).unwrap();
+            let key = saved.recipe.key();
+            let run = s.run_saving(&key, "<p>one</p>");
+            assert_eq!(
+                (run.outputs[0].waiting, run.outputs[0].kept.as_str()),
+                (true, "Only on this Mac")
+            );
+            assert_eq!(s.host.job_state(&saved.recipe).unwrap().attention, 1);
+            s.sync();
+            assert_eq!(
+                s.github.show(OUTPUT),
+                None,
+                "nothing is pushed before Share"
+            );
+            let listed = s.boards();
+            assert_eq!(listed.len(), 1);
+            assert!(listed[0].waiting && listed[0].keeping == Keeping::Private);
+            assert_eq!(listed[0].run_id.as_deref(), Some(run.id.as_str()));
+            let around = s.host.share_board(&listed[0].id, &s.sage.id).unwrap_err();
+            assert!(format!("{around:#}").contains("waits for your approval"));
+
+            // Keep private leaves it here and the job unapproved.
+            (s.host.approve_job_output(&run.id, TITLE, false)).unwrap();
+            assert!(!s.host.job_run(&run.id).unwrap().outputs[0].waiting);
+            s.sync();
+            assert_eq!(s.github.show(OUTPUT), None);
+            let run = s.run_saving(&key, "<p>two</p>");
+            assert!(run.outputs[0].waiting);
+
+            // Share pushes it and moves it out of the private store.
+            (s.host.approve_job_output(&run.id, TITLE, true)).unwrap();
+            assert!(s.host.approve_job_output(&run.id, TITLE, true).is_err());
+            s.sync();
+            assert_eq!(s.github.show(OUTPUT).as_deref(), Some("<p>two</p>"));
+            let listed = s.boards();
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].keeping, Keeping::SharedStorage);
+            assert!(!listed[0].waiting && listed[0].runner.is_some());
+
+            let run = s.run_saving(&key, "<p>three</p>");
+            assert_eq!(
+                (run.outputs[0].waiting, run.outputs[0].kept.as_str()),
+                (false, "Shared in Sage")
+            );
+            s.sync();
+            assert_eq!(s.github.show(OUTPUT).as_deref(), Some("<p>three</p>"));
+
+            // A changed prompt, or changed sources, wait again.
+            let changed = Recipe {
+                prompt: "Brief me on the release.".into(),
+                ..saved.recipe
+            };
+            let changed = s.host.save_job(changed).unwrap().recipe;
+            let run = s.run_saving(&key, "<p>four</p>");
+            assert!(run.outputs[0].waiting);
+            s.sync();
+            assert_eq!(s.github.show(OUTPUT).as_deref(), Some("<p>three</p>"));
+
+            // So does a teammate's change, pulled.
+            (s.host.approve_job_output(&run.id, TITLE, true)).unwrap();
+            s.sync();
+            let theirs = Recipe {
+                prompt: "Brief me on the release, with crash rates.".into(),
+                ..changed
+            };
+            let file = recipe_file("sage", "release-dashboard");
+            s.github.commit(&file, recipe_yaml(&theirs).unwrap());
+            s.sync();
+            assert_eq!(s.host.recipe(&key).unwrap().prompt, theirs.prompt);
+            let run = s.run_saving(&key, "<p>five</p>");
+            assert!(run.outputs[0].waiting);
+            s.sync();
+            assert_eq!(s.github.show(OUTPUT).as_deref(), Some("<p>four</p>"));
+        }
+
+        /// The runner rule set, in a storage repository of its own and in one that is also the
+        /// settings repository.
+        fn a_runners_output_pushes_without_comparing_and_again_when_github_moves(settings: bool) {
+            let mut s = shared(settings);
+            let key = s.approved();
+            // A former runner's version lands on GitHub while this Mac saves its own.
+            s.pushed_elsewhere("<p>from Jamie</p>", now());
+            s.run_saving(&key, "<p>mine</p>");
+            let github = s.github.clone();
+            *s.github.before.lock().unwrap() = Some((
+                "push",
+                Box::new(move || github.commit("README.md", "Changed meanwhile.\n")),
+            ));
+            s.sync();
+            assert_eq!(s.github.show(OUTPUT).as_deref(), Some("<p>mine</p>"));
+            assert_eq!(
+                s.github.show("README.md").as_deref(),
+                Some("Changed meanwhile.\n")
+            );
+            assert_eq!(s.paused(), Vec::<String>::new());
+            let status = s.host.storage_status(&s.sage.id).unwrap();
+            assert_eq!(status.error, None);
+        }
+        #[test]
+        fn a_runners_output_pushes_without_comparing_and_again_when_github_moves_under_it() {
+            a_runners_output_pushes_without_comparing_and_again_when_github_moves(false);
+        }
+        #[test]
+        fn in_storage_that_is_the_settings_repository_a_runners_output_pushes_the_same() {
+            a_runners_output_pushes_without_comparing_and_again_when_github_moves(true);
+        }
+
+        #[test]
+        fn another_macs_output_is_pulled_and_pauses_only_over_a_change_here() {
+            let mut s = shared(false);
+            let saved = s.host.save_job(jamies(&s.sage)).unwrap();
+            assert_eq!(saved.not_here.as_deref(), Some("Runs on Jamie's Mac"));
+            let saved_at = now() - 60_000;
+            s.pushed_elsewhere("<p>Jamie's</p>", saved_at);
+            s.sync();
+            assert_eq!(s.paused(), Vec::<String>::new());
+            let listed = s.boards();
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].keeping, Keeping::SharedStorage);
+            assert_eq!(listed[0].runner, jamies(&s.sage).runner);
+            let state = s.host.job_state(&saved.recipe).unwrap();
+            assert_eq!(state.last_run_at, Some(saved_at));
+            assert!(state.can_take_over());
+
+            s.host
+                .write_storage_files(&s.sage, &[(OUTPUT.into(), Some(b"<p>here</p>"))], "edit")
+                .unwrap();
+            s.github.commit(OUTPUT, "<p>Jamie's second</p>");
+            s.sync();
+            assert_eq!(s.paused(), [OUTPUT]);
+            assert_eq!(
+                s.github.show(OUTPUT).as_deref(),
+                Some("<p>Jamie's second</p>")
+            );
+        }
+
+        #[test]
+        fn taking_over_a_stale_job_is_a_commit_and_its_first_output_here_waits() {
+            let mut s = shared(false);
+            s.host.save_job(jamies(&s.sage)).unwrap();
+            s.pushed_elsewhere("<p>Jamie's</p>", now() - 15 * 24 * 3_600_000);
+            s.sync();
+            assert!(s.boards()[0].stale, "two Mondays passed without a version");
+            let state = (s.host.take_over_job(&s.sage.id, "release-dashboard")).unwrap();
+            let runner = state.recipe.runner.clone().unwrap();
+            assert_eq!(runner.machine, sync::machine_name());
+            assert!(state.not_here.is_none() && !state.can_take_over());
+            assert!(
+                s.host
+                    .take_over_job(&s.sage.id, "release-dashboard")
+                    .is_err()
+            );
+            s.sync();
+            let pushed = s
+                .github
+                .show("spaces/sage/jobs/release-dashboard.yaml")
+                .unwrap();
+            assert!(pushed.contains(&sync::machine_name()), "{pushed}");
+            let run = s.run_saving(&state.recipe.key(), "<p>mine</p>");
+            assert!(run.outputs[0].waiting);
+            s.sync();
+            assert_eq!(s.github.show(OUTPUT).as_deref(), Some("<p>Jamie's</p>"));
+        }
+
+        #[test]
+        fn everyone_runs_their_own_and_keeps_the_result_on_this_mac() {
+            let mut s = shared(false);
+            let template = Recipe {
+                sharing: Sharing::Everyone,
+                ..dashboard(&s.sage)
+            };
+            let saved = s.host.save_job(template).unwrap();
+            assert_eq!((&saved.recipe.runner, &saved.not_here), (&None, &None));
+            let run = s.run_saving(&saved.recipe.key(), "<p>my queue</p>");
+            assert_eq!(
+                (run.outputs[0].waiting, run.outputs[0].kept.as_str()),
+                (false, "Only on this Mac")
+            );
+            s.sync();
+            assert_eq!(s.github.show(OUTPUT), None);
+            assert_eq!(s.boards()[0].keeping, Keeping::Private);
+        }
     }
 }

@@ -1,9 +1,10 @@
 //! Boards (stage 4): every output a thread or job saved, listed from this Mac's private board
 //! store and each Space's storage, with its versions from Git history. Listing and reading
-//! history run off the host thread; only Share to Space… writes, and only the user asks it.
+//! history run off the host thread. Only Share to Space…, which the user asks for, and a job's
+//! outputs write an output into a Space's storage.
 use crate::*;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use workspace_core::board::{BoardOutput, BoardVersion, FileKind, Keeping, plain_file_name};
 use workspace_core::job::{Cron, JobKey, Recipe, Sharing};
 
@@ -31,6 +32,8 @@ pub(crate) struct Shelves {
     recipes: Vec<Recipe>,
     /// The missed runs each catch-up run caught up on, by run.
     catch_ups: HashMap<String, u32>,
+    /// The outputs waiting for approval, by run and title.
+    waiting: HashSet<(String, String)>,
     /// Where an output's earlier versions are copied for the viewer.
     versions: PathBuf,
     now: i64,
@@ -111,9 +114,15 @@ impl Shelves {
         let runner = recipe
             .filter(|r| shelf.keeping == Keeping::SharedStorage && r.sharing == Sharing::OneRunner)
             .and_then(|r| r.runner.clone());
+        let title = (found.about["title"].as_str()).unwrap_or(&file).to_owned();
+        let run_id = found.about["run_id"].as_str().map(str::to_owned);
+        let waiting = shelf.keeping == Keeping::Private
+            && (run_id.clone()).is_some_and(|run| self.waiting.contains(&(run, title.clone())));
         Some(BoardOutput {
             id: found.id(),
-            title: (found.about["title"].as_str()).unwrap_or(&file).to_owned(),
+            title,
+            run_id,
+            waiting,
             space_id: shelf.space.clone(),
             job: found.job.clone(),
             job_name: recipe.map(|r| r.name.clone()),
@@ -326,10 +335,16 @@ impl Host {
             .prepare("SELECT id, json_extract(data,'$.catch_up') FROM job_runs WHERE json_extract(data,'$.catch_up')>0")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
+        let waiting = self
+            .db
+            .prepare("SELECT r.id, json_extract(o.value,'$.title') FROM job_runs r, json_each(r.data,'$.outputs') o WHERE json_extract(o.value,'$.waiting')=1")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
         Ok(Shelves {
             shelves,
             recipes: self.recipes()?,
             catch_ups,
+            waiting,
             versions: self.home.join("assistant").join("versions"),
             now: now(),
         })
@@ -344,6 +359,10 @@ impl Host {
             "Only an output kept only on this Mac can be shared"
         );
         let output = shelves.describe(&found).context("The output has no file")?;
+        ensure!(
+            !output.waiting,
+            "This output waits for your approval: choose Share or Keep private"
+        );
         let record = self.space(space)?;
         ensure!(
             record.local.enabled,
@@ -351,30 +370,11 @@ impl Host {
             record.space.name
         );
         let target = record.space;
-        let storage = self.storage_folder(&target.storage.repository);
         let base = format!("spaces/{}/boards/{SHARED_OUTPUTS}", target.storage.folder);
-        let slug = assistant::output_folder(&storage.join(&base), &output.title)?;
-        let folder = format!("{base}/{slug}");
         let bytes = fs::read(output.path())?;
-        let about =
-            json!({"title": output.title, "file": output.file, "saved_at": now(), "shared": true});
-        let about = serde_json::to_vec_pretty(&about)?;
-        let mut files: Vec<(String, Option<&[u8]>)> = vec![];
-        // A title shared before is replaced, its old file included.
-        for old in fs::read_dir(storage.join(&folder))
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
-            let name = old.file_name().to_string_lossy().into_owned();
-            if name != output.file {
-                files.push((format!("{folder}/{name}"), None));
-            }
-        }
-        files.push((format!("{folder}/{}", output.file), Some(&bytes)));
-        files.push((format!("{folder}.json"), Some(&about)));
+        let about = json!({"title": output.title, "saved_at": now(), "shared": true});
         let message = format!("{}: shared the output {}", target.name, output.title);
-        self.write_storage_files(&target, &files, &message)?;
+        let folder = self.write_output(&target, &base, &output.file, bytes, about, &message)?;
         let shared = self.shelves()?.list();
         (shared.into_iter())
             .find(|o| {
@@ -383,6 +383,39 @@ impl Host {
                     && o.folder.ends_with(&folder)
             })
             .context("The shared copy was not found")
+    }
+    /// Writes an output into `space`'s storage under `base`, at the folder of the title `about`
+    /// names, as `file` with `about` beside it; a title written before is replaced, its old file
+    /// included. Committed at once in local storage, and pushed by the next pass from GitHub.
+    /// Returns the output's folder, relative to the repository.
+    pub(crate) fn write_output(
+        &self,
+        space: &Space,
+        base: &str,
+        file: &str,
+        bytes: Vec<u8>,
+        mut about: Value,
+        message: &str,
+    ) -> Result<String> {
+        let storage = self.storage_folder(&space.storage.repository);
+        let title = about["title"].as_str().context("An output has a title")?;
+        let folder = format!(
+            "{base}/{}",
+            assistant::output_folder(&storage.join(base), title)?
+        );
+        about["file"] = json!(file);
+        let about = serde_json::to_vec_pretty(&about)?;
+        let mut files: Vec<(String, Option<&[u8]>)> = vec![];
+        for old in (fs::read_dir(storage.join(&folder)).into_iter().flatten()).flatten() {
+            let name = old.file_name().to_string_lossy().into_owned();
+            if name != file {
+                files.push((format!("{folder}/{name}"), None));
+            }
+        }
+        files.push((format!("{folder}/{file}"), Some(&bytes)));
+        files.push((format!("{folder}.json"), Some(&about)));
+        self.write_storage_files(space, &files, message)?;
+        Ok(folder)
     }
 }
 
