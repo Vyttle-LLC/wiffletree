@@ -961,6 +961,11 @@ impl Host {
         let save = move |host: &mut Self| -> Result<Vec<Session>> {
             let project = affected[0].project_id.clone();
             let stops_project = archived && affected[0].role == Role::ProjectOrchestrator;
+            // An implementer's log entries collect per ticket, not per session.
+            let implemented: Vec<String> = (affected.iter())
+                .filter(|s| s.role == Role::Implementer)
+                .filter_map(|s| host.session_runtime(&s.id).ok()?.ticket_id)
+                .collect();
             // A savepoint, so a ticket close or accept can include this in its own change.
             let tx = host.db.savepoint()?;
             for session in &mut affected {
@@ -992,6 +997,10 @@ impl Host {
                 Self::stop_schedules_in(&tx, &sessions, None, "archived")?;
                 for session in &sessions {
                     let closing = memory::Closing::Session(session);
+                    closed_logs += memory::close_log_batches(&tx, closing, now())?;
+                }
+                for ticket in &implemented {
+                    let closing = memory::Closing::Ticket(ticket);
                     closed_logs += memory::close_log_batches(&tx, closing, now())?;
                 }
             }
@@ -1735,7 +1744,7 @@ impl Host {
                 project_id,
                 before,
                 limit,
-            } => serde_json::to_value(self.logs(&project_id, before, limit)?)?,
+            } => serde_json::to_value(self.logs_page(&project_id, before, limit)?)?,
             Command::CreateSpace {
                 name,
                 description,

@@ -737,7 +737,25 @@ impl Host {
 
     pub fn logs(&self, project: &str, before: Option<i64>, limit: usize) -> Result<Vec<WorkLog>> {
         self.project(project)?;
-        Ok(self.db.prepare("SELECT sequence,data FROM work_logs WHERE project_id=?1 AND sequence<?2 ORDER BY sequence DESC LIMIT ?3")?.query_map(params![project, before.unwrap_or(i64::MAX), page_limit(limit)?], |r| { let mut log: WorkLog = decode(r, 1)?; log.sequence = r.get(0)?; Ok(log) })?.collect::<rusqlite::Result<Vec<_>>>()?)
+        Ok(self.db.prepare("SELECT sequence,data FROM work_logs WHERE project_id=?1 AND sequence<?2 ORDER BY sequence DESC LIMIT ?3")?.query_map(params![project, before.unwrap_or(i64::MAX), page_limit(limit)?], read_log)?.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The `logs` command: a page of the project's entries, newest first. The first page also
+    /// ends with every held entry older than it, so the human can always fix or release one.
+    pub fn logs_page(
+        &self,
+        project: &str,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<WorkLog>> {
+        let mut logs = self.logs(project, before, limit)?;
+        if before.is_none()
+            && let Some(oldest) = logs.last().map(|log| log.sequence)
+        {
+            let held = self.db.prepare("SELECT sequence,data FROM work_logs WHERE project_id=?1 AND sequence<?2 AND json_extract(data,'$.held') IS NOT NULL ORDER BY sequence DESC")?.query_map(params![project, oldest], read_log)?.collect::<rusqlite::Result<Vec<_>>>()?;
+            logs.extend(held);
+        }
+        Ok(logs)
     }
 
     /// The migration's carry-over of every row captured before per-entry files.
@@ -921,6 +939,9 @@ impl Host {
                 "UPDATE work_logs SET data=?2,repository=?3,batch_id=?4 WHERE id=?1",
                 params![log.id, encode(&log)?, log.repository, log.batch_id],
             )?;
+            if sent && let Some(batch) = &log.batch_id {
+                host.close_full_batch(batch, now())?;
+            }
             host.clear_held_item(&log.project_id)
         })?;
         Ok(log)
@@ -966,6 +987,13 @@ impl Host {
         }
         Ok(())
     }
+}
+
+/// A `work_logs` row read as `sequence,data`.
+fn read_log(r: &rusqlite::Row) -> rusqlite::Result<WorkLog> {
+    let mut log: WorkLog = decode(r, 1)?;
+    log.sequence = r.get(0)?;
+    Ok(log)
 }
 
 /// Why an entry carried over from before per-entry files cannot be sent as it stands, or `None`
@@ -1571,6 +1599,7 @@ mod tests {
 
         let coordinator = f.coordinator.id.clone();
         log_work(&mut f, &coordinator, args("Plan")).unwrap();
+        log_work(&mut f, &implementer, args("Still open")).unwrap();
         f.host.set_archived(&coordinator, true).unwrap();
         let open: i64 = (f.host.db)
             .query_row(
@@ -1579,9 +1608,14 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(open, 0, "archiving the coordinator closes its batch");
+        assert_eq!(
+            open, 0,
+            "archiving the coordinator closes its batch and its implementers' ticket batches"
+        );
         f.host.send_log_batches(now(), &tools.git).unwrap();
-        assert_eq!(files(&f), [50, 1, 1]);
+        let mut sent = files(&f);
+        sent.sort();
+        assert_eq!(sent, [1, 1, 1, 50]);
     }
 
     #[test]
@@ -1948,6 +1982,79 @@ mod tests {
     }
 
     #[test]
+    fn a_fixed_entry_moved_into_an_open_batch_closes_it_at_50() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let sage = host.create_space("Sage", "", "", None).unwrap().space;
+        let sage = name_brain(&mut host, &sage.id, REPO);
+        let project = host.create_project("Full").unwrap();
+        host.move_project_to_space(&project.id, &sage).unwrap();
+        let coordinator = host.coordinator_of(&project.id).unwrap().unwrap();
+        drop(host);
+        before_entries(
+            home.path(),
+            &[
+                ("fits", &coordinator, "—", false),
+                ("broken", &coordinator, "main 1a2b3c4", false),
+            ],
+        );
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        host.legacy_pointer = home.path().join("no-pointer");
+        host.record_gh_login(Some("mhohlios".into()));
+        let folder = tempfile::tempdir().unwrap();
+        let tools = GitHub::new(folder.path()).tools();
+        assert!(run(&mut host, &tools));
+        host.send_logs_now(None).unwrap();
+        host.send_log_batches(now(), &tools.git).unwrap();
+        assert_eq!(
+            host.brain_batches(Some(REPO)).unwrap().len(),
+            1,
+            "sent without the held one"
+        );
+        let input = |i: usize| LogInput {
+            session_id: coordinator.clone(),
+            milestone: None,
+            kind: LogKind::Observation,
+            title: format!("Entry {i}"),
+            repository: None,
+            ticket_id: None,
+            changed: "c".into(),
+            why: "w".into(),
+            state: "s".into(),
+        };
+        for i in 0..49 {
+            host.append_log(input(i)).unwrap();
+        }
+        let broken = (host.logs(&project.id, None, 100).unwrap().into_iter())
+            .find(|l| l.held.is_some())
+            .unwrap();
+        let fixed = host
+            .fix_held_log(
+                &broken.id,
+                LogFix {
+                    kind: LogKind::Decision,
+                    title: "Old".into(),
+                    repository: "sagehaven-docs".into(),
+                    reference: NO_REF.into(),
+                    changed: "c".into(),
+                    why: "w".into(),
+                    state: "s".into(),
+                },
+            )
+            .unwrap();
+        let (count, closed): (i64, bool) = (host.db)
+            .query_row(
+                "SELECT (SELECT count(*) FROM work_logs WHERE batch_id=?1), closed_at IS NOT NULL FROM log_batches WHERE id=?1",
+                [&fixed.batch_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((count, closed), (50, true));
+        let next = host.append_log(input(50)).unwrap();
+        assert_ne!(next.batch_id, fixed.batch_id, "the 51st starts a new batch");
+    }
+
+    #[test]
     fn a_held_entry_is_fixed_or_released_and_the_inbox_item_clears_once_none_is_held() {
         let home = tempfile::tempdir().unwrap();
         let mut host = Host::open_set_up(home.path()).unwrap();
@@ -1980,6 +2087,11 @@ mod tests {
                 .clone()
         };
         let (to_fix, to_release) = (held("main 1a2b3c4"), held("see PR 92"));
+        // The panel's first page always reaches every held entry, however old.
+        let page = host.logs_page(&project.id, None, 1).unwrap();
+        assert_eq!(page.len(), 2);
+        assert!(page.iter().all(|l| l.held.is_some()));
+        assert_eq!(host.logs(&project.id, None, 1).unwrap().len(), 1);
         // The held entries' batch goes out without them.
         let folder = tempfile::tempdir().unwrap();
         let tools = GitHub::new(folder.path()).tools();

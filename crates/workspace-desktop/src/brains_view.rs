@@ -404,6 +404,17 @@ impl BrainsPage {
                     })),
             );
         }
+        if !brain.spaces.is_empty() {
+            let r = repository.clone();
+            actions = actions.child(
+                ui::gated(button(SharedString::from(format!("send-now-{repository}"))).outline().label("Send now"), host)
+                    .tooltip("Closes every open log batch of this brain, so each opens its PR on the next sync instead of waiting up to a day.")
+                    .on_click(cx.listener(move |v, _, w, c| {
+                        let repository = Some(r.clone());
+                        v.request(Command::SendLogsNow { repository }, w, c)
+                    })),
+            );
+        }
         if brain.legacy_import {
             let r = repository.clone();
             actions = actions.child(
