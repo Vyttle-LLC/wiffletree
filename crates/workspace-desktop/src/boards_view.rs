@@ -18,7 +18,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use ui::{card, hint, icon, pill};
-use workspace_core::board::{BoardOutput, BoardVersion, FileKind, Keeping, plain_file_name};
+use workspace_core::board::{
+    BoardOutput, BoardVersion, FileKind, Keeping, LATEST, plain_file_name,
+};
 use workspace_core::job::{JobKey, JobState, RunOutcome, Runner, Sharing};
 
 /// What the HTML viewer says about its sandbox, as the mockup words it.
@@ -301,7 +303,7 @@ impl BoardsPage {
                 };
                 match versions {
                     Ok(versions) => {
-                        viewer.version = versions.first().map(|v| v.commit.clone());
+                        viewer.version = Some(LATEST.to_owned());
                         viewer.versions = versions;
                     }
                     Err(error) => toast_error(error, window, cx),

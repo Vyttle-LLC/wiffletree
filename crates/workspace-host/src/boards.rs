@@ -5,7 +5,9 @@
 use crate::*;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use workspace_core::board::{BoardOutput, BoardVersion, FileKind, Keeping, plain_file_name};
+use workspace_core::board::{
+    BoardOutput, BoardVersion, FileKind, Keeping, LATEST, plain_file_name,
+};
 use workspace_core::job::{Cron, JobKey, Recipe, Sharing};
 
 /// The folder of a Space's storage, beside its jobs' folders, that holds outputs the user
@@ -137,17 +139,53 @@ impl Shelves {
             stale: recipe.is_some_and(|r| stale(r, updated_at, self.now)),
         })
     }
-    /// An output's versions, newest first: each commit that rewrote its metadata, and for a
-    /// shared job's output, the runner's saves that a later save replaced before a push, which
-    /// only this Mac keeps.
+    /// An output's versions: `LATEST`, the output as it is now, then its history newest first:
+    /// each commit that rewrote its metadata, and for a shared job's output, the runner's saves
+    /// that a later save replaced before a push, which only this Mac keeps. The commit that
+    /// holds the latest is not listed twice.
     pub(crate) fn versions(&self, id: &str) -> Result<Vec<BoardVersion>> {
         let found = self.find(id)?;
-        let mut versions = self.logged(&found.shelf.repository, &found.metadata(), false)?;
+        let latest = self.version_of(LATEST, &found.about, 0, false);
+        let mut history = self.logged(&found.shelf.repository, &found.metadata(), false)?;
         if let Some(folder) = self.unpushed_of(&found) {
-            versions.extend(self.logged(&self.store, &format!("{folder}.json"), true)?);
-            versions.sort_by_key(|version| std::cmp::Reverse(version.saved_at));
+            history.extend(self.logged(&self.store, &format!("{folder}.json"), true)?);
+            history.sort_by_key(|version| std::cmp::Reverse(version.saved_at));
         }
-        Ok(versions)
+        let held = |version: &BoardVersion| {
+            let commit = LATEST.to_owned();
+            !version.local_only
+                && BoardVersion {
+                    commit,
+                    ..version.clone()
+                } == latest
+        };
+        if history.first().is_some_and(held) {
+            history.remove(0);
+        }
+        history.insert(0, latest);
+        Ok(history)
+    }
+    /// The version whose metadata is `about`, saved at `committed` (Unix seconds) if it says no
+    /// time.
+    fn version_of(
+        &self,
+        commit: &str,
+        about: &Value,
+        committed: i64,
+        local_only: bool,
+    ) -> BoardVersion {
+        let run_id = about["run_id"].as_str().map(str::to_owned);
+        BoardVersion {
+            commit: commit.to_owned(),
+            saved_at: about["saved_at"].as_i64().unwrap_or(committed * 1000),
+            catch_up: (run_id.as_ref())
+                .and_then(|run| self.catch_ups.get(run).copied())
+                .unwrap_or_default(),
+            run_id,
+            shared: about["shared"].as_bool().unwrap_or_default(),
+            local_only,
+            file: about["file"].as_str().unwrap_or_default().to_owned(),
+        }
     }
     /// The private board store's folder that keeps the replaced, never pushed saves of a
     /// shared job's output, by its title.
@@ -192,32 +230,23 @@ impl Shelves {
                 .ok()
                 .and_then(|text| serde_json::from_str(&text).ok())
                 .unwrap_or_default();
+            let committed = time.parse().unwrap_or_default();
+            let version = self.version_of(commit, &about, committed, local_only);
             // An earlier commit's metadata is as untrusted as the latest's.
-            let file = about["file"].as_str().unwrap_or_default().to_owned();
-            if !plain_file_name(&file) {
-                continue;
+            if plain_file_name(&version.file) {
+                versions.push(version);
             }
-            let run_id = about["run_id"].as_str().map(str::to_owned);
-            versions.push(BoardVersion {
-                commit: commit.to_owned(),
-                saved_at: (about["saved_at"].as_i64())
-                    .unwrap_or_else(|| time.parse::<i64>().unwrap_or_default() * 1000),
-                catch_up: (run_id.as_ref())
-                    .and_then(|run| self.catch_ups.get(run).copied())
-                    .unwrap_or_default(),
-                run_id,
-                shared: about["shared"].as_bool().unwrap_or_default(),
-                local_only,
-                file,
-            });
         }
         Ok(versions)
     }
-    /// The folder holding the version `commit` of an output: its own folder for the latest it
-    /// keeps, else a copy of the commit's files, made once.
+    /// The folder holding the version `commit` of an output: its own folder for `LATEST`, else
+    /// a copy of the commit's files, made once.
     pub(crate) fn version_folder(&self, id: &str, commit: &str) -> Result<PathBuf> {
-        let versions = self.versions(id)?;
         let found = self.find(id)?;
+        if commit == LATEST {
+            return Ok(found.shelf.repository.join(&found.folder));
+        }
+        let versions = self.versions(id)?;
         let at = (versions.iter())
             .position(|version| version.commit == commit)
             .context("That version is not one of the output's")?;
@@ -228,9 +257,6 @@ impl Shelves {
             ),
             false => (found.shelf.repository.clone(), found.folder.clone()),
         };
-        if at == 0 && !versions[at].local_only {
-            return Ok(repository.join(&folder));
-        }
         let copy = self.versions.join(id).join(commit);
         if copy.is_dir() {
             return Ok(copy);

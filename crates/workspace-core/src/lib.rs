@@ -3375,12 +3375,13 @@ pub enum Command {
     },
     /// Every output on Boards, at its latest version. Answered with `Vec<BoardOutput>`.
     Boards,
-    /// An output's versions, newest first. Answered with `Vec<BoardVersion>`.
+    /// An output's versions: `board::LATEST` first, then its history, newest first. Answered
+    /// with `Vec<BoardVersion>`.
     BoardVersions {
         board_id: String,
     },
     /// The folder on this Mac that holds one version of an output, for the viewer: the
-    /// output's own folder for its latest, else a copy. Answered with the folder's path.
+    /// output's own folder for `board::LATEST`, else a copy. Answered with the folder's path.
     BoardVersionFolder {
         board_id: String,
         commit: String,

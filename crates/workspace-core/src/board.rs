@@ -97,7 +97,11 @@ impl FileKind {
     }
 }
 
-/// One version of an output: a commit that saved it.
+/// The `commit` of the version that is the output as it is now, in its own folder, which Git may
+/// not hold yet.
+pub const LATEST: &str = "latest";
+
+/// One version of an output: a commit that saved it, or `LATEST`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoardVersion {
     pub commit: String,

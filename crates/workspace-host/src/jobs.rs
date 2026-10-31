@@ -2407,7 +2407,7 @@ mod tests {
         use crate::storage::tests::{host, join_sage, shared_storage, space_named, sync};
         use crate::sync::tests::{GitHub, NAME};
         use std::sync::Arc;
-        use workspace_core::board::{BoardOutput, Keeping};
+        use workspace_core::board::{BoardOutput, Keeping, LATEST};
 
         const OUTPUT: &str =
             "spaces/sage/boards/release-dashboard/release-dashboard/dashboard.html";
@@ -2669,6 +2669,47 @@ mod tests {
                 s.boards().len(),
                 1,
                 "a kept save is a version, not an output"
+            );
+        }
+
+        #[test]
+        fn the_picker_starts_with_the_current_output_before_and_after_a_push() {
+            let mut s = shared(false);
+            let key = s.approved();
+            s.run_saving(&key, "<p>two</p>");
+            s.run_saving(&key, "<p>three</p>");
+            let shared = s.shared_output();
+            // Each version's label and what picking it serves.
+            let picker = |s: &Shared| {
+                let shelves = s.host.shelves().unwrap();
+                let versions = shelves.versions(&shared.id).unwrap();
+                (versions.into_iter())
+                    .map(|v| {
+                        let folder = shelves.version_folder(&shared.id, &v.commit).unwrap();
+                        let body = fs::read_to_string(folder.join("dashboard.html")).unwrap();
+                        (v.commit == LATEST, v.local_only, body)
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let version = |latest, local_only, body: &str| (latest, local_only, body.to_owned());
+            // Version 1 is pushed, 2 is only here and 3 is not committed anywhere yet.
+            assert_eq!(
+                picker(&s),
+                [
+                    version(true, false, "<p>three</p>"),
+                    version(false, true, "<p>two</p>"),
+                    version(false, false, "<p>first</p>"),
+                ]
+            );
+            // Pushed, 3 is a commit, which the latest stands for rather than repeats.
+            s.sync();
+            assert_eq!(
+                picker(&s),
+                [
+                    version(true, false, "<p>three</p>"),
+                    version(false, true, "<p>two</p>"),
+                    version(false, false, "<p>first</p>"),
+                ]
             );
         }
 
