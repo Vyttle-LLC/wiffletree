@@ -169,6 +169,19 @@ impl Host {
         };
         selection.resolve(job, small, may_skip, &limits, &reset_time)
     }
+    /// `resolve_job` for a run `without` cannot be started on, as if it were not signed in.
+    pub(crate) fn resolve_job_without(&self, job: &Job, without: Provider) -> Result<Pick> {
+        let selection = self.model_selection()?;
+        let (quotas, mut unusable, switch_at) = self.limits()?;
+        unusable.insert(without);
+        let limits = Limits {
+            quotas: &quotas,
+            unusable: &unusable,
+            switch_at,
+            now: now(),
+        };
+        selection.resolve(job, false, false, &limits, &reset_time)
+    }
     /// Pins a session's model and records how it was chosen.
     pub(crate) fn pin(
         &mut self,

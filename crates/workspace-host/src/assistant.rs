@@ -2,8 +2,10 @@
 //! parent or ticket, each in its own scratch folder, kept only on this Mac.
 use crate::*;
 use workspace_core::assistant::{
-    CardKind, Thread, ThreadCard, ThreadHit, ThreadTab, title_from_message, validate_title,
+    CardKind, JobRunOf, Thread, ThreadCard, ThreadHit, ThreadTab, title_from_message,
+    validate_title,
 };
+use workspace_core::job::{OutputKind, Recipe, Sharing, job_id};
 
 /// The message a thread is sent when the human asks for Make this a project's brief.
 pub(crate) const BRIEF_REQUEST: &str = "Make this a project: write a project brief from our conversation, with a short project name, and show it to me with project_brief.";
@@ -246,12 +248,26 @@ impl Host {
             return Ok(thread);
         }
         let record = self.space(space)?;
+        let model = self.thread_model(&record, chosen)?;
+        self.open_thread(id, space, title, None, model, first)
+    }
+    /// Starts a thread, or with `job` a job's run, on `model` and sends it its `first`
+    /// message.
+    pub(crate) fn open_thread(
+        &mut self,
+        id: &str,
+        space: &SpaceId,
+        title: &str,
+        job: Option<JobRunOf>,
+        (profile, chooser, reason, waits): (ModelProfile, Chooser, String, bool),
+        first: FirstMessage,
+    ) -> Result<Thread> {
+        let record = self.space(space)?;
         ensure!(
             record.local.enabled,
             "{} is off on this Mac",
             record.space.name
         );
-        let (profile, chooser, reason, waits) = self.thread_model(&record, chosen)?;
         let at = now();
         let title = title.to_owned();
         let session = Session {
@@ -260,7 +276,10 @@ impl Host {
             parent_id: None,
             repository_id: None,
             name: title.clone(),
-            role: Role::Assistant,
+            role: match job {
+                Some(_) => Role::JobRun,
+                None => Role::Assistant,
+            },
             provider: profile.provider,
             status: Status::Ready,
             archived: false,
@@ -284,6 +303,7 @@ impl Host {
             cards: vec![],
             routed: vec![],
             moved: vec![],
+            job,
         };
         let scratch = scratch_folder(&self.home, id);
         fs::create_dir_all(&scratch)?;
@@ -347,7 +367,7 @@ impl Host {
     /// Whether this Mac may run `profile` in a Space: its provider is not found signed out here
     /// and the Space's local list, if it has one, allows the model. A provider not detected yet
     /// counts as signed in, as the Spaces page's fallback note counts it.
-    fn may_use(&self, local: &SpaceLocal, profile: &ModelProfile) -> bool {
+    pub(crate) fn may_use(&self, local: &SpaceLocal, profile: &ModelProfile) -> bool {
         self.detected
             .get(&profile.provider)
             .is_none_or(|signed_in| *signed_in)
@@ -367,6 +387,15 @@ impl Host {
             thread.project_id.is_none(),
             "This thread became a project and is read-only"
         );
+        if thread.job.is_some() {
+            let sent: i64 = self.db.query_row(
+                "SELECT count(*) FROM messages WHERE recipient=?1 AND sender IS NULL",
+                [&session.id],
+                |r| r.get(0),
+            )?;
+            ensure!(sent == 0, "A job's run takes no message but its prompt");
+            return Ok(());
+        }
         if sender.is_none() {
             thread.last_message_at = now();
             thread.closed = false;
@@ -440,7 +469,7 @@ impl Host {
         let query = query.trim();
         let pattern = like_pattern(query);
         let threads: Vec<Thread> = self.list_data(
-            "SELECT t.data FROM threads t WHERE (?2 IS NULL OR t.space_id=?2) AND (json_extract(t.data,'$.title') LIKE ?1 ESCAPE '\\' OR EXISTS (SELECT 1 FROM messages m WHERE m.recipient=t.id AND m.body LIKE ?1 ESCAPE '\\')) ORDER BY json_extract(t.data,'$.last_message_at') DESC LIMIT 100",
+            "SELECT t.data FROM threads t WHERE (?2 IS NULL OR t.space_id=?2) AND json_extract(t.data,'$.job') IS NULL AND (json_extract(t.data,'$.title') LIKE ?1 ESCAPE '\\' OR EXISTS (SELECT 1 FROM messages m WHERE m.recipient=t.id AND m.body LIKE ?1 ESCAPE '\\')) ORDER BY json_extract(t.data,'$.last_message_at') DESC LIMIT 100",
             params![pattern, space.map(SpaceId::as_str)],
         )?;
         threads
@@ -578,10 +607,14 @@ impl Host {
         Some(sync::named(author, subject).to_owned())
     }
     /// What a thread's turn may use beyond reading: its scratch folder and its Space's
-    /// sources, with each MCP source's definition from the provider's own configuration.
+    /// sources, or for a job's run only its recipe's, with each MCP source's definition from
+    /// the provider's own configuration.
     pub(crate) fn thread_launch(&self, session: &Session) -> Result<provider::ThreadLaunch> {
         let thread = self.thread(&session.id)?;
-        let sources = self.space(&thread.space_id)?.space.sources;
+        let sources = match &thread.job {
+            Some(job) => self.recipe(&job.job)?.sources,
+            None => self.space(&thread.space_id)?.space.sources,
+        };
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_default();
@@ -601,6 +634,7 @@ impl Host {
             scratch: fs::canonicalize(scratch)?,
             sources,
             servers,
+            job_run: thread.job.is_some(),
         })
     }
     /// A thread's workspace tool. No other tool is offered to a thread, and none of these
@@ -612,7 +646,24 @@ impl Host {
         args: &Value,
     ) -> Result<Value> {
         let mut thread = self.thread(&session.id)?;
+        // A job's run saves its output, and does nothing else.
+        if let Some(job) = thread.job.clone() {
+            ensure!(
+                name == "save_output",
+                "{name} is not one of a job run's tools"
+            );
+            let title = card_text(args, "title", 200)?;
+            let source = self.output_source(&thread, card_text(args, "path", 1024)?)?;
+            let output = self.save_job_output(&thread, &job, title, &source)?;
+            return Ok(json!({"version": output.version, "kept": output.kept}));
+        }
         match name {
+            "propose_job" => {
+                let recipe = proposed_recipe(&thread, args)?;
+                let preview = self.preview_job(&recipe)?;
+                let recipe = Box::new(recipe);
+                self.add_card(&mut thread, CardKind::Recipe { recipe, preview })
+            }
             "save_output" => {
                 let title = card_text(args, "title", 200)?;
                 let path = card_text(args, "path", 1024)?;
@@ -647,56 +698,138 @@ impl Host {
     /// with its metadata beside the folder as `<folder>.json`, so no file name collides with
     /// it. Returns the file's name and the version.
     fn save_output(&self, thread: &Thread, title: &str, path: &str) -> Result<(String, u32)> {
+        let source = self.output_source(thread, path)?;
+        let about = json!({"title":title,"thread_id":thread.id,"saved_at":now()});
+        store_output(
+            &board_store(&self.home),
+            thread.space_id.as_str(),
+            title,
+            &source,
+            about,
+        )
+    }
+    /// A file of the thread's scratch folder that `save_output` may copy.
+    fn output_source(&self, thread: &Thread, path: &str) -> Result<PathBuf> {
         let scratch = fs::canonicalize(scratch_folder(&self.home, &thread.id))?;
         let source = inside_scratch(&scratch, path)?;
         let size = fs::metadata(&source)?.len();
         ensure!(size <= MAX_OUTPUT_BYTES, "An output can be at most 20 MB");
-        let store = board_store(&self.home);
-        if !store.join(".git").exists() {
-            fs::create_dir_all(&store)?;
-            runtime::git_output(&store, &["init", "-q", "-b", "main"])?;
-        }
-        let relative = output_folder(&store.join(thread.space_id.as_str()), title)
-            .map(|folder| format!("{}/{folder}", thread.space_id))?;
-        let metadata = format!("{relative}.json");
-        let folder = store.join(&relative);
-        if folder.exists() {
-            fs::remove_dir_all(&folder)?;
-        }
-        fs::create_dir_all(&folder)?;
-        let file = source
-            .file_name()
-            .context("Name a file")?
-            .to_string_lossy()
-            .into_owned();
-        fs::copy(&source, folder.join(&file))?;
-        let about = json!({"title":title,"file":file,"thread_id":thread.id,"saved_at":now()});
-        shared::write_atomically(&store.join(&metadata), &serde_json::to_vec_pretty(&about)?)?;
-        let author = [
-            "-c",
-            "user.name=Wiffletree",
-            "-c",
-            "user.email=wiffletree@localhost",
-        ];
-        let mut add = author.to_vec();
-        add.extend(["add", "-A", "--", relative.as_str(), metadata.as_str()]);
-        runtime::git_output(&store, &add)?;
-        let mut commit = author.to_vec();
-        let message = format!("Save {relative}");
-        commit.extend([
-            "commit",
-            "-q",
-            "-m",
-            message.as_str(),
-            "--",
-            relative.as_str(),
-            metadata.as_str(),
-        ]);
-        runtime::git_output(&store, &commit)?;
-        // Each save rewrites the metadata, so its commits count the versions.
-        let count = runtime::git_output(&store, &["rev-list", "--count", "HEAD", "--", &metadata])?;
-        Ok((file, count.trim().parse().unwrap_or(1)))
+        Ok(source)
     }
+}
+
+/// The folder of a Space's part of the board store that holds its jobs' outputs. A title's
+/// folder is never named so, since titles' folder names hold no underscore.
+pub(crate) const JOB_OUTPUTS: &str = "_jobs";
+
+/// Copies `source` into the repository at `repository`, under `base`, as `title`'s output and
+/// commits it; a title saved before gets a new version. Each output is a folder holding only
+/// its file, with `about` and the file's name beside the folder as `<folder>.json`, so no
+/// file name collides with it. Returns the file's name and the version.
+pub(crate) fn store_output(
+    repository: &Path,
+    base: &str,
+    title: &str,
+    source: &Path,
+    mut about: Value,
+) -> Result<(String, u32)> {
+    if !repository.join(".git").exists() {
+        fs::create_dir_all(repository)?;
+        runtime::git_output(repository, &["init", "-q", "-b", "main"])?;
+    }
+    let relative =
+        output_folder(&repository.join(base), title).map(|folder| format!("{base}/{folder}"))?;
+    let metadata = format!("{relative}.json");
+    let folder = repository.join(&relative);
+    if folder.exists() {
+        fs::remove_dir_all(&folder)?;
+    }
+    fs::create_dir_all(&folder)?;
+    let file = source
+        .file_name()
+        .context("Name a file")?
+        .to_string_lossy()
+        .into_owned();
+    fs::copy(source, folder.join(&file))?;
+    about["file"] = json!(file);
+    shared::write_atomically(
+        &repository.join(&metadata),
+        &serde_json::to_vec_pretty(&about)?,
+    )?;
+    let author = [
+        "-c",
+        "user.name=Wiffletree",
+        "-c",
+        "user.email=wiffletree@localhost",
+        "-c",
+        "commit.gpgsign=false",
+    ];
+    let mut add = author.to_vec();
+    add.extend(["add", "-A", "--", relative.as_str(), metadata.as_str()]);
+    runtime::git_output(repository, &add)?;
+    let mut commit = author.to_vec();
+    let message = format!("Save {relative}");
+    commit.extend([
+        "commit",
+        "-q",
+        "--no-verify",
+        "-m",
+        message.as_str(),
+        "--",
+        relative.as_str(),
+        metadata.as_str(),
+    ]);
+    runtime::git_output(repository, &commit)?;
+    // Each save rewrites the metadata, so its commits count the versions.
+    let count = runtime::git_output(
+        repository,
+        &["rev-list", "--count", "HEAD", "--", &metadata],
+    )?;
+    Ok((file, count.trim().parse().unwrap_or(1)))
+}
+
+/// The recipe a thread's `propose_job` describes, in the thread's own Space, for its card.
+/// A recipe names its own sources; none are taken from elsewhere.
+fn proposed_recipe(thread: &Thread, args: &Value) -> Result<Recipe> {
+    let name = card_text(args, "name", 200)?.to_owned();
+    let prompt = card_text(args, "prompt", MAX_CARD_TEXT)?.to_owned();
+    let cron = card_text(args, "cron", 200)?.to_owned();
+    let timezone = match args["timezone"].as_str().map(str::trim) {
+        Some(zone) if !zone.is_empty() => zone.to_owned(),
+        _ => jobs::local_timezone(),
+    };
+    let sources: Vec<Source> = match args.get("sources") {
+        Some(sources) if !sources.is_null() => serde_json::from_value(sources.clone())
+            .context("Each source is an MCP server with its tools or a CLI with its commands")?,
+        _ => vec![],
+    };
+    let output = match args["output_title"].as_str().map(str::trim) {
+        Some(title) if !title.is_empty() => Some(OutputKind {
+            title: title.into(),
+            file_type: args["output_type"].as_str().unwrap_or("md").trim().into(),
+        }),
+        _ => None,
+    };
+    let sharing = match args["sharing"].as_str() {
+        Some("everyone") => Sharing::Everyone,
+        _ => Sharing::OneRunner,
+    };
+    let recipe = Recipe {
+        id: job_id(&name),
+        name,
+        space_id: thread.space_id.clone(),
+        prompt,
+        schedule: workspace_core::job::Schedule { cron, timezone },
+        model: None,
+        sources,
+        output,
+        sharing,
+        runner: None,
+        enabled: true,
+        extra: Default::default(),
+    };
+    jobs::validate(&recipe)?;
+    Ok(recipe)
 }
 
 /// The folder in a Space's part of the board store that `title` saves to: its slug, or the

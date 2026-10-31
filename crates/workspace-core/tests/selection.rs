@@ -473,6 +473,40 @@ fn the_table_needs_each_fixed_job_once_and_a_then_on_another_subscription() {
     assert!(keepers.validate().is_err());
 }
 
+#[test]
+fn jobs_follow_the_assistant_row_until_they_have_a_row_of_their_own() {
+    let unusable = BTreeSet::new();
+    let pick = |table: &ModelSelection| {
+        (table.resolve(&Job::Job, false, false, &limits(&[], &unusable), &when))
+            .unwrap()
+            .profile
+    };
+    let mut table = table();
+    assert_eq!(pick(&table), sonnet());
+    // An upgrade adds no Job row.
+    table.fit(&VerificationSettings::default());
+    assert!(table.row(&Job::Job).is_none());
+    table.set_job_row(Some(Line {
+        first: opus(),
+        then: Then::Model(sol()),
+    }));
+    table.validate().unwrap();
+    assert_eq!(pick(&table), opus());
+    table.fit(&VerificationSettings::default());
+    assert!(table.row(&Job::Job).is_some(), "fitting keeps it");
+    let mut twice = table.clone();
+    twice.jobs.push(twice.row(&Job::Job).unwrap().clone());
+    assert_eq!(
+        twice.validate().unwrap_err().to_string(),
+        "Jobs have two rows"
+    );
+    let mut skipping = table.clone();
+    skipping.row_mut(&Job::Job).unwrap().main.then = Then::Skip;
+    assert!(skipping.validate().is_err());
+    table.set_job_row(None);
+    assert_eq!(pick(&table), sonnet());
+}
+
 fn skipping_reviewer() -> JobRow {
     JobRow {
         job: Job::Verifier {

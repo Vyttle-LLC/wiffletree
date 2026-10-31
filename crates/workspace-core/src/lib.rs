@@ -14,6 +14,7 @@ mod host;
 pub mod host_copy;
 mod index;
 mod issues;
+pub mod job;
 mod launch;
 mod merging;
 mod messages;
@@ -87,9 +88,12 @@ pub enum Role {
     /// An assistant thread, owned by its Space and outside every project. Only the human
     /// starts one.
     Assistant,
+    /// One run of a scheduled job: a read-only thread in the job's Space that only the
+    /// scheduler starts.
+    JobRun,
 }
 impl Role {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::ProjectOrchestrator,
         Self::TaskOrchestrator,
         Self::Implementer,
@@ -98,6 +102,7 @@ impl Role {
         Self::Maintenance,
         Self::Keeper,
         Self::Assistant,
+        Self::JobRun,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -109,13 +114,19 @@ impl Role {
             Self::Maintenance => "Maintenance",
             Self::Keeper => "PR keeper",
             Self::Assistant => "Assistant",
+            Self::JobRun => "Job run",
         }
     }
     pub fn is_worker(self) -> bool {
         !matches!(
             self,
-            Self::ProjectOrchestrator | Self::TaskOrchestrator | Self::Assistant
+            Self::ProjectOrchestrator | Self::TaskOrchestrator | Self::Assistant | Self::JobRun
         )
+    }
+    /// A thread of the assistant or a job's run: owned by a Space, read-only but for its
+    /// scratch folder, with the thread tools and no coordination.
+    pub fn is_thread(self) -> bool {
+        matches!(self, Self::Assistant | Self::JobRun)
     }
     /// A ticket agent's short name: its role, plus its focus when others share that role.
     pub fn agent_label(self, focus: Option<&str>) -> String {
@@ -153,7 +164,7 @@ impl Skill {
             Role::Implementer | Role::Maintenance => Self::Implementing,
             Role::Tester | Role::Reviewer => Self::Reviewing,
             Role::Keeper => Self::KeepingAPr,
-            Role::Assistant => Self::Assisting,
+            Role::Assistant | Role::JobRun => Self::Assisting,
         }
     }
     pub fn name(self) -> &'static str {
@@ -905,6 +916,10 @@ pub struct Snapshot {
     /// The messages the router holds unsent, oldest first.
     #[serde(default)]
     pub held: Vec<assistant::HeldMessage>,
+    /// The jobs saved in the Spaces on this Mac, by Space and name. Built-in host jobs are in
+    /// no Space and not listed.
+    #[serde(default)]
+    pub jobs: Vec<job::JobState>,
 }
 fn assistant_name() -> String {
     assistant::DEFAULT_NAME.into()
@@ -3305,6 +3320,40 @@ pub enum Command {
     SetRouterThreshold {
         threshold: f64,
     },
+    /// Saves a job, new or changed, as the user confirmed it on its recipe card or its page:
+    /// the only way a job is created or changed. Answered with the `JobState`.
+    SaveJob {
+        recipe: Box<job::Recipe>,
+    },
+    /// What a recipe's card shows before it is saved: its schedule in words, its next runs,
+    /// its sources as checked now and its model. Answered with a `RecipePreview`.
+    PreviewJob {
+        recipe: Box<job::Recipe>,
+    },
+    /// Pauses a job, or with `enabled` resumes it from its next scheduled time.
+    SetJobEnabled {
+        space_id: SpaceId,
+        job_id: String,
+        enabled: bool,
+    },
+    /// Run now, for a job or a built-in job.
+    RunJobNow {
+        job: job::JobKey,
+    },
+    /// Removes a job's recipe and its runs.
+    DeleteJob {
+        space_id: SpaceId,
+        job_id: String,
+    },
+    /// Stops a job's run that is still running.
+    StopJobRun {
+        run_id: String,
+    },
+    /// The user opened a job's page: its failed and unstarted runs stop counting on the
+    /// assistant's row.
+    SeeJobRuns {
+        job: job::JobKey,
+    },
     /// Creates a Space with local storage and a local tracker, or, with `storage`, stored in
     /// that private GitHub repository (`owner/name` or its URL), whose tracker it shares; without
     /// `prefix`, a new tracker gets the one proposed from the Space's name.
@@ -3932,6 +3981,7 @@ impl Command {
             | Self::IssuePeople { .. }
             | Self::SearchThreads { .. }
             | Self::ScratchFiles { .. }
+            | Self::PreviewJob { .. }
             | Self::RemoteAccess => true,
             Self::ImportRepositories { .. }
             | Self::RefreshRepositories
@@ -3973,6 +4023,12 @@ impl Command {
             | Self::AnswerHeld { .. }
             | Self::ChangeRoute { .. }
             | Self::SetRouterThreshold { .. }
+            | Self::SaveJob { .. }
+            | Self::SetJobEnabled { .. }
+            | Self::RunJobNow { .. }
+            | Self::DeleteJob { .. }
+            | Self::StopJobRun { .. }
+            | Self::SeeJobRuns { .. }
             | Self::SetSpaceBrain { .. }
             | Self::CreateSpace { .. }
             | Self::UpdateSpace { .. }
@@ -4054,7 +4110,7 @@ impl Command {
     /// Every write to a tracker is the human's, settling a paused issue file, following an issue
     /// and every step of a Linear import too; reading issues is not. Remote access is the human's
     /// too: its state carries the pairing code. The assistant is the human's: its threads, their
-    /// text and its name.
+    /// text and its name. So are jobs: only the user saves, pauses, runs or deletes one.
     pub fn is_human_only(&self) -> bool {
         matches!(
             self,
@@ -4074,6 +4130,13 @@ impl Command {
                 | Self::AnswerHeld { .. }
                 | Self::ChangeRoute { .. }
                 | Self::SetRouterThreshold { .. }
+                | Self::SaveJob { .. }
+                | Self::PreviewJob { .. }
+                | Self::SetJobEnabled { .. }
+                | Self::RunJobNow { .. }
+                | Self::DeleteJob { .. }
+                | Self::StopJobRun { .. }
+                | Self::SeeJobRuns { .. }
                 | Self::ResolveAttention { .. }
                 | Self::DismissAttention { .. }
                 | Self::SetOwnerAllowed { .. }

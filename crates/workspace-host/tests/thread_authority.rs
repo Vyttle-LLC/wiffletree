@@ -51,6 +51,30 @@ fn resumed_turn(
     prompt: &str,
     session: Option<String>,
 ) -> (String, Option<String>) {
+    let launch = ThreadLaunch {
+        scratch: folders.scratch.clone(),
+        ..Default::default()
+    };
+    launched_turn(
+        provider,
+        model,
+        folders,
+        prompt,
+        session,
+        Role::Assistant,
+        launch,
+    )
+}
+/// Runs a turn of `prompt` as a session of `role` with `launch`.
+fn launched_turn(
+    provider: Provider,
+    model: &str,
+    folders: &Folders,
+    prompt: &str,
+    session: Option<String>,
+    role: Role,
+    launch: ThreadLaunch,
+) -> (String, Option<String>) {
     let turn = Turn {
         run_id: new_id(),
         kind: TurnKind::Prompt,
@@ -60,7 +84,7 @@ fn resumed_turn(
             parent_id: None,
             repository_id: None,
             name: "Thread".into(),
-            role: Role::Assistant,
+            role,
             provider,
             status: Status::Ready,
             archived: false,
@@ -78,11 +102,8 @@ fn resumed_turn(
         socket: folders.scratch.join("no-socket"),
         token: String::new(),
         helper: env!("CARGO_BIN_EXE_workspace-host").into(),
-        instructions: provider::skill(Role::Assistant),
-        thread: Some(ThreadLaunch {
-            scratch: folders.scratch.clone(),
-            ..Default::default()
-        }),
+        instructions: provider::skill(role),
+        thread: Some(launch),
     };
     let mut reply = String::new();
     let mut failure = None;
@@ -231,4 +252,68 @@ fn a_codex_thread_cannot_widen_its_next_turn_with_project_files_in_scratch() {
     );
     assert!(!widened.exists(), "the looser sandbox applied: {reply}");
     assert!(!marker.exists(), "the widened MCP server started: {reply}");
+}
+
+#[test]
+#[ignore = "runs the real Claude CLI"]
+fn a_claude_job_run_runs_its_listed_command_and_is_denied_another() {
+    let folders = folders();
+    let launch = ThreadLaunch {
+        scratch: folders.scratch.clone(),
+        sources: vec![Source::Cli {
+            command: "touch".into(),
+            prefixes: vec!["touch listed.txt".into()],
+            check: None,
+            extra: Default::default(),
+        }],
+        job_run: true,
+        ..Default::default()
+    };
+    let (reply, _) = launched_turn(
+        Provider::Claude,
+        "haiku",
+        &folders,
+        "Run exactly these two shell commands in your working folder, one at a time, with the Bash tool, and report each result: 1) touch listed.txt 2) touch unlisted.txt. Do not try another way when one is denied.",
+        None,
+        Role::JobRun,
+        launch,
+    );
+    assert!(folders.scratch.join("listed.txt").exists(), "{reply}");
+    assert!(!folders.scratch.join("unlisted.txt").exists(), "{reply}");
+}
+
+/// Task 3.6: Codex's command rules (`execpolicy`, codex-cli 0.160.0) cannot hold a CLI to the
+/// prefixes a job lists. The strictest rule a command matches wins, so allowing `gh pr list`
+/// beside forbidding the rest of `gh` forbids `gh pr list` too; and a command that names the
+/// CLI another way matches no rule, so it falls to the sandbox and runs. Until this test
+/// fails, a job with a CLI source never runs on Codex.
+#[test]
+#[ignore = "runs the real Codex CLI"]
+fn codex_command_rules_cannot_hold_a_cli_to_its_listed_commands() {
+    let folder = tempfile::tempdir().unwrap();
+    let rules = folder.path().join("job.rules");
+    std::fs::write(
+        &rules,
+        "prefix_rule(pattern=[\"gh\", \"pr\", \"list\"], decision=\"allow\")\nprefix_rule(pattern=[\"gh\"], decision=\"forbidden\")\n",
+    )
+    .unwrap();
+    let decision = |command: &[&str]| -> serde_json::Value {
+        let output = std::process::Command::new(provider::executable(Provider::Codex).unwrap())
+            .args(["execpolicy", "check", "--rules"])
+            .arg(&rules)
+            .args(command)
+            .current_dir(folder.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    assert_eq!(decision(&["gh", "pr", "list"])["decision"], "forbidden");
+    for elsewhere in [
+        &["env", "gh", "pr", "comment"][..],
+        &["/usr/bin/env", "gh", "pr", "comment"],
+    ] {
+        let checked = decision(elsewhere);
+        assert!(checked["decision"].is_null(), "{elsewhere:?}: {checked}");
+    }
 }

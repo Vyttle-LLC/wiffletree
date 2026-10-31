@@ -540,6 +540,7 @@ impl ModelsPage {
             Cell { then: true, .. } => Some("Wait for the reset"),
             Cell { small: true, .. } => Some("Same as the first line"),
             _ if *job == Job::Keeper => Some("No model"),
+            _ if *job == Job::Job => Some("Same as the Assistant row"),
             _ => None,
         };
         let id = SharedString::from(format!(
@@ -786,6 +787,9 @@ impl ModelsPage {
         if self.model_selection.keeper().is_none() {
             table = table.child(self.keeper_placeholder(p, cx));
         }
+        if self.model_selection.row(&Job::Job).is_none() {
+            table = table.child(self.job_placeholder(p, cx));
+        }
         let error = self.model_selection.validate().err();
         card(p)
             .gap_3()
@@ -839,6 +843,34 @@ impl ModelsPage {
                     .child(self.cell_menu(&Job::Keeper, first, None, false, None, cx)),
             )
             .child(hint("No PR keeper model: its model triggers stay off.", p).flex_1())
+    }
+    /// The Job row while it has none: one menu to choose one, as jobs follow the Assistant row.
+    fn job_placeholder(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        let first = Cell {
+            small: false,
+            then: false,
+        };
+        let (name, about) = job_label(&Job::Job, &[]);
+        div()
+            .py_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .w(px(170.))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(name))
+                    .child(hint(about, p)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .child(self.cell_menu(&Job::Job, first, None, false, None, cx)),
+            )
+            .child(hint("No Job row: jobs run on the Assistant row.", p).flex_1())
     }
 
     fn review_card(&self, p: Palette) -> Div {
@@ -996,6 +1028,7 @@ fn job_label(job: &Job, verifiers: &[VerifierConfig]) -> (String, String) {
             "Router".into(),
             "Picks each message's thread; never waits".into(),
         ),
+        Job::Job => ("Job".into(), "Runs your scheduled jobs".into()),
         Job::Verifier { focus } => {
             let verifier = (verifiers.iter()).find(|v| v.focus.eq_ignore_ascii_case(focus));
             let role = verifier.map_or(Role::Reviewer, |v| v.role);

@@ -30,6 +30,7 @@ mod issues_view;
 mod leftovers;
 mod linear_import_view;
 mod live_work;
+mod login_item;
 mod memory_view;
 mod menu_bar;
 mod models;
@@ -508,6 +509,15 @@ impl Workspace {
                     spaces.suggested(name, description, window, cx)
                 });
             }
+            Intent::OpenJob(job) => {
+                self.open_page(Page::Assistant, window, cx);
+                self.assistant.update(cx, |assistant, cx| {
+                    assistant.open_job(job.clone(), window, cx)
+                });
+            }
+            Intent::StopJobRun(run) => self.assistant.update(cx, |assistant, cx| {
+                assistant.stop_run(run.clone(), window, cx)
+            }),
         }
         self.share(window, cx);
         cx.notify();

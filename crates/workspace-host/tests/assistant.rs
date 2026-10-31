@@ -133,7 +133,12 @@ fn a_thread_runs_restricted_in_its_scratch_folder_and_saves_outputs_there_only()
     // Offered only the thread tools; the prompt is the message alone.
     assert_eq!(
         turn["tools"],
-        serde_json::json!(["save_output", "suggest_space", "project_brief"])
+        serde_json::json!([
+            "save_output",
+            "suggest_space",
+            "project_brief",
+            "propose_job"
+        ])
     );
     assert_eq!(turn["prompt"], "save costs.html as AWS costs");
     // The contract, the Assistant core, Assisting and then the Space's instructions.

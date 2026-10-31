@@ -114,6 +114,13 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::AnswerHeld { .. }
         | Command::ChangeRoute { .. }
         | Command::SetRouterThreshold { .. }
+        | Command::SaveJob { .. }
+        | Command::PreviewJob { .. }
+        | Command::SetJobEnabled { .. }
+        | Command::RunJobNow { .. }
+        | Command::DeleteJob { .. }
+        | Command::StopJobRun { .. }
+        | Command::SeeJobRuns { .. }
         | Command::SetSpaceBrain { .. }
         | Command::CreateSpace { .. }
         | Command::UpdateSpace { .. }

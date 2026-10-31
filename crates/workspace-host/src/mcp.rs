@@ -234,8 +234,32 @@ pub fn thread_tools() -> Value {
             "Show the human a project brief for Make this a project, with a short project name. The human edits and confirms it; confirming creates a project in your Space whose first message is the brief. Use it when the work needs code changes or anything else a thread cannot do.",
             json!({"name":string,"brief":string}),
             vec!["name", "brief"]
+        ),
+        tool(
+            "propose_job",
+            "Show the human a recipe card for a scheduled job in your Space when they ask for recurring work, such as a morning brief. It saves nothing: only the human's Save on the card makes a job. cron is five fields, minute hour day-of-month month weekday, such as \"0 7 * * 1-5\"; timezone is an IANA name, such as America/New_York. List every source a run needs and nothing more: a CLI with the read-only command prefixes it may run, such as {\"kind\":\"cli\",\"command\":\"gh\",\"prefixes\":[\"gh pr list\",\"gh pr view\"]}, or an MCP server with the read tools it may call, such as {\"kind\":\"mcp\",\"server\":\"linear\",\"tools\":[\"list_issues\"]}. A job only reads: never list a command or tool that sends, posts or changes anything.",
+            json!({
+                "name": string,
+                "prompt": string,
+                "cron": string,
+                "timezone": string,
+                "sources": {"type":"array","items":{"type":"object"}},
+                "output_title": string,
+                "output_type": string,
+                "sharing": {"type":"string","enum":["one-runner","everyone"]}
+            }),
+            vec!["name", "prompt", "cron", "timezone", "sources"]
         )
     ])
+}
+/// A job run's one tool: it saves the run's result. A run offers no card and changes no job.
+pub fn job_run_tools() -> Value {
+    let string = json!({"type":"string"});
+    json!([{
+        "name": "save_output",
+        "description": "Save a file from your scratch folder as this job's output, under a title. The host keeps it at the same place for that title on every run, as a new version. path is relative to your scratch folder.",
+        "inputSchema": {"type":"object","properties":{"path":string,"title":string},"required":["path","title"],"additionalProperties":false}
+    }])
 }
 /// Serves a session's MCP `tools`: `tools_for` its role, or a thread's `thread_tools`.
 pub fn serve_stdio(tools: Value) -> Result<()> {

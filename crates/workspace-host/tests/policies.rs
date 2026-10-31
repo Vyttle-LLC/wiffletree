@@ -110,7 +110,7 @@ fn current(role: Role) -> Value {
             [("opus", "high"), ("sonnet", "medium")],
             sol,
         ),
-        Role::Maintenance | Role::Keeper | Role::Assistant => codex_fixed(role),
+        Role::Maintenance | Role::Keeper | Role::Assistant | Role::JobRun => codex_fixed(role),
     }
 }
 
@@ -131,8 +131,9 @@ fn seed_detecting(
     setup(&mut host);
     drop(host);
     let db = Connection::open(home.join("workspace.sqlite3")).unwrap();
-    // Legacy stores predate the PR keeper and the assistant, which never had a policy row.
-    for role in (Role::ALL.into_iter()).filter(|&r| !matches!(r, Role::Keeper | Role::Assistant)) {
+    // Legacy stores predate the PR keeper, the assistant and jobs, which never had a policy row.
+    let new = |r: Role| matches!(r, Role::Keeper | Role::Assistant | Role::JobRun);
+    for role in (Role::ALL.into_iter()).filter(|&r| !new(r)) {
         db.execute(
             "INSERT INTO policies VALUES (?1,?2) ON CONFLICT(role) DO UPDATE SET data=excluded.data",
             rusqlite::params![

@@ -70,7 +70,7 @@ impl Host {
         );
         // A compaction runs without a thread's restricted launch.
         ensure!(
-            session.role != Role::Assistant,
+            !session.role.is_thread(),
             "An assistant thread's context is not compacted"
         );
         let mut runtime = self.session_runtime(id)?;

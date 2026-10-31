@@ -5,7 +5,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use workspace_core::Source;
 
 /// The thread tools, as MCP lists them.
-pub(crate) const THREAD_TOOLS: [&str; 3] = ["save_output", "suggest_space", "project_brief"];
+pub(crate) const THREAD_TOOLS: [&str; 4] = [
+    "save_output",
+    "suggest_space",
+    "project_brief",
+    "propose_job",
+];
+/// A job run's one tool: it saves its output, and offers no card.
+pub(crate) const JOB_RUN_TOOLS: [&str; 1] = ["save_output"];
 /// The built-in Claude tools every thread has; `Bash` joins them only for a CLI source.
 const CLAUDE_TOOLS: [&str; 7] = [
     "Read",
@@ -39,8 +46,29 @@ pub struct ThreadLaunch {
     /// Each MCP source's server as the provider's own configuration defines it, by name; a
     /// source with no definition there is not offered.
     pub servers: BTreeMap<String, Value>,
+    /// A job's run, which has only `JOB_RUN_TOOLS` and its recipe's sources.
+    pub job_run: bool,
 }
 impl ThreadLaunch {
+    /// Whether Codex may run it: not a job's run with a CLI source, since Codex's command rules
+    /// cannot hold a CLI to its listed commands (task 3.6).
+    pub(crate) fn codex_may_run(&self) -> bool {
+        !self.job_run || self.cli_prefixes().next().is_none()
+    }
+    /// The workspace tools the run is offered.
+    fn workspace_tools(&self) -> &'static [&'static str] {
+        match self.job_run {
+            true => &JOB_RUN_TOOLS,
+            false => &THREAD_TOOLS,
+        }
+    }
+    /// The helper's argument that serves those tools.
+    fn helper_arg(&self) -> &'static str {
+        match self.job_run {
+            true => "job-mcp",
+            false => "thread-mcp",
+        }
+    }
     fn mcp_sources(&self) -> impl Iterator<Item = (&str, &[String])> {
         self.sources.iter().filter_map(|source| match source {
             Source::Mcp { server, tools, .. } if self.servers.contains_key(server) => {
@@ -82,7 +110,9 @@ impl ThreadLaunch {
         for tool in ["Write", "Edit", "MultiEdit"] {
             allowed.push(format!("{tool}(/{scratch}/**)"));
         }
-        allowed.extend(THREAD_TOOLS.map(|tool| format!("mcp__agent_workspace__{tool}")));
+        allowed.extend(
+            (self.workspace_tools().iter()).map(|tool| format!("mcp__agent_workspace__{tool}")),
+        );
         for (server, tools) in self.mcp_sources() {
             allowed.extend(tools.iter().map(|tool| format!("mcp__{server}__{tool}")));
         }
@@ -147,7 +177,7 @@ impl ThreadLaunch {
             "Stopped: the run called an MCP server its Space's sources do not list ({server})"
         );
         let given = match server {
-            "agent_workspace" => THREAD_TOOLS.contains(&tool),
+            "agent_workspace" => self.workspace_tools().contains(&tool),
             _ => (self.mcp_sources())
                 .any(|(source, tools)| source == server && tools.iter().any(|t| t == tool)),
         };
@@ -177,7 +207,7 @@ pub(super) fn configure_claude(cmd: &mut ProcessCommand, turn: &Turn, launch: &T
     let mut servers = serde_json::Map::new();
     servers.insert(
         "agent_workspace".into(),
-        json!({"command":turn.helper,"args":["thread-mcp"]}),
+        json!({"command":turn.helper,"args":[launch.helper_arg()]}),
     );
     for (server, _) in launch.mcp_sources() {
         servers.insert(server.into(), launch.servers[server].clone());
@@ -242,8 +272,9 @@ pub(super) fn configure_codex(cmd: &mut ProcessCommand, turn: &Turn, launch: &Th
         format!("model_reasoning_effort={}", json!(turn.profile.effort)),
         format!("developer_instructions={}", json!(turn.instructions)),
         format!(
-            "mcp_servers.agent_workspace={{required=true, default_tools_approval_mode=\"approve\", command={}, args=[\"thread-mcp\"], env_vars=[\"WORKSPACE_SOCKET\",\"WORKSPACE_TOKEN\"] }}",
-            json!(turn.helper)
+            "mcp_servers.agent_workspace={{required=true, default_tools_approval_mode=\"approve\", command={}, args=[{}], env_vars=[\"WORKSPACE_SOCKET\",\"WORKSPACE_TOKEN\"] }}",
+            json!(turn.helper),
+            json!(launch.helper_arg())
         ),
     ] {
         cmd.arg("-c").arg(setting);
@@ -324,6 +355,7 @@ mod tests {
             scratch: "/data/assistant/threads/t1".into(),
             sources,
             servers,
+            job_run: false,
         }
     }
     fn linear() -> Source {
@@ -412,6 +444,35 @@ mod tests {
             .map(|tool| tool["name"].as_str().unwrap().to_owned())
             .collect();
         assert_eq!(offered, THREAD_TOOLS);
+        let offered: Vec<String> = (crate::mcp::job_run_tools().as_array().unwrap().iter())
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(offered, JOB_RUN_TOOLS);
+    }
+
+    #[test]
+    fn a_job_run_is_offered_only_save_output_and_its_recipes_sources() {
+        let mut run = launch(vec![gh()]);
+        run.job_run = true;
+        let allowed = run.claude_allowed();
+        assert!(allowed.contains(&"mcp__agent_workspace__save_output".into()));
+        for tool in ["propose_job", "suggest_space", "project_brief"] {
+            assert!(
+                !allowed.contains(&format!("mcp__agent_workspace__{tool}")),
+                "{tool}"
+            );
+        }
+        assert!(allowed.contains(&"Bash(gh pr list:*)".into()));
+        assert!(
+            !allowed
+                .iter()
+                .any(|rule| rule == "Bash" || rule == "Bash(gh:*)")
+        );
+        let call = json!({"type":"mcp_tool_call","server":"agent_workspace","tool":"propose_job"});
+        assert!(run.check_codex_item(&call).is_err());
+        // Codex cannot hold gh to its commands, so a run with a CLI source never starts on it.
+        assert!(!run.codex_may_run());
+        assert!(launch(vec![gh()]).codex_may_run());
     }
 
     #[test]

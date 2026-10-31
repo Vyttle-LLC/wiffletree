@@ -1,7 +1,8 @@
 //! The assistant (OpenSpec change `assistant-spaces-jobs-boards`, screen 1 of its mockup): one
 //! view of thread tabs, each a small read-only provider session in a Space, with search, the
 //! cards a thread's tools show, and a composer whose Space chip is the router's until the user
-//! picks one by hand.
+//! picks one by hand. Its jobs are in the `jobs` view.
+pub(super) mod jobs;
 mod routing;
 
 use super::*;
@@ -132,6 +133,10 @@ pub(super) struct AssistantPage {
     sending: bool,
     /// The assistant's name the composer's placeholder uses.
     named: String,
+    /// The Jobs list, a job's page or its form, shown in place of a thread.
+    jobs_view: Option<jobs::JobsView>,
+    /// Whether the app opens at login, read when the Jobs list first opens.
+    login: Option<bool>,
 }
 impl EventEmitter<Intent> for AssistantPage {}
 impl AssistantPage {
@@ -181,6 +186,8 @@ impl AssistantPage {
             brief: None,
             sending: false,
             named: DEFAULT_NAME.into(),
+            jobs_view: None,
+            login: None,
         }
     }
     fn tabs(&self) -> &[ThreadTab] {
@@ -268,6 +275,7 @@ impl AssistantPage {
         self.open = id;
         self.renaming = false;
         self.brief = None;
+        self.jobs_view = None;
         self.read_messages(window, cx);
         cx.notify();
     }
@@ -665,7 +673,16 @@ impl AssistantPage {
                     .child(icon("plus").size(px(13.)))
                     .on_click(cx.listener(|v, _, w, c| v.select(None, w, c))),
             )
-            .child(div().ml_auto().mb(px(6.)).child(self.search_space_menu(cx)))
+            .child(
+                div().ml_auto().mb(px(6.)).child(
+                    button("open-jobs")
+                        .ghost()
+                        .xsmall()
+                        .label("Jobs")
+                        .on_click(cx.listener(|v, _, w, c| v.open_job(None, w, c))),
+                ),
+            )
+            .child(div().mb(px(6.)).child(self.search_space_menu(cx)))
             .child(
                 div()
                     .mb(px(6.))
@@ -959,6 +976,9 @@ impl AssistantPage {
                 .child(icon("file-text").size(px(14.)))
                 .child(div().flex_1().child(saved_line(title, *version)))
                 .child(dismiss.label("Hide")),
+            CardKind::Recipe { recipe, preview } => {
+                self.recipe_card(&thread_card.id, recipe, preview, p, cx)
+            }
         }
     }
 
@@ -1157,9 +1177,10 @@ impl Requests for AssistantPage {
 impl Render for AssistantPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(is_dark(cx));
-        let body = match (&self.hits, self.open_tab().cloned()) {
-            (Some(hits), _) => self.search_results(hits, p, cx).into_any_element(),
-            (None, Some(tab)) => div()
+        let body = match (&self.jobs_view, &self.hits, self.open_tab().cloned()) {
+            (Some(view), _, _) => self.jobs_body(view, p, cx).into_any_element(),
+            (None, Some(hits), _) => self.search_results(hits, p, cx).into_any_element(),
+            (None, None, Some(tab)) => div()
                 .size_full()
                 .flex()
                 .flex_col()
@@ -1173,7 +1194,7 @@ impl Render for AssistantPage {
                         .child(self.conversation(&tab, p, cx)),
                 )
                 .into_any_element(),
-            (None, None) => {
+            (None, None, None) => {
                 let held = self.held_for(None);
                 match held.is_empty() {
                     true => div()
@@ -1208,7 +1229,9 @@ impl Render for AssistantPage {
             .bg(p.surface)
             .child(self.tab_strip(p, cx))
             .child(div().flex_1().min_h_0().flex().flex_col().child(body))
-            .when(self.hits.is_none(), |d| d.child(self.composer_box(p, cx)))
+            .when(self.hits.is_none() && self.jobs_view.is_none(), |d| {
+                d.child(self.composer_box(p, cx))
+            })
     }
 }
 
@@ -1236,6 +1259,7 @@ mod tests {
                 cards: vec![],
                 routed: vec![],
                 moved: vec![],
+                job: None,
             },
             status,
             profile: None,

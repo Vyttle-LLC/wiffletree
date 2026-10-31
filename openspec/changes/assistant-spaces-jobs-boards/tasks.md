@@ -21,14 +21,14 @@ Six stages, each a ticket or a few, each landing on its own. Every stage needs `
 
 ## 3. Jobs
 
-- [ ] 3.1 Core: `job.rs` (recipe, built-in job kind, run record), `Role::JobRun`, `Job::Job`.
-- [ ] 3.2 Host: recipe files in the Space's storage; the human-only save command; the recipe card a thread proposes. Verify no tool or job run can save, enable or change a job.
-- [ ] 3.3 Host: scheduler with timezones, daylight-saving rules and one catch-up run after sleep or a stopped host; pause, resume, Run now, delete; built-in host jobs with an owner, their own triggers and run function, listed in no Space. Verify a built-in job's catch-up and that no command can create or change one.
-- [ ] 3.4 Host: source declarations and the pre-run check for MCP servers and CLIs (gh, linctl, sentry-cli, aws profiles); the run record naming what is missing.
-- [ ] 3.5 Host: run threads with only their sources; outputs stored at stable paths as commits; the 30-minute note and attention counts.
-- [ ] 3.6 Validate Codex command rules for CLI sources; until they hold, a CLI-source run moves to the next choice that can limit it or does not start.
-- [ ] 3.7 Models: the optional Job row.
-- [ ] 3.8 Desktop: recipe card with schedule in words and next runs; job page; "Start Wiffletree at login".
+- [x] 3.1 Core: `job.rs` (recipe, built-in job kind, run record), `Role::JobRun`, `Job::Job`.
+- [x] 3.2 Host: recipe files in the Space's storage; the human-only save command; the recipe card a thread proposes. Verify no tool or job run can save, enable or change a job.
+- [x] 3.3 Host: scheduler with timezones, daylight-saving rules and one catch-up run after sleep or a stopped host; pause, resume, Run now, delete; built-in host jobs with an owner, their own triggers and run function, listed in no Space. Verify a built-in job's catch-up and that no command can create or change one.
+- [x] 3.4 Host: source declarations and the pre-run check for MCP servers and CLIs (gh, linctl, sentry-cli, aws profiles); the run record naming what is missing.
+- [x] 3.5 Host: run threads with only their sources; outputs stored at stable paths as commits; the 30-minute note and attention counts. Until stage 5, a job in a Space stored on GitHub keeps its output in the private board store, since the runner's push rule and first-push approval come then.
+- [x] 3.6 Validate Codex command rules for CLI sources; until they hold, a CLI-source run moves to the next choice that can limit it or does not start. They do not hold in codex-cli 0.160.0 (design, Risks), so the restriction stays.
+- [x] 3.7 Models: the optional Job row.
+- [x] 3.8 Desktop: recipe card with schedule in words and next runs; job page; "Start Wiffletree at login".
 
 ## 4. Boards with the web view
 

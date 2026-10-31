@@ -279,7 +279,7 @@ const MOVED: &str = "Stopped: you moved its message to another thread.";
 /// one this way.
 fn stopped_notice(session: &Session, reason: &str) -> String {
     match session.role {
-        Role::Assistant => reason.into(),
+        Role::Assistant | Role::JobRun => reason.into(),
         _ => stopped_by_parent_notice(reason),
     }
 }
@@ -2527,6 +2527,19 @@ impl Actor {
                         active.stopped_by_parent = Some(MOVED.into());
                         active.cancel.store(true, Ordering::Relaxed);
                     }
+                    // Stop on a job's run in its turn ends that turn as stopped.
+                    let stopped_run = match &command {
+                        Command::StopJobRun { .. } => {
+                            response["thread"].as_str().map(str::to_owned)
+                        }
+                        _ => None,
+                    };
+                    if let Some(thread) = &stopped_run
+                        && let Some(active) = self.active.get_mut(thread)
+                    {
+                        active.stopped_by_parent = Some(crate::jobs::STOPPED_BY_YOU.into());
+                        active.cancel.store(true, Ordering::Relaxed);
+                    }
                     // Stopping an agent stops what it started, before the command returns: for
                     // every agent of a stopped project, and for a paused session.
                     let stopped = match &command {
@@ -2544,7 +2557,7 @@ impl Actor {
                             session_id,
                             status: Status::Paused,
                         } => vec![session_id.clone()],
-                        _ => vec![],
+                        _ => stopped_run.into_iter().collect(),
                     };
                     self.stop_processes_of(&stopped);
                     // The stop itself has happened, and human_stopped records who made it before
@@ -2672,7 +2685,7 @@ impl Actor {
                     let id = identity.context("Expired or invalid session credential")?;
                     // A thread is offered its own tools, and only those.
                     let session = self.host.session(&id)?;
-                    if session.role == Role::Assistant {
+                    if session.role.is_thread() {
                         return self.host.thread_tool(&session, &name, &args).map(Some);
                     }
                     ensure!(
@@ -3195,6 +3208,7 @@ impl Actor {
                             && !active.stopped_by_human
                             && !active.sort
                             && session.role != Role::Keeper
+                            && session.role != Role::JobRun
                             && session.status != Status::Paused
                     })
                     .and_then(|error| limit_signal(active.limit_reached, error));
@@ -3240,6 +3254,16 @@ impl Actor {
                         "turn_stopped_by_parent",
                         &format!("{run}; {reason}"),
                     )?;
+                }
+                // A job's run is one turn, which its record ends with; a failed one is not
+                // retried at a usage limit's reset.
+                if session.role == Role::JobRun {
+                    let end = match (&stop_reason, &error) {
+                        (Some(reason), _) => crate::jobs::RunEnd::Stopped(reason.clone()),
+                        (None, Some(error)) => crate::jobs::RunEnd::Failed(error.clone()),
+                        (None, None) => crate::jobs::RunEnd::Finished,
+                    };
+                    self.host.job_run_ended(id, end)?;
                 }
                 self.settle_check_ins(&session)?;
                 if let Some(error) = &error {
@@ -4072,6 +4096,15 @@ impl Actor {
     fn check_in(&mut self, id: &str, now: i64) -> Result<()> {
         let session = self.host.session(id)?;
         let active = &self.active[id];
+        // A job's run has no time limit: its note on the assistant's row says how long it has
+        // run, with Stop.
+        if session.role == Role::JobRun {
+            let minutes = (now - active.started_at) / 60_000;
+            if self.host.note_long_job_run(id, minutes)? {
+                self.state_changed();
+            }
+            return Ok(());
+        }
         let run = active.run.clone();
         let minutes = (now - active.started_at) / 60_000;
         let ticket = self.ticket_label(id)?;
@@ -4392,6 +4425,15 @@ impl Actor {
         if session.role == Role::Keeper {
             self.try_ended(session, Some(&format!("{error:#}")));
         }
+        if session.role == Role::JobRun {
+            let failed = crate::jobs::RunEnd::Failed(format!("Could not start: {error:#}"));
+            self.host.job_run_ended(&session.id, failed)?;
+            // Its prompt is its only message, and the run has ended.
+            self.host.db.execute(
+                "UPDATE messages SET receipt='completed' WHERE recipient=?1 AND receipt='queued'",
+                [&session.id],
+            )?;
+        }
         self.host.append_output(
             session,
             &format!("start-error:{}", message.id),
@@ -4576,11 +4618,11 @@ impl Actor {
         let token = format!("{}{}", new_id(), new_id());
         let (prompt, sorted) = match sort {
             Some((prompt, sorted)) => (prompt, Some(sorted)),
-            None if session.role == Role::Assistant => (thread_prompt(&input), None),
+            None if session.role.is_thread() => (thread_prompt(&input), None),
             None => (self.prompt(&session, &input)?, None),
         };
         let (instructions, thread) = match session.role {
-            Role::Assistant => (
+            Role::Assistant | Role::JobRun => (
                 self.host.thread_instructions(&session)?,
                 Some(self.host.thread_launch(&session)?),
             ),
@@ -8041,6 +8083,61 @@ mod tests {
         assert_ne!(
             actor.host.session(&dentist.id).unwrap().status,
             Status::Disconnected
+        );
+    }
+
+    #[test]
+    fn a_job_runs_turn_ends_its_record_and_stop_ends_it_as_stopped() {
+        use workspace_core::job::{Recipe, RunOutcome, Schedule, Sharing};
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let personal = host.default_space().unwrap();
+        let recipe = Recipe {
+            id: "brief".into(),
+            name: "Brief".into(),
+            space_id: personal,
+            prompt: "Brief me.".into(),
+            schedule: Schedule {
+                cron: "0 7 * * *".into(),
+                timezone: "America/New_York".into(),
+            },
+            model: None,
+            sources: vec![],
+            output: None,
+            sharing: Sharing::OneRunner,
+            runner: None,
+            enabled: true,
+            extra: Default::default(),
+        };
+        let key = host.save_job(recipe).unwrap().recipe.key();
+        let (mut actor, _, _) = idle_actor(host);
+        let turn = |actor: &mut Actor| {
+            let run = actor.host.run_job_now(&key).unwrap();
+            let thread = actor.host.session(run.thread_id.as_ref().unwrap()).unwrap();
+            let prompt = actor.host.messages(&thread.id, None, 1).unwrap().remove(0);
+            actor.host.turn_started(&thread.id).unwrap();
+            actor
+                .active
+                .insert(thread.id.clone(), active_turn("run", vec![prompt.id]));
+            (run.id, thread)
+        };
+        let (run, thread) = turn(&mut actor);
+        let stop = Command::StopJobRun {
+            run_id: run.clone(),
+        };
+        command(&mut actor, stop).unwrap();
+        assert!(actor.active[&thread.id].cancel.load(Ordering::Relaxed));
+        cancelled_turn_ends(&mut actor, &thread);
+        let stopped = actor.host.job_run(&run).unwrap();
+        assert_eq!(stopped.outcome, RunOutcome::Stopped);
+        assert_eq!(stopped.reason, crate::jobs::STOPPED_BY_YOU);
+
+        let (run, thread) = turn(&mut actor);
+        finish_turn(&mut actor, &thread, "run");
+        let finished = actor.host.job_run(&run).unwrap();
+        assert_eq!(
+            (finished.outcome, finished.outputs.len()),
+            (RunOutcome::Finished, 0)
         );
     }
 

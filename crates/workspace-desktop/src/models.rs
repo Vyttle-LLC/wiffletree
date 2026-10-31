@@ -143,20 +143,25 @@ pub(crate) fn cell(row: &JobRow, cell: Cell) -> Option<&ModelProfile> {
     }
 }
 /// Sets one cell of `job`'s row. `None` makes a then choice wait, removes a small-work line,
-/// and for the PR keeper's first choice removes the row: no PR keeper model. A first choice
-/// on the then choice's subscription drops the then choice, which would be spent with it.
+/// and for the PR keeper's or the Job row's first choice removes the row: no PR keeper model,
+/// or jobs that follow the Assistant row. A first choice on the then choice's subscription
+/// drops the then choice, which would be spent with it.
 pub(crate) fn set_cell(
     selection: &mut ModelSelection,
     job: &Job,
     cell: Cell,
     profile: Option<ModelProfile>,
 ) {
-    let keeper_first = *job == Job::Keeper && !cell.small && !cell.then;
-    if keeper_first && (profile.is_none() || selection.keeper().is_none()) {
-        selection.set_keeper(profile.map(|first| Line {
+    let optional_first = matches!(job, Job::Keeper | Job::Job) && !cell.small && !cell.then;
+    if optional_first && (profile.is_none() || selection.row(job).is_none()) {
+        let line = profile.map(|first| Line {
             first,
             then: Then::Wait,
-        }));
+        });
+        match job {
+            Job::Keeper => selection.set_keeper(line),
+            _ => selection.set_job_row(line),
+        }
         return;
     }
     let Some(row) = selection.row_mut(job) else {
@@ -675,6 +680,16 @@ mod tests {
         );
         assert_eq!(selection.keeper().unwrap().main.first, opus);
         selection.validate().unwrap();
+        // So does the Job row's, whose absence leaves jobs on the Assistant row.
+        set_cell(
+            &mut selection,
+            &Job::Job,
+            cell(false, false),
+            Some(opus.clone()),
+        );
+        assert_eq!(selection.row(&Job::Job).unwrap().main.first, opus);
+        set_cell(&mut selection, &Job::Job, cell(false, false), None);
+        assert!(selection.row(&Job::Job).is_none());
     }
     fn cell_of(row: &JobRow, small: bool) -> Option<&ModelProfile> {
         cell(row, Cell { small, then: false })

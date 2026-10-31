@@ -470,3 +470,32 @@ pub fn change_route(
         destination,
     })
 }
+pub fn save_job(recipe: job::Recipe) -> Ask<job::JobState> {
+    Ask::new(Command::SaveJob {
+        recipe: Box::new(recipe),
+    })
+}
+pub fn preview_job(recipe: job::Recipe) -> Ask<job::RecipePreview> {
+    Ask::new(Command::PreviewJob {
+        recipe: Box::new(recipe),
+    })
+}
+pub fn set_job_enabled(space_id: SpaceId, job_id: String, enabled: bool) -> Ask<job::JobState> {
+    Ask::new(Command::SetJobEnabled {
+        space_id,
+        job_id,
+        enabled,
+    })
+}
+pub fn run_job_now(job: job::JobKey) -> Ask<job::JobRun> {
+    Ask::new(Command::RunJobNow { job })
+}
+pub fn delete_job(space_id: SpaceId, job_id: String) -> Ask<()> {
+    Ask::new(Command::DeleteJob { space_id, job_id })
+}
+pub fn stop_job_run(run_id: String) -> Ask<Value> {
+    Ask::new(Command::StopJobRun { run_id })
+}
+pub fn see_job_runs(job: job::JobKey) -> Ask<()> {
+    Ask::new(Command::SeeJobRuns { job })
+}

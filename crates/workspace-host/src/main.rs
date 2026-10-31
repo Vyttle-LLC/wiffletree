@@ -16,6 +16,9 @@ fn main() -> Result<()> {
     if args.first().map(String::as_str) == Some("thread-mcp") {
         return workspace_host::mcp::serve_stdio(workspace_host::mcp::thread_tools());
     }
+    if args.first().map(String::as_str) == Some("job-mcp") {
+        return workspace_host::mcp::serve_stdio(workspace_host::mcp::job_run_tools());
+    }
     if args.first().map(String::as_str) == Some("probe-quota") {
         println!(
             "{}",

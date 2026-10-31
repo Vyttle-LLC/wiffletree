@@ -121,8 +121,8 @@ pub fn executable(provider: Provider) -> Result<PathBuf> {
         .with_context(|| format!("Install {name} CLI and sign in before starting live work"))
 }
 /// The fixed core's parts, each with who gets it: the contract, then each role's core, then the
-/// contract's thread version and the assistant's core.
-pub const CORE: [(&str, &str); 7] = [
+/// contract's thread version, the assistant's core and a job run's.
+pub const CORE: [(&str, &str); 8] = [
     (
         "every agent",
         include_str!("../skills/core/communication.md"),
@@ -148,6 +148,7 @@ pub const CORE: [(&str, &str); 7] = [
         "assistant threads",
         include_str!("../skills/core/assistant.md"),
     ),
+    ("job runs", include_str!("../skills/core/job-run.md")),
 ];
 /// The core's parts with their names and versions, for clients.
 pub fn core_instructions() -> Vec<workspace_core::skills::CoreInstructions> {
@@ -172,13 +173,14 @@ fn core(role: Role) -> &'static str {
         Role::Tester | Role::Reviewer => 3,
         Role::Keeper => 4,
         Role::Assistant => 6,
+        Role::JobRun => 7,
     };
     CORE[part].1
 }
-/// The communication contract a role gets: threads have a parent but no team.
+/// The communication contract a role gets: threads and job runs have a parent but no team.
 fn contract(role: Role) -> &'static str {
     match role {
-        Role::Assistant => CORE[5].1,
+        Role::Assistant | Role::JobRun => CORE[5].1,
         _ => CORE[0].1,
     }
 }
@@ -271,6 +273,11 @@ pub fn command(turn: &Turn) -> Result<ProcessCommand> {
     ensure!(
         !matches!(turn.kind, TurnKind::Sort) || turn.session.provider == Provider::Claude,
         "Only Claude can sort comments: Codex cannot be started with every tool off"
+    );
+    ensure!(
+        turn.session.provider != Provider::Codex
+            || turn.thread.as_ref().is_none_or(ThreadLaunch::codex_may_run),
+        "A job with a CLI source runs only on Claude: Codex cannot yet hold a CLI to its listed commands"
     );
     let mut cmd = ProcessCommand::new(executable(turn.session.provider)?);
     configure(&mut cmd, turn);

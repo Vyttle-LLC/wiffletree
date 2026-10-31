@@ -258,6 +258,10 @@ pub(super) enum Intent {
         name: String,
         description: String,
     },
+    /// Opens the assistant's Jobs list, or one job's page.
+    OpenJob(Option<workspace_core::job::JobKey>),
+    /// Stop on a job's long run, by its id.
+    StopJobRun(String),
 }
 
 /// A change to the snapshot the host has confirmed.

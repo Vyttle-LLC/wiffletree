@@ -129,7 +129,7 @@ impl Host {
         let counted = |role| {
             matches!(
                 role,
-                Role::TaskOrchestrator | Role::ProjectOrchestrator | Role::Assistant
+                Role::TaskOrchestrator | Role::ProjectOrchestrator | Role::Assistant | Role::JobRun
             )
         };
         let mut owner = session.clone();

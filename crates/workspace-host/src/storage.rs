@@ -125,8 +125,21 @@ pub(crate) fn check(path: &str, content: &[u8]) -> Result<()> {
             folder: String::new(),
         };
         read_space(content, storage)?;
+    } else if let Some((_, id)) = recipe_path(path) {
+        // Which Space it names is checked when it is taken in, against its folder's Space.
+        let file: serde_yaml::Value = serde_yaml::from_slice(content)?;
+        let space = SpaceId(file["space"].as_str().unwrap_or_default().into());
+        jobs::read_recipe(content, &space, id)?;
     }
     Ok(())
+}
+
+/// The Space folder and job id of a path `spaces/<folder>/jobs/<id>.yaml`.
+fn recipe_path(path: &str) -> Option<(&str, &str)> {
+    let rest = path.strip_prefix("spaces/")?;
+    let (folder, file) = rest.split_once("/jobs/")?;
+    let id = file.strip_suffix(".yaml")?;
+    (!folder.contains('/') && !id.contains('/') && !id.is_empty()).then_some((folder, id))
 }
 
 /// Rewrites a local tracker's issue IDs from `old` to `new`: each `issues/<old>-<n>/` folder,
@@ -211,10 +224,18 @@ pub(crate) fn commit_local(folder: &Path, paths: &[&str], message: &str) -> Resu
     if !folder.join(".git").exists() {
         runtime::git_output(folder, &["init", "--quiet", "--initial-branch=main"])?;
     }
-    // A tracker with no issue has no `issues/` to add.
+    // A tracker with no issue has no `issues/` to add; a removed file that was committed is
+    // added as its removal.
+    let tracked = |path: &str| {
+        runtime::git_answer(folder, &["ls-files", "--error-unmatch", "--", path])
+            .is_ok_and(|answer| answer.status.success())
+    };
     let present: Vec<&str> = (paths.iter().copied())
-        .filter(|path| folder.join(path).exists())
+        .filter(|path| folder.join(path).exists() || tracked(path))
         .collect();
+    if present.is_empty() {
+        return Ok(());
+    }
     runtime::git_output(folder, &[&["add", "--all", "--"][..], &present].concat())?;
     if runtime::git_answer(folder, &["diff", "--cached", "--quiet"])?
         .status
@@ -800,6 +821,33 @@ impl Host {
         let file = space_file(&space.storage.folder);
         self.write_stored(&key, &folder, &file, &space_yaml(space)?)
     }
+    /// Writes a job's recipe file to its Space's storage, or with `None` removes it: committed
+    /// at once in a local repository, and pushed by the next pass from a GitHub one.
+    pub(crate) fn write_recipe_file(
+        &self,
+        space: &Space,
+        id: &str,
+        content: Option<&[u8]>,
+        message: &str,
+    ) -> Result<()> {
+        let folder = self.storage_folder(&space.storage.repository);
+        let file = jobs::recipe_file(&space.storage.folder, id);
+        match content {
+            Some(content) => shared::write_atomically(&folder.join(&file), content)?,
+            None => match fs::remove_file(folder.join(&file)) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(error.into());
+                }
+                _ => {}
+            },
+        }
+        let Some(key) = Self::storage_key(&space.storage.repository) else {
+            return commit_local(&folder, &[&file], message);
+        };
+        Record::wrote(&self.db, &key, &file, content)?;
+        self.storage_written.borrow_mut().insert(key);
+        Ok(())
+    }
     /// The prefixes the other storage repositories on this Mac use, with a Space of each.
     fn other_prefixes(&self, except: &str) -> Result<Vec<(String, Space)>> {
         let mut taken = vec![];
@@ -1196,6 +1244,7 @@ impl Host {
             for (at, record) in joined.iter().enumerate() {
                 let tracker = tracker.as_ref().filter(|_| at == 0 && !has_tracker);
                 spaces::insert_space(&host.db, &record.space, &record.local, tracker)?;
+                host.take_cloned_recipes(&record.space)?;
             }
             let clones: Vec<String> = ticked.iter().flat_map(|t| t.clones.clone()).collect();
             if !clones.is_empty() {
@@ -1212,6 +1261,25 @@ impl Host {
             self.reindex_tracker(&joined[0].space, &tracker.prefix)?;
         }
         Ok(joined)
+    }
+    /// Takes the jobs a joined Space's clone already holds into the store; a recipe this Mac
+    /// cannot read is left out, as a pulled one would be held.
+    fn take_cloned_recipes(&mut self, space: &Space) -> Result<()> {
+        let clone = self.storage_folder(&space.storage.repository);
+        let folder = clone
+            .join("spaces")
+            .join(&space.storage.folder)
+            .join("jobs");
+        for file in files_under(&folder)? {
+            let path = file.strip_prefix(&clone)?.to_string_lossy().into_owned();
+            let Some((_, id)) = recipe_path(&path) else {
+                continue;
+            };
+            if let Err(error) = self.take_pulled_recipe(space, id, Some(&fs::read(&file)?)) {
+                eprintln!("Joining {}: {path} cannot be used: {error:#}", space.name);
+            }
+        }
+        Ok(())
     }
     /// The Space page's notes about a model the Space names that this Mac cannot run, and the
     /// Who runs what choice it uses instead.
@@ -1514,6 +1582,15 @@ impl Host {
     ) -> Result<()> {
         if let Some(id) = tracker::issue_of(path) {
             return self.reindex_issue(storage, &id);
+        }
+        if let Some((folder, id)) = recipe_path(path) {
+            let space = (self.spaces()?.into_iter()).find(|r| {
+                &r.space.storage.repository == storage && r.space.storage.folder == folder
+            });
+            return match space {
+                Some(record) => self.take_pulled_recipe(&record.space, id, content),
+                None => Ok(()),
+            };
         }
         let Some(content) = content else {
             return Ok(());

@@ -184,7 +184,7 @@ Decided by Michael, 2026-10-29, as `brain-compile` recommended: brain compiles r
 
 ## Risks / Trade-offs
 
-- **Codex command limits** → A CLI source on Codex cannot yet be held to read commands; such runs use Claude or do not start. Validate Codex's command rules (`execpolicy` prefix rules with a default of forbidden) in stage 3 and lift the restriction only if they hold.
+- **Codex command limits** → A CLI source on Codex cannot yet be held to read commands; such runs use Claude or do not start. Validate Codex's command rules (`execpolicy` prefix rules with a default of forbidden) in stage 3 and lift the restriction only if they hold. *Checked in stage 3, October 30, 2026, against codex-cli 0.160.0: they do not hold.* The strictest rule a command matches wins, so allowing `gh pr list` beside forbidding the rest of `gh` forbids `gh pr list` too, and a command that names the CLI another way, such as `env gh pr comment`, matches no rule and runs under the sandbox. The restriction stays; an ignored test in `tests/thread_authority.rs` fails once that changes.
 - **MCP tools are named, not proven read-only** → A source lists the MCP tools it may call; a tool named like a read can still write. The recipe confirmation lists each tool, and the job's page says jobs are trusted to read only through the tools listed.
 - **Router mistakes file a topic in the wrong brain** → The threshold, the ask-on-unsure rule and "Change" on each routed message bound it; entries already written stay and are named so the user can move them.
 - **Sleep and the host not running** → No wake scheduling. A brief due at 07:00 on a Mac opened at 08:30 runs once at 08:30, marked as catch-up.

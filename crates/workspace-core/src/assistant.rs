@@ -46,13 +46,24 @@ pub struct Thread {
     /// Its messages that Change moved to another thread, with their replies.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub moved: Vec<MovedMessage>,
+    /// The job run this thread is; such a thread takes no message but its prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<JobRunOf>,
 }
 impl Thread {
-    /// Whether its tab is in the strip at `now`: not closed, and a message or an opening within
-    /// the last 24 hours.
+    /// Whether its tab is in the strip at `now`: not a job's run, not closed, and a message or
+    /// an opening within the last 24 hours.
     pub fn in_strip(&self, now: i64) -> bool {
-        !self.closed && now - self.last_message_at.max(self.opened_at) < IDLE_AFTER_MS
+        self.job.is_none()
+            && !self.closed
+            && now - self.last_message_at.max(self.opened_at) < IDLE_AFTER_MS
     }
+}
+/// The job and run a job run's thread belongs to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobRunOf {
+    pub job: crate::job::JobKey,
+    pub run_id: String,
 }
 
 /// A message the router holds unsent, while it decides and then until the user answers. It
@@ -123,6 +134,12 @@ pub enum CardKind {
         file: String,
         /// 1 for the first save under this title.
         version: u32,
+    },
+    /// `propose_job`: a recipe for the user to check and save; nothing is scheduled until
+    /// they press Save.
+    Recipe {
+        recipe: Box<crate::job::Recipe>,
+        preview: crate::job::RecipePreview,
     },
 }
 
@@ -219,6 +236,7 @@ mod tests {
             cards: vec![],
             routed: vec![],
             moved: vec![],
+            job: None,
         }
     }
 

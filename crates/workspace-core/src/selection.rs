@@ -69,6 +69,8 @@ pub enum Job {
     Assistant,
     /// The router, which decides where each message to the assistant goes. It never waits.
     Router,
+    /// Scheduled jobs' runs. The row is optional: without one, runs resolve the Assistant row.
+    Job,
 }
 impl Job {
     /// "Implementer", or a verifier's focus.
@@ -81,6 +83,7 @@ impl Job {
             Self::Keeper => "PR keeper".into(),
             Self::Assistant => "Assistant".into(),
             Self::Router => "Router".into(),
+            Self::Job => "Job".into(),
         }
     }
     /// Verifier focuses compare ignoring surrounding spaces and ASCII case, as levels do.
@@ -112,6 +115,7 @@ impl Job {
             Role::Reviewer => Some(first_reviewer(verification).unwrap_or(Job::Tester)),
             Role::Keeper => Some(Job::Keeper),
             Role::Assistant => Some(Job::Assistant),
+            Role::JobRun => Some(Job::Job),
             Role::TaskOrchestrator | Role::Maintenance => None,
         }
     }
@@ -261,6 +265,18 @@ impl ModelSelection {
             });
         }
     }
+    /// Sets the Job row's main line, or with `None` removes the row, so that job runs follow
+    /// the Assistant row.
+    pub fn set_job_row(&mut self, main: Option<Line>) {
+        self.jobs.retain(|row| row.job != Job::Job);
+        if let Some(main) = main {
+            self.jobs.push(JobRow {
+                job: Job::Job,
+                main,
+                small: None,
+            });
+        }
+    }
     /// The only model comment sorting and skill merges run on: the PR keeper row's Claude
     /// choice, since those runs have every tool turned off, which only Claude can be started
     /// with.
@@ -358,6 +374,7 @@ impl ModelSelection {
         fitted.extend(take(&mut rest, &Job::Keeper));
         fitted.extend(take(&mut rest, &Job::Assistant));
         fitted.extend(take(&mut rest, &Job::Router));
+        fitted.extend(take(&mut rest, &Job::Job));
         self.jobs = fitted;
     }
     pub fn validate(&self) -> Result<()> {
@@ -371,14 +388,13 @@ impl ModelSelection {
             let rows = self.jobs.iter().filter(|row| row.job == job).count();
             ensure!(rows == 1, "Choose who runs the {} job", job.name());
         }
-        ensure!(
-            self.jobs
-                .iter()
-                .filter(|row| row.job == Job::Keeper)
-                .count()
-                <= 1,
-            "The PR keeper has two rows"
-        );
+        for (job, two) in [
+            (Job::Keeper, "The PR keeper has two rows"),
+            (Job::Job, "Jobs have two rows"),
+        ] {
+            let rows = self.jobs.iter().filter(|row| row.job == job).count();
+            ensure!(rows <= 1, "{two}");
+        }
         let mut focuses = BTreeSet::new();
         for row in &self.jobs {
             if let Job::Verifier { focus } = &row.job {
@@ -439,7 +455,12 @@ impl ModelSelection {
         limits: &Limits,
         when: &dyn Fn(i64) -> String,
     ) -> Result<Pick> {
-        let Some(row) = self.row(job) else {
+        // Without a Job row, jobs run as the assistant's threads do.
+        let row = match job {
+            Job::Job => self.row(job).or_else(|| self.row(&Job::Assistant)),
+            _ => self.row(job),
+        };
+        let Some(row) = row else {
             bail!(
                 "{} has no row in Models → Who runs what. Add one there first.",
                 job.name()
