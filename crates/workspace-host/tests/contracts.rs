@@ -329,6 +329,8 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         assert!(core.contains("confirm by name"));
         // Every role is told not to end a turn while it waits on work.
         assert!(core.contains("Do not end a turn while you wait on checks"));
+        assert!(core.contains("Results the workspace delivers"));
+        assert!(core.contains("do resume you, so finish your turn for those"));
         assert!(core.contains("Run checks in the foreground"));
         assert!(core.contains("Report the result only after it has finished"));
         // Every role is asked for a checklist, which is display only.
