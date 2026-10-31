@@ -24,5 +24,5 @@
 ## 4. Docs and checks
 
 - [x] 4.1 `docs/PRD.md`, `docs/DEVELOPMENT.md`, `docs/host-protocol.md`.
-- [ ] 4.2 Run the app and check all screens, the Space-lists-nothing case and an open-ticket row. Not done: the Mac's screen was locked, so macOS refused every capture.
+- [ ] 4.2 Run the app and check all screens, the Space-lists-nothing case and an open-ticket row. Not done: macOS refused every capture because agents have no Screen Recording permission.
 - [x] 4.3 No code path or text still offers "every workspace repository".
