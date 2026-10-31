@@ -41,7 +41,7 @@ The PRD's memory budget is a fixture of 100,000 log entries and 10,000 notes, wi
    - Opening from the Memory panel selects the project; opening from the Brains page selects Whole brain.
    - Choosing another brain resets to Whole brain.
 3. **The note index tree** follows `notes/INDEX.md`: its headings become groups. Notes not listed in INDEX appear under "Not in the index", so a drift is visible rather than hidden. Each row shows the note's `kind` as a coloured dot.
-4. **Sources per claim come from footnotes.** Each footnote is one claim, and each linked entry is one source. A source shows the entry's date, id and author, then its anchors (commit, PR, tag) and its verification state from `verify_refs`, computed on this machine. A footnote whose entry is missing shows as broken. Backlinks come from wikilinks in notes and in `STATUS.md`.
+4. **Sources per claim come from footnotes.** Each footnote is one claim, and each linked entry is one source. A source shows the entry's date, id and author, then its anchors (commit, PR and branch; tag anchors arrive with `brain-compile`) and its verification state from `verify_refs`, computed on this machine. A footnote whose entry is missing shows as broken. Backlinks come from wikilinks in notes and in `STATUS.md`.
 5. **The PR shown on an entry:**
    - for this machine's entries, the batch PR and its live stage from `brain-registry-sync`;
    - for other merged entries, the PR number from the squash commit that added the file, which is the batch PR, shown as merged;
@@ -61,7 +61,8 @@ The PRD's memory budget is a fixture of 100,000 log entries and 10,000 notes, wi
    - Arrow keys move, Enter opens the note or the entry in Logs, Tab cycles the scope chips, and Esc closes and returns focus to where it was.
 9. **`query_brain`:**
    - It takes `question` (free text), and optionally `scope` (`project`, the default, or `brain`). The brain is the session's project's Space's brain, never chosen by the agent.
-   - It is offered to the coordinator, implementers, testers and reviewers, and to assistant threads, issue threads and job runs, which `assistant-spaces-jobs-boards` already lists it for, because reading is safe. A thread's brain is its own Space's, and its scope is always the whole brain, because a thread has no project. It is not offered to the compile session, which receives its input directly.
+   - It is offered to the coordinator, implementers, testers and reviewers, because reading is safe. It is not offered to the compile session, which receives its input directly.
+   - Assistant threads, issue threads and job runs, which `assistant-spaces-jobs-boards` lists it for, get it with that change (its task 8.1 and `brain-browser` delta, moved there because the assistant is not on `main` yet). A thread's brain is its own Space's, and its scope is always the whole brain, because a thread has no project.
    - It walks the ladder, stopping when the budget of about 4,000 characters is filled or the ladder ends:
      1. STATUS excerpts that match;
      2. INDEX lines that match;
@@ -73,7 +74,7 @@ The PRD's memory budget is a fixture of 100,000 log entries and 10,000 notes, wi
 10. **The Memory panel**, for a project with a brain, shows:
     - the brain and its sync state;
     - the project's batches that are not yet merged, with their stages;
-    - a link to the Inbox with the count of open conflicts;
+    - the count of open conflicts, linking to the browser's Conflicts view in the project scope (the Inbox lists brain conflicts once `brain-compile` ships);
     - the five most recent entries;
     - unsent rows;
     - the capture form;
@@ -116,7 +117,7 @@ These are merged on `main`:
 | Rendering Markdown | Issue descriptions and comments (#162); notes and STATUS here | **Share** one Markdown renderer with wikilink and footnote support. | None. |
 | Libraries of rendered Markdown with history | #163 (merged): Boards lists outputs, renders Markdown natively, and keeps each output's Git history | **Share** the Markdown renderer and the history view. Brain notes stay in the brain browser, because Boards holds outputs, not knowledge. | Should Boards link to the brain notes a job cites? |
 | Search | #163 (merged): the assistant's search finds threads by title and text, filtered by Space; here, ⌘K searches one brain's notes and logs | **Align** on one ⌘K overlay with source chips (Brain, Threads and, from #162, Issues). It never mixes organizations or Spaces in one result list. | One overlay for all three? The scope is settled: **decided by Michael, 2026-10-29,** a search runs in the current Space, over that Space's one brain, its threads and its tracker. |
-| Threads reading the brain | #163: threads read their Space's brain and add entries to it, and list `query_brain` among their tools; the router never sees brains | **Share**: threads, issue threads and job runs get `query_brain` on their own Space's brain, which is read-only and so within thread authority (decision 9). | None. |
+| Threads reading the brain | #163: threads read their Space's brain and add entries to it, and list `query_brain` among their tools; the router never sees brains | **Share**: threads, issue threads and job runs get `query_brain` on their own Space's brain, which is read-only and so within thread authority (decision 9). That clause, and the search overlay's in a thread, moved to #163's change (its task 8.1). | None. |
 | Where the browser sits | #163 pins the assistant and Boards above Projects; `spaces` edits Spaces in Settings; here, Brains is a Workspace page and the Memory panel opens it | **Align** with `brain-registry-sync`'s navigation. | None. A Space's settings choose its brain; the Brains page and browser show it. |
 | Projects created by a coordinator | #164 (merged) | **Decided by Michael, 2026-10-29:** a created project joins its creator's Space (`spaces`), so its Memory panel shows that Space's one brain. | None. |
 

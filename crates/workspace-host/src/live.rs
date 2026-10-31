@@ -968,6 +968,7 @@ impl Host {
                 }
             }
             "log_work" => self.log_work(&session, &args),
+            "query_brain" => self.query_brain(&session, &args),
             "verify_ticket" => {
                 let ticket = self.owned_ticket(id, string("ticket_id")?)?;
                 refuse_model_arguments(&args, &["verifiers", "profile", "reason"])?;

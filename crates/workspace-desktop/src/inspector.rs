@@ -122,6 +122,8 @@ pub(super) struct Inspector {
     pub(super) memory_fixing: Option<WorkLog>,
     pub(super) memory_ref: Entity<InputState>,
     pub(super) memory_folder: Entity<InputState>,
+    /// What the Memory panel read of the project's brain.
+    pub(super) memory_summary: memory_view::MemorySummary,
     /// What the Files panel shows; fetched only while that panel is open.
     pub(super) files: files_view::Files,
     /// What the Processes panel shows; read only while that panel is open.
@@ -170,6 +172,7 @@ impl Inspector {
                 .new(|cx| InputState::new(window, cx).placeholder("ref: —, or <branch> @ <sha>")),
             memory_folder: cx
                 .new(|cx| InputState::new(window, cx).placeholder("Folder under logs/")),
+            memory_summary: Default::default(),
             files: Default::default(),
             processes: Default::default(),
             agents_clock: false,
@@ -195,6 +198,7 @@ impl Inspector {
         }
         if selection || panel {
             self.panel_data = PanelData::Loading;
+            self.memory_summary = Default::default();
         }
         // A held entry is fixed only from its own project's Memory panel.
         let fixing_elsewhere = (self.memory_fixing.as_ref())
@@ -232,6 +236,7 @@ impl Inspector {
         };
         match self.shared.panel {
             Some(Panel::Memory) => {
+                self.load_memory_summary(project_id.clone(), window, cx);
                 let ask = ask::logs(project_id.clone(), None, 30);
                 self.ask(ask, window, cx, move |view, logs, window, cx| {
                     let shown = view.shared.panel == Some(Panel::Memory)

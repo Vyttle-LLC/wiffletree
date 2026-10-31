@@ -2,6 +2,7 @@
 pub mod ask;
 pub mod backoff;
 mod brain;
+mod brain_browser;
 mod client;
 mod context;
 pub mod data_dir;
@@ -33,6 +34,7 @@ mod suggestion;
 mod usage;
 use anyhow::{Context, Result, bail, ensure};
 pub use brain::*;
+pub use brain_browser::*;
 pub use client::*;
 pub use context::*;
 pub use files::*;
@@ -3298,6 +3300,48 @@ pub enum Command {
     ReleaseHeldLog {
         log_id: String,
     },
+    /// A page of the brain `owner/name`'s Logs, newest first, filtered, and in the project's
+    /// scope when `project_id` names one; answered with `BrainLogPage`.
+    BrainLogs {
+        repository: String,
+        #[serde(default)]
+        project_id: Option<String>,
+        #[serde(default)]
+        filter: BrainLogFilter,
+        #[serde(default)]
+        from: BrainLogsFrom,
+    },
+    /// The brain's note index tree, in the project's scope when given; answered with
+    /// `BrainNoteTree`.
+    BrainNotes {
+        repository: String,
+        #[serde(default)]
+        project_id: Option<String>,
+    },
+    /// One note with its links, backlinks and sources; answered with `BrainNote`.
+    BrainNote {
+        repository: String,
+        path: String,
+    },
+    /// The open conflicts of `reconcile-queue.md`, in the project's scope when given; answered
+    /// with `Vec<BrainConflict>`.
+    BrainConflicts {
+        repository: String,
+        #[serde(default)]
+        project_id: Option<String>,
+    },
+    /// STATUS.md, the last compile and the pending entries; answered with `BrainStatus`.
+    BrainStatus {
+        repository: String,
+    },
+    /// The first page of notes and entries matching `query`, decisions first; answered with
+    /// `Vec<BrainHit>`.
+    SearchBrain {
+        repository: String,
+        #[serde(default)]
+        project_id: Option<String>,
+        query: String,
+    },
     Activity {
         project_id: String,
         before: Option<i64>,
@@ -3620,6 +3664,12 @@ impl Command {
             | Self::RepositorySuggestions
             | Self::SpaceStorage { .. }
             | Self::Brains
+            | Self::BrainLogs { .. }
+            | Self::BrainNotes { .. }
+            | Self::BrainNote { .. }
+            | Self::BrainConflicts { .. }
+            | Self::BrainStatus { .. }
+            | Self::SearchBrain { .. }
             | Self::SuggestSpaceBrain { .. }
             | Self::OriginBranches { .. }
             | Self::RemoteAccess => true,

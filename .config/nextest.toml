@@ -1,3 +1,9 @@
+# The brain index's performance fixture times reads against the PRD's 100 ms budget, so it runs
+# with no other test beside it.
+[[profile.default.overrides]]
+filter = 'test(=brain_index::tests::the_first_logs_and_search_pages_stay_within_budget_at_the_prds_fixture_size)'
+threads-required = "num-test-threads"
+
 # `--profile mac` runs the desktop tests and the core and host tests gated with
 # `#[cfg(target_os = "macos")]`, which pull requests otherwise run on Linux. A newly gated test
 # goes here too; CI's `check` job names any it finds missing.

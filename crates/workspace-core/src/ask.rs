@@ -184,6 +184,48 @@ pub fn space_storage(space_id: SpaceId) -> Ask<StorageStatus> {
 pub fn brains() -> Ask<BrainsPage> {
     Ask::new(Command::Brains)
 }
+pub fn brain_logs(
+    repository: String,
+    project_id: Option<String>,
+    filter: BrainLogFilter,
+    from: BrainLogsFrom,
+) -> Ask<BrainLogPage> {
+    Ask::new(Command::BrainLogs {
+        repository,
+        project_id,
+        filter,
+        from,
+    })
+}
+pub fn brain_notes(repository: String, project_id: Option<String>) -> Ask<BrainNoteTree> {
+    Ask::new(Command::BrainNotes {
+        repository,
+        project_id,
+    })
+}
+pub fn brain_note(repository: String, path: String) -> Ask<BrainNote> {
+    Ask::new(Command::BrainNote { repository, path })
+}
+pub fn brain_conflicts(repository: String, project_id: Option<String>) -> Ask<Vec<BrainConflict>> {
+    Ask::new(Command::BrainConflicts {
+        repository,
+        project_id,
+    })
+}
+pub fn brain_status(repository: String) -> Ask<BrainStatus> {
+    Ask::new(Command::BrainStatus { repository })
+}
+pub fn search_brain(
+    repository: String,
+    project_id: Option<String>,
+    query: String,
+) -> Ask<Vec<BrainHit>> {
+    Ask::new(Command::SearchBrain {
+        repository,
+        project_id,
+        query,
+    })
+}
 pub fn set_tracker_prefix(space_id: SpaceId, prefix: String) -> Ask<TrackerConfig> {
     Ask::new(Command::SetTrackerPrefix { space_id, prefix })
 }
