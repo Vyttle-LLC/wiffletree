@@ -118,6 +118,9 @@ pub struct Host {
     /// The open-branch warnings of each repository's base from its latest check, keyed as
     /// `overlap_checks` keys them; see `overlaps`.
     branch_warnings: std::collections::HashMap<String, Vec<BranchWarnings>>,
+    /// What ref verification learned for this machine's pending brain entries, by each clone's
+    /// default-branch head; see `verify_refs`.
+    verified_refs: std::sync::Mutex<verify_refs::Cache>,
     /// When this host last fetched each base of a repository, keyed as `overlap_checks` keys it.
     base_fetched_at: std::collections::HashMap<String, i64>,
     /// Each watched repository's latest PR check; see `pr_watch`.
@@ -335,6 +338,7 @@ impl Host {
             home: home.to_path_buf(),
             fire_retries: Default::default(),
             branch_warnings: Default::default(),
+            verified_refs: Default::default(),
             base_fetched_at: Default::default(),
             pull_request_checks: Default::default(),
             keeper: Default::default(),

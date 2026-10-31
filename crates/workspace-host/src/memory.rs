@@ -232,11 +232,17 @@ fn entry_file(log: &WorkLog, author: &str) -> Result<String> {
     ))
 }
 
-/// The entry's folder for a workspace repository: its GitHub name, or its workspace name.
-fn repository_folder(repository: &Repository) -> Result<String> {
-    let name = (repository.github.as_ref())
+/// The name a workspace repository's entries are logged under: its GitHub name, or its
+/// workspace name.
+pub(crate) fn repository_log_name(repository: &Repository) -> String {
+    (repository.github.as_ref())
         .map(|github| github.name.clone())
-        .unwrap_or_else(|| repository.name.clone());
+        .unwrap_or_else(|| repository.name.clone())
+}
+
+/// The entry's folder for a workspace repository, refused when the contract forbids its name.
+fn repository_folder(repository: &Repository) -> Result<String> {
+    let name = repository_log_name(repository);
     ensure!(
         valid_folder(&name),
         "The repository name {name} cannot be a log folder: use letters, digits, '.', '_' or '-'"

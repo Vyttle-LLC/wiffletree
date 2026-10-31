@@ -266,6 +266,8 @@ pub(crate) struct Pass {
     /// The brain's index, refreshed after the fetch, and the clones it verifies refs against.
     index: PathBuf,
     clones: verify_refs::Clones,
+    /// The brain folder a Space naming the brain gives, for a `main` with no config.
+    space_folder: String,
 }
 
 /// A batch the pass may push, open, watch or discard.
@@ -350,7 +352,7 @@ fn refresh_index(pass: &Pass, passed: &Passed) -> Result<()> {
     };
     let brain_dir = (config.config())
         .map(|config| config.brain_dir.clone())
-        .unwrap_or_else(|| "second-brain".to_owned());
+        .unwrap_or_else(|| pass.space_folder.clone());
     brain_index::refresh(brain_index::Refresh {
         index: &pass.index,
         checkout,
@@ -1747,6 +1749,8 @@ impl Host {
             home: self.home.clone(),
             index: brain_index::index_file(&self.home, &brain.repository),
             clones: verify_refs::Clones::of(&self.repositories()?),
+            space_folder: (self.owner_brain(&SessionOwner::Brain(brain.repository.clone()))?)
+                .map_or_else(|| "second-brain".into(), |b| b.folder),
             repository: brain.repository,
             checkout,
             push_url: brain.push_url,

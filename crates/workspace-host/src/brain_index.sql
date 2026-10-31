@@ -24,12 +24,12 @@ CREATE TABLE IF NOT EXISTS files (
   name TEXT,
   -- The text after the frontmatter.
   body TEXT NOT NULL,
-  -- An entry's `ref` checked on this machine, its reason, and the PR of the commit that added
-  -- it with that commit's time.
+  -- An entry's `ref` checked on this machine, its reason, the PR of the commit that added it,
+  -- and whether a commit after the last compile added it.
   verification TEXT,
   verification_reason TEXT,
   pull_request INTEGER,
-  added_at INTEGER
+  pending INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS entries_by_id ON files(class, entry_id);
 CREATE INDEX IF NOT EXISTS entries_by_repository ON files(class, repository, entry_id);
@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS sources (
 );
 CREATE INDEX IF NOT EXISTS sources_by_file ON sources(file_id);
 
--- `key` is `schema`, `commit`, `last_compile` and `pending`.
+-- `key` is `schema`, `commit` (the brain folder and commit indexed) and `last_compile` (the
+-- time of the last commit that changed the wiki).
 CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 -- Full text over titles and bodies. `_`, `-` and `/` separate tokens, so identifiers and paths

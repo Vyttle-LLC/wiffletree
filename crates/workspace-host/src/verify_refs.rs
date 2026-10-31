@@ -1,9 +1,16 @@
 //! Ref verification (`brain-compile`, decision 2): what an entry's `ref` names, and whether this
-//! machine's clone of its repository holds it. Deterministic and local: it never fetches and
-//! never asks GitHub, so a PR's state is not read here.
+//! machine's clone of its repository holds it on the repository's default branch on GitHub.
+//! Deterministic and local: it never fetches and never asks GitHub, so a PR's state is not read
+//! here. Results are cached by each clone's default-branch head, so a repeat costs one ref read.
 use crate::*;
 use std::collections::{HashMap, HashSet};
 use workspace_core::{RefAnchors, RefState, RefVerification};
+
+/// Above this many unchecked commits in one clone, its default branch is listed once instead of
+/// asking Git about each commit.
+const ONE_BY_ONE: usize = 20;
+/// The cache forgets everything past this many commits, so it stays bounded.
+const CACHE_LIMIT: usize = 10_000;
 
 /// The anchors of a `ref` in the entry contract's forms: `—`, `<branch> @ —`, or
 /// `<branch> @ <sha>[…<sha>][ · PR #NN]`.
@@ -28,53 +35,123 @@ pub(crate) fn anchors(reference: &str) -> RefAnchors {
     }
 }
 
-/// This machine's clones of the workspace repositories, by log folder: each one's GitHub name,
-/// or its workspace name, in lower case, with its clone and its default branch.
+/// One clone of a workspace repository and the refs that may name its default branch on
+/// GitHub, best first: the default branch GitHub reported, then `origin/HEAD`. The repository's
+/// configured base is not one of them, since a feature base is not the default branch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RepoClone {
+    pub(crate) path: PathBuf,
+    pub(crate) defaults: Vec<String>,
+}
+
+/// This machine's clones of the workspace repositories, by log folder in lower case.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Clones(pub(crate) HashMap<String, Vec<(PathBuf, String)>>);
+pub(crate) struct Clones(pub(crate) HashMap<String, Vec<RepoClone>>);
 impl Clones {
     pub(crate) fn of(repositories: &[Repository]) -> Self {
-        let mut clones: HashMap<String, Vec<(PathBuf, String)>> = HashMap::new();
+        let mut clones: HashMap<String, Vec<RepoClone>> = HashMap::new();
         for repository in repositories {
-            let folder = (repository.github.as_ref())
-                .map(|github| github.name.clone())
-                .unwrap_or_else(|| repository.name.clone());
+            let reported = (repository.github.as_ref())
+                .and_then(|github| github.facts.as_ref())
+                .and_then(|facts| facts.branches.as_ref())
+                .and_then(|branches| branches.default_branch.as_ref())
+                .map(|branch| format!("refs/remotes/origin/{branch}"));
+            let defaults = reported
+                .into_iter()
+                .chain(["refs/remotes/origin/HEAD".to_owned()])
+                .collect();
             clones
-                .entry(folder.to_ascii_lowercase())
+                .entry(memory::repository_log_name(repository).to_ascii_lowercase())
                 .or_default()
-                .push((PathBuf::from(&repository.path), repository.base.clone()));
+                .push(RepoClone {
+                    path: PathBuf::from(&repository.path),
+                    defaults,
+                });
         }
         Self(clones)
     }
 }
 
-/// Each `(folder, ref)`'s verification, in order. Git runs twice per clone at most, however many
-/// refs there are: one listing of the default branch and one lookup of every named commit.
-pub(crate) fn verify(clones: &Clones, refs: &[(&str, &str)]) -> Vec<RefVerification> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Found {
+    Elsewhere,
+    OnDefault,
+}
+
+/// What was learned about named commits, by clone and its default branch's head: `None` for a
+/// commit the clone does not hold.
+#[derive(Debug, Default)]
+pub(crate) struct Cache {
+    found: HashMap<(PathBuf, String), HashMap<String, Option<Found>>>,
+    size: usize,
+}
+
+/// The commit the clone's default branch is at, by the first of its refs that resolves.
+fn default_head(clone: &RepoClone) -> Option<String> {
+    clone.defaults.iter().find_map(|reference| {
+        let answer = runtime::git_answer(
+            &clone.path,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{reference}^{{commit}}"),
+            ],
+        )
+        .ok()?;
+        answer
+            .status
+            .success()
+            .then(|| answer.output.trim().to_owned())
+    })
+}
+
+/// Each `(folder, ref)`'s verification, in order. Per clone, Git reads its default branch's
+/// head, then checks only the commits `cache` does not know at that head.
+pub(crate) fn verify(
+    clones: &Clones,
+    refs: &[(&str, &str)],
+    cache: &mut Cache,
+) -> Vec<RefVerification> {
     let unverified = |reason: &str| RefVerification {
         state: RefState::Unverified,
         reason: Some(reason.to_owned()),
     };
     let anchored: Vec<RefAnchors> = refs.iter().map(|(_, r)| anchors(r)).collect();
-    let mut found: HashMap<(String, String), Found> = HashMap::new();
-    let mut by_clone: HashMap<&Path, (&str, HashSet<&str>)> = HashMap::new();
+    let mut named: HashMap<&Path, (&RepoClone, HashSet<&str>)> = HashMap::new();
     for ((folder, _), anchors) in refs.iter().zip(&anchored) {
-        for (clone, base) in clones
+        for clone in clones
             .0
             .get(&folder.to_ascii_lowercase())
             .into_iter()
             .flatten()
         {
-            let (_, commits) = by_clone.entry(clone).or_insert((base, HashSet::new()));
+            let (_, commits) = named.entry(&clone.path).or_insert((clone, HashSet::new()));
             commits.extend(anchors.commits.iter().map(String::as_str));
         }
     }
-    for (clone, (base, commits)) in by_clone {
-        for (sha, state) in look_up(clone, base, commits) {
-            let key = (clone.to_string_lossy().into_owned(), sha);
-            let best = found.entry(key).or_insert(state);
-            *best = (*best).max(state);
+    let mut heads: HashMap<&Path, String> = HashMap::new();
+    for (path, (clone, commits)) in named {
+        if commits.is_empty() {
+            continue;
         }
+        let Some(head) = default_head(clone) else {
+            continue;
+        };
+        if cache.size > CACHE_LIMIT {
+            *cache = Cache::default();
+        }
+        let known = cache
+            .found
+            .entry((path.to_owned(), head.clone()))
+            .or_default();
+        let unknown: Vec<&str> = commits
+            .into_iter()
+            .filter(|c| !known.contains_key(*c))
+            .collect();
+        cache.size += unknown.len();
+        known.extend(look_up(path, &head, &unknown));
+        heads.insert(path, head);
     }
     refs.iter()
         .zip(anchored)
@@ -85,12 +162,21 @@ pub(crate) fn verify(clones: &Clones, refs: &[(&str, &str)]) -> Vec<RefVerificat
             let Some(here) = clones.0.get(&folder.to_ascii_lowercase()) else {
                 return unverified("not on this machine");
             };
-            let state = (here.iter())
-                .flat_map(|(clone, _)| {
-                    let clone = clone.to_string_lossy().into_owned();
-                    (anchors.commits.iter())
-                        .filter_map(|sha| found.get(&(clone.clone(), sha.clone())).copied())
-                        .collect::<Vec<_>>()
+            let checked: Vec<&HashMap<String, Option<Found>>> = (here.iter())
+                .filter_map(|clone| {
+                    let head = heads.get(clone.path.as_path())?;
+                    cache.found.get(&(clone.path.clone(), head.clone()))
+                })
+                .collect();
+            if checked.is_empty() {
+                return unverified("its repository's default branch is not known on this machine");
+            }
+            let state = (checked.iter())
+                .flat_map(|known| {
+                    anchors
+                        .commits
+                        .iter()
+                        .filter_map(|sha| known.get(sha).copied().flatten())
                 })
                 .max();
             match state {
@@ -108,19 +194,13 @@ pub(crate) fn verify(clones: &Clones, refs: &[(&str, &str)]) -> Vec<RefVerificat
         .collect()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Found {
-    Elsewhere,
-    OnDefault,
-}
-
-/// The named commits the clone holds, keyed as named, and whether `base` contains each.
-fn look_up(clone: &Path, base: &str, commits: HashSet<&str>) -> Vec<(String, Found)> {
+/// What the clone holds of the named commits, and whether the default branch at `head`
+/// contains each: one question per commit for a few, or one listing of the branch for many.
+fn look_up(clone: &Path, head: &str, commits: &[&str]) -> Vec<(String, Option<Found>)> {
     if commits.is_empty() {
         return vec![];
     }
-    let named: Vec<&str> = commits.into_iter().collect();
-    let input: String = named
+    let input: String = commits
         .iter()
         .map(|sha| format!("{sha}^{{commit}}\n"))
         .collect();
@@ -132,28 +212,37 @@ fn look_up(clone: &Path, base: &str, commits: HashSet<&str>) -> Vec<(String, Fou
         return vec![];
     };
     let checked = String::from_utf8_lossy(&checked);
-    let full: Vec<(&str, &str)> = (named.iter().copied())
+    let full: Vec<(&str, Option<&str>)> = (commits.iter().copied())
         .zip(checked.lines())
-        .filter(|(_, line)| line.len() == 40 && line.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(|(named, line)| {
+            let held = line.len() == 40 && line.bytes().all(|b| b.is_ascii_hexdigit());
+            (named, held.then_some(line))
+        })
         .collect();
-    if full.is_empty() {
-        return vec![];
-    }
-    let on_default: HashSet<String> =
-        runtime::git_bytes_large(clone, &["rev-list", base, "--"], b"")
+    let held = full.iter().filter(|(_, sha)| sha.is_some()).count();
+    let listed: Option<HashSet<String>> = (held > ONE_BY_ONE).then(|| {
+        runtime::git_bytes_large(clone, &["rev-list", head, "--"], b"")
             .map(|listing| {
                 String::from_utf8_lossy(&listing)
                     .lines()
                     .map(str::to_owned)
                     .collect()
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+    });
     full.into_iter()
         .map(|(named, sha)| {
-            let found = match on_default.contains(sha) {
-                true => Found::OnDefault,
-                false => Found::Elsewhere,
-            };
+            let found = sha.map(|sha| {
+                let on_default = match &listed {
+                    Some(listed) => listed.contains(sha),
+                    None => runtime::git_answer(clone, &["merge-base", "--is-ancestor", sha, head])
+                        .is_ok_and(|answer| answer.status.success()),
+                };
+                match on_default {
+                    true => Found::OnDefault,
+                    false => Found::Elsewhere,
+                }
+            });
             (named.to_owned(), found)
         })
         .collect()
@@ -175,8 +264,17 @@ mod tests {
         assert_eq!(full.pull_request, Some(81));
     }
 
-    #[test]
-    fn a_commit_on_the_default_branch_is_verified_one_elsewhere_claimed() {
+    /// A clone whose `origin/main` is the default branch, with a commit on it, one on a
+    /// feature base that `origin` also has, and one on a local branch only.
+    struct Relay {
+        _folder: tempfile::TempDir,
+        clones: Clones,
+        merged: String,
+        on_feature: String,
+        side: String,
+    }
+
+    fn relay() -> Relay {
         let folder = tempfile::tempdir().unwrap();
         let clone = folder.path().join("relay");
         git(
@@ -185,37 +283,139 @@ mod tests {
         );
         let commit = |message: &str| {
             git(&clone, &["commit", "-q", "--allow-empty", "-m", message]);
-            runtime::git_output(&clone, &["rev-parse", "HEAD"])
-                .unwrap()
-                .trim()
-                .to_owned()
+            git(&clone, &["rev-parse", "HEAD"])
         };
         let merged = commit("merged");
+        git(&clone, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(
+            &clone,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        git(&clone, &["checkout", "-q", "-b", "Parental-controls"]);
+        let on_feature = commit("on the feature base");
+        git(
+            &clone,
+            &[
+                "update-ref",
+                "refs/remotes/origin/Parental-controls",
+                "HEAD",
+            ],
+        );
         git(&clone, &["checkout", "-q", "-b", "side"]);
         let side = commit("side");
         git(&clone, &["checkout", "-q", "main"]);
         let clones = Clones(HashMap::from([(
             "relay".to_owned(),
-            vec![(clone.clone(), "main".to_owned())],
+            vec![RepoClone {
+                path: clone.clone(),
+                defaults: vec!["refs/remotes/origin/HEAD".into()],
+            }],
         )]));
-        let verified =
-            |folder, reference: String| verify(&clones, &[(folder, reference.as_str())])[0].clone();
-        let short = &merged[..7];
+        Relay {
+            _folder: folder,
+            clones,
+            merged,
+            on_feature,
+            side,
+        }
+    }
+
+    #[test]
+    fn a_commit_on_the_default_branch_is_verified_one_elsewhere_claimed() {
+        let relay = relay();
+        let mut cache = Cache::default();
+        let mut verified = |folder, reference: String| {
+            verify(&relay.clones, &[(folder, reference.as_str())], &mut cache)[0].clone()
+        };
+        let short = &relay.merged[..7];
         assert_eq!(
             verified("Relay", format!("main @ {short}")).state,
             RefState::Verified
         );
         assert_eq!(
-            verified("relay", format!("side @ {side}")).state,
+            verified("relay", format!("side @ {}", relay.side)).state,
             RefState::Claimed
+        );
+        let feature = verified("relay", format!("Parental-controls @ {}", relay.on_feature));
+        assert_eq!(
+            feature.state,
+            RefState::Claimed,
+            "a feature base is not the default branch"
         );
         let missing = verified("relay", "main @ 0000000".into());
         assert_eq!(missing.state, RefState::Unverified);
-        let elsewhere = verified("other", format!("main @ {merged}"));
+        let elsewhere = verified("other", format!("main @ {}", relay.merged));
         assert_eq!(elsewhere.reason.as_deref(), Some("not on this machine"));
         assert_eq!(
             verified("relay", "main @ —".into()).state,
             RefState::Unverified
+        );
+    }
+
+    #[test]
+    fn the_default_branch_github_reported_comes_before_origin_head() {
+        let relay = relay();
+        let mut clones = relay.clones.clone();
+        let clone = &mut clones.0.get_mut("relay").unwrap()[0];
+        clone
+            .defaults
+            .insert(0, "refs/remotes/origin/Parental-controls".into());
+        let reference = format!("Parental-controls @ {}", relay.on_feature);
+        let state = verify(&clones, &[("relay", &reference)], &mut Cache::default())[0].state;
+        assert_eq!(state, RefState::Verified);
+    }
+
+    #[test]
+    fn a_repeat_comes_from_the_cache_until_the_default_branch_moves() {
+        let relay = relay();
+        let mut cache = Cache::default();
+        let reference = format!("side @ {}", relay.side);
+        let refs = [("relay", reference.as_str())];
+        assert_eq!(
+            verify(&relay.clones, &refs, &mut cache)[0].state,
+            RefState::Claimed
+        );
+        let path = &relay.clones.0["relay"][0].path;
+        let known = |cache: &Cache| cache.found.keys().filter(|(p, _)| p == path).count();
+        assert_eq!(known(&cache), 1);
+        verify(&relay.clones, &refs, &mut cache);
+        assert_eq!(
+            (known(&cache), cache.size),
+            (1, 1),
+            "nothing new was checked"
+        );
+        git(
+            path,
+            &["update-ref", "refs/remotes/origin/main", &relay.side],
+        );
+        assert_eq!(
+            verify(&relay.clones, &refs, &mut cache)[0].state,
+            RefState::Verified
+        );
+        assert_eq!(known(&cache), 2, "the moved head is a new key");
+    }
+
+    #[test]
+    fn many_commits_are_checked_with_one_listing_of_the_default_branch() {
+        let relay = relay();
+        let clone = &relay.clones.0["relay"][0].path;
+        let mut commits = vec![];
+        for n in 0..=ONE_BY_ONE {
+            git(
+                clone,
+                &["commit", "-q", "--allow-empty", "-m", &format!("c{n}")],
+            );
+            commits.push(format!("main @ {}", git(clone, &["rev-parse", "HEAD"])));
+        }
+        let refs: Vec<(&str, &str)> = commits.iter().map(|r| ("relay", r.as_str())).collect();
+        let states = verify(&relay.clones, &refs, &mut Cache::default());
+        assert!(
+            states.iter().all(|v| v.state == RefState::Claimed),
+            "origin/main has not moved"
         );
     }
 }

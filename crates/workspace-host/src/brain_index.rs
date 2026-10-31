@@ -11,7 +11,7 @@ use verify_refs::Clones;
 
 const SCHEMA: &str = include_str!("brain_index.sql");
 /// Raised when `brain_index.sql` changes, so an older file is rebuilt rather than migrated.
-const SCHEMA_VERSION: &str = "1";
+const SCHEMA_VERSION: &str = "2";
 /// Under the data folder, beside `repos/`.
 const FOLDER: &str = "brain-index";
 const STATUS: &str = "STATUS.md";
@@ -364,26 +364,23 @@ fn parse(class: Class, path: &str, text: &str) -> Indexed {
     }
 }
 
-/// How an entry reached `main`: the PR its adding commit names, and that commit's time.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Added {
-    pull_request: Option<u64>,
-    at: Option<i64>,
-}
-
-/// Stores one file, replacing what the index held at its path.
+/// Stores one file, replacing what the index held at its path; `pull_request` is the PR of the
+/// commit that added an entry.
 fn store(
     db: &Connection,
     path: &str,
     hash: &str,
     class: Class,
     text: &str,
-    added: Added,
+    pull_request: Option<u64>,
 ) -> Result<()> {
     let file = parse(class, path, text);
-    db.execute("DELETE FROM files WHERE path=?1", [path])?;
-    db.execute(
-        "INSERT INTO files(path,hash,class,kind,repository,author,source,entry_id,reference,date,title,name,body,pull_request,added_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+    db.prepare_cached("DELETE FROM files WHERE path=?1")?
+        .execute([path])?;
+    db.prepare_cached(
+        "INSERT INTO files(path,hash,class,kind,repository,author,source,entry_id,reference,date,title,name,body,pull_request) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+    )?
+    .execute(
         params![
             path,
             hash,
@@ -398,22 +395,41 @@ fn store(
             file.title,
             file.name,
             file.body,
-            added.pull_request,
-            added.at
+            pull_request
         ],
     )?;
     let id = db.last_insert_rowid();
     for target in &file.links {
-        db.execute(
-            "INSERT INTO links(file_id,target) VALUES (?1,?2)",
-            params![id, link_key(target)],
-        )?;
+        db.prepare_cached("INSERT INTO links(file_id,target) VALUES (?1,?2)")?
+            .execute(params![id, link_key(target)])?;
     }
     for (repository, entry_id) in &file.sources {
-        db.execute(
+        db.prepare_cached(
             "INSERT INTO sources(file_id,repository,entry_id) VALUES (?1,lower(?2),?3)",
-            params![id, repository, entry_id],
-        )?;
+        )?
+        .execute(params![id, repository, entry_id])?;
+    }
+    Ok(())
+}
+
+/// Marks the entries a commit after the last compile added as pending, by the commit graph, not
+/// by commit times, which a batch and a compile can share to the second. With no compile yet,
+/// every entry is pending.
+fn mark_pending(
+    db: &Connection,
+    checkout: &Path,
+    (last_compile, commit): (Option<&str>, &str),
+    prefix: &str,
+) -> Result<()> {
+    let Some(last_compile) = last_compile else {
+        db.execute("UPDATE files SET pending=(class='entry')", [])?;
+        return Ok(());
+    };
+    let since = added_entries(checkout, &format!("{last_compile}..{commit}"), prefix)?;
+    db.execute("UPDATE files SET pending=0 WHERE pending=1", [])?;
+    let mut mark = db.prepare("UPDATE files SET pending=1 WHERE class='entry' AND path=?1")?;
+    for path in since.keys() {
+        mark.execute([path])?;
     }
     Ok(())
 }
@@ -516,7 +532,14 @@ pub(crate) fn refresh(refresh: Refresh) -> Result<usize> {
     );
     let new_entries = changed.iter().any(|(_, _, class)| *class == Class::Entry);
     let added = match new_entries {
-        true => added_entries(checkout, previous.as_deref(), commit, &prefix)?,
+        true => {
+            let since = previous.filter(|p| publish::is_ancestor(checkout, p, commit));
+            let range = match since {
+                Some(previous) => format!("{previous}..{commit}"),
+                None => commit.to_owned(),
+            };
+            added_entries(checkout, &range, &prefix)?
+        }
         false => HashMap::new(),
     };
     let last_compile = String::from_utf8(runtime::git_bytes(
@@ -524,7 +547,7 @@ pub(crate) fn refresh(refresh: Refresh) -> Result<usize> {
         &[
             "log",
             "-1",
-            "--format=%ct",
+            "--format=%H %ct",
             commit,
             "--",
             &format!("{prefix}notes"),
@@ -532,22 +555,20 @@ pub(crate) fn refresh(refresh: Refresh) -> Result<usize> {
         ],
         b"",
     )?)?;
+    let (compile_commit, compile_time) = last_compile.trim().split_once(' ').unzip();
     let transaction = db.transaction()?;
     for path in &deleted {
         transaction.execute("DELETE FROM files WHERE path=?1", [path])?;
     }
     for ((path, blob, class), content) in changed.iter().zip(&contents) {
         let text = String::from_utf8_lossy(content);
-        let added = added.get(path.as_str()).copied().unwrap_or_default();
-        store(&transaction, path, blob, *class, &text, added)?;
+        let pull_request = added.get(path.as_str()).copied().flatten();
+        store(&transaction, path, blob, *class, &text, pull_request)?;
     }
     resolve_sources(&transaction)?;
+    mark_pending(&transaction, checkout, (compile_commit, commit), &prefix)?;
     verify_entries(&transaction, clones)?;
-    set_state(
-        &transaction,
-        "last_compile",
-        Some(last_compile.trim()).filter(|t| !t.is_empty()),
-    )?;
+    set_state(&transaction, "last_compile", compile_time)?;
     set_state(&transaction, "commit", Some(&at))?;
     transaction.commit()?;
     Ok(changed.len())
@@ -576,19 +597,13 @@ fn blobs(batch: &[u8]) -> Result<Vec<Vec<u8>>> {
     Ok(contents)
 }
 
-/// For each entry file added since `previous`, or ever when there is none: the PR its adding
-/// commit's subject names, as a squash merge's `(#NN)` does, and the commit's time.
+/// Each entry file the commits of `range` added, with the PR its adding commit's subject names,
+/// as a squash merge's `(#NN)` does.
 fn added_entries(
     checkout: &Path,
-    previous: Option<&str>,
-    commit: &str,
+    range: &str,
     prefix: &str,
-) -> Result<HashMap<String, Added>> {
-    let since = previous.filter(|p| publish::is_ancestor(checkout, p, commit));
-    let range = match since {
-        Some(previous) => format!("{previous}..{commit}"),
-        None => commit.to_owned(),
-    };
+) -> Result<HashMap<String, Option<u64>>> {
     let log = runtime::git_bytes_large(
         checkout,
         &[
@@ -598,8 +613,8 @@ fn added_entries(
             "--diff-filter=A",
             "--no-renames",
             "--name-only",
-            "--format=%x1e%ct %s",
-            &range,
+            "--format=%x1e%s",
+            range,
             "--",
             &format!("{prefix}logs"),
         ],
@@ -609,12 +624,7 @@ fn added_entries(
     let mut added = HashMap::new();
     for record in log.split('\x1e').filter(|r| !r.trim().is_empty()) {
         let mut lines = record.lines();
-        let header = lines.next().unwrap_or_default();
-        let (time, subject) = header.split_once(' ').unwrap_or((header, ""));
-        let entry = Added {
-            pull_request: squash_pull_request(subject),
-            at: time.parse().ok(),
-        };
+        let entry = squash_pull_request(lines.next().unwrap_or_default());
         for path in lines.filter(|l| !l.is_empty()) {
             if let Some(relative) = path.strip_prefix(prefix) {
                 // Newest first: a file added again keeps its latest addition.
@@ -645,7 +655,7 @@ fn verify_entries(db: &Connection, clones: &Clones) -> Result<()> {
     let refs: Vec<(&str, &str)> = (unverified.iter())
         .map(|(_, folder, reference, _, _)| (folder.as_str(), reference.as_str()))
         .collect();
-    let checked = verify_refs::verify(clones, &refs);
+    let checked = verify_refs::verify(clones, &refs, &mut verify_refs::Cache::default());
     let mut update =
         db.prepare("UPDATE files SET verification=?2,verification_reason=?3 WHERE id=?1")?;
     for ((id, _, _, state, reason), verification) in unverified.iter().zip(checked) {
@@ -1121,12 +1131,12 @@ fn conflicts(db: &Connection, scope: Option<&Scope>) -> Result<Vec<BrainConflict
 }
 
 /// Freshness: the last compile, as the last commit on `main` that changed the wiki, and the
-/// entries added since.
+/// entries commits after it added.
 fn freshness(db: &Connection) -> Result<(Option<i64>, usize)> {
     let last_compile: Option<i64> = state(db, "last_compile")?.and_then(|t| t.parse().ok());
     let pending: i64 = db.query_row(
-        "SELECT count(*) FROM files WHERE class='entry' AND (?1 IS NULL OR coalesce(added_at,0)>?1)",
-        [last_compile],
+        "SELECT count(*) FROM files WHERE class='entry' AND pending=1",
+        [],
         |r| r.get(0),
     )?;
     Ok((last_compile.map(|seconds| seconds * 1000), pending as usize))
@@ -1382,13 +1392,9 @@ fn ladder(db: &Connection, scope: Option<&Scope>, terms: &[String]) -> Result<Ve
     for hit in &notes {
         let note = read_note(db, &hit.path)?;
         let excerpt = marked(&hit.excerpt);
-        let sources: Vec<Value> = (note.claims.iter())
-            .filter(|claim| excerpt.contains(&format!("[^{}]", claim.label)))
-            .flat_map(|claim| claim.sources.iter().map(source_json))
-            .collect();
         let result = json!({
-            "step": "note", "path": hit.path,
-            "kind": hit.kind.map(BrainKind::name), "updated": hit.date, "sources": sources,
+            "step": "note", "path": hit.path, "kind": hit.kind.map(BrainKind::name),
+            "updated": hit.date, "sources": excerpt_sources(&note, &excerpt),
         });
         if !gathered.add(result, &excerpt) {
             return Ok(gathered.results);
@@ -1396,12 +1402,12 @@ fn ladder(db: &Connection, scope: Option<&Scope>, terms: &[String]) -> Result<Ve
         linked.extend(note.links.into_iter().filter_map(|link| link.path));
     }
     for path in linked {
-        if shown.insert(path.clone()) {
+        if shown.insert(path.clone()) && note_in_scope(db, scope, &path)? {
             let note = read_note(db, &path)?;
             let opening: String = note.body.trim().chars().take(400).collect();
             let result = json!({
                 "step": "linked_note", "path": path, "kind": note.kind.map(BrainKind::name),
-                "updated": note.updated,
+                "updated": note.updated, "sources": excerpt_sources(&note, &opening),
             });
             if !gathered.add(result, &opening) {
                 return Ok(gathered.results);
@@ -1424,6 +1430,24 @@ fn ladder(db: &Connection, scope: Option<&Scope>, terms: &[String]) -> Result<Ve
         }
     }
     Ok(gathered.results)
+}
+
+/// The sources of the claims whose footnote markers the excerpt shows.
+fn excerpt_sources(note: &BrainNote, excerpt: &str) -> Vec<Value> {
+    (note.claims.iter())
+        .filter(|claim| excerpt.contains(&format!("[^{}]", claim.label)))
+        .flat_map(|claim| claim.sources.iter().map(source_json))
+        .collect()
+}
+
+fn note_in_scope(db: &Connection, scope: Option<&Scope>, path: &str) -> Result<bool> {
+    let (folders, planning) = scope_params(scope);
+    let sql = format!("SELECT {NOTE_IN_SCOPE} FROM files f WHERE f.class='note' AND f.path=?3");
+    Ok(db
+        .prepare_cached(&sql)?
+        .query_row(params![folders, planning, path], |r| r.get(0))
+        .optional()?
+        .unwrap_or(false))
 }
 
 fn source_json(source: &ClaimSource) -> Value {
@@ -1510,12 +1534,7 @@ impl Host {
             brain.repository
         );
         let folders = (self.project_repositories(project)?.iter())
-            .map(|repository| {
-                (repository.github.as_ref())
-                    .map(|github| github.name.clone())
-                    .unwrap_or_else(|| repository.name.clone())
-                    .to_lowercase()
-            })
+            .map(|repository| memory::repository_log_name(repository).to_lowercase())
             .collect();
         let planning = (brain.repository.split_once('/'))
             .map(|(_, name)| name.to_lowercase())
@@ -1611,7 +1630,11 @@ impl Host {
         let refs: Vec<(&str, &str)> = (pending.iter())
             .map(|e| (e.repository.as_str(), e.reference.as_str()))
             .collect();
-        let checked = verify_refs::verify(&clones, &refs);
+        // Cached by each clone's default-branch head, so a repeat page reads one ref per clone;
+        // a new commit costs one Git question, or one listing of the branch for many.
+        let mut cache = self.verified_refs.lock().unwrap_or_else(|e| e.into_inner());
+        let checked = verify_refs::verify(&clones, &refs, &mut cache);
+        drop(cache);
         for (entry, verification) in pending.iter_mut().zip(checked) {
             entry.verification = verification;
         }
@@ -1868,6 +1891,25 @@ pub(crate) mod tests {
             );
             git(&self.path(), &["rev-parse", "HEAD"])
         }
+        /// `commit` with the author and committer time `date`, such as `@1790000000 +0000`.
+        fn commit_at(&self, files: &[(String, String)], message: &str, date: &str) -> String {
+            for (path, text) in files {
+                let path = self.path().join("second-brain").join(path);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, text).unwrap();
+            }
+            git(&self.path(), &["add", "-A"]);
+            let status = std::process::Command::new("git")
+                .current_dir(self.path())
+                .args(["-c", "user.name=F", "-c", "user.email=f@example.invalid"])
+                .args(["commit", "-q", "--allow-empty", "-m", message])
+                .env("GIT_AUTHOR_DATE", date)
+                .env("GIT_COMMITTER_DATE", date)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            git(&self.path(), &["rev-parse", "HEAD"])
+        }
         fn remove(&self, path: &str, message: &str) -> String {
             fs::remove_file(self.path().join("second-brain").join(path)).unwrap();
             self.commit(&[], message)
@@ -1930,7 +1972,7 @@ pub(crate) mod tests {
     /// Every row the index holds, without its row ids, and the search results for some queries.
     fn dump(db: &Connection) -> (Vec<String>, Vec<Vec<BrainHit>>) {
         let rows = db
-            .prepare("SELECT path,hash,class,kind,repository,author,entry_id,date,title,body,verification,pull_request,added_at FROM files ORDER BY path")
+            .prepare("SELECT path,hash,class,kind,repository,author,entry_id,date,title,body,verification,pull_request,pending FROM files ORDER BY path")
             .unwrap()
             .query_map([], |r| {
                 Ok((0..13)
@@ -2129,6 +2171,70 @@ pub(crate) mod tests {
             after.links[0].path.as_deref(),
             Some("notes/Call Relay Architecture.md")
         );
+        assert_eq!(after.pending_entries, 0);
+    }
+
+    #[test]
+    fn a_batch_merged_in_the_same_second_as_a_compile_is_still_pending() {
+        let brain = Checkout::new();
+        let second = "@1790000000 +0000";
+        brain.commit_at(&sample()[..1], "Log batch (#80)", second);
+        brain.commit_at(&sample()[4..], "Compile (#81)", second);
+        let head = brain.commit_at(&sample()[1..2], "Log batch (#82)", second);
+        brain.refresh(&head);
+        let status = status(&brain.db()).unwrap();
+        assert_eq!(status.last_compile, Some(1_790_000_000_000));
+        assert_eq!(
+            status.pending_entries, 1,
+            "only the batch after the compile"
+        );
+    }
+
+    #[test]
+    fn linked_notes_keep_the_project_scope_and_their_footnoted_sources() {
+        let brain = Checkout::new();
+        let relay_entry = entry(RELAY, &id(1), ("oscar", "decision", "One retry"), "—");
+        let app_entry = entry(APP, &id(2), ("rb", "decision", "Pages of 50"), "—");
+        let cited = format!("[e](../{})", relay_entry.0);
+        let files = vec![
+            relay_entry.clone(),
+            app_entry.clone(),
+            note(
+                "Alpha",
+                "decision",
+                std::slice::from_ref(&relay_entry.0),
+                "Zebra calls go through [[Beta]] and [[Gamma]].",
+            ),
+            note(
+                "Beta",
+                "observation",
+                std::slice::from_ref(&app_entry.0),
+                "Beta is the app's.",
+            ),
+            note(
+                "Gamma",
+                "observation",
+                &[],
+                &format!("Gamma retries once.[^1]\n\n[^1]: {cited}"),
+            ),
+        ];
+        let head = brain.commit(&files, "Compile");
+        brain.refresh(&head);
+        let results = ladder(&brain.db(), Some(&relay_scope()), &["zebra".into()]).unwrap();
+        let paths: Vec<(&str, &str)> = (results.iter())
+            .map(|r| (r["step"].as_str().unwrap(), r["path"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                ("note", "notes/Alpha.md"),
+                ("linked_note", "notes/Gamma.md")
+            ],
+            "Beta cites only the app's entries"
+        );
+        assert_eq!(results[1]["sources"][0]["path"], relay_entry.0);
+        let whole = ladder(&brain.db(), None, &["zebra".into()]).unwrap();
+        assert_eq!(whole.len(), 3, "the whole brain links Beta too");
     }
 
     #[test]
@@ -2278,55 +2384,82 @@ pub(crate) mod tests {
             "sagechat-cortex",
             "sagechat-platform-api",
         ];
+        let built = std::time::Instant::now();
         {
+            // A bulk insert of the rows a refresh would store, in one transaction, with the
+            // full text built once at the end rather than row by row.
             let mut db = open(&path).unwrap();
             let transaction = db.transaction().unwrap();
+            transaction
+                .execute_batch("DROP TRIGGER files_added;")
+                .unwrap();
             let word = |at: u128| words[(at % words.len() as u128) as usize];
-            for n in 0..100_000u128 {
-                let title = format!("{} {} {}", word(n * 7), word(n * 7 + 1), word(n * 7 + 5));
-                let kind = if n % 4 == 0 {
-                    "decision"
-                } else {
-                    "observation"
-                };
-                let author = ["oscar", "rb", "mhohlios"][(n % 3) as usize];
-                let (entry_path, text) =
-                    entry(repos[(n % 5) as usize], &id(n), (author, kind, &title), "—");
-                store(
-                    &transaction,
-                    &entry_path,
-                    "0",
-                    Class::Entry,
-                    &text,
-                    Added::default(),
+            let mut file = transaction
+                .prepare(
+                    "INSERT INTO files(id,path,hash,class,kind,repository,author,entry_id,date,title,name,body) VALUES (?1,?2,'0',?3,?4,?5,?6,?7,'2026-10-20',?8,?9,?10)",
                 )
                 .unwrap();
+            let mut source = transaction
+                .prepare("INSERT INTO sources(file_id,repository) VALUES (?1,?2)")
+                .unwrap();
+            for n in 0..100_000u128 {
+                let repo = repos[(n % 5) as usize];
+                let title = format!("{} {} {}", word(n * 7), word(n * 7 + 1), word(n * 7 + 5));
+                let kind =
+                    ["decision", "observation", "observation", "observation"][(n % 4) as usize];
+                let author = ["oscar", "rb", "mhohlios"][(n % 3) as usize];
+                let entry = id(n);
+                let path = format!("logs/{repo}/2026/10/2026-10-20-{entry}.md");
+                let body = format!(
+                    "## 2026-10-20 — {title}\n- type: {kind}\n- ref: —\n- changed: {title}.\n- why: Because.\n- state: Done.\n"
+                );
+                let row = params![
+                    n as i64 + 1,
+                    path,
+                    "entry",
+                    kind,
+                    repo,
+                    author,
+                    entry,
+                    title,
+                    None::<String>,
+                    body
+                ];
+                file.execute(row).unwrap();
             }
             for n in 0..10_000u128 {
-                let source = format!(
-                    "logs/{}/2026/10/2026-10-20-{}.md",
-                    repos[(n % 5) as usize],
-                    id(n)
-                );
+                let id = 100_001 + n as i64;
+                let title = format!("Note {n}");
                 let body = format!(
                     "The {} {} note links [[Note {}]].",
                     word(n * 5),
                     word(n * 5 + 1),
                     n + 1
                 );
-                let (note_path, text) = note(&format!("Note {n}"), "observation", &[source], &body);
-                store(
-                    &transaction,
-                    &note_path,
-                    "0",
-                    Class::Note,
-                    &text,
-                    Added::default(),
-                )
-                .unwrap();
+                let row = params![
+                    id,
+                    format!("notes/{title}.md"),
+                    "note",
+                    "observation",
+                    None::<String>,
+                    None::<String>,
+                    None::<String>,
+                    title,
+                    title.to_lowercase(),
+                    body
+                ];
+                file.execute(row).unwrap();
+                source
+                    .execute(params![id, repos[(n % 5) as usize]])
+                    .unwrap();
             }
+            drop((file, source));
+            transaction
+                .execute_batch("INSERT INTO search(search) VALUES ('rebuild');")
+                .unwrap();
             transaction.commit().unwrap();
         }
+        eprintln!("the fixture: {:?}", built.elapsed());
         let budget = std::time::Duration::from_millis(100);
         let scope = relay_scope();
         let filter = BrainLogFilter {
@@ -2445,6 +2578,32 @@ pub(crate) mod tests {
                 "—",
             ));
             files
+        }
+
+        #[test]
+        fn a_brain_without_a_config_is_indexed_in_its_spaces_folder() {
+            let mut b = brained();
+            let mut space = b.f.host.space(&b.sage).unwrap().space;
+            space.brain.as_mut().unwrap().folder = "brain".into();
+            b.f.host.update_space(space).unwrap();
+            let (path, text) = entry(
+                "app",
+                &id(5),
+                ("mhohlios", "decision", "Kept in brain"),
+                "—",
+            );
+            let files = [(format!("brain/{path}"), text)];
+            let files: Vec<(&str, &str)> = files
+                .iter()
+                .map(|(p, t)| (p.as_str(), t.as_str()))
+                .collect();
+            b.github.commit_files_on_main(&files, "Log batch (#7)");
+            assert!(run(&mut b.f.host, &b.tools));
+            let brain = b.f.host.brain(REPO).unwrap();
+            assert_eq!(brain.config, BrainConfigReading::Missing);
+            let hits = b.f.host.search_brain(REPO, None, "kept").unwrap();
+            assert_eq!(titles_of(&hits), ["Kept in brain"]);
+            assert_eq!(hits[0].path, path);
         }
 
         fn steps(answer: &Value) -> Vec<String> {
