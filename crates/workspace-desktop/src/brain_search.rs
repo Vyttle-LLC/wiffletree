@@ -65,6 +65,8 @@ pub(super) struct BrainSearch {
     bridge: Bridge,
     query: Entity<InputState>,
     opened: Option<Opened>,
+    /// Counts openings, so a reply to an earlier one, perhaps over another brain, is dropped.
+    openings: u64,
 }
 impl EventEmitter<Intent> for BrainSearch {}
 impl BrainSearch {
@@ -80,6 +82,7 @@ impl BrainSearch {
             bridge,
             query,
             opened: None,
+            openings: 0,
         }
     }
 
@@ -102,6 +105,7 @@ impl BrainSearch {
         let scope = scope.filter(|scope| {
             matches!(&searched, Searched::Brain { project: Some((id, _)), .. } if id == scope)
         });
+        self.openings += 1;
         self.opened = Some(Opened {
             searched,
             scope,
@@ -137,7 +141,7 @@ impl BrainSearch {
             return cx.notify();
         }
         let (repository, scope) = (repository.clone(), opened.scope.clone());
-        let asked = (query.clone(), scope.clone());
+        let asked = (self.openings, query.clone(), scope.clone());
         self.ask(
             ask::search_brain(repository, scope, query),
             window,
@@ -145,7 +149,7 @@ impl BrainSearch {
             move |view, hits, _, cx| {
                 let current = view.query.read(cx).value().trim().to_owned();
                 if let Some(opened) = &mut view.opened
-                    && (current, opened.scope.clone()) == asked
+                    && (view.openings, current, opened.scope.clone()) == asked
                 {
                     opened.results = Some(hits);
                     opened.selected = 0;
@@ -498,40 +502,95 @@ fn no_brain_line(space: Option<&str>, local: bool) -> String {
     }
 }
 
-/// What ⌘K searches from the shell's state: the brain browser's brain when it shows one, else
-/// the selected project's Space's.
-pub(super) fn searched_for(shared: &Shared) -> Searched {
-    let Some(index) = shared.index.as_deref() else {
+/// What ⌘K searches outside the brain browser: the selected project's Space's brain, with that
+/// project as a scope, or else the brain of `last_space`, the Space last used.
+pub(super) fn searched_for(shared: &Shared, last_space: Option<&SpaceId>) -> Searched {
+    let Some(snapshot) = shared.snapshot() else {
         return Searched::NoBrain {
             space: None,
             local: false,
         };
     };
-    let project = shared.project_id().and_then(|id| index.project(&id));
-    let space = project
-        .and_then(|project| (index.snapshot().spaces.iter()).find(|s| s.id == project.space));
-    match (project, space) {
-        (Some(project), Some(space)) => match github_brain(space) {
-            Some(repository) => Searched::Brain {
-                repository,
-                project: Some((project.id.clone(), project.name.clone())),
-            },
-            None => Searched::NoBrain {
-                space: Some((space.id.clone(), space.name.clone())),
-                local: space.brain.is_some(),
-            },
-        },
-        _ => Searched::NoBrain {
+    let project =
+        (shared.project_id()).and_then(|id| snapshot.projects.iter().find(|p| p.id == id));
+    let space_id = project.map(|p| &p.space).or(last_space);
+    let Some(space) = space_id.and_then(|id| snapshot.spaces.iter().find(|s| &s.id == id)) else {
+        return Searched::NoBrain {
             space: None,
             local: false,
+        };
+    };
+    match github_brain(space) {
+        Some(repository) => Searched::Brain {
+            repository,
+            project: project.map(|p| (p.id.clone(), p.name.clone())),
+        },
+        None => Searched::NoBrain {
+            space: Some((space.id.clone(), space.name.clone())),
+            local: space.brain.is_some(),
         },
     }
 }
 
+/// The Space of the project selected, which the overlay falls back to once none is.
+pub(super) fn space_in_use(shared: &Shared) -> Option<SpaceId> {
+    let project = shared.project_id()?;
+    Some(shared.index.as_ref()?.project(&project)?.space.clone())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{excerpt, no_brain_line};
-    use workspace_core::ExcerptPart;
+    use super::{Searched, excerpt, no_brain_line, searched_for};
+    use crate::Shared;
+    use std::rc::Rc;
+    use workspace_core::*;
+
+    #[test]
+    fn without_a_selected_project_search_uses_the_brain_of_the_space_last_used() {
+        let space = Space {
+            id: SpaceId("sage".into()),
+            name: "Sage".into(),
+            description: String::new(),
+            instructions: String::new(),
+            brain: Some(SpaceBrain {
+                repository: BrainRepository::GitHub {
+                    owner: "Sage-Social".into(),
+                    name: "sagehaven-docs".into(),
+                    extra: Extra::new(),
+                },
+                folder: "second-brain".into(),
+                extra: Extra::new(),
+            }),
+            storage: SpaceStorage {
+                repository: StorageRepository::Local { id: "l".into() },
+                folder: "sage".into(),
+            },
+            repositories: vec![],
+            models: SpaceModels::default(),
+            sources: vec![],
+            extra: Extra::new(),
+        };
+        let snapshot = Snapshot {
+            spaces: vec![space],
+            ..Default::default()
+        };
+        let shared = Shared {
+            index: Some(Rc::new(WorkspaceIndex::new(snapshot, Rc::default()))),
+            ..Default::default()
+        };
+        let last = SpaceId("sage".into());
+        assert_eq!(
+            searched_for(&shared, Some(&last)),
+            Searched::Brain {
+                repository: "Sage-Social/sagehaven-docs".into(),
+                project: None,
+            }
+        );
+        assert!(matches!(
+            searched_for(&shared, None),
+            Searched::NoBrain { space: None, .. }
+        ));
+    }
 
     #[test]
     fn an_excerpt_marks_each_matched_term() {

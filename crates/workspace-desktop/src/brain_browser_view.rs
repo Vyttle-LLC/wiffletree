@@ -103,6 +103,8 @@ pub(super) struct BrainBrowser {
     tree: Reading<BrainNoteTree>,
     /// The selected note's path, and the note once read.
     note_path: Option<String>,
+    /// The human chose the note, so the scope gives way to it rather than the reverse.
+    note_pinned: bool,
     note: Reading<ShownNote>,
     claim: Option<String>,
     logs: Reading<BrainLogPage>,
@@ -128,6 +130,7 @@ impl BrainBrowser {
             status: None,
             tree: None,
             note_path: None,
+            note_pinned: false,
             note: None,
             claim: None,
             logs: None,
@@ -167,6 +170,10 @@ impl BrainBrowser {
             self.seen_authors.clear();
             self.note_path = None;
         }
+        if brain_changed || self.scope != opening.project {
+            self.forget_readings();
+        }
+        self.note_pinned = false;
         self.repository = Some(opening.repository);
         self.scope = opening.project;
         self.claim = None;
@@ -178,6 +185,7 @@ impl BrainBrowser {
             BrainTarget::Note(path) => {
                 self.view = BrainView::Wiki;
                 self.note_path = Some(path);
+                self.note_pinned = true;
             }
             BrainTarget::Entry { id, pending } => {
                 self.view = BrainView::Logs;
@@ -215,8 +223,20 @@ impl BrainBrowser {
         self.scope = scope;
         self.from = BrainLogsFrom::Newest;
         self.focused_entry = None;
+        // A note outside the new scope gives way to the scope's first note.
+        self.note_pinned = false;
+        self.forget_readings();
         self.read(window, cx);
         cx.notify();
+    }
+
+    /// Drops what was read for another brain or scope, so no view shows it meanwhile.
+    fn forget_readings(&mut self) {
+        self.status = None;
+        self.tree = None;
+        self.note = None;
+        self.logs = None;
+        self.conflicts = None;
     }
 
     fn set_view(&mut self, view: BrainView, window: &mut Window, cx: &mut Context<Self>) {
@@ -293,10 +313,25 @@ impl BrainBrowser {
         )
     }
 
-    /// Reads the selected note, or the tree's first when none is selected.
+    /// Reads the selected note, or the tree's first when none is selected or the selected one is
+    /// outside the scope. A note the human chose outside the project's scope opens the whole
+    /// brain instead, as following a link out of the project does in the study.
     fn read_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let first = (self.tree.as_ref().and_then(|t| t.as_ref().ok()))
-            .and_then(|tree| tree_rows(tree).next().map(|row| row.path.clone()));
+        let Some(tree) = self.tree.as_ref().and_then(|t| t.as_ref().ok()) else {
+            return;
+        };
+        let in_tree = |path: &String| tree_rows(tree).any(|row| &row.path == path);
+        let first = tree_rows(tree).next().map(|row| row.path.clone());
+        let outside = self.note_path.as_ref().is_some_and(|path| !in_tree(path));
+        if outside && self.note_pinned && self.scope.is_some() {
+            self.scope = None;
+            self.forget_readings();
+            return self.read(window, cx);
+        }
+        if outside {
+            self.note_path = None;
+            self.note = None;
+        }
         let Some(path) = self.note_path.clone().or(first) else {
             self.note = None;
             return cx.notify();
@@ -305,13 +340,17 @@ impl BrainBrowser {
             return;
         };
         self.note_path = Some(path.clone());
-        let asked = path.clone();
+        let asked = (repository.clone(), Some(path.clone()));
         self.ask(
             ask::brain_note(repository, path),
             window,
             cx,
             move |view, read, _, cx| {
-                if view.note_path.as_ref() == Some(&asked) {
+                if (
+                    view.repository.clone().unwrap_or_default(),
+                    view.note_path.clone(),
+                ) == asked
+                {
                     view.note = Some(read.map(|note| ShownNote {
                         markdown: brain_markdown::prepare(&note.body, &note.links).into(),
                         note,
@@ -324,6 +363,7 @@ impl BrainBrowser {
 
     fn select_note(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         self.note_path = Some(path);
+        self.note_pinned = true;
         self.claim = None;
         self.view = BrainView::Wiki;
         if self.tree.is_none() {
@@ -1332,7 +1372,7 @@ fn kind_color(kind: Option<BrainKind>, p: Palette) -> Hsla {
     }
 }
 
-pub(super) fn verification_pill(verification: &RefVerification, p: Palette) -> Div {
+fn verification_pill(verification: &RefVerification, p: Palette) -> Div {
     let color = match verification.state {
         RefState::Verified => p.green,
         RefState::Claimed => p.yellow,

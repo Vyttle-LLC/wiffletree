@@ -910,8 +910,12 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::render_counts::count("Workspace");
+        // At launch nothing has focus yet; focus lost later is handled by `on_focus_lost`.
+        if window.focused(cx).is_none() {
+            self.focus.focus(window, cx);
+        }
         let p = self.colors(cx);
         if let Some(refusal) = self.bridge.refusal() {
             return self
@@ -938,7 +942,6 @@ impl Render for Workspace {
         div()
             // A context outside any text field, so `/` there still finds its binding.
             .key_context("Workspace")
-            .track_focus(&self.focus)
             .size_full()
             .bg(p.base)
             .text_color(p.text)
@@ -1008,6 +1011,9 @@ impl Render for Workspace {
                     .when(session_tools, |d| d.child(self.inspector_rail(p, cx))),
             )
             .children(file_links::link_menu(cx))
+            // The focus keys fall back to when nothing else has it, inside the workspace's key
+            // context. Nothing draws or clicks it, so it never takes focus from a field.
+            .child(div().absolute().size_0().track_focus(&self.focus))
             .when(self.brain_search.read(cx).is_open(), |d| {
                 d.relative().child(self.brain_search.clone())
             })

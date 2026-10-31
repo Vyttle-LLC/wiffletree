@@ -126,7 +126,7 @@ impl Inspector {
     }
 
     /// The project's GitHub brain, which the host indexes, as `owner/name`.
-    pub(super) fn project_brain(&self) -> Option<String> {
+    fn project_brain(&self) -> Option<String> {
         brain_browser_view::github_brain(self.project_space()?)
     }
 

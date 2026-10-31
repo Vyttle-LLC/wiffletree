@@ -245,6 +245,8 @@ struct Workspace {
     /// Holds focus when nothing else does, such as on a page without a text field, so keys
     /// still pass through the workspace's key context.
     focus: FocusHandle,
+    /// The Space of the project last selected, whose brain ⌘K searches once none is.
+    last_space: Option<SpaceId>,
 }
 impl Workspace {
     fn new(bridge: Bridge, host: HostView, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -327,6 +329,7 @@ impl Workspace {
             last_repository_refresh: None,
             progress_fetch: Default::default(),
             focus: cx.focus_handle(),
+            last_space: None,
         };
         cx.on_focus_lost(window, |view, window, cx| view.focus.focus(window, cx))
             .detach();
@@ -480,6 +483,9 @@ impl Workspace {
     }
     fn share_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let shared = self.shared.clone();
+        if let Some(space) = brain_search::space_in_use(&shared) {
+            self.last_space = Some(space);
+        }
         self.usage
             .update(cx, |usage, cx| usage.share(shared.clone(), window, cx));
         self.repositories.update(cx, |repositories, cx| {
@@ -924,7 +930,7 @@ impl Workspace {
                 .then(|| self.brain_browser.read(cx).searched())
                 .flatten()
         });
-        let selected = brain_search::searched_for(&self.shared);
+        let selected = brain_search::searched_for(&self.shared, self.last_space.as_ref());
         let (searched, scope) = match brain {
             None => {
                 let scope = match &selected {

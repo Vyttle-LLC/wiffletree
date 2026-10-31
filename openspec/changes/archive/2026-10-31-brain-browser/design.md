@@ -41,7 +41,7 @@ The PRD's memory budget is a fixture of 100,000 log entries and 10,000 notes, wi
    - Opening from the Memory panel selects the project; opening from the Brains page selects Whole brain.
    - Choosing another brain resets to Whole brain.
 3. **The note index tree** follows `notes/INDEX.md`: its headings become groups. Notes not listed in INDEX appear under "Not in the index", so a drift is visible rather than hidden. Each row shows the note's `kind` as a coloured dot.
-4. **Sources per claim come from footnotes.** Each footnote is one claim, and each linked entry is one source. A source shows the entry's date, id and author, then its anchors (commit, PR, tag) and its verification state from `verify_refs`, computed on this machine. A footnote whose entry is missing shows as broken. Backlinks come from wikilinks in notes and in `STATUS.md`.
+4. **Sources per claim come from footnotes.** Each footnote is one claim, and each linked entry is one source. A source shows the entry's date, id and author, then its anchors (commit, PR and branch; tag anchors arrive with `brain-compile`) and its verification state from `verify_refs`, computed on this machine. A footnote whose entry is missing shows as broken. Backlinks come from wikilinks in notes and in `STATUS.md`.
 5. **The PR shown on an entry:**
    - for this machine's entries, the batch PR and its live stage from `brain-registry-sync`;
    - for other merged entries, the PR number from the squash commit that added the file, which is the batch PR, shown as merged;

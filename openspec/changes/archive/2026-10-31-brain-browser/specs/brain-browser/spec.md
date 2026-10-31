@@ -30,7 +30,7 @@ The Wiki view SHALL show:
 - a note index tree grouped by `notes/INDEX.md`'s headings, with notes missing from INDEX under "Not in the index" and each note's `kind` marked;
 - the selected note rendered with a `kind: decision` or `kind: observation` badge, its `updated` date and clickable `[[wikilinks]]`; a wikilink to a missing note SHALL be shown as broken;
 - backlinks from other notes and from `STATUS.md`;
-- a Sources list per claim, built from the note's footnotes, where each source shows its entry's date, id and author, then its commit, PR and tag anchors, and its verification state (verified, claimed or unverified, as `brain-compile` defines them, computed on this machine).
+- a Sources list per claim, built from the note's footnotes, where each source shows its entry's date, id and author, then its commit, PR and branch anchors (tag anchors arrive with `brain-compile`), and its verification state (verified, claimed or unverified, as `brain-compile` defines them, computed on this machine).
 
 Selecting a claim's marker SHALL highlight its sources, and selecting an entry SHALL open it in Logs.
 
@@ -40,7 +40,7 @@ Selecting a claim's marker SHALL highlight its sources, and selecting an entry S
 
 #### Scenario: A claim's sources
 - **WHEN** the human selects the retry claim's footnote
-- **THEN** the Sources list highlights two entries: Oscar's, verified with commit a41f2c0, PR #81 and tag v1.6.0, and Michael's, claimed with commit 7d03b1e and PR #92 open
+- **THEN** the Sources list highlights two entries: Oscar's, verified with commit a41f2c0 and PR #81 (and tag v1.6.0 once `brain-compile` ships), and Michael's, claimed with commit 7d03b1e and PR #92 open
 
 ### Requirement: The Logs view is a filtered, paginated timeline
 The Logs view SHALL list entries newest first, 50 per page, with older and newer page controls. It SHALL filter by repository, type, author and verification. Each entry SHALL show:

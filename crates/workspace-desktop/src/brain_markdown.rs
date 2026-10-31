@@ -62,13 +62,10 @@ fn collect(node: &Node, body: &str, links: &[BrainLink], edits: &mut Vec<(Range<
             .flatten()
             .for_each(|child| collect(child, body, links, edits));
     };
+    if neutralise(node, &range, edits) {
+        return;
+    }
     match node {
-        Node::Image(image) => edits.push((range, escape(&image.alt))),
-        Node::ImageReference(image) => edits.push((range, escape(&image.alt))),
-        Node::Html(html) if html.value.trim_start().starts_with("<!--") => {
-            edits.push((range, String::new()))
-        }
-        Node::Html(html) => edits.push((range, escape(&html.value))),
         Node::FootnoteDefinition(_) => edits.push((range, String::new())),
         Node::FootnoteReference(note) => {
             let label = &note.identifier;
@@ -78,11 +75,35 @@ fn collect(node: &Node, body: &str, links: &[BrainLink], edits: &mut Vec<(Range<
             ));
         }
         Node::Text(_) => wikilinks(&body[range.clone()], range.start, links, edits),
-        Node::Code(_) | Node::InlineCode(_) | Node::Link(_) | Node::LinkReference(_) => {}
+        Node::Link(_) | Node::LinkReference(_) => in_link(node, edits),
+        Node::Code(_) | Node::InlineCode(_) => {}
         _ => {
             for child in node.children().into_iter().flatten() {
                 collect(child, body, links, edits);
             }
+        }
+    }
+}
+
+/// Replaces an image with its alt text and raw HTML with itself as text; `false` for any other
+/// node.
+fn neutralise(node: &Node, range: &Range<usize>, edits: &mut Vec<(Range<usize>, String)>) -> bool {
+    let text = match node {
+        Node::Image(image) => escape(&image.alt),
+        Node::ImageReference(image) => escape(&image.alt),
+        Node::Html(html) if html.value.trim_start().starts_with("<!--") => String::new(),
+        Node::Html(html) => escape(&html.value),
+        _ => return false,
+    };
+    edits.push((range.clone(), text));
+    true
+}
+
+/// Inside a link's text, only images and raw HTML change: a link holds no other links.
+fn in_link(node: &Node, edits: &mut Vec<(Range<usize>, String)>) {
+    for child in node.children().into_iter().flatten() {
+        if !span(child).is_some_and(|range| neutralise(child, &range, edits)) {
+            in_link(child, edits);
         }
     }
 }
@@ -272,6 +293,15 @@ mod tests {
         assert!(shown.contains("a tracker"));
         assert!(shown.contains("\\<script\\>"), "{shown}");
         assert!(!shown.contains("conflict:c1"));
+        // Inside a link too, inline and by reference.
+        let linked = prepare(
+            "[![pixel](https://evil.example/p.png)](https://example.com) and [<img src=\"https://evil.example/x.png\">](https://example.com) and [![ref][px]][site]\n\n[px]: https://evil.example/r.png\n[site]: https://example.com\n",
+            &[],
+        );
+        assert!(!linked.contains("evil.example/p.png"), "{linked}");
+        assert!(linked.contains("[\\<img src="), "shown as text: {linked}");
+        assert!(linked.contains("[pixel](https://example.com)"), "{linked}");
+        assert!(linked.contains("[ref][site]"), "{linked}");
     }
 
     #[test]
