@@ -860,11 +860,16 @@ impl Inspector {
                 .find(|item| !item.is_permission())
                 .map(|item| item.id.clone())
         });
+        // Issue notes first, under their own label, as every project's Inbox shows them.
+        let (issues, others): (Vec<&WorkspaceNote>, Vec<&WorkspaceNote>) =
+            (notes.iter()).partition(|note| matches!(note, WorkspaceNote::Issue(_)));
         let mut body = div()
             .flex()
             .flex_col()
             .gap_3()
-            .children(notes.iter().map(|note| self.note_card(note, p, cx)));
+            .when(!issues.is_empty(), |body| body.child(section("Issues", p)))
+            .children(issues.into_iter().map(|note| self.note_card(note, p, cx)))
+            .children(others.into_iter().map(|note| self.note_card(note, p, cx)));
         for item in items {
             let open = answering.as_ref() == Some(&item.id);
             body = body.child(self.inbox.update(cx, |inbox, cx| {
@@ -883,6 +888,14 @@ impl Inspector {
                 .skills
                 .update(cx, |skills, cx| skills.question_card(question, p, cx)),
             WorkspaceNote::Held(held) => self.inbox.read(cx).held_card(held, p),
+            WorkspaceNote::Issue(note) => {
+                let (inspector, id) = (cx.entity().downgrade(), note.id.clone());
+                let open: inbox::OpenIssue = Rc::new(move |_, cx| {
+                    let _ = inspector.update(cx, |_, cx| cx.emit(Intent::OpenIssue(id.clone())));
+                });
+                self.inbox
+                    .update(cx, |inbox, cx| inbox.issue_card(note, open, p, cx))
+            }
         }
     }
 

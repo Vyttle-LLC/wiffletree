@@ -207,6 +207,10 @@ impl Shared {
 pub(super) enum Intent {
     Select(String),
     OpenPage(Page),
+    /// Opens the Issues page filtered to a Space, or to every Space.
+    OpenIssues(Option<SpaceId>),
+    /// Opens one issue on the Issues page, which marks it read and settles its Inbox news.
+    OpenIssue(IssueId),
     ShowPanel(Panel),
     TogglePanel(Panel),
     ClosePanel,
@@ -242,6 +246,12 @@ pub(super) enum Intent {
     Create {
         kind: Creation,
         ticket: Option<String>,
+    },
+    /// Opens Start project from issue on what the host offers for the issue.
+    StartProjectFromIssue {
+        id: IssueId,
+        title: String,
+        defaults: IssueProjectDefaults,
     },
 }
 

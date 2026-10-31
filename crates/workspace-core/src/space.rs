@@ -267,7 +267,13 @@ pub fn repository_owner(identity: &str) -> &str {
 pub struct TrackerConfig {
     pub format: u32,
     pub prefix: String,
-    /// Such as the states and labels `shared-issues` adds.
+    /// Listed so readers without Wiffletree see them; a tracker from before they were written
+    /// has the fixed ones.
+    #[serde(default = "all_states")]
+    pub states: Vec<crate::IssueState>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// Keys this release does not know.
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -277,9 +283,14 @@ impl TrackerConfig {
         Self {
             format: Self::FORMAT,
             prefix,
+            states: all_states(),
+            labels: vec![],
             extra: Extra::new(),
         }
     }
+}
+fn all_states() -> Vec<crate::IssueState> {
+    crate::IssueState::ALL.to_vec()
 }
 
 /// What checking a GitHub repository as a Space's storage found. Nothing was written.

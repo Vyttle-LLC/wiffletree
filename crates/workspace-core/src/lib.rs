@@ -12,6 +12,7 @@ mod files;
 mod host;
 pub mod host_copy;
 mod index;
+mod issues;
 mod launch;
 mod merging;
 mod messages;
@@ -40,6 +41,7 @@ pub use context::*;
 pub use files::*;
 pub use host::*;
 pub use index::WorkspaceIndex;
+pub use issues::*;
 pub use launch::*;
 pub use merging::*;
 pub use messages::*;
@@ -778,6 +780,17 @@ pub struct Snapshot {
     /// credential, so an agent's shell cannot read them.
     #[serde(default)]
     pub space_locals: BTreeMap<SpaceId, SpaceLocal>,
+    /// Each Space's tracker, in the order of `spaces`. Spaces sharing a storage repository
+    /// each have an entry with the same counts.
+    #[serde(default)]
+    pub issue_trackers: Vec<IssueTracker>,
+    /// The Space of the last issue filed on this Mac, where New issue starts without a Space
+    /// filter.
+    #[serde(default)]
+    pub last_filed_space: Option<SpaceId>,
+    /// The Linear import running on this Mac, or the last one until the human closes it.
+    #[serde(default)]
+    pub linear_import: Option<LinearImportStatus>,
     pub repositories: Vec<Repository>,
     /// The sessions that are not archived and open tickets' archived agents, in the order they
     /// were created, then archived sessions still in a turn.
@@ -1010,10 +1023,11 @@ fn file_list(files: &[String]) -> String {
     list
 }
 impl Snapshot {
-    /// The workspace notes about settings sync paused.
+    /// The workspace notes about a file sync paused, a paused issue file or part included.
     pub fn paused_settings(&self) -> impl Iterator<Item = &PausedSetting> {
         self.workspace_notes.iter().filter_map(|note| match note {
             WorkspaceNote::Paused(setting) => Some(setting),
+            WorkspaceNote::Issue(note) => note.paused.as_ref(),
             WorkspaceNote::SkillQuestion(_) | WorkspaceNote::Held(_) => None,
         })
     }
@@ -1181,6 +1195,8 @@ pub enum WorkspaceNote {
     SkillQuestion(SkillQuestion),
     /// A file held back from a push because a scan failed or could not run.
     Held(HeldFile),
+    /// An issue the human should look at, listed under Issues at the top of every Inbox.
+    Issue(IssueNote),
 }
 /// A file of a storage repository that is not pushed until a scan passes it. Names the check and
 /// its rule, never what matched.
@@ -3208,6 +3224,116 @@ pub enum Command {
         space_id: SpaceId,
         prefix: String,
     },
+    /// Runs a pass of the Space's tracker now, or of every tracker without `space_id`.
+    SyncIssues {
+        #[serde(default)]
+        space_id: Option<SpaceId>,
+    },
+    /// Read-only: the issues of the Space's tracker, or of every tracker on this Mac without
+    /// `space_id`, as `IssueListing`s ordered by tracker and ID; with `search`, only those
+    /// whose ID, title, description or comments hold each of its words.
+    Issues {
+        #[serde(default)]
+        space_id: Option<SpaceId>,
+        #[serde(default)]
+        search: Option<String>,
+    },
+    /// Read-only: one issue with its comments and events, as an `IssueRecord`.
+    Issue {
+        id: IssueId,
+    },
+    /// Files an issue in the Space's tracker, numbered at once in a local tracker and with a
+    /// temporary ID until it is pushed to a GitHub one; answered with the `Issue`.
+    CreateIssue {
+        space_id: SpaceId,
+        issue: NewIssue,
+    },
+    /// Replaces an issue's fields; its ID, state, author and creation stay as they are, and a
+    /// changed priority or assignee is recorded as an event. Answered with the `Issue`.
+    EditIssue {
+        issue: Box<Issue>,
+    },
+    /// Adds the human's comment to an issue; answered with the `Comment`.
+    Comment {
+        id: IssueId,
+        body: String,
+    },
+    /// Moves an issue to `state`, recorded as an event; answered with the `Issue`.
+    MoveIssue {
+        id: IssueId,
+        state: IssueState,
+    },
+    /// Marks an issue read on this Mac as it is now; nothing is written to its tracker.
+    MarkIssueRead {
+        id: IssueId,
+    },
+    /// Read-only: what Start project from issue offers for the issue, starting in `space_id`
+    /// when it shares the issue's tracker, else in the one of them last used for a new project;
+    /// answered with `IssueProjectDefaults`.
+    IssueProjectDefaults {
+        id: IssueId,
+        #[serde(default)]
+        space_id: Option<SpaceId>,
+    },
+    /// Creates a project and its coordinator in `space_id`, one of the Spaces sharing the
+    /// issue's tracker, with the issue's repositories on this Mac, or the Space's when it lists
+    /// none; links it to the issue, sends the coordinator the issue as untrusted context, and
+    /// records in the tracker that the human started work. Answered with `CreatedProject`.
+    StartProjectFromIssue {
+        id: IssueId,
+        space_id: SpaceId,
+    },
+    /// Links an issue to a project on this Mac, or to one of its tickets; answered with the
+    /// `Issue` as its state now follows the linked work.
+    LinkIssue {
+        id: IssueId,
+        project_id: String,
+        #[serde(default)]
+        ticket_id: Option<String>,
+    },
+    /// Removes a link; the issue keeps its state. Answered with the remaining `IssueLink`s.
+    UnlinkIssue {
+        id: IssueId,
+        project_id: String,
+        #[serde(default)]
+        ticket_id: Option<String>,
+    },
+    /// Follows an issue on this Mac, or stops following it, so its comments reach the Inbox or
+    /// not; nothing is written to its tracker.
+    FollowIssue {
+        id: IssueId,
+        follow: bool,
+    },
+    /// Read-only: who an issue in the Space's tracker can be assigned to, as `IssuePerson`s:
+    /// the logins seen in the tracker and the storage repository's collaborators where GitHub
+    /// lets this Mac read them, with their profiles' names where read.
+    IssuePeople {
+        space_id: SpaceId,
+    },
+    /// Starts an import from Linear into the Space's tracker: keeps `key` in the Keychain until
+    /// the import ends and answers with the `LinearTeam`s it reads.
+    LinearTeams {
+        space_id: SpaceId,
+        key: LinearKey,
+    },
+    /// Reads the Linear team and answers with the `LinearImportPlan`; nothing is written.
+    PreviewLinearImport {
+        space_id: SpaceId,
+        team_id: String,
+    },
+    /// Writes the previewed team's issues not imported before, naming each Linear user by the
+    /// GitHub login the human confirmed in `logins`, keyed by Linear user ID. Its progress is
+    /// the snapshot's `linear_import`.
+    ImportFromLinear {
+        space_id: SpaceId,
+        #[serde(default)]
+        logins: BTreeMap<String, String>,
+    },
+    /// Ends the Space's import: stops one that runs after its current batch, removes the key
+    /// from the Keychain and closes its status. Another Space's import is left as it is.
+    CancelLinearImport {
+        space_id: SpaceId,
+    },
     /// Replaces a Space's definition; its id and storage stay as they are.
     UpdateSpace {
         space: Box<Space>,
@@ -3672,6 +3798,10 @@ impl Command {
             | Self::SearchBrain { .. }
             | Self::SuggestSpaceBrain { .. }
             | Self::OriginBranches { .. }
+            | Self::Issues { .. }
+            | Self::Issue { .. }
+            | Self::IssueProjectDefaults { .. }
+            | Self::IssuePeople { .. }
             | Self::RemoteAccess => true,
             Self::ImportRepositories { .. }
             | Self::RefreshRepositories
@@ -3719,6 +3849,20 @@ impl Command {
             | Self::ImportLegacyLogs { .. }
             | Self::FixHeldLog { .. }
             | Self::ReleaseHeldLog { .. }
+            | Self::SyncIssues { .. }
+            | Self::CreateIssue { .. }
+            | Self::EditIssue { .. }
+            | Self::Comment { .. }
+            | Self::MoveIssue { .. }
+            | Self::MarkIssueRead { .. }
+            | Self::StartProjectFromIssue { .. }
+            | Self::LinkIssue { .. }
+            | Self::UnlinkIssue { .. }
+            | Self::FollowIssue { .. }
+            | Self::LinearTeams { .. }
+            | Self::PreviewLinearImport { .. }
+            | Self::ImportFromLinear { .. }
+            | Self::CancelLinearImport { .. }
             | Self::SetWorkspacesDir { .. }
             | Self::SetVerification { .. }
             | Self::SetBuildsAtOnce { .. }
@@ -3763,7 +3907,10 @@ impl Command {
     /// Spaces are the human's: creating, editing or removing one, setting its brain, moving a
     /// project into one and choosing which repositories it lists, and reading where its storage
     /// is on this Mac. So are brains: the push grant, forgetting one, Set up, the compiler,
-    /// amending a batch, Send now and the legacy import, and fixing or releasing a held entry. Remote access is the human's too: its state carries the pairing code.
+    /// amending a batch, Send now and the legacy import, and fixing or releasing a held entry.
+    /// Every write to a tracker is the human's, settling a paused issue file, following an issue
+    /// and every step of a Linear import too; reading issues is not. Remote access is the human's
+    /// too: its state carries the pairing code.
     pub fn is_human_only(&self) -> bool {
         matches!(
             self,
@@ -3784,6 +3931,19 @@ impl Command {
                 | Self::JoinSpaces { .. }
                 | Self::SetTrackerPrefix { .. }
                 | Self::SetUpIssues { .. }
+                | Self::CreateIssue { .. }
+                | Self::EditIssue { .. }
+                | Self::Comment { .. }
+                | Self::MoveIssue { .. }
+                | Self::MarkIssueRead { .. }
+                | Self::StartProjectFromIssue { .. }
+                | Self::LinkIssue { .. }
+                | Self::UnlinkIssue { .. }
+                | Self::FollowIssue { .. }
+                | Self::LinearTeams { .. }
+                | Self::PreviewLinearImport { .. }
+                | Self::ImportFromLinear { .. }
+                | Self::CancelLinearImport { .. }
                 | Self::SetSpaceBrain { .. }
                 | Self::SpaceStorage { .. }
                 | Self::ConfirmBrain { .. }
@@ -3801,6 +3961,11 @@ impl Command {
                 | Self::CancelPairing
                 | Self::SetDeviceLevel { .. }
                 | Self::RemoveDevice { .. }
+        ) || matches!(
+            self,
+            // Settling a paused issue file writes to its tracker, whichever repository names it:
+            // a tracker can be the settings repository too.
+            Self::SettlePausedFile { path, .. } if path.starts_with("issues/")
         )
     }
     /// Remote access, pairing and devices, which only the host itself may read or change.

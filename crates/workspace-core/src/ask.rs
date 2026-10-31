@@ -232,6 +232,53 @@ pub fn set_tracker_prefix(space_id: SpaceId, prefix: String) -> Ask<TrackerConfi
 pub fn set_up_issues(space_id: SpaceId, prefix: String) -> Ask<TrackerConfig> {
     Ask::new(Command::SetUpIssues { space_id, prefix })
 }
+pub fn sync_issues(space_id: Option<SpaceId>) -> Ask<()> {
+    Ask::new(Command::SyncIssues { space_id })
+}
+pub fn issues(space_id: Option<SpaceId>, search: Option<String>) -> Ask<Vec<IssueListing>> {
+    Ask::new(Command::Issues { space_id, search })
+}
+pub fn issue(id: IssueId) -> Ask<IssueRecord> {
+    Ask::new(Command::Issue { id })
+}
+pub fn create_issue(space_id: SpaceId, issue: NewIssue) -> Ask<Issue> {
+    Ask::new(Command::CreateIssue { space_id, issue })
+}
+pub fn edit_issue(issue: Issue) -> Ask<Issue> {
+    Ask::new(Command::EditIssue {
+        issue: Box::new(issue),
+    })
+}
+pub fn comment_on_issue(id: IssueId, body: String) -> Ask<Comment> {
+    Ask::new(Command::Comment { id, body })
+}
+pub fn move_issue(id: IssueId, state: IssueState) -> Ask<Issue> {
+    Ask::new(Command::MoveIssue { id, state })
+}
+pub fn mark_issue_read(id: IssueId) -> Ask<()> {
+    Ask::new(Command::MarkIssueRead { id })
+}
+pub fn follow_issue(id: IssueId, follow: bool) -> Ask<()> {
+    Ask::new(Command::FollowIssue { id, follow })
+}
+pub fn issue_people(space_id: SpaceId) -> Ask<Vec<IssuePerson>> {
+    Ask::new(Command::IssuePeople { space_id })
+}
+pub fn linear_teams(space_id: SpaceId, key: LinearKey) -> Ask<Vec<LinearTeam>> {
+    Ask::new(Command::LinearTeams { space_id, key })
+}
+pub fn preview_linear_import(space_id: SpaceId, team_id: String) -> Ask<LinearImportPlan> {
+    Ask::new(Command::PreviewLinearImport { space_id, team_id })
+}
+pub fn import_from_linear(space_id: SpaceId, logins: BTreeMap<String, String>) -> Ask<()> {
+    Ask::new(Command::ImportFromLinear { space_id, logins })
+}
+pub fn cancel_linear_import(space_id: SpaceId) -> Ask<()> {
+    Ask::new(Command::CancelLinearImport { space_id })
+}
+pub fn issue_project_defaults(id: IssueId, space_id: Option<SpaceId>) -> Ask<IssueProjectDefaults> {
+    Ask::new(Command::IssueProjectDefaults { id, space_id })
+}
 pub fn new_project_defaults(space_id: Option<SpaceId>) -> Ask<SpaceRepositories> {
     Ask::new(Command::NewProjectDefaults { space_id })
 }

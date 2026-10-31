@@ -395,9 +395,9 @@ fn spawn_gh_login_read(sender: Sender<Event>, tools: publish::Tools, home: PathB
     spawn_job(
         sender,
         (),
-        move |_| spaces::gh_login(&tools, &home),
-        |_| None,
-        |(), login| Event::GhLogin(login),
+        move |_| spaces::gh_account(&tools, &home),
+        |_| spaces::GhAccount::Unknown,
+        |(), account| Event::GhLogin(account),
     );
 }
 fn spawn_github_read(
@@ -662,8 +662,24 @@ enum Event {
     /// A read of the repositories' GitHub facts finished on its own thread; `None` when it
     /// panicked, and what is stored then stands.
     GitHub(Option<repositories::GitHubReading>),
-    /// The human's `gh` login, read on its own thread for the upgrade's Space suggestions.
-    GhLogin(Option<String>),
+    /// The human's `gh` account, read on its own thread for the upgrade's Space suggestions and
+    /// the human's tracker writes.
+    GhLogin(spaces::GhAccount),
+    /// A tracker's collaborators and the profile names of its people, read on their own thread.
+    IssuePeople(issue_inbox::PeopleRead),
+    /// The teams the key reads, read on its own thread for the import `flow`.
+    LinearTeamsRead {
+        flow: u64,
+        teams: Result<Vec<LinearTeam>>,
+        reply: Reply,
+    },
+    /// A Linear team, read on its own thread for the import `flow` begun in the Space.
+    LinearRead {
+        flow: u64,
+        space_id: SpaceId,
+        team: Result<linear_import::Team>,
+        reply: Reply,
+    },
     /// A publish step finished on its own thread.
     Published(publish::Outcome),
     /// A merge decision finished on its own thread, with the `merge_ticket` call waiting for
@@ -900,6 +916,9 @@ struct Actor {
     pr_tickets_due_at: i64,
     /// A read of the repositories' GitHub facts has not reported yet.
     github_reading: bool,
+    /// When `gh`'s account file last changed as this host saw it, so a change of account reads
+    /// the human's login again.
+    gh_account_seen: Option<std::time::SystemTime>,
     /// `gh` as every GitHub read runs it, and Git as publish steps run it.
     publish_tools: publish::Tools,
     /// The settings repository's pace, with the cadence of every rule set it holds: settings,
@@ -1057,6 +1076,7 @@ impl Service {
                     pr_tickets_stale: true,
                     pr_tickets_due_at: 0,
                     github_reading: false,
+                    gh_account_seen: spaces::gh_account_stamp(),
                     publish_tools: publish::Tools::default(),
                     sync_pace: repos::Pace::every(&[sync::CADENCE_MS]),
                     storage_paces: Default::default(),
@@ -1482,6 +1502,45 @@ impl Actor {
                     .for_each(repos::Pace::sync_now);
                 let _ = reply.try_send(Ok(Value::Null));
             }
+            Command::SyncIssues { space_id } => {
+                self.sync_issues_now(space_id.as_ref())?;
+                // A login found since launch lets the human write issues, a local tracker's too.
+                if self.host.gh_login.is_none() {
+                    let (tools, home) = (self.publish_tools.clone(), self.host.home.clone());
+                    spawn_gh_login_read(self.sender.clone(), tools, home);
+                }
+                let _ = reply.try_send(Ok(Value::Null));
+            }
+            // Linear is read off the host thread; the key never leaves this host but for Linear.
+            Command::LinearTeams { space_id, key } => {
+                self.host.begin_linear_import(space_id, key)?;
+                let (api, key) = (self.host.linear.tools.api.clone(), key.clone());
+                let (sender, reply, flow) =
+                    (self.sender.clone(), reply.clone(), self.host.linear_flow());
+                std::thread::spawn(move || {
+                    let teams = linear_import::teams(api.as_ref(), &key);
+                    let read = Event::LinearTeamsRead { flow, teams, reply };
+                    let _ = sender.send_blocking(read);
+                });
+            }
+            Command::PreviewLinearImport { space_id, team_id } => {
+                self.host.linear_began(space_id)?;
+                let tools = self.host.linear.tools.clone();
+                let (space_id, team_id) = (space_id.clone(), team_id.clone());
+                let (sender, reply, flow) =
+                    (self.sender.clone(), reply.clone(), self.host.linear_flow());
+                std::thread::spawn(move || {
+                    let team = (tools.keys.read())
+                        .and_then(|key| linear_import::team(tools.api.as_ref(), &key, &team_id));
+                    let read = Event::LinearRead {
+                        flow,
+                        space_id,
+                        team,
+                        reply,
+                    };
+                    let _ = sender.send_blocking(read);
+                });
+            }
             Command::RefreshCodexQuota => {
                 let (sender, reply) = (self.sender.clone(), reply.clone());
                 std::thread::spawn(move || {
@@ -1568,6 +1627,10 @@ impl Actor {
         }
         self.scheduling.observe(&event);
         let mut dirty = self.handle(event);
+        dirty |= self.refresh_linear_import();
+        if let Some(at) = self.host.expire_linear_key(now()) {
+            self.wake(at);
+        }
         if self.scheduling.take_due() {
             dirty |= self.end_keeper_reviews();
             if let Err(e) = self.schedule() {
@@ -1576,6 +1639,7 @@ impl Actor {
         }
         self.refresh_overlaps(now());
         self.refresh_pull_requests(now(), dirty);
+        self.watch_gh_account(spaces::gh_account_stamp());
         // Storage first, as a write to a Space stored in the settings clone makes its pass due.
         let storing = self.refresh_storage_sync(now());
         let syncing = self.refresh_settings_sync(now()) || storing;
@@ -1665,7 +1729,7 @@ impl Actor {
     /// `true` when a pass started, which the sync status shows.
     fn refresh_settings_sync(&mut self, at: i64) -> bool {
         if self.host.shared_written.take() {
-            self.sync_pace.wrote(at);
+            self.sync_pace.wrote(at, repos::PUSH_DELAY_MS);
         }
         match self.host.settings_cadence() {
             Ok(every) => self.sync_pace.set_every(every),
@@ -1742,14 +1806,21 @@ impl Actor {
 
     /// Starts a pass of each GitHub storage repository that syncs on its own when one is due,
     /// and arms a wake-up for the next; `true` when a pass started. A write to the settings
-    /// repository's clone makes its own pass due instead.
+    /// repository's clone makes its own pass due instead. An issue's change is pushed sooner
+    /// than a Space's, as issues are a conversation.
     fn refresh_storage_sync(&mut self, at: i64) -> bool {
         let settings = self.host.settings_key();
-        for key in std::mem::take(&mut *self.host.storage_written.borrow_mut()) {
-            match self.storage_paces.get_mut(&key) {
-                _ if Some(&key) == settings.as_ref() => self.sync_pace.wrote(at),
-                Some(pace) => pace.wrote(at),
-                None => {}
+        let written = [
+            (&self.host.storage_written, repos::PUSH_DELAY_MS),
+            (&self.host.issues_written, issues_sync::PUSH_DELAY_MS),
+        ];
+        for (written, delay) in written {
+            for key in std::mem::take(&mut *written.borrow_mut()) {
+                match self.storage_paces.get_mut(&key) {
+                    _ if Some(&key) == settings.as_ref() => self.sync_pace.wrote(at, delay),
+                    Some(pace) => pace.wrote(at, delay),
+                    None => {}
+                }
             }
         }
         let cadences = self.host.storage_cadences().unwrap_or_else(|e| {
@@ -1888,8 +1959,8 @@ impl Actor {
         }
     }
 
-    /// Reads the human's `gh` login off the host thread while the upgrade's Space suggestions
-    /// wait on it, so answering them runs no `gh`.
+    /// Reads the human's `gh` login off the host thread while the upgrade's Space suggestions or
+    /// the human's issues wait on it, so answering them runs no `gh`.
     fn read_gh_login(&mut self) {
         match self.host.wants_gh_login() {
             Ok(true) => spawn_gh_login_read(
@@ -1899,6 +1970,62 @@ impl Actor {
             ),
             Ok(false) => {}
             Err(e) => eprintln!("Workspace gh login: {e:#}"),
+        }
+    }
+
+    /// Makes a pass of the Space's tracker, or of every GitHub tracker here, due at once.
+    fn sync_issues_now(&mut self, space_id: Option<&SpaceId>) -> Result<()> {
+        let settings = self.host.settings_key();
+        for key in self.host.issue_sync_keys(space_id)? {
+            match self.storage_paces.get_mut(&key) {
+                _ if Some(&key) == settings.as_ref() => self.sync_pace.sync_now(),
+                Some(pace) => pace.sync_now(),
+                None => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Writes the next batch of a Linear import that has one, one batch per event so agents
+    /// are never held up long; `true` when the import's status changed.
+    fn refresh_linear_import(&mut self) -> bool {
+        if !self.host.linear_ready() {
+            return false;
+        }
+        let step = self.host.linear_step();
+        self.follow_linear(step);
+        true
+    }
+
+    /// After the pass of the storage repository `key`: the import waiting on it goes on.
+    fn linear_pass_ended(&mut self, key: &str) -> bool {
+        let Some(step) = self.host.linear_pass_ended(key) else {
+            return false;
+        };
+        self.follow_linear(step);
+        true
+    }
+
+    fn follow_linear(&mut self, step: linear_import::Step) {
+        match step {
+            linear_import::Step::Next => self.wake(now()),
+            linear_import::Step::Push(space_id) => {
+                if let Err(e) = self.sync_issues_now(Some(&space_id)) {
+                    eprintln!("Linear import: {e:#}");
+                }
+            }
+            linear_import::Step::Done => {}
+        }
+    }
+
+    /// Reads the human's login again once `gh`'s account file changed, as signing in, out or to
+    /// another account does, so tracker writes use the account `gh` has now. `stamp` is the
+    /// file's, from `spaces::gh_account_stamp`.
+    fn watch_gh_account(&mut self, stamp: Option<std::time::SystemTime>) {
+        if stamp != self.gh_account_seen {
+            self.gh_account_seen = stamp;
+            let (tools, home) = (self.publish_tools.clone(), self.host.home.clone());
+            spawn_gh_login_read(self.sender.clone(), tools, home);
         }
     }
 
@@ -2077,6 +2204,7 @@ impl Actor {
                     .unwrap_or_else(|e| {
                         eprintln!("Syncing {key}: {e:#}");
                     });
+                self.linear_pass_ended(&key);
                 true
             }
             Event::StorageStaged {
@@ -2109,15 +2237,39 @@ impl Actor {
                     .map_err(|e| format!("{e:#}"));
                 let added = result.is_ok();
                 let _ = reply.try_send(result);
+                // The login the human writes the chosen or joined tracker's issues as.
+                if added {
+                    let (tools, home) = (self.publish_tools.clone(), self.host.home.clone());
+                    spawn_gh_login_read(self.sender.clone(), tools, home);
+                }
                 added
             }
             Event::Synced(passed) => {
                 let at = now();
                 self.sync_pace.finish(at, passed.is_ok());
-                self.host.finish_sync(at, passed).unwrap_or_else(|e| {
+                let changed = self.host.finish_sync(at, passed).unwrap_or_else(|e| {
                     eprintln!("Workspace sync: {e:#}");
                     false
-                })
+                });
+                let key = self.host.settings_key();
+                changed | key.is_some_and(|key| self.linear_pass_ended(&key))
+            }
+            Event::LinearTeamsRead { flow, teams, reply } => {
+                let teams = (self.host.linear_read(flow, teams))
+                    .and_then(|teams| Ok(serde_json::to_value(teams)?));
+                let _ = reply.try_send(teams.map_err(|e| format!("{e:#}")));
+                false
+            }
+            Event::LinearRead {
+                flow,
+                space_id,
+                team,
+                reply,
+            } => {
+                let plan = (self.host.linear_previewed(flow, &space_id, team))
+                    .and_then(|plan| Ok(serde_json::to_value(plan)?));
+                let _ = reply.try_send(plan.map_err(|e| format!("{e:#}")));
+                false
             }
             Event::SkillMerged(run, answered) => {
                 self.host.finish_merge_run(run, answered);
@@ -2197,6 +2349,22 @@ impl Actor {
                     }
                 }
                 let read = command.is_read();
+                // A tracker write refused for want of a login reads it again, so signing gh in
+                // is all the human's next try needs.
+                let writes_issues = matches!(
+                    command,
+                    Command::CreateIssue { .. }
+                        | Command::EditIssue { .. }
+                        | Command::Comment { .. }
+                        | Command::MoveIssue { .. }
+                        | Command::StartProjectFromIssue { .. }
+                        | Command::LinkIssue { .. }
+                        | Command::SettlePausedFile { .. }
+                );
+                if writes_issues && self.host.gh_login.is_none() {
+                    let (tools, home) = (self.publish_tools.clone(), self.host.home.clone());
+                    spawn_gh_login_read(self.sender.clone(), tools, home);
+                }
                 let result = (|| -> Result<Value> {
                     // Sessions this command stops on the human's behalf.
                     let mut human_stops = Vec::new();
@@ -2246,6 +2414,37 @@ impl Actor {
                                 self.state_changed();
                             }
                             serde_json::to_value(listing)?
+                        }
+                        // A read, but one that finds issues changed on disk refreshes the
+                        // snapshot, so the sidebar's unread count follows the list.
+                        Command::Issues { space_id, .. } => {
+                            if self.host.refresh_issues_of(space_id.as_ref())? {
+                                self.state_changed();
+                            }
+                            self.host.execute(command.clone())?
+                        }
+                        // Answered from what is kept, which a read off this thread renews
+                        // for the next ask once it is an hour old.
+                        Command::IssuePeople { space_id } => {
+                            if let Some(read) = self.host.people_to_read(space_id, now())? {
+                                let (sender, tools) =
+                                    (self.sender.clone(), self.publish_tools.clone());
+                                let home = self.host.home.clone();
+                                spawn_job(
+                                    sender,
+                                    read,
+                                    move |read| issue_inbox::read_people(read, &tools, &home),
+                                    |read| read.clone(),
+                                    |_, read| Event::IssuePeople(read),
+                                );
+                            }
+                            self.host.execute(command.clone())?
+                        }
+                        // Only started here: each batch is written after an event, and a GitHub
+                        // tracker's pass pushes it before the next.
+                        Command::ImportFromLinear { space_id, logins } => {
+                            self.host.start_linear_import(space_id, logins.clone())?;
+                            Value::Null
                         }
                         _ => self.host.execute(command.clone())?,
                     };
@@ -2302,6 +2501,9 @@ impl Actor {
                         } => Some(self.host.session(session_id)?.project_id),
                         Command::ResolveAttention { .. } => {
                             response["project_id"].as_str().map(str::to_owned)
+                        }
+                        Command::StartProjectFromIssue { .. } => {
+                            response["id"].as_str().map(str::to_owned)
                         }
                         _ => None,
                     };
@@ -2480,7 +2682,10 @@ impl Actor {
                     _ => {}
                 }
                 // A checklist is a work step, not a state change: it reloads no snapshot.
-                !matches!(name.as_str(), "workspace_context" | "set_plan")
+                !matches!(
+                    name.as_str(),
+                    "workspace_context" | "set_plan" | "list_issues" | "read_issue"
+                )
             }
             Event::Provider {
                 session,
@@ -2650,11 +2855,19 @@ impl Actor {
                 }
             }
             // The upgrade's suggestions can name Personal now, so clients read them again.
-            Event::GhLogin(login) => {
-                let found = login.is_some();
-                self.host.record_gh_login(login);
-                found
+            Event::GhLogin(account) => {
+                let before = self.host.gh_login.clone();
+                self.host.record_gh_account(account);
+                self.host.gh_login != before
             }
+            // A state change, so an open issue asks again and its picker lists who was found.
+            Event::IssuePeople(read) => self.host.record_issue_people(read).map_or_else(
+                |e| {
+                    eprintln!("Issue people: {e:#}");
+                    false
+                },
+                |()| true,
+            ),
             Event::GitHub(reading) => {
                 self.github_reading = false;
                 reading.is_some_and(|reading| {
@@ -4745,6 +4958,8 @@ mod tests {
             pr_tickets_stale: true,
             pr_tickets_due_at: 0,
             github_reading: false,
+            // As found, so a test's events never read the real `gh` account.
+            gh_account_seen: spaces::gh_account_stamp(),
             publish_tools: publish::Tools::default(),
             sync_pace: repos::Pace::every(&[sync::CADENCE_MS]),
             storage_paces: Default::default(),
@@ -5245,6 +5460,133 @@ mod tests {
         assert!(matches!(&event, Event::GitHub(Some(reading)) if reading.error.is_none()));
         assert!(!actor.handle(event));
         assert!(!actor.github_reading && events.try_recv().is_err());
+    }
+
+    /// An idle actor whose fake `gh` is signed in as `jlin` and counts reads of the account. Its
+    /// events arrive on the receiver.
+    fn login_actor(host: Host) -> (Actor, Receiver<Event>, Arc<AtomicUsize>) {
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(8);
+        actor.sender = sender;
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counted = reads.clone();
+        actor.publish_tools.gh = Arc::new(move |_, args| {
+            assert_eq!(args, ["api", "--hostname", "github.com", "user"]);
+            counted.fetch_add(1, Ordering::Relaxed);
+            Ok(runtime::GhAnswer {
+                status: publish::tests::exit(0),
+                output: r#"{"login":"jlin"}"#.into(),
+                error: String::new(),
+            })
+        });
+        (actor, events, reads)
+    }
+
+    /// Takes the login read the actor started.
+    fn login_read(actor: &mut Actor, events: &Receiver<Event>) {
+        let event = events.recv_blocking().unwrap();
+        assert!(matches!(event, Event::GhLogin(_)));
+        actor.handle(event);
+        assert_eq!(actor.host.gh_login.as_deref(), Some("jlin"));
+    }
+
+    #[test]
+    fn joining_a_storage_repository_reads_the_login() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = storage::tests::shared_storage(folder.path(), Some("SAGE"));
+        let (_home, host) = storage::tests::host();
+        let staged = storage::stage(&host.home, sync::tests::NAME, &github.tools(), &[]);
+        let (mut actor, events, reads) = login_actor(host);
+        let (reply, replies) = async_channel::bounded(1);
+        let then = StorageChoice::Join(vec![JoinSpace {
+            folder: "sage".into(),
+            brain_path: None,
+            clones: vec![],
+        }]);
+        actor.handle(Event::StorageStaged {
+            staged,
+            then,
+            reply,
+        });
+        assert!(replies.try_recv().unwrap().is_ok());
+        login_read(&mut actor, &events);
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_change_to_ghs_account_file_reads_the_login_and_no_change_does_not() {
+        let (_home, host) = storage::tests::host();
+        let (mut actor, events, reads) = login_actor(host);
+        let signed_in = std::time::SystemTime::UNIX_EPOCH;
+        actor.gh_account_seen = Some(signed_in);
+        actor.watch_gh_account(Some(signed_in));
+        let switched = signed_in + std::time::Duration::from_secs(60);
+        actor.watch_gh_account(Some(switched));
+        login_read(&mut actor, &events);
+        actor.watch_gh_account(Some(switched));
+        assert_eq!(reads.load(Ordering::Relaxed), 1, "one read per change");
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_tracker_write_refused_for_want_of_a_login_reads_it() {
+        let (_home, host) = storage::tests::host();
+        let personal = host.spaces().unwrap().remove(0).space;
+        let (mut actor, events, reads) = login_actor(host);
+        let create = Command::CreateIssue {
+            space_id: personal.id,
+            issue: NewIssue {
+                title: "Theme".into(),
+                ..NewIssue::default()
+            },
+        };
+        let refused = command(&mut actor, create).unwrap_err();
+        assert!(refused.contains("Sign gh in"), "{refused}");
+        login_read(&mut actor, &events);
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn an_import_from_linear_writes_a_batch_per_event_and_the_next_once_a_pass_pushed_it() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = storage::tests::shared_storage(folder.path(), Some("CEL"));
+        let (_home, mut host) = storage::tests::host();
+        host.record_gh_login(Some("jlin".into()));
+        storage::tests::join_sage(&mut host, &github).unwrap();
+        let sage = storage::tests::space_named(&host, "Sage");
+        let (keys, _) = linear_import::tests::recorded(&mut host, linear_import::tests::many(150));
+        linear_import::tests::begin(&mut host, &sage).unwrap();
+        linear_import::tests::preview(&mut host, &sage).unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(64);
+        actor.sender = sender;
+        actor.publish_tools = github.tools();
+        let before = github.log("%s").len();
+        let (reply, replies) = async_channel::bounded(1);
+        let import = Command::ImportFromLinear {
+            space_id: sage.id.clone(),
+            logins: Default::default(),
+        };
+        actor.process(Event::Command(import, reply));
+        assert_eq!(replies.try_recv().unwrap(), Ok(Value::Null));
+        let status = |actor: &Actor| actor.host.snapshot().unwrap().linear_import.unwrap();
+        assert_eq!(
+            status(&actor).written,
+            100,
+            "the first batch, written at once"
+        );
+        let mut pushed_at = vec![];
+        while !status(&actor).finished {
+            let event = events.recv_blocking().unwrap();
+            if matches!(event, Event::StorageSynced(..)) {
+                pushed_at.push(status(&actor).written);
+            }
+            actor.process(event);
+        }
+        assert_eq!(pushed_at, [100, 150], "each batch waits for its push");
+        assert_eq!(github.log("%s").len() - before, 2);
+        assert!(status(&actor).error.is_none());
+        assert!(keys.kept().is_none());
     }
 
     /// An actor over a reviewed ticket in `allowed-org/app`, which is allowed, with a local bare
@@ -11127,5 +11469,34 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': text,
         let threshold = actor.host.settings().checkin_child_turns as i64;
         run_turns(&mut actor, &sorting.id, now(), 2 * threshold);
         assert!(turn_check_ins(&actor, &ticket.coordinator_id).is_empty());
+    }
+
+    #[test]
+    fn listing_issues_that_changed_on_disk_refreshes_the_snapshots_unread_count() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        host.record_gh_login(Some("jlin".into()));
+        let personal = host.spaces().unwrap().remove(0).space;
+        let new = NewIssue {
+            title: "Renew the passport".into(),
+            ..NewIssue::default()
+        };
+        let filed = host.create_issue(&personal.id, new).unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+        let list = Command::Issues {
+            space_id: None,
+            search: None,
+        };
+        command(&mut actor, list.clone()).unwrap();
+        assert!(!actor.changes.state, "nothing changed on disk");
+        let folder = actor.host.storage_folder(&personal.storage.repository);
+        let file = folder
+            .join(tracker::issue_folder(&filed.id))
+            .join("issue.md");
+        let edited = fs::read_to_string(&file).unwrap().replace("the", "both");
+        fs::write(&file, edited).unwrap();
+        command(&mut actor, list).unwrap();
+        assert!(actor.changes.state, "an edit by hand reaches the sidebar");
+        assert_eq!(actor.host.issue_trackers().unwrap()[0].unread, 1);
     }
 }

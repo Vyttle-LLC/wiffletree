@@ -914,6 +914,8 @@ impl Host {
                 approved: request.approved,
             });
             self.save_ticket(&ticket)?;
+            // Linked issues hear of the merge here, as the watcher no longer sees it change.
+            self.follow_ticket_work(&ticket, true);
             let project = self.session(&ticket.coordinator_id)?.project_id;
             let detail = format!(
                 "{}: PR #{} into {} at {}",
@@ -1275,6 +1277,7 @@ fn approval_prompt(ticket: &Ticket, request: &MergeRequest, repository: &Reposit
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::issue_work::tests::{events, file, personal, state};
     use crate::publish::tests::{Fixture, exit, fixture, git, restart, watch_open_pr};
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
@@ -2123,6 +2126,31 @@ mod tests {
         assert!(ticket.is_open());
         assert!(ticket.merging.is_none());
         assert!(ticket.pull_request.unwrap().merged_by_host.is_some());
+    }
+
+    #[test]
+    fn a_linked_issue_hears_of_the_merge_whether_or_not_the_ticket_is_accepted() {
+        for accepted in [true, false] {
+            let (mut f, fake) = ready();
+            let space = personal(&f.host);
+            let issue = file(&mut f.host, &space, &[], "").id;
+            let ticket = f.ticket();
+            let project = f.host.session(&ticket.coordinator_id).unwrap().project_id;
+            (f.host.link_issue(&issue, &project, Some(&ticket.id))).unwrap();
+            let job = f
+                .host
+                .merge_ticket(&coordinator(&f), &f.ticket.clone(), None)
+                .unwrap();
+            if !accepted {
+                fs::write(f.worktree.join("stray.txt"), "untracked\n").unwrap();
+            }
+            let merged = settle(&mut f, &fake, &job, true).unwrap();
+            assert_eq!(merged["accepted"], accepted);
+            let prs = events(&f.host, &issue, "pr");
+            let statuses: Vec<&Value> = prs.iter().map(|pr| &pr["status"]).collect();
+            assert_eq!(statuses, ["open", "merged"], "accepted: {accepted}");
+            assert_eq!(state(&f.host, &issue), IssueState::Done);
+        }
     }
 
     #[test]

@@ -400,6 +400,107 @@ fn space_commands_are_the_humans() {
 }
 
 #[test]
+fn every_tracker_write_is_the_humans_and_reading_issues_is_not() {
+    let id = IssueId::parse("CEL-151").unwrap();
+    let issue = Issue {
+        id: id.clone(),
+        title: text(),
+        state: IssueState::Triage,
+        priority: Priority::None,
+        assignee: None,
+        labels: vec![],
+        repositories: vec![],
+        blocks: vec![],
+        blocked_by: vec![],
+        related: vec![],
+        duplicate_of: None,
+        author: text(),
+        created: text(),
+        description: text(),
+        extra: Default::default(),
+    };
+    let writes = [
+        Command::CreateIssue {
+            space_id: space().id,
+            issue: NewIssue::default(),
+        },
+        Command::EditIssue {
+            issue: Box::new(issue),
+        },
+        Command::Comment {
+            id: id.clone(),
+            body: text(),
+        },
+        Command::MoveIssue {
+            id: id.clone(),
+            state: IssueState::Todo,
+        },
+        Command::MarkIssueRead { id: id.clone() },
+        Command::StartProjectFromIssue {
+            id: id.clone(),
+            space_id: space().id,
+        },
+        Command::LinkIssue {
+            id: id.clone(),
+            project_id: text(),
+            ticket_id: None,
+        },
+        Command::UnlinkIssue {
+            id: id.clone(),
+            project_id: text(),
+            ticket_id: Some(text()),
+        },
+        // Every step of an import from Linear, which no agent can start or steer.
+        Command::LinearTeams {
+            space_id: space().id,
+            key: LinearKey(text()),
+        },
+        Command::PreviewLinearImport {
+            space_id: space().id,
+            team_id: text(),
+        },
+        Command::ImportFromLinear {
+            space_id: space().id,
+            logins: Default::default(),
+        },
+        Command::CancelLinearImport {
+            space_id: space().id,
+        },
+    ];
+    for command in writes {
+        assert!(command.is_human_only() && !command.is_read(), "{command:?}");
+    }
+    let issues = Command::Issues {
+        space_id: None,
+        search: None,
+    };
+    let defaults = Command::IssueProjectDefaults {
+        id: id.clone(),
+        space_id: None,
+    };
+    for command in [issues, defaults, Command::Issue { id }] {
+        assert!(!command.is_human_only() && command.is_read(), "{command:?}");
+    }
+    let sync = Command::SyncIssues { space_id: None };
+    assert!(
+        !sync.is_human_only() && !sync.is_read(),
+        "it pushes only what the human wrote"
+    );
+    // Settling an issue file writes to its tracker, whichever repository names it; the settings
+    // repository, `None`, can be a tracker too.
+    for repository in [None, Some("o/storage".to_owned())] {
+        let settle = |path: &str| Command::SettlePausedFile {
+            path: path.into(),
+            settle: Settle::SyncThisVersion,
+            repository: repository.clone(),
+        };
+        assert!(settle("issues/SAGE-1/issue.md").is_human_only());
+        assert!(settle("issues/SAGE-1/issue.md#priority").is_human_only());
+        assert!(!settle("settings/review.md").is_human_only());
+    }
+}
+
+#[test]
 fn a_snapshot_from_a_host_older_than_spaces_still_reads() {
     let old = serde_json::json!({
         "projects": [{"id": "p", "name": "Calls", "brain": "/Users/m/dev/brain"}],

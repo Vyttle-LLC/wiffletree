@@ -471,6 +471,8 @@ impl ReservedCreation {
             )?;
             self.release(host)
         })?;
+        // New work in a linked project takes its issue out of Done.
+        host.follow_ticket_work(&self.ticket, false);
         Ok(self.ticket)
     }
     pub(crate) fn release(&self, host: &Host) -> Result<()> {

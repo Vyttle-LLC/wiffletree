@@ -540,8 +540,13 @@ impl Host {
                 .retain(|old| held.iter().all(|new| new.problem != old.problem));
             record.held_wakes.extend(held);
         }
+        // A linked issue hears only of a new PR or state, not of checks or comments.
+        let moved = old.is_none_or(|old| old.number != new.number || old.state != new.state);
         ticket.pull_request = Some(new);
         self.save_ticket(&ticket)?;
+        if moved {
+            self.follow_ticket_work(&ticket, true);
+        }
         let project = self.session(&ticket.coordinator_id)?.project_id;
         Self::event(&self.db, &project, None, "pull_request", &detail).map(|_| true)
     }
@@ -701,7 +706,7 @@ impl Host {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::test_support::git;
 
@@ -1161,7 +1166,7 @@ mod tests {
     }
 
     /// A host with ticket "Toolbar" in a repository whose base has no remote.
-    fn host_with_ticket() -> (tempfile::TempDir, Host, Ticket) {
+    pub(crate) fn host_with_ticket() -> (tempfile::TempDir, Host, Ticket) {
         let home = tempfile::tempdir().unwrap();
         let folder = home.path().join("web");
         fs::create_dir_all(&folder).unwrap();
@@ -1180,12 +1185,12 @@ mod tests {
             .unwrap();
         (home, host, ticket)
     }
-    fn open_pr(merge_state: MergeState) -> PullRequest {
+    pub(crate) fn open_pr(merge_state: MergeState) -> PullRequest {
         let mut pr = chosen(vec![node(142, "OPEN")]).unwrap();
         pr.merge_state = merge_state;
         pr
     }
-    fn found(ticket: &Ticket, pull_request: PullRequest) -> Outcome {
+    pub(crate) fn found(ticket: &Ticket, pull_request: PullRequest) -> Outcome {
         Outcome::Read(Pass {
             found: vec![Found {
                 ticket_id: ticket.id.clone(),

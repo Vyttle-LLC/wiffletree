@@ -624,6 +624,7 @@ impl Sidebar {
             );
         for (page, label, glyph) in [
             (Page::Spaces, "Spaces", "spaces"),
+            (Page::Issues, "Issues", "list-checks"),
             (Page::Repositories, "Repositories", "folder"),
             (Page::Brains, "Brains", "brain"),
             (Page::Usage, "Usage and limits", "activity"),
@@ -652,7 +653,15 @@ impl Sidebar {
                     .when(
                         page == Page::Skills && skills_view::a_rewrite_is_out_of_date(&self.shared),
                         |d| d.child(div().size(px(6.)).rounded_full().bg(p.accent)),
-                    ),
+                    )
+                    .when(page == Page::Issues, |d| {
+                        let unread = (self.shared.snapshot())
+                            .map_or(0, |s| issues_view::unread(&s.issue_trackers));
+                        d.when(unread > 0, |d| {
+                            d.child(div().flex_1())
+                                .child(ui::pill(format!("{unread} new"), p.accent))
+                        })
+                    }),
             );
         }
         nav

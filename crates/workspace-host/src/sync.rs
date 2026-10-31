@@ -1265,6 +1265,8 @@ impl Host {
         .collect::<rusqlite::Result<_>>()?;
         let settings = self.settings_key().unwrap_or_default();
         let mut notes = BTreeMap::new();
+        // An issue's paused file is an issue note, under Issues.
+        let rows = (rows.into_iter()).filter(|(_, path, _)| !path.starts_with("issues/"));
         for (key, path, why) in rows {
             let path = unit(&path).to_owned();
             let paused: Paused = serde_json::from_str(&why)?;
@@ -1312,13 +1314,14 @@ impl Host {
         });
         let questions = (skills.iter()).filter_map(|state| state.question.clone());
         let notes = notes.into_iter().map(WorkspaceNote::Paused);
-        Ok(notes
+        Ok((self.issue_notes()?.into_iter())
+            .chain(notes)
             .chain(self.held_notes()?)
             .chain(questions.map(WorkspaceNote::SkillQuestion))
             .collect())
     }
     /// A repository as `owner/name`, by its record key.
-    fn stored_repository_name(&self, key: &str) -> Result<String> {
+    pub(crate) fn stored_repository_name(&self, key: &str) -> Result<String> {
         let stored: Option<String> = (self.db)
             .query_row(
                 "SELECT data FROM storage_repositories WHERE key=?1",
@@ -1389,6 +1392,9 @@ impl Host {
     }
     /// This machine's version beside the other, line by line, as a note's Compare shows them.
     pub(crate) fn compare_paused(&self, repository: Option<&str>, path: &str) -> Result<Vec<Line>> {
+        if let Some(name) = repository.filter(|_| path.contains('#')) {
+            return self.compare_part(name, path);
+        }
         let (key, shared) = self.paused_in(repository);
         let (paused, files) = self.paused_unit(&key, path)?;
         // A skill's agents get its rewrite, or else its rules; `base.md` is never theirs to read.
@@ -1417,6 +1423,9 @@ impl Host {
         path: &str,
         settle: Settle,
     ) -> Result<()> {
+        if let Some(name) = repository.filter(|_| path.contains('#')) {
+            return self.settle_part(name, path, settle);
+        }
         let (key, shared) = self.paused_in(repository);
         let (paused, mut rows) = self.paused_unit(&key, path)?;
         let offered = match paused {
@@ -1484,6 +1493,7 @@ impl Host {
                 for (file, content) in taken {
                     self.take_pulled(&storage, &file, content.as_deref())?;
                 }
+                self.follow_pending_work(&storage);
                 self.storage_written.borrow_mut().insert(key);
             }
             None => self.shared_written.set(true),
@@ -1538,7 +1548,7 @@ pub(crate) mod tests {
 
     /// A local bare repository standing in for GitHub, the answers a fake `gh` gives, and every
     /// command each tool was sent. No test reaches GitHub.
-    type Hook = (&'static str, Box<dyn FnOnce() + Send>);
+    pub(crate) type Hook = (&'static str, Box<dyn FnOnce() + Send>);
 
     pub(crate) struct GitHub {
         pub(crate) bare: PathBuf,
@@ -1548,7 +1558,7 @@ pub(crate) mod tests {
         gh: Mutex<Vec<Vec<String>>>,
         git: Mutex<Vec<Vec<String>>>,
         /// Git cannot reach GitHub.
-        offline: AtomicBool,
+        pub(crate) offline: AtomicBool,
         /// The Git protocol gh is configured with.
         protocol: Mutex<&'static str>,
         /// The beginnings of URLs Git cannot read the repository by, as without an SSH key or
@@ -1556,7 +1566,7 @@ pub(crate) mod tests {
         unreadable: Mutex<Vec<&'static str>>,
         /// Runs before the next Git command of that name, as another machine's push or a
         /// save made meanwhile would.
-        before: Mutex<Option<Hook>>,
+        pub(crate) before: Mutex<Option<Hook>>,
     }
     impl GitHub {
         pub(crate) fn new(folder: &Path, readme: bool) -> Self {
@@ -3382,8 +3392,8 @@ pub(crate) mod tests {
         let mut pace = repos::Pace::every(&[CADENCE_MS]);
         assert!(pace.start(0));
         pace.finish(0, true);
-        pace.wrote(1_000);
-        pace.wrote(4_000);
+        pace.wrote(1_000, repos::PUSH_DELAY_MS);
+        pace.wrote(4_000, repos::PUSH_DELAY_MS);
         assert!(!pace.start(8_999));
         assert!(pace.start(9_000));
         pace.finish(9_000, true);
@@ -3449,7 +3459,7 @@ pub(crate) mod tests {
             assert_eq!(pace.next_due(), Some(at + minutes * 60_000));
             at += minutes * 60_000;
         }
-        pace.wrote(at - 60_000);
+        pace.wrote(at - 60_000, repos::PUSH_DELAY_MS);
         assert!(!pace.start(at - 60_000 + repos::PUSH_DELAY_MS));
         pace.sync_now();
         assert!(pace.start(at - 60_000 + repos::PUSH_DELAY_MS));

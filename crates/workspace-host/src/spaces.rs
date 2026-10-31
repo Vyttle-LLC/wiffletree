@@ -203,10 +203,56 @@ fn is_personal(space: &Space) -> bool {
     space.name.eq_ignore_ascii_case(PERSONAL)
 }
 
-/// The login `gh` is signed in to GitHub as, or `None` when it cannot say.
-pub(crate) fn gh_login(tools: &publish::Tools, home: &Path) -> Option<String> {
-    let user = github_access::gh_json(tools, home, "user").ok()?;
-    user["login"].as_str().map(str::to_owned)
+/// What `gh api user` says of the human's GitHub account.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GhAccount {
+    SignedIn(String),
+    /// `gh` answered that it needs signing in.
+    SignedOut,
+    /// `gh` could not say, such as while GitHub is out of reach.
+    Unknown,
+}
+impl GhAccount {
+    /// The login `gh` is signed in as, if it said.
+    pub(crate) fn login(self) -> Option<String> {
+        match self {
+            Self::SignedIn(login) => Some(login),
+            Self::SignedOut | Self::Unknown => None,
+        }
+    }
+}
+/// `gh`'s exit code when a command needs it signed in.
+const GH_AUTH_REQUIRED: i32 = 4;
+
+/// The account `gh` is signed in to GitHub as.
+pub(crate) fn gh_account(tools: &publish::Tools, home: &Path) -> GhAccount {
+    let args = ["api", "--hostname", repositories::GITHUB_HOST, "user"];
+    let Ok(answer) = (tools.gh)(home, &args) else {
+        return GhAccount::Unknown;
+    };
+    if answer.status.code() == Some(GH_AUTH_REQUIRED) {
+        return GhAccount::SignedOut;
+    }
+    let user: Option<Value> = (answer.status.success())
+        .then(|| serde_json::from_str(&answer.output).ok())
+        .flatten();
+    match user.as_ref().and_then(|user| user["login"].as_str()) {
+        Some(login) => GhAccount::SignedIn(login.to_owned()),
+        None => GhAccount::Unknown,
+    }
+}
+
+/// When `gh`'s account file last changed, which signing in, out or to another account does;
+/// `None` while it has none.
+pub(crate) fn gh_account_stamp() -> Option<std::time::SystemTime> {
+    let folder = match std::env::var_os("GH_CONFIG_DIR") {
+        Some(folder) => PathBuf::from(folder),
+        None => match std::env::var_os("XDG_CONFIG_HOME") {
+            Some(config) => PathBuf::from(config).join("gh"),
+            None => PathBuf::from(std::env::var_os("HOME")?).join(".config/gh"),
+        },
+    };
+    fs::metadata(folder.join("hosts.yml")).ok()?.modified().ok()
 }
 
 /// The Space counted most, the first of those on a tie, or `None` when none is counted.
@@ -463,7 +509,9 @@ impl Host {
                 (host.spaces()?.iter()).any(|r| r.space.storage.repository.key() == storage);
             if !shared {
                 host.db
-                    .execute("DELETE FROM trackers WHERE storage=?1", [storage])?;
+                    .execute("DELETE FROM trackers WHERE storage=?1", [&storage])?;
+                host.db
+                    .execute("DELETE FROM issue_index WHERE storage=?1", [&storage])?;
             }
             Ok(())
         })
@@ -665,15 +713,28 @@ impl Host {
             })
             .collect())
     }
-    /// Whether the upgrade's suggestions wait on the human's `gh` login, which no read has
-    /// found yet.
+    /// Whether the upgrade's suggestions or the human's issues in a tracker on GitHub, which
+    /// this Mac reaches through `gh`, wait on the human's `gh` login, which no read has found
+    /// yet. Sync issues reads it for a local tracker.
     pub(crate) fn wants_gh_login(&self) -> Result<bool> {
-        Ok(self.gh_login.is_none() && !self.found_repositories()?.is_empty())
+        let on_github = (self.spaces()?.iter()).any(|r| {
+            matches!(r.space.storage.repository, StorageRepository::GitHub { .. })
+                && self.tracker(&r.space).is_ok()
+        });
+        Ok(self.gh_login.is_none() && (on_github || !self.found_repositories()?.is_empty()))
     }
-    /// Keeps the human's `gh` login for the host's lifetime, once one is found.
+    #[cfg(test)]
     pub(crate) fn record_gh_login(&mut self, login: Option<String>) {
-        if login.is_some() {
-            self.gh_login = login;
+        self.gh_login = login;
+    }
+    /// Takes what `gh` said of the human's account: a login replaces the one kept, which a
+    /// signed-out `gh` forgets, so tracker writes are refused; an answer that says neither
+    /// keeps it, so issues can still be filed offline.
+    pub(crate) fn record_gh_account(&mut self, account: GhAccount) {
+        match account {
+            GhAccount::SignedIn(login) => self.gh_login = Some(login),
+            GhAccount::SignedOut => self.gh_login = None,
+            GhAccount::Unknown => {}
         }
     }
     /// Applies the human's choices for the upgrade's suggestions, and stops offering them.
@@ -889,7 +950,7 @@ mod tests {
             gh: std::sync::Arc::new(|_, _| anyhow::bail!("gh is not installed")),
             ..publish::Tools::default()
         };
-        host.record_gh_login(gh_login(&signed_out, home.path()));
+        host.record_gh_account(gh_account(&signed_out, home.path()));
         let suggestions = host.repository_suggestions().unwrap();
         assert_eq!(suggestions[0].space, None);
         assert_eq!(suggestions[0].repository, "MHohlios/dotfiles");
@@ -905,6 +966,41 @@ mod tests {
             ["MHohlios/dotfiles"]
         );
         assert!(host.repository_suggestions().unwrap().is_empty());
+    }
+
+    /// A `gh` answering `api user` with `code` and `output`.
+    fn gh_answering(code: i32, output: &'static str) -> publish::Tools {
+        publish::Tools {
+            gh: std::sync::Arc::new(move |_, _| {
+                Ok(runtime::GhAnswer {
+                    status: std::os::unix::process::ExitStatusExt::from_raw(code << 8),
+                    output: output.into(),
+                    error: String::new(),
+                })
+            }),
+            ..publish::Tools::default()
+        }
+    }
+
+    #[test]
+    fn another_account_replaces_the_login_signing_out_forgets_it_and_offline_keeps_it() {
+        let (_home, mut host) = crate::storage::tests::host();
+        let home = Path::new("/");
+        host.record_gh_account(gh_account(&gh_answering(0, r#"{"login":"jlin"}"#), home));
+        assert_eq!(host.gh_login.as_deref(), Some("jlin"));
+        host.record_gh_account(gh_account(&gh_answering(0, r#"{"login":"pshah"}"#), home));
+        assert_eq!(host.gh_login.as_deref(), Some("pshah"));
+        host.record_gh_account(gh_account(&gh_answering(1, ""), home));
+        assert_eq!(host.gh_login.as_deref(), Some("pshah"), "offline keeps it");
+        host.record_gh_account(gh_account(&gh_answering(4, ""), home));
+        assert_eq!(host.gh_login, None, "signed out");
+        let personal = host.spaces().unwrap().remove(0).space;
+        let new = NewIssue {
+            title: "Renew the passport".into(),
+            ..NewIssue::default()
+        };
+        let refused = host.create_issue(&personal.id, new).unwrap_err();
+        assert!(format!("{refused:#}").contains("Sign gh in"), "{refused:#}");
     }
 
     #[test]
@@ -930,7 +1026,7 @@ mod tests {
         assert_eq!(calls(), 0);
 
         // The service's read at start, off the host thread.
-        host.record_gh_login(gh_login(&gh, home.path()));
+        host.record_gh_account(gh_account(&gh, home.path()));
         assert_eq!(calls(), 1);
         for _ in 0..2 {
             assert_eq!(host.repository_suggestions().unwrap()[0].space, personal);

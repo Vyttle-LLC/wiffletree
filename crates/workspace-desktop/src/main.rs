@@ -23,13 +23,17 @@ mod history_sheet;
 mod hosts;
 mod inbox;
 mod inspector;
+mod issue_view;
+mod issues_view;
 mod leftovers;
+mod linear_import_view;
 mod live_work;
 mod memory_view;
 mod menu_bar;
 mod models;
 mod models_view;
 mod native_quit;
+mod new_issue;
 mod new_project;
 mod palette;
 mod preferences;
@@ -60,7 +64,7 @@ mod welcome;
 mod wording;
 mod workspace_notes;
 use bridge::{Bridge, ChangedSteps};
-use creation::{Creation, CreationForm};
+use creation::{Creation, CreationForm, FromIssue};
 use gpui::{prelude::*, *};
 use gpui_component::{
     Root, Sizable, Theme, ThemeMode, TitleBar, WindowExt,
@@ -146,10 +150,10 @@ struct ArchiveDemand<'a> {
 }
 
 /// The archive is out of date and something shown needs it: Show archived, the Tickets, Agents or
-/// Events panel, the Repositories page, the brain browser, a ticket table's done list or a publish
-/// or merge request,
-/// or a selected session or message sender
-/// that the snapshot does not list, which only the archive holds.
+/// Events panel, the Repositories page, the Issues page, whose Work box lists accepted and closed
+/// tickets, the brain browser, a ticket table's done list or a publish or merge request, or a
+/// selected session or message sender that the snapshot does not list, which only the archive
+/// holds.
 fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
     let snapshot = index.snapshot();
     let live: BTreeSet<&str> = snapshot.sessions.iter().map(|s| s.id.as_str()).collect();
@@ -160,7 +164,7 @@ fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
                 shown.panel,
                 Some(Panel::Team | Panel::Agents | Panel::Events)
             )
-            || shown.page == Page::Repositories
+            || matches!(shown.page, Page::Repositories | Page::Issues)
             // Logs links this Mac's entries to their tickets and conversations, finished ones too.
             || shown.page == Page::BrainBrowser
             || shown.done_tickets
@@ -208,6 +212,7 @@ enum Page {
     Usage,
     Models,
     Skills,
+    Issues,
     Repositories,
     Spaces,
     Brains,
@@ -238,6 +243,7 @@ struct Workspace {
     brains: Entity<brains_view::BrainsPage>,
     brain_browser: Entity<brain_browser_view::BrainBrowser>,
     brain_search: Entity<brain_search::BrainSearch>,
+    issues: Entity<issues_view::IssuesPage>,
     usage: Entity<usage_view::UsagePage>,
     sidebar: Entity<sidebar::Sidebar>,
     inspector: Entity<Inspector>,
@@ -296,6 +302,8 @@ impl Workspace {
         Self::adopt(&brain_search, window, cx);
         // The shell draws the overlay while it is open.
         cx.observe(&brain_search, |_, _, cx| cx.notify()).detach();
+        let issues = cx.new(|cx| issues_view::IssuesPage::new(bridge.clone(), window, cx));
+        Self::adopt(&issues, window, cx);
         let sidebar = cx.new(|cx| sidebar::Sidebar::new(bridge.clone(), window, cx));
         Self::adopt(&sidebar, window, cx);
         let usage = cx.new(|_| usage_view::UsagePage::new(bridge.clone()));
@@ -321,6 +329,7 @@ impl Workspace {
             brains,
             brain_browser,
             brain_search,
+            issues,
             usage,
             sidebar,
             inspector,
@@ -424,6 +433,16 @@ impl Workspace {
         match intent {
             Intent::Select(id) => self.select(id.clone(), window, cx),
             Intent::OpenPage(page) => self.open_page(*page, window, cx),
+            Intent::OpenIssues(space_id) => {
+                self.issues.update(cx, |issues, cx| {
+                    issues.filter_space(space_id.clone(), window, cx)
+                });
+                self.open_page(Page::Issues, window, cx);
+            }
+            Intent::OpenIssue(id) => {
+                (self.issues).update(cx, |issues, cx| issues.show_issue(id.clone(), window, cx));
+                self.open_page(Page::Issues, window, cx);
+            }
             Intent::ShowPanel(panel) => self.show_panel(*panel, window, cx),
             Intent::TogglePanel(panel) => self.toggle_panel(*panel, window, cx),
             Intent::ClosePanel => self.shared.panel = None,
@@ -470,6 +489,11 @@ impl Workspace {
             Intent::Create { kind, ticket } => {
                 self.open_creation(*kind, ticket.as_deref(), window, cx)
             }
+            Intent::StartProjectFromIssue {
+                id,
+                title,
+                defaults,
+            } => self.open_issue_project(id.clone(), title.clone(), defaults.clone(), window, cx),
         }
         self.share(window, cx);
         cx.notify();
@@ -494,6 +518,8 @@ impl Workspace {
             .update(cx, |brains, cx| brains.share(shared.clone(), window, cx));
         self.brain_browser
             .update(cx, |browser, cx| browser.share(shared.clone(), window, cx));
+        self.issues
+            .update(cx, |issues, cx| issues.share(shared.clone(), window, cx));
         self.models
             .update(cx, |models, cx| models.share(shared.clone(), window, cx));
         self.skills
@@ -783,8 +809,77 @@ impl Workspace {
                 self.select(coordinator_id, window, cx);
                 self.shared.panel = Some(Panel::Team);
             }
+            // The issue's Work box lists the project once the issue is read again.
+            Command::StartProjectFromIssue { .. } => {
+                if let Ok(created) = serde_json::from_value::<CreatedProject>(value) {
+                    let mut said = format!("Started {}", created.project.name);
+                    if !created.not_on_this_mac.is_empty() {
+                        said.push_str(&format!(
+                            ". Not on this Mac, so left out: {}",
+                            created.not_on_this_mac.join(", ")
+                        ));
+                    }
+                    toast(said, window, cx);
+                }
+                self.issues
+                    .update(cx, |issues, cx| issues.reload(window, cx));
+            }
             _ => {}
         }
+    }
+    /// Opens Start project from issue with the Spaces sharing the issue's tracker.
+    fn open_issue_project(
+        &mut self,
+        id: IssueId,
+        title: String,
+        defaults: IssueProjectDefaults,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.shared.index.clone() else {
+            return;
+        };
+        let repositories = (defaults.repositories.repository_ids.iter())
+            .filter_map(|id| index.snapshot().repositories.iter().find(|r| &r.id == id))
+            .map(|r| r.name.clone())
+            .collect();
+        let issue = FromIssue {
+            id,
+            title,
+            defaults,
+            repositories,
+        };
+        let bridge = self.bridge.clone();
+        let form = cx.new(|cx| CreationForm::from_issue(&index, issue, bridge, window, cx));
+        self.creation = Some(form.clone());
+        let kind = Creation::ProjectFromIssue;
+        let weak = cx.weak_entity();
+        let cancel = weak.clone();
+        window.open_alert_dialog(cx, move |dialog, window, _| {
+            let weak = weak.clone();
+            let cancel = cancel.clone();
+            dialog
+                .title(kind.title())
+                .width(px(560.).min(window.viewport_size().width - px(48.)))
+                .confirm()
+                .ok_text(kind.action())
+                .child(form.clone())
+                .on_ok(move |_, window, cx| {
+                    let _ = weak.update(cx, |view, cx| view.submit_creation(window, cx));
+                    false
+                })
+                .on_cancel(move |_, _, cx| {
+                    cancel
+                        .update(cx, |view, cx| {
+                            if view.creation.as_ref().is_some_and(|f| f.read(cx).pending) {
+                                return false;
+                            }
+                            view.creation = None;
+                            true
+                        })
+                        .unwrap_or(true)
+                })
+        });
     }
     /// Asks for the latest snapshot, or, while one is on its way, for one more after it.
     fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -967,6 +1062,7 @@ impl Workspace {
                 | Command::AttachRepository { .. }
                 | Command::ImportRepositories { .. }
                 | Command::SetProjectRepositories { .. }
+                | Command::StartProjectFromIssue { .. }
         ) && let Some(form) = &self.creation
         {
             form.update(cx, |form, cx| {
@@ -1625,6 +1721,11 @@ mod tests {
             // The ticket table's done list names tickets only the archive holds.
             ArchiveDemand {
                 done_tickets: true,
+                ..shown("live")
+            },
+            // The Work box lists a linked project's accepted and closed tickets.
+            ArchiveDemand {
+                page: Page::Issues,
                 ..shown("live")
             },
             // An archived session already in the held archive, whose status may have moved.

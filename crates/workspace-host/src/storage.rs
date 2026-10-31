@@ -2,19 +2,19 @@
 //! `spaces`, stage 3). Local storage is a Git repository at `repos/local-<id>/` with no remote,
 //! committed to on every change and never pushed. GitHub storage is a clone under `repos/` that
 //! its one sync engine runs with two rule sets: Spaces, over the folders of the Spaces this Mac
-//! added, and the tracker, over `wiffletree-issues.yaml` with `issues/` reserved for
-//! `shared-issues`. The store keeps each Space as the host uses it; the files are what travel.
+//! added, and issues (`issues_sync`), over `wiffletree-issues.yaml` and `issues/`. The store
+//! keeps each Space as the host uses it; the files are what travel.
 use crate::*;
+use issues_sync::IssueRules;
 use publish::Tools;
 use repos::{Content, Record, Remote, RuleSet};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use tempfile::TempDir;
+use tracker::ISSUES;
 
 /// The tracker's config at a storage repository's root.
 pub(crate) const TRACKER: &str = "wiffletree-issues.yaml";
-/// Where `shared-issues` keeps one folder per issue.
-const ISSUES: &str = "issues";
 const SPACE_FORMAT: u32 = 1;
 /// How often a storage repository is fetched, and once it holds a tracker.
 const CADENCE_MS: i64 = 300_000;
@@ -107,6 +107,10 @@ fn read_tracker(content: &[u8]) -> Result<TrackerConfig> {
         "This tracker was written by a newer Wiffletree. Update to use it."
     );
     validate_prefix(&tracker.prefix)?;
+    ensure!(
+        tracker.states == IssueState::ALL,
+        "This tracker uses states this release does not know"
+    );
     Ok(tracker)
 }
 
@@ -181,7 +185,7 @@ fn rename_ids(text: &str, old: &str, new: &str) -> String {
 }
 
 /// Every file under `folder`, hidden ones aside, never following a link.
-fn files_under(folder: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) fn files_under(folder: &Path) -> Result<Vec<PathBuf>> {
     let mut files = vec![];
     let Ok(entries) = fs::read_dir(folder) else {
         return Ok(files);
@@ -203,7 +207,7 @@ fn files_under(folder: &Path) -> Result<Vec<PathBuf>> {
 
 /// Commits `paths` of the local repository at `folder`, creating it first when it has none,
 /// with the human's Git identity or, without one, Wiffletree's, as nothing here is pushed.
-fn commit_local(folder: &Path, paths: &[&str], message: &str) -> Result<()> {
+pub(crate) fn commit_local(folder: &Path, paths: &[&str], message: &str) -> Result<()> {
     if !folder.join(".git").exists() {
         runtime::git_output(folder, &["init", "--quiet", "--initial-branch=main"])?;
     }
@@ -251,33 +255,8 @@ fn check_clone(space: &Space, clone: &str) -> Result<()> {
     Ok(())
 }
 
-/// How many issues with `prefix` the tracker in `folder` holds: the folders of `issues/` named
-/// by an issue ID, in the clone and, for a GitHub repository, at the commit last `synced`, as
-/// passes leave `issues/` out of the clone.
-fn count_issues(folder: &Path, prefix: &str, synced: Option<&str>) -> Result<usize> {
-    let mut ids: std::collections::BTreeSet<String> = (fs::read_dir(folder.join(ISSUES))
-        .into_iter())
-    .flatten()
-    .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
-    .collect();
-    if let Some(synced) = synced {
-        let listed =
-            runtime::git_output(folder, &["ls-tree", "--name-only", synced, "--", "issues/"])?;
-        ids.extend(
-            listed
-                .lines()
-                .filter_map(|line| line.strip_prefix("issues/"))
-                .map(str::to_owned),
-        );
-    }
-    Ok(ids
-        .iter()
-        .filter(|id| issue_number(id, prefix).is_some())
-        .count())
-}
-
 /// Whether a tracker holds any issue: in its clone, or on GitHub as of `synced`, the commit last
-/// synced, as a pass never brings `issues/` into the clone for this release.
+/// synced, which may hold one a pass has not brought into the clone yet.
 fn has_issues(folder: &Path, synced: &str) -> Result<bool> {
     let listed = ["ls-tree", "-r", "--name-only", synced, "--", ISSUES];
     let on_github = !runtime::git_output(folder, &listed)?.trim().is_empty();
@@ -402,13 +381,30 @@ pub(crate) enum Use {
 }
 
 /// What a storage repository's pass compares: the folders of the Spaces this Mac added, by
-/// folder with their names, and the record.
+/// folder with their names, its tracker's prefix, and the record.
+#[derive(Clone)]
 pub(crate) struct Input {
     key: String,
     names: BTreeMap<String, String>,
+    pub(crate) prefix: Option<String>,
     synced: BTreeMap<String, Content>,
     written: BTreeMap<String, Content>,
     two_machines: Vec<String>,
+    /// The paused parts of each `issue.md`, by its path.
+    pub(crate) parts: BTreeMap<String, Vec<String>>,
+    /// The number each of this Mac's new issues would rather have, by its temporary ID.
+    pub(crate) preferred: BTreeMap<IssueId, u64>,
+}
+
+/// A part of an `issue.md` both sides changed to different values, which this Mac keeps and
+/// does not push: a front matter field, or the description.
+pub(crate) struct PausedPart {
+    pub(crate) path: String,
+    pub(crate) part: String,
+    /// The other side's value as written, `None` when it has none.
+    pub(crate) theirs: Option<String>,
+    /// Who last changed the file on GitHub.
+    pub(crate) by: String,
 }
 
 /// The files of a storage repository's paths a pass found, for the host thread to write and
@@ -419,35 +415,42 @@ pub(crate) struct Found {
     /// Each file changed only on GitHub: this machine's content as read, then GitHub's.
     pulled: Vec<(String, Content, Content)>,
     alike: Vec<(String, Content)>,
-    committed: Vec<(String, Content)>,
+    pub(crate) committed: Vec<(String, Content)>,
     paused: Vec<(String, Paused, Content)>,
     held: Vec<scan::Held>,
     /// Why a rule set's compare failed.
     failed: Vec<String>,
     /// The paths of the rule sets whose compare failed, whose notes stay as they were.
     failed_roots: Vec<String>,
+    /// The new issues the commit numbered: each temporary ID and its number.
+    pub(crate) numbered: Vec<(IssueId, IssueId)>,
+    /// The new issues GitHub already held, as this Mac pushed them before: each temporary ID
+    /// and the number it has there.
+    pub(crate) adopted: Vec<(IssueId, IssueId)>,
+    /// Each file merged with GitHub's: this machine's content as read, what it keeps here, and
+    /// GitHub's, which is what it last synced unless the merge is pushed.
+    merged: Vec<(String, Content, Vec<u8>, Content)>,
+    /// The `issue.md` files whose parts were merged, and the parts that paused.
+    parts_compared: Vec<String>,
+    parts: Vec<PausedPart>,
 }
 
 /// A rule set comparing whole files under `roots` with the version last synced, as the settings
 /// rule set does: what changed on both sides, changed outside Wiffletree or arrived in a form
-/// this Mac cannot use is paused and kept here. It also claims `reserved`, which it leaves
-/// alone for the rule set another change adds.
-struct WholeFiles {
+/// this Mac cannot use is paused and kept here.
+pub(crate) struct WholeFiles {
     roots: Vec<String>,
-    reserved: Option<&'static str>,
     subject: String,
-    synced: BTreeMap<String, Content>,
+    pub(crate) synced: BTreeMap<String, Content>,
     written: BTreeMap<String, Content>,
     two_machines: Vec<String>,
-    found: Found,
+    /// For issues: the paused parts of each `issue.md`, which its files merge by part and
+    /// `events.jsonl` by line instead of pausing whole.
+    pub(crate) parts: Option<BTreeMap<String, Vec<String>>>,
+    pub(crate) found: Found,
 }
 impl WholeFiles {
-    fn new(
-        input: &Input,
-        roots: Vec<String>,
-        reserved: Option<&'static str>,
-        subject: String,
-    ) -> Self {
+    pub(crate) fn new(input: &Input, roots: Vec<String>, subject: String) -> Self {
         let mine = |map: &BTreeMap<String, Content>| -> BTreeMap<String, Content> {
             (map.iter())
                 .filter(|(path, _)| under(&roots, path))
@@ -462,8 +465,8 @@ impl WholeFiles {
                 .cloned()
                 .collect(),
             roots,
-            reserved,
             subject,
+            parts: None,
             found: Found::default(),
         }
     }
@@ -495,9 +498,6 @@ impl WholeFiles {
 impl RuleSet for WholeFiles {
     fn claims(&self, path: &str) -> bool {
         self.compares(path)
-            || self
-                .reserved
-                .is_some_and(|reserved| path.starts_with(reserved))
     }
     fn compare(&mut self, clone: &Path, remote: &str) -> Result<()> {
         let here = self.here(clone)?;
@@ -509,6 +509,12 @@ impl RuleSet for WholeFiles {
         for path in paths {
             let base = self.synced.get(path).cloned().flatten();
             let (mine, theirs) = (here.get(path).cloned(), there.get(path).cloned());
+            let written = self.written.get(path).cloned().flatten();
+            let outside = mine != base && mine != written;
+            // An issue file changed outside Wiffletree pauses whole, its parts as they were.
+            if self.parts.is_some() && path.ends_with("/issue.md") && !outside {
+                self.found.parts_compared.push(path.clone());
+            }
             let found = &mut self.found;
             if mine == theirs {
                 if mine != base {
@@ -516,12 +522,39 @@ impl RuleSet for WholeFiles {
                 }
                 continue;
             }
-            let written = self.written.get(path).cloned().flatten();
+            if let (Some(parts), Some(m), Some(t)) = (&self.parts, &mine, &theirs)
+                && !outside
+                && let Some((here, pushed, paused)) =
+                    issues_sync::merge_file(path, base.as_deref(), m, t, parts)
+            {
+                let by = match paused.is_empty() {
+                    true => String::new(),
+                    false => issues_sync::last_author(clone, remote, path),
+                };
+                for (part, theirs) in paused {
+                    let path = path.clone();
+                    let by = by.clone();
+                    found.parts.push(PausedPart {
+                        path,
+                        part,
+                        theirs,
+                        by,
+                    });
+                }
+                if &pushed != t {
+                    found.committed.push((path.clone(), Some(pushed.clone())));
+                }
+                match &here == t && &pushed == t {
+                    true => found.pulled.push((path.clone(), mine, theirs)),
+                    false => found.merged.push((path.clone(), mine, here, theirs)),
+                }
+                continue;
+            }
             let refused = (theirs != base)
                 .then(|| theirs.as_deref().and_then(|c| check(path, c).err()))
                 .flatten();
             let machine = || "another machine".to_owned();
-            let why = if mine != base && mine != written {
+            let why = if outside {
                 Some(Paused::OutsideWiffletree)
             } else if let Some(error) = refused {
                 Some(Paused::CannotBeRead {
@@ -550,10 +583,7 @@ impl RuleSet for WholeFiles {
     }
     fn failed(&mut self, error: anyhow::Error) {
         self.found.failed.push(format!("{error:#}"));
-        let reserved = self.reserved.map(|r| r.trim_end_matches('/').to_owned());
-        self.found
-            .failed_roots
-            .extend(self.roots.iter().cloned().chain(reserved));
+        self.found.failed_roots.extend(self.roots.iter().cloned());
     }
 }
 
@@ -566,7 +596,7 @@ fn under(roots: &[String], path: &str) -> bool {
 /// A storage repository's two rule sets for one pass.
 pub(crate) struct RuleSets {
     spaces: WholeFiles,
-    tracker: WholeFiles,
+    issues: IssueRules,
 }
 impl RuleSets {
     pub(crate) fn new(input: Input) -> Self {
@@ -577,30 +607,32 @@ impl RuleSets {
             .collect();
         let names: Vec<&str> = input.names.values().map(String::as_str).collect();
         let subject = format!("{}: changed the Space", names.join(", "));
-        let spaces = WholeFiles::new(&input, roots, None, subject);
-        let issues = Some("issues/");
-        let tracker = WholeFiles::new(
-            &input,
-            vec![TRACKER.into()],
-            issues,
-            "Issues: changed the tracker".into(),
-        );
-        let mut rule_sets = Self { spaces, tracker };
+        let spaces = WholeFiles::new(&input, roots, subject);
+        let mut issues = IssueRules::new(&input);
+        issues.files.parts = Some(input.parts.clone());
+        let mut rule_sets = Self { spaces, issues };
         rule_sets.spaces.found.key = input.key;
         rule_sets
     }
     pub(crate) fn as_mut(&mut self) -> [&mut dyn RuleSet; 2] {
-        [&mut self.spaces, &mut self.tracker]
+        [&mut self.spaces, &mut self.issues]
     }
-    /// What both found, with the files `held` back from the push left out of what was committed.
-    pub(crate) fn found(self, held: Vec<scan::Held>) -> Found {
-        let (mut found, tracker) = (self.spaces.found, self.tracker.found);
-        found.pulled.extend(tracker.pulled);
-        found.alike.extend(tracker.alike);
-        found.committed.extend(tracker.committed);
-        found.paused.extend(tracker.paused);
-        found.failed.extend(tracker.failed);
-        found.failed_roots.extend(tracker.failed_roots);
+    /// What both found, with the files `held` back from the push left out of what was
+    /// committed, and a new issue held whole kept under its temporary ID.
+    pub(crate) fn found(self, mut held: Vec<scan::Held>) -> Found {
+        let (mut found, mut issues) = (self.spaces.found, self.issues.files.found);
+        issues_sync::keep_held_unnumbered(&mut issues, &mut held);
+        found.pulled.extend(issues.pulled);
+        found.alike.extend(issues.alike);
+        found.committed.extend(issues.committed);
+        found.paused.extend(issues.paused);
+        found.failed.extend(issues.failed);
+        found.failed_roots.extend(issues.failed_roots);
+        found.merged = issues.merged;
+        found.parts_compared = issues.parts_compared;
+        found.parts = issues.parts;
+        found.numbered = issues.numbered;
+        found.adopted = issues.adopted;
         found
             .committed
             .retain(|(path, _)| !held.iter().any(|h| &h.path == path));
@@ -639,8 +671,9 @@ pub(crate) struct Synced {
     error: Option<String>,
 }
 
-/// Runs a storage repository's engine with its Space and tracker rule sets, scanning what it
-/// pushes.
+/// Runs a storage repository's engine with its Space and issue rule sets, scanning what it
+/// pushes. When GitHub refuses the push because the branch moved, the same pass fetches,
+/// compares and numbers again, up to `issues_sync::PUSH_TRIES` times.
 pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
     let Pass {
         clone,
@@ -653,30 +686,45 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
     let _running = running
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut rule_sets = RuleSets::new(input);
-    let remote = Remote {
+    let remote = || Remote {
         url: &repository.push_url,
         branch: &repository.branch,
     };
-    let outcome = repos::pass(
-        &clone,
-        remote,
-        &commit,
-        &mut rule_sets.as_mut(),
-        Some(&scanner),
-        &tools.git,
-    )?;
-    let head = runtime::git_output(&clone, &["rev-parse", "FETCH_HEAD"])?;
-    let (pushed, error) = match outcome.pushed {
-        Ok(pushed) => (pushed, None),
-        Err(error) => (None, Some(error)),
-    };
-    Ok(Passed {
-        remote: head.trim().to_owned(),
-        pushed,
-        error,
-        found: rule_sets.found(outcome.held),
-    })
+    // The commit whose files outside every rule set the clone holds.
+    let mut previous = commit;
+    let mut again = 0;
+    loop {
+        let mut rule_sets = RuleSets::new(input.clone());
+        let outcome = repos::pass(
+            &clone,
+            remote(),
+            &previous,
+            &mut rule_sets.as_mut(),
+            Some(&scanner),
+            &tools.git,
+        )?;
+        let head = runtime::git_output(&clone, &["rev-parse", "FETCH_HEAD"])?;
+        let head = head.trim().to_owned();
+        let (pushed, error) = match outcome.pushed {
+            Ok(pushed) => (pushed, None),
+            Err(error) => (None, Some(error)),
+        };
+        let moved = || {
+            let now = github_access::remote_head(&clone, remote().url, remote().branch, &tools.git);
+            now.is_ok_and(|now| now.as_deref() != Some(head.as_str()))
+        };
+        if error.is_some() && again < issues_sync::PUSH_TRIES && moved() {
+            again += 1;
+            previous = head;
+            continue;
+        }
+        return Ok(Passed {
+            remote: head,
+            pushed,
+            error,
+            found: rule_sets.found(outcome.held),
+        });
+    }
 }
 
 impl Host {
@@ -889,6 +937,13 @@ impl Host {
                 shared::write_atomically(&folder.join(TRACKER), &content)?;
                 let message = format!("Renamed the issue prefix {} to {prefix}", current.prefix);
                 commit_local(&folder, &[TRACKER, ISSUES], &message)?;
+                // The issues' links, derived states and follows follow them to their new IDs.
+                for table in ["issue_links", "issue_derived", "issue_follows"] {
+                    self.db.execute(
+                        &format!("UPDATE {table} SET id=?3||substr(id,length(?2)+1) WHERE storage=?1 AND substr(id,1,length(?2)+1)=?2||'-'"),
+                        params![storage, current.prefix, prefix],
+                    )?;
+                }
             }
             Some(key) => {
                 let synced = Record::read(&self.db, &key)?
@@ -905,6 +960,7 @@ impl Host {
             "UPDATE trackers SET data=?2 WHERE storage=?1",
             params![storage, encode(&tracker)?],
         )?;
+        self.reindex_tracker(&space, prefix)?;
         Ok(tracker)
     }
     /// Makes a GitHub storage repository joined without `wiffletree-issues.yaml` a tracker with
@@ -931,6 +987,7 @@ impl Host {
             "INSERT INTO trackers VALUES (?1,?2)",
             params![storage, encode(&tracker)?],
         )?;
+        self.reindex_tracker(&space, prefix)?;
         Ok(tracker)
     }
     /// Puts a staged clone at its folder under `repos/`, or keeps the clone already there, and
@@ -1003,6 +1060,7 @@ impl Host {
             }
             Ok(())
         })?;
+        self.reindex_tracker(&space, &self.tracker(&space)?.prefix)?;
         Ok(SpaceRecord { space, local })
     }
     /// `check_new_stored_space` for the repository the human named, before it is read: the
@@ -1150,6 +1208,9 @@ impl Host {
             }
             Ok(())
         })?;
+        if let Ok(tracker) = self.tracker(&joined[0].space) {
+            self.reindex_tracker(&joined[0].space, &tracker.prefix)?;
+        }
         Ok(joined)
     }
     /// The Space page's notes about a model the Space names that this Mac cannot run, and the
@@ -1179,13 +1240,18 @@ impl Host {
     /// What a pass of the GitHub storage repository `key` compares, or `None` when no Space on
     /// this Mac is stored there.
     pub(crate) fn storage_input(&self, key: &str) -> Result<Option<Input>> {
-        let names: BTreeMap<String, String> = (self.spaces()?.into_iter())
+        let stored: Vec<Space> = (self.spaces()?.into_iter())
             .filter(|r| Self::storage_key(&r.space.storage.repository).as_deref() == Some(key))
-            .map(|r| (r.space.storage.folder, r.space.name))
+            .map(|r| r.space)
             .collect();
-        if names.is_empty() {
+        let Some(first) = stored.first() else {
             return Ok(None);
-        }
+        };
+        let prefix = self.tracker(first).ok().map(|tracker| tracker.prefix);
+        let storage = first.storage.repository.key();
+        let names: BTreeMap<String, String> = (stored.into_iter())
+            .map(|space| (space.storage.folder, space.name))
+            .collect();
         let record =
             Record::read(&self.db, key)?.context("The storage repository has no record")?;
         let two_machines = (self.db.prepare(
@@ -1193,12 +1259,29 @@ impl Host {
         )?)
         .query_map([key], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
+        let mut parts: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut rows =
+            (self.db).prepare("SELECT path,part FROM issue_parts WHERE repository=?1")?;
+        for row in rows.query_map([key], |r| Ok((r.get(0)?, r.get(1)?)))? {
+            let (path, part): (String, String) = row?;
+            parts.entry(path).or_default().push(part);
+        }
+        let mut preferred = BTreeMap::new();
+        let mut rows =
+            (self.db).prepare("SELECT temporary,number FROM issue_preferred WHERE storage=?1")?;
+        for row in rows.query_map([storage], |r| Ok((r.get(0)?, r.get(1)?)))? {
+            let (temporary, number): (String, u64) = row?;
+            preferred.insert(IssueId::parse(&temporary)?, number);
+        }
         Ok(Some(Input {
             key: key.to_owned(),
             names,
+            prefix,
             synced: record.synced,
             written: record.written,
             two_machines,
+            parts,
+            preferred,
         }))
     }
     /// The GitHub storage repositories that sync on their own, being no settings repository,
@@ -1294,8 +1377,26 @@ impl Host {
         };
         let storage = &record.space.storage.repository;
         let clone = self.storage_folder(storage);
+        let touched = (found.pulled.iter().map(|(path, ..)| path))
+            .chain(found.merged.iter().map(|(path, ..)| path));
+        let before = self.issues_before(storage, touched);
         let mut pulled = vec![];
         let mut paused = found.paused;
+        // Merged with GitHub's: each written here, unless the host wrote it meanwhile, and
+        // recorded as last synced in GitHub's version, so this Mac's own part changes push.
+        // One the host wrote meanwhile keeps the record it had, even if its merge was pushed:
+        // the merge's parts from GitHub never reached it, so the next pass merges again.
+        let (mut merged, mut skipped) = (vec![], vec![]);
+        for (path, here, kept, there) in found.merged {
+            if fs::read(clone.join(&path)).ok() != here {
+                skipped.push(path);
+                continue;
+            }
+            if here.as_ref() != Some(&kept) {
+                shared::write_atomically(&clone.join(&path), &kept)?;
+            }
+            merged.push((path, kept, there));
+        }
         for (path, here, there) in found.pulled {
             if fs::read(clone.join(&path)).ok() != here {
                 continue;
@@ -1311,15 +1412,38 @@ impl Host {
             }
             match &there {
                 Some(content) => shared::write_atomically(&clone.join(&path), content)?,
-                None => drop(fs::remove_file(clone.join(&path))),
+                None => {
+                    drop(fs::remove_file(clone.join(&path)));
+                    tracker::remove_emptied(&clone, &path);
+                }
             }
             pulled.push((path, there));
         }
         let mut synced = found.alike;
-        synced.extend(found.committed.into_iter().filter(|_| pushed));
+        synced.extend(
+            (found.committed.into_iter()).filter(|(path, _)| pushed && !skipped.contains(path)),
+        );
         // A rule set whose compare failed keeps its notes until a pass compares it again.
         let ours = |path: &str| scan::scanned(path) && !under(&found.failed_roots, path);
         let tx = self.db.unchecked_transaction()?;
+        for (path, kept, there) in &merged {
+            tx.execute(
+                "INSERT INTO sync_record(repository,path,synced,written) VALUES (?1,?2,?3,?4) ON CONFLICT(repository,path) DO UPDATE SET synced=excluded.synced, written=excluded.written",
+                params![key, path, there, kept],
+            )?;
+        }
+        for path in &found.parts_compared {
+            tx.execute(
+                "DELETE FROM issue_parts WHERE repository=?1 AND path=?2",
+                params![key, path],
+            )?;
+        }
+        for part in &found.parts {
+            tx.execute(
+                "INSERT OR REPLACE INTO issue_parts(repository,path,part,theirs,by) VALUES (?1,?2,?3,?4,?5)",
+                params![key, part.path, part.part, part.theirs, part.by],
+            )?;
+        }
         for (rows, written) in [(&pulled, "excluded.written"), (&synced, "written")] {
             for (path, content) in rows {
                 tx.execute(
@@ -1364,15 +1488,33 @@ impl Host {
         for (path, content) in pulled {
             self.take_pulled(storage, &path, content.as_deref())?;
         }
+        for (path, ..) in &merged {
+            if let Some(id) = tracker::issue_of(path) {
+                self.reindex_issue(storage, &id)?;
+            }
+        }
+        self.note_issue_news(storage, before);
+        if pushed {
+            self.apply_numbers(storage, &found.numbered)?;
+        }
+        self.apply_numbers(storage, &found.adopted)?;
+        // A file put back by hand since no longer holds back its issue's work.
+        self.follow_pending_work(storage);
+        // The pass compared every issue file, so an edit made by hand is indexed now too.
+        self.refresh_issue_index(Some(&storage.key()))?;
         Ok(())
     }
-    /// Takes a pulled `space.yaml` of a Space on this Mac, or the tracker's config, into the store.
+    /// Takes a pulled `space.yaml` of a Space on this Mac, or the tracker's config, into the
+    /// store, and a pulled issue's file into the index.
     pub(crate) fn take_pulled(
         &mut self,
         storage: &StorageRepository,
         path: &str,
         content: Option<&[u8]>,
     ) -> Result<()> {
+        if let Some(id) = tracker::issue_of(path) {
+            return self.reindex_issue(storage, &id);
+        }
         let Some(content) = content else {
             return Ok(());
         };
@@ -1382,6 +1524,10 @@ impl Host {
                 "INSERT INTO trackers VALUES (?1,?2) ON CONFLICT(storage) DO UPDATE SET data=excluded.data",
                 params![storage.key(), encode(&tracker)?],
             )?;
+            let mut spaces = self.spaces()?.into_iter().map(|r| r.space);
+            if let Some(space) = spaces.find(|s| &s.storage.repository == storage) {
+                self.reindex_tracker(&space, &tracker.prefix)?;
+            }
             return Ok(());
         }
         for record in self.spaces()? {
@@ -1408,11 +1554,13 @@ impl Host {
         let folder = self.storage_folder(&space.storage.repository);
         let prefix = self.tracker(&space).ok().map(|tracker| tracker.prefix);
         let path = folder.to_string_lossy().into_owned();
+        self.refresh_issue_index(Some(&space.storage.repository.key()))?;
+        let issues: usize = self.db.query_row(
+            "SELECT count(*) FROM issue_index WHERE storage=?1",
+            [space.storage.repository.key()],
+            |r| r.get(0),
+        )?;
         let Some(key) = Self::storage_key(&space.storage.repository) else {
-            let issues = match &prefix {
-                Some(prefix) => count_issues(&folder, prefix, None)?,
-                None => 0,
-            };
             return Ok(StorageStatus {
                 prefix,
                 issues,
@@ -1429,18 +1577,8 @@ impl Host {
             |r| r.get(0),
         )?;
         let repository: SettingsRepository = serde_json::from_str(&data)?;
-        let synced = Record::read(&self.db, &key)?.map(|record| record.commit);
-        let issues = match &prefix {
-            Some(prefix) => count_issues(&folder, prefix, synced.as_deref())?,
-            None => 0,
-        };
         let settings_repository = self.settings_key().as_ref() == Some(&key);
-        let (synced_at, error) = match settings_repository {
-            true => (self.sync_status()?).map_or((None, None), |s| (s.synced_at, s.error)),
-            false => {
-                (self.storage_synced.get(&key)).map_or((None, None), |s| (s.at, s.error.clone()))
-            }
-        };
+        let (synced_at, error) = self.storage_sync_state(&key)?;
         Ok(StorageStatus {
             prefix,
             issues,
@@ -1450,6 +1588,14 @@ impl Host {
             synced_at,
             error,
         })
+    }
+    /// When a pass of the GitHub storage repository `key` last reached GitHub, and why the
+    /// latest one failed: the settings sync's, when it is also the settings repository.
+    pub(crate) fn storage_sync_state(&self, key: &str) -> Result<(Option<i64>, Option<String>)> {
+        if self.settings_key().as_deref() == Some(key) {
+            return Ok((self.sync_status()?).map_or((None, None), |s| (s.synced_at, s.error)));
+        }
+        Ok((self.storage_synced.get(key)).map_or((None, None), |s| (s.at, s.error.clone())))
     }
     /// The settings repository's record key, `None` without one. Reads only this Mac's settings
     /// file, as the shared folder's recorder asks while the shared settings are read.
@@ -1535,7 +1681,7 @@ pub(crate) mod tests {
     }
 
     /// The Sage Space as a teammate's Mac wrote it to `spaces/sage/space.yaml`.
-    fn sage(description: &str) -> String {
+    pub(crate) fn sage(description: &str) -> String {
         let space = Space {
             id: SpaceId("sage-id".into()),
             name: "Sage".into(),
@@ -1850,7 +1996,7 @@ sources:
     fn a_shared_trackers_unknown_keys_survive_a_prefix_change() {
         let folder = tempfile::tempdir().unwrap();
         let github = shared_storage(folder.path(), None);
-        github.commit(TRACKER, "format: 1\nprefix: SAGE\nstates: [triage, done]\n");
+        github.commit(TRACKER, "format: 1\nprefix: SAGE\ncolors: [teal]\n");
         let (_home, mut host) = host();
         join_sage(&mut host, &github).unwrap();
         let sage = space_named(&host, "Sage");
@@ -1858,9 +2004,14 @@ sources:
         sync(&mut host, &github);
         let tracker = github.show(TRACKER).unwrap();
         assert!(
-            tracker.contains("prefix: SG") && tracker.contains("- triage"),
+            tracker.contains("prefix: SG") && tracker.contains("- teal"),
             "{tracker}"
         );
+    }
+
+    /// `wiffletree-issues.yaml` as this release writes a new tracker's.
+    fn tracker_file(prefix: &str) -> String {
+        String::from_utf8(tracker_yaml(&TrackerConfig::new(prefix.into())).unwrap()).unwrap()
     }
 
     #[test]
@@ -1937,7 +2088,7 @@ sources:
         let sage = space_named(&host, "Sage");
         host.set_tracker_prefix(&sage.id, "SG").unwrap();
         sync(&mut host, &github);
-        assert_eq!(github.show(TRACKER).unwrap(), "format: 1\nprefix: SG\n");
+        assert_eq!(github.show(TRACKER).unwrap(), tracker_file("SG"));
         let issue = repos::clone_folder(home.path(), NAME).join("issues/SG-1/issue.md");
         fs::create_dir_all(issue.parent().unwrap()).unwrap();
         fs::write(issue, "---\nid: SG-1\n---\n").unwrap();
@@ -1954,10 +2105,7 @@ sources:
         github.commit("issues/SAGE-1/issue.md", "---\nid: SAGE-1\n---\n");
         sync(&mut host, &github);
         let clone = repos::clone_folder(home.path(), NAME);
-        assert!(
-            !clone.join("issues").exists(),
-            "issues/ is left for shared-issues"
-        );
+        assert!(clone.join("issues/SAGE-1/issue.md").exists(), "pulled");
         let sage = space_named(&host, "Sage");
         let error = host.set_tracker_prefix(&sage.id, "SG").unwrap_err();
         assert!(format!("{error:#}").contains("changes only while it has none"));
@@ -1996,7 +2144,7 @@ sources:
         }
         let pushed = github.show("spaces/sage/space.yaml").unwrap();
         assert!(pushed.contains("instructions: Name the ticket."));
-        assert_eq!(github.show(TRACKER).unwrap(), "format: 1\nprefix: SAGE\n");
+        assert_eq!(github.show(TRACKER).unwrap(), tracker_file("SAGE"));
         assert!(repos::clone_folder(home.path(), NAME).join(".git").exists());
     }
 
@@ -2018,7 +2166,7 @@ sources:
             "the start and one commit per rule set"
         );
         assert!(github.show("spaces/sage/space.yaml").is_some());
-        assert_eq!(github.show(TRACKER).unwrap(), "format: 1\nprefix: SAGE\n");
+        assert_eq!(github.show(TRACKER).unwrap(), tracker_file("SAGE"));
     }
 
     #[test]
@@ -2542,9 +2690,15 @@ sources:
         let personal = personal(&host);
         let local = host.storage_folder(&personal.storage.repository);
         let prefix = host.tracker(&personal).unwrap().prefix;
-        for id in [format!("{prefix}-1"), format!("{prefix}-2"), "notes".into()] {
-            fs::create_dir_all(local.join("issues").join(id)).unwrap();
+        host.record_gh_login(Some("jlin".into()));
+        for title in ["Renew the passport", "Book the dentist"] {
+            let new = NewIssue {
+                title: title.into(),
+                ..NewIssue::default()
+            };
+            host.create_issue(&personal.id, new).unwrap();
         }
+        fs::create_dir_all(local.join("issues/notes")).unwrap();
         let status = host.storage_status(&personal.id).unwrap();
         assert_eq!(status.prefix.as_deref(), Some(prefix.as_str()));
         assert_eq!((status.issues, status.readers), (2, None));
@@ -2571,7 +2725,10 @@ sources:
         sync(&mut host, &github);
         let status = host.storage_status(&sage.id).unwrap();
         assert_eq!(status.prefix.as_deref(), Some("SAGE"));
-        assert_eq!(status.issues, 1, "counted on GitHub, outside the clone");
+        assert_eq!(
+            status.issues, 1,
+            "the clone's issue is indexed once it is a tracker"
+        );
         assert!(status.synced_at.is_some() && status.error.is_none());
     }
 
