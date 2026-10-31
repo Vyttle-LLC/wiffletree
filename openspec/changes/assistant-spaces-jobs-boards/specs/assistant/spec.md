@@ -8,8 +8,8 @@ Gives each user one assistant for quick questions and small research: many threa
 Each Wiffletree install SHALL have exactly one assistant. The user SHALL name it; until then it SHALL be called "Assistant". The name SHALL be a shared setting (see settings-repository). Threads SHALL run on the model their Who runs what row picks (see model-routing), unless the thread's Space names an assistant model this Mac may use or the user chose a model in the thread's composer. The assistant SHALL be pinned in the sidebar above Projects (see native-workspace).
 
 #### Scenario: Naming the assistant
-- **WHEN** the user renames the assistant to "Dot" on one Mac that uses a settings repository
-- **THEN** the sidebar row reads "Dot" on that Mac at once and on the user's other Mac after its next pull
+- **WHEN** the user renames the assistant to "Wren" on one Mac that uses a settings repository
+- **THEN** the sidebar row reads "Wren" on that Mac at once and on the user's other Mac after its next pull
 
 #### Scenario: A thread's model
 - **WHEN** the Assistant row is Sonnet · medium, the thread's Space names no assistant model and the user picked nothing

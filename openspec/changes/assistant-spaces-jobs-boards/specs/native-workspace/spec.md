@@ -24,5 +24,5 @@ Above the PROJECTS header, the sidebar SHALL show two pinned rows: the assistant
 - **THEN** that project's row shows as selected
 
 #### Scenario: The assistant is pinned
-- **WHEN** the user named the assistant "Dot" and has nine projects
-- **THEN** the sidebar shows "Dot" and "Boards" above the PROJECTS header, and dragging projects never moves them
+- **WHEN** the user named the assistant "Wren" and has nine projects
+- **THEN** the sidebar shows "Wren" and "Boards" above the PROJECTS header, and dragging projects never moves them

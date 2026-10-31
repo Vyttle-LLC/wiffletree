@@ -1273,10 +1273,10 @@ mod tests {
     fn the_sidebar_row_names_the_assistant_and_shows_any_thread_working() {
         assert_eq!(assistant_name(None), "Assistant");
         let named = Snapshot {
-            assistant_name: "Dot".into(),
+            assistant_name: "Wren".into(),
             ..Default::default()
         };
-        assert_eq!(assistant_name(Some(&named)), "Dot");
+        assert_eq!(assistant_name(Some(&named)), "Wren");
         assert_eq!(assistant_name(Some(&Snapshot::default())), "Assistant");
         assert!(!any_working(&[tab("a", Status::Ready)]));
         assert!(any_working(&[
@@ -1315,7 +1315,7 @@ mod tests {
 
     #[test]
     fn the_composer_asks_by_the_assistants_name() {
-        assert_eq!(composer_placeholder("Dot"), "Ask Dot…");
+        assert_eq!(composer_placeholder("Wren"), "Ask Wren…");
         assert_eq!(composer_placeholder("Assistant"), "Ask Assistant…");
     }
 

@@ -268,7 +268,7 @@ mod tests {
 
     #[test]
     fn names_and_titles_are_one_short_line() {
-        assert_eq!(validate_name(" Dot ").unwrap(), "Dot");
+        assert_eq!(validate_name(" Wren ").unwrap(), "Wren");
         assert!(validate_name("").is_err() && validate_name("a\nb").is_err());
         assert!(validate_name(&"x".repeat(41)).is_err());
         assert!(validate_title(&"x".repeat(61)).is_err());

@@ -683,17 +683,17 @@ mod tests {
     fn the_threshold_is_a_shared_setting_from_half_to_one() {
         let mut s = store();
         assert_eq!(s.host.settings().router_threshold, 0.8);
-        s.host.set_assistant_name("Dot").unwrap();
+        s.host.set_assistant_name("Wren").unwrap();
         s.host.set_router_threshold(0.7).unwrap();
         assert!(s.host.set_router_threshold(0.4).is_err());
         let settings = s.host.settings();
         assert_eq!(
             (settings.router_threshold, settings.assistant_name.as_str()),
-            (0.7, "Dot")
+            (0.7, "Wren")
         );
         let file = s.host.shared_folder().join(shared::ASSISTANT);
         let saved: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
-        assert_eq!(saved, json!({"name": "Dot", "threshold": 0.7}));
+        assert_eq!(saved, json!({"name": "Wren", "threshold": 0.7}));
 
         // The rules read it: 0.75 is enough at 0.7.
         let run = route(&mut s.host, "m1", None);

@@ -10,7 +10,7 @@ The shared settings SHALL be: the skills, with the human's rules, rewrites, thei
 - **THEN** it gets the other machine's review levels, guide, switch threshold, check-in thresholds, keeper triggers and skills, and its own allowed owners, Who runs what table, workspace folder and Spaces are unchanged
 
 #### Scenario: The assistant's settings
-- **WHEN** the human names the assistant "Dot" and sets the router threshold to 0.7 on one Mac
+- **WHEN** the human names the assistant "Wren" and sets the router threshold to 0.7 on one Mac
 - **THEN** the other Mac gets both at its next pull, and its Spaces and threads are unchanged
 
 ### Requirement: Shared settings live in one folder on every machine

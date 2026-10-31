@@ -154,7 +154,7 @@ impl Settings {
                     InputState::new(window, cx).placeholder("owner/name or a GitHub URL")
                 });
                 let assistant_input =
-                    cx.new(|cx| InputState::new(window, cx).placeholder("Dot, Sage, Assistant"));
+                    cx.new(|cx| InputState::new(window, cx).placeholder("Wren, Assistant"));
                 let view = cx.new(|cx| {
                     cx.subscribe(&assistant_input, |view: &mut Self, _, event, cx| {
                         if matches!(event, InputEvent::PressEnter { .. }) {
