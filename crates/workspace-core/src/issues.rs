@@ -410,6 +410,10 @@ pub struct LinearImportPlan {
     pub comments: usize,
     /// How many of `issues` keep their Linear number.
     pub keeping_numbers: usize,
+    /// Issues imported before that lack a relation Linear has, as after an import cut short;
+    /// the import adds them.
+    #[serde(default)]
+    pub relations_to_add: usize,
     pub states: Vec<LinearStateMapping>,
     pub users: Vec<LinearUser>,
 }

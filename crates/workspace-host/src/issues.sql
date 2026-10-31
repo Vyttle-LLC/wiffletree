@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS issue_read (storage TEXT NOT NULL, id TEXT NOT NULL, 
 CREATE TABLE IF NOT EXISTS issue_last_filed (space TEXT NOT NULL);
 -- The temporary IDs this Mac gave issues it filed, and the number each was pushed as.
 CREATE TABLE IF NOT EXISTS issue_temporary (storage TEXT NOT NULL, temporary TEXT NOT NULL, number TEXT, PRIMARY KEY(storage, temporary));
+-- The number a temporary ID's issue would rather be pushed as, such as its number in Linear;
+-- a pass gives it that number only when the tracker's history never had it.
+CREATE TABLE IF NOT EXISTS issue_preferred (storage TEXT NOT NULL, temporary TEXT NOT NULL, number INTEGER NOT NULL, PRIMARY KEY(storage, temporary));
 -- Links between issues and this Mac's projects, or one of a project's tickets (`ticket` is ''
 -- for the whole project). Never written to a tracker.
 CREATE TABLE IF NOT EXISTS issue_links (storage TEXT NOT NULL, id TEXT NOT NULL, project TEXT NOT NULL, ticket TEXT NOT NULL, PRIMARY KEY(storage, id, project, ticket));

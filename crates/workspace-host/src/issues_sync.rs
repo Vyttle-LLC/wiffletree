@@ -223,6 +223,8 @@ pub(crate) struct IssueRules {
     compared: Option<(PathBuf, String)>,
     /// The committed files outside a new issue's folder whose content names its number.
     references: Vec<(String, Vec<IssueId>)>,
+    /// The number each new issue would rather have, such as its number in Linear.
+    preferred: BTreeMap<IssueId, u64>,
 }
 impl IssueRules {
     pub(crate) fn new(input: &Input) -> Self {
@@ -232,13 +234,15 @@ impl IssueRules {
             prefix: input.prefix.clone(),
             compared: None,
             references: vec![],
+            preferred: input.preferred.clone(),
         }
     }
-    /// Numbers this Mac's new issues on top of GitHub's head: each takes one more than the
-    /// highest number its history has had, unless GitHub already holds it, as when this Mac
-    /// pushed it and stopped before renaming it here; that one is adopted, renamed here
-    /// whether or not the pass pushes. Rewrites each temporary ID in the paths and content
-    /// committed.
+    /// Numbers this Mac's new issues on top of GitHub's head: each takes its preferred number
+    /// when GitHub's history never had it, as an import from Linear asks, and otherwise one
+    /// more than the highest number that history has had, unless GitHub already holds it, as
+    /// when this Mac pushed it and stopped before renaming it here; that one is adopted,
+    /// renamed here whether or not the pass pushes. Rewrites each temporary ID in the paths
+    /// and content committed.
     fn number(&mut self) -> Result<()> {
         let (Some(prefix), Some((clone, remote))) = (&self.prefix, &self.compared) else {
             return Ok(());
@@ -257,15 +261,14 @@ impl IssueRules {
         let pushed: BTreeMap<String, Vec<u8>> = repos::files_at(clone, remote, &|path| {
             path.ends_with("/issue.md") && !synced.contains_key(path)
         })?;
-        // Numbered issues new in this commit, as an import keeping Linear's numbers writes,
-        // take theirs first.
-        let new_here = (committed.iter())
-            .filter_map(|(path, _)| match issue_of(path)? {
-                IssueId::Numbered { prefix: p, number } if &p == prefix => Some(number),
-                _ => None,
-            })
-            .max();
-        let mut next = tracker::highest_number(clone, remote, prefix)?.max(new_here.unwrap_or(0));
+        let mut taken = tracker::used_numbers(clone, remote, prefix)?;
+        let mut next = taken.last().copied().unwrap_or(0);
+        // Those whose preferred number is free first, in its order, so no other takes it.
+        let preferred = &self.preferred;
+        temporary.sort_by_key(|id| match preferred.get(id) {
+            Some(&number) if !taken.contains(&number) => (0, number),
+            _ => (1, 0),
+        });
         let (mut numbered, mut adopted) = (vec![], vec![]);
         for id in temporary {
             let mine = (committed.iter())
@@ -283,10 +286,20 @@ impl IssueRules {
             match already {
                 Some(there) => adopted.push((id, there)),
                 None => {
-                    next += 1;
+                    let number = match preferred.get(&id) {
+                        Some(&number) if !taken.contains(&number) => number,
+                        _ => {
+                            next += 1;
+                            while taken.contains(&next) {
+                                next += 1;
+                            }
+                            next
+                        }
+                    };
+                    taken.insert(number);
                     let number = IssueId::Numbered {
                         prefix: prefix.clone(),
-                        number: next,
+                        number,
                     };
                     numbered.push((id, number));
                 }
@@ -327,8 +340,7 @@ impl IssueRules {
             let (subject, change) = match issue_of(path) {
                 None => ("the tracker".to_owned(), "changed"),
                 Some(id) => {
-                    let new = found.numbered.iter().any(|(_, number)| number == &id)
-                        || self.files.synced.get(path).is_none_or(Option::is_none);
+                    let new = found.numbered.iter().any(|(_, number)| number == &id);
                     let change = match (path.rsplit('/').next(), content) {
                         (_, None) => "removed",
                         (Some("issue.md"), _) if new => "filed",

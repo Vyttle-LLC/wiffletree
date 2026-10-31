@@ -392,6 +392,8 @@ pub(crate) struct Input {
     two_machines: Vec<String>,
     /// The paused parts of each `issue.md`, by its path.
     pub(crate) parts: BTreeMap<String, Vec<String>>,
+    /// The number each of this Mac's new issues would rather have, by its temporary ID.
+    pub(crate) preferred: BTreeMap<IssueId, u64>,
 }
 
 /// A part of an `issue.md` both sides changed to different values, which this Mac keeps and
@@ -1246,6 +1248,7 @@ impl Host {
             return Ok(None);
         };
         let prefix = self.tracker(first).ok().map(|tracker| tracker.prefix);
+        let storage = first.storage.repository.key();
         let names: BTreeMap<String, String> = (stored.into_iter())
             .map(|space| (space.storage.folder, space.name))
             .collect();
@@ -1263,6 +1266,13 @@ impl Host {
             let (path, part): (String, String) = row?;
             parts.entry(path).or_default().push(part);
         }
+        let mut preferred = BTreeMap::new();
+        let mut rows =
+            (self.db).prepare("SELECT temporary,number FROM issue_preferred WHERE storage=?1")?;
+        for row in rows.query_map([storage], |r| Ok((r.get(0)?, r.get(1)?)))? {
+            let (temporary, number): (String, u64) = row?;
+            preferred.insert(IssueId::parse(&temporary)?, number);
+        }
         Ok(Some(Input {
             key: key.to_owned(),
             names,
@@ -1271,6 +1281,7 @@ impl Host {
             written: record.written,
             two_machines,
             parts,
+            preferred,
         }))
     }
     /// The GitHub storage repositories that sync on their own, being no settings repository,

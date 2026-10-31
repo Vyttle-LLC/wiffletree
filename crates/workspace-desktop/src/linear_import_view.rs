@@ -239,7 +239,9 @@ impl LinearImportPanel {
                             .primary()
                             .label(format!("Import {}", counted(plan.issues, "issue")))
                             .loading(self.busy)
-                            .disabled(self.busy || plan.issues == 0),
+                            .disabled(
+                                self.busy || (plan.issues == 0 && plan.relations_to_add == 0),
+                            ),
                         &self.shared.host,
                     )
                     .on_click(cx.listener(|view, _, window, cx| view.import(window, cx))),
@@ -265,6 +267,10 @@ pub(super) fn summary(plan: &LinearImportPlan) -> String {
     if plan.imported_before > 0 {
         let before = counted(plan.imported_before, "issue");
         line.push_str(&format!("; {before} imported before are skipped"));
+    }
+    if plan.relations_to_add > 0 {
+        let missing = counted(plan.relations_to_add, "issue");
+        line.push_str(&format!("; {missing} imported before gain their relations"));
     }
     line
 }
@@ -364,6 +370,7 @@ mod tests {
             imported_before: 0,
             comments: 512,
             keeping_numbers: 240,
+            relations_to_add: 0,
             states: vec![],
             users: vec![],
         }
@@ -380,11 +387,12 @@ mod tests {
             comments: 0,
             keeping_numbers: 0,
             imported_before: 239,
+            relations_to_add: 2,
             ..plan()
         };
         assert_eq!(
             summary(&again),
-            "1 issue and 0 comments from CEL; 239 issues imported before are skipped"
+            "1 issue and 0 comments from CEL; 239 issues imported before are skipped; 2 issues imported before gain their relations"
         );
     }
 

@@ -20,9 +20,11 @@ pub(crate) const LINEAR_FIELD: &str = "linear";
 /// How many passes may end with a batch still unpushed before the import stops.
 const PASS_TRIES: usize = 3;
 
-const TEAMS: &str = "query Teams { teams(first: 250) { nodes { id key name } } }";
+const TEAMS: &str = "query Teams($after: String) { teams(first: 250, after: $after) { nodes { id key name } pageInfo { hasNextPage endCursor } } }";
 const TEAM: &str = "query Team($team: String!) { viewer { id } team(id: $team) { id key name states(first: 250) { nodes { id name type } } } }";
-const ISSUES_PAGE: &str = "query Issues($team: String!, $after: String) { team(id: $team) { issues(first: 25, after: $after) { nodes { id identifier number title description priority createdAt state { id } creator { id name email } assignee { id name email } labels(first: 50) { nodes { name } } relations(first: 50) { nodes { type relatedIssue { identifier } } } comments(first: 50) { nodes { body createdAt user { id name email } } pageInfo { hasNextPage endCursor } } } pageInfo { hasNextPage endCursor } } } }";
+const ISSUES_PAGE: &str = "query Issues($team: String!, $after: String) { team(id: $team) { issues(first: 25, after: $after) { nodes { id identifier number title description priority createdAt state { id } creator { id name email } assignee { id name email } labels(first: 50) { nodes { name } pageInfo { hasNextPage endCursor } } relations(first: 50) { nodes { type relatedIssue { identifier } } pageInfo { hasNextPage endCursor } } comments(first: 50) { nodes { body createdAt user { id name email } } pageInfo { hasNextPage endCursor } } } pageInfo { hasNextPage endCursor } } } }";
+const LABELS_PAGE: &str = "query Labels($issue: String!, $after: String) { issue(id: $issue) { labels(first: 100, after: $after) { nodes { name } pageInfo { hasNextPage endCursor } } } }";
+const RELATIONS_PAGE: &str = "query Relations($issue: String!, $after: String) { issue(id: $issue) { relations(first: 100, after: $after) { nodes { type relatedIssue { identifier } } pageInfo { hasNextPage endCursor } } } }";
 const COMMENTS_PAGE: &str = "query Comments($issue: String!, $after: String) { issue(id: $issue) { comments(first: 100, after: $after) { nodes { body createdAt user { id name email } } pageInfo { hasNextPage endCursor } } } }";
 
 /// Where the key waits while an import runs.
@@ -215,14 +217,40 @@ pub(crate) struct Team {
     issues: Vec<LinearIssue>,
 }
 
-/// The teams the key reads.
+/// The teams the key reads, a page at a time.
 pub(crate) fn teams(api: &dyn Api, key: &LinearKey) -> Result<Vec<LinearTeam>> {
-    let data = read(api, key, TEAMS, json!({}))?;
-    let teams: Nodes<LinearTeam> = serde_json::from_value(data["teams"].clone())?;
-    Ok(teams.nodes)
+    let (mut teams, mut after) = (vec![], None);
+    loop {
+        let data = read(api, key, TEAMS, json!({ "after": after }))?;
+        let page: Nodes<LinearTeam> = serde_json::from_value(data["teams"].clone())?;
+        teams.extend(page.nodes);
+        after = Page::next(page.page);
+        if after.is_none() {
+            return Ok(teams);
+        }
+    }
 }
 
-/// Reads the team with its states and every issue and comment, a page at a time.
+/// The rest of one of an issue's lists, `field`, after its first page.
+fn rest<T: DeserializeOwned>(
+    api: &dyn Api,
+    key: &LinearKey,
+    (document, field): (&str, &str),
+    issue: &str,
+    list: &mut Nodes<T>,
+) -> Result<()> {
+    while let Some(after) = Page::next(list.page.take()) {
+        let variables = json!({ "issue": issue, "after": after });
+        let data = read(api, key, document, variables)?;
+        let more: Nodes<T> = serde_json::from_value(data["issue"][field].clone())?;
+        list.nodes.extend(more.nodes);
+        list.page = more.page;
+    }
+    Ok(())
+}
+
+/// Reads the team with its states and every issue with all its labels, relations and
+/// comments, a page at a time.
 pub(crate) fn team(api: &dyn Api, key: &LinearKey, team_id: &str) -> Result<Team> {
     let data = read(api, key, TEAM, json!({ "team": team_id }))?;
     let viewer = (data["viewer"]["id"].as_str()).context("Linear did not say whose key it is")?;
@@ -240,14 +268,22 @@ pub(crate) fn team(api: &dyn Api, key: &LinearKey, team_id: &str) -> Result<Team
         }
     }
     for issue in &mut issues {
-        while let Some(after) = Page::next(issue.comments.page.take()) {
-            let variables = json!({ "issue": issue.id, "after": after });
-            let data = read(api, key, COMMENTS_PAGE, variables)?;
-            let more: Nodes<LinearComment> =
-                serde_json::from_value(data["issue"]["comments"].clone())?;
-            issue.comments.nodes.extend(more.nodes);
-            issue.comments.page = more.page;
-        }
+        let id = &issue.id;
+        rest(api, key, (LABELS_PAGE, "labels"), id, &mut issue.labels)?;
+        rest(
+            api,
+            key,
+            (RELATIONS_PAGE, "relations"),
+            id,
+            &mut issue.relations,
+        )?;
+        rest(
+            api,
+            key,
+            (COMMENTS_PAGE, "comments"),
+            id,
+            &mut issue.comments,
+        )?;
     }
     Ok(Team {
         team,
@@ -342,7 +378,7 @@ pub(crate) enum Step {
 }
 
 /// Relations one issue gains.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Related {
     blocks: Vec<String>,
     blocked_by: Vec<String>,
@@ -354,7 +390,7 @@ struct Run {
     space_id: SpaceId,
     /// The issues still to write, those keeping their Linear number first.
     queue: VecDeque<LinearIssue>,
-    /// Each Linear relation of the issues written: from, kind and to, by identifier.
+    /// Each Linear relation of the team's issues: from, kind and to, by identifier.
     relations: Vec<(String, String, String)>,
     /// The relations still to write, once every issue is written.
     related: Option<VecDeque<(IssueId, Related)>>,
@@ -454,6 +490,14 @@ impl Host {
         let space = self.space(space_id)?.space;
         let store = self.store(&space, &self.tracker(&space)?.prefix);
         let before = imported(&store);
+        // Relations among issues imported before that an import cut short never wrote.
+        let imported_ids: BTreeSet<&IssueId> = before.values().collect();
+        let relations_to_add = (relations(&team_relations(&team.issues), &before).into_iter())
+            .filter(|(id, _)| imported_ids.contains(id))
+            .filter(|(id, adds)| {
+                (store.issue(id)).is_ok_and(|mut issue| relate(&mut issue, adds.clone()))
+            })
+            .count();
         let used = used_numbers(&store)?;
         let new: Vec<&LinearIssue> = (team.issues.iter())
             .filter(|issue| !before.contains_key(&issue.identifier))
@@ -502,6 +546,7 @@ impl Host {
             imported_before: team.issues.len() - new.len(),
             comments: new.iter().map(|issue| issue.comments.nodes.len()).sum(),
             keeping_numbers: new.iter().filter(|issue| keeps(issue)).count(),
+            relations_to_add,
             states,
             users,
         };
@@ -543,6 +588,9 @@ impl Host {
         };
         let before = imported(&store);
         let used = used_numbers(&store)?;
+        // Every relation of the team, so a run cut short before its relations are written
+        // has them written by the next.
+        let relations = team_relations(&team.issues);
         let (mut kept, mut renumbered): (Vec<LinearIssue>, Vec<LinearIssue>) = (team.issues)
             .into_iter()
             .filter(|issue| !before.contains_key(&issue.identifier))
@@ -550,14 +598,6 @@ impl Host {
         kept.sort_by_key(|issue| issue.number);
         renumbered.sort_by_key(|issue| issue.number);
         let queue: VecDeque<LinearIssue> = kept.into_iter().chain(renumbered).collect();
-        let relations = (queue.iter())
-            .flat_map(|issue| {
-                (issue.relations.nodes.iter()).map(|relation| {
-                    let to = relation.related_issue.identifier.clone();
-                    (issue.identifier.clone(), relation.kind.clone(), to)
-                })
-            })
-            .collect();
         self.linear.status = Some(LinearImportStatus {
             space_id: space_id.clone(),
             team: team.team.key.clone(),
@@ -709,23 +749,32 @@ impl Host {
             let mut writes = vec![];
             for _ in 0..BATCH.min(run.queue.len()) {
                 let issue = run.queue.pop_front().context("A queued issue")?;
-                let keeps = store.prefix == run.team_key && !used.contains(&issue.number);
-                let id = match (keeps, &space.storage.repository) {
-                    (true, _) => IssueId::Numbered {
-                        prefix: store.prefix.clone(),
-                        number: issue.number,
-                    },
-                    (false, StorageRepository::Local { .. }) => IssueId::Numbered {
-                        prefix: store.prefix.clone(),
-                        number: used.last().copied().unwrap_or(0) + 1,
-                    },
-                    (false, StorageRepository::GitHub { .. }) => {
-                        self.temporary_id(&space.storage.repository, &store.prefix)?
+                let same_prefix = store.prefix == run.team_key;
+                let id = match &space.storage.repository {
+                    // Numbered by a pass, as a new issue is: Linear's number when GitHub's
+                    // history never had it, and none while a scan holds it.
+                    StorageRepository::GitHub { .. } => {
+                        let id = self.temporary_id(&space.storage.repository, &store.prefix)?;
+                        if same_prefix {
+                            self.db.execute(
+                                "INSERT INTO issue_preferred(storage,temporary,number) VALUES (?1,?2,?3)",
+                                params![space.storage.repository.key(), id.to_string(), issue.number],
+                            )?;
+                        }
+                        id
+                    }
+                    StorageRepository::Local { .. } => {
+                        let number = match same_prefix && !used.contains(&issue.number) {
+                            true => issue.number,
+                            false => used.last().copied().unwrap_or(0) + 1,
+                        };
+                        used.insert(number);
+                        IssueId::Numbered {
+                            prefix: store.prefix.clone(),
+                            number,
+                        }
                     }
                 };
-                if let IssueId::Numbered { number, .. } = id {
-                    used.insert(number);
-                }
                 writes.push(issue_write(run, &issue, id)?);
             }
             let count = writes.len();
@@ -747,19 +796,7 @@ impl Host {
             let Ok(mut issue) = store.issue(&id) else {
                 continue;
             };
-            let before = issue.clone();
-            let add = |list: &mut Vec<String>, ids: Vec<String>| {
-                for id in ids {
-                    if !list.contains(&id) {
-                        list.push(id);
-                    }
-                }
-            };
-            add(&mut issue.blocks, adds.blocks);
-            add(&mut issue.blocked_by, adds.blocked_by);
-            add(&mut issue.related, adds.related);
-            issue.duplicate_of = issue.duplicate_of.or(adds.duplicate_of);
-            if issue != before {
+            if relate(&mut issue, adds) {
                 let files = vec![(issue_file(&id), issue_md(&issue)?)];
                 let did = "related".into();
                 writes.push(Write { id, files, did });
@@ -772,6 +809,35 @@ impl Host {
         self.write_issues(&space, writes, &message)?;
         Ok(true)
     }
+}
+
+/// Each Linear relation of `issues`: from, kind and to, by identifier.
+fn team_relations(issues: &[LinearIssue]) -> Vec<(String, String, String)> {
+    (issues.iter())
+        .flat_map(|issue| {
+            (issue.relations.nodes.iter()).map(|relation| {
+                let to = relation.related_issue.identifier.clone();
+                (issue.identifier.clone(), relation.kind.clone(), to)
+            })
+        })
+        .collect()
+}
+
+/// Adds the relations `adds` names that `issue` lacks; `true` when it gained any.
+fn relate(issue: &mut Issue, adds: Related) -> bool {
+    let before = issue.clone();
+    let add = |list: &mut Vec<String>, ids: Vec<String>| {
+        for id in ids {
+            if !list.contains(&id) {
+                list.push(id);
+            }
+        }
+    };
+    add(&mut issue.blocks, adds.blocks);
+    add(&mut issue.blocked_by, adds.blocked_by);
+    add(&mut issue.related, adds.related);
+    issue.duplicate_of = issue.duplicate_of.take().or(adds.duplicate_of);
+    *issue != before
 }
 
 /// The login of a Linear user as the tracker's people have it: by login, by profile name, or by
@@ -944,7 +1010,7 @@ pub(crate) mod tests {
     /// comments, and `more` issues appended to the last page.
     fn celadon(more: Vec<Value>) -> Answer {
         Box::new(move |operation, variables| match operation {
-            "Teams" => fixture("teams.json"),
+            "Teams" => teams_page(variables),
             "Team" => fixture("team.json"),
             "Issues" if variables["after"].is_null() => fixture("issues-1.json"),
             "Issues" => {
@@ -962,6 +1028,18 @@ pub(crate) mod tests {
                     &json!({"issue":"issue-3","after":"comment-cursor-1"})
                 );
                 fixture("comments.json")
+            }
+            "Labels" => {
+                assert_eq!(
+                    variables,
+                    &json!({"issue":"issue-1","after":"label-cursor-1"})
+                );
+                fixture("labels.json")
+            }
+            "Relations" => {
+                let after = json!({"issue":"issue-1","after":"relation-cursor-1"});
+                assert_eq!(variables, &after);
+                fixture("relations.json")
             }
             other => panic!("{other} was not recorded"),
         })
@@ -988,19 +1066,36 @@ pub(crate) mod tests {
 
     /// Team CEL with `count` plain issues, 25 a page as the import asks.
     pub(crate) fn many(count: u64) -> Answer {
+        listed((1..=count).map(plain).collect())
+    }
+
+    /// Team CEL with `issues`, 25 a page as the import asks.
+    fn listed(issues: Vec<Value>) -> Answer {
         Box::new(move |operation, variables| match operation {
             "Team" => fixture("team.json"),
-            "Teams" => fixture("teams.json"),
+            "Teams" => teams_page(variables),
             "Issues" => {
-                let from: u64 =
+                let from: usize =
                     (variables["after"].as_str()).map_or(0, |after| after.parse().unwrap());
-                let to = (from + 25).min(count);
-                let nodes: Vec<Value> = (from + 1..=to).map(plain).collect();
-                let page = json!({"hasNextPage": to < count, "endCursor": to.to_string()});
+                let to = (from + 25).min(issues.len());
+                let nodes = &issues[from..to];
+                let more = to < issues.len();
+                let page = json!({"hasNextPage": more, "endCursor": to.to_string()});
                 json!({"data":{"team":{"issues":{"nodes": nodes, "pageInfo": page}}}})
             }
             other => panic!("{other} was not recorded"),
         })
+    }
+
+    /// The key's teams, CEL on the first page and OPS on the second.
+    fn teams_page(variables: &Value) -> Value {
+        match variables["after"].as_str() {
+            None => fixture("teams.json"),
+            Some(after) => {
+                assert_eq!(after, "team-cursor-1");
+                fixture("teams-2.json")
+            }
+        }
     }
 
     /// Gives the host a kept key and Linear as `answer` records it.
@@ -1100,7 +1195,11 @@ pub(crate) mod tests {
             documents.iter().all(|d| d.starts_with("query ")),
             "reads only"
         );
-        assert_eq!(documents.len(), 2 + 10, "the teams, the team and ten pages");
+        assert_eq!(
+            documents.len(),
+            3 + 10,
+            "two pages of teams, the team and ten pages"
+        );
     }
 
     #[test]
@@ -1171,9 +1270,16 @@ pub(crate) mod tests {
             (&*first.author, first.assignee.as_deref()),
             ("pshah", Some("jlin"))
         );
-        assert_eq!(first.labels, ["bug", "webhooks"]);
+        assert_eq!(
+            first.labels,
+            ["bug", "webhooks", "p1"],
+            "both pages of labels"
+        );
         assert_eq!(first.created, "2026-09-01T10:00:00Z");
-        assert_eq!(first.blocks, [id(2)]);
+        assert_eq!(
+            (first.blocks.clone(), first.related.clone()),
+            (vec![id(2)], vec![id(3)])
+        );
         let comments = issue(&host, &id(1)).comments;
         let written: Vec<(&str, &str)> = (comments.iter())
             .map(|c| (c.author.as_str(), c.body.as_str()))
@@ -1199,13 +1305,17 @@ pub(crate) mod tests {
         let third = issue(&host, &id(3));
         let fields = third.issue.as_ref().unwrap();
         assert_eq!(fields.state, IssueState::Canceled);
-        assert!(fields.related.is_empty(), "OPS-9 is not in this tracker");
+        assert_eq!(
+            fields.related,
+            [id(1)],
+            "from CEL-1's second page; OPS-9 is not here"
+        );
         assert_eq!(third.comments.len(), 2, "both pages of comments");
         let folder = host.storage_folder(&personal.storage.repository);
         let subjects = git(&folder, &["log", "--format=%s", "-2"]);
         assert_eq!(
             subjects,
-            "Related 2 issues imported from Linear\nImported 3 issues from Linear"
+            "Related 3 issues imported from Linear\nImported 3 issues from Linear"
         );
     }
 
@@ -1226,6 +1336,94 @@ pub(crate) mod tests {
         assert_eq!(listed.len(), 4);
         let fourth = issue(&host, &format!("{prefix}-4")).issue.unwrap();
         assert_eq!(fourth.extra[LINEAR_FIELD], "CEL-4");
+    }
+
+    /// Sage on this Mac, its tracker CEL on `github`, with the human signed in as `jlin`.
+    fn cel_tracker(github: &Arc<sync::tests::GitHub>) -> (tempfile::TempDir, Host, Space) {
+        let (home, mut host) = host();
+        host.record_gh_login(Some("jlin".into()));
+        join_sage(&mut host, github).unwrap();
+        let sage = space_named(&host, "Sage");
+        (home, host, sage)
+    }
+
+    #[test]
+    fn a_linear_number_a_teammate_took_meanwhile_goes_to_the_next_free_one() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("CEL"));
+        let (_home, mut host, sage) = cel_tracker(&github);
+        recorded(&mut host, many(3));
+        begin(&mut host, &sage).unwrap();
+        preview(&mut host, &sage).unwrap();
+        // A teammate files CEL-1 after this Mac last fetched.
+        let theirs = issue_md(&tracker::tests::blurry("CEL-1")).unwrap();
+        github.commit("issues/CEL-1/issue.md", &theirs);
+        let tools = github.tools();
+        (host.import_from_linear_now(&sage.id, BTreeMap::new(), &tools)).unwrap();
+        let status = host.linear.status.clone().unwrap();
+        assert!(status.error.is_none(), "{status:?}");
+        let teammates = github.show("issues/CEL-1/issue.md").unwrap();
+        assert_eq!(
+            teammates.as_bytes(),
+            theirs,
+            "left as the teammate wrote it"
+        );
+        for (number, linear) in [(2, "CEL-2"), (3, "CEL-3"), (4, "CEL-1")] {
+            let there = github
+                .show(&format!("issues/CEL-{number}/issue.md"))
+                .unwrap();
+            assert!(there.contains(&format!("\nlinear: {linear}\n")), "{there}");
+        }
+    }
+
+    #[test]
+    fn an_imported_issue_a_scan_holds_stays_here_whole_and_unnumbered() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("CEL"));
+        let (_home, mut host, sage) = cel_tracker(&github);
+        let mut held = plain(2);
+        held["description"] = json!("Call the parent at (415) 555-0134 tonight.");
+        held["comments"]["nodes"] =
+            json!([{"body": "Seen.", "createdAt": "2026-09-02T09:00:00.000Z", "user": null}]);
+        recorded(&mut host, listed(vec![plain(1), held, plain(3)]));
+        let status = import(&mut host, &sage, &[], &github.tools());
+        assert!(status.finished && status.error.is_none(), "{status:?}");
+        let there = git(&github.bare, &["ls-tree", "-r", "--name-only", "main"]);
+        assert!(
+            !there.contains("CEL-2/"),
+            "nothing of it is pushed: {there}"
+        );
+        for number in [1, 3] {
+            assert!(
+                there.contains(&format!("issues/CEL-{number}/issue.md")),
+                "{there}"
+            );
+        }
+        let here = host.list_issues(Some(&sage.id), None).unwrap();
+        let waiting: Vec<&IssueListing> = here.iter().filter(|i| i.id.is_temporary()).collect();
+        assert_eq!(waiting.len(), 1, "{here:?}");
+        let fields = issue(&host, &waiting[0].id.to_string()).issue.unwrap();
+        assert_eq!(fields.extra[LINEAR_FIELD], "CEL-2");
+    }
+
+    #[test]
+    fn a_rerun_writes_the_relations_an_import_cut_short_never_wrote() {
+        let (_home, mut host, personal, prefix) = personal();
+        recorded(&mut host, celadon(vec![]));
+        begin(&mut host, &personal).unwrap();
+        preview(&mut host, &personal).unwrap();
+        (host.start_linear_import(&personal.id, BTreeMap::new())).unwrap();
+        assert_eq!(host.linear_step(), Step::Next, "the issues are written");
+        host.execute(Command::CancelLinearImport).unwrap();
+        let first = format!("{prefix}-1");
+        assert!(issue(&host, &first).issue.unwrap().blocks.is_empty());
+        begin(&mut host, &personal).unwrap();
+        let plan = preview(&mut host, &personal).unwrap();
+        assert_eq!((plan.issues, plan.relations_to_add), (0, 3));
+        let tools = publish::Tools::default();
+        (host.import_from_linear_now(&personal.id, BTreeMap::new(), &tools)).unwrap();
+        let blocks = issue(&host, &first).issue.unwrap().blocks;
+        assert_eq!(blocks, [format!("{prefix}-2")]);
     }
 
     #[test]

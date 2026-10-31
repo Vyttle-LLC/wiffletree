@@ -425,6 +425,19 @@ fn listing(record: &IssueRecord) -> IssueListing {
 /// The highest number with `prefix` that any `issues/<ID>/` path has had in the history up to
 /// `commit`, so an issue deleted by an ordinary commit never gives its number away; 0 for none.
 pub(crate) fn highest_number(folder: &Path, commit: &str, prefix: &str) -> Result<u64> {
+    Ok(used_numbers(folder, commit, prefix)?
+        .last()
+        .copied()
+        .unwrap_or(0))
+}
+
+/// Every number with `prefix` that any `issues/<ID>/` path has had in the history up to
+/// `commit`.
+pub(crate) fn used_numbers(
+    folder: &Path,
+    commit: &str,
+    prefix: &str,
+) -> Result<std::collections::BTreeSet<u64>> {
     let names = runtime::git_output(
         folder,
         &["log", "--format=", "--name-only", commit, "--", ISSUES],
@@ -436,8 +449,7 @@ pub(crate) fn highest_number(folder: &Path, commit: &str, prefix: &str) -> Resul
             IssueId::Numbered { prefix: p, number } if p == prefix => Some(number),
             _ => None,
         })
-        .max()
-        .unwrap_or(0))
+        .collect())
 }
 
 /// Four letters for a temporary ID, such as `qxvb`.
@@ -1144,6 +1156,10 @@ impl Host {
             self.db.execute(
                 "UPDATE issue_temporary SET number=?3 WHERE storage=?1 AND temporary=?2",
                 params![storage.key(), old, new],
+            )?;
+            self.db.execute(
+                "DELETE FROM issue_preferred WHERE storage=?1 AND temporary=?2",
+                params![storage.key(), old],
             )?;
             for (was, now) in issues {
                 let read = self.is_read(&storage.key(), &was)?;

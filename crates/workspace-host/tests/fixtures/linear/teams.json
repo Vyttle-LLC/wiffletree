@@ -1,1 +1,1 @@
-{"data":{"teams":{"nodes":[{"id":"team-cel","key":"CEL","name":"Celadon"},{"id":"team-ops","key":"OPS","name":"Operations"}]}}}
+{"data":{"teams":{"nodes":[{"id":"team-cel","key":"CEL","name":"Celadon"}],"pageInfo":{"hasNextPage":true,"endCursor":"team-cursor-1"}}}}
