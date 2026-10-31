@@ -12,7 +12,7 @@ use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
 use output::{Next, Output, StopReading};
-pub use restricted::{ThreadLaunch, server_definition};
+pub use restricted::{ThreadLaunch, server_definition, shell_text_refused};
 pub use router::{ROUTER_LIMIT, RouterProvider};
 use std::os::unix::process::CommandExt;
 use std::{

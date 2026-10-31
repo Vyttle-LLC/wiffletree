@@ -16,6 +16,16 @@ fn main() -> Result<()> {
     if args.first().map(String::as_str) == Some("thread-mcp") {
         return workspace_host::mcp::serve_stdio(workspace_host::mcp::thread_tools());
     }
+    // Claude's hook before a job run's shell command: exit 2 refuses it, with the reason.
+    if args.first().map(String::as_str) == Some("job-bash-check") {
+        let mut input = vec![];
+        io::stdin().read_to_end(&mut input)?;
+        if let Some(why) = workspace_host::provider::shell_text_refused(&input) {
+            eprintln!("{why}");
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
     if args.first().map(String::as_str) == Some("job-mcp") {
         return workspace_host::mcp::serve_stdio(workspace_host::mcp::job_run_tools());
     }

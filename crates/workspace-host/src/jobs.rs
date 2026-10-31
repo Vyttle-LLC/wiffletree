@@ -1451,13 +1451,17 @@ mod tests {
             .unwrap();
         let session = s.host.session(&thread.id).unwrap();
         let propose = |prefix: &str, check: Option<&str>| {
+            let command = prefix.split(' ').next().unwrap();
             json!({"name":"Brief","prompt":"Brief me.","cron":"0 7 * * *","timezone":"America/New_York",
-                "sources":[{"kind":"cli","command":"gh","prefixes":[prefix],"check":check}]})
+                "sources":[{"kind":"cli","command":command,"prefixes":[prefix],"check":check}]})
         };
         for (prefix, check) in [
             ("gh pr comment", None),
             ("gh api", None),
             ("gh pr list", Some("gh pr comment 1 --body hi")),
+            // Its outfile writes anywhere, and an operation not listed is refused too.
+            ("aws --profile readonly s3api get-object", None),
+            ("aws --profile readonly ec2 describe-instances", None),
         ] {
             let args = propose(prefix, check);
             assert!(
@@ -1466,7 +1470,7 @@ mod tests {
             );
             let mut write = recipe(&s.personal, "Brief", "0 7 * * *");
             write.sources = vec![Source::Cli {
-                command: "gh".into(),
+                command: prefix.split(' ').next().unwrap().into(),
                 prefixes: vec![prefix.into()],
                 check: check.map(str::to_owned),
                 extra: Default::default(),

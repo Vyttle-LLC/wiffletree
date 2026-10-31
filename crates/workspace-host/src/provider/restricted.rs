@@ -11,6 +11,25 @@ pub(crate) const THREAD_TOOLS: [&str; 4] = [
     "project_brief",
     "propose_job",
 ];
+/// Shell text a job run's commands may never hold: redirection, chaining, pipes,
+/// substitution, variables, grouping, escapes and a second line.
+const SHELL_TEXT: [char; 13] = [
+    '>', '<', ';', '&', '|', '$', '`', '(', ')', '{', '}', '\\', '\n',
+];
+
+/// Why the hook before a job run's shell command refuses it, given the hook's input; `None`
+/// lets Claude's own rules decide. Unreadable input is refused.
+pub fn shell_text_refused(input: &[u8]) -> Option<String> {
+    let input: Value = serde_json::from_slice(input).unwrap_or_default();
+    let Some(command) = input["tool_input"]["command"].as_str() else {
+        return Some(
+            "Wiffletree could not read this command, so a job's run may not run it.".into(),
+        );
+    };
+    command.contains(SHELL_TEXT).then(|| {
+        "A job's run may run only its listed commands as they are, with no redirection, chaining, pipe, substitution or variable.".into()
+    })
+}
 /// A job run's one tool: it saves its output, and offers no card.
 pub(crate) const JOB_RUN_TOOLS: [&str; 1] = ["save_output"];
 /// The built-in Claude tools every thread has; `Bash` joins them only for a CLI source.
@@ -54,6 +73,19 @@ impl ThreadLaunch {
     /// cannot hold a CLI to its listed commands (task 3.6).
     pub(crate) fn codex_may_run(&self) -> bool {
         !self.job_run || self.cli_prefixes().next().is_none()
+    }
+    /// The settings a Claude run starts with: auto memory off and, for a job's run with a CLI
+    /// source, a hook before every shell command that refuses any holding shell text (see
+    /// `shell_text_refused`). Claude itself denies `;`, `&&` and `|` after an allowed prefix,
+    /// but runs a redirection to a path it may write, and a deny rule cannot match one.
+    fn claude_settings(&self, helper: &Path) -> Value {
+        let mut settings = json!({"autoMemoryEnabled": false});
+        if self.job_run && self.cli_prefixes().next().is_some() {
+            let quoted = format!("'{}'", helper.display().to_string().replace('\'', r"'\''"));
+            let check = json!({"type":"command","command":format!("{quoted} job-bash-check")});
+            settings["hooks"] = json!({"PreToolUse":[{"matcher":"Bash","hooks":[check]}]});
+        }
+        settings
     }
     /// The workspace tools the run is offered.
     fn workspace_tools(&self) -> &'static [&'static str] {
@@ -232,7 +264,10 @@ pub(super) fn configure_claude(cmd: &mut ProcessCommand, turn: &Turn, launch: &T
     .args(["--setting-sources", ""])
     // Auto memory would load and invite writes to a folder outside scratch; the setting and
     // the variable each turn it off in Claude Code 2.1.310.
-    .args(["--settings", r#"{"autoMemoryEnabled":false}"#])
+    .args([
+        "--settings",
+        &launch.claude_settings(&turn.helper).to_string(),
+    ])
     .env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
     .args(["--permission-mode", "dontAsk"])
     .args(["--tools", &launch.claude_tools().join(",")])
@@ -448,6 +483,44 @@ mod tests {
             .map(|tool| tool["name"].as_str().unwrap().to_owned())
             .collect();
         assert_eq!(offered, JOB_RUN_TOOLS);
+    }
+
+    #[test]
+    fn a_job_runs_shell_commands_hold_no_shell_text() {
+        let input = |command: &str| json!({"tool_input":{"command":command}}).to_string();
+        assert_eq!(
+            shell_text_refused(input("gh pr list --state open").as_bytes()),
+            None
+        );
+        for command in [
+            "gh pr list > /tmp/x",
+            "gh pr list; touch x",
+            "gh pr list && touch x",
+            "gh pr list | tee x",
+            "gh pr list $(touch x)",
+            "gh pr list `touch x`",
+            "gh pr list\ntouch x",
+            "gh pr list < x",
+        ] {
+            assert!(
+                shell_text_refused(input(command).as_bytes()).is_some(),
+                "{command}"
+            );
+        }
+        assert!(shell_text_refused(b"not json").is_some());
+        // Only a job's run with a CLI source gets the hook, which runs Wiffletree's helper.
+        let helper = Path::new("/Apps/Wiffle tree/workspace-host");
+        let mut run = launch(vec![gh()]);
+        assert!(run.claude_settings(helper)["hooks"].is_null());
+        run.job_run = true;
+        let settings = run.claude_settings(helper);
+        assert_eq!(settings["autoMemoryEnabled"], false);
+        assert_eq!(
+            settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "'/Apps/Wiffle tree/workspace-host' job-bash-check"
+        );
+        run.sources.clear();
+        assert!(run.claude_settings(helper)["hooks"].is_null());
     }
 
     #[test]

@@ -459,7 +459,9 @@ A job's CLI source is read-only by construction: it is gh, linctl, sentry-cli or
 
 A run's output is kept at a stable path per title, as a commit: under `spaces/<folder>/boards/<job>/` in a Space with local storage, and, until stage 5 adds the runner's push rule and first-push approval, in the private board store at `<data folder>/boards/<space>/_jobs/<job>/` for a Space stored on GitHub, where only the runner's Mac runs a "One runner" job. A run that has run 30 minutes, and every 30 minutes after, puts a note with Stop on the assistant's sidebar row; failed and unstarted runs count there until the job's page is opened. A run the host's stop cut off is recorded as failed at the next start and never retried.
 
-The ignored tests in `tests/thread_authority.rs` also check that a Claude job run runs its listed command and is denied another, and that Codex's command rules still cannot hold a CLI to its listed commands; when that test fails, revisit the restriction. They passed on October 30, 2026, with Claude Code 2.1.310 and codex-cli 0.160.0.
+A Claude job run with a CLI source also starts with a `PreToolUse` hook on `Bash`, `workspace-host job-bash-check` (`provider::shell_text_refused`), which refuses any command holding redirection, chaining, a pipe, substitution, a variable, grouping, an escape or a second line. Claude's own prefix rules deny chaining and pipes but let a redirection to a writable path through.
+
+The ignored tests in `tests/thread_authority.rs` also check that a Claude job run runs its listed command and is denied another, that none of those shell forms after an allowed `gh pr list` writes a file in scratch or through a link out of it, and that Codex's command rules still cannot hold a CLI to its listed commands; when that test fails, revisit the restriction. They passed on October 30, 2026, with Claude Code 2.1.310 and codex-cli 0.160.0.
 
 ## Current limits
 

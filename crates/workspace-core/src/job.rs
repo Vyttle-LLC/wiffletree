@@ -315,28 +315,76 @@ pub fn validate(recipe: &Recipe) -> Result<()> {
 
 /// The CLIs a job may read through; every other CLI is refused.
 pub const JOB_CLIS: [&str; 4] = ["gh", "linctl", "sentry-cli", "aws"];
-/// gh's read commands. `gh api` is not among them, as it can write.
-const GH_READS: [&str; 12] = [
-    "pr list",
-    "pr view",
-    "pr diff",
-    "pr checks",
-    "issue list",
-    "issue view",
-    "run list",
-    "run view",
-    "repo view",
-    "release list",
-    "release view",
-    "search",
+/// The exact read operations a job may run, by CLI, as the words after its name; an aws one
+/// follows `--profile <name>`. Each was checked in its CLI's help (gh 2.x, linctl, sentry-cli
+/// 3.8.2, aws-cli 2) to take no argument that writes a file, so `gh api`, `linctl issue get`
+/// with its attachment download and `aws s3api get-object` with its outfile are not here.
+const READS: [(&str, &[&str]); 4] = [
+    (
+        "gh",
+        &[
+            "pr list",
+            "pr view",
+            "pr diff",
+            "pr checks",
+            "issue list",
+            "issue view",
+            "run list",
+            "run view",
+            "repo view",
+            "release list",
+            "release view",
+            "search prs",
+            "search issues",
+            "search repos",
+            "search code",
+            "search commits",
+        ],
+    ),
+    (
+        "linctl",
+        &[
+            "issue list",
+            "issue search",
+            "project list",
+            "project get",
+            "team list",
+            "team get",
+            "team members",
+            "user me",
+            "comment list",
+            "label list",
+        ],
+    ),
+    (
+        "sentry-cli",
+        &[
+            "issues list",
+            "events list",
+            "releases list",
+            "releases info",
+            "projects list",
+            "organizations list",
+        ],
+    ),
+    (
+        "aws",
+        &[
+            "logs describe-log-groups",
+            "logs filter-log-events",
+            "logs get-log-events",
+            "logs start-query",
+            "logs get-query-results",
+            "ecs list-services",
+            "ecs describe-services",
+            "ecs list-tasks",
+            "ecs describe-tasks",
+            "cloudwatch get-metric-data",
+            "cloudwatch get-metric-statistics",
+            "cloudwatch describe-alarms",
+        ],
+    ),
 ];
-const LINCTL_NOUNS: [&str; 6] = ["issue", "project", "team", "user", "label", "comment"];
-const SENTRY_NOUNS: [&str; 5] = ["issues", "releases", "projects", "organizations", "events"];
-const READ_VERBS: [&str; 3] = ["list", "get", "view"];
-/// aws read verbs, by the start of the operation's name.
-const AWS_READS: [&str; 3] = ["list-", "get-", "describe-"];
-/// aws services whose reads return secrets or credentials.
-const AWS_REFUSED: [&str; 3] = ["secretsmanager", "ssm", "sts"];
 
 fn plain(name: &str) -> bool {
     !name.is_empty()
@@ -344,28 +392,22 @@ fn plain(name: &str) -> bool {
         && (name.chars()).all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Whether the words after a CLI's name start a read this allowlist names (design, decision
-/// 9): an aws command names its profile, then the service and a read operation.
+/// Whether the words after a CLI's name start one of its operations in `READS` (design,
+/// decision 9); an aws command first names its profile.
 fn reads(command: &str, words: &[&str]) -> bool {
-    match (command, words) {
-        ("gh", _) => (GH_READS.iter()).any(|read| {
-            let read: Vec<&str> = read.split(' ').collect();
-            words.starts_with(&read)
-        }),
-        ("linctl", [noun, verb, ..]) => LINCTL_NOUNS.contains(noun) && READ_VERBS.contains(verb),
-        ("sentry-cli", [noun, verb, ..]) => {
-            SENTRY_NOUNS.contains(noun) && READ_VERBS.contains(verb)
-        }
-        ("aws", ["--profile", profile, service, operation, ..]) => {
-            plain(profile)
-                && !AWS_REFUSED.contains(service)
-                && AWS_READS.iter().any(|read| operation.starts_with(read))
-                && !["token", "password", "secret", "login"]
-                    .iter()
-                    .any(|word| operation.contains(word))
-        }
-        _ => false,
-    }
+    let words = match (command, words) {
+        ("aws", ["--profile", profile, rest @ ..]) if plain(profile) => rest,
+        ("aws", _) => return false,
+        (_, words) => words,
+    };
+    (READS.iter())
+        .find(|(cli, _)| *cli == command)
+        .is_some_and(|(_, operations)| {
+            (operations.iter()).any(|operation| {
+                let operation: Vec<&str> = operation.split(' ').collect();
+                words.starts_with(&operation)
+            })
+        })
 }
 
 /// A source's name is one plain word. A CLI is one of `JOB_CLIS`, each of its commands one
@@ -704,10 +746,11 @@ mod tests {
         for (command, prefix) in [
             ("gh", "gh issue view"),
             ("gh", "gh search prs"),
+            ("gh", "gh pr list --state open"),
             ("linctl", "linctl issue list"),
             ("sentry-cli", "sentry-cli issues list"),
-            ("aws", "aws --profile readonly ce get-cost-and-usage"),
-            ("aws", "aws --profile readonly ec2 describe-instances"),
+            ("aws", "aws --profile readonly logs filter-log-events"),
+            ("aws", "aws --profile readonly ecs describe-services"),
         ] {
             validate_source(&cli(command, prefix)).unwrap();
         }
@@ -716,10 +759,18 @@ mod tests {
             ("gh", "gh pr merge"),
             ("gh", "gh api"),
             ("gh", "gh pr"),
+            ("gh", "gh search"),
+            ("gh", "gh run download"),
             ("linctl", "linctl issue create"),
+            ("linctl", "linctl issue get"),
             ("linctl", "linctl graphql"),
             ("sentry-cli", "sentry-cli releases new"),
+            ("sentry-cli", "sentry-cli issues resolve"),
             ("aws", "aws s3 ls"),
+            ("aws", "aws --profile readonly s3api get-object"),
+            ("aws", "aws --profile readonly ec2 describe-instances"),
+            ("aws", "aws --profile readonly logs delete-log-group"),
+            ("aws", "aws logs filter-log-events"),
             ("aws", "aws --profile readonly s3api put-object"),
             (
                 "aws",
