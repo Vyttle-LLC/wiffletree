@@ -7,7 +7,7 @@
 ## 2. Host
 
 - [x] 2.1 `ensure_uses` wherever `uses` was read; the refusal at `create_ticket` and `create_session` with the Space's name and the way forward.
-- [x] 2.2 `set_added_repositories` holds nothing the Space lists, for `create_project`, Start project from issue, Attach and Add repositories too.
+- [x] 2.2 `set_added_repositories` adds nothing new the Space lists and keeps what was already added, for `create_project`, Start project from issue, Attach and Add repositories too.
 - [x] 2.3 Drop the "works in a repository you removed" refusal. Verify a verifier starts on an open ticket whose repository left the Space, and that the repository leaves once the last ticket closes.
 - [x] 2.4 `move_project_to_space` keeps added repositories; `repository_uses` follows the new reasons.
 - [x] 2.5 `create_project`'s description, `workspace_context` and the coordinator's core instructions, v13.

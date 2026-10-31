@@ -34,7 +34,7 @@ A ticket's project is its coordinator's, and the snapshot leaves out an archived
 
 A repository can be listed by the Space and also added, or added with an open ticket. Overview shows it once, in the first group that applies. An added repository the Space later lists stays stored, so it stays if it leaves the Space.
 
-`set_added_repositories` drops a Space's repositories at each write, and `create_project`, Start project from issue, Attach and Add repositories all go through it. So "repositories a Space already lists add nothing" holds in one line. Saving Add to this project can therefore drop a repository that was both added and listed, which is what the dialog shows: it is ticked as the Space's.
+`set_added_repositories` drops a new id its Space lists, and `create_project`, Start project from issue, Attach and Add repositories all go through it. So "repositories a Space already lists add nothing" holds in one line. An id already added stays, whatever the Space lists now, so an unrelated edit cannot lose a repository the human added.
 
 ### The command is renamed and made the human's
 

@@ -18,7 +18,7 @@ impl RepositoryGroups<'_> {
 }
 
 pub(super) fn groups<'a>(snapshot: &'a Snapshot, project: &Project) -> RepositoryGroups<'a> {
-    let space = snapshot.spaces.iter().find(|s| s.id == project.space);
+    let space = snapshot.space_of(project);
     let mut groups = RepositoryGroups {
         from_space: vec![],
         not_cloned: (space.iter())
@@ -95,13 +95,11 @@ pub(super) fn move_preview(snapshot: &Snapshot, project: &Project, target: &Spac
     preview
 }
 
-/// The first three names, then how many more.
+/// Up to four names in full; a longer list as its first three and how many more.
 pub(super) fn names_label(names: &[String]) -> String {
-    const SHOWN: usize = 3;
-    let list = names[..names.len().min(SHOWN)].join(", ");
-    match names.len().checked_sub(SHOWN) {
-        None | Some(0) => list,
-        Some(more) => format!("{list} and {more} more"),
+    match names.len() {
+        0..=4 => names.join(", "),
+        count => format!("{} and {} more", names[..3].join(", "), count - 3),
     }
 }
 
@@ -227,9 +225,9 @@ mod tests {
     }
 
     #[test]
-    fn a_long_list_is_cut_to_three_names() {
+    fn four_names_show_in_full_and_a_longer_list_is_cut_to_three() {
         let names = |n: usize| -> Vec<String> { (0..n).map(|i| format!("r{i}")).collect() };
-        assert_eq!(names_label(&names(3)), "r0, r1, r2");
+        assert_eq!(names_label(&names(4)), "r0, r1, r2, r3");
         assert_eq!(names_label(&names(5)), "r0, r1, r2 and 2 more");
         assert_eq!(names_label(&[]), "");
     }

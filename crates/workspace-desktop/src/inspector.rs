@@ -452,7 +452,7 @@ impl Inspector {
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
-        let space = snapshot.spaces.iter().find(|s| s.id == project.space);
+        let space = snapshot.space_of(project);
         let others: Vec<(SpaceId, String, MovePreview)> = (snapshot.spaces.iter())
             .filter(|s| s.id != project.space)
             .map(|s| {
@@ -858,7 +858,7 @@ impl Inspector {
                 ));
             }
             if let Some(project) = index.project(&session.project_id) {
-                let space = snapshot.spaces.iter().find(|s| s.id == project.space);
+                let space = snapshot.space_of(project);
                 let groups = groups(snapshot, project);
                 if groups.uses_nothing() && !snapshot.repositories.is_empty() {
                     let name = space.map_or("Its Space", |s| s.name.as_str());

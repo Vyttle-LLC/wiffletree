@@ -158,9 +158,7 @@ impl CreationForm {
         let added_repositories = project
             .map(|p| p.added_repositories.iter().cloned().collect())
             .unwrap_or_default();
-        let space = project
-            .and_then(|p| snapshot.spaces.iter().find(|s| s.id == p.space))
-            .cloned();
+        let space = project.and_then(|p| snapshot.space_of(p)).cloned();
         let root_id = index
             .sessions()
             .find(|s| {

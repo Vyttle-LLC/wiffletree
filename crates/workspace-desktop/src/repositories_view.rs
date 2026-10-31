@@ -1,4 +1,4 @@
-//! The workspace's repositories. Projects use all of them unless they choose their own set.
+//! The workspace's repositories, grouped by the Spaces that list them.
 use super::*;
 use gpui_component::{
     Disableable, Sizable,

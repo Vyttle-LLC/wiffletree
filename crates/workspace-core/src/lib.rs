@@ -1129,8 +1129,15 @@ impl Snapshot {
         project: &Project,
         repository: &Repository,
     ) -> Option<RepositoryUse> {
-        let space = self.spaces.iter().find(|s| s.id == project.space);
-        project.repository_use(repository, space, &self.open_ticket_repositories)
+        project.repository_use(
+            repository,
+            self.space_of(project),
+            &self.open_ticket_repositories,
+        )
+    }
+    /// The Space `project` belongs to; none for a project from a host older than Spaces.
+    pub fn space_of(&self, project: &Project) -> Option<&Space> {
+        self.spaces.iter().find(|s| s.id == project.space)
     }
     pub fn questions_waiting(&self, session_id: &str) -> u32 {
         self.questions_waiting
@@ -3096,7 +3103,7 @@ pub enum Command {
     RemoveRepositoryRoot {
         path: String,
     },
-    /// Replaces the repositories added to a project beyond its Space's, which add nothing here.
+    /// Replaces the repositories added to a project. A new one its Space lists adds nothing.
     SetAddedRepositories {
         project_id: String,
         repository_ids: Vec<String>,

@@ -152,6 +152,23 @@ fn an_added_repository_outside_the_space_is_usable_and_a_move_keeps_it() {
 }
 
 #[test]
+fn an_addition_the_space_later_lists_outlasts_it_after_an_unrelated_edit() {
+    let mut f = fixture();
+    let (project, tool, api) = (f.project.id.clone(), f.tool.clone(), f.api.clone());
+    f.host
+        .set_added_repositories(&project, vec![tool.id.clone()])
+        .unwrap();
+    list(&mut f.host, &f.space.clone(), &["octo/tool"]);
+
+    (f.host)
+        .set_added_repositories(&project, vec![tool.id.clone(), api.id.clone()])
+        .unwrap();
+    list(&mut f.host, &f.space.clone(), &[]);
+
+    assert_eq!(used(&f.host, &project), ["api", "tool"]);
+}
+
+#[test]
 fn the_list_holds_nothing_the_space_lists_and_reports_why_each_is_used() {
     let mut f = fixture();
     list(&mut f.host, &f.space.clone(), &["Sage-Social/web"]);

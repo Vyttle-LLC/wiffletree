@@ -805,8 +805,9 @@ impl Host {
         Ok(())
     }
 
-    /// Replaces the repositories added to a project: each once, and none its Space lists, which
-    /// it uses anyway. An open ticket in one taken away carries on, as `repository_use` says.
+    /// Replaces the repositories added to a project, each once. A new one its Space lists adds
+    /// nothing, while one added before the Space listed it stays, so it outlasts the Space. An
+    /// open ticket in one taken away carries on, as `repository_use` says.
     pub fn set_added_repositories(&mut self, project: &str, ids: Vec<String>) -> Result<Project> {
         let mut project = self.project(project)?;
         ensure!(ids.len() <= 1000, "Choose at most 1000 repositories");
@@ -817,7 +818,8 @@ impl Host {
             let repository = (workspace.iter())
                 .find(|r| r.id == id)
                 .context("Repository not found")?;
-            if !space.lists(repository) && !added.contains(&id) {
+            let wanted = project.added_repositories.contains(&id) || !space.lists(repository);
+            if wanted && !added.contains(&id) {
                 added.push(id);
             }
         }

@@ -210,6 +210,10 @@ A project SHALL use a repository when any of these holds: its Space lists the re
 - **WHEN** a project needs a repository that no Space lists
 - **THEN** it reaches it only through Add to this project, and moving Space keeps it
 
+#### Scenario: An addition the Space later lists
+- **WHEN** the human added a repository, its Space later lists it, the human edits the project's other additions, and the Space then drops it
+- **THEN** the project still uses it
+
 #### Scenario: A repository in several Spaces
 - **WHEN** two Spaces list a repository
 - **THEN** a project reads only its own Space's list
