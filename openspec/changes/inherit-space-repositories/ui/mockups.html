@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Projects inherit their Space's repositories</title>
+<!--
+  Static study for the inherit-space-repositories change. No script, no network.
+  Styles copied from openspec/changes/archive/2026-10-30-spaces/ui/mockups.html.
+  APPROVED by Michael on 2026-10-31: all six screens as drawn.
+  1. Overview › Repositories, today and proposed.
+  2. Add to this project, which replaces Choose repositories….
+  3. New project.
+  4. Move to another Space.
+  5. The refusal a coordinator gets.
+  6. What the upgrade does to the projects on this Mac (real figures, read 2026-10-31).
+-->
+<style>
+.light,:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}}
+body:has(#force-light:checked){--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+body:has(#force-dark:checked){--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+h2{font-size:15px;font-weight:600;margin:0 0 2px}
+h3{font-size:13px;font-weight:600;margin:0}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.intro{max-width:880px;margin-bottom:22px}
+.intro p{color:var(--subtle);font-size:12px;margin-top:4px}
+.pending{display:inline-block;margin:6px 0 4px;padding:3px 10px;border-radius:9px;font-size:11.5px;font-weight:600;color:var(--yellow);background:color-mix(in srgb,var(--yellow) 16%,transparent)}
+.switch{display:flex;gap:6px;margin:10px 0 0;font-size:12px;color:var(--subtle)}
+.switch input{display:none}
+.switch label{padding:3px 10px;border:1px solid var(--edge);border-radius:7px;cursor:pointer}
+.switch input:checked+label{background:var(--overlay);color:var(--text)}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:26px;align-items:start}
+.wide{grid-column:1/-1}
+.study>.eyebrow{margin-bottom:6px}
+.caption{margin:10px 2px 0;font-size:11.5px;color:var(--subtle)}
+.caption b{color:var(--text);font-weight:600}
+.frame{background:var(--surface);border:1px solid var(--edge);border-radius:12px;overflow:hidden;color:var(--text)}
+.label{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--subtle);margin:8px 6px 2px}
+.row{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:7px;font-size:13px}
+.row.sel{background:var(--overlay)}
+.row .r{margin-left:auto;font-size:11px;color:var(--subtle)}
+.sp{width:8px;height:8px;border-radius:2px;flex:none}
+.sage{background:var(--focus)}.personal{background:var(--magenta)}.vyttle{background:var(--blue)}
+.chip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--edge);border-radius:7px;padding:1px 8px;font-size:11.5px;color:var(--subtle)}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--edge);border-radius:7px;padding:4px 11px;font-size:12px;background:var(--surface);color:var(--text)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.btn.quiet{border-color:transparent;color:var(--subtle)}
+code{font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--overlay);padding:0 4px;border-radius:4px}
+.ok{color:var(--green)}.warn{color:var(--yellow)}
+.note{font-size:11.5px;color:var(--subtle)}
+.actions{display:flex;gap:8px;justify-content:flex-end}
+.page{padding:16px 18px;display:flex;flex-direction:column;gap:12px}
+.form{display:grid;grid-template-columns:150px 1fr;gap:10px 16px;font-size:12.5px;align-items:start}
+.form>label{color:var(--subtle);padding-top:5px}
+.field{border:1px solid var(--edge);border-radius:7px;padding:5px 9px;background:var(--surface)}
+.field.area{min-height:58px;color:var(--text)}
+.field small{color:var(--subtle)}
+.banner{border:1px solid color-mix(in srgb,var(--yellow) 45%,var(--edge));background:color-mix(in srgb,var(--yellow) 9%,transparent);border-radius:9px;padding:8px 11px;font-size:12px}
+.banner b{color:var(--yellow)}
+.banner.calm{border-color:var(--edge);background:var(--base)}
+.banner.calm b{color:var(--text)}
+.split{display:grid;grid-template-columns:180px 1fr}
+.spaces{border-right:1px solid var(--edge);padding:12px 8px;display:flex;flex-direction:column;gap:2px;background:var(--base)}
+.group{border:1px solid var(--edge);border-radius:10px;background:var(--base);padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.group h3{display:flex;align-items:center;gap:8px}
+.group h3 .r{margin-left:auto;font-weight:400;font-size:11.5px;color:var(--subtle)}
+.kv{display:grid;grid-template-columns:130px 1fr;gap:5px 12px;font-size:12px}
+.kv dt{color:var(--subtle)}
+.kv dd{margin:0}
+.repos{display:flex;flex-direction:column;gap:3px;font-size:12.5px}
+.repos .rep{display:flex;align-items:center;gap:8px;padding:3px 6px;border-radius:6px}
+.repos .rep .r{margin-left:auto;font-size:11px;color:var(--subtle)}
+.box{width:13px;height:13px;border:1.5px solid var(--edge);border-radius:3px;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:10px;line-height:1}
+.box.on{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.sheet{max-width:620px;margin:22px auto;border:1px solid var(--edge);border-radius:12px;background:var(--surface);box-shadow:0 10px 30px rgba(0,0,0,.12)}
+.sheet .head{padding:12px 16px;border-bottom:1px solid var(--edge);display:flex;align-items:center;gap:10px}
+.sheet .body{padding:14px 16px;display:flex;flex-direction:column;gap:12px}
+.sheet .foot{padding:10px 16px;border-top:1px solid var(--edge)}
+.dim{background:var(--base);padding:1px 0}
+ul.legend{margin:6px 0 0;padding-left:18px;color:var(--subtle);font-size:12px;max-width:900px}
+ul.legend li{margin:3px 0}
+@media(max-width:1100px){.grid{grid-template-columns:1fr}}
+.head{padding:9px 12px;border-bottom:1px solid var(--edge);display:flex;align-items:center;gap:8px}
+.sect{display:flex;align-items:center;gap:8px;font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.sect .r{margin-left:auto}
+.sub{display:flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;margin:10px 0 2px}
+.sub .r{margin-left:auto;font-weight:400;color:var(--accent)}
+.badge{display:inline-block;margin:0 0 6px;padding:1px 8px;border-radius:7px;font-size:11px;font-weight:600}
+.badge.was{color:var(--red);background:color-mix(in srgb,var(--red) 12%,transparent)}
+.badge.now{color:var(--green);background:color-mix(in srgb,var(--green) 14%,transparent)}
+.say{border-left:2px solid var(--edge);padding:6px 10px;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+.say.bad{border-color:var(--red)}
+.say.good{border-color:var(--green)}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th{font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--subtle);font-weight:600;text-align:left}
+th,td{padding:7px 12px;border-bottom:1px solid var(--edge);vertical-align:top}
+tr:last-child td{border-bottom:0}
+.menu{border:1px solid var(--edge);border-radius:8px;background:var(--surface);padding:4px;font-size:12px;width:230px;margin-left:auto;box-shadow:0 6px 18px rgba(0,0,0,.1)}
+.menu div{padding:3px 8px;border-radius:5px}
+.menu .on{background:var(--overlay)}
+</style>
+</head>
+<body>
+<div class="intro">
+  <div class="eyebrow">Wiffletree · design study</div>
+  <h1>A project inherits its Space's repositories</h1>
+  <span class="pending">Approved by Michael, October 31, 2026</span>
+  <p><b>The rule:</b> a project uses its Space's repositories, always current, plus any you add to that project. Its open tickets keep working wherever they already are.</p>
+  <p>Today a Space's list is copied once, when New project opens, and the two lists then drift apart. Nothing here runs. Screens 1 to 5 use sample rows; the upgrade table in screen 6 uses the real figures on this Mac.</p>
+  <div class="switch">
+    <span>Appearance:</span>
+    <input type="radio" name="theme" id="force-system" checked><label for="force-system">System</label>
+    <input type="radio" name="theme" id="force-light"><label for="force-light">Light</label>
+    <input type="radio" name="theme" id="force-dark"><label for="force-dark">Dark</label>
+  </div>
+</div>
+
+<div class="grid">
+
+<!-- 1a. Today -->
+<section class="study">
+  <div class="eyebrow">1 · Overview › Repositories, today</div>
+  <div class="frame">
+    <div class="page">
+      <span class="badge was" style="align-self:flex-start">Today</span>
+      <div class="sect">Space<span class="r">Move to another Space ▾</span></div>
+      <div class="row"><span class="sp vyttle"></span>Vyttle</div>
+      <div class="sect">Repositories<span class="r">＋ Add</span></div>
+      <p class="note">Uses 0 of 45 workspace repositories.</p>
+    </div>
+  </div>
+  <p class="caption"><b>What you saw.</b> The project sits in Vyttle and Vyttle lists wiffletree, yet the project uses none. Nothing says the two lists are separate, or why every ticket is refused.</p>
+</section>
+
+<!-- 1b. Proposed -->
+<section class="study">
+  <div class="eyebrow">1 · Overview › Repositories, proposed</div>
+  <div class="frame">
+    <div class="page">
+      <span class="badge now" style="align-self:flex-start">Proposed</span>
+      <div class="sect">Space<span class="r">Move to another Space ▾</span></div>
+      <div class="row"><span class="sp vyttle"></span>Vyttle</div>
+      <div class="sect">Repositories<span class="r">＋ Add</span></div>
+      <div class="menu">
+        <div class="on">Add to this project…</div>
+        <div>Add repositories…</div>
+        <div>Attach one with a custom base…</div>
+      </div>
+      <div>
+        <div class="sub"><span class="sp vyttle"></span>From Vyttle · 4<span class="r">Edit on Repositories ›</span></div>
+        <div class="repos">
+          <div class="rep">wiffletree<span class="r">origin/main</span></div>
+          <div class="rep">wiffletree-website<span class="r">origin/main</span></div>
+          <div class="rep">mudling<span class="r">origin/main</span></div>
+          <div class="rep">Vyttle-LLC/mudling-docs<span class="r warn">not cloned here</span></div>
+        </div>
+        <div class="sub">Added to this project · 1</div>
+        <div class="repos">
+          <div class="rep">termic<span class="r">origin/main · Remove</span></div>
+        </div>
+        <div class="sub">An open ticket works here · 1</div>
+        <div class="repos">
+          <div class="rep">pica-api<span class="r">“Fix login retry” · until it closes</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>Every row says where it comes from.</b> “From Vyttle” is live: a repository added to the Space appears here at once, and one removed disappears. “Added to this project” is this project's own. The third group appears only when a repository left the Space, or the project moved, while a ticket still works there.</p>
+</section>
+
+<!-- 2. Add to this project -->
+<section class="study">
+  <div class="eyebrow">2 · Add to this project</div>
+  <div class="frame dim">
+    <div class="sheet">
+      <div class="head"><h2>Add to this project</h2></div>
+      <div class="body">
+        <p class="note">Vyttle's repositories are always included. Tick others for this project only; the Space does not change.</p>
+        <div class="repos">
+          <div class="rep"><span class="box on" style="opacity:.5">✓</span>wiffletree<span class="r">From Vyttle</span></div>
+          <div class="rep"><span class="box on" style="opacity:.5">✓</span>wiffletree-website<span class="r">From Vyttle</span></div>
+          <div class="rep"><span class="box on" style="opacity:.5">✓</span>mudling<span class="r">From Vyttle</span></div>
+          <div class="rep"><span class="box on">✓</span>termic<span class="r">Base origin/main</span></div>
+          <div class="rep"><span class="box"></span>celadon<span class="r">Base origin/main</span></div>
+          <div class="rep"><span class="box"></span>pica-api<span class="r">Base origin/main</span></div>
+        </div>
+      </div>
+      <div class="foot actions"><span class="btn quiet">Cancel</span><span class="btn primary">Save</span></div>
+    </div>
+  </div>
+  <p class="caption"><b>Replaces Choose repositories….</b> The “Use every workspace repository” box goes away. Add repositories… still brings a new clone into the workspace, and from a project's Overview it also adds it to that project, as it does today.</p>
+</section>
+
+<!-- 3. New project -->
+<section class="study">
+  <div class="eyebrow">3 · New project</div>
+  <div class="frame dim">
+    <div class="sheet">
+      <div class="head"><h2>New project</h2></div>
+      <div class="body">
+        <div class="form">
+          <label>Space</label><div class="field"><span class="sp vyttle" style="display:inline-block;margin-right:6px"></span>Vyttle ▾<br><small>Logs to <code>Vyttle-LLC/vyttle-docs</code>.</small></div>
+          <label>Name</label><div class="field">Wiffletree website refresh</div>
+          <label>Repositories</label>
+          <div>
+            <div class="repos">
+              <div class="rep">Vyttle-LLC/wiffletree</div>
+              <div class="rep">Vyttle-LLC/wiffletree-website</div>
+              <div class="rep">Vyttle-LLC/mudling</div>
+              <div class="rep">Vyttle-LLC/mudling-docs<span class="r warn">not cloned here</span></div>
+              <div class="rep"><span class="box on">✓</span>simion/termic<span class="r">added to this project</span></div>
+            </div>
+            <p class="note" style="margin-top:6px">Vyttle's repositories, kept current. <span style="color:var(--accent)">Add another repository…</span></p>
+          </div>
+          <label>First message</label><div class="field area"><span class="note">What should the coordinator do?</span></div>
+        </div>
+      </div>
+      <div class="foot actions"><span class="btn quiet">Cancel</span><span class="btn primary">Create project</span></div>
+    </div>
+  </div>
+  <p class="caption"><b>The Space's repositories are no longer tick boxes.</b> They come with the Space, so there is nothing to untick. Changing the Space swaps them and keeps anything you added. Start project from issue and a coordinator's <code>create_project</code> follow the same rule: repositories they name beyond the Space's become added ones.</p>
+</section>
+
+<!-- 4. Move -->
+<section class="study">
+  <div class="eyebrow">4 · Move to another Space</div>
+  <div class="frame dim">
+    <div class="sheet">
+      <div class="head"><h2>Move Pica onboarding to Vyttle?</h2></div>
+      <div class="body">
+        <p class="note">Its later entries go to Vyttle's brain; earlier ones stay where they are.</p>
+        <div>
+          <div class="sub">Gains 4 from Vyttle</div>
+          <p class="note">wiffletree, wiffletree-website, mudling, mudling-website</p>
+          <div class="sub">Loses 31 from Personal</div>
+          <p class="note">dotfiles, bootstrap, pica-ios and 28 more</p>
+          <div class="sub">Keeps</div>
+          <div class="repos">
+            <div class="rep">termic<span class="r">added to this project</span></div>
+            <div class="rep">pica-api<span class="r">“Fix login retry” · until it closes</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="foot actions"><span class="btn quiet">Cancel</span><span class="btn primary">Move</span></div>
+    </div>
+  </div>
+  <p class="caption"><b>Move now says what it does.</b> Today it says “Its repositories don't change.” Moving is never refused: open tickets finish where they are, and when the last one closes that repository leaves the project unless you added it.</p>
+</section>
+
+<!-- 5. Refusal -->
+<section class="study">
+  <div class="eyebrow">5 · When a ticket is refused</div>
+  <div class="frame">
+    <div class="page">
+      <span class="badge was" style="align-self:flex-start">Today</span>
+      <div class="say bad">Project Billing does not use repository wiffletree</div>
+      <span class="badge now" style="align-self:flex-start">Proposed</span>
+      <div class="say good">Project Billing does not use repository wiffletree: Vyttle does not list it and it was not added to this project. Ask the human to add it to Vyttle on the Repositories page, or to this project from its Overview.</div>
+    </div>
+  </div>
+  <p class="caption"><b>The refusal names the way forward.</b> It should now be rare, and only the human can resolve it, so the coordinator knows to ask you instead of retrying. Coordinators still cannot change a Space's list or a project's repositories.</p>
+</section>
+
+<!-- 6. Upgrade -->
+<section class="study wide">
+  <div class="eyebrow">6 · What the upgrade does on this Mac</div>
+  <div class="frame">
+    <table>
+      <tr><th>Project</th><th>Today</th><th>After the upgrade</th></tr>
+      <tr><td>Mudling: Initialization (Personal)</td><td>Every repository; 10 open tickets in mudling, which only Vyttle lists</td><td>Personal's 32, plus mudling kept as added. Moving it to Vyttle is your call.</td></tr>
+      <tr><td>Wiffletree: Build Speed Fixes (Vyttle)</td><td>wiffletree, wiffletree-website</td><td>Vyttle's 4</td></tr>
+      <tr><td>Wiffletree: Projects Inherit Space Repositories (Vyttle)</td><td>wiffletree</td><td>Vyttle's 4</td></tr>
+      <tr><td>23 archived projects (Personal)</td><td>Every repository</td><td>Personal's 32. watcher-fixes keeps wiffletree as added, for its one open ticket.</td></tr>
+    </table>
+  </div>
+  <p class="caption"><b>The upgrade keeps what a project named or has an open ticket in, and drops “every repository”.</b> Everything else comes from the Space. No Space's list changes. Runs once.</p>
+</section>
+
+</div>
+
+<div style="margin-top:26px">
+  <h2>How it behaves</h2>
+  <ul class="legend">
+    <li><b>A repository joins a Space:</b> every project in that Space gets it at once, including when the change arrives from another Mac.</li>
+    <li><b>A repository leaves a Space:</b> open tickets and their reviews carry on there; new tickets there are allowed until the last open one closes, and then it leaves the project.</li>
+    <li><b>A repository in no Space:</b> a project reaches it only through Add to this project. On this Mac that is termic and the 8 celadon-theme repositories.</li>
+    <li><b>A repository in several Spaces:</b> a project reads only its own Space's list, so this needs no rule.</li>
+    <li><b>A Space entry not cloned here:</b> shown as not cloned here and unusable until it joins the workspace, when it appears by itself.</li>
+    <li><b>A Space that lists nothing here:</b> the project uses nothing until you add to the Space or the project, and Overview says so.</li>
+    <li><b>Narrowing goes away.</b> A project cannot use fewer repositories than its Space. It was rarely used: 24 of 26 projects use every repository.</li>
+    <li>This study is static. It is not the GPUI implementation. Michael approved it on October 31, 2026.</li>
+  </ul>
+</div>
+</body>
+</html>
