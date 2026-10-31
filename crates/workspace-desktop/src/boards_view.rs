@@ -1125,12 +1125,16 @@ impl BoardsPage {
         cx: &mut Context<Self>,
     ) -> Div {
         // A board never draws over an overlay. Every menu and popover, this page's or another
-        // view's, takes GPUI's focus as it opens; tooltips take none, so they are counted, as
+        // view's, takes GPUI's focus as it opens; tooltips take none, so they are watched, as
         // are dialogs, sheets and notices.
+        let (tooltip, again) = tooltip_frame(cx);
+        if again {
+            window.request_animation_frame();
+        }
         let covered = window.has_active_dialog(cx)
             || window.has_active_sheet(cx)
             || !window.notifications(cx).is_empty()
-            || open_tooltips(cx) > 0
+            || tooltip
             || !self.focus.contains_focused(window, cx);
         let painted = pane.painted.clone();
         let placeholder = canvas(
@@ -1302,26 +1306,70 @@ fn under_overlay(covered: bool, still: Option<Arc<Image>>) -> Shows {
     }
 }
 
-/// The tooltips open in the app, which GPUI draws above every view, a board's included, and
-/// which take no focus.
-struct OpenTooltips(Rc<Cell<usize>>);
-impl Global for OpenTooltips {}
+/// Whether a tooltip is open, which GPUI draws above every view, a board's included, and which
+/// takes no focus. GPUI's own tooltips live from their creation to their release. A managed
+/// tooltip, such as `Button::tooltip`'s, is built afresh in every frame by the window's tooltip
+/// overlay, which draws after the page and notifies as one shows, switches or hides; so the
+/// page's next frame knows whether the last one built one.
+#[derive(Default)]
+struct TooltipWatch {
+    /// Tooltips alive now.
+    open: usize,
+    /// Tooltips built so far.
+    built: u64,
+    /// `built` at the page's last frame.
+    seen: u64,
+    /// The last frame built one.
+    shown: bool,
+    /// An overlay showed, switched or hid a tooltip since the page's last frame.
+    changed: bool,
+}
+impl TooltipWatch {
+    fn tooltip_built(&mut self) {
+        self.open += 1;
+        self.built += 1;
+    }
+    fn tooltip_released(&mut self) {
+        self.open = self.open.saturating_sub(1);
+    }
+    fn overlay_changed(&mut self) {
+        self.changed = true;
+    }
+    /// At the page's frame: whether a tooltip is open, and whether to draw another frame, as
+    /// one is needed to see what an overlay change, or a tooltip that came or went, now draws.
+    fn frame(&mut self) -> (bool, bool) {
+        let shown = self.built != self.seen;
+        self.seen = self.built;
+        let again = std::mem::take(&mut self.changed) || shown != self.shown;
+        self.shown = shown;
+        (self.open > 0 || shown, again)
+    }
+}
+struct Tooltips(Rc<RefCell<TooltipWatch>>);
+impl Global for Tooltips {}
 
-/// Counts tooltips from their creation to their release; call once, before any window opens.
-pub(super) fn count_tooltips(cx: &mut App) {
-    let open = Rc::new(Cell::new(0));
-    cx.set_global(OpenTooltips(open.clone()));
+/// Watches tooltips and the tooltip overlays; call once, before any window opens.
+pub(super) fn watch_tooltips(cx: &mut App) {
+    let watch = Rc::new(RefCell::new(TooltipWatch::default()));
+    cx.set_global(Tooltips(watch.clone()));
+    let tooltips = watch.clone();
     cx.observe_new::<gpui_component::tooltip::Tooltip>(move |_, _, cx| {
-        open.set(open.get() + 1);
-        let open = open.clone();
-        cx.on_release(move |_, _| open.set(open.get().saturating_sub(1)))
+        tooltips.borrow_mut().tooltip_built();
+        let tooltips = tooltips.clone();
+        cx.on_release(move |_, _| tooltips.borrow_mut().tooltip_released())
+            .detach();
+    })
+    .detach();
+    cx.observe_new::<gpui_base::TooltipOverlay>(move |_, _, cx| {
+        let watch = watch.clone();
+        cx.observe_self(move |_, _| watch.borrow_mut().overlay_changed())
             .detach();
     })
     .detach();
 }
-fn open_tooltips(cx: &App) -> usize {
-    cx.try_global::<OpenTooltips>()
-        .map_or(0, |open| open.0.get())
+fn tooltip_frame(cx: &App) -> (bool, bool) {
+    cx.try_global::<Tooltips>()
+        .map_or((false, false), |watch| watch.0.borrow_mut().frame())
 }
 
 /// `file` in `folder`, when it is one plain name of a file there, links resolved, so a native
@@ -1483,8 +1531,8 @@ impl Render for BoardsPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        JobFilter, Shows, contained, filtered, keeping_label, source_label, under_overlay,
-        version_label,
+        JobFilter, Shows, TooltipWatch, contained, filtered, keeping_label, source_label,
+        under_overlay, version_label,
     };
     use gpui::{Image, ImageFormat};
     use std::sync::Arc;
@@ -1515,6 +1563,40 @@ mod tests {
         assert!(matches!(under_overlay(true, None), Shows::Hidden));
         let still = Arc::new(Image::from_bytes(ImageFormat::Png, vec![]));
         assert!(matches!(under_overlay(true, Some(still)), Shows::Still(_)));
+    }
+
+    #[test]
+    fn a_managed_tooltip_built_afresh_each_frame_covers_the_board_until_it_hides() {
+        let mut watch = TooltipWatch::default();
+        // A button's tooltip shows: the page draws before the overlay builds it, so it looks
+        // again.
+        watch.overlay_changed();
+        assert_eq!(watch.frame(), (false, true));
+        let draw_overlay = |watch: &mut TooltipWatch| {
+            watch.tooltip_built();
+            watch.tooltip_released();
+        };
+        draw_overlay(&mut watch);
+        assert_eq!(watch.frame(), (true, true));
+        draw_overlay(&mut watch);
+        assert_eq!(watch.frame(), (true, false));
+        draw_overlay(&mut watch);
+        // It hides: the next frame still shows the one built before, then the board returns.
+        watch.overlay_changed();
+        assert_eq!(watch.frame(), (true, true));
+        assert_eq!(watch.frame(), (false, true));
+        assert_eq!(watch.frame(), (false, false));
+    }
+
+    #[test]
+    fn a_gpui_tooltip_covers_the_board_from_its_creation_to_its_release() {
+        let mut watch = TooltipWatch::default();
+        watch.tooltip_built();
+        assert_eq!(watch.frame(), (true, true));
+        assert_eq!(watch.frame(), (true, true));
+        assert_eq!(watch.frame(), (true, false));
+        watch.tooltip_released();
+        assert_eq!(watch.frame(), (false, false));
     }
 
     #[test]
