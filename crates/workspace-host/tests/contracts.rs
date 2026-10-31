@@ -287,7 +287,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = core(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator core — v12"));
+    assert!(coordinator.contains("Project coordinator core — v13"));
     // A background reply the records show unchanged folds; news keeps it full.
     assert!(
         coordinator

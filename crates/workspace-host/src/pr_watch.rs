@@ -174,6 +174,8 @@ pub(crate) fn github_repository(remote_url: &str) -> Option<(String, String)> {
 // is of those, so for a PR with more it is a lower bound.
 pub(crate) const PULL_REQUEST_FIELDS: &str = "fragment pr on PullRequest { number url state isDraft \
     isCrossRepository headRefOid baseRefName baseRefOid mergeStateStatus mergeCommit { oid } \
+    isInMergeQueue timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) \
+    { nodes { ... on RemovedFromMergeQueueEvent { id reason } } } \
     commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } \
     reviewThreads(last: 50) { nodes { isResolved comments(last: 1) { nodes { databaseId createdAt } } } } \
     comments(last: 1) { nodes { databaseId } } reviews(last: 1) { nodes { databaseId } } }";
@@ -293,6 +295,15 @@ fn pull_request(node: &Value) -> Result<PullRequest> {
         .max()
         .map(|(_, id)| id);
     let last_id = |kind: &str| node[kind]["nodes"][0]["databaseId"].as_u64();
+    // GitHub records a merge as a removal too, up to a second before the PR reads as merged.
+    let removal = &node["timelineItems"]["nodes"][0];
+    let queue_removal = removal["id"]
+        .as_str()
+        .filter(|_| removal["reason"] != "merged")
+        .map(|id| QueueRemoval {
+            id: id.to_owned(),
+            reason: removal["reason"].as_str().map(str::to_owned),
+        });
     Ok(PullRequest {
         number: node["number"].as_u64().context("A PR is missing number")?,
         url: text("url")?,
@@ -314,6 +325,8 @@ fn pull_request(node: &Value) -> Result<PullRequest> {
             None
         },
         merged_by_host: None,
+        in_merge_queue: node["isInMergeQueue"].as_bool().unwrap_or(false),
+        queue_removal,
     })
 }
 
@@ -638,6 +651,20 @@ impl Host {
                 }
                 due = self.budgeted(ticket, pr, sending)?;
             }
+        }
+        // Each removal has its own id, so a PR queued again and removed again is told again.
+        if let Some(removal) = pr
+            .queue_removal
+            .as_ref()
+            .filter(|_| !pr.in_merge_queue && pr.state != PrState::Merged)
+        {
+            let reason = removal.reason.as_deref().unwrap_or("none given");
+            due.push((
+                format!("{prefix}:dequeued:{}:{}", pr.number, removal.id),
+                format!(
+                    "{named} left the merge queue without merging, at head {head}. GitHub's reason: {reason}. Merge-queue checks do not show on the PR; run gh run list --event merge_group in the ticket worktree for them. Nothing queues it again. A fix needs a new verification cycle before it is pushed."
+                ),
+            ));
         }
         let mut unsent = vec![];
         for (id, body) in due {
@@ -1693,6 +1720,161 @@ pub(crate) mod tests {
         assert!(record(&mut host, &ticket, pr.clone()).is_empty());
         assert_eq!(host.ticket(&ticket.id).unwrap().pull_request, Some(pr));
         assert_eq!(pull_request_events(&host), 2);
+    }
+
+    /// The PR's node with its newest removal from a merge queue.
+    fn removed(id: &str, reason: Option<&str>) -> Value {
+        let mut pr = node(142, "OPEN");
+        pr["timelineItems"] = json!({"nodes": [{"id": id, "reason": reason}]});
+        pr
+    }
+    fn queued() -> PullRequest {
+        let mut pr = open_pr(MergeState::Clean);
+        pr.in_merge_queue = true;
+        pr
+    }
+    fn dequeued(id: &str, reason: Option<&str>) -> PullRequest {
+        let mut pr = chosen(vec![removed(id, reason)]).unwrap();
+        pr.merge_state = MergeState::Clean;
+        pr
+    }
+
+    #[test]
+    fn a_queued_pr_that_leaves_unmerged_tells_the_coordinator_once_with_githubs_reason() {
+        let (home, mut host, ticket) = host_with_ticket();
+        assert!(record(&mut host, &ticket, queued()).is_empty());
+        let pr = dequeued("RFMQE_1", Some("merge_conflict"));
+        assert_eq!(
+            record(&mut host, &ticket, pr.clone()),
+            [format!(
+                "PR #142 for ticket \"Toolbar\" ({}) left the merge queue without merging, at head 7c1c59e. GitHub's reason: merge_conflict. Merge-queue checks do not show on the PR; run gh run list --event merge_group in the ticket worktree for them. Nothing queues it again. A fix needs a new verification cycle before it is pushed.",
+                ticket.id
+            )]
+        );
+        assert_eq!(
+            notices(&host)[0].0,
+            format!("pr:{}:dequeued:142:RFMQE_1", ticket.id)
+        );
+        assert_eq!(notices(&host)[0].1, ticket.coordinator_id);
+        assert!(record(&mut host, &ticket, pr.clone()).is_empty());
+        // A later change to the same PR is no news, nor is a restart.
+        let mut later = pr.clone();
+        later.unresolved_threads = 1;
+        assert!(record(&mut host, &ticket, later.clone()).is_empty());
+        drop(host);
+        let mut host = Host::open_set_up(home.path().join("home")).unwrap();
+        assert!(record(&mut host, &ticket, later).is_empty());
+        assert!(record(&mut host, &ticket, pr).is_empty());
+    }
+
+    #[test]
+    fn a_send_before_a_crash_is_not_repeated_and_a_full_queue_is_sent_on_the_next_pass() {
+        let (_home, mut host, ticket) = host_with_ticket();
+        record(&mut host, &ticket, queued());
+        let id = format!("pr:{}:dequeued:142:RFMQE_1", ticket.id);
+        host.send(&id, None, &ticket.coordinator_id, "Sent before the crash")
+            .unwrap();
+        let pr = dequeued("RFMQE_1", Some("manual"));
+        assert!(record(&mut host, &ticket, pr.clone()).is_empty());
+        let recorded = host.ticket(&ticket.id).unwrap().pull_request;
+        assert_eq!(recorded, Some(pr));
+
+        record(&mut host, &ticket, queued());
+        for i in 0..1023 {
+            host.send(&format!("m{i}"), None, &ticket.coordinator_id, "Queued")
+                .unwrap();
+        }
+        let again = dequeued("RFMQE_2", Some("manual"));
+        assert!(record(&mut host, &ticket, again.clone()).is_empty());
+        assert!(host.ticket(&ticket.id).unwrap().in_merge_queue());
+        host.db
+            .execute("UPDATE messages SET receipt='completed' WHERE id='m0'", [])
+            .unwrap();
+        assert_eq!(record(&mut host, &ticket, again).len(), 1);
+    }
+
+    #[test]
+    fn a_pr_the_human_removed_is_reported_and_each_removal_has_its_own_message() {
+        let (_home, mut host, ticket) = host_with_ticket();
+        record(&mut host, &ticket, queued());
+        let first = record(&mut host, &ticket, dequeued("RFMQE_1", Some("manual")));
+        assert!(first[0].contains("GitHub's reason: manual."));
+        // Queued again with the old removal still the newest, then removed again.
+        let mut again = queued();
+        again.queue_removal = dequeued("RFMQE_1", Some("manual")).queue_removal;
+        assert!(record(&mut host, &ticket, again).is_empty());
+        let second = record(&mut host, &ticket, dequeued("RFMQE_2", None));
+        assert!(second[0].contains("GitHub's reason: none given."));
+        assert_eq!(notices(&host).len(), 2);
+    }
+
+    #[test]
+    fn a_removal_is_reported_even_when_no_pass_saw_the_pr_queued() {
+        let (_home, mut host, ticket) = host_with_ticket();
+        record(&mut host, &ticket, open_pr(MergeState::Clean));
+        let pr = dequeued("RFMQE_1", Some("merge_conflict"));
+        assert_eq!(record(&mut host, &ticket, pr).len(), 1);
+    }
+
+    #[test]
+    fn a_removal_counts_against_no_wake_budget_and_a_closed_pr_says_why_too() {
+        let (_home, mut host, ticket) = host_with_ticket();
+        for head in ["a1", "a2", "a3"] {
+            let mut pr = failing(head);
+            pr.number = 142;
+            record(&mut host, &ticket, pr);
+        }
+        let mut pr = dequeued("RFMQE_1", Some("manual"));
+        pr.state = PrState::Closed;
+        let sent = record(&mut host, &ticket, pr);
+        assert_eq!(sent.len(), 2);
+        assert!(sent[0].contains("was closed without merging"));
+        assert!(sent[1].contains("left the merge queue"));
+    }
+
+    #[test]
+    fn a_queued_pr_that_merges_sends_no_removal_message() {
+        let (_home, mut host, ticket) = host_with_ticket();
+        record(&mut host, &ticket, queued());
+        // GitHub records the merge as a removal a moment before the PR reads as merged.
+        let leaving = chosen(vec![removed("RFMQE_1", Some("merged"))]).unwrap();
+        assert_eq!(leaving.queue_removal, None);
+        assert!(record(&mut host, &ticket, leaving).is_empty());
+        let mut merged_node = removed("RFMQE_1", Some("merged"));
+        merged_node["state"] = json!("MERGED");
+        let sent = record(&mut host, &ticket, chosen(vec![merged_node]).unwrap());
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("merged into main"));
+    }
+
+    #[test]
+    fn an_earlier_removal_of_a_pr_that_merged_stays_silent() {
+        let (_home, mut host, ticket) = host_with_ticket();
+        let mut pr = dequeued("RFMQE_1", Some("merge_conflict"));
+        pr.state = PrState::Merged;
+        let sent = record(&mut host, &ticket, pr);
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("merged into main"));
+    }
+
+    #[test]
+    fn a_pr_with_no_queue_fields_reads_as_never_queued_and_decodes_from_an_older_store() {
+        let pr = chosen(vec![node(142, "OPEN")]).unwrap();
+        assert!(!pr.in_merge_queue);
+        assert_eq!(pr.queue_removal, None);
+        let mut stored = serde_json::to_value(&pr).unwrap();
+        stored.as_object_mut().unwrap().remove("in_merge_queue");
+        assert_eq!(serde_json::from_value::<PullRequest>(stored).unwrap(), pr);
+    }
+
+    #[test]
+    fn the_query_reads_the_queue_state_and_the_newest_removal_only() {
+        let mut pr = node(142, "OPEN");
+        pr["isInMergeQueue"] = json!(true);
+        assert!(chosen(vec![pr]).unwrap().in_merge_queue);
+        assert!(PULL_REQUEST_FIELDS.contains(
+            "isInMergeQueue timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT])"
+        ));
     }
 
     #[test]

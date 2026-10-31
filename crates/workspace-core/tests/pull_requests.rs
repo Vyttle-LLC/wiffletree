@@ -19,6 +19,8 @@ fn pull_request() -> PullRequest {
         },
         merge_commit: None,
         merged_by_host: None,
+        in_merge_queue: false,
+        queue_removal: None,
     }
 }
 
@@ -51,6 +53,16 @@ fn changes_name_what_moved() {
         "new head 3daf610, checks success"
     );
     assert_eq!(PullRequest::changes(None, &old), "found, open");
+    let mut queued = old.clone();
+    queued.in_merge_queue = true;
+    assert_eq!(
+        PullRequest::changes(Some(&old), &queued),
+        "in the merge queue"
+    );
+    assert_eq!(
+        PullRequest::changes(Some(&queued), &old),
+        "out of the merge queue"
+    );
 }
 
 #[test]

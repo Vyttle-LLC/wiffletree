@@ -1499,6 +1499,8 @@ pub(crate) mod tests {
             comments: CommentCursors::default(),
             merge_commit: None,
             merged_by_host: None,
+            in_merge_queue: false,
+            queue_removal: None,
         };
         let mut ticket = f.ticket();
         ticket.pull_request = Some(pr.clone());

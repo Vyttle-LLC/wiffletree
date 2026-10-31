@@ -1164,6 +1164,7 @@ impl Host {
         };
         if !self.kept(ticket, repository, &self.session(&ticket.coordinator_id)?)?
             || !ancestry.may_change(ticket)
+            || ticket.in_merge_queue()
         {
             return Ok(None);
         }
@@ -1265,14 +1266,15 @@ impl Host {
             .join("keeper")
             .join(ticket_id)
     }
-    /// Whether `problem` at the PR's head would get a try: its trigger is on, the repository
-    /// has a checks command, the keeper's model is chosen, its review could start, no try
-    /// at that problem is recorded for that head and the watcher has not woken the coordinator
-    /// for it, so the coordinator hears once, from whichever acts first.
+    /// Whether `problem` at the PR's head would get a try: the PR is not in a merge queue, its
+    /// trigger is on, the repository has a checks command, the keeper's model is chosen, its
+    /// review could start, no try at that problem is recorded for that head and the watcher has
+    /// not woken the coordinator for it, so the coordinator hears once, from whichever acts first.
     fn would_try(&self, ticket: &Ticket, repository: &Repository, problem: KeeperProblem) -> bool {
         let settings = self.settings().keeper;
         let head = ticket.open_pull_request().map(|pr| pr.head.as_str());
-        settings.rebase
+        !ticket.in_merge_queue()
+            && settings.rebase
             && settings.tries(problem)
             && repository.checks.is_some()
             && head.is_some_and(|head| !ticket.tried(problem, head))
@@ -1810,9 +1812,15 @@ impl Host {
     pub(crate) fn keeper_review_ended(&mut self, ticket_id: &str) {
         self.keeper.reviews_ended.insert(ticket_id.into());
     }
-    /// The tickets whose keeper review ended and waits for their worktree.
+    /// The tickets whose keeper review ended and waits for their worktree, leaving out any whose
+    /// PR is in a merge queue until it leaves.
     pub(crate) fn keeper_reviews_ended(&self) -> Vec<String> {
-        self.keeper.reviews_ended.iter().cloned().collect()
+        self.keeper
+            .reviews_ended
+            .iter()
+            .filter(|id| !self.ticket(id).is_ok_and(|t| t.in_merge_queue()))
+            .cloned()
+            .collect()
     }
     /// Pushes the ticket's keeper review that passed, or puts its branch back after a
     /// withdrawal and tells the coordinator. The actor calls it only while no agent of the
@@ -1864,8 +1872,13 @@ impl Host {
         self.keeper_push(&mut ticket)
     }
     /// Starts the push of the keeper's commit on the ticket's branch. A refused push ends as
-    /// one that failed.
+    /// one that failed. A PR that entered a merge queue since its result was taken up is not
+    /// pushed: GitHub does not say what a push does to a queued PR, so it counts as ejecting it.
     fn keeper_push(&mut self, ticket: &mut Ticket) -> Result<Option<publish::Job>> {
+        if ticket.in_merge_queue() {
+            let unpushed = "its PR entered a merge queue first, so GitHub's branch is unchanged";
+            return self.end_keeper_push(ticket, false, unpushed).map(|()| None);
+        }
         self.keeper_publish(&ticket.id).or_else(|e| {
             eprintln!("Workspace PR keeper: {}: push refused: {e:#}", ticket.id);
             self.keeper_published(ticket, false).map(|()| None)
@@ -6340,5 +6353,70 @@ pub(crate) mod tests {
         let due = checks_failed(&mut f, &base, MINUTE);
         assert!(due.reproductions.is_empty());
         assert_eq!(wakes(&f).len(), 1);
+    }
+
+    /// Records in the ticket whether its PR is in a merge queue, as a pass would.
+    pub(crate) fn set_queued(f: &mut Fixture, queued: bool) {
+        let mut ticket = f.ticket();
+        ticket.pull_request.as_mut().unwrap().in_merge_queue = queued;
+        f.host.save_ticket(&ticket).unwrap();
+    }
+
+    #[test]
+    fn a_queued_pr_is_not_rebased_until_it_leaves_the_queue() {
+        let (mut f, r) = kept();
+        let base = move_base(&f, &r, "other.txt", "1\n");
+        let mut pr = f.ticket().pull_request.unwrap();
+        pr.in_merge_queue = true;
+        observed(&mut f, &base, pr.clone(), 0);
+        let quiet = 2 * MINUTE;
+        assert!(
+            observed(&mut f, &base, pr.clone(), quiet)
+                .rebases
+                .is_empty()
+        );
+        assert!(f.host.keeper_parts().is_empty());
+        pr.in_merge_queue = false;
+        let due = observed(&mut f, &base, pr, quiet + 1);
+        assert_eq!(due.rebases.len(), 1);
+    }
+
+    #[test]
+    fn a_queued_pr_with_failed_checks_gets_no_try_and_its_wake_is_not_held() {
+        let (mut f, _r, base) = checking(FIXED);
+        set_queued(&mut f, true);
+        let mut pr = f.ticket().pull_request.unwrap();
+        pr.head = f.head();
+        pr.checks = CheckState::Failure;
+        pr.merge_state = MergeState::Clean;
+        let due = observed(&mut f, &base, pr, 0);
+        assert!(due.reproductions.is_empty() && try_agent(&f).is_none());
+        assert!(held_for(&f, KeeperProblem::Checks).is_none());
+        assert_eq!(wakes(&f).len(), 1);
+    }
+
+    #[test]
+    fn a_result_taken_up_before_the_pr_was_queued_is_not_pushed() {
+        let (mut f, r, result) = waiting();
+        let pushed = r.branch(BRANCH);
+        set_queued(&mut f, true);
+        assert!(f.host.keeper_move(&f.ticket.clone()).unwrap().is_none());
+        assert_eq!(f.head(), result);
+        assert_eq!(r.branch(BRANCH), pushed);
+        assert!(f.ticket().publishing.is_none());
+        let told = notices(&f.host);
+        assert_eq!(told.len(), 1);
+        assert!(told[0].2.contains("its PR entered a merge queue first"));
+    }
+
+    #[test]
+    fn a_keeper_review_that_ended_waits_for_the_pr_to_leave_the_queue() {
+        let (mut f, r) = reviewing("true");
+        under_review(&mut f, &r);
+        verdict(&mut f, "Correctness", "passed", json!([]));
+        set_queued(&mut f, true);
+        assert!(f.host.keeper_reviews_ended().is_empty());
+        set_queued(&mut f, false);
+        assert_eq!(f.host.keeper_reviews_ended(), [f.ticket.clone()]);
     }
 }

@@ -1190,6 +1190,8 @@ mod tests {
             comments: CommentCursors::default(),
             merge_commit: (state == PrState::Merged).then(|| "be5f484cc".into()),
             merged_by_host: None,
+            in_merge_queue: false,
+            queue_removal: None,
         }
     }
     fn line(pr: &PullRequest) -> String {
