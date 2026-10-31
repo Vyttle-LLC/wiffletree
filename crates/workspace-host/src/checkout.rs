@@ -391,6 +391,7 @@ impl Creation {
             waived_commits: vec![],
             pull_request: None,
             publishing: None,
+            merging: None,
             pushed: None,
             keeper: None,
         };

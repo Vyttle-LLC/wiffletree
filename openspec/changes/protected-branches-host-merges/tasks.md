@@ -7,20 +7,20 @@
 
 ## 2. merge_ticket
 
-- [ ] 2.1 Add the `merge_ticket` tool, coordinator only, with an optional `waived`.
-- [ ] 2.2 Share acceptance's checks with `accept_ticket`, and run every check of the "checks before a merge" in order, reading the PR, the default branch, the allowed methods, branch protection and rulesets from GitHub at the time of the merge; refuse when any read fails.
-- [ ] 2.3 Record a waiting merge on the ticket; decide it again after each PR watcher pass; follow the host's own same-change pushes; end it on failed checks, a conflict, a protected base, a new cycle or another head, and on any new head when it needs the human's approval; withdraw it on accept or close.
-- [ ] 2.4 Ask the human under a host-only `merge:` prefix after a blocked review, waived or not, and for commits waived at the cap; check everything again on approval and before merging.
-- [ ] 2.5 Merge with `gh pr merge --<method> --match-head-commit`, the method being the first GitHub allows of squash, merge commit and rebase; never `--auto`, `--admin` or `--delete-branch`.
-- [ ] 2.6 Record the PR as merged by the host and accept the ticket; tell the coordinator when acceptance fails after the merge.
-- [ ] 2.7 Retarget each open stacked child's PR to the merged PR's base, skipping one GitHub already moved.
-- [ ] 2.8 Finish or end a merge interrupted by a restart or a time limit.
-- [ ] 2.9 Test with a fake `gh`: every refusal, a PR with no checks, a blocked review without `waived` reaching the approval, a protected base whoever asks, `SetProtectedBranches` without the credential, GitHub unreadable, waiting then merging, waiting then failing, the keeper's rebase while waiting, the blocked-review approval and denial, a moved head after approval, method choice, acceptance after the merge, a stacked child, and a restart mid-merge.
+- [x] 2.1 Add the `merge_ticket` tool, coordinator only, with an optional `waived`.
+- [x] 2.2 Share acceptance's checks with `accept_ticket`, and run every check of the "checks before a merge" in order, reading the PR, the default branch, the allowed methods, branch protection and rulesets from GitHub at the time of the merge; refuse when any read fails.
+- [x] 2.3 Record a waiting merge on the ticket; decide it again after each PR watcher pass; follow the host's own same-change pushes; end it on failed checks, a conflict, a protected base, a new cycle or another head, and on any new head when it needs the human's approval; withdraw it on accept or close.
+- [x] 2.4 Ask the human under a host-only `merge:` prefix after a blocked review, waived or not, and for commits waived at the cap; check everything again on approval and before merging.
+- [x] 2.5 Merge with `gh pr merge --<method> --match-head-commit`, the method being the first GitHub allows of squash, merge commit and rebase; never `--auto`, `--admin` or `--delete-branch`.
+- [x] 2.6 Record the PR as merged by the host and accept the ticket; tell the coordinator when acceptance fails after the merge.
+- [x] 2.7 Retarget each open stacked child's PR to the merged PR's base, skipping one GitHub already moved.
+- [x] 2.8 Finish or end a merge interrupted by a restart or a time limit.
+- [x] 2.9 Test with a fake `gh`: every refusal, a PR with no checks, a blocked review without `waived` reaching the approval, a protected base whoever asks, `SetProtectedBranches` without the credential, GitHub unreadable, waiting then merging, waiting then failing, the keeper's rebase while waiting, the blocked-review approval and denial, a moved head after approval, method choice, acceptance after the merge, a stacked child, and a restart mid-merge.
 
 ## 3. PR keeper and stacks
 
-- [ ] 3.1 Rebase a retargeted child with `git rebase --onto <new base> <parent's last pushed head>`.
-- [ ] 3.2 Measure a commit's patch against the ref it was built on in `stacks::Base::same_patch`, so the child's review stands after the rebase; test it with a squash-merged parent.
+- [x] 3.1 Rebase a retargeted child with `git rebase --onto <new base> <parent's last pushed head>`.
+- [x] 3.2 Measure a commit's patch against the ref it was built on in `stacks::Base::same_patch`, so the child's review stands after the rebase; test it with a squash-merged parent.
 
 ## 4. Desktop
 

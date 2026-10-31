@@ -1117,6 +1117,7 @@ mod tests {
             unresolved_threads: 0,
             comments: CommentCursors::default(),
             merge_commit: (state == PrState::Merged).then(|| "be5f484cc".into()),
+            merged_by_host: None,
         }
     }
     fn line(pr: &PullRequest) -> String {

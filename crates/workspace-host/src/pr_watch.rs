@@ -306,6 +306,7 @@ fn pull_request(node: &Value) -> Result<PullRequest> {
         } else {
             None
         },
+        merged_by_host: None,
     })
 }
 
@@ -494,6 +495,10 @@ impl Host {
                 .filter(|old| old.number == new.number && old.head == new.head)
         {
             new.merge_state = old.merge_state;
+        }
+        // GitHub does not say who merged; the host's own record of its merge stands.
+        if let Some(old) = old.as_ref().filter(|old| old.number == new.number) {
+            new.merged_by_host = old.merged_by_host.clone();
         }
         if old.as_ref() == Some(&new) {
             return Ok(false);

@@ -45,6 +45,7 @@ fn the_tool_list_offers_ticket_tools_and_no_repository_coordinator_tools() {
             "triage_findings",
             "accept_ticket",
             "publish_ticket",
+            "merge_ticket",
             "close_ticket",
             "archive_agent",
             "ask_user",
@@ -111,14 +112,13 @@ fn no_agent_tool_requests_cancels_or_runs_a_compaction() {
 }
 
 #[test]
-fn publishing_is_one_tool_and_no_tool_merges_approves_closes_or_comments() {
+fn publishing_is_one_tool_only_merge_ticket_merges_and_none_approves_closes_or_comments() {
     let tools = mcp::tools();
     let tools = tools.as_array().unwrap();
     // `close_ticket` and `close_question` close Wiffletree's own records, never a pull request.
     for tool in tools {
         let name = tool["name"].as_str().unwrap();
         for verb in [
-            "merge",
             "approve",
             "comment",
             "review",
@@ -128,7 +128,14 @@ fn publishing_is_one_tool_and_no_tool_merges_approves_closes_or_comments() {
         ] {
             assert!(!name.contains(verb), "{name}");
         }
+        assert!(name == "merge_ticket" || !name.contains("merge"), "{name}");
     }
+    // The host chooses the pull request, base and method; the coordinator names only the ticket.
+    let merge = tools.iter().find(|t| t["name"] == "merge_ticket").unwrap();
+    let properties = merge["inputSchema"]["properties"].as_object().unwrap();
+    let mut arguments: Vec<&str> = properties.keys().map(String::as_str).collect();
+    arguments.sort_unstable();
+    assert_eq!(arguments, ["ticket_id", "waived"]);
     let publish = tools
         .iter()
         .find(|t| t["name"] == "publish_ticket")

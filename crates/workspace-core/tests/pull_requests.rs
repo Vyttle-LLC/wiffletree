@@ -18,6 +18,7 @@ fn pull_request() -> PullRequest {
             inline: Some(3),
         },
         merge_commit: None,
+        merged_by_host: None,
     }
 }
 
