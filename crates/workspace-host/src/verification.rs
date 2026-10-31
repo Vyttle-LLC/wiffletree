@@ -1,8 +1,8 @@
 //! Ticket verification. One call starts every verifier of the review level the coordinator names
 //! on the ticket's current commit; the scheduler runs a round's verifiers together. Verifiers are read-only. Failures go
 //! back to the implementer, only failed verifiers re-run, rounds are capped, and the project
-//! coordinator wakes once, when the cycle ends. Verifiers are archived once the cycle no longer
-//! needs them, so every cycle starts fresh sessions.
+//! coordinator wakes once, when the cycle ends. A verifier is archived as soon as it passes, and
+//! the rest when the cycle ends, so every cycle starts fresh sessions.
 use crate::*;
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -1078,8 +1078,9 @@ impl Host {
     }
     /// Records a verifier's result on its round: failed when it changed the worktree or reported
     /// an evidenced blocking finding, else passed, unless it could not verify. While the cycle
-    /// runs, a completed check updates the ledger. Ends the round once nobody is pending, unless
-    /// the cycle already ended.
+    /// runs, a completed check updates the ledger. A pass is final, since a later round re-runs
+    /// only failed verifiers, so a verifier that passed is archived at once. Ends the round once
+    /// nobody is pending, unless the cycle already ended.
     fn record_verdict(
         &mut self,
         mut ticket: Ticket,
@@ -1110,6 +1111,7 @@ impl Host {
             _ if !untouched || failing => VerifierResult::Failed,
             _ => VerifierResult::Passed,
         };
+        let passed = run.result == VerifierResult::Passed;
         run.reason = match (kind, run.result) {
             _ if !untouched => Some(WORKTREE_CHANGED),
             ("failed", VerifierResult::Passed) => {
@@ -1135,6 +1137,9 @@ impl Host {
             record_findings(&mut ticket, &focus, source, keeper, findings);
         }
         self.save_ticket(&ticket)?;
+        if passed {
+            self.retire(&[session.to_owned()])?;
+        }
         if ended && running {
             self.end_round(ticket)?;
         }
@@ -1186,16 +1191,10 @@ impl Host {
                 open.chain(changed).collect::<Vec<_>>().join("\n\n")
             );
             let id = format!("verification:{}:{cycle}:{}", ticket.id, round.round);
-            let passed: Vec<String> = round
-                .verifiers
-                .iter()
-                .filter(|v| v.result == VerifierResult::Passed)
-                .map(|v| v.session_id.clone())
-                .collect();
             ticket.state = TicketState::Failed;
             self.save_ticket(&ticket)?;
             self.send(&id, None, &implementer, &body)?;
-            return self.retire(&passed);
+            return Ok(());
         }
         let max_cycles = self.settings().verification.max_cycles;
         let level = match &verification.level {

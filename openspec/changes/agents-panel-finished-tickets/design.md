@@ -1,0 +1,17 @@
+## Context
+
+`Roster` lists what the panel draws, and also gives the toggle's working count, the coordinator's agents card and the project row's counts. The board holds accepted tickets but not closed ones, and it lists no agents under an accepted ticket. Every finished ticket without an unarchived agent lives in the archive half of the snapshot, which `WorkspaceIndex` joins and which opening the Agents panel already demands.
+
+## Decisions
+
+- **A pass is final, so the verifier can go.** `record_verdict` is the only place a result is written, and only for a run still `pending`. `next_round` re-runs only failed results, so a passed verifier is never sent input again in its cycle. A later reporter that finds the worktree changed fails itself; it does not touch a pass already recorded. `Standing` and `archive_agent` already treat an archived `passed` run as needing nothing, a withdrawn keeper review retires its verifiers anyway, and each cycle starts unarchived sessions. A report that says `failed` with no evidenced blocking finding is recorded as `passed`, so it archives too.
+- **Archiving happens inside the verifier's own turn,** as it already does for the last reporter of a round. `stop_started_by` leaves a session with an unfinished run its processes until the run ends, so the verifier can still write its summary. It counts as working until then, under Previous agents.
+- **The failed round's archive of passes goes.** Each pass has already archived its verifier. A cycle running when the host updates may keep an earlier pass unarchived until the cycle ends, which only leaves its full row showing.
+- **The roster reads finished tickets from the index, not the board.** Open cards keep the board's order and its crew. `tickets_owned_by` then gives every finished ticket, live or archived: one with an unarchived agent becomes a card after the open ones, and the rest fold. The board is unchanged, so the project's bar is too.
+- **`TicketCard.progress` is optional.** A closed ticket has no board entry, so its card reads "Closed" with no bar. An accepted one keeps "Accepted · 100%".
+- **The working count stands; the tickets beside it follow the cards.** Moving a restored agent from Previous agents to a card leaves "N agents working" and the stuck count the same. "on M tickets" now counts that ticket, which it should.
+- **A finished ticket's PR reads the same on a card as on a line:** its outcome only, so an open PR on an accepted ticket never shows a conflict in the error color.
+- **A line shows the ticket's title, as the study draws it,** not "repository · title".
+- **Quiet is a status, not a word.** An agent is quiet when its status is ready or done, it is not stuck and it is not compacting. A verifier with a recorded result keeps its full row, so a verifier that failed while reporting `passed`, whose status is done, is not quieted.
+- **What it waits for.** "Waiting for review" while the ticket is `ready_for_testing` or `verifying`, "Waiting on PR #21" while its PR is open, otherwise "Waiting on coordinator", short enough that the panel's width keeps the agent's name. A verifier that has not reported reads "Waiting to start", because it is the review. A finished ticket's agent keeps its full row: the ticket is not waiting on it.
+- **The fold's chevron line is one function** shared with Previous agents, and each fold keeps its own open state on the inspector.

@@ -131,6 +131,7 @@ pub(super) struct Inspector {
     pub(super) agents_clock: bool,
     /// The Agents panel's "Previous agents" section is unfolded.
     pub(super) previous_open: bool,
+    pub(super) finished_open: bool,
     /// The Compact form of each session that has it open, and the field they share.
     pub(super) compact_forms: BTreeMap<String, context_view::CompactForm>,
     pub(super) compact_note: Entity<TextareaState>,
@@ -177,6 +178,7 @@ impl Inspector {
             processes: Default::default(),
             agents_clock: false,
             previous_open: false,
+            finished_open: false,
             compact_forms: BTreeMap::new(),
             compact_note: cx.new(|cx| {
                 TextareaState::new(window, cx)
@@ -406,6 +408,11 @@ impl Inspector {
                 .pl_5()
                 .pr_3()
                 .gap_2()
+                .children(
+                    (panel == Panel::Agents)
+                        .then(|| self.agents_counts(p))
+                        .flatten(),
+                )
                 .child(
                     button("close-inspector")
                         .ghost()

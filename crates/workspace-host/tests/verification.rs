@@ -1122,7 +1122,7 @@ fn a_restored_verifier_at_the_same_profile_reuses_its_session() {
 }
 
 #[test]
-fn passed_verifiers_retire_after_their_round_and_the_rest_when_the_cycle_ends() {
+fn a_verifier_retires_as_it_passes_and_the_rest_when_the_cycle_ends() {
     let mut f = Fixture::ready(three_verifiers(), 2);
     f.verify().unwrap();
     let (claude, codex, style) = (
@@ -1131,20 +1131,68 @@ fn passed_verifiers_retire_after_their_round_and_the_rest_when_the_cycle_ends() 
         f.verifier("Style"),
     );
     f.report(&claude, "pass", "passed").unwrap();
-    assert!(!f.archived(&claude), "a pass mid-round retires nothing");
+    assert!(f.archived(&claude), "a pass is final");
+    assert!(!f.archived(&codex) && !f.archived(&style));
+    assert_eq!(f.current().state, TicketState::Verifying);
+    assert!(!f.host.start_queued_cycles().unwrap(), "the cycle goes on");
+
     f.fail(&codex, "fail").unwrap();
     f.report(&style, "pass", "passed").unwrap();
 
-    assert!(f.archived(&claude) && f.archived(&style));
+    assert!(f.archived(&style));
     assert!(!f.archived(&codex), "the failed verifier re-checks the fix");
+    assert_eq!(f.current().state, TicketState::Failed);
     f.commit("fix.txt", "two");
     f.report(&f.implementer.id.clone(), "fixed", "ready_for_testing")
         .unwrap();
+    let again: Vec<String> = (f.round().verifiers.iter())
+        .map(|run| run.session_id.clone())
+        .collect();
+    assert_eq!(
+        again,
+        std::slice::from_ref(&codex),
+        "a pass is never re-run"
+    );
     f.report(&codex, "pass-2", "passed").unwrap();
 
     assert_eq!(f.current().state, TicketState::Passed);
     assert!(f.archived(&codex));
     assert!(!f.archived(&f.implementer.id), "the implementer stays");
+}
+
+#[test]
+fn a_changed_worktree_fails_the_next_reporter_and_leaves_an_archived_pass_standing() {
+    let mut f = Fixture::ready(three_verifiers(), 2);
+    f.verify().unwrap();
+    let (claude, codex) = (f.verifier("Claude"), f.verifier("Codex"));
+    f.report(&claude, "pass", "passed").unwrap();
+    f.commit("verifier.txt", "sneaky");
+    f.report(&codex, "pass", "passed").unwrap();
+    f.report(&f.verifier("Style"), "pass", "passed").unwrap();
+
+    assert!(f.archived(&claude));
+    assert!(!f.archived(&codex), "its result failed, so it runs again");
+    f.report(&f.implementer.id.clone(), "fixed", "ready_for_testing")
+        .unwrap();
+    let round = f.round();
+    let again: Vec<&str> = (round.verifiers.iter())
+        .map(|run| run.focus.as_str())
+        .collect();
+    assert_eq!(again, ["Codex", "Style"], "both reported after the change");
+}
+
+#[test]
+fn only_a_pass_retires_a_verifier_in_its_round() {
+    let mut f = Fixture::ready(three_verifiers(), 2);
+    f.verify().unwrap();
+    let (claude, codex) = (f.verifier("Claude"), f.verifier("Codex"));
+    // A failure without evidence counts as a pass, and an evidenced one does not.
+    f.report(&claude, "weak", "failed").unwrap();
+    assert!(f.archived(&claude));
+    f.fail(&codex, "fail").unwrap();
+    assert!(!f.archived(&codex));
+    f.report(&f.verifier("Style"), "stuck", "blocked").unwrap();
+    assert_eq!(f.current().state, TicketState::Blocked);
 }
 
 #[test]
