@@ -245,6 +245,7 @@ fn log_work_input(session: &Session, args: &Value) -> Result<LogInput> {
 
 /// Which open batches to close.
 pub(crate) enum Closing<'a> {
+    Batch(&'a str),
     Ticket(&'a str),
     Session(&'a str),
     /// Those whose first entry is at least 24 hours older than this.
@@ -257,6 +258,7 @@ pub(crate) enum Closing<'a> {
 pub(crate) fn close_log_batches(db: &Connection, closing: Closing, at: i64) -> Result<usize> {
     let open = "UPDATE log_batches SET closed_at=?1 WHERE closed_at IS NULL AND";
     Ok(match closing {
+        Closing::Batch(batch) => db.execute(&format!("{open} id=?2"), params![at, batch])?,
         Closing::Ticket(ticket) => {
             db.execute(&format!("{open} ticket_id=?2"), params![at, ticket])?
         }
@@ -352,7 +354,13 @@ impl Host {
                     input.ticket_id.as_ref().is_none_or(|named| *named == own),
                     "An implementer logs for its own ticket; leave ticket_id out"
                 );
-                Some(self.ticket(&own)?)
+                let own = self.ticket(&own)?;
+                ensure!(
+                    own.is_open(),
+                    "This ticket is already {}; its implementer logs nothing more",
+                    own.state
+                );
+                Some(own)
             }
             _ => {
                 match &input.ticket_id {
@@ -431,10 +439,10 @@ impl Host {
         };
         entry_file(&log, &author)?;
         self.atomically(|host| {
-            // A finished ticket's batch has gone already, so an entry for it joins the session's
-            // batch, keeping the ticket's folder, `ref` and `task_id`.
-            let key = match &ticket {
-                Some(ticket) if ticket.is_open() => BatchKey::Ticket(&ticket.id),
+            // By role: an implementer's entries per ticket, the coordinator's and the human's
+            // per coordinator session, whichever ticket names their folder and `ref`.
+            let key = match (session.role, &ticket) {
+                (Role::Implementer, Some(ticket)) => BatchKey::Ticket(&ticket.id),
                 _ => BatchKey::Session(&session.id),
             };
             let brain = log.brain.clone().unwrap_or_default();
@@ -742,6 +750,7 @@ impl Host {
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
         let mut newly_held = std::collections::BTreeSet::new();
+        let mut finished_batches = std::collections::BTreeSet::new();
         for (id, data) in rows {
             let mut entry: WorkLog = serde_json::from_str(&data)?;
             let project = self.project(&entry.project_id)?;
@@ -782,6 +791,17 @@ impl Host {
                 params![id, entry.id, encode(&entry)?, batch, project.space.as_str()],
             )?;
             self.close_full_batch(&batch, now())?;
+            // A finished ticket's batch would otherwise wait for the 24-hour flush.
+            let finished = (entry.task_id.as_ref())
+                .is_some_and(|ticket| self.ticket(ticket).map_or(true, |t| !t.is_open()));
+            if finished {
+                finished_batches.insert(batch);
+            }
+        }
+        // Once every row is in, so a finished ticket's rows go together in one pull request.
+        for batch in &finished_batches {
+            close_log_batches(&self.db, Closing::Batch(batch), now())?;
+            self.brains_now = true;
         }
         for project in &newly_held {
             self.raise_held_item(project)?;
@@ -1428,6 +1448,46 @@ mod tests {
     }
 
     #[test]
+    fn carried_over_rows_of_a_finished_ticket_go_at_once_in_one_batch() {
+        let mut f = fixture();
+        let coordinator = f.coordinator.id.clone();
+        let (ticket, repository) = (f.ticket.clone(), f.ticket().repository_id);
+        let open = (f.host)
+            .create_ticket(&coordinator, &repository, "Still open", "Do")
+            .unwrap();
+        (f.host)
+            .agent_tool(&coordinator, "close_ticket", json!({"ticket_id": ticket}))
+            .unwrap();
+        // Unsent rows as the upgrade's carry-over leaves them.
+        let project = f.coordinator.project_id.clone();
+        for (id, task) in [("old-1", &ticket), ("old-2", &ticket), ("old-3", &open.id)] {
+            let data = json!({"sequence": 0, "id": id, "project_id": project, "task_id": task,
+                "repository": "app", "created_at": 1_793_000_000_000i64, "date": "2026-10-26",
+                "reference": "—", "input": {"session_id": coordinator, "milestone": id,
+                    "kind": "decision", "title": "Old", "changed": "c", "why": "w", "state": "s"}});
+            (f.host.db)
+                .execute(
+                    "INSERT INTO work_logs(id,project_id,session_id,milestone,repository,data) VALUES (?1,?2,?3,?1,'app',?4)",
+                    params![id, project, coordinator, data.to_string()],
+                )
+                .unwrap();
+        }
+        f.host.atomically(Host::queue_unsent).unwrap();
+        let batches: Vec<(Option<String>, i64, bool)> = (f.host.db)
+            .prepare("SELECT ticket_id, (SELECT count(*) FROM work_logs w WHERE w.batch_id=b.id), closed_at IS NOT NULL FROM log_batches b ORDER BY ticket_id=?1 DESC")
+            .unwrap()
+            .query_map([&ticket], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            batches,
+            [(Some(ticket), 2, true), (Some(open.id), 1, false)],
+            "the finished ticket's rows close together; the open ticket's wait for it"
+        );
+    }
+
+    #[test]
     fn closing_a_ticket_closes_its_batch() {
         let mut f = fixture();
         let (implementer, coordinator) = (f.implementer.id.clone(), f.coordinator.id.clone());
@@ -1470,63 +1530,70 @@ mod tests {
     }
 
     #[test]
-    fn a_coordinator_entry_for_a_ticket_joins_its_batch_with_its_ref() {
+    fn a_coordinator_entry_for_a_ticket_takes_its_ref_and_stays_in_the_session_batch() {
         let mut f = fixture();
         let (_github, tools) = fetched(&mut f);
         let (implementer, coordinator) = (f.implementer.id.clone(), f.coordinator.id.clone());
         let ticket = f.ticket.clone();
+        let repository = f.ticket().repository_id;
+        let other = (f.host)
+            .create_ticket(&coordinator, &repository, "Other", "Do")
+            .unwrap();
         let mine = log_work(&mut f, &implementer, args("Work")).unwrap();
         let mut about = args("Reviewed");
         about["ticket_id"] = json!(ticket);
         let theirs = log_work(&mut f, &coordinator, about.clone()).unwrap();
         assert_eq!(theirs["ref"], mine["ref"]);
-        assert!(
-            theirs["path"]
-                .as_str()
-                .unwrap()
-                .starts_with("second-brain/logs/app/")
+        let path = theirs["path"].as_str().unwrap();
+        assert!(path.starts_with("second-brain/logs/app/"), "{path}");
+        let mut elsewhere = args("Planned");
+        elsewhere["ticket_id"] = json!(other.id);
+        log_work(&mut f, &coordinator, elsewhere).unwrap();
+        let batch_of = |f: &Fixture, id: &Value| -> String {
+            let log = stored(f).into_iter().find(|l| l.id == *id).unwrap();
+            log.batch_id.unwrap()
+        };
+        let session_batch = batch_of(&f, &theirs["id"]);
+        let ticket_batch = batch_of(&f, &mine["id"]);
+        assert_ne!(
+            session_batch, ticket_batch,
+            "the implementer's stays per ticket"
         );
-        let batches: i64 = (f.host.db)
-            .query_row("SELECT count(DISTINCT batch_id) FROM work_logs", [], |r| {
-                r.get(0)
-            })
+        let entries: i64 = (f.host.db)
+            .query_row(
+                "SELECT count(*) FROM work_logs WHERE batch_id=?1",
+                [&session_batch],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(batches, 1, "the ticket's one batch");
+        assert_eq!(
+            entries, 2,
+            "both tickets' coordinator entries in one session batch"
+        );
 
-        // After the accept removed the worktree, an entry for the ticket still has its ref and
-        // its ticket, and joins the coordinator's own batch instead of opening a PR of its own.
+        // After the accept removed the worktree, the accept entry still has the ticket's ref and
+        // counts for it, in the same session batch.
         f.host
             .agent_tool(&coordinator, "accept_ticket", json!({"ticket_id": ticket}))
             .unwrap();
-        log_work(&mut f, &coordinator, args("Plan")).unwrap();
         about["title"] = json!("Accepted");
         let after = log_work(&mut f, &coordinator, about).unwrap();
         assert_eq!(after["ref"], mine["ref"]);
-        assert!(
-            after["path"]
-                .as_str()
-                .unwrap()
-                .starts_with("second-brain/logs/app/")
-        );
-        let accepted = stored(&f)
-            .into_iter()
-            .find(|l| l.id == after["id"])
-            .unwrap();
-        assert_eq!(accepted.task_id.as_deref(), Some(ticket.as_str()));
-        f.host.send_log_batches(now(), &tools.git).unwrap();
-        f.host.send_log_batches(now(), &tools.git).unwrap();
-        let sent = |f: &Fixture| -> Vec<usize> {
+        assert_eq!(batch_of(&f, &after["id"]), session_batch);
+        let accepted = stored(&f).into_iter().find(|l| l.id == after["id"]);
+        assert_eq!(accepted.unwrap().task_id.as_deref(), Some(ticket.as_str()));
+        let sent = |f: &mut Fixture| -> Vec<usize> {
+            f.host.send_log_batches(now(), &tools.git).unwrap();
             (f.host.brain_batches(Some(REPO)).unwrap().iter())
                 .map(|b| b.files.len())
                 .collect()
         };
-        assert_eq!(sent(&f), [2], "no one-file batch for the accept entry");
+        assert_eq!(sent(&mut f), [1], "the accept sends the ticket's batch");
         f.host.send_logs_now(None).unwrap();
-        f.host.send_log_batches(now(), &tools.git).unwrap();
         assert_eq!(
-            sent(&f),
-            [2, 2],
-            "it goes with the coordinator's next batch"
+            sent(&mut f),
+            [1, 3],
+            "then the session's, with the accept entry"
         );
     }
 
