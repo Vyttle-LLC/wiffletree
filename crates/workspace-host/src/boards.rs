@@ -65,7 +65,9 @@ impl Shelves {
             };
             for job in jobs.flatten() {
                 let name = job.file_name().to_string_lossy().into_owned();
-                if name.starts_with(['_', '.']) || !job.path().is_dir() {
+                // A link to a folder could name any folder on this Mac.
+                let folder = job.file_type().is_ok_and(|kind| kind.is_dir());
+                if name.starts_with(['_', '.']) || !folder {
                     continue;
                 }
                 let key = JobKey::recipe(&shelf.space, &name);
@@ -209,16 +211,22 @@ fn outputs_in<'a>(shelf: &'a Shelf, base: &str, job: Option<JobKey>) -> Vec<Foun
     let Ok(entries) = fs::read_dir(shelf.repository.join(base)) else {
         return vec![];
     };
+    let Ok(repository) = shelf.repository.canonicalize() else {
+        return vec![];
+    };
     let mut found = vec![];
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let Some(slug) = name.strip_suffix(".json") else {
             continue;
         };
+        // The output's folder must be where its path says, with no link and no `.` or `..` on
+        // the way, as it becomes the root its board is served from.
         let folder = format!("{base}/{slug}");
-        let linked =
-            fs::symlink_metadata(shelf.repository.join(&folder)).is_ok_and(|m| !m.is_dir());
-        if linked {
+        let in_place = (shelf.repository.join(&folder).canonicalize())
+            .is_ok_and(|resolved| resolved == repository.join(&folder));
+        let metadata = entry.file_type().is_ok_and(|kind| kind.is_file());
+        if !plain_file_name(slug) || slug.starts_with('.') || !in_place || !metadata {
             continue;
         }
         let Some(about) = (fs::read(entry.path()).ok())
@@ -590,6 +598,25 @@ mod tests {
         let versions = shelves.versions(&outputs[0].id).unwrap();
         let files: Vec<&str> = versions.iter().map(|v| v.file.as_str()).collect();
         assert_eq!(files, ["brief.md", "brief.md"]);
+    }
+
+    #[test]
+    fn a_dot_slug_or_a_linked_job_folder_never_widens_a_boards_root() {
+        let (_home, host, personal) = host();
+        let storage = host.storage_folder(&personal.storage.repository);
+        let boards = storage.join(format!("spaces/{}/boards", personal.storage.folder));
+        fs::create_dir_all(&boards).unwrap();
+        std::os::unix::fs::symlink("../../..", boards.join("escape")).unwrap();
+        let about = json!({"title":"Board","file":"index.html","saved_at":1}).to_string();
+        fs::write(storage.join("..json"), &about).unwrap();
+        fs::write(storage.join("index.html"), "<p>root</p>").unwrap();
+        // A dot slug beside real outputs is refused too, linked or not.
+        let shared = boards.join("_shared");
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(shared.join("..json"), &about).unwrap();
+        fs::write(shared.join(".json"), &about).unwrap();
+        fs::write(boards.join("index.html"), "<p>boards</p>").unwrap();
+        assert!(host.shelves().unwrap().list().is_empty());
     }
 
     #[test]
