@@ -768,9 +768,11 @@ pub(crate) struct Synced {
     error: Option<String>,
 }
 
-/// Runs a storage repository's engine with its Space and issue rule sets, scanning what it
-/// pushes. When GitHub refuses the push because the branch moved, the same pass fetches,
-/// compares and numbers again, up to `issues_sync::PUSH_TRIES` times.
+/// Runs a storage repository's engine with its Space, boards and issue rule sets, scanning what
+/// it pushes. When GitHub refuses the push because the branch moved, the same pass fetches,
+/// compares, numbers and pushes every rule set again, a runner's boards included, up to
+/// `issues_sync::PUSH_TRIES` times. This is the pass's one retry: its boards never retry alone
+/// (`RuleSets::new` with `retries_alone` false), as they do in the settings pass.
 pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
     let Pass {
         clone,

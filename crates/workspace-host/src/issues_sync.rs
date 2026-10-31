@@ -17,7 +17,9 @@ use tracker::{ISSUES, issue_folder, issue_of};
 
 /// How long after the human's last change to an issue its push waits.
 pub(crate) const PUSH_DELAY_MS: i64 = 2_000;
-/// How many times one pass pushes again after GitHub refused because the branch moved.
+/// How many times a storage repository's own pass runs whole again after GitHub refused its
+/// push because the branch moved: higher than `repos::pass`'s boards-only tries, as teammates
+/// filing at once each move the branch and take the next number.
 pub(crate) const PUSH_TRIES: usize = 5;
 
 /// `text` with each whole `old`, an issue ID, written `new`; `CEL-new-abcd` in

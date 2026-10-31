@@ -1,6 +1,8 @@
 //! Boards (OpenSpec change `assistant-spaces-jobs-boards`, stage 4): every output a thread or a
 //! job saved, on this Mac or pulled from a Space's storage. Each output is a folder holding its
-//! one file, with its metadata beside the folder, and each version of it is a Git commit.
+//! one file, with its metadata beside the folder, and each version of it is a Git commit,
+//! except a runner's save that a later save replaced before any pass pushed it, which stays on
+//! this Mac in the job's `_unpushed/` folder of the private board store.
 use crate::SpaceId;
 use crate::job::{JobKey, Runner};
 use serde::{Deserialize, Serialize};

@@ -738,7 +738,7 @@ ul.legend li{margin:3px 0}
         <div class="ihead">
           <h2 style="margin-right:6px">Issues</h2>
           <span class="seg"><span class="on">List</span><span>Board</span></span>
-          <span class="chip"><span class="sp sage"></span>Sage ▾</span><span class="chip">Open ▾</span><span class="chip">Label: watch ▾</span>
+          <span class="chip"><span class="sp sage"></span>Sage ▾</span><span class="chip">Open ▾</span>
           <span class="btn" style="margin-left:auto;background:var(--overlay)">Ask the assistant</span>
           <span class="btn primary">New issue</span>
         </div>
@@ -764,8 +764,8 @@ ul.legend li{margin:3px 0}
           <div class="msg ai"><p>SAGE-160 is SAGE-151 seen from the watch. SAGE-140 already covers exporting, but not watchOS 12, so here is a new issue rather than an edit.</p></div>
           <div class="proposal">
             <div class="kind"><b>Duplicate</b> · SAGE-160 of SAGE-151</div>
-            <div class="draft"><span class="mono">SAGE-160</span>Watch keeps retrying delivery after a bad payload<span class="note">Todo · Priya Shah · will be closed as a duplicate</span></div>
-            <div class="draft"><span class="mono">SAGE-151</span>Delivery webhook retries forever on a malformed payload<span class="note">Todo · Urgent · stays open</span></div>
+            <div class="draft"><span class="mono">SAGE-160</span>Watch keeps retrying delivery after a bad payload<span class="note">Todo · Priya Shah · gets <code>duplicate_of: SAGE-151</code>, its state unchanged</span></div>
+            <div class="draft"><span class="mono">SAGE-151</span>Delivery webhook retries forever on a malformed payload<span class="note">Todo · Urgent · unchanged</span></div>
             <div class="actions"><span class="btn quiet">Discard</span><span class="btn">Edit</span><span class="btn primary">Apply</span></div>
           </div>
         </div>
@@ -773,7 +773,7 @@ ul.legend li{margin:3px 0}
       </aside>
     </div>
   </div>
-  <p class="caption"><b>The Issues page's Ask opens the list thread of the tracker the filter shows</b>, one per tracker and Space, listed as “Issues · Sage”. It sees only that tracker, as filtered here or wider when asked, and it proposes; filing, closing and linking happen only when the human applies a card.</p>
+  <p class="caption"><b>The Issues page's Ask opens the list thread of the tracker the filter shows</b>, one per tracker and Space, listed as “Issues · Sage”. It sees only that tracker, as filtered here or wider when asked, and it proposes; filing, editing and marking duplicates happen only when the human applies a card.</p>
 </section>
 
 <section class="study wide">
@@ -801,8 +801,9 @@ ul.legend li{margin:3px 0}
       </div>
       <div class="proposal">
         <div class="kind"><b>Duplicate</b> · SAGE-160 of SAGE-151</div>
-        <div class="draft"><span class="mono">SAGE-160</span>Watch keeps retrying delivery…<span class="note">closed as a duplicate</span></div>
-        <div class="draft"><span class="mono">SAGE-151</span>Delivery webhook retries forever…<span class="note">stays open</span></div>
+        <div class="draft"><span class="mono">SAGE-160</span>Watch keeps retrying delivery…<span class="note">gets <code>duplicate_of: SAGE-151</code></span></div>
+        <div class="draft"><span class="mono">SAGE-151</span>Delivery webhook retries forever…<span class="note">unchanged</span></div>
+        <p class="note">A link only: no state changes.</p>
         <div class="actions"><span class="btn quiet">Discard</span><span class="btn">Edit</span><span class="btn primary">Apply</span></div>
       </div>
       <div class="proposal">
@@ -813,7 +814,7 @@ ul.legend li{margin:3px 0}
       </div>
     </div>
   </div>
-  <p class="caption"><b>Five cards, one rule: nothing reaches the tracker until Apply.</b> Apply runs the issue's own write command as the human, one commit authored by them. <b>Edit</b> opens the matching form, the issue's edit form, the comment composer or New issue, filled with the proposal, and saving there is the apply. <b>Discard</b> writes nothing. An edit is a diff of the fields and description; a comment is its text; a split is the new issues and the edit to the original; a duplicate is the two issues; a new issue is its draft.</p>
+  <p class="caption"><b>Five cards, one rule: nothing reaches the tracker until Apply.</b> Apply runs the issue's own write command as the human, one commit authored by them. <b>Edit</b> opens the matching form, the issue's edit form, the comment composer or New issue, filled with the proposal, and saving there is the apply. <b>Discard</b> writes nothing. An edit is a diff of the fields and description; a comment is its text; a split is the new issues and the edit to the original; a duplicate is the two issues and the <code>duplicate_of</code> link it adds; a new issue is its draft.</p>
 </section>
 
 <section class="study">

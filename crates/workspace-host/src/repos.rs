@@ -293,7 +293,11 @@ pub(crate) trait RuleSet {
     }
 }
 
-/// How many times a pass fetches and pushes in all when GitHub's branch moves under its push.
+/// How many times a pass fetches and pushes in all when GitHub's branch moves under the push of
+/// a rule set that `pushes_again`. Only the settings pass's runner boards do, which only this
+/// Mac writes, so a few tries are enough. A storage repository's own pass retries whole instead,
+/// up to `issues_sync::PUSH_TRIES`, which is higher because teammates filing at once each take
+/// the next number.
 const PUSH_TRIES: usize = 3;
 
 /// The only URL and branch a clone is fetched from and pushed to.
