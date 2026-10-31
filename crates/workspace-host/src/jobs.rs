@@ -1490,7 +1490,7 @@ pub(crate) fn unpushed_folder(space: &Space, recipe: &Recipe) -> String {
     format!("{}/{UNPUSHED}", private_folder(space, recipe))
 }
 
-pub(crate) const STOPPED_BY_YOU: &str = "Stopped: you stopped the run.";
+pub(crate) const STOPPED_BY_YOU: &str = "You stopped the run.";
 
 /// Starts and proposes jobs as the service does, with sources checked here, not off the thread.
 #[cfg(test)]
@@ -2329,7 +2329,7 @@ mod tests {
         let stopped = s.host.job_run(&run.id).unwrap();
         assert_eq!(
             (stopped.outcome, stopped.reason.as_str()),
-            (RunOutcome::Stopped, STOPPED_BY_YOU)
+            (RunOutcome::Stopped, "You stopped the run.")
         );
         let thread = run.thread_id.unwrap();
         assert_eq!(

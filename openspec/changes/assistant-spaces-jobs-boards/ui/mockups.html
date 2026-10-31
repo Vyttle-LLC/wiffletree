@@ -156,7 +156,6 @@ code{font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--ov
 .jobhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .jobhead h2{margin:0;font-size:16px}
 .run.long{border-color:color-mix(in srgb,var(--yellow) 55%,var(--edge));background:color-mix(in srgb,var(--yellow) 7%,var(--base))}
-.src .when{color:var(--muted)}
 .old{color:var(--muted)}
 .dialog{border:1px solid var(--edge);border-radius:12px;background:var(--surface);box-shadow:0 8px 24px rgba(0,0,0,.18);padding:14px 16px;display:flex;flex-direction:column;gap:8px;max-width:420px}
 ul.legend{margin:6px 0 0;padding-left:18px;color:var(--subtle);font-size:12px;max-width:900px}
@@ -439,7 +438,7 @@ ul.legend li{margin:3px 0}
         <div class="logo">wiffle<span>tree</span></div>
         <div class="pinned">
           <div class="row sel"><span class="spin"></span>Dot<span class="r"><span class="count">2</span></span></div>
-          <div class="longrun"><span style="flex:1">Morning brief has run 45 min</span><span class="btn quiet">Stop</span></div>
+          <div class="longrun"><span style="flex:1">Morning brief has run 30 min</span><span class="btn quiet">Stop</span></div>
           <div class="row"><span class="ico">▦</span>Boards</div>
         </div>
         <div class="label">Projects</div>
@@ -461,7 +460,7 @@ ul.legend li{margin:3px 0}
             <span class="btn quiet">Pause</span><span class="btn quiet">Edit</span><span class="btn danger">Delete</span>
             <span class="btn off">Run now</span>
           </div>
-          <div class="jobhead"><span class="sp sage"></span><h2>Morning brief</h2><span class="pill ok">Active</span><span class="pill live">Running · 45 min</span></div>
+          <div class="jobhead"><span class="sp sage"></span><h2>Morning brief</h2><span class="pill ok">Active</span><span class="pill live">Running · over 30 min</span></div>
           <div class="card">
             <dl class="kv">
               <dt>Space</dt><dd>Sage</dd>
@@ -481,8 +480,8 @@ ul.legend li{margin:3px 0}
           <h3>Runs</h3>
           <div class="runs">
             <div class="run long">
-              <div class="line"><span class="pill live">Running</span><span style="flex:1">today 07:00 · 45 min so far</span><span class="btn" style="padding:0 9px">Stop</span></div>
-              <span class="note warn">This run has gone past 30 minutes. Stop ends it; the next run still starts on schedule.</span>
+              <div class="line"><span class="pill live">Running</span><span style="flex:1">today 07:00 · over 30 min so far</span><span class="btn" style="padding:0 9px">Stop</span></div>
+              <span class="note warn">This run has gone past 30 minutes. While it runs, the job's scheduled times are skipped; Stop ends it.</span>
             </div>
             <div class="run">
               <div class="line"><span class="pill bad">Failed</span><span>Thu Oct 30 07:00</span></div>
@@ -606,7 +605,7 @@ ul.legend li{margin:3px 0}
       <p class="note">Jobs run only while Wiffletree runs on this Mac.</p>
       <div class="src">☑ Start Wiffletree at login</div>
       <div class="card" style="gap:2px;padding:9px 12px">
-        <div class="jobhead"><span class="sp sage"></span><b style="flex:1">Morning brief</b><span class="pill live">Running · 45 min</span></div>
+        <div class="jobhead"><span class="sp sage"></span><b style="flex:1">Morning brief</b><span class="pill live">Running · over 30 min</span></div>
         <span class="note">Weekdays at 07:00 · Next Mon Nov 3 07:00</span>
       </div>
       <div class="card" style="gap:2px;padding:9px 12px">

@@ -98,7 +98,7 @@ fn run_line(run: &JobRun) -> String {
         run.scheduled_at.unwrap_or(run.started_at),
     )];
     if let (RunOutcome::Running, Some(minutes)) = (run.outcome, run.long_minutes) {
-        parts.push(format!("{} so far", elapsed(minutes)));
+        parts.push(format!("over {} so far", elapsed(minutes)));
     }
     parts.extend(run.catch_up_label());
     if run.scheduled_at.is_none() {
@@ -108,6 +108,20 @@ fn run_line(run: &JobRun) -> String {
         parts.push("no output".into());
     }
     parts.join(" · ")
+}
+
+/// The Jobs list's "Last run" line: how this Mac's newest run ended, since a running one is in
+/// the pills, or, with no run here, when the Mac that runs it last saved an output.
+fn last_run_line(job: &JobState) -> Option<String> {
+    match job.runs.first() {
+        Some(run) if run.outcome == RunOutcome::Running => None,
+        Some(run) => Some(format!(
+            "Last run: {} · {}",
+            run_line(run),
+            run.outcome.label()
+        )),
+        None => (job.last_run_at).map(|at| format!("Last run: {}", wording::day_and_time(at))),
+    }
 }
 
 /// The model a run started on, only when it is not the one the job's page names.
@@ -130,8 +144,9 @@ fn checked_note(run: &JobRun, now: i64) -> (String, bool) {
     }
 }
 
-/// The pills by a job's name: Active, on its page only, or Paused; a running run and how long it
-/// has run; and the Mac that runs it in this Mac's place.
+/// The pills by a job's name: Active, on its page only, or Paused; a running run and the last
+/// 30-minute mark it passed, since that is when `long_minutes` moves; and the Mac that runs it
+/// in this Mac's place.
 fn job_pills(job: &JobState, with_active: bool, p: Palette) -> Vec<Div> {
     let state = match job.recipe.enabled {
         true => with_active.then(|| pill("Active", p.green)),
@@ -140,7 +155,7 @@ fn job_pills(job: &JobState, with_active: bool, p: Palette) -> Vec<Div> {
     let running = (job.runs.iter())
         .find(|run| run.outcome == RunOutcome::Running)
         .map(|run| match run.long_minutes {
-            Some(minutes) => pill(format!("Running · {}", elapsed(minutes)), p.accent),
+            Some(minutes) => pill(format!("Running · over {}", elapsed(minutes)), p.accent),
             None => pill("Running", p.accent),
         });
     let elsewhere = (job.not_here.clone()).map(|why| pill(why, p.subtle));
@@ -548,10 +563,7 @@ impl AssistantPage {
         }
         for job in self.jobs() {
             let key = job.recipe.key();
-            // A running run is in the pills; the line names how an ended one ended.
-            let last = (job.runs.first())
-                .filter(|run| run.outcome != RunOutcome::Running)
-                .map(|run| format!("Last run: {} · {}", run_line(run), run.outcome.label()));
+            let last = last_run_line(job);
             // Paused and another Mac's runner are in the pills.
             let next = match (&job.not_here, job.recipe.enabled, job.next_runs.first()) {
                 (Some(_), _, _) | (None, false, _) => String::new(),
@@ -919,8 +931,8 @@ impl AssistantPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHECK_FRESH_MS, attention, checked_note, file_type_label, long_run_text, long_runs,
-        run_line, run_model, stale_source_line,
+        CHECK_FRESH_MS, attention, checked_note, file_type_label, last_run_line, long_run_text,
+        long_runs, run_line, run_model, stale_source_line,
     };
     use workspace_core::job::{
         JobKey, JobRun, JobState, Recipe, RunOutcome, Schedule, SourceCheck,
@@ -1031,8 +1043,13 @@ mod tests {
             "the pill names the outcome: {line}"
         );
         let mut long = run("r2", RunOutcome::Running, 0);
-        long.long_minutes = Some(45);
-        assert!(run_line(&long).ends_with(" · 45 min so far"));
+        long.long_minutes = Some(30);
+        assert!(run_line(&long).ends_with(" · over 30 min so far"));
+        // Another Mac's job, with no run here, says when its runner last saved.
+        let mut elsewhere = job(vec![]);
+        elsewhere.last_run_at = Some(0);
+        assert!(last_run_line(&elsewhere).is_some_and(|line| line.starts_with("Last run: ")));
+        assert_eq!(last_run_line(&job(vec![long])), None);
         assert_eq!(file_type_label("md"), "Markdown");
         assert_eq!(file_type_label("html"), "HTML");
     }

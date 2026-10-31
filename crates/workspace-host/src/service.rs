@@ -8218,7 +8218,7 @@ mod tests {
         cancelled_turn_ends(&mut actor, &thread);
         let stopped = actor.host.job_run(&run).unwrap();
         assert_eq!(stopped.outcome, RunOutcome::Stopped);
-        assert_eq!(stopped.reason, crate::jobs::STOPPED_BY_YOU);
+        assert_eq!(stopped.reason, "You stopped the run.");
 
         let (run, thread) = turn(&mut actor);
         finish_turn(&mut actor, &thread, "run");
