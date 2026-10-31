@@ -74,7 +74,7 @@ The PRD's memory budget is a fixture of 100,000 log entries and 10,000 notes, wi
 10. **The Memory panel**, for a project with a brain, shows:
     - the brain and its sync state;
     - the project's batches that are not yet merged, with their stages;
-    - a link to the Inbox with the count of open conflicts;
+    - the count of open conflicts, linking to the browser's Conflicts view in the project scope (the Inbox lists brain conflicts once `brain-compile` ships);
     - the five most recent entries;
     - unsent rows;
     - the capture form;

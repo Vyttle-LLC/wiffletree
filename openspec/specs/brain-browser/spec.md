@@ -66,7 +66,7 @@ This machine's unmerged entries SHALL appear as pending, with their batch's stag
 - **THEN** it shows RB, `source: skill` and its merged PR, and says it was logged outside this install
 
 ### Requirement: The Conflicts view shows open conflicts with rulings
-The Conflicts view SHALL show each open conflict from `reconcile-queue.md` in scope as a card with the new claim, the established decision, the evidence, the recommended ruling and the actions Uphold existing, Keep new, Keep both and Defer, as `brain-compile` specifies. A ruled conflict SHALL show its ruling and that a compile starts when its entry merges. With no conflicts, it SHALL say so.
+The Conflicts view SHALL show each open conflict from `reconcile-queue.md` in scope as a card with the new claim, the established decision, the evidence, the recommended ruling and the actions Uphold existing, Keep new, Keep both and Defer, as `brain-compile` specifies. Until `brain-compile` ships, the actions SHALL be shown disabled with the reason "Rulings come with brain compile". A ruled conflict SHALL show its ruling and that a compile starts when its entry merges. With no conflicts, it SHALL say so.
 
 #### Scenario: No conflicts
 - **WHEN** `vyttle-docs` has no open conflicts
@@ -76,17 +76,17 @@ The Conflicts view SHALL show each open conflict from `reconcile-queue.md` in sc
 A project's Memory panel SHALL show:
 - the project's brain and its sync state;
 - the project's batches that are not yet merged, with their stages;
-- the number of open conflicts, linking to the Inbox;
+- the number of open conflicts, linking to the browser's Conflicts view in the project scope;
 - the five most recent entries in scope;
 - unsent rows;
 - the capture form;
 - Open brain browser and Search.
 
-Selecting an entry SHALL open it in the browser with the project scope. A project without a brain SHALL see the "No brain" state from `brain-registry`.
+Selecting an entry SHALL open it in the browser with the project scope. A project without a brain SHALL see the "No brain" state from `brain-registry`. The Inbox lists brain conflicts once `brain-compile` ships.
 
 #### Scenario: The relay project
 - **WHEN** the human opens Memory in "Watch app call relay"
-- **THEN** it shows `sagehaven-docs`, the failed batch #214 and the auto-merging batch #213, a link to 2 conflicts in the Inbox, and the five newest entries
+- **THEN** it shows `sagehaven-docs`, the failed batch #214 and the auto-merging batch #213, a link to its 2 conflicts in the browser's Conflicts view, and the five newest entries
 
 ### Requirement: Search is a keyboard quick-open over one brain
 ⌘K and Ctrl+K anywhere in the window, and `/` when focus is not in a text field, SHALL open a search overlay over one brain:

@@ -14,7 +14,7 @@ Michael approved the Brains page and brain browser in `design/mockups/current/br
 - **The Memory panel becomes the project's summary.** It shows:
   - the project's brain and its sync state;
   - the project's batches with their stages;
-  - open conflicts, linking to the Inbox;
+  - open conflicts, linking to the browser's Conflicts view (the Inbox lists them once `brain-compile` ships);
   - recent entries and unsent rows;
   - the capture form;
   - Open brain browser and Search.
