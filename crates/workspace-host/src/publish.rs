@@ -541,7 +541,10 @@ impl Host {
         }
         let repository = checked.repository.clone();
         let job = self.start_request(&mut ticket, checked, caller, title, body, false)?;
-        Ok((self.publish_status(&ticket, &repository), job))
+        let status = self.publish_status(&ticket, &repository);
+        let caller = self.session(caller)?;
+        let status = self.with_milestone_prompt(status, &caller, &ticket, "published")?;
+        Ok((status, job))
     }
 
     /// Publishes a ticket for the PR keeper: only a push to its open pull request, with every

@@ -48,6 +48,7 @@ fn the_tool_list_offers_ticket_tools_and_no_repository_coordinator_tools() {
             "merge_ticket",
             "close_ticket",
             "archive_agent",
+            "log_work",
             "ask_user",
             "close_question",
             "request_permission",

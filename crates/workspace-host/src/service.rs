@@ -1796,6 +1796,10 @@ impl Actor {
     /// backing off to thirty minutes while GitHub cannot be reached. A brain command makes every
     /// pass due at once.
     fn refresh_brains(&mut self, at: i64) {
+        // First, so a log batch closed since the last call is queued for this pass.
+        if let Err(e) = self.host.send_log_batches(at, &self.publish_tools.git) {
+            eprintln!("Log batches: {e:#}");
+        }
         let now_due = std::mem::take(&mut self.host.brains_now);
         let cadences = self.host.brain_cadences().unwrap_or_else(|e| {
             eprintln!("Brains: {e:#}");

@@ -36,7 +36,6 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::Progress { .. }
         | Command::RunSummaries { .. }
         | Command::Logs { .. }
-        | Command::Runs { .. }
         | Command::Activity { .. }
         | Command::GitHistory { .. }
         | Command::Settings
@@ -105,7 +104,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::SetUpBrain { .. }
         | Command::SetBrainCompiler { .. }
         | Command::AmendBrainBatch { .. }
-        | Command::ExportLogs { .. }
+        | Command::SendLogsNow { .. }
         | Command::SetWorkspacesDir { .. }
         | Command::SetVerification { .. }
         | Command::SetBuildsAtOnce { .. }

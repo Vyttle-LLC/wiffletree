@@ -1,10 +1,12 @@
 //! Small stdio MCP bridge. Credentials identify the caller; agents cannot supply a sender.
+use crate::memory;
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Read, Write},
     os::unix::net::UnixStream,
 };
+use workspace_core::Role;
 
 pub fn read_json(reader: &mut impl BufRead) -> Result<Option<Value>> {
     let mut line = Vec::new();
@@ -135,6 +137,12 @@ pub fn tools() -> Value {
             vec!["session_id"]
         ),
         tool(
+            "log_work",
+            "Coordinator or implementer: record one terse entry in your project's Space's brain, at a meaningful milestone: a decision, a finished assignment, a handoff or a blocker. Give type, a one-line title of at most 80 characters, and one line each of changed, why and state; newlines become spaces. No transcripts, step-by-step narration or pasted output, and never child personal information (names, message text, phone numbers, locations), credentials or secrets. Wiffletree fills in the entry's id, date, author and ref, from your ticket's branch, commits and pull request; you cannot give them. An implementer always logs for its ticket's repository. The coordinator may name one of the project's repositories as repository; without one, the entry is a planning entry. milestone is an optional deduplication key: the same key with the same content returns the first entry, and with other content is refused. Refused, storing nothing, when the Space has no brain, gh is not signed in, or the entry is over 2,000 characters, saying how much to cut. Entries reach the brain in batches: one pull request per ticket, or per coordinator session within a day. Returns the entry's id, file path and ref.",
+            json!({"type":{"type":"string","enum":["decision","observation"]},"title":string,"changed":string,"why":string,"state":string,"repository":string,"milestone":string}),
+            vec!["type", "title", "changed", "why", "state"]
+        ),
+        tool(
             "ask_user",
             "Coordinator: place one decision in front of the human, then finish your turn. The answer resumes you. When there are distinct choices, list them as options: short, self-explanatory labels the human can pick with one click. They can always answer in their own words instead.",
             json!({"request_id":string,"question":string,"options":{"type":"array","items":{"type":"string"},"maxItems":6}}),
@@ -154,7 +162,29 @@ pub fn tools() -> Value {
         )
     ])
 }
-pub fn serve_stdio() -> Result<()> {
+/// The tools listed for a session in `role`: every tool, except `log_work` for the roles that do
+/// not log. The host still refuses a call its caller may not make.
+pub fn tools_for(role: Option<Role>) -> Value {
+    let mut tools = tools();
+    if !role.is_some_and(memory::logs_work) {
+        let listed = tools.as_array_mut().expect("tools are a list");
+        listed.retain(|tool| tool["name"] != "log_work");
+    }
+    tools
+}
+/// A tool's result as the agent reads it: the JSON, with a milestone prompt moved to its last
+/// line.
+fn result_text(mut result: Value) -> String {
+    let prompt = (result.as_object_mut())
+        .and_then(|fields| fields.remove(memory::PROMPT_KEY))
+        .and_then(|prompt| prompt.as_str().map(str::to_owned));
+    match prompt {
+        Some(prompt) => format!("{result}\n{prompt}"),
+        None => result.to_string(),
+    }
+}
+/// Serves a session's MCP tools; `role` is the session's, as its launch names it.
+pub fn serve_stdio(role: Option<Role>) -> Result<()> {
     let socket = std::env::var("WORKSPACE_SOCKET").context("Missing workspace endpoint")?;
     let token = std::env::var("WORKSPACE_TOKEN").context("Missing session credential")?;
     let mut input = std::io::stdin().lock();
@@ -169,7 +199,7 @@ pub fn serve_stdio() -> Result<()> {
                     json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"wiffletree","version":"0.2.0"}})
                 }
                 "ping" => json!({}),
-                "tools/list" => json!({"tools":tools()}),
+                "tools/list" => json!({"tools":tools_for(role)}),
                 "tools/call" => {
                     let mut stream =
                         UnixStream::connect(&socket).context("Workspace host unavailable")?;
@@ -182,7 +212,7 @@ pub fn serve_stdio() -> Result<()> {
                     let reply = read_json(&mut BufReader::new(stream))?
                         .context("Workspace disconnected")?;
                     let error = reply.get("error").and_then(Value::as_str);
-                    json!({"isError":error.is_some(),"content":[{"type":"text","text":error.map(str::to_owned).unwrap_or_else(||reply["result"].to_string())}]})
+                    json!({"isError":error.is_some(),"content":[{"type":"text","text":error.map(str::to_owned).unwrap_or_else(||result_text(reply["result"].clone()))}]})
                 }
                 _ => anyhow::bail!("Method not found"),
             })
@@ -197,4 +227,19 @@ pub fn serve_stdio() -> Result<()> {
         output.flush()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_milestone_prompt_is_the_results_last_line() {
+        let prompted = json!({"status": "publishing", memory::PROMPT_KEY: "Log it."});
+        assert_eq!(
+            result_text(prompted),
+            "{\"status\":\"publishing\"}\nLog it."
+        );
+        assert_eq!(result_text(json!({"id": "a"})), "{\"id\":\"a\"}");
+    }
 }

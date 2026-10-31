@@ -9,7 +9,9 @@ fn main() -> Result<()> {
         return serve(&args[1..]);
     }
     if args.first().map(String::as_str) == Some("agent-mcp") {
-        return workspace_host::mcp::serve_stdio();
+        let role = (args.get(1))
+            .and_then(|role| serde_json::from_value(serde_json::Value::String(role.clone())).ok());
+        return workspace_host::mcp::serve_stdio(role);
     }
     if args.first().map(String::as_str) == Some("probe-quota") {
         println!(

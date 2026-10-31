@@ -672,34 +672,72 @@ pub enum LogKind {
     Decision,
     Observation,
 }
+/// What a log entry's author gives (OpenSpec change `brain-log-capture`). The host fills in the
+/// rest; nothing here names the entry's id, date, `ref` or author.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogInput {
     pub session_id: String,
-    pub milestone: String,
+    /// A deduplication key: repeating it with the same content returns the first entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub milestone: Option<String>,
     pub kind: LogKind,
     pub title: String,
-    pub reference: String,
+    /// The coordinator's choice of one of its project's repositories, by id or name. Without
+    /// one, its entry is a planning entry in the brain repository's own folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
     pub changed: String,
     pub why: String,
     pub state: String,
 }
+/// A stored log entry. Entries captured before `brain-log-capture` keep their old id and lack
+/// the brain fields; those already in a legacy `logs/<repo>.md` file say so.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkLog {
     pub sequence: i64,
+    /// The entry's lowercase ULID.
     pub id: String,
     pub project_id: String,
     pub task_id: Option<String>,
+    /// The entry's folder under `logs/`: the GitHub repository's name.
     pub repository: String,
     pub created_at: i64,
+    /// The host's local date at capture, `YYYY-MM-DD`.
+    #[serde(default)]
+    pub date: String,
     pub input: LogInput,
+    /// The entry's `ref`, which the host computed.
+    #[serde(default)]
+    pub reference: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<SpaceId>,
+    /// The brain repository, `owner/name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brain: Option<String>,
+    /// The entry's file in the brain repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    /// The human's GitHub login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<Provider>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
+    /// Exported to a legacy `logs/<repo>.md` file before per-entry files; the legacy import
+    /// brings it over, so it is never written again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_legacy_file: bool,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MaintenanceRun {
-    pub id: String,
-    pub project_id: String,
-    pub outcome: String,
-    pub exported: usize,
-    pub created_at: i64,
+impl WorkLog {
+    /// Neither in a batch nor in a legacy file: it waits for its project's Space to have a brain.
+    pub fn is_unsent(&self) -> bool {
+        self.batch_id.is_none() && !self.in_legacy_file
+    }
 }
 /// The live workspace. Archived sessions, accepted and closed tickets and those sessions'
 /// runtimes are left to the `Archive`; `WorkspaceIndex` joins the two for views.
@@ -3214,11 +3252,10 @@ pub enum Command {
         batch_id: String,
         amendment: BrainAmendment,
     },
-    ExportLogs {
-        project_id: String,
-    },
-    Runs {
-        project_id: String,
+    /// Send now: closes every open log batch of the brain `owner/name`, or of every brain, so
+    /// each opens its pull request on the brain's next pass; answered with how many closed.
+    SendLogsNow {
+        repository: Option<String>,
     },
     Activity {
         project_id: String,
@@ -3520,7 +3557,6 @@ impl Command {
             | Self::Progress { .. }
             | Self::RunSummaries { .. }
             | Self::Logs { .. }
-            | Self::Runs { .. }
             | Self::Activity { .. }
             | Self::GitHistory { .. }
             | Self::Settings
@@ -3588,7 +3624,7 @@ impl Command {
             | Self::SetUpBrain { .. }
             | Self::SetBrainCompiler { .. }
             | Self::AmendBrainBatch { .. }
-            | Self::ExportLogs { .. }
+            | Self::SendLogsNow { .. }
             | Self::SetWorkspacesDir { .. }
             | Self::SetVerification { .. }
             | Self::SetBuildsAtOnce { .. }
@@ -3661,6 +3697,7 @@ impl Command {
                 | Self::SetUpBrain { .. }
                 | Self::SetBrainCompiler { .. }
                 | Self::AmendBrainBatch { .. }
+                | Self::SendLogsNow { .. }
                 | Self::RemoteAccess
                 | Self::SetRemoteAccess { .. }
                 | Self::OpenPairing

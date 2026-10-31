@@ -15,7 +15,7 @@ No dependency on the other brain changes, or on `spaces`, for steps 1–3, which
 
 ## 3. Shared fixtures
 
-- [ ] 3.1 Point `brain-log-capture`'s renderer tests at `gate/tests/fixtures/` instead of copies. Lands with `brain-log-capture` task 2.2: the per-entry renderer and its tests do not exist yet, and the fixtures they will read are in place (`gate/tests/fixtures/entries/`).
+- [x] 3.1 Point `brain-log-capture`'s renderer tests at `gate/tests/fixtures/` instead of copies. Landed with `brain-log-capture` task 2.2: `memory.rs`'s renderer test reads `gate/tests/fixtures/entries/` where the gate keeps them.
 
 ## 4. Set up and update
 

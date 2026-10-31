@@ -372,6 +372,8 @@ impl Host {
         // After local storage is in place, as turning a brain folder into its repository writes
         // the Space's file.
         brains::migrate(&mut host)?;
+        // After the brains, as an unexported entry is queued for its Space's brain.
+        memory::migrate(&mut host)?;
         host.clear_uploads()?;
         host.recover()?;
         host.end_interrupted_publishes()?;
@@ -983,9 +985,14 @@ impl Host {
                     Self::event(&tx, &project, Some(id), kind, &session.name)?;
                 }
             }
+            let mut closed_logs = 0;
             if archived {
                 let sessions = affected.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
                 Self::stop_schedules_in(&tx, &sessions, None, "archived")?;
+                for session in &sessions {
+                    let closing = memory::Closing::Session(session);
+                    closed_logs += memory::close_log_batches(&tx, closing, now())?;
+                }
             }
             if stops_project {
                 tx.execute(
@@ -1001,6 +1008,7 @@ impl Host {
                 )?;
             }
             tx.commit()?;
+            host.brains_now |= closed_logs > 0;
             Ok(affected)
         };
         if !archived {
@@ -1815,10 +1823,9 @@ impl Host {
                 &amendment,
                 &publish::Tools::default().git,
             )?)?,
-            Command::ExportLogs { project_id } => {
-                serde_json::to_value(self.export_logs(&project_id)?)?
+            Command::SendLogsNow { repository } => {
+                json!({"closed": self.send_logs_now(repository.as_deref())?})
             }
-            Command::Runs { project_id } => serde_json::to_value(self.runs(&project_id)?)?,
             Command::Activity {
                 project_id,
                 before,

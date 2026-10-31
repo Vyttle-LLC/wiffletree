@@ -1833,7 +1833,7 @@ impl Host {
         Ok(())
     }
 
-    fn coordinator_of(&self, project: &str) -> Result<Option<String>> {
+    pub(crate) fn coordinator_of(&self, project: &str) -> Result<Option<String>> {
         Ok(self
             .db
             .query_row(
@@ -1846,14 +1846,14 @@ impl Host {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::publish::tests::exit;
     use crate::test_support::git;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
-    const REPO: &str = "Sage-Social/sagehaven-docs";
+    pub(crate) const REPO: &str = "Sage-Social/sagehaven-docs";
     const URL: &str = "https://github.com/Sage-Social/sagehaven-docs.git";
     /// A value the sensitive scan would match, planted in check output that must never be kept.
     const PLANTED: &str = "555-867-5309";
@@ -1869,7 +1869,7 @@ mod tests {
 
     /// The brain on GitHub as a local bare repository, a `gh` that answers from what it holds, and
     /// every command each tool was sent. No test reaches GitHub.
-    struct GitHub {
+    pub(crate) struct GitHub {
         folder: PathBuf,
         bare: PathBuf,
         gh: Mutex<Vec<Vec<String>>>,
@@ -1883,7 +1883,7 @@ mod tests {
         required: Mutex<Vec<&'static str>>,
     }
     impl GitHub {
-        fn new(folder: &Path) -> Arc<Self> {
+        pub(crate) fn new(folder: &Path) -> Arc<Self> {
             let bare = folder.join("github.git");
             git(
                 folder,
@@ -1913,7 +1913,7 @@ mod tests {
                 required: Mutex::new(GATE_CHECKS.to_vec()),
             })
         }
-        fn tools(self: &Arc<Self>) -> Tools {
+        pub(crate) fn tools(self: &Arc<Self>) -> Tools {
             let github = self.clone();
             let gh = move |_: &Path, args: &[&str]| -> Result<runtime::GhAnswer> {
                 Ok(github.answer_gh(args))
@@ -2159,7 +2159,7 @@ mod tests {
         let sage = name_brain(&mut host, &sage.id, REPO);
         (host, sage)
     }
-    fn name_brain(host: &mut Host, space: &SpaceId, repository: &str) -> SpaceId {
+    pub(crate) fn name_brain(host: &mut Host, space: &SpaceId, repository: &str) -> SpaceId {
         let mut space = host.space(space).unwrap().space;
         let (owner, name) = repository.split_once('/').unwrap();
         space.brain = Some(SpaceBrain {
@@ -2174,7 +2174,7 @@ mod tests {
         host.update_space(space).unwrap().space.id
     }
     /// Runs the brain's pass as the service does, off the host thread's state.
-    fn run(host: &mut Host, tools: &Tools) -> bool {
+    pub(crate) fn run(host: &mut Host, tools: &Tools) -> bool {
         let pass = host.brain_pass(REPO).unwrap().unwrap();
         let passed = super::pass(pass, tools);
         let reached = passed.reached;

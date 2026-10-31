@@ -14,7 +14,7 @@ impl Inspector {
     }
 
     /// Where the project's Space keeps its brain on this Mac, a local folder or a GitHub brain's
-    /// clone, which pending memories export to.
+    /// clone.
     fn local_brain_path(&self, space: &Space) -> Option<String> {
         let index = self.shared.index.as_ref()?;
         index
@@ -77,7 +77,6 @@ impl Inspector {
         let local = space
             .filter(|_| brain.is_some())
             .and_then(|s| self.local_brain_path(s));
-        let exports = local.is_some();
         let mut links = div().flex().flex_wrap().gap_2().child(
             button("open-brains")
                 .outline()
@@ -131,21 +130,6 @@ impl Inspector {
                     ),
             })
             .child(links)
-            .when(exports, |d| {
-                d.child(
-                    div().flex().child(
-                        button("export")
-                            .outline()
-                            .icon(icon("arrow-up"))
-                            .label("Export pending memories")
-                            .on_click(cx.listener(|v, _, w, c| {
-                                if let Some(project_id) = v.shared.project_id() {
-                                    v.request(Command::ExportLogs { project_id }, w, c);
-                                }
-                            })),
-                    ),
-                )
-            })
     }
 
     pub(super) fn memory_panel(&self, p: Palette, cx: &mut Context<Self>) -> Div {

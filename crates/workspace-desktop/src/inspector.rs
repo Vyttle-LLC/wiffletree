@@ -267,10 +267,10 @@ impl Inspector {
             Command::AppendLog {
                 input: LogInput {
                     session_id,
-                    milestone: new_id(),
+                    milestone: None,
                     kind: self.memory_kind.clone(),
                     title,
-                    reference: "—".into(),
+                    repository: None,
                     changed,
                     why: "Captured directly in native prototype".into(),
                     state: "Source report; evidence not independently verified".into(),
@@ -869,16 +869,13 @@ impl Requests for Inspector {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let value = match reply {
-            Ok(value) => value,
-            Err(error) => {
-                // A refused compaction shows in its form.
-                if let Command::CompactContext { session_id, .. } = &command {
-                    return self.compact_refused(session_id, &error);
-                }
-                return toast_error(error, window, cx);
+        if let Err(error) = reply {
+            // A refused compaction shows in its form.
+            if let Command::CompactContext { session_id, .. } = &command {
+                return self.compact_refused(session_id, &error);
             }
-        };
+            return toast_error(error, window, cx);
+        }
         match command {
             Command::CompactContext { session_id, .. } => self.compact_accepted(&session_id),
             Command::AppendLog { .. } => {
@@ -888,18 +885,6 @@ impl Requests for Inspector {
                     .update(cx, |input, cx| input.set_value("", window, cx));
                 toast("Saved to project memory", window, cx);
                 self.load_panel(window, cx);
-            }
-            Command::ExportLogs { .. } => {
-                let exported = value["exported"].as_u64().unwrap_or_default();
-                toast(
-                    if exported == 0 {
-                        "Nothing new to export".to_owned()
-                    } else {
-                        format!("Exported {exported} memories to the brain")
-                    },
-                    window,
-                    cx,
-                );
             }
             _ => {}
         }
