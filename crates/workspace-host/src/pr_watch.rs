@@ -1165,7 +1165,7 @@ pub(crate) mod tests {
             Some(3 * MINUTE + ACTIVE_MS)
         );
         // A repository whose ticket is newer than the last listing is due at once too, and
-        // leaves again when the listing shows no open ticket there.
+        // leaves again when the listing shows no ticket to watch there.
         watch.check_now("new");
         assert_eq!(watch.next_due(), Some(0));
         watch.keep(["r"]);
@@ -1173,7 +1173,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_repository_without_open_tickets_leaves_the_watch() {
+    fn a_repository_with_no_ticket_to_watch_leaves_the_watch() {
         let mut watch = Watch::default();
         watch.keep(["web", "docs"]);
         watch.start_due(0);

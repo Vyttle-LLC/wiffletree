@@ -65,7 +65,8 @@ impl History {
 /// application rechecks the repository, tickets and watched base before making work due.
 pub(crate) struct KeeperPoll {
     pub(crate) repository: Repository,
-    /// Each ticket with an open PR, the base commit the keeper last saw for it, and its base.
+    /// Each open ticket with an open PR, the base commit the keeper last saw for it, and its
+    /// base.
     tickets: Vec<(Ticket, Option<String>, stacks::Base)>,
 }
 #[derive(Default)]

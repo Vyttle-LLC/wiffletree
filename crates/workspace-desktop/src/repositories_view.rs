@@ -1831,8 +1831,8 @@ fn repository_counts(snapshot: &Snapshot, repository: &Repository, projects: usi
 }
 
 /// When the repository's PRs were last checked, or why not, and whether the check failed. A
-/// repository is not watched, and shows nothing, without an open ticket whose coordinator is
-/// not archived, which the snapshot lists.
+/// repository shows nothing without an open ticket whose coordinator is not archived, which the
+/// snapshot lists, even while the watcher still reads a finished ticket's PR there.
 fn pr_check_status(snapshot: &Snapshot, repository: &Repository) -> Option<(String, bool)> {
     let listed = |id: &str| snapshot.sessions.iter().any(|s| s.id == id && !s.archived);
     open_tickets(snapshot, repository).find(|t| listed(&t.coordinator_id))?;
