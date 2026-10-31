@@ -224,7 +224,8 @@ impl AssistantPage {
             locals.and_then(|l| l.get(id)).is_none_or(|l| l.enabled)
         };
         let open = self.open_tab().map(|tab| tab.thread.space_id.clone());
-        (self.chosen_space.clone().filter(&on))
+        // `on` borrows only `self`, so it is `Copy` and passes by value twice.
+        (self.chosen_space.clone().filter(on))
             .or(open)
             .or_else(|| self.spaces().iter().map(|s| s.id.clone()).find(on))
     }
