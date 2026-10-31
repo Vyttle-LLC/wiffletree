@@ -31,7 +31,7 @@ impl Creation {
             Self::Agent => "Assign ticket agent",
             Self::Repository => "Attach repository",
             Self::Import => "Add repositories",
-            Self::ProjectRepositories => "Project repositories",
+            Self::ProjectRepositories => "Add to this project",
             Self::ProjectFromIssue => "Start project from issue",
         }
     }
@@ -116,8 +116,9 @@ pub(crate) struct CreationForm {
     folders: BTreeSet<String>,
     scanning: bool,
     workspace_repositories: Vec<Repository>,
-    /// The project's choice: `None` uses every workspace repository.
-    chosen_repositories: Option<BTreeSet<String>>,
+    /// Add to this project's ticks, and the project's Space: its repositories are always ticked.
+    added_repositories: BTreeSet<String>,
+    space: Option<Space>,
     from_issue: Option<FromIssue>,
 }
 
@@ -154,9 +155,12 @@ impl CreationForm {
         let project_id = selected.map(|s| s.project_id.clone());
         let project = project_id.as_deref().and_then(|id| index.project(id));
         let project_name = project.map(|p| p.name.clone()).unwrap_or_default();
-        let chosen_repositories = project
-            .and_then(|p| p.repositories.as_ref())
-            .map(|ids| ids.iter().cloned().collect());
+        let added_repositories = project
+            .map(|p| p.added_repositories.iter().cloned().collect())
+            .unwrap_or_default();
+        let space = project
+            .and_then(|p| snapshot.spaces.iter().find(|s| s.id == p.space))
+            .cloned();
         let root_id = index
             .sessions()
             .find(|s| {
@@ -245,7 +249,8 @@ impl CreationForm {
             folders: BTreeSet::new(),
             scanning: false,
             workspace_repositories: snapshot.repositories.clone(),
-            chosen_repositories,
+            added_repositories,
+            space,
             from_issue: None,
         }
     }
@@ -408,16 +413,13 @@ impl CreationForm {
         }
         let project_id = self.project_id.clone().ok_or("Select a project first")?;
         if self.kind == Creation::ProjectRepositories {
-            return Ok(Command::SetProjectRepositories {
+            return Ok(Command::SetAddedRepositories {
                 project_id,
-                repository_ids: self.chosen_repositories.as_ref().map(|chosen| {
-                    // Keep the workspace order rather than the set's.
-                    self.workspace_repositories
-                        .iter()
-                        .filter(|r| chosen.contains(&r.id))
-                        .map(|r| r.id.clone())
-                        .collect()
-                }),
+                // Keep the workspace order rather than the set's.
+                repository_ids: (self.workspace_repositories.iter())
+                    .filter(|r| self.added_repositories.contains(&r.id))
+                    .map(|r| r.id.clone())
+                    .collect(),
             });
         }
         let selected = self.choices.read(cx).selected_value();
@@ -798,7 +800,7 @@ impl CreationForm {
                     .disabled(self.pending),
             ))
             .child(Self::note(
-                "The project uses the issue’s repositories that are on this Mac, or the Space’s when the issue lists none. The coordinator gets the issue as its first message, as context written by its authors.",
+                "The project uses the Space’s repositories, and any others the issue lists that are on this Mac are added to it. The coordinator gets the issue as its first message, as context written by its authors.",
                 cx,
             ))
             .child(Self::note(uses, cx))
@@ -813,37 +815,35 @@ impl CreationForm {
             })
     }
 
+    /// Add to this project: the Space's repositories first, ticked and disabled, then the
+    /// others, which change this project only.
     fn project_repository_fields(&self, cx: &mut Context<Self>) -> Div {
-        let uses_all = self.chosen_repositories.is_none();
-        let mut body = div().flex().flex_col().gap_4().child(
-            Checkbox::new("use-all-repositories")
-                .label("Use every workspace repository, including ones added later")
-                .checked(uses_all)
-                .disabled(self.pending)
-                .on_click(cx.listener(|form, checked: &bool, _, cx| {
-                    // Unticking starts from everything, so nothing silently disappears.
-                    form.chosen_repositories = (!*checked).then(|| {
-                        form.workspace_repositories
-                            .iter()
-                            .map(|r| r.id.clone())
-                            .collect()
-                    });
-                    cx.notify();
-                })),
-        );
+        let space = self.space.as_ref();
+        let name = space.map_or("The Space", |s| s.name.as_str());
+        let mut body = div().flex().flex_col().gap_4().child(Self::note(
+            format!(
+                "{name}’s repositories are always included. Tick others for this project only; the Space does not change."
+            ),
+            cx,
+        ));
         if self.workspace_repositories.is_empty() {
             return body.child(Self::note(
                 "The workspace has no repositories yet. Use Add repositories to bring some in.",
                 cx,
             ));
         }
+        let listed = |repo: &Repository| space.is_some_and(|s| s.lists(repo));
+        let (from_space, others): (Vec<&Repository>, Vec<&Repository>) =
+            self.workspace_repositories.iter().partition(|r| listed(r));
         let mut list = div().flex().flex_col();
-        for repo in &self.workspace_repositories {
+        for repo in from_space.into_iter().chain(others) {
             let id = repo.id.clone();
-            let chosen = self
-                .chosen_repositories
-                .as_ref()
-                .is_none_or(|chosen| chosen.contains(&repo.id));
+            let from_space = listed(repo);
+            let chosen = from_space || self.added_repositories.contains(&repo.id);
+            let source = match from_space {
+                true => format!("From {name}"),
+                false => format!("Base {}", repo.base),
+            };
             list = list.child(
                 div()
                     .py_2()
@@ -855,14 +855,12 @@ impl CreationForm {
                     .child(
                         Checkbox::new(SharedString::from(format!("use-{id}")))
                             .checked(chosen)
-                            .disabled(self.pending || uses_all)
+                            .disabled(self.pending || from_space)
                             .on_click(cx.listener(move |form, checked: &bool, _, cx| {
-                                if let Some(chosen) = &mut form.chosen_repositories {
-                                    if *checked {
-                                        chosen.insert(id.clone());
-                                    } else {
-                                        chosen.remove(&id);
-                                    }
+                                if *checked {
+                                    form.added_repositories.insert(id.clone());
+                                } else {
+                                    form.added_repositories.remove(&id);
                                 }
                                 cx.notify();
                             })),
@@ -878,7 +876,7 @@ impl CreationForm {
                             )
                             .child(Self::note(repo.path.clone(), cx).text_ellipsis()),
                     )
-                    .child(Self::note(format!("Base {}", repo.base), cx)),
+                    .child(Self::note(source, cx)),
             );
         }
         body = body.child(list);
@@ -1057,7 +1055,7 @@ impl Render for CreationForm {
             (Some(issue), _) => format!("From {} · {}", issue.id, issue.title),
             (None, Some(_)) => format!("In {}", self.project_name),
             (None, None) => {
-                "For the whole workspace. Projects that use every repository pick these up.".into()
+                "For the whole workspace. A project uses one once its Space lists it or it is added to that project.".into()
             }
         };
         div()

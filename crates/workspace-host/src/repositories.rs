@@ -94,6 +94,81 @@ pub(crate) fn migrate_to_workspace(db: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Every open ticket's project, repository and title, in the order they were created. A ticket's
+/// project is its coordinator's, archived or not.
+pub(crate) fn open_ticket_repositories(db: &Connection) -> Result<Vec<OpenTicketRepository>> {
+    let sql = format!(
+        "SELECT s.project_id,json_extract(t.data,'$.repository_id'),json_extract(t.data,'$.title') FROM tickets t JOIN sessions s ON s.id=t.coordinator_id WHERE t.id IN (SELECT id FROM tickets WHERE {}) ORDER BY t.rowid",
+        tickets_where(true)
+    );
+    Ok(db
+        .prepare(&sql)?
+        .query_map([], |r| {
+            Ok(OpenTicketRepository {
+                project_id: r.get(0)?,
+                repository_id: r.get(1)?,
+                title: r.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// Turns each project's selection into its added repositories (schema 10), changing no Space: what
+/// it named and its open tickets' repositories, less what its Space lists on this Mac. A row with
+/// `added_repositories` is done, which makes this run once however often the earlier migrations
+/// put `user_version` back.
+pub(crate) fn migrate_to_added(db: &Connection) -> Result<()> {
+    let tx = db.unchecked_transaction()?;
+    let projects: Vec<(String, Value)> = tx
+        .prepare(
+            "SELECT id,data FROM projects WHERE json_type(data,'$.added_repositories') IS NULL ORDER BY rowid",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get::<_, String>(1)?)))?
+        .map(|row| {
+            let (id, data) = row?;
+            Ok((id, serde_json::from_str(&data)?))
+        })
+        .collect::<Result<_>>()?;
+    let spaces: Vec<Space> = tx
+        .prepare("SELECT data FROM spaces")?
+        .query_map([], |r| decode(r, 0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let workspace: Vec<Repository> = tx
+        .prepare("SELECT data FROM repositories")?
+        .query_map([], |r| decode(r, 0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let open_tickets = open_ticket_repositories(&tx)?;
+    for (id, mut project) in projects {
+        let space = (spaces.iter()).find(|s| Some(s.id.as_str()) == project["space"].as_str());
+        let named =
+            (project["repositories"].as_array().into_iter().flatten()).filter_map(|id| id.as_str());
+        let ticketed = (open_tickets.iter())
+            .filter(|t| t.project_id == id)
+            .map(|t| t.repository_id.as_str());
+        let mut added: Vec<&str> = vec![];
+        for repository in named.chain(ticketed) {
+            let listed = (workspace.iter())
+                .any(|r| r.id == repository && space.is_some_and(|space| space.lists(r)));
+            if !listed && !added.contains(&repository) {
+                added.push(repository);
+            }
+        }
+        let added = json!(added);
+        let fields = project
+            .as_object_mut()
+            .context("Project is not an object")?;
+        fields.remove("repositories");
+        fields.insert("added_repositories".into(), added);
+        tx.execute(
+            "UPDATE projects SET data=?2 WHERE id=?1",
+            params![id, project.to_string()],
+        )?;
+    }
+    tx.execute_batch("PRAGMA user_version = 10;")?;
+    tx.commit()?;
+    Ok(())
+}
+
 pub(crate) fn folder_path(value: &str) -> Result<PathBuf> {
     let value = value.trim().strip_suffix("/*").unwrap_or(value.trim());
     text(value, 4096)?;
@@ -507,11 +582,27 @@ impl Host {
     /// The workspace repositories this project uses.
     pub fn project_repositories(&self, project: &str) -> Result<Vec<Repository>> {
         let project = self.project(project)?;
+        let space = self.space(&project.space)?.space;
+        let open_tickets = open_ticket_repositories(&self.db)?;
         Ok(self
             .repositories()?
             .into_iter()
-            .filter(|r| project.uses(&r.id))
+            .filter(|r| (project.repository_use(r, Some(&space), &open_tickets)).is_some())
             .collect())
+    }
+
+    /// Refuses a repository `project` does not use, saying what the human can do about it.
+    pub(crate) fn ensure_uses(&self, project: &Project, repository: &Repository) -> Result<()> {
+        let space = self.space(&project.space)?.space;
+        let open_tickets = open_ticket_repositories(&self.db)?;
+        ensure!(
+            (project.repository_use(repository, Some(&space), &open_tickets)).is_some(),
+            "Project {project} does not use repository {repository}: {space} does not list it and it was not added to this project. Ask the human to add it to {space} on the Repositories page, or to this project from its Overview.",
+            project = project.name,
+            repository = repository.name,
+            space = space.name,
+        );
+        Ok(())
     }
 
     /// Every repository as stored, for `read_github`, which decides off the host thread which
@@ -681,7 +772,7 @@ impl Host {
             .collect())
     }
 
-    /// Adds a repository to the workspace and makes sure this project uses it.
+    /// Adds a repository to the workspace and to this project, unless its Space lists it.
     pub fn attach_repository(
         &mut self,
         project: &str,
@@ -701,58 +792,40 @@ impl Host {
         Ok(repository)
     }
 
-    /// Adds repositories to a project's custom selection; a project using all of them already has them.
+    /// Adds repositories to a project, keeping those added before.
     fn include_repositories(&mut self, project: &str, ids: &[String]) -> Result<()> {
         let project = self.project(project)?;
-        let Some(chosen) = &project.repositories else {
-            return Ok(());
-        };
-        let missing: Vec<_> = ids.iter().filter(|id| !chosen.contains(id)).collect();
+        let added = &project.added_repositories;
+        let missing: Vec<_> = ids.iter().filter(|id| !added.contains(id)).collect();
         if missing.is_empty() {
             return Ok(());
         }
-        let chosen = chosen.iter().chain(missing).cloned().collect();
-        self.set_project_repositories(&project.id, Some(chosen))?;
+        let added = added.iter().chain(missing).cloned().collect();
+        self.set_added_repositories(&project.id, added)?;
         Ok(())
     }
 
-    /// `None` lets the project use every workspace repository, including ones added later.
-    pub fn set_project_repositories(
-        &mut self,
-        project: &str,
-        ids: Option<Vec<String>>,
-    ) -> Result<Project> {
+    /// Replaces the repositories added to a project: each once, and none its Space lists, which
+    /// it uses anyway. An open ticket in one taken away carries on, as `repository_use` says.
+    pub fn set_added_repositories(&mut self, project: &str, ids: Vec<String>) -> Result<Project> {
         let mut project = self.project(project)?;
-        let known: BTreeSet<String> = self.repositories()?.into_iter().map(|r| r.id).collect();
-        if let Some(ids) = &ids {
-            ensure!(ids.len() <= 1000, "Choose at most 1000 repositories");
-            ensure!(
-                ids.iter().all(|id| known.contains(id)),
-                "Repository not found"
-            );
+        ensure!(ids.len() <= 1000, "Choose at most 1000 repositories");
+        let workspace = self.repositories()?;
+        let space = self.space(&project.space)?.space;
+        let mut added = vec![];
+        for id in ids {
+            let repository = (workspace.iter())
+                .find(|r| r.id == id)
+                .context("Repository not found")?;
+            if !space.lists(repository) && !added.contains(&id) {
+                added.push(id);
+            }
         }
-        let mut unique = BTreeSet::new();
-        project.repositories = ids.map(|ids| {
-            ids.into_iter()
-                .filter(|id| unique.insert(id.clone()))
-                .collect()
-        });
-        if let Some(ticket) = self.tickets()?.into_iter().find(|t| {
-            t.is_open()
-                && !project.uses(&t.repository_id)
-                && self
-                    .session(&t.coordinator_id)
-                    .is_ok_and(|s| s.project_id == project.id && !s.archived)
-        }) {
-            bail!(
-                "Ticket \"{}\" works in a repository you removed; close it first",
-                ticket.title
-            );
+        if added == project.added_repositories {
+            return Ok(project);
         }
-        let detail = match &project.repositories {
-            None => "All workspace repositories".to_owned(),
-            Some(ids) => format!("{} chosen repositories", ids.len()),
-        };
+        project.added_repositories = added;
+        let detail = format!("{} added repositories", project.added_repositories.len());
         let tx = self.db.savepoint()?;
         tx.execute(
             "UPDATE projects SET data=?2 WHERE id=?1",
@@ -778,10 +851,8 @@ impl Host {
         let projects = self.projects()?;
         let tx = self.db.transaction()?;
         for mut project in projects {
-            if let Some(ids) = &mut project.repositories
-                && ids.iter().any(|r| r == id)
-            {
-                ids.retain(|r| r != id);
+            if project.added_repositories.iter().any(|r| r == id) {
+                project.added_repositories.retain(|r| r != id);
                 tx.execute(
                     "UPDATE projects SET data=?2 WHERE id=?1",
                     params![project.id, encode(&project)?],
@@ -874,7 +945,7 @@ impl Host {
         self.add_discovered(found, warnings)
     }
 
-    /// Adds repositories to the workspace. A project with a custom selection also gains them.
+    /// Adds repositories to the workspace, and to `project` unless its Space lists them.
     pub fn import_repositories(
         &mut self,
         project: Option<&str>,
@@ -1519,7 +1590,9 @@ mod tests {
                 ],
             )
             .unwrap();
-        host.create_project("Site").unwrap();
+        let project = host.create_project("Site").unwrap();
+        host.set_added_repositories(&project.id, vec![repository.id])
+            .unwrap();
         let coordinator = host.sessions().unwrap().remove(0);
         (home, host, coordinator)
     }
@@ -1634,7 +1707,7 @@ mod tests {
         host.set_repository_checks(&added.id, Some(checks.clone()))
             .unwrap();
         let project = host.create_project("Mud").unwrap();
-        host.set_project_repositories(&project.id, Some(vec![added.id.clone()]))
+        host.set_added_repositories(&project.id, vec![added.id.clone()])
             .unwrap();
         git(&path, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
         let head = git(&path, &["rev-parse", "HEAD"]);
@@ -1659,8 +1732,8 @@ mod tests {
             }]
         );
         assert_eq!(
-            host.project(&project.id).unwrap().repositories,
-            Some(vec![added.id])
+            host.project(&project.id).unwrap().added_repositories,
+            [added.id]
         );
     }
 

@@ -121,9 +121,9 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
         },
         Command::RefreshRepositories,
         Command::RemoveRepositoryRoot { path: text() },
-        Command::SetProjectRepositories {
+        Command::SetAddedRepositories {
             project_id: text(),
-            repository_ids: None,
+            repository_ids: vec![],
         },
         Command::RemoveRepository {
             repository_id: text(),

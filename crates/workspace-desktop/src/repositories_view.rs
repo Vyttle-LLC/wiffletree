@@ -609,7 +609,7 @@ impl RepositoriesPage {
         let projects = snapshot
             .projects
             .iter()
-            .filter(|project| project.uses(&repository.id))
+            .filter(|project| snapshot.repository_use(project, repository).is_some())
             .count();
         let id = repository.id.clone();
         let missing = snapshot.missing_repositories.contains(&repository.id);
@@ -1532,7 +1532,7 @@ fn grouped<'a>(
     spaces: &'a [Space],
     repositories: &'a [Repository],
 ) -> Vec<(Option<&'a Space>, Vec<&'a Repository>)> {
-    let listed = |space: &Space, r: &Repository| space.repositories.iter().any(|i| r.is_github(i));
+    let listed = Space::lists;
     let mut sections: Vec<(Option<&Space>, Vec<&Repository>)> = (spaces.iter())
         .map(|space| {
             (

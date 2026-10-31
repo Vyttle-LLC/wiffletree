@@ -22,7 +22,7 @@ The approved study is `ui/mockups.html`. Its "How it behaves" list and screen 6 
 
 ### Three reasons, in one place
 
-`Project::repository_use` answers why a project uses a repository: `Space`, `Added` or `OpenTicket`, in that order, or not at all. `Project::uses` is whether it has an answer. The host and `Snapshot` both call it, so the client's groups and the host's refusals cannot disagree. `Space::lists` holds the match by `Repository::is_github`, which `space_repositories` and the Repositories page share.
+`Project::repository_use` answers why a project uses a repository: `Space`, `Added` or `OpenTicket`, in that order, or not at all. The host and `Snapshot` both call it, so the client's groups and the host's refusals cannot disagree. `Space::lists` holds the match by `Repository::is_github`, which `space_repositories` and the Repositories page share.
 
 The alternative, resolving to a stored list on every Space edit, needs a write to every project and a hook on sync. Reading is cheap: the workspace holds tens of repositories.
 
@@ -34,7 +34,7 @@ A ticket's project is its coordinator's, and the snapshot leaves out an archived
 
 A repository can be listed by the Space and also added, or added with an open ticket. Overview shows it once, in the first group that applies. An added repository the Space later lists stays stored, so it stays if it leaves the Space.
 
-Normalising the list drops a Space's repositories at each write to it: `set_added_repositories`, `create_project`, Start project from issue, Attach and Add repositories all go through `added_beyond_space`. So "repositories a Space already lists add nothing" holds in one line. Saving Add to this project can therefore drop a repository that was both added and listed, which is what the dialog shows: it is ticked as the Space's.
+`set_added_repositories` drops a Space's repositories at each write, and `create_project`, Start project from issue, Attach and Add repositories all go through it. So "repositories a Space already lists add nothing" holds in one line. Saving Add to this project can therefore drop a repository that was both added and listed, which is what the dialog shows: it is ticked as the Space's.
 
 ### The command is renamed and made the human's
 

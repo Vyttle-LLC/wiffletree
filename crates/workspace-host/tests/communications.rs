@@ -867,8 +867,6 @@ fn coordinator_ownership_and_runtime_recovery_are_enforced() {
         .into_iter()
         .find(|s| s.project_id == other.id)
         .unwrap();
-    host.set_project_repositories(&other.id, Some(vec![]))
-        .unwrap();
     let refused = host
         .agent_tool(
             &other_root.id,

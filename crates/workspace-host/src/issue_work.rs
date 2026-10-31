@@ -73,26 +73,26 @@ impl Host {
             (filter.and_then(|filter| spaces.iter().position(|s| &s.id == filter))).unwrap_or(0);
         (spaces.into_iter().nth(at)).context("No Space here shares this issue's tracker")
     }
-    /// The workspace repositories whose GitHub name the issue lists, and the listed ones not on
-    /// this Mac; the Space's, as New project ticks them, only when the issue lists none.
+    /// The repositories a project from this issue would use in `space`: the Space's, then the
+    /// workspace repositories whose GitHub name the issue lists, and those of both not on this
+    /// Mac.
     fn issue_repositories(&self, issue: &Issue, space: &SpaceId) -> Result<SpaceRepositories> {
-        if issue.repositories.is_empty() {
-            return self.space_repositories(space);
-        }
+        let mut repositories = self.space_repositories(space)?;
         let here = self.repositories()?;
-        let listed = |r: &Repository| issue.repositories.iter().any(|i| r.is_github(i));
-        Ok(SpaceRepositories {
-            space_id: space.clone(),
-            repository_ids: here
-                .iter()
-                .filter(|r| listed(r))
-                .map(|r| r.id.clone())
-                .collect(),
-            not_cloned: (issue.repositories.iter())
-                .filter(|identity| !here.iter().any(|r| r.is_github(identity)))
-                .cloned()
-                .collect(),
-        })
+        for repository in &here {
+            if (issue.repositories.iter()).any(|i| repository.is_github(i))
+                && !repositories.repository_ids.contains(&repository.id)
+            {
+                repositories.repository_ids.push(repository.id.clone());
+            }
+        }
+        for identity in &issue.repositories {
+            let known = (repositories.not_cloned.iter()).any(|i| i.eq_ignore_ascii_case(identity));
+            if !known && !here.iter().any(|r| r.is_github(identity)) {
+                repositories.not_cloned.push(identity.clone());
+            }
+        }
+        Ok(repositories)
     }
     /// What Start project from issue offers: the Spaces sharing the issue's tracker, and
     /// `space` when it is one of them, else the one last used for a new project, with the
@@ -118,7 +118,8 @@ impl Host {
             .with_context(|| format!("{id}’s issue.md does not parse; fix it first"))
     }
     /// Creates a project and its coordinator in `space_id`, one of the Spaces sharing the
-    /// issue's tracker, with the issue's repositories on this Mac, links it to the issue, sends
+    /// issue's tracker, with the issue's repositories on this Mac that the Space does not list
+    /// added to it, links it to the issue, sends
     /// the coordinator the issue as context written by its authors, and records in the tracker
     /// that the human started work, which moves the issue to In progress.
     pub fn start_project_from_issue(
@@ -141,8 +142,7 @@ impl Host {
         let at = schedules::rfc3339(now());
         self.atomically(|host| {
             let (project, coordinator) = host.insert_project(&name, space_id, None)?;
-            let project =
-                host.set_project_repositories(&project.id, Some(repositories.repository_ids))?;
+            let project = host.set_added_repositories(&project.id, repositories.repository_ids)?;
             host.insert_link(&space, id, &project.id, None)?;
             host.send(
                 &format!("{ISSUE_START_PREFIX}{}", project.id),
@@ -804,33 +804,46 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_project_from_an_issue_uses_its_repositories_here_and_the_spaces_only_when_it_lists_none() {
+    fn a_project_from_an_issue_uses_its_space_and_has_the_issues_other_repositories_added() {
         let (home, mut host) = crate::storage::tests::host();
         let space = personal(&host);
         let api = clone_here(&mut host, &home.path().join("api"), "celadon-theme/api");
+        let chat = clone_here(&mut host, &home.path().join("chat"), "celadon-theme/chat");
         host.set_repository_spaces("celadon-theme/api", std::slice::from_ref(&space.id))
             .unwrap();
+        let used = |host: &Host, created: &CreatedProject| -> Vec<String> {
+            (host.project_repositories(&created.project.id).unwrap())
+                .into_iter()
+                .map(|r| r.id)
+                .collect()
+        };
         let elsewhere = file(&mut host, &space, &["celadon-theme/watch-app"], "");
         let created = host
             .start_project_from_issue(&elsewhere.id, &space.id)
             .unwrap();
-        assert_eq!(
-            created.project.repositories,
-            Some(vec![]),
-            "api is not added"
-        );
+        assert!(created.project.added_repositories.is_empty());
+        assert_eq!(used(&host, &created), std::slice::from_ref(&api.id));
         assert_eq!(created.not_on_this_mac, ["celadon-theme/watch-app"]);
-        let here = file(&mut host, &space, &["Celadon-Theme/API"], "");
-        let created = host.start_project_from_issue(&here.id, &space.id).unwrap();
-        assert_eq!(created.project.repositories, Some(vec![api.id.clone()]));
+        let listed = file(&mut host, &space, &["Celadon-Theme/API"], "");
+        let created = host
+            .start_project_from_issue(&listed.id, &space.id)
+            .unwrap();
+        assert!(created.project.added_repositories.is_empty());
         assert!(created.not_on_this_mac.is_empty());
-        let none = file(&mut host, &space, &[], "");
-        let created = host.start_project_from_issue(&none.id, &space.id).unwrap();
+        let beyond = file(&mut host, &space, &["celadon-theme/chat"], "");
+        let defaults = host.issue_project_defaults(&beyond.id, None).unwrap();
         assert_eq!(
-            created.project.repositories,
-            Some(vec![api.id]),
-            "the Space's"
+            defaults.repositories.repository_ids,
+            [api.id.clone(), chat.id.clone()]
         );
+        let created = host
+            .start_project_from_issue(&beyond.id, &space.id)
+            .unwrap();
+        assert_eq!(
+            created.project.added_repositories,
+            std::slice::from_ref(&chat.id)
+        );
+        assert_eq!(used(&host, &created), [api.id, chat.id]);
     }
 
     #[test]

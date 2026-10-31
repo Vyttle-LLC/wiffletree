@@ -138,7 +138,7 @@ fn ticket(
 }
 
 #[test]
-fn projects_use_every_repository_until_they_choose_some() {
+fn adding_from_a_project_adds_there_and_a_workspace_repository_alone_is_not_used() {
     let folder = tempfile::tempdir().unwrap();
     let (one, two, three) = (
         folder.path().join("one"),
@@ -150,45 +150,35 @@ fn projects_use_every_repository_until_they_choose_some() {
     }
     let home = tempfile::tempdir().unwrap();
     let mut host = Host::open_set_up(home.path()).unwrap();
-    let all = host.create_project("All").unwrap();
-    let custom = host.create_project("Custom").unwrap();
+    let project = host.create_project("Calls").unwrap();
     let first = host.add_repository(one.to_str().unwrap(), "HEAD").unwrap();
-    let second = host.add_repository(two.to_str().unwrap(), "HEAD").unwrap();
-    host.set_project_repositories(&custom.id, Some(vec![first.id.clone()]))
-        .unwrap();
+    let workspaces = home.path().join("workspaces");
+    assert!(host.project_repositories(&project.id).unwrap().is_empty());
+    assert!(ticket(&mut host, &workspaces, &project.id, &first.id).is_err());
 
-    // Later additions reach projects that use everything, not ones that chose.
+    let second = host
+        .attach_repository(&project.id, two.to_str().unwrap(), "HEAD")
+        .unwrap();
     let third = host
-        .import_repositories(None, &[three.display().to_string()], &[], &[])
+        .import_repositories(Some(&project.id), &[three.display().to_string()], &[], &[])
         .unwrap()
         .imported
         .remove(0);
-    assert_eq!(host.project_repositories(&all.id).unwrap().len(), 3);
     assert_eq!(
-        host.project_repositories(&custom.id).unwrap(),
-        vec![first.clone()]
+        host.project(&project.id).unwrap().added_repositories,
+        [second.id.clone(), third.id.clone()]
     );
-    let workspaces = home.path().join("workspaces");
-    assert!(ticket(&mut host, &workspaces, &custom.id, &second.id).is_err());
-    ticket(&mut host, &workspaces, &all.id, &second.id).unwrap();
+    ticket(&mut host, &workspaces, &project.id, &second.id).unwrap();
 
-    // Adding from inside a choosing project includes the repository there too.
-    host.attach_repository(&custom.id, three.to_str().unwrap(), "HEAD")
+    host.set_added_repositories(&project.id, vec![third.id.clone(), third.id.clone()])
         .unwrap();
-    assert!(host.project(&custom.id).unwrap().uses(&third.id));
-
-    let working = ticket(&mut host, &workspaces, &custom.id, &first.id).unwrap();
-    assert!(
-        host.set_project_repositories(&custom.id, Some(vec![third.id.clone()]))
-            .is_err()
+    assert_eq!(
+        host.project(&project.id).unwrap().added_repositories,
+        std::slice::from_ref(&third.id),
+        "once each, and an open ticket's repository may be taken off the list"
     );
-    host.close_ticket(&working.id).unwrap();
-    host.set_project_repositories(&custom.id, Some(vec![third.id.clone()]))
-        .unwrap();
-    host.set_project_repositories(&custom.id, None).unwrap();
-    assert_eq!(host.project_repositories(&custom.id).unwrap().len(), 3);
     assert!(
-        host.set_project_repositories(&custom.id, Some(vec!["unknown".into()]))
+        host.set_added_repositories(&project.id, vec!["unknown".into()])
             .is_err()
     );
 }
@@ -204,7 +194,7 @@ fn repositories_with_tickets_stay_in_the_workspace() {
     let project = host.create_project("Remove").unwrap();
     let used = host.add_repository(used.to_str().unwrap(), "HEAD").unwrap();
     let idle = host.add_repository(idle.to_str().unwrap(), "HEAD").unwrap();
-    host.set_project_repositories(&project.id, Some(vec![used.id.clone(), idle.id.clone()]))
+    host.set_added_repositories(&project.id, vec![used.id.clone(), idle.id.clone()])
         .unwrap();
     let workspaces = home.path().join("workspaces");
     let working = ticket(&mut host, &workspaces, &project.id, &used.id).unwrap();
@@ -213,8 +203,8 @@ fn repositories_with_tickets_stay_in_the_workspace() {
     host.remove_repository(&idle.id).unwrap();
     assert_eq!(host.repositories().unwrap(), vec![used.clone()]);
     assert_eq!(
-        host.project(&project.id).unwrap().repositories,
-        Some(vec![used.id])
+        host.project(&project.id).unwrap().added_repositories,
+        [used.id]
     );
 }
 
@@ -276,14 +266,11 @@ fn per_project_attachments_migrate_to_one_workspace_list() {
         .collect();
     assert_eq!(ids, ["a-app", "a-api"]);
     assert_eq!(
-        host.project("a").unwrap().repositories,
-        Some(vec!["a-app".into(), "a-api".into()])
+        host.project("a").unwrap().added_repositories,
+        ["a-app", "a-api"]
     );
-    assert_eq!(
-        host.project("b").unwrap().repositories,
-        Some(vec!["a-app".into()])
-    );
-    assert_eq!(host.project("empty").unwrap().repositories, None);
+    assert_eq!(host.project("b").unwrap().added_repositories, ["a-app"]);
+    assert!(host.project("empty").unwrap().added_repositories.is_empty());
     assert_eq!(
         host.session("b-team").unwrap().repository_id.as_deref(),
         Some("a-app")

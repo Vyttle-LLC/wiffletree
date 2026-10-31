@@ -247,12 +247,7 @@ impl Creation {
         );
         let repo = host.repository(repository_id)?;
         let project = host.project(&coordinator.project_id)?;
-        ensure!(
-            project.uses(&repo.id),
-            "Project {} does not use repository {}",
-            project.name,
-            repo.name
-        );
+        host.ensure_uses(&project, &repo)?;
         if let Some(ticket) = host
             .tickets()?
             .into_iter()
@@ -723,7 +718,7 @@ impl Reservations {
             Command::SetArchived { session_id, .. } => host
                 .session_tree(session_id)
                 .is_ok_and(|sessions| sessions.iter().any(|s| self.blocks_session(host, &s.id))),
-            Command::SetProjectRepositories { project_id, .. }
+            Command::SetAddedRepositories { project_id, .. }
             | Command::SetLive { project_id, .. } => self.blocks_project(host, project_id),
             Command::RemoveRepository { repository_id }
             | Command::SetRepositoryChecks { repository_id, .. }

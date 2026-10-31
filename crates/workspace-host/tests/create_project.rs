@@ -88,7 +88,8 @@ fn a_coordinator_creates_a_project_that_starts_on_its_labelled_brief() {
         project.space,
         host.project(&creator.project_id).unwrap().space
     );
-    assert_eq!(project.repositories, Some(vec![]));
+    assert!(project.added_repositories.is_empty());
+    assert!(host.project_repositories(&project.id).unwrap().is_empty());
 }
 
 #[test]
@@ -272,7 +273,12 @@ fn without_repository_ids_it_uses_the_spaces_repositories_here_and_names_the_res
         )
         .unwrap();
     let created: CreatedProject = serde_json::from_value(result).unwrap();
-    assert_eq!(created.project.repositories, Some(vec![web.id.clone()]));
+    assert!(created.project.added_repositories.is_empty());
+    let used = host.project_repositories(&created.project.id).unwrap();
+    assert_eq!(
+        used,
+        std::slice::from_ref(&host.repository(&web.id).unwrap())
+    );
     assert_eq!(created.not_on_this_mac, ["Sage-Social/mobile-app"]);
     assert_eq!(
         created.project.space,
@@ -281,7 +287,7 @@ fn without_repository_ids_it_uses_the_spaces_repositories_here_and_names_the_res
 }
 
 #[test]
-fn repository_ids_choose_the_new_projects_repositories() {
+fn repository_ids_beyond_the_space_are_added_and_those_it_lists_add_nothing() {
     let (home, mut host, creator, [web, api]) = fixture();
     in_space(
         &home,
@@ -294,16 +300,17 @@ fn repository_ids_choose_the_new_projects_repositories() {
         .agent_tool(
             &creator.id,
             "create_project",
-            json!({"name": "Web only", "brief": "Do", "repository_ids": [web.id]}),
+            json!({"name": "Both", "brief": "Do", "repository_ids": [web.id, api.id]}),
         )
         .unwrap();
-    assert!(result.get("not_on_this_mac").is_none(), "{result}");
-    let project: Project = serde_json::from_value(result).unwrap();
-    assert_eq!(project.repositories, Some(vec![web.id.clone()]));
+    let created: CreatedProject = serde_json::from_value(result).unwrap();
+    assert_eq!(created.not_on_this_mac, ["Sage-Social/mobile-app"]);
+    let project = created.project;
+    assert_eq!(project.added_repositories, std::slice::from_ref(&web.id));
     let used: Vec<String> = (host.project_repositories(&project.id).unwrap().into_iter())
         .map(|r| r.id)
         .collect();
-    assert_eq!(used, std::slice::from_ref(&web.id));
+    assert_eq!(used, [web.id.clone(), api.id.clone()]);
     assert_eq!(
         project.space,
         host.project(&creator.project_id).unwrap().space
@@ -313,6 +320,8 @@ fn repository_ids_choose_the_new_projects_repositories() {
 #[test]
 fn refusals_create_nothing() {
     let (home, mut host, creator, [web, _]) = fixture();
+    host.set_added_repositories(&creator.project_id, vec![web.id.clone()])
+        .unwrap();
     let before = host.snapshot().unwrap();
     let ticket = host
         .create_ticket(&creator.id, &web.id, "Toolbar", "Do")

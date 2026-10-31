@@ -757,7 +757,7 @@ impl SpacesPage {
             .child(row(
                 "Code repositories",
                 self.repositories_field(space, p, cx),
-                Some(format!("New projects in {} start with these.", space.name)),
+                Some(format!("Every project in {} uses these.", space.name)),
                 p,
             ))
             .child(row(

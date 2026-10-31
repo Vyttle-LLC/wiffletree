@@ -368,9 +368,9 @@ pub struct Project {
     /// The Space it belongs to; it logs to that Space's brain. Empty from an older host.
     #[serde(default)]
     pub space: SpaceId,
-    /// The workspace repositories this project may use; `None` means all of them.
+    /// The workspace repositories the human added to this project, beyond its Space's.
     #[serde(default)]
-    pub repositories: Option<Vec<String>>,
+    pub added_repositories: Vec<String>,
     /// The main coordinator's directory, fixed at creation; its name is the project's slug.
     /// `None` for projects created before workspace folders, which keep their original directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -412,14 +412,45 @@ impl Repository {
             .is_some_and(|own| own.eq_ignore_ascii_case(identity))
     }
 }
+/// Why a project uses a repository, in the order Overview shows them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepositoryUse {
+    /// Its Space lists it and it is in this Mac's workspace.
+    Space,
+    /// The human added it to this project.
+    Added,
+    /// An open ticket of this project works there, which holds it until the last one closes.
+    OpenTicket,
+}
+/// An open ticket and the project and repository it holds, whether or not the project is
+/// archived.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenTicketRepository {
+    pub project_id: String,
+    pub repository_id: String,
+    pub title: String,
+}
 impl Project {
-    pub fn uses(&self, repository_id: &str) -> bool {
-        self.repositories
-            .as_ref()
-            .is_none_or(|ids| ids.iter().any(|id| id == repository_id))
+    /// Why this project uses `repository`, if it does. Read each time, so a change to `space`
+    /// or to a ticket needs no write here. `open_tickets` may hold other projects' tickets.
+    pub fn repository_use(
+        &self,
+        repository: &Repository,
+        space: Option<&Space>,
+        open_tickets: &[OpenTicketRepository],
+    ) -> Option<RepositoryUse> {
+        if space.is_some_and(|space| space.lists(repository)) {
+            Some(RepositoryUse::Space)
+        } else if self.added_repositories.contains(&repository.id) {
+            Some(RepositoryUse::Added)
+        } else {
+            (open_tickets.iter())
+                .any(|t| t.project_id == self.id && t.repository_id == repository.id)
+                .then_some(RepositoryUse::OpenTicket)
+        }
     }
 }
-/// A repository known to the whole workspace. Projects choose which ones they use.
+/// A repository known to the whole workspace. A project uses its Space's and those added to it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Repository {
     pub id: String,
@@ -821,6 +852,10 @@ pub struct Snapshot {
     #[serde(default)]
     pub linear_import: Option<LinearImportStatus>,
     pub repositories: Vec<Repository>,
+    /// Every open ticket's repository, including an archived project's, whose coordinator
+    /// `sessions` may leave out.
+    #[serde(default)]
+    pub open_ticket_repositories: Vec<OpenTicketRepository>,
     /// The sessions that are not archived and open tickets' archived agents, in the order they
     /// were created, then archived sessions still in a turn.
     pub sessions: Vec<Session>,
@@ -1085,8 +1120,17 @@ impl Snapshot {
         };
         self.repositories
             .iter()
-            .filter(|r| project.uses(&r.id))
+            .filter(|r| self.repository_use(project, r).is_some())
             .collect()
+    }
+    /// Why `project` uses `repository`, if it does.
+    pub fn repository_use(
+        &self,
+        project: &Project,
+        repository: &Repository,
+    ) -> Option<RepositoryUse> {
+        let space = self.spaces.iter().find(|s| s.id == project.space);
+        project.repository_use(repository, space, &self.open_ticket_repositories)
     }
     pub fn questions_waiting(&self, session_id: &str) -> u32 {
         self.questions_waiting
@@ -3035,7 +3079,8 @@ pub enum Command {
     DiscoverRepositories {
         folders: Vec<String>,
     },
-    /// Adds repositories to the workspace; a project with a custom selection also gains them.
+    /// Adds repositories to the workspace; a project named here has those its Space does not
+    /// list added to it.
     /// `roots` are parent folders to keep checking for new repositories; `dismissed` are
     /// repositories found in them that the user chose not to add.
     ImportRepositories {
@@ -3051,10 +3096,10 @@ pub enum Command {
     RemoveRepositoryRoot {
         path: String,
     },
-    /// `None` lets the project use every workspace repository.
-    SetProjectRepositories {
+    /// Replaces the repositories added to a project beyond its Space's, which add nothing here.
+    SetAddedRepositories {
         project_id: String,
-        repository_ids: Option<Vec<String>>,
+        repository_ids: Vec<String>,
     },
     RemoveRepository {
         repository_id: String,
@@ -4057,7 +4102,7 @@ impl Command {
             Self::ImportRepositories { .. }
             | Self::RefreshRepositories
             | Self::RemoveRepositoryRoot { .. }
-            | Self::SetProjectRepositories { .. }
+            | Self::SetAddedRepositories { .. }
             | Self::RemoveRepository { .. }
             | Self::SetLive { .. }
             | Self::ConfigureSession { .. }
@@ -4182,7 +4227,7 @@ impl Command {
     /// the host may merge into, and a settings repository the host pushes to.
     /// Spaces are the human's: creating, editing or removing one, setting its brain, moving a
     /// project into one and choosing which repositories it lists, and reading where its storage
-    /// is on this Mac. So are brains: the push grant, forgetting one, Set up, the compiler,
+    /// is on this Mac. So are a project's added repositories. So are brains: the push grant, forgetting one, Set up, the compiler,
     /// amending a batch, Send now and the legacy import, and fixing or releasing a held entry.
     /// Every write to a tracker is the human's, settling a paused issue file, following an issue
     /// and every step of a Linear import too; reading issues is not. Remote access is the human's
@@ -4237,6 +4282,7 @@ impl Command {
                 | Self::UpdateSpace { .. }
                 | Self::RemoveSpace { .. }
                 | Self::MoveProjectToSpace { .. }
+                | Self::SetAddedRepositories { .. }
                 | Self::SetRepositorySpaces { .. }
                 | Self::ConfirmRepositorySuggestions { .. }
                 | Self::JoinSpaces { .. }

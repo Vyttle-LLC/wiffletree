@@ -52,6 +52,12 @@ pub struct Space {
     #[serde(flatten)]
     pub extra: Extra,
 }
+impl Space {
+    /// Whether this Space lists `repository`, matched by its GitHub name.
+    pub fn lists(&self, repository: &crate::Repository) -> bool {
+        self.repositories.iter().any(|i| repository.is_github(i))
+    }
+}
 
 /// A Space's brain: a Git repository and the folder in it that entries are written to.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
