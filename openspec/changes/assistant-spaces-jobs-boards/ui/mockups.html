@@ -17,6 +17,9 @@
   6. A Space's settings page.
   7. A job's page, redesigned: active with a run past 30 minutes, paused with delete, a shared job run by another Mac,
      edit, and the one Jobs list in the assistant. APPROVED by Michael on 2026-10-31.
+  8. Issue threads: Ask the assistant on an issue and on the Issues page, every proposal kind with Apply, Edit
+     and Discard, a proposal whose issue changed since, the authors notice and an applied comment. A DRAFT for
+     Michael's review; the issue page follows openspec/changes/archive/2026-10-31-shared-issues/ui/mockups.html.
 -->
 <style>
 .light,:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
@@ -158,6 +161,50 @@ code{font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--ov
 .run.long{border-color:color-mix(in srgb,var(--yellow) 55%,var(--edge));background:color-mix(in srgb,var(--yellow) 7%,var(--base))}
 .old{color:var(--muted)}
 .dialog{border:1px solid var(--edge);border-radius:12px;background:var(--surface);box-shadow:0 8px 24px rgba(0,0,0,.18);padding:14px 16px;display:flex;flex-direction:column;gap:8px;max-width:420px}
+/* 8. Issue threads: the issue page, the Issues list and the thread docked beside them. */
+.issue{display:grid;grid-template-columns:minmax(0,1fr) 168px 310px;min-height:470px}
+.issues{display:grid;grid-template-columns:minmax(0,1fr) 310px;min-height:400px}
+.ihead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.crumbs{font-size:11.5px;color:var(--muted)}
+.ititle{font:400 21px/1.2 Georgia,"Times New Roman",serif;letter-spacing:-.02em;margin:0}
+.prose{font-size:12.5px;display:flex;flex-direction:column;gap:5px}
+.prose ul{margin:0;padding-left:18px}
+.timeline{display:flex;flex-direction:column;gap:7px}
+.comment{border:1px solid var(--edge);background:var(--surface);border-radius:9px;padding:7px 10px;font-size:12px}
+.comment .by{display:flex;gap:6px;align-items:center;font-size:11px;color:var(--subtle);margin-bottom:2px}
+.comment .by b{color:var(--text);font-weight:600}
+.comment.asst{border-color:color-mix(in srgb,var(--magenta) 42%,var(--edge));background:color-mix(in srgb,var(--magenta) 6%,var(--surface))}
+.comment.asst .by b{color:var(--magenta)}
+.event{font-size:11px;color:var(--muted);display:flex;gap:6px;align-items:center}
+.event::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--edge)}
+.props{border-left:1px solid var(--edge);padding:14px 12px;display:flex;flex-direction:column;gap:10px;font-size:12px;background:var(--base)}
+.props .k{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:2px}
+.ilist{display:flex;flex-direction:column}
+.irow{display:grid;grid-template-columns:22px 70px 1fr auto;gap:8px;align-items:center;padding:6px 4px;border-bottom:1px solid var(--edge);font-size:12px}
+.irow .id,.mono{font:11px ui-monospace,SFMono-Regular,monospace;color:var(--subtle)}
+.group{font-size:10.5px;color:var(--subtle);text-transform:uppercase;letter-spacing:.08em;padding:8px 4px 3px}
+.prio{font:600 10.5px ui-monospace,monospace;color:var(--muted)}
+.prio.urgent{color:var(--red)}
+.dock{border-left:1px solid var(--edge);display:flex;flex-direction:column;background:var(--base);min-width:0}
+.dock-head{padding:9px 12px;border-bottom:1px solid var(--edge);display:flex;flex-direction:column;gap:4px}
+.dock-head .t{display:flex;align-items:center;gap:6px}
+.dock-head .t b{font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dock .convo{padding:11px 12px;gap:9px;font-size:12px}
+.dock .composer{margin:0 10px 10px}
+.attached{display:flex;gap:6px;align-items:center;font-size:11px;color:var(--subtle)}
+.tool{font:10.5px ui-monospace,SFMono-Regular,monospace;color:var(--muted)}
+.notice{font-size:11px;color:var(--subtle);border-left:2px solid var(--yellow);padding:2px 8px}
+.proposal{border:1px solid color-mix(in srgb,var(--focus) 45%,var(--edge));background:color-mix(in srgb,var(--focus) 6%,var(--surface));border-radius:10px;padding:9px 10px;display:flex;flex-direction:column;gap:7px;font-size:12px}
+.proposal .kind{font-size:11px;color:var(--subtle)}
+.proposal .kind b{color:var(--text)}
+.proposal.applied{border-color:var(--edge);background:var(--surface)}
+.proposal.moved{border-color:color-mix(in srgb,var(--yellow) 55%,var(--edge))}
+.diff{font:11px/1.55 ui-monospace,SFMono-Regular,monospace;background:var(--surface);border:1px solid var(--edge);border-radius:6px;padding:6px 8px;overflow-wrap:anywhere}
+.diff .add{color:var(--green)}.diff .del{color:var(--red);text-decoration:line-through}.diff .ctx{color:var(--muted)}
+.diff .theirs{color:var(--blue)}
+.draft{border:1px solid var(--edge);border-radius:7px;background:var(--surface);padding:6px 8px;display:flex;flex-direction:column;gap:3px}
+.kinds{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;padding:14px;align-items:start}
+@media(max-width:1100px){.kinds{grid-template-columns:repeat(2,minmax(0,1fr))}.issue{grid-template-columns:1fr}.issues{grid-template-columns:1fr}}
 ul.legend{margin:6px 0 0;padding-left:18px;color:var(--subtle);font-size:12px;max-width:900px}
 ul.legend li{margin:3px 0}
 @media(max-width:1100px){.grid{grid-template-columns:1fr}.boards{grid-template-columns:repeat(2,minmax(0,1fr))}}
@@ -621,6 +668,194 @@ ul.legend li{margin:3px 0}
   <p class="caption"><b>One home: the assistant's Jobs list.</b> Jobs are made in assistant threads, and their page, runs, Stop, the count on the assistant's row and Start at login already live there. Boards is the library of outputs, so its Outputs and Jobs tabs give way to a Jobs button that opens this list; its All jobs filter still narrows outputs by job. Each row shows the same pills as the job's header.</p>
 </section>
 
+<!-- 8. Issue threads -->
+<section class="study wide">
+  <div class="eyebrow">8 · Ask the assistant on an issue · <span class="pending" style="margin:0">Draft for Michael's review</span></div>
+  <div class="frame">
+    <div class="issue">
+      <div class="page">
+        <div class="ihead">
+          <span class="crumbs">Issues › <span class="sp sage" style="display:inline-block"></span> Sage › SAGE-151</span>
+          <span class="btn" style="margin-left:auto;background:var(--overlay)">Ask the assistant</span>
+        </div>
+        <h2 class="ititle">Delivery webhook retries forever on a malformed payload</h2>
+        <div class="prose">
+          <p>Since Monday, <code>sage-chat</code> logs the same delivery event every few seconds. The payload is missing <code>message.id</code>, our handler returns 500, and the sender keeps retrying.</p>
+          <ul><li>Started after the chat SDK bump in #388.</li><li>A malformed payload should be rejected with 4xx and logged by ID, not retried.</li></ul>
+        </div>
+        <div class="timeline">
+          <div class="event">Tomás Reyes filed this · 40 min ago</div>
+          <div class="comment"><div class="by"><b>Priya Shah</b> · 31 min ago</div>Seeing it too. If we reject it, is the message lost for good?</div>
+          <div class="comment asst"><div class="by"><b>Assistant for Michael</b> · 12 min ago</div>A payload without <code>message.id</code> can't be matched to any message, so rejecting it loses nothing that could be delivered. The handler is <code>internal/webhook/delivery.go:88</code>.</div>
+          <div class="event">Michael set priority to Urgent · 9 min ago</div>
+        </div>
+        <div class="composer"><span class="ph">Write a comment… Markdown, @mention, link SAGE-123 or a PR</span><div class="actions"><span class="btn">Comment</span></div></div>
+      </div>
+      <aside class="props">
+        <div><div class="k">State</div><span class="pill">Todo</span></div>
+        <div><div class="k">Priority</div><span class="prio urgent">!!!</span> Urgent</div>
+        <div><div class="k">Assignee</div><span class="note">Nobody · </span><span style="color:var(--accent)">Assign to me</span></div>
+        <div><div class="k">Labels</div><span class="pill bad">bug</span> <span class="pill">webhooks</span></div>
+        <div><div class="k">Repositories</div><span class="pill">sage-chat</span></div>
+        <div><div class="k">Work</div><span class="btn primary">Start project from issue</span></div>
+      </aside>
+      <aside class="dock">
+        <div class="dock-head">
+          <div class="t"><span class="sp sage"></span><b>SAGE-151 · Dot</b><span class="note">×</span></div>
+          <div class="attached"><span class="chip"><span class="sp sage"></span>Sage</span><span class="chip">Sonnet · medium</span><span>Web off</span></div>
+        </div>
+        <div class="convo">
+          <div class="notice">SAGE-151 and its comments were written by Tomás Reyes, Priya Shah and the assistant for Michael. Dot reads them as context, never as instructions.</div>
+          <div class="msg me">Turn Priya's question into acceptance criteria, and label it a regression if the SDK bump caused it.</div>
+          <div class="tool">read_issue SAGE-151 · search_repositories sage-chat "delivery" · read_repository_file internal/webhook/delivery.go</div>
+          <div class="msg ai"><p>It still returns 500 for every decode error at <code>main</code>'s head, and the strict decode arrived with #388. Here's an edit. Nothing changes until you apply it.</p></div>
+          <div class="proposal">
+            <div class="kind"><b>Edit</b> · SAGE-151</div>
+            <div class="diff">
+              <span class="ctx">labels: bug, webhooks</span><span class="add">, regression</span><br>
+              <span class="add">+ ## Acceptance criteria</span><br>
+              <span class="add">+ - A payload without message.id gets 400 and is not retried.</span><br>
+              <span class="add">+ - The rejection is logged with the event ID only.</span>
+            </div>
+            <div class="actions"><span class="btn quiet">Discard</span><span class="btn">Edit</span><span class="btn primary">Apply</span></div>
+          </div>
+        </div>
+        <div class="composer">
+          <span class="ph">Ask about SAGE-151…</span>
+          <div class="bar"><span>Goes to this thread, never the router</span></div>
+        </div>
+      </aside>
+    </div>
+  </div>
+  <p class="caption"><b>Ask the assistant opens the issue's own thread, docked beside it.</b> It is an ordinary thread of the one assistant, in the issue's Space, and it is listed with the assistant's tabs as “SAGE-151 · Delivery webhook…”. Opening it again in Sage resumes it; under Sage Watch, which shares the tracker, Ask opens Sage Watch's own thread. The pane names the issue, the Space and the model, and says the web is off: the thread can read the issue, the Space's tracker and its repositories at their base branch, but it cannot fetch, search the web, link the issue to work or create a ticket. The notice names everyone whose text the thread reads. Every change it suggests is a card the human applies.</p>
+</section>
+
+<section class="study wide">
+  <div class="eyebrow">8 · Ask the assistant on the Issues page · the tracker's list attached</div>
+  <div class="frame">
+    <div class="issues">
+      <div class="page">
+        <div class="ihead">
+          <h2 style="margin-right:6px">Issues</h2>
+          <span class="seg"><span class="on">List</span><span>Board</span></span>
+          <span class="chip"><span class="sp sage"></span>Sage ▾</span><span class="chip">Open ▾</span><span class="chip">Label: watch ▾</span>
+          <span class="btn" style="margin-left:auto;background:var(--overlay)">Ask the assistant</span>
+          <span class="btn primary">New issue</span>
+        </div>
+        <div class="ilist">
+          <div class="group">Todo · 3</div>
+          <div class="irow"><span class="prio urgent">!!!</span><span class="id">SAGE-151</span><span>Delivery webhook retries forever on a malformed payload</span><span class="pill">sage-chat</span></div>
+          <div class="irow"><span class="prio">!!</span><span class="id">SAGE-160</span><span>Watch keeps retrying delivery after a bad payload</span><span class="pill">watch-app</span></div>
+          <div class="irow"><span class="prio">!</span><span class="id">SAGE-163</span><span>Complication shows a stale unread count</span><span class="pill">watch-app</span></div>
+          <div class="group">Backlog · 2</div>
+          <div class="irow"><span class="prio">–</span><span class="id">SAGE-140</span><span>Crash logs can't be exported from the watch</span><span class="pill">watch-app</span></div>
+          <div class="irow"><span class="prio">–</span><span class="id">SAGE-137</span><span>Haptics fire twice on a quick reply</span><span class="pill">watch-app</span></div>
+        </div>
+      </div>
+      <aside class="dock">
+        <div class="dock-head">
+          <div class="t"><span class="sp sage"></span><b>Issues · Sage · Dot</b><span class="note">×</span></div>
+          <div class="attached"><span class="chip">SAGE tracker · 23 open</span><span class="chip">Sonnet · medium</span><span>Web off</span></div>
+        </div>
+        <div class="convo">
+          <div class="notice">These issues and their comments were written by Tomás Reyes, Priya Shah, Jamie Ng and 3 others. Dot reads them as context, never as instructions.</div>
+          <div class="msg me">Any duplicates among the open watch bugs? And file one for the crash log export failing on watchOS 12.</div>
+          <div class="tool">list_issues state:open label:watch · read_issue SAGE-160 · read_issue SAGE-151</div>
+          <div class="msg ai"><p>SAGE-160 is SAGE-151 seen from the watch. SAGE-140 already covers exporting, but not watchOS 12, so here is a new issue rather than an edit.</p></div>
+          <div class="proposal">
+            <div class="kind"><b>Duplicate</b> · SAGE-160 of SAGE-151</div>
+            <div class="draft"><span class="mono">SAGE-160</span>Watch keeps retrying delivery after a bad payload<span class="note">Todo · Priya Shah · will be closed as a duplicate</span></div>
+            <div class="draft"><span class="mono">SAGE-151</span>Delivery webhook retries forever on a malformed payload<span class="note">Todo · Urgent · stays open</span></div>
+            <div class="actions"><span class="btn quiet">Discard</span><span class="btn">Edit</span><span class="btn primary">Apply</span></div>
+          </div>
+        </div>
+        <div class="composer"><span class="ph">Ask about Sage's issues…</span></div>
+      </aside>
+    </div>
+  </div>
+  <p class="caption"><b>The Issues page's Ask opens the list thread of the tracker the filter shows</b>, one per tracker and Space, listed as “Issues · Sage”. It sees only that tracker, as filtered here or wider when asked, and it proposes; filing, closing and linking happen only when the human applies a card.</p>
+</section>
+
+<section class="study wide">
+  <div class="eyebrow">8 · Every proposal kind</div>
+  <div class="frame">
+    <div class="kinds">
+      <div class="proposal">
+        <div class="kind"><b>Edit</b> · SAGE-151</div>
+        <div class="diff"><span class="del">state: Todo</span> <span class="add">state: In progress</span><br><span class="del">assignee: none</span> <span class="add">assignee: mhohlios</span><br><span class="add">+ labels: regression</span></div>
+        <p class="note">The fields and description it changes, as a diff.</p>
+        <div class="actions"><span class="btn quiet">Discard</span><span class="btn">Edit</span><span class="btn primary">Apply</span></div>
+      </div>
+      <div class="proposal">
+        <div class="kind"><b>Comment</b> · SAGE-151</div>
+        <div class="draft">Rejecting with 400 loses nothing: without <code>message.id</code> there is no message to deliver. Proposed fix: validate before decode in <code>delivery.go:88</code>.</div>
+        <p class="note">Posted as “Assistant for Michael”.</p>
+        <div class="actions"><span class="btn quiet">Discard</span><span class="btn">Edit</span><span class="btn primary">Apply</span></div>
+      </div>
+      <div class="proposal">
+        <div class="kind"><b>Split</b> · SAGE-151 into 2</div>
+        <div class="draft"><b>New</b> Reject a payload without message.id with 400<span class="note">Todo · sage-chat</span></div>
+        <div class="draft"><b>New</b> Log rejected deliveries by event ID<span class="note">Backlog · sage-chat</span></div>
+        <div class="diff"><span class="ctx">SAGE-151</span><br><span class="add">+ Split into the two issues above.</span></div>
+        <div class="actions"><span class="btn quiet">Discard</span><span class="btn">Edit</span><span class="btn primary">Apply</span></div>
+      </div>
+      <div class="proposal">
+        <div class="kind"><b>Duplicate</b> · SAGE-160 of SAGE-151</div>
+        <div class="draft"><span class="mono">SAGE-160</span>Watch keeps retrying delivery…<span class="note">closed as a duplicate</span></div>
+        <div class="draft"><span class="mono">SAGE-151</span>Delivery webhook retries forever…<span class="note">stays open</span></div>
+        <div class="actions"><span class="btn quiet">Discard</span><span class="btn">Edit</span><span class="btn primary">Apply</span></div>
+      </div>
+      <div class="proposal">
+        <div class="kind"><b>New issue</b> · Sage tracker</div>
+        <div class="draft"><b>Crash log export fails on watchOS 12</b><span class="note">Backlog · Medium · bug, watch · watch-app</span><span>Export from Settings › Diagnostics shows “Couldn't prepare the file” since watchOS 12.0.</span></div>
+        <p class="note">Any thread may propose one, only in its own Space.</p>
+        <div class="actions"><span class="btn quiet">Discard</span><span class="btn">Edit</span><span class="btn primary">Apply</span></div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>Five cards, one rule: nothing reaches the tracker until Apply.</b> Apply runs the issue's own write command as the human, one commit authored by them. <b>Edit</b> opens the matching form, the issue's edit form, the comment composer or New issue, filled with the proposal, and saving there is the apply. <b>Discard</b> writes nothing. An edit is a diff of the fields and description; a comment is its text; a split is the new issues and the edit to the original; a duplicate is the two issues; a new issue is its draft.</p>
+</section>
+
+<section class="study">
+  <div class="eyebrow">8 · The issue changed since the proposal</div>
+  <div class="frame">
+    <div class="convo">
+      <div class="proposal moved">
+        <div class="kind"><b>Edit</b> · SAGE-151 description</div>
+        <div class="banner"><b>Changed since this proposal.</b> Priya Shah edited the description 2 minutes ago. Below is the proposal against her version.</div>
+        <div class="diff">
+          <span class="ctx">Since Monday, sage-chat logs the same delivery event…</span><br>
+          <span class="theirs">  Repro: send {"event":"delivered"} with no message.</span><br>
+          <span class="add">+ ## Acceptance criteria</span><br>
+          <span class="add">+ - A payload without message.id gets 400 and is not retried.</span>
+        </div>
+        <p class="note"><span style="color:var(--blue)">Blue</span> is Priya's new line, kept. Green is what Apply adds.</p>
+        <div class="actions"><span class="btn quiet">Discard</span><span class="btn">Edit</span><span class="btn primary">Apply to her version</span></div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>A proposal never overwrites a newer issue.</b> When the issue changed after the card was made, the card says who changed it and when, and shows its change against the current version before Apply.</p>
+</section>
+
+<section class="study">
+  <div class="eyebrow">8 · Applied, and on a teammate's Mac</div>
+  <div class="frame">
+    <div class="convo">
+      <div class="proposal applied">
+        <div class="kind"><b>Comment</b> · SAGE-151 · <span class="ok">Applied by you · 1 commit · 2 min ago</span></div>
+        <div class="draft">Rejecting with 400 loses nothing: without <code>message.id</code> there is no message to deliver.</div>
+      </div>
+      <div class="eyebrow" style="margin-top:6px">Priya's Mac · SAGE-151 timeline</div>
+      <div class="timeline">
+        <div class="comment"><div class="by"><b>Priya Shah</b> · 31 min ago</div>If we reject it, is the message lost for good?</div>
+        <div class="comment asst"><div class="by"><b>Assistant for Michael</b> · 2 min ago</div>Rejecting with 400 loses nothing: without <code>message.id</code> there is no message to deliver.</div>
+        <div class="event">Assistant for Michael filed SAGE-164 · just now</div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>Whose assistant wrote it, on every Mac.</b> An applied comment is the human's, by login, and carries whose assistant wrote it, so it reads “Assistant for Michael”, tinted apart from people's comments. An issue filed from a card says the same.</p>
+</section>
+
 </div>
 
 <div style="margin-top:26px">
@@ -630,7 +865,8 @@ ul.legend li{margin:3px 0}
     <li>Threads read repositories, files, the web and their Space's brain, add log entries to that brain, and write only in their scratch folder. The provider enforces this.</li>
     <li>The router never writes. Below the threshold, or when it fails, it asks.</li>
     <li>Jobs are user-owned and separate from coordinator timers. Brain notes and other content cannot create one.</li>
-    <li>This study is static and was approved by Michael on October 29, 2026. It is not the GPUI implementation.</li>
+    <li>Issue threads read only their Space's tracker and repositories, with the web off, and change an issue only through a card the human applies.</li>
+    <li>This study is static and was approved by Michael on October 29, 2026, except section 8, which waits for his review. It is not the GPUI implementation.</li>
   </ul>
 </div>
 </body>
