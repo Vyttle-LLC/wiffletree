@@ -1872,13 +1872,8 @@ impl Host {
         self.keeper_push(&mut ticket)
     }
     /// Starts the push of the keeper's commit on the ticket's branch. A refused push ends as
-    /// one that failed. A PR that entered a merge queue since its result was taken up is not
-    /// pushed: GitHub does not say what a push does to a queued PR, so it counts as ejecting it.
+    /// one that failed.
     fn keeper_push(&mut self, ticket: &mut Ticket) -> Result<Option<publish::Job>> {
-        if ticket.in_merge_queue() {
-            let unpushed = "its PR entered a merge queue first, so GitHub's branch is unchanged";
-            return self.end_keeper_push(ticket, false, unpushed).map(|()| None);
-        }
         self.keeper_publish(&ticket.id).or_else(|e| {
             eprintln!("Workspace PR keeper: {}: push refused: {e:#}", ticket.id);
             self.keeper_published(ticket, false).map(|()| None)
@@ -6393,20 +6388,6 @@ pub(crate) mod tests {
         assert!(due.reproductions.is_empty() && try_agent(&f).is_none());
         assert!(held_for(&f, KeeperProblem::Checks).is_none());
         assert_eq!(wakes(&f).len(), 1);
-    }
-
-    #[test]
-    fn a_result_taken_up_before_the_pr_was_queued_is_not_pushed() {
-        let (mut f, r, result) = waiting();
-        let pushed = r.branch(BRANCH);
-        set_queued(&mut f, true);
-        assert!(f.host.keeper_move(&f.ticket.clone()).unwrap().is_none());
-        assert_eq!(f.head(), result);
-        assert_eq!(r.branch(BRANCH), pushed);
-        assert!(f.ticket().publishing.is_none());
-        let told = notices(&f.host);
-        assert_eq!(told.len(), 1);
-        assert!(told[0].2.contains("its PR entered a merge queue first"));
     }
 
     #[test]
