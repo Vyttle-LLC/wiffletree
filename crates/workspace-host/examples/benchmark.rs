@@ -299,6 +299,7 @@ fn main() -> Result<()> {
                 kind: LogKind::Observation,
                 title: format!("Milestone {i}"),
                 repository: None,
+                ticket_id: None,
                 changed: "Historical source entry".into(),
                 why: "Performance fixture".into(),
                 state: "Synthetic".into(),
@@ -322,6 +323,7 @@ fn main() -> Result<()> {
                 model: None,
                 machine: None,
                 in_legacy_file: false,
+                held: None,
             };
             logs.execute(params![
                 log.id,

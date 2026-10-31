@@ -271,6 +271,7 @@ impl Inspector {
                     kind: self.memory_kind.clone(),
                     title,
                     repository: None,
+                    ticket_id: None,
                     changed,
                     why: "Captured directly in native prototype".into(),
                     state: "Source report; evidence not independently verified".into(),

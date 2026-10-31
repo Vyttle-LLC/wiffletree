@@ -217,6 +217,7 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
                 kind: LogKind::Decision,
                 title: text(),
                 repository: None,
+                ticket_id: None,
                 changed: text(),
                 why: text(),
                 state: text(),

@@ -19,6 +19,7 @@ fn log(session: &str, milestone: &str) -> LogInput {
         kind: LogKind::Decision,
         title: format!("Decision {milestone}"),
         repository: None,
+        ticket_id: None,
         changed: "Spaces".into(),
         why: "One home".into(),
         state: "Reported; unverified".into(),

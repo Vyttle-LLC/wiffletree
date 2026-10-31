@@ -4,6 +4,7 @@
 //! the brain's batch flow (`brains.rs`), which opens one pull request for it. Nothing here logs
 //! an entry's text; errors and events name entry and batch ids only.
 use super::*;
+use brains::new_ulid;
 use chrono::{Datelike, Local, TimeZone};
 use publish::GitTool;
 
@@ -18,15 +19,16 @@ const NO_REF: &str = "—";
 /// The tool result's key for the milestone prompt, which the MCP bridge moves to the end of the
 /// result's text as its last line.
 pub(crate) const PROMPT_KEY: &str = "log_work_prompt";
-const PROMPT: &str = "Milestone: record it with one terse log_work call (type, title, changed, why, state). No transcripts, narration or pasted output, and never child personal information, credentials or secrets.";
+const PROMPT: &str = "Milestone: record it with one terse log_work call (type, title, changed, why, state; the coordinator also gives this ticket's ticket_id). No transcripts, narration or pasted output, and never child personal information, credentials or secrets.";
 /// The arguments `log_work` takes. The host fills in the entry's id, date, `ref` and author.
-const LOG_WORK_ARGUMENTS: [&str; 7] = [
+const LOG_WORK_ARGUMENTS: [&str; 8] = [
     "type",
     "title",
     "changed",
     "why",
     "state",
     "repository",
+    "ticket_id",
     "milestone",
 ];
 
@@ -41,9 +43,9 @@ pub(crate) fn logs_work(role: Role) -> bool {
 }
 
 /// Adds the batch tables and the entries' batch column and, once, carries the rows captured
-/// before per-entry files over: an exported row is marked as in its legacy file, and one never
-/// exported is queued when its project's Space has a brain. The export receipts and the
-/// maintenance runs are dropped.
+/// before per-entry files over: an exported row is marked as in its legacy file, and the
+/// export receipts and the maintenance runs are dropped. Then queues the unsent entries whose
+/// project's Space has a brain.
 pub(crate) fn migrate(host: &mut Host) -> Result<()> {
     let has_batches: bool = host.db.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('work_logs') WHERE name='batch_id')",
@@ -67,19 +69,8 @@ pub(crate) fn migrate(host: &mut Host) -> Result<()> {
                 "DROP TABLE log_exports; DROP INDEX IF EXISTS runs_project; DROP TABLE IF EXISTS maintenance_runs;",
             )?;
         }
-        Ok(())
+        host.queue_unsent()
     })
-}
-
-/// A lowercase ULID: 48 bits of `at` in milliseconds, then 80 random bits, in Crockford base32.
-fn new_ulid(at: i64) -> String {
-    const ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
-    let random = u128::from_be_bytes(*uuid::Uuid::new_v4().as_bytes()) >> 48;
-    let value = ((at as u128) << 80) | random;
-    (0..26)
-        .rev()
-        .map(|digit| ALPHABET[((value >> (digit * 5)) & 31) as usize] as char)
-        .collect()
 }
 
 /// The host's local date of `at`, `YYYY-MM-DD`.
@@ -245,6 +236,7 @@ fn log_work_input(session: &Session, args: &Value) -> Result<LogInput> {
             .context("type is decision or observation")?,
         title: string("title")?,
         repository: optional("repository"),
+        ticket_id: optional("ticket_id"),
         changed: string("changed")?,
         why: string("why")?,
         state: string("state")?,
@@ -348,20 +340,46 @@ impl Host {
         let author = (self.gh_login.clone())
             .filter(|login| valid_login(login))
             .context("Wiffletree has not read your GitHub login, so nothing was stored. Sign gh in (gh auth login), then Sync now on the Brains page.")?;
-        let (task_id, repository, reference) = match session.role {
+        let ticket = match session.role {
             Role::Implementer => {
                 ensure!(
                     input.repository.is_none(),
                     "An implementer logs for its ticket's repository; leave repository out"
                 );
-                let ticket = (self.session_runtime(&session.id)?.ticket_id)
+                let own = (self.session_runtime(&session.id)?.ticket_id)
                     .context("This implementer has no ticket to log for")?;
-                let ticket = self.ticket(&ticket)?;
-                let folder = repository_folder(&self.ticket_repository(&ticket)?)?;
-                let reference = self.ticket_reference(&ticket)?;
-                (Some(ticket.id), folder, reference)
+                ensure!(
+                    input.ticket_id.as_ref().is_none_or(|named| *named == own),
+                    "An implementer logs for its own ticket; leave ticket_id out"
+                );
+                Some(self.ticket(&own)?)
             }
-            _ => match &input.repository {
+            _ => {
+                match &input.ticket_id {
+                    Some(named) => {
+                        ensure!(
+                            input.repository.is_none(),
+                            "Give ticket_id or repository, not both: a ticket's entry is for its repository"
+                        );
+                        let ticket = self.ticket(named).ok().filter(|ticket| {
+                            (self.session(&ticket.coordinator_id))
+                                .is_ok_and(|c| c.project_id == project.id)
+                        });
+                        Some(ticket.with_context(|| {
+                            format!("{named} is not one of this project's tickets")
+                        })?)
+                    }
+                    None => None,
+                }
+            }
+        };
+        let (task_id, repository, reference) = match &ticket {
+            Some(ticket) => {
+                let folder = repository_folder(&self.ticket_repository(ticket)?)?;
+                let reference = self.ticket_reference(ticket)?;
+                (Some(ticket.id.clone()), folder, reference)
+            }
+            None => match &input.repository {
                 Some(named) => {
                     let repositories = self.project_repositories(&project.id)?;
                     let repository = (repositories.iter())
@@ -386,9 +404,7 @@ impl Host {
             valid_folder(&repository),
             "The brain repository's name {repository} cannot be a log folder"
         );
-        let folder = (self.brain(&brain).ok())
-            .and_then(|b| b.config.config().map(|c| c.brain_dir.clone()))
-            .unwrap_or_else(|| space_brain.folder.clone());
+        let folder = self.brain_folder(&brain, &space_brain);
         let at = now();
         let id = new_ulid(at);
         let date = local_date(at);
@@ -411,8 +427,11 @@ impl Host {
             model: (self.session_runtime(&session.id)?.profile).map(|p| p.model),
             machine: Some(sync::machine_name()),
             in_legacy_file: false,
+            held: None,
         };
         entry_file(&log, &author)?;
+        // A finished ticket's batch has gone already, so an entry for it goes at once.
+        let finished = ticket.as_ref().is_some_and(|t| !t.is_open());
         self.atomically(|host| {
             let key = match &log.task_id {
                 Some(ticket) => BatchKey::Ticket(ticket),
@@ -429,9 +448,16 @@ impl Host {
                 "work_log",
                 &log.id,
             )?;
-            host.close_full_batch(&batch, at)
+            host.close_batch_when(&batch, at, finished)
         })?;
         Ok(log)
+    }
+
+    /// The brain folder: `brain_dir` in the brain's config on `main`, or the Space's.
+    fn brain_folder(&self, brain: &str, space_brain: &SpaceBrain) -> String {
+        (self.brain(brain).ok())
+            .and_then(|b| b.config.config().map(|c| c.brain_dir.clone()))
+            .unwrap_or_else(|| space_brain.folder.clone())
     }
 
     /// Inserts the entry; one without a milestone takes its id as its milestone column, which
@@ -454,15 +480,20 @@ impl Host {
         Ok(())
     }
 
-    /// The ticket's `ref` from its worktree: the commits since its base, and its open or merged
-    /// pull request.
+    /// The ticket's `ref` from its branch, which its worktree has checked out: the commits since
+    /// its base, and its open or merged pull request. Read in the repository, so a ticket whose
+    /// worktree was removed on accepting still has one; `—` once its branch is gone.
     fn ticket_reference(&self, ticket: &Ticket) -> Result<String> {
+        let repository = PathBuf::from(self.ticket_repository(ticket)?.path);
+        let branch = format!("refs/heads/{}", ticket.branch);
+        let present =
+            runtime::git_answer(&repository, &["rev-parse", "--verify", "--quiet", &branch])?;
+        if !present.status.success() {
+            return Ok(NO_REF.into());
+        }
         let base = self.ticket_base(ticket)?;
-        let range = format!("{}..HEAD", base.measured());
-        let commits = runtime::git_output(
-            Path::new(&ticket.worktree),
-            &["rev-list", "--reverse", &range],
-        )?;
+        let range = format!("{}..{branch}", base.measured());
+        let commits = runtime::git_output(&repository, &["rev-list", "--reverse", &range])?;
         let commits: Vec<&str> = commits.lines().collect();
         let pull_request = (ticket.pull_request.as_ref())
             .filter(|pr| pr.state != PrState::Closed)
@@ -495,14 +526,15 @@ impl Host {
         Ok(id)
     }
 
-    /// Closes the batch once it holds the most entries one may, so the next starts another.
-    fn close_full_batch(&mut self, batch: &str, at: i64) -> Result<()> {
+    /// Closes the batch when `now` says so, or once it holds the most entries one may, so the
+    /// next entry starts another.
+    fn close_batch_when(&mut self, batch: &str, at: i64, now: bool) -> Result<()> {
         let entries: i64 = self.db.query_row(
             "SELECT count(*) FROM work_logs WHERE batch_id=?1",
             [batch],
             |r| r.get(0),
         )?;
-        if entries >= MAX_BATCH_ENTRIES {
+        if now || entries >= MAX_BATCH_ENTRIES {
             self.db.execute(
                 "UPDATE log_batches SET closed_at=?2 WHERE id=?1",
                 params![batch, at],
@@ -528,6 +560,7 @@ impl Host {
     /// which commits its entry files and opens one pull request on the brain's next pass. A
     /// batch whose brain has not been fetched, or is held, waits for a later call.
     pub(crate) fn send_log_batches(&mut self, at: i64, git: &GitTool) -> Result<()> {
+        self.atomically(Self::queue_unsent)?;
         self.brains_now |= close_log_batches(&self.db, Closing::Due(at), at)? > 0;
         let closed: Vec<(String, String, String, Option<String>)> = self
             .db
@@ -562,13 +595,17 @@ impl Host {
             [id],
         )?;
         let mut files = vec![];
-        for log in &logs {
+        // A held entry waits for the human and is never sent as it stands.
+        for log in logs.iter().filter(|log| log.held.is_none()) {
             // A row carried over from before per-entry files has no author until gh's login is read.
             let Some(author) = log.author.clone().or_else(|| self.gh_login.clone()) else {
                 return Ok(());
             };
             let path = log.path.clone().context("An entry in a batch has a path")?;
             files.push((path, entry_file(log, &author)?.into_bytes()));
+        }
+        if files.is_empty() {
+            return Ok(());
         }
         let about = match ticket {
             Some(ticket) => self.ticket(ticket)?.title,
@@ -580,24 +617,33 @@ impl Host {
         };
         let title: String = format!("Log batch: {about} ({entries})");
         let title: String = title.chars().take(256).collect();
-        let batch = self.queue_brain_batch(
-            brain,
-            BrainBatchKind::Log,
-            BrainSource::Project(project.into()),
-            &title,
-            &files,
-            git,
-        )?;
-        self.db.execute(
-            "UPDATE log_batches SET brain_batch_id=?2 WHERE id=?1",
-            params![id, batch.id],
-        )?;
-        Ok(())
+        // The brain batch and the record of it are stored together or not at all, so a failure
+        // between them neither loses the log batch nor queues it twice.
+        self.atomically(|host| {
+            let batch = host.queue_brain_batch(
+                brain,
+                BrainBatchKind::Log,
+                BrainSource::Project(project.into()),
+                &title,
+                &files,
+                git,
+            )?;
+            let recorded = host.db.execute(
+                "UPDATE log_batches SET brain_batch_id=?2 WHERE id=?1",
+                params![id, batch.id],
+            );
+            if let Err(error) = recorded {
+                let checkout = PathBuf::from(host.brain(brain)?.checkout);
+                host.remove_batch_worktree(&checkout, &batch.id);
+                return Err(error.into());
+            }
+            Ok(())
+        })
     }
 
     /// The prompt for one `log_work` call at `milestone` of the ticket, or `None`: when no brain
-    /// applies, when this milestone was prompted already, or when the session has logged since
-    /// its previous prompted milestone of the ticket (an implementer for that ticket).
+    /// applies, when this milestone was prompted already, or when the session has logged an
+    /// entry for the ticket since its previous prompted milestone of it.
     pub(crate) fn milestone_prompt(
         &mut self,
         session: &Session,
@@ -620,10 +666,10 @@ impl Host {
         if prompted {
             return Ok(None);
         }
-        let for_ticket = (session.role == Role::Implementer).then_some(ticket.id.as_str());
+        // Only an entry for this ticket counts; another ticket's or a planning entry does not.
         let logged: bool = self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM work_logs WHERE session_id=?1 AND json_extract(data,'$.created_at')>=?2 AND (?3 IS NULL OR json_extract(data,'$.task_id')=?3))",
-            params![session.id, previous.unwrap_or(0), for_ticket],
+            "SELECT EXISTS(SELECT 1 FROM work_logs WHERE session_id=?1 AND json_extract(data,'$.created_at')>=?2 AND json_extract(data,'$.task_id')=?3)",
+            params![session.id, previous.unwrap_or(0), ticket.id],
             |r| r.get(0),
         )?;
         if logged {
@@ -670,80 +716,118 @@ impl Host {
             // The old `reference` was the author's own text; `ref` is now the host's.
             let reference = (value["input"].as_object_mut())
                 .and_then(|input| input.remove("reference"))
-                .and_then(|reference| reference.as_str().map(one_line))
+                .and_then(|reference| reference.as_str().map(str::to_owned))
                 .unwrap_or_default();
             let mut log: WorkLog = serde_json::from_value(value)?;
             log.reference = reference;
             log.space_id = space.map(SpaceId);
             log.date = local_date(log.created_at);
-            if exported {
-                log.in_legacy_file = true;
-            } else {
-                self.queue_carried_over(&mut log)?;
-            }
+            log.in_legacy_file = exported;
             self.db.execute(
-                "UPDATE work_logs SET id=?2,data=?3,batch_id=?4 WHERE id=?1",
-                params![id, log.id, encode(&log)?, log.batch_id],
+                "UPDATE work_logs SET data=?2 WHERE id=?1",
+                params![id, encode(&log)?],
             )?;
-            if let Some(batch) = &log.batch_id {
-                self.close_full_batch(batch, now())?;
-            }
         }
         Ok(())
     }
 
-    /// Queues a row never exported into its batch when its Space has a GitHub brain and it fits
-    /// the entry contract; otherwise it stays unsent. Its `ref` becomes `—` when the old text does
-    /// not fit, and that text moves into `state`.
-    fn queue_carried_over(&mut self, log: &mut WorkLog) -> Result<()> {
-        let Some(space) = log.space_id.clone() else {
-            return Ok(());
-        };
-        let Some(record) = self.find_space(&space)? else {
-            return Ok(());
-        };
-        let Some(SpaceBrain {
-            repository: BrainRepository::GitHub { owner, name, .. },
-            folder,
-            ..
-        }) = record.space.brain
-        else {
-            return Ok(());
-        };
-        let mut entry = log.clone();
-        if !valid_ref(&entry.reference) {
-            if !entry.reference.is_empty() {
-                entry.input.state = format!("{} (ref: {})", entry.input.state, entry.reference);
+    /// Queues each unsent entry whose project's Space now has a GitHub brain, giving it an entry
+    /// id, its brain and its path. One that breaks the entry contract or the cap as it stands is
+    /// queued held, its text unchanged, and is never sent; the project's coordinator gets one
+    /// Inbox item saying how many it holds.
+    fn queue_unsent(&mut self) -> Result<()> {
+        type Row = (String, String);
+        let rows: Vec<Row> = self
+            .db
+            .prepare("SELECT id,data FROM work_logs WHERE batch_id IS NULL AND json_extract(data,'$.in_legacy_file') IS NOT 1 ORDER BY sequence")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut newly_held = std::collections::BTreeSet::new();
+        for (id, data) in rows {
+            let mut entry: WorkLog = serde_json::from_str(&data)?;
+            let project = self.project(&entry.project_id)?;
+            let Some(space_brain) = self.owner_brain(&SessionOwner::Project(project.id.clone()))?
+            else {
+                continue;
+            };
+            let BrainRepository::GitHub { owner, name, .. } = &space_brain.repository else {
+                continue;
+            };
+            let brain = format!("{owner}/{name}");
+            // The coordinator's rows were logged for the project as a whole.
+            if entry.repository == "project" {
+                entry.repository = name.clone();
             }
-            entry.reference = NO_REF.into();
+            entry.id = new_ulid(entry.created_at);
+            entry.space_id = Some(project.space.clone());
+            let folder = self.brain_folder(&brain, &space_brain);
+            entry.path = Some(entry_path(
+                &folder,
+                &entry.repository,
+                &entry.date,
+                &entry.id,
+            ));
+            entry.brain = Some(brain.clone());
+            entry.held = unfit(&entry).map(str::to_owned);
+            if entry.held.is_some() {
+                newly_held.insert(project.id.clone());
+            }
+            let key = match &entry.task_id {
+                Some(ticket) => BatchKey::Ticket(ticket),
+                None => BatchKey::Session(&entry.input.session_id),
+            };
+            let batch = self.open_batch(&brain, &project.id, key, now())?;
+            entry.batch_id = Some(batch.clone());
+            self.db.execute(
+                "UPDATE work_logs SET id=?2,data=?3,batch_id=?4,space_id=?5 WHERE id=?1",
+                params![id, entry.id, encode(&entry)?, batch, project.space.as_str()],
+            )?;
+            self.close_batch_when(&batch, now(), false)?;
         }
-        // The coordinator's rows were logged for the project as a whole.
-        if entry.repository == "project" {
-            entry.repository = name.clone();
+        for project in &newly_held {
+            self.raise_held_item(project)?;
         }
-        entry.id = new_ulid(entry.created_at);
-        entry.brain = Some(format!("{owner}/{name}"));
-        entry.path = Some(entry_path(
-            &folder,
-            &entry.repository,
-            &entry.date,
-            &entry.id,
-        ));
-        let fits = valid_folder(&entry.repository)
-            && folded(entry.input.clone()).is_ok_and(|input| input == entry.input)
-            && entry_file(&entry, "author").is_ok();
-        if !fits {
-            return Ok(());
-        }
-        let key = match &entry.task_id {
-            Some(ticket) => BatchKey::Ticket(ticket),
-            None => BatchKey::Session(&entry.input.session_id),
-        };
-        let brain = entry.brain.clone().unwrap_or_default();
-        entry.batch_id = Some(self.open_batch(&brain, &entry.project_id, key, now())?);
-        *log = entry;
         Ok(())
     }
+
+    /// One Inbox item for the project's coordinator naming how many entries it holds.
+    fn raise_held_item(&mut self, project: &str) -> Result<()> {
+        let Some(coordinator) = self.coordinator_of(project)? else {
+            return Ok(());
+        };
+        let held: i64 = self.db.query_row(
+            "SELECT count(*) FROM work_logs WHERE project_id=?1 AND json_extract(data,'$.held') IS NOT NULL",
+            [project],
+            |r| r.get(0),
+        )?;
+        let entries = match held {
+            1 => "1 log entry".to_owned(),
+            n => format!("{n} log entries"),
+        };
+        let prompt = format!(
+            "{entries} captured before per-entry files cannot be sent to the brain as they stand: each breaks the entry contract or the 2,000-character cap. They are kept unchanged in this project's memory and are not sent."
+        );
+        let operation = format!("{BRAIN_NOTICE_PREFIX}held-logs:{held}");
+        self.request_attention(&coordinator, "local", &operation, &prompt, &[])?;
+        Ok(())
+    }
+}
+
+/// Why an entry carried over from before per-entry files cannot be sent as it stands, or `None`
+/// when it can. Names the rule, never the text.
+fn unfit(entry: &WorkLog) -> Option<&'static str> {
+    if !valid_folder(&entry.repository) {
+        return Some("its folder name is not one the entry contract allows");
+    }
+    if !valid_ref(&entry.reference) {
+        return Some("its ref is not one the entry contract allows");
+    }
+    if folded(entry.input.clone()).ok().as_ref() != Some(&entry.input) {
+        return Some("a field is empty or not on one line, or the title is over 80 characters");
+    }
+    entry_file(entry, "author")
+        .err()
+        .map(|_| "it is over the 2,000-character cap")
 }
 
 #[cfg(test)]
@@ -953,6 +1037,28 @@ mod tests {
             error.contains("not one of this project's repositories"),
             "{error}"
         );
+        // A ticket of another project, or another ticket than an implementer's own.
+        let other = f.host.create_project("Other").unwrap();
+        let other_coordinator = f.host.coordinator_of(&other.id).unwrap().unwrap();
+        let repository = f.ticket().repository_id;
+        f.host
+            .set_project_repositories(&other.id, Some(vec![repository.clone()]))
+            .unwrap();
+        let foreign = (f.host)
+            .create_ticket(&other_coordinator, &repository, "Foreign", "Do")
+            .unwrap();
+        let mut theirs = args("x");
+        theirs["ticket_id"] = json!(foreign.id);
+        let error = format!(
+            "{:#}",
+            log_work(&mut f, &coordinator, theirs.clone()).unwrap_err()
+        );
+        assert!(
+            error.contains("not one of this project's tickets"),
+            "{error}"
+        );
+        let error = format!("{:#}", log_work(&mut f, &implementer, theirs).unwrap_err());
+        assert!(error.contains("leave ticket_id out"), "{error}");
 
         let ticket = f.ticket.clone();
         for role in [Role::Tester, Role::Reviewer] {
@@ -970,6 +1076,23 @@ mod tests {
             .query_row("SELECT count(*) FROM log_batches", [], |r| r.get(0))
             .unwrap();
         assert_eq!(batches, 0);
+    }
+
+    #[test]
+    fn the_cap_allows_2000_characters_of_body_and_refuses_2001() {
+        let mut f = fixture();
+        let implementer = f.implementer.id.clone();
+        log_work(&mut f, &implementer, args("Base")).unwrap();
+        let mut log = stored(&f).remove(0);
+        let base = entry_file(&log, "mhohlios").unwrap();
+        let body = base.split_once("\n---\n").unwrap().1.trim().chars().count();
+        let room = MAX_BODY_CHARS - body + log.input.changed.chars().count();
+        log.input.changed = "x".repeat(room);
+        assert!(entry_file(&log, "mhohlios").is_ok());
+        log.input.changed.push('x');
+        let error = format!("{:#}", entry_file(&log, "mhohlios").unwrap_err());
+        assert!(error.contains("The entry is 2001 characters"), "{error}");
+        assert!(error.contains("cut at least 1 characters"), "{error}");
     }
 
     #[test]
@@ -1020,6 +1143,7 @@ mod tests {
             kind: LogKind::Observation,
             title: "Seen\nin review".into(),
             repository: None,
+            ticket_id: None,
             changed: "Line one\nline two".into(),
             why: "w".into(),
             state: "s".into(),
@@ -1103,6 +1227,7 @@ mod tests {
                 kind: serde_json::from_value(json!(fields[0].1)).ok()?,
                 title: title.into(),
                 repository: None,
+                ticket_id: None,
                 changed: fields[2].1.clone(),
                 why: fields[3].1.clone(),
                 state: fields[4].1.clone(),
@@ -1117,6 +1242,7 @@ mod tests {
             model: None,
             machine: None,
             in_legacy_file: false,
+            held: None,
         };
         let path = entry_path("second-brain", repo, date, id);
         Some((path, entry_file(&log, author).ok()?))
@@ -1259,6 +1385,7 @@ mod tests {
     #[test]
     fn a_batch_holds_at_most_50_entries_and_send_now_or_an_archive_closes_one() {
         let mut f = fixture();
+        let (_github, tools) = fetched(&mut f);
         let implementer = f.implementer.id.clone();
         for i in 0..51 {
             log_work(&mut f, &implementer, args(&format!("Entry {i}"))).unwrap();
@@ -1271,12 +1398,20 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert_eq!(counts, [(50, true), (1, false)]);
+        let files = |f: &Fixture| -> Vec<usize> {
+            let batches = f.host.brain_batches(Some(REPO)).unwrap();
+            batches.iter().map(|b| b.files.len()).collect()
+        };
+        f.host.send_log_batches(now(), &tools.git).unwrap();
+        assert_eq!(files(&f), [50], "the full batch goes on its own");
         assert_eq!(
             f.host
                 .send_logs_now(Some("sage-social/SAGEHAVEN-DOCS"))
                 .unwrap(),
             1
         );
+        f.host.send_log_batches(now(), &tools.git).unwrap();
+        assert_eq!(files(&f), [50, 1], "Send now sends the open one");
 
         let coordinator = f.coordinator.id.clone();
         log_work(&mut f, &coordinator, args("Plan")).unwrap();
@@ -1289,6 +1424,90 @@ mod tests {
             )
             .unwrap();
         assert_eq!(open, 0, "archiving the coordinator closes its batch");
+        f.host.send_log_batches(now(), &tools.git).unwrap();
+        assert_eq!(files(&f), [50, 1, 1]);
+    }
+
+    #[test]
+    fn closing_a_ticket_closes_its_batch() {
+        let mut f = fixture();
+        let (implementer, coordinator) = (f.implementer.id.clone(), f.coordinator.id.clone());
+        log_work(&mut f, &implementer, args("Partial")).unwrap();
+        let ticket = f.ticket.clone();
+        f.host
+            .agent_tool(&coordinator, "close_ticket", json!({"ticket_id": ticket}))
+            .unwrap();
+        let open: i64 = (f.host.db)
+            .query_row(
+                "SELECT count(*) FROM log_batches WHERE ticket_id=?1 AND closed_at IS NULL",
+                [&ticket],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(open, 0);
+    }
+
+    #[test]
+    fn a_hand_off_that_fails_halfway_queues_its_batch_once_on_the_next_try() {
+        let mut f = fixture();
+        let (_github, tools) = fetched(&mut f);
+        let coordinator = f.coordinator.id.clone();
+        log_work(&mut f, &coordinator, args("Plan")).unwrap();
+        f.host.send_logs_now(None).unwrap();
+        // Recording the hand-off fails after the brain batch was committed.
+        (f.host.db)
+            .execute_batch("CREATE TEMP TRIGGER refuse BEFORE UPDATE OF brain_batch_id ON log_batches BEGIN SELECT RAISE(ABORT,'database is busy'); END;")
+            .unwrap();
+        f.host.send_log_batches(now(), &tools.git).unwrap();
+        assert!(f.host.brain_batches(Some(REPO)).unwrap().is_empty());
+        let leftovers = fs::read_dir(f.host.home.join("brain-batches"))
+            .unwrap()
+            .count();
+        assert_eq!(leftovers, 0, "its worktree is removed with it");
+        (f.host.db).execute_batch("DROP TRIGGER refuse;").unwrap();
+        f.host.send_log_batches(now(), &tools.git).unwrap();
+        f.host.send_log_batches(now(), &tools.git).unwrap();
+        assert_eq!(f.host.brain_batches(Some(REPO)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_coordinator_entry_for_a_ticket_joins_its_batch_with_its_ref() {
+        let mut f = fixture();
+        let (_github, tools) = fetched(&mut f);
+        let (implementer, coordinator) = (f.implementer.id.clone(), f.coordinator.id.clone());
+        let ticket = f.ticket.clone();
+        let mine = log_work(&mut f, &implementer, args("Work")).unwrap();
+        let mut about = args("Reviewed");
+        about["ticket_id"] = json!(ticket);
+        let theirs = log_work(&mut f, &coordinator, about.clone()).unwrap();
+        assert_eq!(theirs["ref"], mine["ref"]);
+        assert!(
+            theirs["path"]
+                .as_str()
+                .unwrap()
+                .starts_with("second-brain/logs/app/")
+        );
+        let batches: i64 = (f.host.db)
+            .query_row("SELECT count(DISTINCT batch_id) FROM work_logs", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(batches, 1, "the ticket's one batch");
+
+        // After the accept removed the worktree, an entry for the ticket still has its ref and
+        // goes at once.
+        f.host
+            .agent_tool(&coordinator, "accept_ticket", json!({"ticket_id": ticket}))
+            .unwrap();
+        about["title"] = json!("Accepted");
+        let after = log_work(&mut f, &coordinator, about).unwrap();
+        assert_eq!(after["ref"], mine["ref"]);
+        f.host.send_log_batches(now(), &tools.git).unwrap();
+        f.host.send_log_batches(now(), &tools.git).unwrap();
+        let sent: Vec<usize> = (f.host.brain_batches(Some(REPO)).unwrap().iter())
+            .map(|b| b.files.len())
+            .collect();
+        assert_eq!(sent, [2, 1]);
     }
 
     fn ready(f: &mut Fixture, message: &str) -> Value {
@@ -1324,18 +1543,32 @@ mod tests {
         let coordinator = f.coordinator.id.clone();
         let (status, _) = f.publish(&coordinator).unwrap();
         assert_eq!(status[PROMPT_KEY], PROMPT);
-        // Logged since that prompt, so accepting adds none.
-        log_work(&mut f, &coordinator, args("Published")).unwrap();
+        // An entry for the ticket since that prompt, so accepting adds none.
         let ticket = f.ticket.clone();
+        let mut published = args("Published");
+        published["ticket_id"] = json!(ticket);
+        log_work(&mut f, &coordinator, published).unwrap();
         let accepted = f
             .host
             .agent_tool(&coordinator, "accept_ticket", json!({"ticket_id": ticket}))
             .unwrap();
         assert!(accepted.get(PROMPT_KEY).is_none());
 
+        // A planning entry, or one for another ticket, says nothing about this one.
         let mut f = fixture();
         let coordinator = f.coordinator.id.clone();
         let ticket = f.ticket.clone();
+        log_work(&mut f, &coordinator, args("Plan")).unwrap();
+        let (status, _) = f.publish(&coordinator).unwrap();
+        assert_eq!(status[PROMPT_KEY], PROMPT);
+        let repository = f.ticket().repository_id;
+        let other = f
+            .host
+            .create_ticket(&coordinator, &repository, "Other", "Do")
+            .unwrap();
+        let mut elsewhere = args("Other ticket");
+        elsewhere["ticket_id"] = json!(other.id);
+        log_work(&mut f, &coordinator, elsewhere).unwrap();
         let accepted = f
             .host
             .agent_tool(&coordinator, "accept_ticket", json!({"ticket_id": ticket}))
@@ -1401,7 +1634,7 @@ mod tests {
     }
 
     #[test]
-    fn the_upgrade_keeps_every_row_and_queues_only_unexported_ones_with_a_brain() {
+    fn the_upgrade_keeps_every_row_and_queues_every_unexported_one_with_a_brain() {
         let home = tempfile::tempdir().unwrap();
         let mut host = Host::open_set_up(home.path()).unwrap();
         let sage = host.create_space("Sage", "", "", None).unwrap().space;
@@ -1418,11 +1651,12 @@ mod tests {
             home.path(),
             &[
                 ("exported", &one, "—", true),
-                ("pending", &one, "main 1a2b3c4", false),
+                ("fits", &one, "—", false),
+                ("broken", &one, "main 1a2b3c4", false),
                 ("no-brain", &two, "—", false),
             ],
         );
-        let host = Host::open_set_up(home.path()).unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
         let gone: bool = (host.db)
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ('log_exports','maintenance_runs'))",
@@ -1432,28 +1666,60 @@ mod tests {
             .unwrap();
         assert!(!gone);
         let logs = host.logs(&with_brain.id, None, 100).unwrap();
-        assert_eq!(logs.len(), 2);
+        assert_eq!(logs.len(), 3);
         let exported = logs.iter().find(|l| l.id == "exported").unwrap();
         assert!(exported.in_legacy_file && exported.batch_id.is_none());
-        let queued = logs.iter().find(|l| l.id != "exported").unwrap();
-        assert_eq!(queued.id.len(), 26);
-        assert!(queued.batch_id.is_some());
-        assert_eq!(queued.brain.as_deref(), Some(REPO));
-        assert!(
-            queued
-                .path
-                .as_deref()
-                .unwrap()
-                .starts_with("second-brain/logs/sagehaven-docs/")
-        );
-        // An old ref that does not fit the contract becomes `—`, its text kept in `state`.
+        let queued: Vec<&WorkLog> = logs.iter().filter(|l| l.id != "exported").collect();
+        for log in &queued {
+            assert_eq!(log.id.len(), 26);
+            assert!(log.batch_id.is_some());
+            assert_eq!(log.brain.as_deref(), Some(REPO));
+            let path = log.path.as_deref().unwrap();
+            assert!(
+                path.starts_with("second-brain/logs/sagehaven-docs/"),
+                "{path}"
+            );
+        }
+        // The row whose old ref breaks the contract is queued held, its text unchanged.
+        let held: Vec<&&WorkLog> = queued.iter().filter(|l| l.held.is_some()).collect();
+        assert_eq!(held.len(), 1);
         assert_eq!(
-            (queued.reference.as_str(), queued.input.state.as_str()),
-            ("—", "s (ref: main 1a2b3c4)")
+            (held[0].reference.as_str(), held[0].input.state.as_str()),
+            ("main 1a2b3c4", "s")
+        );
+        let items = host.open_attention(&with_brain.id).unwrap();
+        let item = items
+            .iter()
+            .find(|i| i.operation_id.contains("held-logs"))
+            .unwrap();
+        assert!(
+            item.prompt.starts_with("1 log entry captured before"),
+            "{}",
+            item.prompt
         );
         let unsent = host.logs(&without.id, None, 100).unwrap();
         assert_eq!(unsent.len(), 1);
         assert!(unsent[0].is_unsent());
         assert_eq!(unsent[0].id, "no-brain");
+
+        // Only the entry that fits is sent; the held one stays.
+        host.legacy_pointer = home.path().join("no-pointer");
+        host.record_gh_login(Some("mhohlios".into()));
+        let folder = tempfile::tempdir().unwrap();
+        let tools = GitHub::new(folder.path()).tools();
+        assert!(run(&mut host, &tools));
+        host.send_logs_now(None).unwrap();
+        host.send_log_batches(now(), &tools.git).unwrap();
+        let batches = host.brain_batches(Some(REPO)).unwrap();
+        let fits = queued.iter().find(|l| l.held.is_none()).unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].files, [fits.path.clone().unwrap()]);
+
+        // Once the other project's Space names a brain, its waiting row is queued.
+        let personal = host.project(&without.id).unwrap().space;
+        name_brain(&mut host, &personal, REPO);
+        host.send_log_batches(now(), &tools.git).unwrap();
+        let queued = host.logs(&without.id, None, 100).unwrap().remove(0);
+        assert!(queued.batch_id.is_some() && queued.held.is_none());
     }
 }

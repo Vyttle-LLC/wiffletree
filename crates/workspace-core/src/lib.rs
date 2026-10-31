@@ -686,12 +686,17 @@ pub struct LogInput {
     /// one, its entry is a planning entry in the brain repository's own folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
+    /// The coordinator's choice of one of its project's tickets: the entry goes in that
+    /// ticket's batch, for its repository, with its `ref`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket_id: Option<String>,
     pub changed: String,
     pub why: String,
     pub state: String,
 }
-/// A stored log entry. Entries captured before `brain-log-capture` keep their old id and lack
-/// the brain fields; those already in a legacy `logs/<repo>.md` file say so.
+/// A stored log entry. An entry captured before `brain-log-capture` keeps its old id and has no
+/// brain fields while it is in a legacy `logs/<repo>.md` file or waits for a brain; once queued
+/// into a batch it gains an entry id, its brain and its path like any other.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkLog {
     pub sequence: i64,
@@ -732,6 +737,11 @@ pub struct WorkLog {
     /// brings it over, so it is never written again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_legacy_file: bool,
+    /// Why an entry captured before per-entry files is held in its batch and not sent: as it
+    /// stands it breaks the entry contract or the cap. Its text is never changed; it waits for
+    /// the human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<String>,
 }
 impl WorkLog {
     /// Neither in a batch nor in a legacy file: it waits for its project's Space to have a brain.

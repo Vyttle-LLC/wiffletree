@@ -105,10 +105,11 @@ fn refuse_symlinks(worktree: &Path, path: &str) -> Result<()> {
     Ok(())
 }
 
-/// A lowercase ULID: 48 bits of milliseconds, then 80 random bits, in Crockford's base 32.
-fn new_batch_id() -> String {
+/// A lowercase ULID: 48 bits of `at` in milliseconds, then 80 random bits, in Crockford's base
+/// 32. Batch ids and log entry ids both use it.
+pub(crate) fn new_ulid(at: i64) -> String {
     const ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
-    let time = (now() as u128) & ((1 << 48) - 1);
+    let time = (at as u128) & ((1 << 48) - 1);
     let random = u128::from_be_bytes(*uuid::Uuid::new_v4().as_bytes()) & ((1 << 80) - 1);
     let mut value = (time << 80) | random;
     let mut id = [0u8; 26];
@@ -1373,7 +1374,7 @@ impl Host {
             );
         }
         let checkout = PathBuf::from(&brain.checkout);
-        let id = new_batch_id();
+        let id = new_ulid(now());
         let worktree = self.batch_folder(&id);
         fs::create_dir_all(self.home.join(BATCHES))?;
         let into = worktree
@@ -1429,7 +1430,7 @@ impl Host {
         Ok(batch)
     }
 
-    fn remove_batch_worktree(&self, checkout: &Path, id: &str) {
+    pub(crate) fn remove_batch_worktree(&self, checkout: &Path, id: &str) {
         let _ = fs::remove_dir_all(self.batch_folder(id));
         let _ = runtime::git_output(checkout, &["worktree", "prune"]);
     }
