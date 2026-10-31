@@ -7,7 +7,7 @@
 <title>Wiffletree · Brain compile study</title>
 <!--
   Static study for brain-compile. No script, no network.
-  PENDING Michael's approval.
+  APPROVED by Michael on 2026-10-31.
   The theme switch at the top is a CSS-only checkbox. Names, times, counts and costs are drawn by hand.
   1. The Models page: the Brain compiler row in Who runs what, empty ("No model") and set, and its then menu.
   2. The Brains page for a brain this Mac compiles: last and next run, Run now, the paginated run history,
@@ -159,7 +159,7 @@ ul.legend li{margin:3px 0}
 <div class="intro">
   <div class="eyebrow">Wiffletree · design study</div>
   <h1>Brain compile</h1>
-  <span class="pending">Pending Michael's approval</span>
+  <span class="pending">Approved by Michael, October 31, 2026</span>
   <p>A static study for <code>openspec/changes/brain-compile</code>. Nothing here runs: no compile is scheduled, no model starts, no ref is verified, no ruling is written and no pull request opens. <code>sagehaven-docs</code> and <code>vyttle-docs</code> are sample brains; names, times, counts and costs are drawn by hand.</p>
   <div class="switch">
     <span>Appearance:</span>
@@ -285,7 +285,7 @@ ul.legend li{margin:3px 0}
             <div class="cardhead"><span class="pill" style="background:color-mix(in srgb,var(--magenta) 14%,transparent);color:var(--magenta)">Conflict</span><b>Destructive change · sagehaven-infra</b><span class="r hint">No project includes sagehaven-infra</span></div>
             <div class="vs">
               <div class="side-say"><span class="k">The note says · notes/ecr-lifecycle.md</span><q>Images are kept for 90 days.</q><span class="src">kind: observation · updated Oct 12 · verified</span></div>
-              <div class="side-say"><span class="k">The new entry says · Oct 30 · Oscar's agent</span><q>Drop the lifecycle policy; ECR keeps every image.</q><span class="src">unverified · not on this machine</span></div>
+              <div class="side-say"><span class="k">The new entry says · Oct 30 · Tomás's agent</span><q>Drop the lifecycle policy; ECR keeps every image.</q><span class="src">unverified · not on this machine</span></div>
             </div>
             <div class="rulings"><span class="btn">Uphold existing</span><span class="btn">Keep new</span><span class="btn">Keep both…</span><span class="btn ghost">Defer</span><span class="btn link" style="margin-left:auto">Evidence ↗</span></div>
           </div>
@@ -327,7 +327,7 @@ ul.legend li{margin:3px 0}
 </section>
 
 <section class="study">
-  <div class="eyebrow">2b · On RB's Mac, which does not compile it</div>
+  <div class="eyebrow">2b · On Priya's Mac, which does not compile it</div>
   <div class="frame"><div class="page">
     <div class="card">
       <div class="cardhead"><span class="mono">◎</span><b>Sage-Social/sagehaven-docs</b><span class="r"><span class="pill ok">Synced 2 min ago</span></span></div>
@@ -362,12 +362,12 @@ ul.legend li{margin:3px 0}
               <div class="cardhead"><span class="pill" style="background:color-mix(in srgb,var(--magenta) 14%,transparent);color:var(--magenta)">Brain conflict</span><b>Contradicts a decision</b><span class="r hint">sagehaven-docs · c-7b21</span></div>
               <div class="vs">
                 <div class="side-say"><span class="k">The decision note says</span><q>Telnyx call retries cap at 5 attempts, backing off from 2 seconds.</q><span class="src"><code>notes/call-watch-relay-retries.md</code> · kind: decision · Michael · Oct 14</span></div>
-                <div class="side-say"><span class="k">The new entry says</span><q>Retries now cap at 3 attempts, to keep a call under the watch's 20-second timeout.</q><span class="src">Oct 30 · Oscar's implementer · <span class="warn">claimed</span></span></div>
+                <div class="side-say"><span class="k">The new entry says</span><q>Retries now cap at 3 attempts, to keep a call under the watch's 20-second timeout.</q><span class="src">Oct 30 · Tomás's implementer · <span class="warn">claimed</span></span></div>
               </div>
               <ul class="evidence">
                 <li>Entry ref <code>wiffletree/retry-telnyx-timeout @ 7d03b1e · PR #92</code>: commit only on its branch; PR #92 open.</li>
                 <li>Decision sources: 2 entries, verified; PR #81 merged; in release <code>v1.8.0</code>.</li>
-                <li>Authors: Michael (decision), Oscar (entry).</li>
+                <li>Authors: Michael (decision), Tomás (entry).</li>
               </ul>
               <div class="rec"><b>Recommended: Uphold existing.</b> PR #92 is still open, while the 5-attempt cap is merged and released.</div>
               <div class="rulings"><span class="btn primary">Uphold existing</span><span class="tag">Recommended</span><span class="btn">Keep new</span><span class="btn">Keep both…</span><span class="btn ghost">Defer</span><span class="btn link" style="margin-left:auto">Evidence ↗</span></div>
@@ -376,8 +376,8 @@ ul.legend li{margin:3px 0}
             <div class="conflict">
               <div class="cardhead"><span class="pill" style="background:color-mix(in srgb,var(--magenta) 14%,transparent);color:var(--magenta)">Brain conflict</span><b>Two authors disagree</b><span class="r hint">sagehaven-docs · c-91d4</span></div>
               <div class="vs">
-                <div class="side-say"><span class="k">RB's entry says · Oct 28</span><q>The relay's health check is <code>/healthz</code>.</q><span class="src">RB's tester · <span class="ok">verified</span> · PR #88 merged</span></div>
-                <div class="side-say"><span class="k">Oscar's entry says · Oct 30</span><q>The relay's health check is <code>/ready</code>.</q><span class="src">Oscar's implementer · <span class="ok">verified</span> · PR #90 merged</span></div>
+                <div class="side-say"><span class="k">Priya's entry says · Oct 28</span><q>The relay's health check is <code>/healthz</code>.</q><span class="src">Priya's tester · <span class="ok">verified</span> · PR #88 merged</span></div>
+                <div class="side-say"><span class="k">Tomás's entry says · Oct 30</span><q>The relay's health check is <code>/ready</code>.</q><span class="src">Tomás's implementer · <span class="ok">verified</span> · PR #90 merged</span></div>
               </div>
               <div class="rec"><b>Recommended: Keep both.</b> Both PRs merged; they may be two different checks.</div>
               <div class="field">/healthz is the ALB's liveness check; /ready is ECS's readiness check.</div>
@@ -398,7 +398,7 @@ ul.legend li{margin:3px 0}
             <div class="conflict done">
               <div class="cardhead"><span class="pill ok">Ruled</span><b>Contradicts a decision</b><span class="r hint">sagehaven-docs · c-0f3a</span></div>
               <div class="ruled">
-                <span><b>Uphold existing</b> by Oscar · yesterday, on Oscar's Mac.</span>
+                <span><b>Uphold existing</b> by Tomás · yesterday, on Tomás's Mac.</span>
                 <span>Ruling merged in PR #208 · compile run on Michael's Mac opened <span class="btn link">PR #209</span>, merged.</span>
               </div>
             </div>
@@ -450,7 +450,7 @@ ul.legend li{margin:3px 0}
     <li>At most one run and one open compile PR per brain. A brain's <code>main</code> is never pushed: every compile is a PR through the brain gate.</li>
     <li>The compile session changes only <code>notes/**</code>, <code>STATUS.md</code> and <code>reconcile-queue.md</code>, has only <code>queue_conflict</code> and <code>finish_compile</code>, and stops after 30 minutes.</li>
     <li>Rulings are yours alone. Uphold existing, Keep new and Keep both write a decision entry; Defer writes nothing.</li>
-    <li>This study is static and pending Michael's approval. It is not the GPUI implementation.</li>
+    <li>This study is static and was approved by Michael on October 31, 2026. It is not the GPUI implementation.</li>
   </ul>
 </div>
 </body>
