@@ -142,7 +142,8 @@ impl Shelves {
     /// An output's versions: `LATEST`, the output as it is now, then its history newest first:
     /// each commit that rewrote its metadata, and for a shared job's output, the runner's saves
     /// that a later save replaced before a push, which only this Mac keeps. The commit that
-    /// holds the latest is not listed twice.
+    /// holds the latest is not listed twice. An output whose own metadata names no plain file
+    /// has no latest.
     pub(crate) fn versions(&self, id: &str) -> Result<Vec<BoardVersion>> {
         let found = self.find(id)?;
         let latest = self.version_of(LATEST, &found.about, 0, false);
@@ -150,6 +151,10 @@ impl Shelves {
         if let Some(folder) = self.unpushed_of(&found) {
             history.extend(self.logged(&self.store, &format!("{folder}.json"), true)?);
             history.sort_by_key(|version| std::cmp::Reverse(version.saved_at));
+        }
+        // The latest's metadata is as untrusted as an earlier commit's.
+        if !plain_file_name(&latest.file) {
+            return Ok(history);
         }
         let held = |version: &BoardVersion| {
             let commit = LATEST.to_owned();
@@ -244,6 +249,11 @@ impl Shelves {
     pub(crate) fn version_folder(&self, id: &str, commit: &str) -> Result<PathBuf> {
         let found = self.find(id)?;
         if commit == LATEST {
+            let file = found.about["file"].as_str().unwrap_or_default();
+            ensure!(
+                plain_file_name(file),
+                "That version is not one of the output's"
+            );
             return Ok(found.shelf.repository.join(&found.folder));
         }
         let versions = self.versions(id)?;
@@ -699,6 +709,13 @@ mod tests {
         let versions = shelves.versions(&outputs[0].id).unwrap();
         let files: Vec<&str> = versions.iter().map(|v| v.file.as_str()).collect();
         assert_eq!(files, ["brief.md", "brief.md"]);
+        // The latest is left out when its own metadata names a path; the history stays.
+        let bad = json!({"title":"Brief","file":"../../secret.md","saved_at":4});
+        fs::write(&metadata, bad.to_string()).unwrap();
+        let versions = shelves.versions(&outputs[0].id).unwrap();
+        assert!(versions.iter().all(|v| v.commit != LATEST), "{versions:?}");
+        assert_eq!(versions.len(), 2);
+        assert!(shelves.version_folder(&outputs[0].id, LATEST).is_err());
     }
 
     #[test]
