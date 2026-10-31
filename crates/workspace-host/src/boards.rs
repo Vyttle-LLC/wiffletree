@@ -1,0 +1,532 @@
+//! Boards (stage 4): every output a thread or job saved, listed from this Mac's private board
+//! store and each Space's storage, with its versions from Git history. Listing and reading
+//! history run off the host thread; only Share to Space… writes, and only the user asks it.
+use crate::*;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use workspace_core::board::{BoardOutput, BoardVersion, FileKind, Keeping};
+use workspace_core::job::{Cron, JobKey, Recipe, Sharing};
+
+/// The folder of a Space's storage, beside its jobs' folders, that holds outputs the user
+/// shared into it. Job folders are job ids, which hold no underscore.
+const SHARED_OUTPUTS: &str = "_shared";
+const MAX_VERSIONS: usize = 100;
+const PREVIEW_CHARS: usize = 300;
+/// The part of an output a preview reads.
+const PREVIEW_BYTES: u64 = 16 * 1024;
+
+/// One repository folder that holds outputs: `<slug>.json` files beside `<slug>/` folders for
+/// outputs saved from threads or shared, and in `jobs`, a folder per job holding the same.
+struct Shelf {
+    repository: PathBuf,
+    space: SpaceId,
+    keeping: Keeping,
+    loose: String,
+    jobs: String,
+}
+
+/// What Boards reads, taken from the store on the host thread and read off it.
+pub(crate) struct Shelves {
+    shelves: Vec<Shelf>,
+    recipes: Vec<Recipe>,
+    /// The missed runs each catch-up run caught up on, by run.
+    catch_ups: HashMap<String, u32>,
+    /// Where an output's earlier versions are copied for the viewer.
+    versions: PathBuf,
+    now: i64,
+}
+
+/// An output found on a shelf, before it is described.
+struct Found<'a> {
+    shelf: &'a Shelf,
+    /// The output's folder, relative to its repository.
+    folder: String,
+    job: Option<JobKey>,
+    about: Value,
+}
+impl Found<'_> {
+    fn id(&self) -> String {
+        let named = format!("{}\0{}", self.shelf.repository.display(), self.folder);
+        let digest = Sha256::digest(named.as_bytes());
+        digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+    }
+    fn metadata(&self) -> String {
+        format!("{}.json", self.folder)
+    }
+}
+
+impl Shelves {
+    fn found(&self) -> Vec<Found<'_>> {
+        let mut found = vec![];
+        for shelf in &self.shelves {
+            found.extend(outputs_in(shelf, &shelf.loose, None));
+            let Ok(jobs) = fs::read_dir(shelf.repository.join(&shelf.jobs)) else {
+                continue;
+            };
+            for job in jobs.flatten() {
+                let name = job.file_name().to_string_lossy().into_owned();
+                if name.starts_with(['_', '.']) || !job.path().is_dir() {
+                    continue;
+                }
+                let key = JobKey::recipe(&shelf.space, &name);
+                found.extend(outputs_in(
+                    shelf,
+                    &format!("{}/{name}", shelf.jobs),
+                    Some(key),
+                ));
+            }
+        }
+        found
+    }
+    fn find(&self, id: &str) -> Result<Found<'_>> {
+        (self.found().into_iter())
+            .find(|found| found.id() == id)
+            .context("That output is no longer on this Mac")
+    }
+    /// Every output, newest first.
+    pub(crate) fn list(&self) -> Vec<BoardOutput> {
+        let mut outputs: Vec<BoardOutput> = (self.found().iter())
+            .filter_map(|found| self.describe(found))
+            .collect();
+        outputs.sort_by_key(|output| std::cmp::Reverse(output.updated_at));
+        outputs
+    }
+    fn describe(&self, found: &Found) -> Option<BoardOutput> {
+        let shelf = found.shelf;
+        let folder = shelf.repository.join(&found.folder);
+        let file = found.about["file"].as_str()?.to_owned();
+        let path = folder.join(&file);
+        if Path::new(&file).file_name() != Some(file.as_ref()) || !path.is_file() {
+            return None;
+        }
+        let recipe = (found.job.as_ref())
+            .and_then(|key| self.recipes.iter().find(|recipe| &recipe.key() == key));
+        let updated_at = found.about["saved_at"].as_i64().unwrap_or_default();
+        let runner = recipe
+            .filter(|r| shelf.keeping == Keeping::SharedStorage && r.sharing == Sharing::OneRunner)
+            .and_then(|r| r.runner.clone());
+        Some(BoardOutput {
+            id: found.id(),
+            title: (found.about["title"].as_str()).unwrap_or(&file).to_owned(),
+            space_id: shelf.space.clone(),
+            job: found.job.clone(),
+            job_name: recipe.map(|r| r.name.clone()),
+            preview: preview(&path),
+            folder: folder.to_string_lossy().into_owned(),
+            file,
+            updated_at,
+            keeping: shelf.keeping,
+            runner,
+            stale: recipe.is_some_and(|r| stale(r, updated_at, self.now)),
+        })
+    }
+    /// An output's versions, newest first: each commit that rewrote its metadata.
+    pub(crate) fn versions(&self, id: &str) -> Result<Vec<BoardVersion>> {
+        let found = self.find(id)?;
+        let repository = &found.shelf.repository;
+        let metadata = found.metadata();
+        let limit = format!("-n{MAX_VERSIONS}");
+        let log = runtime::git_output(
+            repository,
+            &["log", &limit, "--format=%H %ct", "--", &metadata],
+        )?;
+        let mut versions = vec![];
+        for line in log.lines() {
+            let Some((commit, time)) = line.split_once(' ') else {
+                continue;
+            };
+            let shown = format!("{commit}:{metadata}");
+            let about: Value = runtime::git_output(repository, &["show", &shown])
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or_default();
+            let run_id = about["run_id"].as_str().map(str::to_owned);
+            versions.push(BoardVersion {
+                commit: commit.to_owned(),
+                saved_at: (about["saved_at"].as_i64())
+                    .unwrap_or_else(|| time.parse::<i64>().unwrap_or_default() * 1000),
+                catch_up: (run_id.as_ref())
+                    .and_then(|run| self.catch_ups.get(run).copied())
+                    .unwrap_or_default(),
+                run_id,
+                shared: about["shared"].as_bool().unwrap_or_default(),
+            });
+        }
+        Ok(versions)
+    }
+    /// The folder holding the version `commit` of an output: its own folder for the latest,
+    /// else a copy of the commit's files, made once.
+    pub(crate) fn version_folder(&self, id: &str, commit: &str) -> Result<PathBuf> {
+        let versions = self.versions(id)?;
+        let found = self.find(id)?;
+        let at = (versions.iter())
+            .position(|version| version.commit == commit)
+            .context("That version is not one of the output's")?;
+        let folder = found.shelf.repository.join(&found.folder);
+        if at == 0 {
+            return Ok(folder);
+        }
+        let copy = self.versions.join(id).join(commit);
+        if copy.is_dir() {
+            return Ok(copy);
+        }
+        let staged = self.versions.join(id).join(format!(".{commit}"));
+        if staged.exists() {
+            fs::remove_dir_all(&staged)?;
+        }
+        let prefix = format!("{}/", found.folder);
+        let listed = runtime::git_output(
+            &found.shelf.repository,
+            &["ls-tree", "-r", "-z", "--name-only", commit, "--", &prefix],
+        )?;
+        for path in listed.split('\0').filter(|path| !path.is_empty()) {
+            let relative = path.strip_prefix(&prefix).context("Unexpected path")?;
+            let bytes = runtime::git_bytes(
+                &found.shelf.repository,
+                &["show", &format!("{commit}:{path}")],
+                &[],
+            )?;
+            shared::write_atomically(&staged.join(relative), &bytes)?;
+        }
+        fs::create_dir_all(&staged)?;
+        fs::rename(&staged, &copy)?;
+        Ok(copy)
+    }
+}
+
+/// The outputs whose metadata is directly in `base`.
+fn outputs_in<'a>(shelf: &'a Shelf, base: &str, job: Option<JobKey>) -> Vec<Found<'a>> {
+    let Ok(entries) = fs::read_dir(shelf.repository.join(base)) else {
+        return vec![];
+    };
+    let mut found = vec![];
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(slug) = name.strip_suffix(".json") else {
+            continue;
+        };
+        let Some(about) = (fs::read(entry.path()).ok())
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        else {
+            continue;
+        };
+        found.push(Found {
+            shelf,
+            folder: format!("{base}/{slug}"),
+            job: job.clone(),
+            about,
+        });
+    }
+    found
+}
+
+/// The first lines of a Markdown or text file, or an HTML file's title.
+fn preview(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let kind = FileKind::of(&path.to_string_lossy());
+    let text = path.extension().is_some_and(|e| e == "txt");
+    if !matches!(kind, FileKind::Markdown | FileKind::Html) && !text {
+        return None;
+    }
+    let mut start = vec![];
+    fs::File::open(path)
+        .ok()?
+        .take(PREVIEW_BYTES)
+        .read_to_end(&mut start)
+        .ok()?;
+    let start = String::from_utf8_lossy(&start);
+    let shown = match kind {
+        FileKind::Html => {
+            let lower = start.to_lowercase();
+            let open = lower.find("<title>")? + "<title>".len();
+            let close = open + lower[open..].find("</title>")?;
+            start[open..close].trim().to_owned()
+        }
+        _ => (start.lines())
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .take(6)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    (!shown.is_empty()).then(|| shown.chars().take(PREVIEW_CHARS).collect())
+}
+
+/// Two of the job's scheduled times passed since its output's last version.
+fn stale(recipe: &Recipe, updated_at: i64, now: i64) -> bool {
+    let (Ok(cron), Ok(zone)) = (
+        Cron::parse(&recipe.schedule.cron),
+        jobs::timezone(&recipe.schedule.timezone),
+    ) else {
+        return false;
+    };
+    jobs::times_between(&cron, zone, updated_at + 1, now) >= 2
+}
+
+impl Host {
+    /// What Boards reads: the private board store and the storage of each Space that is on.
+    pub(crate) fn shelves(&self) -> Result<Shelves> {
+        let store = assistant::board_store(&self.home);
+        let mut shelves = vec![];
+        for record in self.spaces()? {
+            if !record.local.enabled {
+                continue;
+            }
+            let space = record.space;
+            shelves.push(Shelf {
+                repository: store.clone(),
+                space: space.id.clone(),
+                keeping: Keeping::Private,
+                loose: space.id.to_string(),
+                jobs: format!("{}/{}", space.id, assistant::JOB_OUTPUTS),
+            });
+            let boards = format!("spaces/{}/boards", space.storage.folder);
+            shelves.push(Shelf {
+                repository: self.storage_folder(&space.storage.repository),
+                space: space.id.clone(),
+                keeping: match space.storage.repository {
+                    StorageRepository::Local { .. } => Keeping::LocalStorage,
+                    StorageRepository::GitHub { .. } => Keeping::SharedStorage,
+                },
+                loose: format!("{boards}/{SHARED_OUTPUTS}"),
+                jobs: boards,
+            });
+        }
+        let catch_ups = self
+            .db
+            .prepare("SELECT id, json_extract(data,'$.catch_up') FROM job_runs WHERE json_extract(data,'$.catch_up')>0")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(Shelves {
+            shelves,
+            recipes: self.recipes()?,
+            catch_ups,
+            versions: self.home.join("assistant").join("versions"),
+            now: now(),
+        })
+    }
+    /// Share to Space…: copies an output that is only on this Mac into `space`'s storage, as
+    /// its own output there with the same title. The user confirmed who can read it first.
+    pub fn share_board(&mut self, id: &str, space: &SpaceId) -> Result<BoardOutput> {
+        let shelves = self.shelves()?;
+        let found = shelves.find(id)?;
+        ensure!(
+            found.shelf.keeping == Keeping::Private,
+            "Only an output kept only on this Mac can be shared"
+        );
+        let output = shelves.describe(&found).context("The output has no file")?;
+        let record = self.space(space)?;
+        ensure!(
+            record.local.enabled,
+            "{} is off on this Mac",
+            record.space.name
+        );
+        let target = record.space;
+        let storage = self.storage_folder(&target.storage.repository);
+        let base = format!("spaces/{}/boards/{SHARED_OUTPUTS}", target.storage.folder);
+        let slug = assistant::output_folder(&storage.join(&base), &output.title)?;
+        let folder = format!("{base}/{slug}");
+        let bytes = fs::read(output.path())?;
+        let about =
+            json!({"title": output.title, "file": output.file, "saved_at": now(), "shared": true});
+        let about = serde_json::to_vec_pretty(&about)?;
+        let mut files: Vec<(String, Option<&[u8]>)> = vec![];
+        // A title shared before is replaced, its old file included.
+        for old in fs::read_dir(storage.join(&folder))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let name = old.file_name().to_string_lossy().into_owned();
+            if name != output.file {
+                files.push((format!("{folder}/{name}"), None));
+            }
+        }
+        files.push((format!("{folder}/{}", output.file), Some(&bytes)));
+        files.push((format!("{folder}.json"), Some(&about)));
+        let message = format!("{}: shared the output {}", target.name, output.title);
+        self.write_storage_files(&target, &files, &message)?;
+        let shared = self.shelves()?.list();
+        (shared.into_iter())
+            .find(|o| {
+                o.space_id == target.id
+                    && o.keeping != Keeping::Private
+                    && o.folder.ends_with(&folder)
+            })
+            .context("The shared copy was not found")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::git;
+
+    fn host() -> (tempfile::TempDir, Host, Space) {
+        let home = tempfile::tempdir().unwrap();
+        let host = Host::open_set_up(home.path()).unwrap();
+        let personal = host.space(&host.default_space().unwrap()).unwrap().space;
+        (home, host, personal)
+    }
+
+    fn save(store: &Path, base: &str, title: &str, file: &str, body: &str, about: Value) {
+        let scratch = tempfile::tempdir().unwrap();
+        fs::write(scratch.path().join(file), body).unwrap();
+        assistant::store_output(store, base, title, &scratch.path().join(file), about).unwrap();
+    }
+
+    #[test]
+    fn boards_lists_thread_and_job_outputs_with_their_versions() {
+        let (home, mut host, personal) = host();
+        let store = assistant::board_store(home.path());
+        let thread = json!({"title":"Competitor pricing","thread_id":"t1","saved_at":1000});
+        save(
+            &store,
+            personal.id.as_str(),
+            "Competitor pricing",
+            "pricing.md",
+            "# Pricing\n\nThree tiers.\n",
+            thread,
+        );
+        let recipe = Recipe {
+            id: "release-dashboard".into(),
+            name: "Release dashboard".into(),
+            space_id: personal.id.clone(),
+            prompt: "Draw it.".into(),
+            schedule: workspace_core::job::Schedule {
+                cron: "0 8 * * 1".into(),
+                timezone: "America/New_York".into(),
+            },
+            model: None,
+            sources: vec![],
+            output: None,
+            sharing: Sharing::OneRunner,
+            runner: None,
+            enabled: true,
+            extra: Default::default(),
+        };
+        host.save_job(recipe).unwrap();
+        let storage = host.storage_folder(&personal.storage.repository);
+        let base = format!(
+            "spaces/{}/boards/release-dashboard",
+            personal.storage.folder
+        );
+        let now = now();
+        for (body, run, saved_at) in [
+            ("<title>Week one</title>", "r1", now - 1000),
+            ("<title>Week two</title>", "r2", now),
+        ] {
+            let about = json!({"title":"Release dashboard","run_id":run,"saved_at":saved_at});
+            save(
+                &storage,
+                &base,
+                "Release dashboard",
+                "dashboard.html",
+                body,
+                about,
+            );
+        }
+        host.db
+            .execute(
+                "INSERT INTO job_runs VALUES ('r1', ?1, 0, ?2)",
+                params![
+                    JobKey::recipe(&personal.id, "release-dashboard").as_str(),
+                    json!({"id":"r1","job":"x","started_at":0,"outcome":"finished","catch_up":3})
+                        .to_string()
+                ],
+            )
+            .unwrap();
+
+        let shelves = host.shelves().unwrap();
+        let outputs = shelves.list();
+        assert_eq!(outputs.len(), 2, "{outputs:?}");
+        let dashboard = &outputs[0];
+        assert_eq!(
+            (
+                dashboard.title.as_str(),
+                dashboard.job_name.as_deref(),
+                dashboard.keeping
+            ),
+            (
+                "Release dashboard",
+                Some("Release dashboard"),
+                Keeping::LocalStorage
+            )
+        );
+        assert_eq!(dashboard.preview.as_deref(), Some("Week two"));
+        assert!(!dashboard.stale);
+        let pricing = &outputs[1];
+        assert_eq!(
+            (pricing.job.as_ref(), pricing.keeping),
+            (None, Keeping::Private)
+        );
+        assert_eq!(pricing.preview.as_deref(), Some("# Pricing\nThree tiers."));
+
+        let versions = shelves.versions(&dashboard.id).unwrap();
+        let runs: Vec<_> = versions
+            .iter()
+            .map(|v| (v.run_id.as_deref(), v.catch_up))
+            .collect();
+        assert_eq!(runs, [(Some("r2"), 0), (Some("r1"), 3)]);
+        // The latest is the output's own folder; an earlier one is a copy that leaves it be.
+        let latest = shelves
+            .version_folder(&dashboard.id, &versions[0].commit)
+            .unwrap();
+        assert_eq!(latest, Path::new(&dashboard.folder));
+        let earlier = shelves
+            .version_folder(&dashboard.id, &versions[1].commit)
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(earlier.join("dashboard.html")).unwrap(),
+            "<title>Week one</title>"
+        );
+        assert_eq!(
+            fs::read_to_string(dashboard.path()).unwrap(),
+            "<title>Week two</title>"
+        );
+        assert!(shelves.version_folder(&dashboard.id, "HEAD").is_err());
+    }
+
+    #[test]
+    fn an_output_is_stale_after_two_scheduled_runs_without_a_version() {
+        let mut recipe: Recipe = serde_json::from_value(json!({
+            "id":"brief","name":"Brief","space_id":"s","prompt":"p",
+            "schedule":{"cron":"0 7 * * *","timezone":"UTC"},"enabled":true
+        }))
+        .unwrap();
+        let day = 86_400_000;
+        let saved = 7 * 3_600_000;
+        assert!(!stale(&recipe, saved, saved + day));
+        assert!(stale(&recipe, saved, saved + 2 * day));
+        recipe.schedule.cron = "0 7 * * 1".into();
+        assert!(!stale(&recipe, saved, saved + 2 * day));
+    }
+
+    #[test]
+    fn share_to_space_copies_a_private_output_into_the_storage_as_a_commit() {
+        let (home, mut host, personal) = host();
+        let store = assistant::board_store(home.path());
+        let about = json!({"title":"Chart","thread_id":"t1","saved_at":1});
+        save(
+            &store,
+            personal.id.as_str(),
+            "Chart",
+            "chart.html",
+            "<p>one</p>",
+            about,
+        );
+        let output = host.shelves().unwrap().list().remove(0);
+        let shared = host.share_board(&output.id, &personal.id).unwrap();
+        assert_eq!(
+            (shared.title.as_str(), shared.keeping),
+            ("Chart", Keeping::LocalStorage)
+        );
+        assert_eq!(fs::read_to_string(shared.path()).unwrap(), "<p>one</p>");
+        let storage = host.storage_folder(&personal.storage.repository);
+        let subject = git(&storage, &["log", "-1", "--format=%s"]);
+        assert!(subject.contains("shared the output Chart"), "{subject}");
+        // A shared copy is not shared again, and the private output stays.
+        assert!(host.share_board(&shared.id, &personal.id).is_err());
+        assert_eq!(host.shelves().unwrap().list().len(), 2);
+    }
+}

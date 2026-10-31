@@ -2,6 +2,7 @@
 mod agent_processes;
 mod assistant;
 pub mod attachments;
+mod boards;
 mod brain_index;
 mod brains;
 pub mod build_gate;
@@ -1773,6 +1774,17 @@ impl Host {
             Command::SeeJobRuns { job } => {
                 self.see_job_runs(&job)?;
                 Value::Null
+            }
+            // The service reads Boards off the host thread instead.
+            Command::Boards => serde_json::to_value(self.shelves()?.list())?,
+            Command::BoardVersions { board_id } => {
+                serde_json::to_value(self.shelves()?.versions(&board_id)?)?
+            }
+            Command::BoardVersionFolder { board_id, commit } => {
+                json!(self.shelves()?.version_folder(&board_id, &commit)?)
+            }
+            Command::ShareBoard { board_id, space_id } => {
+                serde_json::to_value(self.share_board(&board_id, &space_id)?)?
             }
             Command::AttachRepository {
                 project_id,

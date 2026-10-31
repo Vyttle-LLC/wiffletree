@@ -194,7 +194,7 @@ fn instant(zone: Tz, date: NaiveDate, hour: u32, minute: u32) -> Option<i64> {
 }
 
 /// How many times `cron` names from `from` through `to`, up to `MAX_COUNTED`.
-fn times_between(cron: &Cron, zone: Tz, from: i64, to: i64) -> u32 {
+pub(crate) fn times_between(cron: &Cron, zone: Tz, from: i64, to: i64) -> u32 {
     let mut count = 0;
     let mut at = from - 1;
     while count < MAX_COUNTED {

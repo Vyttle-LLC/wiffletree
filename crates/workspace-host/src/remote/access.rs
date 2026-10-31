@@ -121,6 +121,10 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::DeleteJob { .. }
         | Command::StopJobRun { .. }
         | Command::SeeJobRuns { .. }
+        | Command::Boards
+        | Command::BoardVersions { .. }
+        | Command::BoardVersionFolder { .. }
+        | Command::ShareBoard { .. }
         | Command::SetSpaceBrain { .. }
         | Command::CreateSpace { .. }
         | Command::UpdateSpace { .. }

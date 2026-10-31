@@ -501,3 +501,15 @@ pub fn stop_job_run(run_id: String) -> Ask<Value> {
 pub fn see_job_runs(job: job::JobKey) -> Ask<()> {
     Ask::new(Command::SeeJobRuns { job })
 }
+pub fn boards() -> Ask<Vec<board::BoardOutput>> {
+    Ask::new(Command::Boards)
+}
+pub fn board_versions(board_id: String) -> Ask<Vec<board::BoardVersion>> {
+    Ask::new(Command::BoardVersions { board_id })
+}
+pub fn board_version_folder(board_id: String, commit: String) -> Ask<String> {
+    Ask::new(Command::BoardVersionFolder { board_id, commit })
+}
+pub fn share_board(board_id: String, space_id: SpaceId) -> Ask<board::BoardOutput> {
+    Ask::new(Command::ShareBoard { board_id, space_id })
+}

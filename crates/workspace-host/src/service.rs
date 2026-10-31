@@ -1483,6 +1483,24 @@ impl Actor {
                     });
                 });
             }
+            Command::Boards
+            | Command::BoardVersions { .. }
+            | Command::BoardVersionFolder { .. } => {
+                let (shelves, command, reply) =
+                    (self.host.shelves()?, command.clone(), reply.clone());
+                std::thread::spawn(move || {
+                    let read = match command {
+                        Command::BoardVersions { board_id } => shelves
+                            .versions(&board_id)
+                            .and_then(|versions| Ok(serde_json::to_value(versions)?)),
+                        Command::BoardVersionFolder { board_id, commit } => shelves
+                            .version_folder(&board_id, &commit)
+                            .map(|folder| json!(folder)),
+                        _ => Ok(serde_json::to_value(shelves.list()).unwrap_or_default()),
+                    };
+                    let _ = reply.try_send(read.map_err(|e| format!("{e:#}")));
+                });
+            }
             Command::PreviewJob { recipe } => {
                 let pending = self.host.preview_job(recipe)?;
                 let reply = reply.clone();

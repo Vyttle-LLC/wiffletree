@@ -2,6 +2,7 @@
 pub mod ask;
 pub mod assistant;
 pub mod backoff;
+pub mod board;
 mod brain;
 mod brain_browser;
 mod client;
@@ -3357,6 +3358,24 @@ pub enum Command {
     SeeJobRuns {
         job: job::JobKey,
     },
+    /// Every output on Boards, at its latest version. Answered with `Vec<BoardOutput>`.
+    Boards,
+    /// An output's versions, newest first. Answered with `Vec<BoardVersion>`.
+    BoardVersions {
+        board_id: String,
+    },
+    /// The folder on this Mac that holds one version of an output, for the viewer: the
+    /// output's own folder for its latest, else a copy. Answered with the folder's path.
+    BoardVersionFolder {
+        board_id: String,
+        commit: String,
+    },
+    /// Share to Space…: copies an output that is only on this Mac into a Space's storage,
+    /// once the user confirmed who can read it. Answered with the copy's `BoardOutput`.
+    ShareBoard {
+        board_id: String,
+        space_id: SpaceId,
+    },
     /// Creates a Space with local storage and a local tracker, or, with `storage`, stored in
     /// that private GitHub repository (`owner/name` or its URL), whose tracker it shares; without
     /// `prefix`, a new tracker gets the one proposed from the Space's name.
@@ -3985,6 +4004,9 @@ impl Command {
             | Self::SearchThreads { .. }
             | Self::ScratchFiles { .. }
             | Self::PreviewJob { .. }
+            | Self::Boards
+            | Self::BoardVersions { .. }
+            | Self::BoardVersionFolder { .. }
             | Self::RemoteAccess => true,
             Self::ImportRepositories { .. }
             | Self::RefreshRepositories
@@ -4032,6 +4054,7 @@ impl Command {
             | Self::DeleteJob { .. }
             | Self::StopJobRun { .. }
             | Self::SeeJobRuns { .. }
+            | Self::ShareBoard { .. }
             | Self::SetSpaceBrain { .. }
             | Self::CreateSpace { .. }
             | Self::UpdateSpace { .. }
@@ -4113,7 +4136,8 @@ impl Command {
     /// Every write to a tracker is the human's, settling a paused issue file, following an issue
     /// and every step of a Linear import too; reading issues is not. Remote access is the human's
     /// too: its state carries the pairing code. The assistant is the human's: its threads, their
-    /// text and its name. So are jobs: only the user saves, pauses, runs or deletes one.
+    /// text and its name. So are jobs: only the user saves, pauses, runs or deletes one. So are
+    /// Boards, the outputs threads and jobs saved, and only the user shares one into a Space.
     pub fn is_human_only(&self) -> bool {
         matches!(
             self,
@@ -4140,6 +4164,10 @@ impl Command {
                 | Self::DeleteJob { .. }
                 | Self::StopJobRun { .. }
                 | Self::SeeJobRuns { .. }
+                | Self::Boards
+                | Self::BoardVersions { .. }
+                | Self::BoardVersionFolder { .. }
+                | Self::ShareBoard { .. }
                 | Self::ResolveAttention { .. }
                 | Self::DismissAttention { .. }
                 | Self::SetOwnerAllowed { .. }

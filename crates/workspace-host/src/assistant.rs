@@ -857,7 +857,7 @@ fn proposed_recipe(thread: &Thread, args: &Value) -> Result<Recipe> {
 
 /// The folder in a Space's part of the board store that `title` saves to: its slug, or the
 /// slug with `-2`, `-3`… when another title with the same slug holds it.
-fn output_folder(space: &Path, title: &str) -> Result<String> {
+pub(crate) fn output_folder(space: &Path, title: &str) -> Result<String> {
     let slug = slug(title);
     let held_by = |folder: &str| -> Option<String> {
         let about: Value =

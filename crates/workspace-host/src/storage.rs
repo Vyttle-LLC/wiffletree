@@ -830,21 +830,37 @@ impl Host {
         content: Option<&[u8]>,
         message: &str,
     ) -> Result<()> {
-        let folder = self.storage_folder(&space.storage.repository);
         let file = jobs::recipe_file(&space.storage.folder, id);
-        match content {
-            Some(content) => shared::write_atomically(&folder.join(&file), content)?,
-            None => match fs::remove_file(folder.join(&file)) {
-                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                    return Err(error.into());
-                }
-                _ => {}
-            },
+        self.write_storage_files(space, &[(file, content)], message)
+    }
+    /// Writes files of a Space's storage, relative to the repository, or with `None` removes
+    /// them: committed at once in a local repository, and pushed by the next pass from a GitHub
+    /// one.
+    pub(crate) fn write_storage_files(
+        &self,
+        space: &Space,
+        files: &[(String, Option<&[u8]>)],
+        message: &str,
+    ) -> Result<()> {
+        let folder = self.storage_folder(&space.storage.repository);
+        for (file, content) in files {
+            match content {
+                Some(content) => shared::write_atomically(&folder.join(file), content)?,
+                None => match fs::remove_file(folder.join(file)) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                        return Err(error.into());
+                    }
+                    _ => {}
+                },
+            }
         }
         let Some(key) = Self::storage_key(&space.storage.repository) else {
-            return commit_local(&folder, &[&file], message);
+            let paths: Vec<&str> = files.iter().map(|(file, _)| file.as_str()).collect();
+            return commit_local(&folder, &paths, message);
         };
-        Record::wrote(&self.db, &key, &file, content)?;
+        for (file, content) in files {
+            Record::wrote(&self.db, &key, file, *content)?;
+        }
         self.storage_written.borrow_mut().insert(key);
         Ok(())
     }
