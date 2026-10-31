@@ -14,11 +14,13 @@ use tracker::{Store, Write, comment_md, issue_file, issue_folder, issue_md};
 
 const ENDPOINT: &str = "https://api.linear.app/graphql";
 /// The most issues one commit adds or changes.
-pub(crate) const BATCH: usize = 100;
+const BATCH: usize = 100;
 /// The front matter field holding an issue's Linear identifier, such as `linear: CEL-12`.
-pub(crate) const LINEAR_FIELD: &str = "linear";
+const LINEAR_FIELD: &str = "linear";
 /// How many passes may end with a batch still unpushed before the import stops.
 const PASS_TRIES: usize = 3;
+/// How long the key waits for the human's next step before the import starts; then it ends.
+const KEY_WAIT_MS: i64 = 30 * 60 * 1000;
 
 const TEAMS: &str = "query Teams($after: String) { teams(first: 250, after: $after) { nodes { id key name } pageInfo { hasNextPage endCursor } } }";
 const TEAM: &str = "query Team($team: String!) { viewer { id } team(id: $team) { id key name states(first: 250) { nodes { id name type } } } }";
@@ -426,6 +428,8 @@ pub(crate) struct Linear {
     pub(crate) tools: Tools,
     /// The Space whose import began, and the team once read.
     began: Option<(SpaceId, Option<Team>)>,
+    /// When the human last took a step before the import started.
+    stepped_at: i64,
     run: Option<Run>,
     pub(crate) status: Option<LinearImportStatus>,
 }
@@ -434,6 +438,7 @@ impl Linear {
         Self {
             tools,
             began: None,
+            stepped_at: 0,
             run: None,
             status: None,
         }
@@ -469,8 +474,30 @@ impl Host {
         );
         self.linear.tools.keys.keep(key)?;
         self.linear.began = Some((space_id.clone(), None));
+        self.linear.stepped_at = now();
         self.linear.status = None;
         Ok(())
+    }
+    /// Passes on a read of Linear for the import begun, ending the import when the read failed
+    /// so the key does not outlast it.
+    pub(crate) fn linear_read<T>(&mut self, read: Result<T>) -> Result<T> {
+        if read.is_err() && self.linear.run.is_none() {
+            self.end_linear_import(None);
+        }
+        read
+    }
+    /// Ends an import that has not started once its key has waited `KEY_WAIT_MS` at `at` for
+    /// the human's next step, as when the app quit mid-way; while it waits, when it will end.
+    pub(crate) fn expire_linear_key(&mut self, at: i64) -> Option<i64> {
+        if self.linear.began.is_none() || self.linear.run.is_some() {
+            return None;
+        }
+        let ends = self.linear.stepped_at + KEY_WAIT_MS;
+        if at < ends {
+            return Some(ends);
+        }
+        self.end_linear_import(None);
+        None
     }
     /// Refuses a step of an import that did not begin in the Space.
     pub(crate) fn linear_began(&self, space_id: &SpaceId) -> Result<()> {
@@ -551,6 +578,7 @@ impl Host {
             users,
         };
         self.linear.began = Some((space_id.clone(), Some(team)));
+        self.linear.stepped_at = now();
         Ok(plan)
     }
     /// Starts writing the previewed team's new issues, naming each Linear user by the login the
@@ -1451,6 +1479,136 @@ pub(crate) mod tests {
         let status = host.linear.status.clone().unwrap();
         assert!(status.finished && status.error.is_some(), "{status:?}");
         assert!(keys.kept().is_none());
+    }
+
+    #[test]
+    fn the_key_is_removed_when_a_read_fails_or_waits_too_long_for_the_human() {
+        let (_home, mut host, personal, _) = personal();
+        let (keys, _) = recorded(&mut host, Box::new(|_, _| fixture("unauthorized.json")));
+        assert!(begin(&mut host, &personal).is_err());
+        assert!(keys.kept().is_none(), "the teams read failed");
+
+        let refuses_the_team = |operation: &str, variables: &Value| match operation {
+            "Teams" => teams_page(variables),
+            _ => fixture("unauthorized.json"),
+        };
+        let (keys, _) = recorded(&mut host, Box::new(refuses_the_team));
+        begin(&mut host, &personal).unwrap();
+        assert!(preview(&mut host, &personal).is_err());
+        assert!(keys.kept().is_none(), "the preview read failed");
+        assert!(preview(&mut host, &personal).is_err(), "it begins again");
+
+        let (keys, _) = recorded(&mut host, celadon(vec![]));
+        begin(&mut host, &personal).unwrap();
+        preview(&mut host, &personal).unwrap();
+        let ends = host.expire_linear_key(now()).unwrap();
+        assert!(keys.kept().is_some(), "kept while the human decides");
+        assert_eq!(host.expire_linear_key(ends), None);
+        assert!(
+            keys.kept().is_none(),
+            "the human left it, as when the app quit"
+        );
+        let start = host.start_linear_import(&personal.id, BTreeMap::new());
+        assert!(start.is_err(), "it begins again");
+    }
+
+    #[test]
+    fn a_rerun_relates_an_issue_imported_before_to_one_imported_now() {
+        let (_home, mut host, personal, prefix) = personal();
+        recorded(&mut host, listed(vec![plain(1), plain(2)]));
+        import(&mut host, &personal, &[], &publish::Tools::default());
+        // CEL-1 now blocks a new CEL-3, a relation Linear keeps on CEL-1 alone.
+        let mut first = plain(1);
+        first["relations"]["nodes"] =
+            json!([{"type": "blocks", "relatedIssue": {"identifier": "CEL-3"}}]);
+        recorded(&mut host, listed(vec![first, plain(2), plain(3)]));
+        import(&mut host, &personal, &[], &publish::Tools::default());
+        let id = |n: u64| format!("{prefix}-{n}");
+        assert_eq!(issue(&host, &id(1)).issue.unwrap().blocks, [id(3)]);
+        assert_eq!(issue(&host, &id(3)).issue.unwrap().blocked_by, [id(1)]);
+    }
+
+    /// A Keychain that will not let the key go.
+    struct Stuck(Kept);
+    impl KeyStore for Stuck {
+        fn keep(&self, key: &LinearKey) -> Result<()> {
+            self.0.keep(key)
+        }
+        fn read(&self) -> Result<LinearKey> {
+            self.0.read()
+        }
+        fn remove(&self) -> Result<()> {
+            bail!("The Keychain is locked")
+        }
+    }
+
+    /// What this process writes to its standard error, its own and its children's, while `run`
+    /// runs. Nextest runs each test in a process of its own, so no other test writes here.
+    fn logged(run: impl FnOnce()) -> String {
+        use std::io::{Read, Seek};
+        use std::os::fd::AsRawFd;
+        let mut file = tempfile::tempfile().unwrap();
+        // SAFETY: duplicates and restores this process's own standard error descriptor.
+        let saved = unsafe { libc::dup(2) };
+        assert!(saved >= 0 && unsafe { libc::dup2(file.as_raw_fd(), 2) } >= 0);
+        run();
+        // SAFETY: as above.
+        unsafe {
+            libc::dup2(saved, 2);
+            libc::close(saved);
+        }
+        let mut log = String::new();
+        file.rewind().unwrap();
+        file.read_to_string(&mut log).unwrap();
+        log
+    }
+
+    #[test]
+    fn neither_the_key_nor_any_issue_or_comment_text_is_logged() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("CEL"));
+        let (_home, mut host, sage) = cel_tracker(&github);
+        let mut told = plain(1);
+        told["title"] = json!("Title only Linear knows");
+        told["description"] = json!("Call the parent at (415) 555-0134 tonight.");
+        told["comments"]["nodes"] = json!([{
+            "body": "Comment only Linear knows",
+            "createdAt": "2026-09-02T09:00:00.000Z",
+            "user": {"id": "user-sam", "name": "Sam Ortiz", "email": "sam@example.com"},
+        }]);
+        recorded(&mut host, listed(vec![told.clone(), plain(2)]));
+        host.linear.tools.keys = Arc::new(Stuck(Kept::default()));
+        let log = logged(|| {
+            // A scan holds CEL-1, and the key cannot be removed.
+            import(&mut host, &sage, &[], &github.tools());
+            // Linear refuses, then a push fails.
+            begin(&mut host, &sage).unwrap();
+            recorded(&mut host, Box::new(|_, _| fixture("unauthorized.json")));
+            host.linear.tools.keys = Arc::new(Stuck(Kept::default()));
+            assert!(preview(&mut host, &sage).is_err());
+            recorded(&mut host, listed(vec![told, plain(2), plain(3)]));
+            host.linear.tools.keys = Arc::new(Stuck(Kept::default()));
+            github
+                .offline
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            let status = import(&mut host, &sage, &[], &github.tools());
+            assert!(status.error.is_some(), "{status:?}");
+        });
+        assert!(
+            log.contains("the key was not removed"),
+            "logs are read: {log}"
+        );
+        let secrets = [
+            KEY,
+            "Title only Linear knows",
+            "555-0134",
+            "Comment only Linear knows",
+            "Sam Ortiz",
+            "sam@example.com",
+        ];
+        for secret in secrets {
+            assert!(!log.contains(secret), "{secret} was logged: {log}");
+        }
     }
 
     #[test]

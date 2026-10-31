@@ -27,6 +27,8 @@ pub(super) struct LinearImportPanel {
     stage: Stage,
     busy: bool,
     error: Option<String>,
+    /// The host was asked to end the import, which removes the key.
+    ended: bool,
 }
 impl EventEmitter<Closed> for LinearImportPanel {}
 impl LinearImportPanel {
@@ -46,6 +48,7 @@ impl LinearImportPanel {
             stage: Stage::Key,
             busy: false,
             error: None,
+            ended: false,
         }
     }
 
@@ -132,6 +135,7 @@ impl LinearImportPanel {
 
     /// Ends the import, which removes the key, and closes the panel.
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ended = true;
         self.ask(ask::cancel_linear_import(), window, cx, |_, _, _, cx| {
             cx.emit(Closed)
         });
@@ -254,7 +258,7 @@ const KEY_NOTE: &str = "Paste a Linear personal API key. Wiffletree keeps it in 
 const USERS_NOTE: &str = "Confirm each person’s GitHub login. What someone without one wrote is written as yours, with a first line naming them.";
 
 /// The summary's first line, such as "240 issues and 512 comments, 240 keeping their numbers".
-pub(super) fn summary(plan: &LinearImportPlan) -> String {
+fn summary(plan: &LinearImportPlan) -> String {
     let mut line = format!(
         "{} and {} from {}",
         counted(plan.issues, "issue"),
@@ -281,7 +285,7 @@ fn state_line(mapping: &LinearStateMapping) -> String {
 }
 
 /// The progress line, such as "Importing CEL: 100 of 240 issues written".
-pub(super) fn progress_line(status: &LinearImportStatus) -> String {
+fn progress_line(status: &LinearImportStatus) -> String {
     let written = format!("{} of {}", status.written, counted(status.total, "issue"));
     match (&status.error, status.finished) {
         (Some(error), _) => {
@@ -293,7 +297,7 @@ pub(super) fn progress_line(status: &LinearImportStatus) -> String {
 }
 
 /// The logins the human confirmed, by Linear user ID; an empty field confirms none.
-pub(super) fn confirmed(
+fn confirmed(
     users: &[LinearUser],
     typed: impl Iterator<Item = String>,
 ) -> BTreeMap<String, String> {
@@ -303,6 +307,18 @@ pub(super) fn confirmed(
             (!login.is_empty()).then(|| (user.id.clone(), login))
         })
         .collect()
+}
+
+/// A panel that goes away holding a key the host keeps for an import not yet started, as when
+/// another Space's import replaces it or the app quits, ends that import so the key does not
+/// wait for it. A started import goes on without the panel.
+impl Drop for LinearImportPanel {
+    fn drop(&mut self) {
+        let key_kept = matches!(self.stage, Stage::Teams(_) | Stage::Plan(..));
+        if key_kept && !self.ended {
+            let _ = self.bridge.request(Command::CancelLinearImport);
+        }
+    }
 }
 
 impl Requests for LinearImportPanel {

@@ -1,7 +1,8 @@
 //! The client credential of a signed launchd host, the host's remote-access key and, while an
 //! import from Linear runs, the human's Linear key, each kept in a login Keychain item whose
-//! access list names only the programs given: the signed app and the host's own copy. Keychain matches them by their signing requirement, and asks any other
-//! program, an agent's shell among them, for the login password in a dialog.
+//! access list names only the programs given: the signed app and the host's own copy, or for
+//! the Linear key the host alone. Keychain matches them by their signing requirement, and asks
+//! any other program, an agent's shell among them, for the login password in a dialog.
 //!
 //! Design §2 of `openspec/changes/archive/2026-10-19-standalone-host` settles which keychain,
 //! access list and signature this needs; everything that depends on it is in this module.

@@ -667,6 +667,11 @@ enum Event {
     GhLogin(spaces::GhAccount),
     /// A tracker's collaborators and the profile names of its people, read on their own thread.
     IssuePeople(issue_inbox::PeopleRead),
+    /// The teams the key reads, read on its own thread for the import begun.
+    LinearTeamsRead {
+        teams: Result<Vec<LinearTeam>>,
+        reply: Reply,
+    },
     /// A Linear team, read on its own thread for the import begun in the Space.
     LinearRead {
         space_id: SpaceId,
@@ -1507,15 +1512,11 @@ impl Actor {
             // Linear is read off the host thread; the key never leaves this host but for Linear.
             Command::LinearTeams { space_id, key } => {
                 self.host.begin_linear_import(space_id, key)?;
-                let (api, key, reply) = (
-                    self.host.linear.tools.api.clone(),
-                    key.clone(),
-                    reply.clone(),
-                );
+                let (api, key) = (self.host.linear.tools.api.clone(), key.clone());
+                let (sender, reply) = (self.sender.clone(), reply.clone());
                 std::thread::spawn(move || {
-                    let teams = linear_import::teams(api.as_ref(), &key)
-                        .and_then(|teams| Ok(serde_json::to_value(teams)?));
-                    let _ = reply.try_send(teams.map_err(|e| format!("{e:#}")));
+                    let teams = linear_import::teams(api.as_ref(), &key);
+                    let _ = sender.send_blocking(Event::LinearTeamsRead { teams, reply });
                 });
             }
             Command::PreviewLinearImport { space_id, team_id } => {
@@ -1621,6 +1622,9 @@ impl Actor {
         self.scheduling.observe(&event);
         let mut dirty = self.handle(event);
         dirty |= self.refresh_linear_import();
+        if let Some(at) = self.host.expire_linear_key(now()) {
+            self.wake(at);
+        }
         if self.scheduling.take_due() {
             dirty |= self.end_keeper_reviews();
             if let Err(e) = self.schedule() {
@@ -2244,14 +2248,20 @@ impl Actor {
                 let key = self.host.settings_key();
                 changed | key.is_some_and(|key| self.linear_pass_ended(&key))
             }
+            Event::LinearTeamsRead { teams, reply } => {
+                let teams = (self.host.linear_read(teams))
+                    .and_then(|teams| Ok(serde_json::to_value(teams)?));
+                let _ = reply.try_send(teams.map_err(|e| format!("{e:#}")));
+                false
+            }
             Event::LinearRead {
                 space_id,
                 team,
                 reply,
             } => {
-                let plan = team
-                    .and_then(|team| self.host.linear_plan(&space_id, team))
-                    .and_then(|plan| Ok(serde_json::to_value(plan)?));
+                let plan = team.and_then(|team| self.host.linear_plan(&space_id, team));
+                let plan =
+                    (self.host.linear_read(plan)).and_then(|plan| Ok(serde_json::to_value(plan)?));
                 let _ = reply.try_send(plan.map_err(|e| format!("{e:#}")));
                 false
             }

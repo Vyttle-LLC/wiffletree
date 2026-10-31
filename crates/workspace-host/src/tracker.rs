@@ -472,7 +472,7 @@ pub(crate) fn event(by: &str, at: &str, kind: &str, from: Value, to: Value) -> I
     }
 }
 
-pub(crate) fn validate_title(title: &str) -> Result<String> {
+fn validate_title(title: &str) -> Result<String> {
     let title = title.trim();
     ensure!(!title.is_empty(), "An issue needs a title");
     ensure!(
