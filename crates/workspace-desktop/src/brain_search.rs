@@ -67,6 +67,8 @@ pub(super) struct BrainSearch {
     opened: Option<Opened>,
     /// Counts openings, so a reply to an earlier one, perhaps over another brain, is dropped.
     openings: u64,
+    /// The results list, scrolled to keep the selected row in view.
+    results: ScrollHandle,
 }
 impl EventEmitter<Intent> for BrainSearch {}
 impl BrainSearch {
@@ -83,6 +85,7 @@ impl BrainSearch {
             query,
             opened: None,
             openings: 0,
+            results: ScrollHandle::new(),
         }
     }
 
@@ -153,6 +156,7 @@ impl BrainSearch {
                 {
                     opened.results = Some(hits);
                     opened.selected = 0;
+                    view.results.scroll_to_item(0);
                     cx.notify();
                 }
             },
@@ -171,6 +175,8 @@ impl BrainSearch {
             && count > 0
         {
             opened.selected = opened.selected.saturating_add_signed(by).min(count - 1);
+            // Each result is one child of the list, so its index is the row's.
+            self.results.scroll_to_item(opened.selected);
             cx.notify();
         }
     }
@@ -285,6 +291,7 @@ impl BrainSearch {
         panel = panel.child(chips);
         let mut list = div()
             .id("brain-search-results")
+            .track_scroll(&self.results)
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()

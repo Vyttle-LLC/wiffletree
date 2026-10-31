@@ -384,9 +384,18 @@ impl BrainBrowser {
             self.filter.clone(),
             self.from.clone(),
         );
-        self.ask(ask, window, cx, move |view, read, _, cx| {
+        self.ask(ask, window, cx, move |view, read, window, cx| {
             if (view.asked(), view.filter.clone(), view.from.clone()) != asked {
                 return;
+            }
+            // An entry opened from outside the project's repositories, such as a note's source,
+            // is in the whole brain only, as the study's focusLog has it.
+            if let (Ok(page), BrainLogsFrom::At(id), Some(_)) = (&read, &view.from, &view.scope)
+                && page.entries.first().is_none_or(|first| &first.id != id)
+            {
+                view.scope = None;
+                view.forget_readings();
+                return view.read(window, cx);
             }
             if let Ok(page) = &read {
                 for entry in page.entries.iter().chain(&page.pending) {

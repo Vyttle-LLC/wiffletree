@@ -146,7 +146,8 @@ struct ArchiveDemand<'a> {
 }
 
 /// The archive is out of date and something shown needs it: Show archived, the Tickets, Agents or
-/// Events panel, the Repositories page, a ticket table's done list or a publish or merge request,
+/// Events panel, the Repositories page, the brain browser, a ticket table's done list or a publish
+/// or merge request,
 /// or a selected session or message sender
 /// that the snapshot does not list, which only the archive holds.
 fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
@@ -160,6 +161,8 @@ fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
                 Some(Panel::Team | Panel::Agents | Panel::Events)
             )
             || shown.page == Page::Repositories
+            // Logs links this Mac's entries to their tickets and conversations, finished ones too.
+            || shown.page == Page::BrainBrowser
             || shown.done_tickets
             || (snapshot.attention.iter()).any(|a| a.is_publish() || a.is_merge())
             || shown.selected.is_some_and(archived)
@@ -1604,6 +1607,11 @@ mod tests {
             },
             ArchiveDemand {
                 page: Page::Repositories,
+                ..shown("live")
+            },
+            // Logs names the finished tickets this Mac's entries came from.
+            ArchiveDemand {
+                page: Page::BrainBrowser,
                 ..shown("live")
             },
             // The ticket table's done list names tickets only the archive holds.
