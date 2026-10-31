@@ -402,7 +402,7 @@ impl Inspector {
     }
 
     /// The folded "Finished tickets (N)" section: each ticket's title and how it ended, on one
-    /// line, with no bar, checks or conflict.
+    /// line, with no bar, checks or conflict, and under it any waiver it was accepted with.
     fn finished_tickets(
         &self,
         finished: &[&Ticket],
@@ -425,15 +425,10 @@ impl Inspector {
         }));
         let rows = finished.iter().filter(|_| open).map(|ticket| {
             let outcome = wording::finished_outcome(ticket);
-            div()
+            let line = div()
                 .flex()
                 .items_baseline()
                 .gap_2()
-                .px_1()
-                .py(px(2.))
-                .rounded_md()
-                .text_size(px(font::SMALL))
-                .hover(|d| d.bg(p.overlay.opacity(0.7)))
                 .child(
                     div()
                         .flex_1()
@@ -446,6 +441,18 @@ impl Inspector {
                         .flex_none()
                         .text_color(tone_color(outcome.tone, p))
                         .child(outcome.text),
+                );
+            div()
+                .px_1()
+                .py(px(2.))
+                .rounded_md()
+                .text_size(px(font::SMALL))
+                .hover(|d| d.bg(p.overlay.opacity(0.7)))
+                .child(line)
+                // Too long to share the line, and a waived ticket never reads only as accepted.
+                .children(
+                    wording::waiver_note(ticket)
+                        .map(|note| hint(note, p).text_color(p.yellow).text_ellipsis()),
                 )
         });
         Some(div().flex().flex_col().gap_1().child(toggle).children(rows))

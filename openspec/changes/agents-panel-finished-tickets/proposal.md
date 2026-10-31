@@ -19,6 +19,7 @@ The Agents panel draws every accepted ticket as a full card and every unarchived
 ### Modified Capabilities
 - `work-progress`: the Agents panel folds finished tickets, counts what it draws and quiets waiting agents.
 - `agent-lifecycle`: a verifier retires as it passes, not at the end of its round.
+- `ticket-workspaces`: not every ticket is a card, and a waived ticket keeps its warning in the fold.
 
 ## Impact
 
