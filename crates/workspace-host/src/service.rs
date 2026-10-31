@@ -8611,6 +8611,71 @@ mod tests {
     }
 
     #[test]
+    fn input_held_by_a_limit_survives_a_parent_stop_and_resume() {
+        run_with_provider(
+            "service::tests::limit_held_input_survives_stop_and_resume_with_the_fixture_provider",
+            &fixture_provider(),
+        );
+    }
+    #[test]
+    #[ignore = "run by input_held_by_a_limit_survives_a_parent_stop_and_resume, with the fixture as its provider"]
+    fn limit_held_input_survives_stop_and_resume_with_the_fixture_provider() {
+        assert!(
+            std::env::var_os("WORKSPACE_CLAUDE_BIN").is_some(),
+            "never a real provider"
+        );
+        let (_home, mut actor, reviewer, coordinator, _) = waiting_codex_reviewer();
+        let assignment = format!("assignment:{}", reviewer.id);
+        let receipt = |actor: &Actor| actor.host.message(&assignment).unwrap().receipt;
+        let status = |actor: &Actor| actor.host.session(&reviewer.id).unwrap().status;
+        let told = |actor: &Actor| -> i64 {
+            (actor.host.db)
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE recipient=?1 AND id LIKE 'wait:%'",
+                    [&coordinator.id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+
+        actor.schedule().unwrap();
+        assert_eq!(status(&actor), Status::Blocked);
+        assert_eq!(receipt(&actor), Receipt::Queued);
+
+        let args = json!({"session_ids":[reviewer.id],"reason":"Hold on"});
+        let stopped = actor.stop_agents(&coordinator.id, &args).unwrap();
+        assert_eq!(stopped["agents"][0]["result"], "paused_idle");
+        assert_eq!(status(&actor), Status::Paused);
+        assert_eq!(receipt(&actor), Receipt::Queued);
+
+        let args = json!({"session_id":reviewer.id});
+        let resumed = actor.resume_agent(&coordinator.id, &args).unwrap();
+        assert!(resumed["queued"].as_i64().unwrap() > 0, "{resumed}");
+        assert_eq!(resumed["turn_scheduled"], true);
+        assert_eq!(receipt(&actor), Receipt::Queued);
+
+        // The reading is still spent: the input is held again, not lost, and nobody is told twice.
+        actor.schedule().unwrap();
+        assert!(!actor.active.contains_key(&reviewer.id));
+        assert_eq!(status(&actor), Status::Blocked);
+        assert_eq!(receipt(&actor), Receipt::Queued);
+        assert_eq!(told(&actor), 1);
+
+        // Once the provider reads below the threshold, the turn starts with that input.
+        spend(&mut actor.host, Provider::Codex, 40.);
+        let ticket = actor.host.session_runtime(&reviewer.id).unwrap().ticket_id;
+        let ticket = ticket.expect("a reviewer works on a ticket");
+        let prepared = checkout::Worktree::prepare(&actor.host, &ticket).unwrap();
+        actor.prepared_worktrees.insert(ticket, (prepared, Ok(())));
+        actor.schedule().unwrap();
+        let active = &actor.active[&reviewer.id];
+        assert_eq!(active.messages, std::slice::from_ref(&assignment));
+        active.cancel.store(true, Ordering::Relaxed);
+        assert_eq!(status(&actor), Status::Working);
+        assert_eq!(receipt(&actor), Receipt::Delivered);
+    }
+
+    #[test]
     fn skip_during_a_limit_wait_drops_the_input_and_the_retry() {
         let (_home, mut actor, implementer, _, input) = implementer_taking_input();
         let reset = now() + 3_600_000;
