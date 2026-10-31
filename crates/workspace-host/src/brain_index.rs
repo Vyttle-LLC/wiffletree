@@ -41,22 +41,40 @@ fn open(path: &Path) -> Result<Connection> {
         .unwrap_or(None);
     if version.as_deref() != Some(SCHEMA_VERSION) {
         drop(db);
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = fs::remove_file(format!("{}{suffix}", path.display()));
-        }
-        let db = Connection::open(path)?;
-        db.execute_batch("PRAGMA foreign_keys=ON;")?;
+        remove(path);
+        // The schema is written in a file of its own and moved into place once whole, so a
+        // host stopped meanwhile leaves no index that looks like one.
+        let fresh = path.with_extension("sqlite.new");
+        remove(&fresh);
+        let db = Connection::open(&fresh)?;
         db.execute_batch(SCHEMA)?;
         db.execute(
             "INSERT INTO state(key,value) VALUES ('schema',?1)",
             [SCHEMA_VERSION],
         )?;
+        drop(db);
+        fs::rename(&fresh, path)?;
+        let db = Connection::open(path)?;
+        db.execute_batch("PRAGMA foreign_keys=ON;")?;
         return Ok(db);
     }
     Ok(db)
 }
 
-/// Opens the index for reading, or `None` before its first build.
+/// Removes an index file with its WAL and shared-memory files.
+fn remove(path: &Path) {
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
+
+/// Whether the index holds a completed build: its schema is current and a refresh committed
+/// the commit it indexed. Anything else, a file a stopped build left included, is missing.
+pub(crate) fn is_built(path: &Path) -> bool {
+    open_read(path).is_ok_and(|db| db.is_some())
+}
+
+/// Opens the index for reading, or `None` until a build has completed.
 fn open_read(path: &Path) -> Result<Option<Connection>> {
     if !path.exists() {
         return Ok(None);
@@ -68,7 +86,8 @@ fn open_read(path: &Path) -> Result<Option<Connection>> {
         })
         .optional()
         .unwrap_or(None);
-    Ok((version.as_deref() == Some(SCHEMA_VERSION)).then_some(db))
+    let built = state(&db, "commit").unwrap_or(None).is_some();
+    Ok((version.as_deref() == Some(SCHEMA_VERSION) && built).then_some(db))
 }
 
 fn state(db: &Connection, key: &str) -> Result<Option<String>> {
@@ -2003,6 +2022,36 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_index_a_stopped_build_left_counts_as_missing_and_the_next_refresh_completes_it() {
+        let brain = Checkout::new();
+        brain.commit(&sample()[..4], "Log batch (#80)");
+        let head = brain.commit(&sample()[4..], "Compile (#81)");
+        brain.refresh(&head);
+        let complete = dump(&brain.db());
+        // Stopped after the schema: a current schema, no commit marker.
+        fs::remove_file(brain.index()).unwrap();
+        drop(open(&brain.index()).unwrap());
+        assert!(!is_built(&brain.index()));
+        assert!(
+            open_read(&brain.index()).unwrap().is_none(),
+            "reads say not indexed yet"
+        );
+        assert_eq!(brain.refresh(&head), sample().len());
+        assert!(is_built(&brain.index()));
+        assert_eq!(dump(&brain.db()), complete);
+        // Stopped partway through the schema, as an older host's build could be: some tables,
+        // no state at all.
+        fs::remove_file(brain.index()).unwrap();
+        Connection::open(brain.index())
+            .unwrap()
+            .execute_batch("CREATE TABLE files (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        assert!(!is_built(&brain.index()));
+        assert_eq!(brain.refresh(&head), sample().len());
+        assert_eq!(dump(&brain.db()), complete);
+    }
+
+    #[test]
     fn an_entry_takes_the_pr_of_the_squash_commit_that_added_it() {
         let brain = Checkout::new();
         let (first, second) = (
@@ -2457,6 +2506,8 @@ pub(crate) mod tests {
             transaction
                 .execute_batch("INSERT INTO search(search) VALUES ('rebuild');")
                 .unwrap();
+            // A completed build, as a refresh marks one.
+            set_state(&transaction, "commit", Some("second-brain\0fixture")).unwrap();
             transaction.commit().unwrap();
         }
         eprintln!("the fixture: {:?}", built.elapsed());
@@ -2621,6 +2672,13 @@ pub(crate) mod tests {
             let hits = b.f.host.search_brain(REPO, None, "telnyx").unwrap();
             assert_eq!(hits.len(), 4);
             fs::remove_file(&index).unwrap();
+            assert!(b.f.host.brain_status(REPO).is_err(), "not indexed yet");
+            assert!(run(&mut b.f.host, &b.tools));
+            assert_eq!(b.f.host.search_brain(REPO, None, "telnyx").unwrap(), hits);
+            // A build stopped after the schema, with nothing new to fetch: the pass still
+            // completes it from the checkout's main.
+            fs::remove_file(&index).unwrap();
+            drop(open(&index).unwrap());
             assert!(b.f.host.brain_status(REPO).is_err(), "not indexed yet");
             assert!(run(&mut b.f.host, &b.tools));
             assert_eq!(b.f.host.search_brain(REPO, None, "telnyx").unwrap(), hits);

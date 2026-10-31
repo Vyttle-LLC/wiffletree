@@ -334,12 +334,13 @@ pub(crate) fn pass(mut pass: Pass, tools: &Tools) -> Passed {
 }
 
 /// Brings the brain's index to the `main` the pass fetched or, when it fetched nothing and the
-/// index is missing, to the checkout's `main`, so a deleted index is rebuilt offline too.
+/// index is missing or its build never completed, to the checkout's `main`, so a deleted or
+/// interrupted index is rebuilt offline too.
 fn refresh_index(pass: &Pass, passed: &Passed) -> Result<()> {
     let checkout = &pass.checkout;
     let commit = match &passed.head {
         Some(head) => head.clone(),
-        None if !pass.index.exists() && checkout.join(".git").exists() => {
+        None if !brain_index::is_built(&pass.index) && checkout.join(".git").exists() => {
             runtime::git_output(checkout, &["rev-parse", "--verify", "refs/heads/main"])?
                 .trim()
                 .to_owned()
