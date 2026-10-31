@@ -404,6 +404,17 @@ impl BrainsPage {
                     })),
             );
         }
+        if brain.legacy_import {
+            let r = repository.clone();
+            actions = actions.child(
+                ui::gated(button(SharedString::from(format!("import-{repository}"))).outline().label("Import legacy logs"), host)
+                    .tooltip("Copies each entry of the legacy logs/<repo>.md files into its own entry file, in log PRs of at most 200 files. The legacy files are not changed. Import again once the PRs merge to finish.")
+                    .on_click(cx.listener(move |v, _, w, c| {
+                        let repository = r.clone();
+                        v.request(Command::ImportLegacyLogs { repository }, w, c)
+                    })),
+            );
+        }
         if brain.config.config().is_some() {
             let weak = cx.entity().downgrade();
             let (here, r) = (listing.this_host.clone(), repository.clone());
@@ -806,8 +817,13 @@ impl Requests for BrainsPage {
     ) {
         match reply {
             Err(error) => self.error = Some(error),
-            Ok(_) => {
+            Ok(answer) => {
                 self.error = None;
+                if let Command::ImportLegacyLogs { .. } = command
+                    && let Ok(import) = serde_json::from_value::<LegacyImport>(answer)
+                {
+                    toast(import_line(&import), window, cx);
+                }
                 if !matches!(command, Command::SyncNow) {
                     self.edit(None, window, cx);
                 }
@@ -1185,10 +1201,23 @@ fn discard_line(batch: &BrainBatch) -> String {
     }
 }
 
+/// What Import legacy logs did, in a line.
+fn import_line(import: &LegacyImport) -> String {
+    if import.done {
+        return "Every legacy entry is on main. The import is done.".into();
+    }
+    match (import.added, import.batches) {
+        (0, _) => "Nothing new to import. Import again once the import PRs merge to finish.".into(),
+        (1, _) => "1 entry queued in 1 log PR.".into(),
+        (n, 1) => format!("{n} entries queued in 1 log PR."),
+        (n, b) => format!("{n} entries queued in {b} log PRs."),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        LAST_COMPILE, Tone, author, batch_note, compiler_line, grant_lines, last_pr,
+        LAST_COMPILE, Tone, author, batch_note, compiler_line, grant_lines, import_line, last_pr,
         required_checks, steps, sync_state, warnings, without_origin, without_origin_line,
     };
     use crate::ui;
@@ -1211,6 +1240,7 @@ mod tests {
             required_checks: vec![],
             legacy_pointer: false,
             last_pull_request: None,
+            legacy_import: false,
         }
     }
     fn batch(stage: BrainStage, problem: Option<BrainProblem>) -> BrainBatch {
@@ -1471,5 +1501,21 @@ mod tests {
             line.contains("/Users/m/notes has no GitHub origin")
                 && line.contains("Space's settings")
         );
+    }
+
+    #[test]
+    fn the_import_says_what_it_queued_and_when_it_is_done() {
+        let import = |added, batches, done| LegacyImport {
+            added,
+            batches,
+            compiled: 0,
+            done,
+        };
+        assert_eq!(
+            import_line(&import(202, 2, false)),
+            "202 entries queued in 2 log PRs."
+        );
+        assert!(import_line(&import(0, 0, false)).contains("once the import PRs merge"));
+        assert!(import_line(&import(0, 0, true)).contains("done"));
     }
 }

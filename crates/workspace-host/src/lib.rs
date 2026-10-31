@@ -15,6 +15,7 @@ mod github_access;
 pub mod host_files;
 mod keeper;
 pub mod keychain;
+mod legacy_logs;
 pub mod live;
 pub mod login_env;
 pub mod mcp;
@@ -1825,6 +1826,15 @@ impl Host {
             )?)?,
             Command::SendLogsNow { repository } => {
                 json!({"closed": self.send_logs_now(repository.as_deref())?})
+            }
+            Command::ImportLegacyLogs { repository } => serde_json::to_value(
+                self.import_legacy_logs(&repository, &publish::Tools::default())?,
+            )?,
+            Command::FixHeldLog { log_id, fix } => {
+                serde_json::to_value(self.fix_held_log(&log_id, fix)?)?
+            }
+            Command::ReleaseHeldLog { log_id } => {
+                serde_json::to_value(self.release_held_log(&log_id)?)?
             }
             Command::Activity {
                 project_id,

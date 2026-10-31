@@ -105,6 +105,9 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::SetBrainCompiler { .. }
         | Command::AmendBrainBatch { .. }
         | Command::SendLogsNow { .. }
+        | Command::ImportLegacyLogs { .. }
+        | Command::FixHeldLog { .. }
+        | Command::ReleaseHeldLog { .. }
         | Command::SetWorkspacesDir { .. }
         | Command::SetVerification { .. }
         | Command::SetBuildsAtOnce { .. }

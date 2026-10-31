@@ -13,7 +13,7 @@ Michael decided on October 29, 2026 that brains are team-shared and that every c
     - the repository folder and `ref`, from the ticket's worktree: branch, commits since the base, and PR;
     - the author (the human's GitHub login) and `source: wiffletree`;
     - the provider, model, machine, Space, project, ticket, session and thread, which stay in the host's store because the entry contract allows exactly four frontmatter keys.
-- **Assistant thread entries use the same contract**, in `logs/assistant/YYYY/MM/…` with `repo: assistant`, instead of the rolling `logs/assistant.md` that `assistant-spaces-jobs-boards` proposed.
+- **Assistant thread entries use the same contract**, in `logs/assistant/YYYY/MM/…` with `repo: assistant`, instead of the rolling `logs/assistant.md` that `assistant-spaces-jobs-boards` proposed. The thread tools they need are not on `main` yet, so that part moved to `assistant-spaces-jobs-boards` (its `project-memory` delta and task 7.1); this change ships `log_work` for the coordinator and implementers.
 - **PR-gated writes supersede #163's decision (c)** (Michael, 2026-10-29). #163 no longer adds its `project-memory` requirement "Brain pushes from several people", so there is nothing of it to remove here.
 - **Builds on `spaces`**, which makes every project belong to a Space and exports to the Space's brain until this change replaces the export.
 - **The entry contract from the gate, exactly.** One file per entry at `second-brain/logs/<repo>/YYYY/MM/YYYY-MM-DD-<ulid>.md`, never edited after merge. Its `ref` is `—`, `<branch> @ —` or `<branch> @ <sha>[…<sha>][ · PR #NN]`. The host refuses an entry whose body exceeds 2,000 characters, saying how much to cut.

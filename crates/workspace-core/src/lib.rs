@@ -686,10 +686,22 @@ pub struct LogInput {
     /// one, its entry is a planning entry in the brain repository's own folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
-    /// The coordinator's choice of one of its project's tickets: the entry goes in that
-    /// ticket's batch, for its repository, with its `ref`.
+    /// The coordinator's choice of one of its project's tickets: the entry is that ticket's,
+    /// for its repository, with its `ref`, and stays in the coordinator session's batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket_id: Option<String>,
+    pub changed: String,
+    pub why: String,
+    pub state: String,
+}
+/// The human's fix of a held entry: its whole text, its folder and its `ref`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogFix {
+    pub kind: LogKind,
+    pub title: String,
+    /// The folder under `logs/`.
+    pub repository: String,
+    pub reference: String,
     pub changed: String,
     pub why: String,
     pub state: String,
@@ -739,9 +751,12 @@ pub struct WorkLog {
     pub in_legacy_file: bool,
     /// Why an entry captured before per-entry files is held in its batch and not sent: as it
     /// stands it breaks the entry contract or the cap. Its text is never changed; it waits for
-    /// the human.
+    /// the human, who fixes or releases it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held: Option<String>,
+    /// The human released this held entry: it stays here and is never sent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub released: bool,
 }
 impl WorkLog {
     /// Neither in a batch nor in a legacy file: it waits for its project's Space to have a brain.
@@ -3267,6 +3282,22 @@ pub enum Command {
     SendLogsNow {
         repository: Option<String>,
     },
+    /// Import legacy logs: queues the brain's legacy `logs/<repo>.md` entries as entry files in
+    /// log-only batches; answered with the `LegacyImport`.
+    ImportLegacyLogs {
+        repository: String,
+    },
+    /// Replaces a held entry's text with the human's fix, which must then fit the entry
+    /// contract and the cap; answered with the `WorkLog`.
+    FixHeldLog {
+        log_id: String,
+        fix: LogFix,
+    },
+    /// Releases a held entry: it stays in the project's memory and is never sent; answered with
+    /// the `WorkLog`.
+    ReleaseHeldLog {
+        log_id: String,
+    },
     Activity {
         project_id: String,
         before: Option<i64>,
@@ -3635,6 +3666,9 @@ impl Command {
             | Self::SetBrainCompiler { .. }
             | Self::AmendBrainBatch { .. }
             | Self::SendLogsNow { .. }
+            | Self::ImportLegacyLogs { .. }
+            | Self::FixHeldLog { .. }
+            | Self::ReleaseHeldLog { .. }
             | Self::SetWorkspacesDir { .. }
             | Self::SetVerification { .. }
             | Self::SetBuildsAtOnce { .. }
@@ -3678,8 +3712,8 @@ impl Command {
     /// the host may merge into, and a settings repository the host pushes to.
     /// Spaces are the human's: creating, editing or removing one, setting its brain, moving a
     /// project into one and choosing which repositories it lists, and reading where its storage
-    /// is on this Mac. So are brains: the push grant, forgetting one, Set up, the compiler and
-    /// amending a batch. Remote access is the human's too: its state carries the pairing code.
+    /// is on this Mac. So are brains: the push grant, forgetting one, Set up, the compiler,
+    /// amending a batch, Send now and the legacy import, and fixing or releasing a held entry. Remote access is the human's too: its state carries the pairing code.
     pub fn is_human_only(&self) -> bool {
         matches!(
             self,
@@ -3708,6 +3742,9 @@ impl Command {
                 | Self::SetBrainCompiler { .. }
                 | Self::AmendBrainBatch { .. }
                 | Self::SendLogsNow { .. }
+                | Self::ImportLegacyLogs { .. }
+                | Self::FixHeldLog { .. }
+                | Self::ReleaseHeldLog { .. }
                 | Self::RemoteAccess
                 | Self::SetRemoteAccess { .. }
                 | Self::OpenPairing

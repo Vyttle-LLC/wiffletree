@@ -9,13 +9,15 @@ use chrono::{Datelike, Local, TimeZone};
 use publish::GitTool;
 
 /// The gate's cap on an entry's body, `gate.max_entry_body_chars`'s default.
-const MAX_BODY_CHARS: usize = 2000;
-const MAX_TITLE_CHARS: usize = 80;
+pub(crate) const MAX_BODY_CHARS: usize = 2000;
+pub(crate) const MAX_TITLE_CHARS: usize = 80;
 /// A batch holds at most this many entries; the next one starts a new batch.
 const MAX_BATCH_ENTRIES: i64 = 50;
 /// A batch opens its pull request at the latest this long after its first entry.
 const BATCH_FLUSH_MS: i64 = 24 * 60 * 60 * 1000;
-const NO_REF: &str = "—";
+pub(crate) const NO_REF: &str = "—";
+/// The held-entries Inbox item's id after `BRAIN_NOTICE_PREFIX`, followed by how many it holds.
+const HELD_ITEM: &str = "held-logs:";
 /// The tool result's key for the milestone prompt, which the MCP bridge moves to the end of the
 /// result's text as its last line.
 pub(crate) const PROMPT_KEY: &str = "log_work_prompt";
@@ -59,6 +61,7 @@ pub(crate) fn migrate(host: &mut Host) -> Result<()> {
     )?;
     host.atomically(|host| {
         host.db.execute_batch(SCHEMA)?;
+        host.db.execute_batch(legacy_logs::SCHEMA)?;
         if !has_batches {
             host.db
                 .execute_batch("ALTER TABLE work_logs ADD COLUMN batch_id TEXT;")?;
@@ -81,7 +84,7 @@ fn local_date(at: i64) -> String {
 
 /// One line: whitespace runs, newlines included, become one space, and HTML comments are
 /// escaped so that no entry carries the gate's `gate:allow` suppression marker.
-fn one_line(value: &str) -> String {
+pub(crate) fn one_line(value: &str) -> String {
     value
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -115,7 +118,7 @@ fn folded(mut input: LogInput) -> Result<LogInput> {
 
 /// A folder name the entry contract allows: a letter or digit, then letters, digits, `.`, `_`
 /// and `-`.
-fn valid_folder(name: &str) -> bool {
+pub(crate) fn valid_folder(name: &str) -> bool {
     name.chars()
         .next()
         .is_some_and(|c| c.is_ascii_alphanumeric())
@@ -125,7 +128,7 @@ fn valid_folder(name: &str) -> bool {
 }
 
 /// A GitHub login as the gate checks it.
-fn valid_login(login: &str) -> bool {
+pub(crate) fn valid_login(login: &str) -> bool {
     !login.is_empty()
         && login.len() <= 39
         && !login.starts_with('-')
@@ -136,7 +139,7 @@ fn valid_login(login: &str) -> bool {
 
 /// A `ref` the entry contract allows: `—`, `<branch> @ —`, or `<branch> @ <sha>[…<sha>]` with an
 /// optional ` · PR #NN`, where each SHA is 7–40 lowercase hex characters.
-fn valid_ref(reference: &str) -> bool {
+pub(crate) fn valid_ref(reference: &str) -> bool {
     if reference == NO_REF {
         return true;
     }
@@ -184,26 +187,49 @@ fn entry_path(folder: &str, repository: &str, date: &str, id: &str) -> String {
     format!("{folder}/logs/{repository}/{year}/{month}/{date}-{id}.md")
 }
 
-/// The entry's file in the gate's contract, refused when its body is over the cap.
-fn entry_file(log: &WorkLog, author: &str) -> Result<String> {
-    let kind = match log.input.kind {
+/// An entry's body in the gate's contract: its heading and the five fields.
+pub(crate) fn entry_body(date: &str, input: &LogInput, reference: &str) -> String {
+    let kind = match input.kind {
         LogKind::Decision => "decision",
         LogKind::Observation => "observation",
     };
-    let input = &log.input;
-    let body = format!(
-        "## {} — {}\n- type: {kind}\n- ref: {}\n- changed: {}\n- why: {}\n- state: {}\n",
-        log.date, input.title, log.reference, input.changed, input.why, input.state
-    );
-    let length = body.trim().chars().count();
+    format!(
+        "## {date} — {}\n- type: {kind}\n- ref: {reference}\n- changed: {}\n- why: {}\n- state: {}\n",
+        input.title, input.changed, input.why, input.state
+    )
+}
+
+/// The body's length as the gate counts it against the cap.
+pub(crate) fn body_chars(body: &str) -> usize {
+    body.trim().chars().count()
+}
+
+/// The entry file: the four frontmatter keys, then `body`.
+pub(crate) fn entry_text(
+    id: &str,
+    repository: &str,
+    author: &str,
+    source: &str,
+    body: &str,
+) -> String {
+    format!("---\nid: {id}\nrepo: {repository}\nauthor: {author}\nsource: {source}\n---\n{body}")
+}
+
+/// The entry's file in the gate's contract, refused when its body is over the cap.
+fn entry_file(log: &WorkLog, author: &str) -> Result<String> {
+    let body = entry_body(&log.date, &log.input, &log.reference);
+    let length = body_chars(&body);
     ensure!(
         length <= MAX_BODY_CHARS,
         "The entry is {length} characters and the cap is {MAX_BODY_CHARS}: cut at least {} characters. Nothing was stored.",
         length - MAX_BODY_CHARS
     );
-    Ok(format!(
-        "---\nid: {}\nrepo: {}\nauthor: {author}\nsource: wiffletree\n---\n{body}",
-        log.id, log.repository
+    Ok(entry_text(
+        &log.id,
+        &log.repository,
+        author,
+        "wiffletree",
+        &body,
     ))
 }
 
@@ -436,6 +462,7 @@ impl Host {
             machine: Some(sync::machine_name()),
             in_legacy_file: false,
             held: None,
+            released: false,
         };
         entry_file(&log, &author)?;
         self.atomically(|host| {
@@ -602,8 +629,11 @@ impl Host {
             [id],
         )?;
         let mut files = vec![];
-        // A held entry waits for the human and is never sent as it stands.
-        for log in logs.iter().filter(|log| log.held.is_none()) {
+        // A held entry waits for the human and is never sent as it stands; a released one never.
+        for log in logs
+            .iter()
+            .filter(|log| log.held.is_none() && !log.released)
+        {
             // A row carried over from before per-entry files has no author until gh's login is read.
             let Some(author) = log.author.clone().or_else(|| self.gh_login.clone()) else {
                 return Ok(());
@@ -826,8 +856,114 @@ impl Host {
         let prompt = format!(
             "{entries} captured before per-entry files cannot be sent to the brain as they stand: each breaks the entry contract or the 2,000-character cap. They are kept unchanged in this project's memory and are not sent."
         );
-        let operation = format!("{BRAIN_NOTICE_PREFIX}held-logs:{held}");
+        let operation = format!("{BRAIN_NOTICE_PREFIX}{HELD_ITEM}{held}");
         self.request_attention(&coordinator, "local", &operation, &prompt, &[])?;
+        Ok(())
+    }
+
+    /// The held entry `id`.
+    fn held_log(&self, id: &str) -> Result<WorkLog> {
+        let log = (self.db)
+            .query_row(
+                "SELECT sequence,data FROM work_logs WHERE id=?1",
+                [id],
+                |r| {
+                    let mut log: WorkLog = decode(r, 1)?;
+                    log.sequence = r.get(0)?;
+                    Ok(log)
+                },
+            )
+            .optional()?
+            .context("Log entry not found")?;
+        ensure!(log.held.is_some(), "This log entry is not held");
+        Ok(log)
+    }
+
+    /// Fix: the held entry takes the human's text, folder and `ref`. Refused, changing nothing,
+    /// while it still breaks the entry contract or the cap. Once it fits it goes with its
+    /// batch, or with its ticket's or session's open batch when its own was already sent.
+    pub fn fix_held_log(&mut self, id: &str, fix: LogFix) -> Result<WorkLog> {
+        let mut log = self.held_log(id)?;
+        log.input = folded(LogInput {
+            kind: fix.kind,
+            title: fix.title,
+            changed: fix.changed,
+            why: fix.why,
+            state: fix.state,
+            ..log.input
+        })?;
+        log.repository = fix.repository.trim().to_owned();
+        log.reference = fix.reference.trim().to_owned();
+        if let Some(rule) = unfit(&log) {
+            bail!("This entry still cannot be sent: {rule}. Nothing was changed.");
+        }
+        let folder = (log.path.as_deref())
+            .and_then(|path| path.split_once("/logs/"))
+            .map(|(folder, _)| folder.to_owned())
+            .context("A held entry has a path")?;
+        log.path = Some(entry_path(&folder, &log.repository, &log.date, &log.id));
+        log.held = None;
+        self.atomically(|host| {
+            let sent: bool = host.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM log_batches WHERE id=?1 AND brain_batch_id IS NOT NULL)",
+                [&log.batch_id],
+                |r| r.get(0),
+            )?;
+            if sent {
+                let key = match &log.task_id {
+                    Some(ticket) => BatchKey::Ticket(ticket),
+                    None => BatchKey::Session(&log.input.session_id),
+                };
+                let brain = log.brain.clone().unwrap_or_default();
+                log.batch_id = Some(host.open_batch(&brain, &log.project_id, key, now())?);
+            }
+            host.db.execute(
+                "UPDATE work_logs SET data=?2,repository=?3,batch_id=?4 WHERE id=?1",
+                params![log.id, encode(&log)?, log.repository, log.batch_id],
+            )?;
+            host.clear_held_item(&log.project_id)
+        })?;
+        Ok(log)
+    }
+
+    /// Release: the held entry stays in the project's memory and is never sent.
+    pub fn release_held_log(&mut self, id: &str) -> Result<WorkLog> {
+        let mut log = self.held_log(id)?;
+        log.held = None;
+        log.released = true;
+        self.atomically(|host| {
+            host.db.execute(
+                "UPDATE work_logs SET data=?2 WHERE id=?1",
+                params![log.id, encode(&log)?],
+            )?;
+            host.clear_held_item(&log.project_id)
+        })?;
+        Ok(log)
+    }
+
+    /// Clears the project's held-entries Inbox item once none of its entries is held.
+    fn clear_held_item(&mut self, project: &str) -> Result<()> {
+        let held: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM work_logs WHERE project_id=?1 AND json_extract(data,'$.held') IS NOT NULL)",
+            [project],
+            |r| r.get(0),
+        )?;
+        if held {
+            return Ok(());
+        }
+        let open: Vec<String> = self
+            .db
+            .prepare(
+                "SELECT id FROM attention WHERE project_id=?1 AND operation_id LIKE ?2 AND json_extract(data,'$.answer') IS NULL",
+            )?
+            .query_map(
+                params![project, format!("{BRAIN_NOTICE_PREFIX}{HELD_ITEM}%")],
+                |r| r.get(0),
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        for id in open {
+            self.resolve_attention(&id, "Cleared: no log entry is held")?;
+        }
         Ok(())
     }
 }
@@ -1262,6 +1398,7 @@ mod tests {
             machine: None,
             in_legacy_file: false,
             held: None,
+            released: false,
         };
         let path = entry_path("second-brain", repo, date, id);
         Some((path, entry_file(&log, author).ok()?))
@@ -1808,5 +1945,89 @@ mod tests {
         host.send_log_batches(now(), &tools.git).unwrap();
         let queued = host.logs(&without.id, None, 100).unwrap().remove(0);
         assert!(queued.batch_id.is_some() && queued.held.is_none());
+    }
+
+    #[test]
+    fn a_held_entry_is_fixed_or_released_and_the_inbox_item_clears_once_none_is_held() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let sage = host.create_space("Sage", "", "", None).unwrap().space;
+        let sage = name_brain(&mut host, &sage.id, REPO);
+        let project = host.create_project("Held").unwrap();
+        host.move_project_to_space(&project.id, &sage).unwrap();
+        let coordinator = host.coordinator_of(&project.id).unwrap().unwrap();
+        drop(host);
+        before_entries(
+            home.path(),
+            &[
+                ("fix-me", &coordinator, "main 1a2b3c4", false),
+                ("release-me", &coordinator, "see PR 92", false),
+            ],
+        );
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        host.legacy_pointer = home.path().join("no-pointer");
+        host.record_gh_login(Some("mhohlios".into()));
+        let item_open = |host: &Host| {
+            (host.open_attention(&project.id).unwrap().iter())
+                .any(|i| i.operation_id.contains("held-logs"))
+        };
+        assert!(item_open(&host));
+        let logs = host.logs(&project.id, None, 100).unwrap();
+        let held = |title_ref: &str| {
+            (logs.iter())
+                .find(|l| l.reference == title_ref)
+                .unwrap()
+                .clone()
+        };
+        let (to_fix, to_release) = (held("main 1a2b3c4"), held("see PR 92"));
+        // The held entries' batch goes out without them.
+        let folder = tempfile::tempdir().unwrap();
+        let tools = GitHub::new(folder.path()).tools();
+        assert!(run(&mut host, &tools));
+        host.send_logs_now(None).unwrap();
+        host.send_log_batches(now(), &tools.git).unwrap();
+        assert!(host.brain_batches(Some(REPO)).unwrap().is_empty());
+
+        let fix = |reference: &str| LogFix {
+            kind: LogKind::Decision,
+            title: "Old".into(),
+            repository: "sagehaven-docs".into(),
+            reference: reference.into(),
+            changed: "c".into(),
+            why: "w".into(),
+            state: "s (was main 1a2b3c4)".into(),
+        };
+        let error = host
+            .fix_held_log(&to_fix.id, fix("main 1a2b3c4"))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("its ref"), "{error:#}");
+        assert_eq!(
+            host.held_log(&to_fix.id).unwrap(),
+            to_fix,
+            "nothing changed"
+        );
+        let fixed = host.fix_held_log(&to_fix.id, fix(NO_REF)).unwrap();
+        assert_eq!(
+            (fixed.held.as_deref(), fixed.reference.as_str()),
+            (None, NO_REF)
+        );
+        assert!(item_open(&host), "another entry is still held");
+
+        let released = host.release_held_log(&to_release.id).unwrap();
+        assert!(released.released && released.held.is_none());
+        assert!(!item_open(&host));
+        assert!(
+            host.release_held_log(&to_release.id).is_err(),
+            "no longer held"
+        );
+        let kept = host.logs(&project.id, None, 100).unwrap();
+        assert_eq!(kept.len(), 2, "a released entry stays in the store");
+
+        // The fixed entry is sent; the released one never.
+        host.send_logs_now(None).unwrap();
+        host.send_log_batches(now(), &tools.git).unwrap();
+        let batches = host.brain_batches(Some(REPO)).unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].files, [fixed.path.unwrap()]);
     }
 }

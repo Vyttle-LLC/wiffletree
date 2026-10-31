@@ -108,9 +108,14 @@ fn refuse_symlinks(worktree: &Path, path: &str) -> Result<()> {
 /// A lowercase ULID: 48 bits of `at` in milliseconds, then 80 random bits, in Crockford's base
 /// 32. Batch ids and log entry ids both use it.
 pub(crate) fn new_ulid(at: i64) -> String {
+    ulid(at, u128::from_be_bytes(*uuid::Uuid::new_v4().as_bytes()))
+}
+
+/// A lowercase ULID of `at` and the low 80 bits of `random`.
+pub(crate) fn ulid(at: i64, random: u128) -> String {
     const ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
     let time = (at as u128) & ((1 << 48) - 1);
-    let random = u128::from_be_bytes(*uuid::Uuid::new_v4().as_bytes()) & ((1 << 80) - 1);
+    let random = random & ((1 << 80) - 1);
     let mut value = (time << 80) | random;
     let mut id = [0u8; 26];
     for slot in id.iter_mut().rev() {
@@ -1055,6 +1060,7 @@ impl Host {
                 required_checks: vec![],
                 legacy_pointer: false,
                 last_pull_request: None,
+                legacy_import: false,
             };
             self.db.execute(
                 "INSERT INTO brains(repository,data) VALUES (?1,?2)",
@@ -1143,6 +1149,8 @@ impl Host {
                 && named
                     .as_deref()
                     .is_some_and(|n| n.eq_ignore_ascii_case(&brain.repository));
+            // A checkout that cannot be read offers no import; its problem shows already.
+            brain.legacy_import = self.offers_legacy_import(brain).unwrap_or(false);
         }
         let this_host = BrainCompiler {
             host_id: self.host_id()?,
@@ -1882,6 +1890,8 @@ pub(crate) mod tests {
         annotations: Mutex<Value>,
         /// The checks `main`'s branch protection requires.
         required: Mutex<Vec<&'static str>>,
+        /// The GitHub login of each commit's author GitHub knows, by SHA.
+        pub(crate) commit_authors: Mutex<std::collections::HashMap<String, String>>,
     }
     impl GitHub {
         pub(crate) fn new(folder: &Path) -> Arc<Self> {
@@ -1912,6 +1922,7 @@ pub(crate) mod tests {
                 check_runs: Mutex::new(json!({"check_runs": []})),
                 annotations: Mutex::new(json!([])),
                 required: Mutex::new(GATE_CHECKS.to_vec()),
+                commit_authors: Mutex::default(),
             })
         }
         pub(crate) fn tools(self: &Arc<Self>) -> Tools {
@@ -2046,6 +2057,10 @@ pub(crate) mod tests {
                 return Some(json!([{"type": "required_status_checks",
                     "parameters": {"required_status_checks": contexts}}]));
             }
+            if let Some(sha) = rest.strip_prefix("commits/").filter(|s| !s.contains('/')) {
+                let login = self.commit_authors.lock().unwrap().get(sha).cloned();
+                return Some(json!({"sha": sha, "author": login.map(|l| json!({"login": l}))}));
+            }
             if rest.starts_with("commits/") {
                 return Some(self.check_runs.lock().unwrap().clone());
             }
@@ -2065,7 +2080,7 @@ pub(crate) mod tests {
                 .then(|| answer.output.trim().to_owned())
         }
         /// GitHub squash-merges the PR, as auto-merge does once its checks pass.
-        fn merge(&self, number: u64) {
+        pub(crate) fn merge(&self, number: u64) {
             let mut prs = self.prs.lock().unwrap();
             let pr = prs.iter_mut().find(|pr| pr.number == number).unwrap();
             let work = self.folder.join(format!("merge-{number}"));
@@ -2079,15 +2094,21 @@ pub(crate) mod tests {
         }
         /// A teammate's commit pushed straight to `main`.
         fn commit_on_main(&self, file: &str) {
+            self.commit_file_on_main(file, "From a teammate.\n");
+        }
+        /// A teammate's commit of `file` with `content` pushed straight to `main`; answers its
+        /// SHA.
+        pub(crate) fn commit_file_on_main(&self, file: &str, content: &str) -> String {
             let work = self.folder.join(format!("teammate-{}", new_id()));
             let bare = self.bare.to_str().unwrap();
             git(&self.folder, &["clone", "-q", bare, work.to_str().unwrap()]);
             let path = work.join(file);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, "From a teammate.\n").unwrap();
+            fs::write(path, content).unwrap();
             git(&work, &["add", "."]);
             git(&work, &["commit", "-q", "-m", "A teammate's change"]);
             git(&work, &["push", "-q", "origin", "main"]);
+            git(&work, &["rev-parse", "HEAD"]).trim().to_owned()
         }
         /// A teammate's commit on `main` of `file` as a symlink to `target`.
         #[cfg(unix)]
@@ -2106,7 +2127,7 @@ pub(crate) mod tests {
             let log = git(&self.bare, &["log", "--format=%s", "main"]);
             log.lines().map(str::to_owned).collect()
         }
-        fn gh_calls(&self, first: &str) -> Vec<Vec<String>> {
+        pub(crate) fn gh_calls(&self, first: &str) -> Vec<Vec<String>> {
             (self.gh.lock().unwrap().iter())
                 .filter(|call| call.first().map(String::as_str) == Some(first))
                 .cloned()
@@ -2209,7 +2230,7 @@ pub(crate) mod tests {
              "message": format!("possible phone number {PLANTED} [rule: phone]"), "title": PLANTED, "raw_details": PLANTED},
         ]);
     }
-    fn passing_checks(github: &GitHub) {
+    pub(crate) fn passing_checks(github: &GitHub) {
         *github.check_runs.lock().unwrap() = json!({"check_runs": GATE_CHECKS.iter().enumerate().map(|(i, name)| json!(
             {"id": 100 + i, "name": name, "status": "completed", "conclusion": "success", "output": {"annotations_count": 0}}
         )).collect::<Vec<_>>()});
@@ -2378,6 +2399,9 @@ pub(crate) mod tests {
             Command::AmendBrainBatch {
                 batch_id: "b".into(),
                 amendment: BrainAmendment::Discard,
+            },
+            Command::ImportLegacyLogs {
+                repository: REPO.into(),
             },
             Command::UpdateSpace {
                 space: Box::new(Space {

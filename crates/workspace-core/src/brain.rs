@@ -46,6 +46,22 @@ pub struct Brain {
     /// The most recent batch PR here, however long ago it was opened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_pull_request: Option<BrainLastPullRequest>,
+    /// `main` holds legacy `logs/<repo>.md` files and their import is not done, so the page
+    /// offers Import legacy logs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub legacy_import: bool,
+}
+
+/// What Import legacy logs did.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyImport {
+    /// Entry files queued, in `batches` log-only batches of at most 200 files.
+    pub added: usize,
+    pub batches: usize,
+    /// Entries newly recorded as already compiled.
+    pub compiled: usize,
+    /// Every legacy entry is on `main`, so the import is recorded as done.
+    pub done: bool,
 }
 
 /// A brain's most recent batch pull request and the stage its batch reached.

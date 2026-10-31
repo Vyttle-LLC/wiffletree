@@ -37,6 +37,8 @@ The frontmatter has exactly these four keys. The body, everything after the fron
 
 ## Decisions
 
+The assistant-thread parts of these decisions (the `assistant` folder, the thread's batch and its close on deletion, the thread id in the store) moved to `assistant-spaces-jobs-boards`, whose thread tools are not on `main` yet. They are kept below as decided.
+
 ### Decided by Michael (October 29, 2026)
 
 - One file per entry, append-only once merged, with the author recorded.

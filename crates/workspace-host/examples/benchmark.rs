@@ -324,6 +324,7 @@ fn main() -> Result<()> {
                 machine: None,
                 in_legacy_file: false,
                 held: None,
+                released: false,
             };
             logs.execute(params![
                 log.id,

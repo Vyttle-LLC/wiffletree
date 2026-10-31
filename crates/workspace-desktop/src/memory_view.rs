@@ -1,4 +1,5 @@
-//! Project memory: captured decisions and observations, and its Space's Markdown brain.
+//! Project memory: the capture form, which logs as the coordinator's `log_work` does, the
+//! project's entries with any that are unsent or held, and its Space's brain.
 use super::*;
 use gpui_component::button::ButtonVariants;
 use ui::{card, empty_state, hint, icon, mono, pill, section, segment};
@@ -38,10 +39,37 @@ impl Inspector {
                 }),
             ));
         }
-        card(p)
-            .child(section("CAPTURE", p).child(kinds))
-            .child(Input::new(&self.memory_title).w_full())
+        let fixing = self.memory_fixing.as_ref();
+        let mut form = card(p).child(
+            section(
+                if fixing.is_some() {
+                    "FIX HELD ENTRY"
+                } else {
+                    "CAPTURE"
+                },
+                p,
+            )
+            .child(kinds),
+        );
+        if let Some(held) = fixing {
+            form = form
+                .child(hint(held_line(held), p))
+                .child(Input::new(&self.memory_folder).w_full())
+                .child(Input::new(&self.memory_ref).w_full());
+        }
+        let mut buttons = div().flex().gap_2();
+        if fixing.is_some() {
+            buttons = buttons.child(
+                button("cancel-fix")
+                    .ghost()
+                    .label("Cancel")
+                    .on_click(cx.listener(|v, _, w, c| v.clear_capture(w, c))),
+            );
+        }
+        form.child(Input::new(&self.memory_title).w_full())
             .child(Textarea::new(&self.memory_body).w_full())
+            .child(Input::new(&self.memory_why).w_full())
+            .child(Input::new(&self.memory_state).w_full())
             .child(
                 div()
                     .flex()
@@ -51,9 +79,9 @@ impl Inspector {
                     .child(
                         hint(
                             if self.memory_kind == LogKind::Decision {
-                                "A commitment later work must respect."
+                                "A commitment later work must respect. One terse entry; never child personal information or secrets."
                             } else {
-                                "A note about the current state."
+                                "A note about the current state. One terse entry; never child personal information or secrets."
                             },
                             p,
                         )
@@ -61,11 +89,37 @@ impl Inspector {
                         .min_w_0(),
                     )
                     .child(
-                        button("capture-memory")
-                            .primary()
-                            .label("Save")
-                            .on_click(cx.listener(|v, _, w, c| v.capture_memory(w, c))),
+                        buttons.child(
+                            button("capture-memory")
+                                .primary()
+                                .label("Save")
+                                .on_click(cx.listener(|v, _, w, c| v.capture_memory(w, c))),
+                        ),
                     ),
+            )
+    }
+
+    /// A held entry's Fix and Release.
+    fn held_actions(&self, log: &WorkLog, cx: &mut Context<Self>) -> Div {
+        let (fix, release) = (log.clone(), log.id.clone());
+        div()
+            .flex()
+            .gap_2()
+            .child(
+                button(SharedString::from(format!("fix-{}", log.id)))
+                    .outline()
+                    .label("Fix")
+                    .on_click(cx.listener(move |v, _, w, c| v.fix_held(fix.clone(), w, c))),
+            )
+            .child(
+                button(SharedString::from(format!("release-{}", log.id)))
+                    .ghost()
+                    .label("Release")
+                    .tooltip("Keeps it in this project's memory and never sends it to the brain.")
+                    .on_click(cx.listener(move |v, _, w, c| {
+                        let log_id = release.clone();
+                        v.request(Command::ReleaseHeldLog { log_id }, w, c)
+                    })),
             )
     }
 
@@ -152,6 +206,20 @@ impl Inspector {
             PanelData::Memory(logs) => {
                 for log in logs {
                     let decision = log.input.kind == LogKind::Decision;
+                    let mut status = None;
+                    if let Some((line, warn)) = log_status(log) {
+                        let color = if warn { p.yellow } else { p.subtle };
+                        status = Some(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(hint(line, p).text_color(color).flex_1().min_w_0())
+                                .children(log.held.is_some().then(|| self.held_actions(log, cx))),
+                        );
+                    }
                     entries = entries.child(
                         card(p)
                             .child(
@@ -175,7 +243,8 @@ impl Inspector {
                                     .font_weight(FontWeight::MEDIUM)
                                     .child(log.input.title.clone()),
                             )
-                            .child(hint(log.input.changed.clone(), p)),
+                            .child(hint(log.input.changed.clone(), p))
+                            .children(status),
                     );
                 }
             }
@@ -189,6 +258,43 @@ impl Inspector {
             .child(entries)
             .child(self.brain_section(p, cx))
     }
+}
+
+/// Where an entry stands when it is not simply on its way to the brain, and whether that needs
+/// the human.
+fn log_status(log: &WorkLog) -> Option<(String, bool)> {
+    if let Some(rule) = &log.held {
+        return Some((
+            format!("Held, not sent: {rule}. Fix it, or release it to keep it here only."),
+            true,
+        ));
+    }
+    if log.released {
+        return Some(("Released: kept here, never sent.".into(), false));
+    }
+    if log.in_legacy_file {
+        return Some((
+            "In a legacy log file; the legacy import brings it over.".into(),
+            false,
+        ));
+    }
+    log.is_unsent().then(|| {
+        (
+            "Unsent: it waits for this project's Space to name a brain.".into(),
+            true,
+        )
+    })
+}
+
+/// What the fix form says about the held entry it is fixing.
+fn held_line(held: &WorkLog) -> String {
+    let rule = held
+        .held
+        .as_deref()
+        .unwrap_or("it breaks the entry contract");
+    format!(
+        "Held because {rule}. Edit it so it fits; the folder and ref must be ones the entry contract allows."
+    )
 }
 
 /// Why a project has no brain, and where one is named.
@@ -211,8 +317,28 @@ fn brain_name(brain: &SpaceBrain, local: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{brain_name, no_brain_line};
+    use super::{brain_name, log_status, no_brain_line};
     use workspace_core::*;
+
+    #[test]
+    fn an_entry_says_when_it_is_held_released_or_waiting_for_a_brain() {
+        let mut log: WorkLog = serde_json::from_value(serde_json::json!({
+            "sequence": 1, "id": "01j", "project_id": "p", "task_id": null, "repository": "app",
+            "created_at": 0, "input": {"session_id": "s", "kind": "decision", "title": "T",
+                "changed": "c", "why": "w", "state": "s"}
+        }))
+        .unwrap();
+        let (line, warn) = log_status(&log).unwrap();
+        assert!(line.starts_with("Unsent") && warn);
+        log.batch_id = Some("b".into());
+        assert_eq!(log_status(&log), None, "on its way to the brain");
+        log.held = Some("its ref is not one the entry contract allows".into());
+        let (line, warn) = log_status(&log).unwrap();
+        assert!(line.contains("its ref is not one") && line.contains("release") && warn);
+        log.held = None;
+        log.released = true;
+        assert!(!log_status(&log).unwrap().1);
+    }
 
     #[test]
     fn a_project_without_a_brain_says_so_and_where_one_is_named() {

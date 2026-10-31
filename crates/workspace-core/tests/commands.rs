@@ -241,6 +241,20 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
             space_id: space().id,
         },
         Command::SendLogsNow { repository: None },
+        Command::ImportLegacyLogs { repository: text() },
+        Command::FixHeldLog {
+            log_id: text(),
+            fix: LogFix {
+                kind: LogKind::Observation,
+                title: text(),
+                repository: text(),
+                reference: text(),
+                changed: text(),
+                why: text(),
+                state: text(),
+            },
+        },
+        Command::ReleaseHeldLog { log_id: text() },
         Command::SetWorkspacesDir { path: text() },
         Command::SetVerification {
             verification: VerificationSettings::default(),
