@@ -24,5 +24,5 @@
 ## 4. Docs and checks
 
 - [x] 4.1 `docs/PRD.md`, `docs/DEVELOPMENT.md`, `docs/host-protocol.md`.
-- [ ] 4.2 Run the app and check all screens, the Space-lists-nothing case and an open-ticket row. Not done: macOS refused every capture because agents have no Screen Recording permission.
+- [x] 4.2 Run the app and check all screens, the Space-lists-nothing case and an open-ticket row. Compared in the app with the mockup on a seeded store: Overview with its Add menu, a Space listing nothing, a Space with nothing cloned here, an open-ticket row, Add to this project, New project, Move and the Repositories page. Screens 5 and 6 have no window in a seeded store: a test holds the refusal's text, and the upgrade's figures were computed read-only from the real store.
 - [x] 4.3 No code path or text still offers "every workspace repository".
