@@ -63,8 +63,8 @@ A router run SHALL be started with every tool off, no MCP server, no workspace t
 - **THEN** its answer is discarded and the user is asked
 
 ### Requirement: Router providers behind one interface
-The router SHALL be reached through one interface that takes the router's input and returns its answer. Version 1 SHALL provide it on the user's installed Claude and Codex CLIs with structured output, on the model the Router row picks, with no API key. Another provider, such as Jev through OpenRouter or Vercel, MAY be added later behind the same interface without changing the host rules.
+The router SHALL be reached through one interface that takes the router's input and returns its answer. Version 1 SHALL provide it on the user's installed Claude CLI with structured output, on the model the Router row picks, with no API key. A Codex choice on the Router row SHALL count as unusable, because Codex cannot be started with every tool off: a row whose only choices are Codex SHALL always count as unsure, and Codex SHALL NOT run. Another provider, such as Jev through OpenRouter or Vercel, MAY be added later behind the same interface without changing the host rules.
 
 #### Scenario: Router on Codex
 - **WHEN** the Router row's first choice is a Codex model
-- **THEN** the router runs through Codex with an output schema, and the host rules are the same as on Claude
+- **THEN** no router run starts, the user is asked where the message goes, and Models says Codex cannot run with every tool off

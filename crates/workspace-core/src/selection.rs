@@ -272,8 +272,8 @@ impl ModelSelection {
     /// reviewer's row, and a tester, or a reviewer with no reviewer row to copy, the Tester
     /// row. A table saved before the Assistant row existed gets one copied from the
     /// Implementer row's small-work line, or its main line without one, and a Router row on
-    /// the smallest model of the Assistant row's provider at low effort, both named in
-    /// `copied`. Rows are put in the page's order.
+    /// Haiku at low effort when the table uses Claude, else on Codex's smallest model, both
+    /// named in `copied`. Rows are put in the page's order.
     pub fn fit(&mut self, verification: &VerificationSettings) {
         self.copied.clear();
         if self.row(&Job::Assistant).is_none()
@@ -290,10 +290,16 @@ impl ModelSelection {
             });
             self.copied.push(Job::Assistant.name());
         }
-        if self.row(&Job::Router).is_none()
-            && let Some(assistant) = self.row(&Job::Assistant)
-        {
-            let provider = assistant.main.first.provider;
+        if self.row(&Job::Router).is_none() && self.row(&Job::Assistant).is_some() {
+            // Codex cannot route, so a table with Codex only gets a row that always asks.
+            let claude = (self.jobs.iter())
+                .flat_map(|row| std::iter::once(&row.main).chain(&row.small))
+                .flat_map(Line::choices)
+                .any(|p| p.provider == Provider::Claude);
+            let provider = match claude {
+                true => Provider::Claude,
+                false => Provider::Codex,
+            };
             let first = ModelProfile {
                 provider,
                 model: smallest_model(provider).into(),
@@ -540,8 +546,11 @@ pub struct Pick {
     pub reason: String,
 }
 
-/// First unless it is spent, then `then` unless that is spent; choices this machine cannot run
-/// are left out. When every remaining choice is spent, the one that resets first is pinned and
+/// Why a Router row of Codex choices only never runs.
+pub const CODEX_ROUTER: &str = "The router cannot run on Codex: Codex cannot be started with every tool off, so it asks you where each message goes.";
+
+/// First unless it is spent, then `then` unless that is spent; choices this machine cannot run,
+/// and for the router Codex, are left out. When every remaining choice is spent, the one that resets first is pinned and
 /// waits. A line whose then is skip skips once its first choice is spent or not signed in, when
 /// `may_skip`; otherwise it waits.
 pub fn resolve(
@@ -554,6 +563,26 @@ pub fn resolve(
     let (line, small) = match (&row.small, small) {
         (Some(line), true) => (line, true),
         _ => (&row.main, false),
+    };
+    // The router runs with every tool off, which Codex cannot be started with.
+    let router_unusable;
+    let router_limits;
+    let limits = match row.job {
+        Job::Router => {
+            ensure!(
+                line.choices().any(|p| p.provider != Provider::Codex),
+                "{CODEX_ROUTER}"
+            );
+            let mut without_codex = limits.unusable.clone();
+            without_codex.insert(Provider::Codex);
+            router_unusable = without_codex;
+            router_limits = Limits {
+                unusable: &router_unusable,
+                ..*limits
+            };
+            &router_limits
+        }
+        _ => limits,
     };
     if may_skip && line.then == Then::Skip {
         let provider = line.first.provider;

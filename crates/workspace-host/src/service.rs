@@ -2423,15 +2423,20 @@ impl Actor {
                     // Sessions this command stops on the human's behalf.
                     let mut human_stops = Vec::new();
                     // Where Change moves a message from, read before the change removes its line.
+                    // Changing it to the thread it went to moves nothing.
                     let moving = match &command {
                         Command::ChangeRoute {
                             thread_id,
                             message_id,
-                            ..
-                        } => Some((
-                            self.host.routed_to(thread_id, message_id)?,
-                            message_id.clone(),
-                        )),
+                            destination,
+                        } => {
+                            let went_to = self.host.routed_to(thread_id, message_id)?;
+                            let stays = *destination
+                                == (workspace_core::assistant::router::Destination::Thread {
+                                    thread_id: went_to.clone(),
+                                });
+                            (!stays).then(|| (went_to, message_id.clone()))
+                        }
                         _ => None,
                     };
                     match &command {
@@ -8006,6 +8011,18 @@ mod tests {
         actor
             .active
             .insert(dentist.id.clone(), active_turn("run", vec!["m1".into()]));
+
+        // Changing it to the thread it already went to stops nothing.
+        let same = Command::ChangeRoute {
+            thread_id: notes.id.clone(),
+            message_id: "m1".into(),
+            destination: Destination::Thread {
+                thread_id: dentist.id.clone(),
+            },
+        };
+        command(&mut actor, same).unwrap();
+        assert!(!actor.active[&dentist.id].cancel.load(Ordering::Relaxed));
+        assert!(actor.host.thread(&dentist.id).unwrap().moved.is_empty());
 
         let change = Command::ChangeRoute {
             thread_id: notes.id.clone(),

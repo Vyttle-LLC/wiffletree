@@ -1,5 +1,5 @@
-//! The router on the real Claude and Codex CLIs, with every tool off. They are ignored by
-//! default and need both signed in:
+//! The router on the real Claude CLI, with every tool off. It is ignored by default and needs
+//! Claude signed in:
 //! `cargo nextest run -p workspace-host --test router --run-ignored only`.
 use workspace_core::assistant::router::{RouterInput, RouterSpace, ThreadPick};
 use workspace_core::*;
@@ -63,10 +63,4 @@ fn routes_and_never_writes(router: RouterProvider) {
 #[ignore = "runs the real Claude CLI"]
 fn claude_routes_in_shape_with_its_tools_off() {
     routes_and_never_writes(router(Provider::Claude, "haiku"));
-}
-
-#[test]
-#[ignore = "runs the real Codex CLI"]
-fn codex_routes_in_shape_with_its_tools_off() {
-    routes_and_never_writes(router(Provider::Codex, "gpt-6-luna"));
 }

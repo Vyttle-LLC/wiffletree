@@ -251,6 +251,8 @@ pub(crate) enum Now {
     /// Its first choice is spent and its row says skip: skips reviews until this time, if known.
     Skips(Option<String>),
     Cannot,
+    /// The router cannot run or would wait, so it asks you where each message goes.
+    AsksYou,
     /// A provider's sign-in is still being checked, so the pick is not known.
     Checking,
 }
@@ -268,6 +270,8 @@ pub(crate) fn now_of(
         _ => &row.main,
     };
     match pick {
+        Ok(pick) if pick.waits && row.job == Job::Router => Now::AsksYou,
+        Err(_) if row.job == Job::Router => Now::AsksYou,
         Ok(pick) if pick.waits => Now::Waits(pick.until.map(reset_time)),
         Ok(pick) if pick.skip.is_some() => Now::Skips(pick.until.map(reset_time)),
         Ok(pick) if pick.profile == line.first => Now::First(pick.profile.provider),
@@ -695,6 +699,18 @@ mod tests {
             pick(Job::Implementer, &spent, &both),
             Now::Moved(Provider::Codex)
         );
+        // The router asks you rather than waiting, and on Codex alone it always asks.
+        assert_eq!(pick(Job::Router, &[], &both), Now::First(Provider::Claude));
+        assert_eq!(pick(Job::Router, &spent, &both), Now::AsksYou);
+        let mut codex = row(Job::Router);
+        codex.main.first = workspace_core::ModelProfile {
+            provider: Provider::Codex,
+            model: "gpt-6-luna".into(),
+            effort: "low".into(),
+        };
+        let refused = right_now(&selection, &codex, false, &[], &both, now);
+        assert_eq!(refused.clone().unwrap_err(), workspace_core::CODEX_ROUTER);
+        assert_eq!(now_of(&codex, false, &refused, &both), Now::AsksYou);
         let correctness = Job::Verifier {
             focus: "Correctness".into(),
         };

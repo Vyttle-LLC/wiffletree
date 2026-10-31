@@ -149,7 +149,8 @@ pub fn seed_row(
     usable: &[Provider],
     available: &[ModelOption],
 ) -> Option<JobRow> {
-    let waits = matches!(seed, Seed::Lens(_));
+    // A lens waits for its provider, and the router has no then: Codex cannot route.
+    let waits = matches!(seed, Seed::Lens(_) | Seed::Router);
     let line = |pair: Pair| {
         let order = match pair.first {
             Provider::Claude => [Provider::Claude, Provider::Codex],

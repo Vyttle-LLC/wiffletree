@@ -641,6 +641,7 @@ impl ModelsPage {
             Now::Skips(Some(at)) => pill(format!("Skips · {at}"), p.subtle),
             Now::Skips(None) => pill("Skips", p.subtle),
             Now::Cannot => pill("Cannot start", p.red),
+            Now::AsksYou => pill("Asks you", p.yellow),
             Now::Checking => pill("Checking…", p.subtle),
         };
         div()

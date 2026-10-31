@@ -45,6 +45,18 @@ pub(super) fn question_text(spaces: &[String]) -> String {
     }
 }
 
+/// Where Change on `line` must not offer, as the message is already there: the thread it went
+/// to, and for a thread it started, a new thread in that thread's Space `space`.
+fn already_there(line: &RoutedLine, space: Option<&SpaceId>) -> Vec<Destination> {
+    let thread = Destination::Thread {
+        thread_id: line.to.clone(),
+    };
+    let new = (space.filter(|_| line.new)).map(|space| Destination::NewThread {
+        space_id: space.clone(),
+    });
+    std::iter::once(thread).chain(new).collect()
+}
+
 /// A click that sends a message: answering a held one, or Change on a routed one.
 #[derive(Clone)]
 enum Pick {
@@ -135,17 +147,19 @@ impl AssistantPage {
             }
         });
     }
-    /// A menu of destinations, `first` then a separator and the rest of `everywhere`.
+    /// A menu of destinations, `first` then a separator and the rest of `everywhere`, none
+    /// of them in `left_out`.
     fn destination_menu(
         &self,
         id: SharedString,
         label: &str,
         first: Vec<(String, Destination)>,
+        left_out: &[Destination],
         pick: Pick,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let rest: Vec<(String, Destination)> = (self.everywhere().into_iter())
-            .filter(|(_, d)| !first.iter().any(|(_, f)| f == d))
+            .filter(|(_, d)| !first.iter().any(|(_, f)| f == d) && !left_out.contains(d))
             .collect();
         let weak = cx.weak_entity();
         button(id)
@@ -173,7 +187,6 @@ impl AssistantPage {
             })
     }
 
-    /// The user's message as the conversation shows it.
     pub(super) fn bubble(body: &str, p: Palette) -> Div {
         div()
             .self_end()
@@ -201,12 +214,10 @@ impl AssistantPage {
             true => format!("New thread in {named}"),
             false => format!("Sent to {} in {named}", self.title(&line.to)),
         };
-        let went_to = Destination::Thread {
-            thread_id: line.to.clone(),
-        };
+        let left_out = already_there(line, space.as_ref());
         let origin = (line.to != holder.id).then_some(holder.id.as_str());
         let choices = (line.choices.iter())
-            .filter(|c| **c != went_to)
+            .filter(|c| !left_out.contains(c))
             .map(|c| (self.choice_label(c, origin), c.clone()))
             .collect();
         let pick = Pick::Change {
@@ -225,9 +236,8 @@ impl AssistantPage {
                 d.child(space_mark(space_color(&spaces, &s, p)))
             })
             .child(format!("{text} ·"))
-            .child(self.destination_menu(id, "Change", choices, pick, cx))
+            .child(self.destination_menu(id, "Change", choices, &left_out, pick, cx))
     }
-    /// What a message Change moved out of this thread says under it.
     pub(super) fn moved_line(&self, to: &str, p: Palette) -> Div {
         hint(format!("Moved to {}", self.title(to)), p).self_end()
     }
@@ -287,8 +297,14 @@ impl AssistantPage {
         let pick = Pick::Held {
             id: held.id.clone(),
         };
-        choices =
-            choices.child(self.destination_menu(elsewhere, "Somewhere else…", vec![], pick, cx));
+        choices = choices.child(self.destination_menu(
+            elsewhere,
+            "Somewhere else…",
+            vec![],
+            &[],
+            pick,
+            cx,
+        ));
         let why = format!("{} Your message waits until you choose.", question.why);
         let asked = div()
             .flex_1()
@@ -321,7 +337,36 @@ impl AssistantPage {
 
 #[cfg(test)]
 mod tests {
-    use super::question_text;
+    use super::{already_there, question_text};
+    use workspace_core::SpaceId;
+    use workspace_core::assistant::RoutedLine;
+    use workspace_core::assistant::router::Destination;
+
+    #[test]
+    fn change_never_offers_where_the_message_already_is() {
+        let personal = SpaceId("personal".into());
+        let new_in = |space: &str| Destination::NewThread {
+            space_id: SpaceId(space.into()),
+        };
+        let to = Destination::Thread {
+            thread_id: "dentist".into(),
+        };
+        let mut line = RoutedLine {
+            message_id: "m1".into(),
+            body: "book the dentist".into(),
+            created_at: 0,
+            to: "dentist".into(),
+            new: true,
+            choices: vec![new_in("personal"), new_in("sage"), to.clone()],
+        };
+        assert_eq!(
+            already_there(&line, Some(&personal)),
+            [to.clone(), new_in("personal")]
+        );
+        // Sent to a thread that was open already, a new thread in its Space is a real move.
+        line.new = false;
+        assert_eq!(already_there(&line, Some(&personal)), [to]);
+    }
 
     #[test]
     fn the_question_names_the_spaces_of_its_choices() {

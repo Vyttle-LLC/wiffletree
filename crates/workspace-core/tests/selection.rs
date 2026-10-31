@@ -354,16 +354,35 @@ fn a_table_saved_before_the_router_gets_one_on_the_assistants_smallest_model() {
     assert_eq!(router.main.then, Then::Wait);
     assert_eq!(older.copied[..2], ["Assistant", "Router"]);
     older.validate().unwrap();
-    // On a Codex assistant, Codex's smallest.
+    // Claude anywhere in the table puts the router on Haiku, even for a Codex assistant.
+    let mut codex_assistant = table();
+    codex_assistant.jobs.retain(|row| row.job != Job::Router);
+    codex_assistant.row_mut(&Job::Assistant).unwrap().main.first = sol();
+    codex_assistant.fit(&VerificationSettings::default());
+    let router = codex_assistant.row(&Job::Router).unwrap();
+    assert_eq!(router.main.first, haiku());
+    // A table on Codex only gets Codex's smallest model, which always asks.
     let mut codex = table();
     codex.jobs.retain(|row| row.job != Job::Router);
-    codex.row_mut(&Job::Assistant).unwrap().main.first = sol();
+    for row in &mut codex.jobs {
+        row.main = Line {
+            first: sol(),
+            then: Then::Wait,
+        };
+        row.small = None;
+    }
     codex.fit(&VerificationSettings::default());
     let first = &codex.row(&Job::Router).unwrap().main.first;
     assert_eq!(
         (first.provider, first.model.as_str()),
         (Provider::Codex, "gpt-6-luna")
     );
+    codex.validate().unwrap();
+    let unusable = BTreeSet::new();
+    let refused = codex
+        .resolve(&Job::Router, false, false, &limits(&[], &unusable), &when)
+        .unwrap_err();
+    assert_eq!(refused.to_string(), CODEX_ROUTER);
     // The router is a fixed job; its then cannot be skip.
     let mut missing = table();
     missing.jobs.retain(|row| row.job != Job::Router);
@@ -655,5 +674,35 @@ fn sorting_uses_only_the_keepers_claude_choice() {
             .unwrap_err()
             .to_string()
             .contains("Choose a PR keeper model in Models first")
+    );
+}
+
+#[test]
+fn the_router_never_moves_on_to_codex() {
+    let mut selection = table();
+    selection.row_mut(&Job::Router).unwrap().main.then = Then::Model(sol());
+    let quotas = [reading(
+        Provider::Claude,
+        vec![window("Weekly", Some(97.), Some(MONDAY))],
+    )];
+    let unusable = BTreeSet::new();
+    let pick = selection
+        .resolve(
+            &Job::Router,
+            false,
+            false,
+            &limits(&quotas, &unusable),
+            &when,
+        )
+        .unwrap();
+    assert!(
+        pick.waits && pick.profile.provider == Provider::Claude,
+        "{pick:?}"
+    );
+    let signed_out = BTreeSet::from([Provider::Claude]);
+    assert!(
+        selection
+            .resolve(&Job::Router, false, false, &limits(&[], &signed_out), &when)
+            .is_err()
     );
 }

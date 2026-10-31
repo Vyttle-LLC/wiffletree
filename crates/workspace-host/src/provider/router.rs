@@ -1,5 +1,5 @@
-//! The router's runs: one question answered in the router's shape on the user's own Claude or
-//! Codex CLI, with every tool off, no MCP server, no stored session and an empty working folder.
+//! The router's runs: one question answered in the router's shape on the user's own Claude CLI,
+//! with every tool off, no MCP server, no stored session and an empty working folder.
 use super::*;
 use workspace_core::assistant::router::{ANSWER_SCHEMA, RouterAnswer, RouterInput};
 
@@ -28,105 +28,29 @@ impl RouterProvider {
         RouterAnswer::from_value(&answered)
             .map_err(|why| format!("The router's answer was out of shape: {why}."))
     }
+    /// Claude with every tool off but the one that returns the answer; Codex is refused, as
+    /// it cannot be started that way (see `CODEX_ROUTER`).
     fn run(&self, input: &RouterInput, limit: Duration) -> Result<Value> {
+        ensure!(self.profile.provider == Provider::Claude, "{CODEX_ROUTER}");
         let mut line = serde_json::to_vec(input)?;
         line.push(b'\n');
-        let provider = self.profile.provider;
-        match provider {
-            Provider::Claude => {
-                let configure = |cmd: &mut ProcessCommand, _: &Path| {
-                    constrained::configure(cmd, &self.profile, ROUTING, ANSWER_SCHEMA)
+        let configure = |cmd: &mut ProcessCommand, _: &Path| {
+            constrained::configure(cmd, &self.profile, ROUTING, ANSWER_SCHEMA)
+        };
+        let mut run = constrained::Run::new("router");
+        answer_run(
+            &self.executable,
+            Provider::Claude,
+            configure,
+            line,
+            limit,
+            |value| {
+                let Some(result) = run.event(value)? else {
+                    return Ok(None);
                 };
-                let mut run = constrained::Run::new("router");
-                answer_run(
-                    &self.executable,
-                    provider,
-                    configure,
-                    line,
-                    limit,
-                    |value| {
-                        let Some(result) = run.event(value)? else {
-                            return Ok(None);
-                        };
-                        Ok(Some(result.answer.context("the run failed")?))
-                    },
-                )
-            }
-            Provider::Codex => {
-                let schema = tempfile::NamedTempFile::new()?;
-                fs::write(schema.path(), ANSWER_SCHEMA)?;
-                let configure = |cmd: &mut ProcessCommand, folder: &Path| {
-                    configure_codex(cmd, &self.profile, folder, schema.path())
-                };
-                let mut said = None;
-                answer_run(
-                    &self.executable,
-                    provider,
-                    configure,
-                    line,
-                    limit,
-                    |value| codex_event(value, &mut said),
-                )
-            }
-        }
-    }
-}
-
-/// Codex with its shell, web and image tools and every outside feature off, in a read-only
-/// sandbox, ignoring the user's configuration and rules, of no stored session. Codex 0.160.0
-/// has no setting that removes its patch tool; the sandbox refuses the write, and the item
-/// check discards the answer.
-fn configure_codex(cmd: &mut ProcessCommand, profile: &ModelProfile, folder: &Path, schema: &Path) {
-    cmd.env_remove("WORKSPACE_SOCKET")
-        .env_remove("WORKSPACE_TOKEN")
-        .args(["exec", "--json", "--ephemeral", "--skip-git-repo-check"])
-        .args(["--color", "never", "--ignore-user-config", "--ignore-rules"])
-        .args(["--sandbox", "read-only"])
-        .arg("--cd")
-        .arg(folder)
-        .arg("--output-schema")
-        .arg(schema)
-        .args(["-m", &profile.model]);
-    for setting in [
-        "approval_policy=\"never\"".to_owned(),
-        "web_search=\"disabled\"".into(),
-        format!("model_reasoning_effort={}", json!(profile.effort)),
-        format!("developer_instructions={}", json!(ROUTING)),
-    ] {
-        cmd.arg("-c").arg(setting);
-    }
-    let tools = [
-        "shell_tool",
-        "unified_exec",
-        "view_image",
-        "image_generation",
-    ];
-    for feature in tools.into_iter().chain(restricted::CODEX_FEATURES_OFF) {
-        cmd.args(["--disable", feature]);
-    }
-    cmd.arg("-");
-}
-
-/// Codex reports no tools when a run starts, so every item is checked as it comes: any item
-/// but a message, reasoning or one of Codex's own warnings means the run used a tool, and its
-/// answer is discarded. The last message holds the answer once the turn completes.
-fn codex_event(value: &Value, said: &mut Option<String>) -> Result<Option<Value>> {
-    match value["type"].as_str().unwrap_or_default() {
-        "item.started" | "item.updated" | "item.completed" => {
-            let item = &value["item"];
-            match item["type"].as_str().unwrap_or_default() {
-                "agent_message" => *said = item["text"].as_str().map(str::to_owned),
-                "reasoning" | "error" => {}
-                other => bail!("the run used a tool ({other}), so its answer was discarded"),
-            }
-            Ok(None)
-        }
-        "turn.completed" => {
-            let text = said.take().context("the run gave no answer")?;
-            Ok(Some(serde_json::from_str(&text)?))
-        }
-        "turn.failed" | "error" => bail!("the run failed"),
-        _ => Ok(None),
+                Ok(Some(result.answer.context("the run failed")?))
+            },
+        )
     }
 }
 
@@ -220,50 +144,20 @@ mod tests {
             .decide(&input(), ROUTER_LIMIT)
             .unwrap_err();
         assert!(why.contains("router run started with tools"), "{why}");
+    }
 
+    #[test]
+    fn codex_is_refused_without_running() {
+        let folder = tempfile::tempdir().unwrap();
         let mut codex = stand_in(
             folder.path(),
-            &[
-                json!({"type":"item.started","item":{"type":"command_execution","command":"ls"}}),
-                json!({"type":"item.completed","item":{"type":"agent_message","text":ANSWER}}),
-                json!({"type":"turn.completed"}),
-            ],
+            &claude_events(json!(["StructuredOutput"])),
             "0",
         );
         codex.profile.provider = Provider::Codex;
         let why = codex.decide(&input(), ROUTER_LIMIT).unwrap_err();
-        assert!(why.contains("used a tool (command_execution)"), "{why}");
-    }
-
-    #[test]
-    fn codex_answers_through_its_output_schema_with_its_tools_off() {
-        let folder = tempfile::tempdir().unwrap();
-        let mut codex = stand_in(
-            folder.path(),
-            &[
-                json!({"type":"thread.started","thread_id":"x"}),
-                json!({"type":"item.completed","item":{"type":"reasoning","text":"…"}}),
-                json!({"type":"item.completed","item":{"type":"agent_message","text":ANSWER}}),
-                json!({"type":"turn.completed","usage":{}}),
-            ],
-            "0",
-        );
-        codex.profile.provider = Provider::Codex;
-        let answer = codex.decide(&input(), ROUTER_LIMIT).unwrap();
-        assert_eq!(answer.space.pick, SpaceId("personal".into()));
-        let args = args(folder.path());
-        for expected in ["--ephemeral", "--ignore-user-config", "--ignore-rules", "-"] {
-            assert!(args.iter().any(|a| a == expected), "{expected}: {args:?}");
-        }
-        assert!(!args.iter().any(|a| a.contains("dangerously")));
-        let disabled: Vec<&str> = (args.windows(2))
-            .filter(|w| w[0] == "--disable")
-            .map(|w| w[1].as_str())
-            .collect();
-        assert!(disabled.contains(&"shell_tool") && disabled.contains(&"unified_exec"));
-        assert!(args.iter().any(|a| a == "web_search=\"disabled\""));
-        let sandbox = &args[args.iter().position(|a| a == "--sandbox").unwrap() + 1];
-        assert_eq!(sandbox, "read-only");
+        assert!(why.contains(CODEX_ROUTER), "{why}");
+        assert!(!folder.path().join("args").exists());
     }
 
     #[test]

@@ -198,7 +198,7 @@ fn current_big_small_policies_become_the_approved_table() {
             "Correctness: claude · opus · high → wait",
             "Regressions: codex · gpt-6.1-sol · high → wait",
             "Assistant: claude · sonnet · medium → codex · gpt-6.1-sol · medium",
-            "Router: claude · haiku · low → codex · gpt-6-luna · low",
+            "Router: claude · haiku · low → wait",
         ]
     );
     let implementer = selection.row(&Job::Implementer).unwrap();

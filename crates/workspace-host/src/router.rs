@@ -152,7 +152,6 @@ impl Host {
         }
         Ok(())
     }
-    /// Sends a held message where the user chose.
     pub fn answer_held(&mut self, id: &str, destination: &Destination) -> Result<()> {
         let held = (self.held_message(id)?).context("That message was already sent")?;
         let choices = (held.question.as_ref()).map_or(vec![], |q| q.choices.clone());
@@ -572,6 +571,31 @@ mod tests {
             question.why,
             "The router did not run: every choice on its row is spent."
         );
+    }
+
+    #[test]
+    fn a_router_row_on_codex_asks_without_running() {
+        let mut s = store();
+        let mut selection = s.host.model_selection().unwrap();
+        let row = selection.row_mut(&Job::Router).unwrap();
+        row.main = workspace_core::Line {
+            first: ModelProfile {
+                provider: Provider::Codex,
+                model: "gpt-6-luna".into(),
+                effort: "low".into(),
+            },
+            then: workspace_core::Then::Wait,
+        };
+        s.host.set_model_selection(&selection).unwrap();
+        s.host.route_message("m1", None, "hello").unwrap();
+        assert!(s.host.take_router_runs().is_empty());
+        let question = s.host.held_messages().unwrap()[0].question.clone().unwrap();
+        assert_eq!(
+            question.why,
+            format!("The router did not run: {}", workspace_core::CODEX_ROUTER)
+        );
+        assert_eq!(question.choices.len(), 2);
+        assert_eq!(thread_messages(&s.host), 0);
     }
 
     #[test]
