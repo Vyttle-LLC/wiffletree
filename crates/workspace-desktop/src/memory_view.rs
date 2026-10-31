@@ -99,7 +99,6 @@ impl Inspector {
             )
     }
 
-    /// A held entry's Fix and Release.
     fn held_actions(&self, log: &WorkLog, cx: &mut Context<Self>) -> Div {
         let (fix, release) = (log.clone(), log.id.clone());
         div()

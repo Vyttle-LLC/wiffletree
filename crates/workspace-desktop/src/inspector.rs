@@ -336,7 +336,6 @@ impl Inspector {
         cx.notify();
     }
 
-    /// Empties the capture form and leaves fixing.
     pub(super) fn clear_capture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for field in [
             &self.memory_title,

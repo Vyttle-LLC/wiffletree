@@ -181,7 +181,6 @@ fn ticket_ref(branch: &str, commits: &[&str], pull_request: Option<u64>) -> Stri
     format!("{branch} @ {shas}{pull_request}")
 }
 
-/// The entry's path in the brain repository.
 fn entry_path(folder: &str, repository: &str, date: &str, id: &str) -> String {
     let (year, month) = (&date[..4], &date[5..7]);
     format!("{folder}/logs/{repository}/{year}/{month}/{date}-{id}.md")
@@ -879,7 +878,6 @@ impl Host {
         Ok(())
     }
 
-    /// The held entry `id`.
     fn held_log(&self, id: &str) -> Result<WorkLog> {
         let log = (self.db)
             .query_row(
@@ -941,6 +939,12 @@ impl Host {
             )?;
             if sent && let Some(batch) = &log.batch_id {
                 host.close_full_batch(batch, now())?;
+                // A finished ticket's batch would otherwise wait for the 24-hour flush.
+                let finished = (log.task_id.as_ref())
+                    .is_some_and(|ticket| host.ticket(ticket).map_or(true, |t| !t.is_open()));
+                if finished {
+                    host.close_logs(Closing::Batch(batch))?;
+                }
             }
             host.clear_held_item(&log.project_id)
         })?;
@@ -1656,6 +1660,57 @@ mod tests {
             [(Some(ticket), 2, true), (Some(open.id), 1, false)],
             "the finished ticket's rows close together; the open ticket's wait for it"
         );
+    }
+
+    #[test]
+    fn a_fixed_entry_of_a_finished_ticket_goes_at_once() {
+        let mut f = fixture();
+        let (_github, tools) = fetched(&mut f);
+        let (coordinator, ticket) = (f.coordinator.id.clone(), f.ticket.clone());
+        (f.host)
+            .agent_tool(&coordinator, "close_ticket", json!({"ticket_id": ticket}))
+            .unwrap();
+        let project = f.coordinator.project_id.clone();
+        for (id, reference) in [("fits", "—"), ("broken", "main 1a2b3c4")] {
+            let data = json!({"sequence": 0, "id": id, "project_id": project, "task_id": ticket,
+                "repository": "app", "created_at": 1_793_000_000_000i64, "date": "2026-10-26",
+                "reference": reference, "input": {"session_id": coordinator, "milestone": id,
+                    "kind": "decision", "title": "Old", "changed": "c", "why": "w", "state": "s"}});
+            (f.host.db)
+                .execute(
+                    "INSERT INTO work_logs(id,project_id,session_id,milestone,repository,data) VALUES (?1,?2,?3,?1,'app',?4)",
+                    params![id, project, coordinator, data.to_string()],
+                )
+                .unwrap();
+        }
+        f.host.send_log_batches(now(), &tools.git).unwrap();
+        assert_eq!(f.host.brain_batches(Some(REPO)).unwrap().len(), 1);
+        let broken = (stored(&f).into_iter()).find(|l| l.held.is_some()).unwrap();
+        let fixed = (f.host)
+            .fix_held_log(
+                &broken.id,
+                LogFix {
+                    kind: LogKind::Decision,
+                    title: "Old".into(),
+                    repository: "app".into(),
+                    reference: NO_REF.into(),
+                    changed: "c".into(),
+                    why: "w".into(),
+                    state: "s".into(),
+                },
+            )
+            .unwrap();
+        assert_ne!(fixed.batch_id, broken.batch_id);
+        let closed: bool = (f.host.db)
+            .query_row(
+                "SELECT closed_at IS NOT NULL FROM log_batches WHERE id=?1",
+                [&fixed.batch_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(closed, "the closed ticket's new batch does not wait a day");
+        f.host.send_log_batches(now(), &tools.git).unwrap();
+        assert_eq!(f.host.brain_batches(Some(REPO)).unwrap().len(), 2);
     }
 
     #[test]

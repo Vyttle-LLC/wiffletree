@@ -119,7 +119,12 @@ fn parse(text: &str) -> LegacyLog {
         }
         match field(trimmed) {
             Some((key, value)) if FIELDS.contains(&key.as_str()) => {
-                entry.fields.insert(key.clone(), value.to_owned());
+                // A repeated field keeps both values.
+                let joined = entry.fields.entry(key.clone()).or_default();
+                if !joined.is_empty() {
+                    joined.push_str("; ");
+                }
+                joined.push_str(value);
                 into = Into::Field(key);
             }
             Some((key, _)) if EXPORT_KEYS.contains(&key.as_str()) => into = Into::Dropped,
@@ -526,6 +531,17 @@ mod tests {
         assert_eq!(input.kind, LogKind::Observation);
         assert_eq!(input.changed, "Some prose before any field. - owner: rb");
         assert_eq!((input.why.as_str(), input.state.as_str()), (NO_REF, NO_REF));
+    }
+
+    #[test]
+    fn a_repeated_field_keeps_both_values() {
+        let legacy = only(&entry(
+            "2026-09-02",
+            "Twice",
+            "- changed: first\n- why: w\n- changed: second\n  more",
+        ));
+        let (input, _) = fitted("calls", &legacy, "abc1234");
+        assert_eq!(input.changed, "first; second more");
     }
 
     #[test]

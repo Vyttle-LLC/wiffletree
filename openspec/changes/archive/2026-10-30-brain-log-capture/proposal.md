@@ -6,7 +6,7 @@ Michael decided on October 29, 2026 that brains are team-shared and that every c
 
 ## What Changes
 
-- **A `log_work` MCP tool** for the project coordinator, implementers and assistant threads.
+- **A `log_work` MCP tool** for the project coordinator and implementers.
   - The brain is always the caller's Space's brain (Michael, 2026-10-29), so a project never spans brains.
   - The agent gives only the type, a title and the `changed`, `why` and `state` text. The host fills in the rest:
     - the entry's id and date;
