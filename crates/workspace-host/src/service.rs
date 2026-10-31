@@ -640,7 +640,11 @@ enum Event {
         std::result::Result<workspace_core::assistant::router::RouterAnswer, String>,
     ),
     /// A job run's sources were checked on their own thread.
-    SourcesChecked(String, Vec<workspace_core::job::SourceCheck>),
+    SourcesChecked(
+        String,
+        Box<crate::jobs::SourceChecks>,
+        Vec<workspace_core::job::SourceCheck>,
+    ),
     /// A thread's proposed recipe had its sources checked on their own thread, for its card.
     JobProposed {
         thread: String,
@@ -1822,7 +1826,7 @@ impl Actor {
                         ),
                     }]
                 },
-                |(run, _), checked| Event::SourcesChecked(run, checked),
+                |(run, checks), checked| Event::SourcesChecked(run, Box::new(checks), checked),
             );
         }
     }
@@ -2377,8 +2381,8 @@ impl Actor {
                 self.host.finish_merge_run(run, answered);
                 true
             }
-            Event::SourcesChecked(run, checks) => {
-                if let Err(e) = self.host.sources_checked(&run, checks) {
+            Event::SourcesChecked(run, checked, checks) => {
+                if let Err(e) = self.host.sources_checked(&run, &checked, checks) {
                     eprintln!("Starting job run {run}: {e:#}");
                 }
                 true

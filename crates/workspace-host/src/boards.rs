@@ -150,6 +150,7 @@ impl Shelves {
                     .unwrap_or_default(),
                 run_id,
                 shared: about["shared"].as_bool().unwrap_or_default(),
+                file: about["file"].as_str().unwrap_or_default().to_owned(),
             });
         }
         Ok(versions)
@@ -237,7 +238,8 @@ fn preview(path: &Path) -> Option<String> {
     let start = String::from_utf8_lossy(&start);
     let shown = match kind {
         FileKind::Html => {
-            let lower = start.to_lowercase();
+            // ASCII lowercasing keeps every byte where it was, so its offsets slice `start`.
+            let lower = start.to_ascii_lowercase();
             let open = lower.find("<title>")? + "<title>".len();
             let close = open + lower[open..].find("</title>")?;
             start[open..close].trim().to_owned()
@@ -485,6 +487,35 @@ mod tests {
             "<title>Week two</title>"
         );
         assert!(shelves.version_folder(&dashboard.id, "HEAD").is_err());
+    }
+
+    #[test]
+    fn an_earlier_version_names_its_own_file_and_a_title_with_unicode_previews() {
+        let (home, host, personal) = host();
+        let store = assistant::board_store(home.path());
+        for (file, body) in [
+            ("first.md", "# First"),
+            ("second.html", "<!doctype html><!--İ--><title>é</title>"),
+        ] {
+            let about = json!({"title":"Brief","thread_id":"t1","saved_at":1});
+            save(&store, personal.id.as_str(), "Brief", file, body, about);
+        }
+        let shelves = host.shelves().unwrap();
+        let brief = shelves.list().remove(0);
+        assert_eq!(
+            (brief.file.as_str(), brief.preview.as_deref()),
+            ("second.html", Some("é"))
+        );
+        let versions = shelves.versions(&brief.id).unwrap();
+        let files: Vec<&str> = versions.iter().map(|v| v.file.as_str()).collect();
+        assert_eq!(files, ["second.html", "first.md"]);
+        let first = shelves
+            .version_folder(&brief.id, &versions[1].commit)
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(first.join("first.md")).unwrap(),
+            "# First"
+        );
     }
 
     #[test]

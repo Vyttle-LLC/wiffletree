@@ -419,7 +419,7 @@ impl State {
         Self {
             placed: prototype.placed.get(),
             frame: native.as_deref().map(frame_in_window),
-            hidden: native.as_ref().is_none_or(|native| native.isHidden()),
+            hidden: board.as_ref().is_none_or(|board| !board.is_shown()),
             board_open: board.is_some(),
             board_focus: prototype.board_has_focus(),
             gpui_focus: prototype.focus.is_focused(window),

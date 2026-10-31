@@ -100,6 +100,9 @@ pub struct BoardVersion {
     /// Copied in by Share to Space….
     #[serde(default)]
     pub shared: bool,
+    /// The file this version saved, which an earlier save of the title may have named
+    /// differently.
+    pub file: String,
 }
 
 #[cfg(test)]

@@ -948,11 +948,36 @@ impl Host {
         Ok(run)
     }
     /// Starts a run's thread once its sources passed their checks, or records what is missing.
-    /// A run stopped while its sources were checked stays stopped.
-    pub(crate) fn sources_checked(&mut self, run_id: &str, checks: Vec<SourceCheck>) -> Result<()> {
+    /// A run stopped while its sources were checked stays stopped. When the recipe's sources or
+    /// the provider its run takes changed meanwhile, the run's sources are checked again, so a
+    /// run only ever starts with sources checked for it.
+    pub(crate) fn sources_checked(
+        &mut self,
+        run_id: &str,
+        checked: &SourceChecks,
+        checks: Vec<SourceCheck>,
+    ) -> Result<()> {
         let mut run = self.job_run(run_id)?;
         if run.outcome != RunOutcome::Running || run.thread_id.is_some() {
             return Ok(());
+        }
+        let current = (self.recipe(&run.job))
+            .and_then(|recipe| Ok((self.job_model(&recipe)?, recipe.sources)));
+        let ((profile, reason, _), sources) = match current {
+            Ok(current) => current,
+            Err(error) => {
+                run.outcome = RunOutcome::NotStarted;
+                run.ended_at = Some(now());
+                run.reason = format!("{error:#}");
+                return self.save_run(&run);
+            }
+        };
+        if sources != checked.sources || profile.provider != checked.provider {
+            let again = self.source_checks(profile.provider, &sources);
+            self.source_checks.push((run.id.clone(), again));
+            run.profile = Some(profile);
+            run.model_reason = reason;
+            return self.save_run(&run);
         }
         run.sources = checks;
         let missing: Vec<&str> = (run.sources.iter())
@@ -1153,8 +1178,16 @@ impl Host {
         Ok(pass)
     }
     fn check_queued_sources(&mut self) {
-        for (run, checks) in self.take_source_checks() {
-            self.sources_checked(&run, checks.run()).unwrap();
+        // A check that finds the recipe changed queues another.
+        loop {
+            let queued = self.take_source_checks();
+            if queued.is_empty() {
+                break;
+            }
+            for (run, checks) in queued {
+                let found = checks.run();
+                self.sources_checked(&run, &checks, found).unwrap();
+            }
         }
     }
     pub(crate) fn propose(&mut self, session: &Session, args: &Value) -> Result<Value> {
@@ -1977,6 +2010,36 @@ mod tests {
     }
 
     #[test]
+    fn a_recipe_changed_while_its_sources_are_checked_is_checked_again_before_it_starts() {
+        let mut s = jobs();
+        s.cli("gh", 0);
+        let mut brief = recipe(&s.personal, "Brief", "0 7 * * *");
+        brief.sources = vec![gh()];
+        let key = s.host.save_job(brief.clone()).unwrap().recipe.key();
+        let run = s.host.run_job_now(&key).unwrap();
+        let (checked, checks) = s.host.take_source_checks().remove(0);
+        brief.sources = vec![linear()];
+        s.host.save_job(brief).unwrap();
+        let found = checks.run();
+        s.host.sources_checked(&checked, &checks, found).unwrap();
+        let waiting = s.host.job_run(&run.id).unwrap();
+        assert_eq!(
+            (waiting.outcome, waiting.thread_id),
+            (RunOutcome::Running, None)
+        );
+        let (_, again) = s.host.take_source_checks().remove(0);
+        let found = again.run();
+        s.host.sources_checked(&run.id, &again, found).unwrap();
+        let ended = s.host.job_run(&run.id).unwrap();
+        assert_eq!(ended.outcome, RunOutcome::NotStarted);
+        assert!(
+            ended.reason.contains("The linear MCP server"),
+            "{}",
+            ended.reason
+        );
+    }
+
+    #[test]
     fn a_run_stopped_or_cut_off_while_its_sources_are_checked_never_starts() {
         let mut s = jobs();
         let key = (s.host.save_job(recipe(&s.personal, "Brief", "0 7 * * *")))
@@ -1986,7 +2049,8 @@ mod tests {
         let run = s.host.run_job_now(&key).unwrap();
         let (checked, checks) = s.host.take_source_checks().remove(0);
         assert_eq!(s.host.stop_job_run(&run.id).unwrap(), None);
-        s.host.sources_checked(&checked, checks.run()).unwrap();
+        let found = checks.run();
+        s.host.sources_checked(&checked, &checks, found).unwrap();
         let stopped = s.host.job_run(&run.id).unwrap();
         assert_eq!(
             (stopped.outcome, stopped.thread_id),

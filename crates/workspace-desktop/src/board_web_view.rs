@@ -64,8 +64,18 @@ impl BoardFolder {
         })
     }
 
+    /// The URL of `path` in the folder, with every byte but a path's unreserved ones escaped,
+    /// so a `#`, `?` or `%` in a file's name stays part of it.
     pub fn url(&self, path: &str) -> String {
-        format!("{SCHEME}://{}/{path}", self.id)
+        let escaped: String = (path.bytes())
+            .map(|byte| match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                    char::from(byte).to_string()
+                }
+                byte => format!("%{byte:02X}"),
+            })
+            .collect();
+        format!("{SCHEME}://{}/{escaped}", self.id)
     }
 
     pub fn respond(&self, uri: &Uri) -> Response<Cow<'static, [u8]>> {
@@ -403,6 +413,10 @@ impl Board {
         }
     }
 
+    pub fn is_shown(&self) -> bool {
+        !self.webview.webview().isHidden()
+    }
+
     /// Takes a still image of the page as it is drawn now; `done` runs on the main thread.
     pub fn snapshot(&self, done: impl Fn(Option<Arc<Image>>) + 'static) {
         let completion = RcBlock::new(move |image: *mut NSImage, _: *mut NSError| {
@@ -523,6 +537,9 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         std::fs::write(root.join("index.html"), "<p>board</p>").unwrap();
         std::fs::write(root.join("my chart.svg"), "<svg/>").unwrap();
+        for name in ["report#1.html", "report?draft.html", "literal%20name.html"] {
+            std::fs::write(root.join(name), name).unwrap();
+        }
         std::fs::write(parent.path().join("secret.txt"), "secret").unwrap();
         let folder = BoardFolder::new("fixture", &root).unwrap();
         (parent, folder)
@@ -541,6 +558,15 @@ mod tests {
         assert_eq!(response.headers()["Content-Security-Policy"], CSP);
         let named = get(&folder, "wiffletree-board://fixture/my%20chart.svg");
         assert_eq!(named.body().as_ref(), b"<svg/>");
+        for name in [
+            "report#1.html",
+            "report?draft.html",
+            "literal%20name.html",
+            "my chart.svg",
+        ] {
+            let response = get(&folder, &folder.url(name));
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+        }
     }
 
     #[test]

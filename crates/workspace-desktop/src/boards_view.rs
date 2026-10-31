@@ -25,6 +25,9 @@ use workspace_core::job::{JobKey, JobState, RunOutcome, Sharing};
 const SANDBOX: &str = "🔒 Scripts run · no network · can't navigate away";
 /// How long an overlay waits for the board's still image before it opens without one.
 const SNAPSHOT_LIMIT: Duration = Duration::from_millis(500);
+/// How often a shown board's still image is taken again, so an overlay that opens with no
+/// warning, such as a shortcut's dialog or another view's menu, has a recent one to show.
+const STILL_EVERY: Duration = Duration::from_secs(2);
 /// The largest Markdown output rendered natively.
 const MAX_MARKDOWN_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -189,6 +192,15 @@ impl BoardsPage {
             }
         })
         .detach();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(STILL_EVERY).await;
+                if this.update(cx, |this, _| this.take_still()).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         Self {
             bridge,
             shared: Shared::default(),
@@ -233,6 +245,8 @@ impl BoardsPage {
     }
     /// Reads the outputs again as Boards opens, and puts back an open HTML board.
     pub(super) fn opened(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A board shows only while GPUI's focus is in this page.
+        window.focus(&self.focus, cx);
         self.read_outputs(window, cx);
         if let Some(viewer) = &self.viewer
             && viewer.output.kind() == FileKind::Html
@@ -251,6 +265,7 @@ impl BoardsPage {
 
     fn open_output(&mut self, output: BoardOutput, window: &mut Window, cx: &mut Context<Self>) {
         self.close_web_view(window, cx);
+        window.focus(&self.focus, cx);
         let folder = PathBuf::from(&output.folder);
         self.viewer = Some(Viewer {
             output: output.clone(),
@@ -287,6 +302,10 @@ impl BoardsPage {
         let Some(viewer) = &mut self.viewer else {
             return;
         };
+        // An earlier save of the title may have named another file, of another type.
+        if let Some(version) = viewer.versions.iter().find(|v| v.commit == commit) {
+            viewer.output.file = version.file.clone();
+        }
         viewer.version = Some(commit.clone());
         let ask = ask::board_version_folder(viewer.output.id.clone(), commit);
         self.ask(ask, window, cx, |view, folder, window, cx| match folder {
@@ -405,6 +424,27 @@ impl BoardsPage {
             }
         }
         cx.notify();
+    }
+    /// Takes a new still image of a board while it shows.
+    fn take_still(&self) {
+        let Some(Viewer {
+            body: Body::Html(pane),
+            ..
+        }) = &self.viewer
+        else {
+            return;
+        };
+        if let Some(board) = pane
+            .board
+            .borrow()
+            .as_ref()
+            .filter(|board| board.is_shown())
+        {
+            let events = self.events.clone();
+            board.snapshot(move |image| {
+                let _ = events.try_send(PaneEvent::Snapshot(image));
+            });
+        }
     }
     /// Runs `then`, which opens an overlay, once the board's still image is ready to show
     /// under it, or after `SNAPSHOT_LIMIT`; until then the live board shows. With no HTML
@@ -1050,9 +1090,12 @@ impl BoardsPage {
         cx: &mut Context<Self>,
     ) -> Div {
         // A board never draws over an overlay: under one, the pane shows its still image.
+        // Menus and popovers, this page's or another view's, take GPUI's focus as they open;
+        // dialogs, sheets and notices are counted as well.
         let covered = window.has_active_dialog(cx)
             || window.has_active_sheet(cx)
-            || !window.notifications(cx).is_empty();
+            || !window.notifications(cx).is_empty()
+            || !self.focus.contains_focused(window, cx);
         let painted = pane.painted.clone();
         let placeholder = canvas(
             |_, _, _| {},
@@ -1124,6 +1167,11 @@ impl BoardsPage {
             .child(
                 div()
                     .track_focus(&self.board_focus)
+                    // A click on the still image brings the live board back.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|v, _, w, c| w.focus(&v.focus, c)),
+                    )
                     .flex_1()
                     .min_h_0()
                     .relative()
@@ -1398,6 +1446,7 @@ mod tests {
             run_id: Some("r".into()),
             catch_up: 2,
             shared: false,
+            file: "brief.md".into(),
         };
         assert_eq!(
             version_label(&version, true).1,
