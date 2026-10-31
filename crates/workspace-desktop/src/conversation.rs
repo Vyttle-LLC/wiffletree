@@ -162,16 +162,13 @@ impl Conversation {
         cx: &mut Context<Self>,
     ) {
         let focused = self.composer_focused(window, cx);
-        if !self.composer_focus.typed(focused, keystroke) {
-            return;
-        }
-        let Some(text) = composer_focus::typed_text(keystroke) else {
+        let Some(text) = self.composer_focus.typed(focused, keystroke) else {
             return;
         };
-        let text = text.to_owned();
         self.input.update(cx, |input, cx| {
             input.focus(window, cx);
-            input.insert(text, window, cx);
+            // Replaces the composer's selected text, as typing there does.
+            input.replace(text.to_owned(), window, cx);
         });
         cx.stop_propagation();
     }

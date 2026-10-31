@@ -29,23 +29,25 @@ impl ComposerFocus {
         give_back
     }
 
-    /// A key went down. Returns whether the composer takes it: a typed character while the
+    /// A key went down. Returns the text the composer takes from it: a typed character while the
     /// composer is owed focus. The composer having focus again, by any route, settles the debt.
-    pub(crate) fn typed(&mut self, composer_focused: bool, keystroke: &Keystroke) -> bool {
+    pub(crate) fn typed<'a>(
+        &mut self,
+        composer_focused: bool,
+        keystroke: &'a Keystroke,
+    ) -> Option<&'a str> {
         if composer_focused {
             self.owed = false;
         }
-        let take = self.owed && typed_text(keystroke).is_some();
-        if take {
-            self.owed = false;
-        }
-        take
+        let text = typed_text(keystroke).filter(|_| self.owed)?;
+        self.owed = false;
+        Some(text)
     }
 }
 
 /// The text a keystroke types, if it types any: a printable character, without ⌃, ⌘ or fn,
 /// which make shortcuts. ⌥ stays, since it types accents and symbols.
-pub(crate) fn typed_text(keystroke: &Keystroke) -> Option<&str> {
+fn typed_text(keystroke: &Keystroke) -> Option<&str> {
     let modifiers = &keystroke.modifiers;
     if modifiers.control || modifiers.platform || modifiers.function {
         return None;
@@ -88,7 +90,7 @@ mod tests {
         let mut focus = ComposerFocus::default();
         focus.pressed(true);
         assert!(!focus.released(true));
-        assert!(!focus.typed(false, &copy()));
+        assert_eq!(focus.typed(false, &copy()), None);
     }
 
     #[test]
@@ -97,9 +99,13 @@ mod tests {
         focus.pressed(true);
         assert!(!focus.released(true));
         let escape = keystroke("escape", None, Modifiers::default());
-        assert!(!focus.typed(false, &escape));
-        assert!(focus.typed(false, &typed("a")));
-        assert!(!focus.typed(false, &typed("b")), "the composer has it now");
+        assert_eq!(focus.typed(false, &escape), None);
+        assert_eq!(focus.typed(false, &typed("a")), Some("a"));
+        assert_eq!(
+            focus.typed(false, &typed("b")),
+            None,
+            "the composer has it now"
+        );
     }
 
     #[test]
@@ -107,7 +113,7 @@ mod tests {
         let mut focus = ComposerFocus::default();
         focus.pressed(false);
         assert!(!focus.released(false));
-        assert!(!focus.typed(false, &typed("a")));
+        assert_eq!(focus.typed(false, &typed("a")), None);
     }
 
     #[test]
@@ -124,8 +130,8 @@ mod tests {
         let mut focus = ComposerFocus::default();
         focus.pressed(true);
         assert!(!focus.released(true));
-        assert!(!focus.typed(true, &typed("a")));
-        assert!(!focus.typed(false, &typed("b")));
+        assert_eq!(focus.typed(true, &typed("a")), None);
+        assert_eq!(focus.typed(false, &typed("b")), None);
     }
 
     #[test]
