@@ -664,12 +664,17 @@ pub(crate) mod tests {
     use crate::sync::tests::NAME;
     use crate::test_support::git;
 
-    fn personal(host: &Host) -> Space {
+    pub(crate) fn personal(host: &Host) -> Space {
         host.spaces().unwrap().remove(0).space
     }
 
     /// Files an issue in `space` as `jlin`, naming `repositories`.
-    fn file(host: &mut Host, space: &Space, repositories: &[&str], description: &str) -> Issue {
+    pub(crate) fn file(
+        host: &mut Host,
+        space: &Space,
+        repositories: &[&str],
+        description: &str,
+    ) -> Issue {
         host.record_gh_login(Some("jlin".into()));
         let new = NewIssue {
             title: "Theme previews look blurry on Retina displays".into(),
@@ -705,12 +710,16 @@ pub(crate) mod tests {
         repository
     }
 
-    fn state(host: &Host, id: &IssueId) -> IssueState {
+    pub(crate) fn state(host: &Host, id: &IssueId) -> IssueState {
         host.read_issue(id).unwrap().issue.unwrap().state
     }
 
     /// The issue's events of `kind`, as their fields.
-    fn events(host: &Host, id: &IssueId, kind: &str) -> Vec<serde_json::Map<String, Value>> {
+    pub(crate) fn events(
+        host: &Host,
+        id: &IssueId,
+        kind: &str,
+    ) -> Vec<serde_json::Map<String, Value>> {
         (host.read_issue(id).unwrap().events.into_iter())
             .filter(|event| event.kind == kind)
             .map(|event| event.fields)
