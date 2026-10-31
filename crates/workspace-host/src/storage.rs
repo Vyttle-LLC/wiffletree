@@ -10,7 +10,7 @@ use issues_sync::IssueRules;
 use publish::Tools;
 use repos::{Content, Record, Remote, RuleSet};
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tempfile::TempDir;
 use tracker::ISSUES;
 
@@ -459,8 +459,17 @@ pub(crate) struct Found {
     /// The `issue.md` files whose parts were merged, and the parts that paused.
     parts_compared: Vec<String>,
     parts: Vec<PausedPart>,
-    /// The newest unpushed version committed, which a push makes done.
-    unpushed_to: Option<i64>,
+    /// The kept versions committed, which a push makes done.
+    unpushed_done: Vec<i64>,
+}
+
+/// The output a file of a board folder belongs to: `<slug>` for `<slug>.json` and for
+/// `<slug>/<file>`.
+fn output_of(path: &str) -> &str {
+    match path.strip_suffix(".json") {
+        Some(output) => output,
+        None => path.rsplit_once('/').map_or(path, |(output, _)| output),
+    }
 }
 
 /// A rule set comparing whole files under `roots`, except those under `excluded`, with the
@@ -626,7 +635,21 @@ impl RuleSet for WholeFiles {
         }
         Ok(())
     }
+    /// A runner's output with a file paused this pass waits whole, its kept versions too, so a
+    /// paused file is never staged and the versions stay in order.
     fn commit(&mut self) -> Option<(Vec<(String, Content)>, String)> {
+        let paused: BTreeSet<&str> = (self.found.paused.iter())
+            .filter(|(path, ..)| under(&self.runs_here, path))
+            .map(|(path, ..)| output_of(path))
+            .collect();
+        (self.found.committed).retain(|(path, _)| {
+            !(under(&self.runs_here, path) && paused.contains(output_of(path)))
+        });
+        (self.unpushed).retain(|(_, files)| {
+            !files
+                .iter()
+                .any(|(path, _)| paused.contains(output_of(path)))
+        });
         let committed = &self.found.committed;
         (!committed.is_empty()).then(|| {
             let message = format!("{} · {}", self.subject, sync::machine_name());
@@ -635,7 +658,7 @@ impl RuleSet for WholeFiles {
     }
     fn earlier(&mut self) -> Vec<(Vec<(String, Content)>, String)> {
         let message = format!("{} · {}", self.subject, sync::machine_name());
-        self.found.unpushed_to = self.unpushed.last().map(|(version, _)| *version);
+        self.found.unpushed_done = self.unpushed.iter().map(|(version, _)| *version).collect();
         (self.unpushed.iter())
             .map(|(_, files)| (files.clone(), message.clone()))
             .collect()
@@ -708,7 +731,7 @@ impl RuleSets {
             found.paused.append(&mut other.paused);
             found.failed.append(&mut other.failed);
             found.failed_roots.append(&mut other.failed_roots);
-            found.unpushed_to = found.unpushed_to.or(other.unpushed_to);
+            found.unpushed_done.append(&mut other.unpushed_done);
         }
         found.merged = issues.merged;
         found.parts_compared = issues.parts_compared;
@@ -1650,9 +1673,9 @@ impl Host {
                 params![key, held.path, held.check, held.rule, held.reason],
             )?;
         }
-        if let Some(version) = found.unpushed_to.filter(|_| pushed) {
+        for version in found.unpushed_done.iter().filter(|_| pushed) {
             tx.execute(
-                "DELETE FROM unpushed_versions WHERE repository=?1 AND version<=?2",
+                "DELETE FROM unpushed_versions WHERE repository=?1 AND version=?2",
                 params![key, version],
             )?;
         }

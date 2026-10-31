@@ -1241,20 +1241,15 @@ impl Host {
                 kept: format!("In {}'s storage", space.name),
                 waiting: false,
             }
-        } else if shared && !waiting {
-            let file = (source.file_name())
-                .context("Name a file")?
-                .to_string_lossy()
-                .into_owned();
-            let version = self.push_job_output(&space, &recipe, &file, fs::read(source)?, about)?;
-            RunOutput {
-                title: title.into(),
-                file,
-                version,
-                kept: format!("Shared in {}", space.name),
-                waiting: false,
-            }
+        } else if let Some(output) = (shared && !waiting)
+            .then(|| self.push_shared_output(&space, &recipe, title, source, about.clone()))
+            .transpose()?
+            .flatten()
+        {
+            output
         } else {
+            // Waiting for approval, or kept here while its shared copy was edited outside
+            // Wiffletree and is paused.
             let store = assistant::board_store(&self.home);
             let base = private_folder(&space, &recipe);
             let (file, version) = assistant::store_output(&store, &base, title, source, about)?;
@@ -1271,8 +1266,32 @@ impl Host {
         self.save_run(&run)?;
         Ok(output)
     }
+    /// A runner's approved save of `source`, written for the next pass to push, or `None` when
+    /// the shared copy was edited outside Wiffletree.
+    fn push_shared_output(
+        &mut self,
+        space: &Space,
+        recipe: &Recipe,
+        title: &str,
+        source: &Path,
+        about: Value,
+    ) -> Result<Option<RunOutput>> {
+        let file = (source.file_name())
+            .context("Name a file")?
+            .to_string_lossy()
+            .into_owned();
+        let version = self.push_job_output(space, recipe, &file, fs::read(source)?, about)?;
+        Ok(version.map(|version| RunOutput {
+            title: title.into(),
+            file,
+            version,
+            kept: format!("Shared in {}", space.name),
+            waiting: false,
+        }))
+    }
     /// Writes a runner's output, which `about` titles, into its Space's storage on GitHub, for
-    /// the next pass to push; returns the version it will be.
+    /// the next pass to push; returns the version it will be, or `None`, writing nothing, when
+    /// its files there were edited outside Wiffletree.
     fn push_job_output(
         &mut self,
         space: &Space,
@@ -1280,7 +1299,7 @@ impl Host {
         file: &str,
         bytes: Vec<u8>,
         about: Value,
-    ) -> Result<u32> {
+    ) -> Result<Option<u32>> {
         let base = board_folder(&space.storage.folder, &recipe.id);
         let storage = self.storage_folder(&space.storage.repository);
         let title = about["title"].as_str().context("An output has a title")?;
@@ -1289,40 +1308,59 @@ impl Host {
             assistant::output_folder(&storage.join(&base), title)?
         );
         let metadata = format!("{folder}.json");
-        let unpushed = self.keep_unpushed_version(space, &folder)?;
+        let Some(unpushed) = self.keep_unpushed_version(space, &folder)? else {
+            return Ok(None);
+        };
         let message = format!("{}: saved an output of {}", space.name, recipe.name);
         self.write_output(space, &base, file, bytes, about, &message)?;
         let pushed =
             runtime::git_output(&storage, &["rev-list", "--count", "HEAD", "--", &metadata]);
-        Ok(pushed.map_or(0, |count| count.trim().parse().unwrap_or(0)) + unpushed + 1)
+        Ok(Some(
+            pushed.map_or(0, |count| count.trim().parse().unwrap_or(0)) + unpushed + 1,
+        ))
     }
     /// Keeps the version of the output at `folder` that the next pass has not pushed yet, as
-    /// a save is about to replace it, so the pass commits it before the new one; returns how
-    /// many versions of it wait.
-    fn keep_unpushed_version(&self, space: &Space, folder: &str) -> Result<u32> {
+    /// a save is about to replace it, so the pass commits it before the new one. The version
+    /// is what Wiffletree recorded writing, never what is read back. Returns how many versions
+    /// of it wait, or `None` when its files here are not what Wiffletree wrote: an edit made
+    /// outside Wiffletree, which the next pass pauses and no save overwrites.
+    fn keep_unpushed_version(&self, space: &Space, folder: &str) -> Result<Option<u32>> {
         let key = repos::key(&space.storage.repository.key());
         let metadata = format!("{folder}.json");
         let record = repos::Record::read(&self.db, &key)?.context("The storage has no record")?;
         let inside = |path: &str| path == metadata || path.starts_with(&format!("{folder}/"));
+        let storage = self.storage_folder(&space.storage.repository);
+        let mut here = std::collections::BTreeMap::new();
+        if let Ok(content) = fs::read(storage.join(&metadata)) {
+            here.insert(metadata.clone(), content);
+        }
+        for entry in (fs::read_dir(storage.join(folder)).into_iter().flatten()).flatten() {
+            let path = format!("{folder}/{}", entry.file_name().to_string_lossy());
+            here.insert(path, fs::read(entry.path())?);
+        }
+        let paths: std::collections::BTreeSet<&String> = (record.written.keys())
+            .filter(|path| inside(path))
+            .chain(here.keys())
+            .collect();
+        // What Wiffletree last wrote or synced of each file, `None` for no file.
+        let wrote = |path: &String| record.written.get(path).cloned().flatten();
+        if paths
+            .iter()
+            .any(|path| here.get(*path).cloned() != wrote(path))
+        {
+            return Ok(None);
+        }
         let mut waiting: u32 = self.db.query_row(
             "SELECT count(DISTINCT version) FROM unpushed_versions WHERE repository=?1 AND path=?2",
             params![key, metadata],
             |r| r.get(0),
         )?;
-        let written = record.written.get(&metadata).cloned().flatten();
+        let written = wrote(&metadata);
         if written.is_none() || written == record.synced.get(&metadata).cloned().flatten() {
-            return Ok(waiting);
+            return Ok(Some(waiting));
         }
-        let storage = self.storage_folder(&space.storage.repository);
-        let mut files: std::collections::BTreeMap<String, repos::Content> = (record.synced.keys())
-            .filter(|path| inside(path))
-            .map(|path| (path.clone(), None))
-            .collect();
-        files.insert(metadata.clone(), written);
-        for entry in fs::read_dir(storage.join(folder))?.flatten() {
-            let path = format!("{folder}/{}", entry.file_name().to_string_lossy());
-            files.insert(path, Some(fs::read(entry.path())?));
-        }
+        let files: Vec<(&String, repos::Content)> =
+            paths.into_iter().map(|path| (path, wrote(path))).collect();
         let version: i64 = self.db.query_row(
             "SELECT coalesce(max(version),0)+1 FROM unpushed_versions",
             [],
@@ -1335,7 +1373,7 @@ impl Host {
             )?;
         }
         waiting += 1;
-        Ok(waiting)
+        Ok(Some(waiting))
     }
     /// Share or Keep private, for the latest output of `title` that waits for approval, which
     /// `run_id` saved. Share pushes it with its Space's storage, takes it out of the private
@@ -1374,7 +1412,12 @@ impl Host {
                 plain_file_name(&file) && fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()),
                 "The output's file is missing"
             );
-            self.push_job_output(&space, &recipe, &file, fs::read(&path)?, about)?;
+            let pushed = self.push_job_output(&space, &recipe, &file, fs::read(&path)?, about)?;
+            ensure!(
+                pushed.is_some(),
+                "{}'s shared copy was changed outside Wiffletree. Settle that change first, then share.",
+                title
+            );
             fs::remove_dir_all(store.join(&folder))?;
             fs::remove_file(store.join(format!("{folder}.json")))?;
             let metadata = format!("{folder}.json");
@@ -2603,6 +2646,77 @@ mod tests {
                 .query_row("SELECT count(*) FROM unpushed_versions", [], |r| r.get(0))
                 .unwrap();
             assert_eq!(waiting, 0);
+        }
+
+        impl Shared {
+            fn edit_outside(&self, body: &str) {
+                let clone = self.host.storage_folder(&self.sage.storage.repository);
+                fs::write(clone.join(OUTPUT), body).unwrap();
+            }
+            fn pushed_versions(&self, path: &str) -> usize {
+                let args = ["log", "--format=%H", "main", "--", path];
+                crate::test_support::git(&self.github.bare, &args)
+                    .lines()
+                    .count()
+            }
+            fn kept_versions(&self) -> i64 {
+                (self.host.db)
+                    .query_row(
+                        "SELECT count(DISTINCT version) FROM unpushed_versions",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap()
+            }
+        }
+
+        #[test]
+        fn a_save_over_a_shared_copy_edited_outside_wiffletree_stays_here_and_nothing_is_pushed() {
+            let mut s = shared(false);
+            let key = s.approved();
+            s.run_saving(&key, "<p>two</p>");
+            s.edit_outside("<p>outside</p>");
+            let run = s.run_saving(&key, "<p>three</p>");
+            assert_eq!(run.outputs[0].kept, "Only on this Mac");
+            assert_eq!(
+                s.kept_versions(),
+                0,
+                "an outside edit is never kept as a version"
+            );
+            let clone = s.host.storage_folder(&s.sage.storage.repository);
+            assert_eq!(
+                fs::read_to_string(clone.join(OUTPUT)).unwrap(),
+                "<p>outside</p>"
+            );
+            s.sync();
+            assert_eq!(s.paused(), [OUTPUT]);
+            assert_eq!(s.github.show(OUTPUT).as_deref(), Some("<p>first</p>"));
+            assert_eq!(
+                (s.pushed_versions(OUTPUT), s.pushed_versions(ABOUT)),
+                (1, 1)
+            );
+        }
+
+        #[test]
+        fn kept_versions_of_an_output_paused_this_pass_wait_with_it() {
+            let mut s = shared(false);
+            let key = s.approved();
+            s.run_saving(&key, "<p>two</p>");
+            s.run_saving(&key, "<p>three</p>");
+            assert_eq!(s.kept_versions(), 1);
+            s.edit_outside("<p>outside</p>");
+            s.sync();
+            assert_eq!(s.paused(), [OUTPUT]);
+            assert_eq!(s.github.show(OUTPUT).as_deref(), Some("<p>first</p>"));
+            assert_eq!(
+                (s.pushed_versions(OUTPUT), s.pushed_versions(ABOUT)),
+                (1, 1)
+            );
+            assert_eq!(
+                s.kept_versions(),
+                1,
+                "still kept for when the pause is settled"
+            );
         }
 
         #[test]
