@@ -531,7 +531,7 @@ enum PublishAction {
         args: Value,
         reply: Reply,
     },
-    Continued(publish::Outcome),
+    Continued(Box<publish::Outcome>),
     Answer {
         item: String,
         approved: bool,
@@ -1885,7 +1885,8 @@ impl Actor {
                         let _ = reply.try_send(result.map_err(|error| format!("{error:#}")));
                     }
                     PublishAction::Continued(outcome) => {
-                        match checked.apply(&mut self.host, |host| host.record_published(outcome)) {
+                        match checked.apply(&mut self.host, |host| host.record_published(*outcome))
+                        {
                             Ok(step) => self.run_publish_step(step),
                             Err(error) => eprintln!("Workspace publish: {error:#}"),
                         }
@@ -2546,8 +2547,8 @@ impl Actor {
                 }
                 if matches!(outcome.result, publish::StepResult::Pushed { .. }) {
                     let ticket = outcome.ticket_id.clone();
-                    if let Err(error) =
-                        self.inspect_publication(&ticket, PublishAction::Continued(outcome))
+                    if let Err(error) = self
+                        .inspect_publication(&ticket, PublishAction::Continued(Box::new(outcome)))
                     {
                         eprintln!("Workspace publish: {error:#}");
                     }

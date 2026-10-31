@@ -109,6 +109,9 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
         },
         Command::LeftoverWorktrees,
         Command::Processes { session_id: text() },
+        Command::OriginBranches {
+            repository_id: text(),
+        },
     ];
     let writes = [
         Command::ImportRepositories {
@@ -312,6 +315,11 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
         Command::SetRepositoryBase {
             repository_id: text(),
             base: text(),
+        },
+        Command::SetProtectedBranches {
+            repository_id: text(),
+            entry: text(),
+            protected: false,
         },
         Command::RemoveLeftoverWorktrees { ticket_ids: vec![] },
         Command::StopProcesses {

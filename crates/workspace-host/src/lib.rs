@@ -1950,6 +1950,18 @@ impl Host {
                 repository_id,
                 base,
             } => serde_json::to_value(self.set_repository_base(&repository_id, &base)?)?,
+            Command::SetProtectedBranches {
+                repository_id,
+                entry,
+                protected,
+            } => serde_json::to_value(self.set_protected_branch(
+                &repository_id,
+                &entry,
+                protected,
+            )?)?,
+            Command::OriginBranches { repository_id } => {
+                serde_json::to_value(self.origin_branches(&repository_id)?)?
+            }
             Command::LeftoverWorktrees => serde_json::to_value(self.leftover_worktrees()?)?,
             Command::RemoveLeftoverWorktrees { ticket_ids } => {
                 serde_json::to_value(self.remove_leftover_worktrees(&ticket_ids)?)?

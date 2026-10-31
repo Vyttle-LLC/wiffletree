@@ -1282,6 +1282,7 @@ pub(crate) mod tests {
                         parent: fork.then(|| "upstream/app".into()),
                         public: false,
                         checked_at: now(),
+                        branches: None,
                     }),
                     problem: None,
                 }),
