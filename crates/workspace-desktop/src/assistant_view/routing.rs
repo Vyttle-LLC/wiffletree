@@ -206,13 +206,12 @@ impl AssistantPage {
         cx: &mut Context<Self>,
     ) -> Div {
         let spaces = self.spaces().to_vec();
-        let space = self.tab_of(&line.to).map(|t| t.thread.space_id.clone());
-        let named = space
-            .as_ref()
-            .map_or_else(String::new, |s| self.space_name(s));
+        // From the line itself, as the thread it went to may have left the strip.
+        let space = Some(line.to_space.clone());
+        let named = self.space_name(&line.to_space);
         let text = match line.new {
             true => format!("New thread in {named}"),
-            false => format!("Sent to {} in {named}", self.title(&line.to)),
+            false => format!("Sent to “{}” in {named}", line.to_title),
         };
         let left_out = already_there(line, space.as_ref());
         let origin = (line.to != holder.id).then_some(holder.id.as_str());
@@ -356,6 +355,8 @@ mod tests {
             body: "book the dentist".into(),
             created_at: 0,
             to: "dentist".into(),
+            to_space: personal.clone(),
+            to_title: "Dentist Tuesday".into(),
             new: true,
             choices: vec![new_in("personal"), new_in("sage"), to.clone()],
         };

@@ -80,8 +80,13 @@ pub struct RoutedLine {
     pub message_id: String,
     pub body: String,
     pub created_at: i64,
-    /// The thread it went to.
+    /// The thread it went to, with its Space and its title then, so the line still names it
+    /// once that thread's tab is closed.
     pub to: String,
+    #[serde(default)]
+    pub to_space: SpaceId,
+    #[serde(default)]
+    pub to_title: String,
     /// It started that thread.
     pub new: bool,
     /// What Change offers before "Somewhere else…".

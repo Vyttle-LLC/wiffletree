@@ -173,11 +173,14 @@ impl Host {
             if let Some(choices) = choices
                 && (held.origin.is_none() || holder != to)
             {
+                let went_to = host.thread(&to)?;
                 let line = RoutedLine {
                     message_id: held.id.clone(),
                     body: held.body.clone(),
                     created_at: held.created_at,
                     to,
+                    to_space: went_to.space_id,
+                    to_title: went_to.title,
                     new,
                     choices: choices.to_vec(),
                 };
@@ -280,9 +283,12 @@ impl Host {
             )?;
             let holder = if from_empty_tab { to.as_str() } else { holder };
             if from_empty_tab || to != holder {
+                let went_to = host.thread(&to)?;
                 let line = RoutedLine {
                     message_id: id.clone(),
                     to: to.clone(),
+                    to_space: went_to.space_id,
+                    to_title: went_to.title,
                     new,
                     ..line
                 };
@@ -513,6 +519,11 @@ mod tests {
             (sent.recipient.as_str(), true)
         );
         assert_eq!(line.choices, question.choices);
+        // The line names where it went even once that thread's tab is closed.
+        s.host.set_thread_open(&line.to, false).unwrap();
+        let line = s.host.thread(&notes).unwrap().routed.remove(0);
+        assert_eq!(line.to_space, s.personal);
+        assert_eq!(line.to_title, s.host.thread(&line.to).unwrap().title);
         // Answering again finds nothing to send.
         assert!(s.host.answer_held("m1", &personal).is_err());
     }
