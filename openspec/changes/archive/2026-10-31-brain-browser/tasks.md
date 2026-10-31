@@ -14,12 +14,12 @@ Depends on `brain-registry-sync` and `brain-log-capture`. Status and Conflicts b
 
 ## 3. Desktop
 
-- [ ] 3.1 The brain browser page: scope chips, the brain switcher and the Status, Wiki, Logs and Conflicts views, following `design/mockups/current/brains.html`. Notes render as Markdown with wikilinks, footnotes and backlinks.
-- [ ] 3.2 Logs entries show their PR stage, ticket and conversation links, pending entries, and the "logged outside this install" note.
-- [ ] 3.3 `memory_view.rs`: the project summary (brain, batches, conflicts link, recent entries, unsent rows, capture form, Open brain browser, Search).
-- [ ] 3.4 The search overlay: ⌘K, Ctrl+K and `/`; arrows, Enter, Tab and Esc with focus return; the brain resolved from the project's Space (a thread's comes with `assistant-spaces-jobs-boards` task 8.1). Check it by keyboard only.
+- [x] 3.1 The brain browser page: scope chips, the brain switcher and the Status, Wiki, Logs and Conflicts views, following `design/mockups/current/brains.html`. Notes render as Markdown with wikilinks, footnotes and backlinks.
+- [x] 3.2 Logs entries show their PR stage, ticket and conversation links, pending entries, and the "logged outside this install" note.
+- [x] 3.3 `memory_view.rs`: the project summary (brain, batches, conflicts link, recent entries, unsent rows, capture form, Open brain browser, Search).
+- [x] 3.4 The search overlay: ⌘K, Ctrl+K and `/`; arrows, Enter, Tab and Esc with focus return; the brain resolved from the project's Space (a thread's comes with `assistant-spaces-jobs-boards` task 8.1). Check it by keyboard only.
 
 ## 4. Docs and checks
 
-- [ ] 4.1 Check that `docs/PRD.md`'s Memory interface and performance section matches the implementation, and update it if not.
-- [ ] 4.2 Run the index, MCP and desktop tests and the performance fixture, then the full suite once before ready_for_testing.
+- [x] 4.1 Check that `docs/PRD.md`'s Memory interface and performance section matches the implementation, and update it if not.
+- [x] 4.2 Run the index, MCP and desktop tests and the performance fixture, then the full suite once before ready_for_testing.

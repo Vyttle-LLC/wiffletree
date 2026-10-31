@@ -4,6 +4,7 @@
 //! added and removed in a Space's settings. Every action here is the human's, and nothing on the
 //! page shows a brain file's content or a check's output.
 use super::*;
+use brain_browser_view::{BrainOpening, BrainTarget, BrainView};
 use gpui_component::{
     Sizable,
     button::ButtonVariants,
@@ -113,6 +114,12 @@ impl BrainsPage {
                 cx.update(|window, cx| this.update(cx, |view, cx| view.read_brains(window, cx)));
         })
         .detach();
+    }
+
+    /// Shows a batch's checks, as the brain browser's Status links to it.
+    pub(super) fn open_batch(&mut self, id: String, cx: &mut Context<Self>) {
+        self.open_batch = Some(id);
+        cx.notify();
     }
 
     fn edit(&mut self, editing: Option<Editing>, window: &mut Window, cx: &mut Context<Self>) {
@@ -376,6 +383,22 @@ impl BrainsPage {
             _ => {}
         }
         let mut actions = div().flex().flex_wrap().gap_2();
+        if !brain.spaces.is_empty() {
+            let r = repository.clone();
+            actions = actions.child(
+                button(SharedString::from(format!("browse-{repository}")))
+                    .outline()
+                    .icon(icon("book"))
+                    .label("Open brain browser")
+                    .on_click(cx.listener(move |_, _, _, c| {
+                        c.emit(Intent::OpenBrain(BrainOpening {
+                            repository: r.clone(),
+                            project: None,
+                            target: BrainTarget::View(BrainView::Status),
+                        }))
+                    })),
+            );
+        }
         if !brain.granted && !brain.spaces.is_empty() {
             let r = repository.clone();
             actions = actions.child(
@@ -862,14 +885,14 @@ impl Render for BrainsPage {
 
 /// How a line on the page reads: fine, worth a look, or wrong.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Tone {
+pub(super) enum Tone {
     Good,
     Quiet,
     Warn,
     Bad,
 }
 impl Tone {
-    fn color(self, p: Palette) -> Hsla {
+    pub(super) fn color(self, p: Palette) -> Hsla {
         match self {
             Tone::Good => p.green,
             Tone::Quiet => p.subtle,
@@ -897,7 +920,7 @@ fn same_line(a: &Editing, b: &Editing) -> bool {
 }
 
 /// The brain's sync pill: held, failing, waiting for the grant, or when it last synced.
-fn sync_state(brain: &Brain) -> (String, Tone) {
+pub(super) fn sync_state(brain: &Brain) -> (String, Tone) {
     if brain.held.is_some() {
         ("Writing held".into(), Tone::Bad)
     } else if brain.problem.is_some() {
@@ -921,7 +944,10 @@ fn grant_lines(repository: &str) -> Vec<String> {
 }
 
 /// Who compiles the brain, from `wiffletree-brain.json` on `main`.
-fn compiler_line(config: &BrainConfigReading, this_host: Option<&BrainCompiler>) -> String {
+pub(super) fn compiler_line(
+    config: &BrainConfigReading,
+    this_host: Option<&BrainCompiler>,
+) -> String {
     match config {
         BrainConfigReading::Unread => "Not read yet".into(),
         BrainConfigReading::Missing => "No compiler · Set up adds wiffletree-brain.json".into(),
@@ -941,7 +967,7 @@ fn compiler_line(config: &BrainConfigReading, this_host: Option<&BrainCompiler>)
     }
 }
 
-fn next_compile(config: &BrainConfigReading) -> String {
+pub(super) fn next_compile(config: &BrainConfigReading) -> String {
     match config.config().and_then(|c| c.compile.as_ref()) {
         Some(compile) => format!("Daily at {} {}", compile.at, compile.timezone),
         None => "Not scheduled".into(),
@@ -1116,7 +1142,7 @@ fn steps(batch: &BrainBatch) -> Vec<(String, Option<Tone>)> {
         .collect()
 }
 
-fn stepper(batch: &BrainBatch, p: Palette) -> Div {
+pub(super) fn stepper(batch: &BrainBatch, p: Palette) -> Div {
     let mut row = div().flex_none().flex().items_center().gap_2();
     for (i, (label, tone)) in steps(batch).into_iter().enumerate() {
         if i > 0 {
@@ -1141,7 +1167,7 @@ fn stepper(batch: &BrainBatch, p: Palette) -> Div {
     row
 }
 
-fn stage_label(stage: BrainStage) -> &'static str {
+pub(super) fn stage_label(stage: BrainStage) -> &'static str {
     match stage {
         BrainStage::Queued => "queued",
         BrainStage::PrOpen => "open",

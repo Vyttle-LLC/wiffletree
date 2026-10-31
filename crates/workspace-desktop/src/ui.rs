@@ -925,6 +925,7 @@ impl Render for Workspace {
             Page::Repositories => self.repositories.clone().cached(full()).into_any_element(),
             Page::Spaces => self.spaces.clone().cached(full()).into_any_element(),
             Page::Brains => self.brains.clone().cached(full()).into_any_element(),
+            Page::BrainBrowser => self.brain_browser.clone().cached(full()).into_any_element(),
             Page::Conversation if self.shared.selected_session().is_some() => {
                 // Not cached: GPUI draws every view inside a cached view that renders again,
                 // so the transcript is cached only below an uncached conversation.
@@ -935,6 +936,9 @@ impl Render for Workspace {
         // Session tools make no sense beside a page about the whole workspace.
         let session_tools = self.shared.page == Page::Conversation;
         div()
+            // A context outside any text field, so `/` there still finds its binding.
+            .key_context("Workspace")
+            .track_focus(&self.focus)
             .size_full()
             .bg(p.base)
             .text_color(p.text)
@@ -1004,6 +1008,9 @@ impl Render for Workspace {
                     .when(session_tools, |d| d.child(self.inspector_rail(p, cx))),
             )
             .children(file_links::link_menu(cx))
+            .when(self.brain_search.read(cx).is_open(), |d| {
+                d.relative().child(self.brain_search.clone())
+            })
             .into_any_element()
     }
 }

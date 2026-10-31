@@ -225,6 +225,15 @@ pub(super) enum Intent {
     OpenSkill(Skill),
     /// Opens the Spaces page on one Space.
     OpenSpace(SpaceId),
+    /// Opens the brain browser on a brain, a scope and a view, note or entry.
+    OpenBrain(brain_browser_view::BrainOpening),
+    /// Opens the Brains page with one batch's checks shown.
+    OpenBatch(String),
+    /// Opens the search overlay over a brain (`owner/name`), in a project's scope when given.
+    SearchBrain {
+        repository: String,
+        project: Option<String>,
+    },
     Catalog(Rc<Vec<ModelOption>>),
     Detected(Rc<Detection>),
     /// Shows a change the host confirmed before the snapshot that has it arrives.

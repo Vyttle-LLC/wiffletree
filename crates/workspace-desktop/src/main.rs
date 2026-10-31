@@ -4,6 +4,9 @@ mod assets;
 mod attachment_chips;
 mod automation;
 mod background;
+mod brain_browser_view;
+mod brain_markdown;
+mod brain_search;
 mod brains_view;
 mod bridge;
 mod browse;
@@ -205,6 +208,8 @@ enum Page {
     Repositories,
     Spaces,
     Brains,
+    /// One brain's Status, Wiki, Logs and Conflicts, opened from Brains or a Memory panel.
+    BrainBrowser,
 }
 
 struct Workspace {
@@ -228,6 +233,8 @@ struct Workspace {
     repositories: Entity<repositories_view::RepositoriesPage>,
     spaces: Entity<spaces_view::SpacesPage>,
     brains: Entity<brains_view::BrainsPage>,
+    brain_browser: Entity<brain_browser_view::BrainBrowser>,
+    brain_search: Entity<brain_search::BrainSearch>,
     usage: Entity<usage_view::UsagePage>,
     sidebar: Entity<sidebar::Sidebar>,
     inspector: Entity<Inspector>,
@@ -235,6 +242,9 @@ struct Workspace {
     contexts: Entity<context_view::Contexts>,
     last_repository_refresh: Option<std::time::Instant>,
     progress_fetch: activity::StepFetch,
+    /// Holds focus when nothing else does, such as on a page without a text field, so keys
+    /// still pass through the workspace's key context.
+    focus: FocusHandle,
 }
 impl Workspace {
     fn new(bridge: Bridge, host: HostView, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -278,6 +288,12 @@ impl Workspace {
         Self::adopt(&spaces, window, cx);
         let brains = cx.new(|cx| brains_view::BrainsPage::new(bridge.clone(), window, cx));
         Self::adopt(&brains, window, cx);
+        let brain_browser = cx.new(|_| brain_browser_view::BrainBrowser::new(bridge.clone()));
+        Self::adopt(&brain_browser, window, cx);
+        let brain_search = cx.new(|cx| brain_search::BrainSearch::new(bridge.clone(), window, cx));
+        Self::adopt(&brain_search, window, cx);
+        // The shell draws the overlay while it is open.
+        cx.observe(&brain_search, |_, _, cx| cx.notify()).detach();
         let sidebar = cx.new(|cx| sidebar::Sidebar::new(bridge.clone(), window, cx));
         Self::adopt(&sidebar, window, cx);
         let usage = cx.new(|_| usage_view::UsagePage::new(bridge.clone()));
@@ -301,6 +317,8 @@ impl Workspace {
             repositories,
             spaces,
             brains,
+            brain_browser,
+            brain_search,
             usage,
             sidebar,
             inspector,
@@ -308,7 +326,10 @@ impl Workspace {
             contexts,
             last_repository_refresh: None,
             progress_fetch: Default::default(),
+            focus: cx.focus_handle(),
         };
+        cx.on_focus_lost(window, |view, window, cx| view.focus.focus(window, cx))
+            .detach();
         if let Some(changes) = view.bridge.changes() {
             cx.spawn_in(window, async move |this, cx| {
                 while changes.recv().await.is_ok() {
@@ -430,6 +451,19 @@ impl Workspace {
                     spaces.open_space(space.clone(), window, cx)
                 });
             }
+            Intent::OpenBrain(opening) => {
+                self.open_page(Page::BrainBrowser, window, cx);
+                self.brain_browser
+                    .update(cx, |browser, cx| browser.open(opening.clone(), window, cx));
+            }
+            Intent::OpenBatch(batch) => {
+                self.open_page(Page::Brains, window, cx);
+                (self.brains).update(cx, |brains, cx| brains.open_batch(batch.clone(), cx));
+            }
+            Intent::SearchBrain {
+                repository,
+                project,
+            } => self.search_brain(Some((repository.clone(), project.clone())), window, cx),
             Intent::Catalog(catalog) => self.shared.catalog = catalog.clone(),
             Intent::Detected(detection) => self.shared.detection = detection.clone(),
             Intent::Amend(amendment) => self.amend(amendment),
@@ -455,6 +489,8 @@ impl Workspace {
             .update(cx, |spaces, cx| spaces.share(shared.clone(), window, cx));
         self.brains
             .update(cx, |brains, cx| brains.share(shared.clone(), window, cx));
+        self.brain_browser
+            .update(cx, |browser, cx| browser.share(shared.clone(), window, cx));
         self.models
             .update(cx, |models, cx| models.share(shared.clone(), window, cx));
         self.skills
@@ -875,6 +911,49 @@ impl Workspace {
         self.sync_archive(window, cx);
         cx.notify();
     }
+    /// Opens the search overlay over `brain`'s repository and scope, or else over the brain
+    /// browser's brain on that page, or the selected project's Space's brain.
+    fn search_brain(
+        &mut self,
+        brain: Option<(String, Option<String>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let brain = brain.or_else(|| {
+            (self.shared.page == Page::BrainBrowser)
+                .then(|| self.brain_browser.read(cx).searched())
+                .flatten()
+        });
+        let selected = brain_search::searched_for(&self.shared);
+        let (searched, scope) = match brain {
+            None => {
+                let scope = match &selected {
+                    brain_search::Searched::Brain { project, .. } => {
+                        project.as_ref().map(|(id, _)| id.clone())
+                    }
+                    brain_search::Searched::NoBrain { .. } => None,
+                };
+                (selected, scope)
+            }
+            Some((repository, scope)) => {
+                // The project chip is the scope's project, or the selected one in this brain.
+                let project = self.shared.snapshot().and_then(|snapshot| {
+                    let projects = brain_browser_view::projects_of_brain(snapshot, &repository);
+                    let wanted = scope.clone().or_else(|| self.shared.project_id());
+                    (projects.into_iter())
+                        .find(|p| Some(&p.id) == wanted.as_ref())
+                        .map(|p| (p.id.clone(), p.name.clone()))
+                });
+                let searched = brain_search::Searched::Brain {
+                    repository,
+                    project,
+                };
+                (searched, scope)
+            }
+        };
+        self.brain_search
+            .update(cx, |search, cx| search.open(searched, scope, window, cx));
+    }
     /// Returns true when an open form displays the failure itself.
     fn form_failed(&mut self, command: &Command, error: &str, cx: &mut Context<Self>) -> bool {
         if matches!(
@@ -1288,6 +1367,9 @@ fn register_window_actions(cx: &mut App) {
     cx.on_action(|_: &NewProject, cx| {
         with_workspace(cx, |view, window, cx| view.new_project(window, cx))
     });
+    cx.on_action(|_: &brain_search::OpenBrainSearch, cx| {
+        with_workspace(cx, |view, window, cx| view.search_brain(None, window, cx))
+    });
     cx.on_action(|_: &CheckForUpdates, cx| {
         with_workspace(cx, |view, window, cx| {
             view.sidebar.update(cx, |sidebar, cx| {
@@ -1398,6 +1480,7 @@ fn main() -> anyhow::Result<()> {
             KeyBinding::new("cmd-,", OpenSettings, None),
             KeyBinding::new("cmd-q", Quit, None),
         ]);
+        cx.bind_keys(brain_search::bindings());
         cx.on_action(|_: &About, _| show_about());
         // Settings needs no main window, so it opens even after that one is closed.
         // Deferred so ⌘, pressed inside Settings can still focus that window.

@@ -630,7 +630,9 @@ impl Sidebar {
             (Page::Models, "Models", "settings"),
             (Page::Skills, "Skills", "book"),
         ] {
-            let selected = self.shared.page == page;
+            // The brain browser is a page of Brains.
+            let selected = self.shared.page == page
+                || (page == Page::Brains && self.shared.page == Page::BrainBrowser);
             nav = nav.child(
                 self.row(SharedString::from(label), selected, p)
                     .on_click(cx.listener(move |_, _, _, c| c.emit(Intent::OpenPage(page))))

@@ -2449,9 +2449,9 @@ mod tests {
             tabs,
             [
                 "Contract v11",
-                "Coordinator v10",
-                "Implementer v3",
-                "Verifier v1",
+                "Coordinator v11",
+                "Implementer v4",
+                "Verifier v2",
                 "PR keeper v1"
             ]
         );
