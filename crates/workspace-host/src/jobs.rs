@@ -61,7 +61,6 @@ pub(crate) struct JobPass {
     pub(crate) changed: bool,
 }
 
-/// How a run's turn ended.
 pub(crate) enum RunEnd {
     Finished,
     Failed(String),
@@ -455,6 +454,33 @@ fn check_source(provider: Provider, env: &SourceEnv, source: &Source) -> SourceC
     }
 }
 
+/// The checks of a run's or a card's sources, which run off the host's thread: each MCP
+/// handshake and sign-in check may take up to `CHECK_LIMIT`.
+pub(crate) struct SourceChecks {
+    provider: Provider,
+    env: SourceEnv,
+    sources: Vec<Source>,
+}
+impl SourceChecks {
+    pub(crate) fn run(&self) -> Vec<SourceCheck> {
+        (self.sources.iter())
+            .map(|source| check_source(self.provider, &self.env, source))
+            .collect()
+    }
+}
+
+/// A recipe card's preview, waiting for its sources' checks.
+pub(crate) struct PendingPreview {
+    preview: RecipePreview,
+    checks: SourceChecks,
+}
+impl PendingPreview {
+    pub(crate) fn check(mut self) -> RecipePreview {
+        self.preview.sources = self.checks.run();
+        self.preview
+    }
+}
+
 impl Host {
     /// The built-in host jobs, which only the host's code adds.
     pub(crate) fn built_in(&self, key: &JobKey) -> Option<&BuiltIn> {
@@ -474,11 +500,17 @@ impl Host {
     fn source_env(&self) -> SourceEnv {
         (self.source_env.clone()).unwrap_or_else(SourceEnv::of_host)
     }
-    pub(crate) fn check_sources(&self, provider: Provider, sources: &[Source]) -> Vec<SourceCheck> {
-        let env = self.source_env();
-        (sources.iter())
-            .map(|source| check_source(provider, &env, source))
-            .collect()
+    pub(crate) fn source_checks(&self, provider: Provider, sources: &[Source]) -> SourceChecks {
+        SourceChecks {
+            provider,
+            env: self.source_env(),
+            sources: sources.to_vec(),
+        }
+    }
+    /// The runs whose sources wait to be checked, for the service to check off the host's
+    /// thread and hand back to `sources_checked`.
+    pub(crate) fn take_source_checks(&mut self) -> Vec<(String, SourceChecks)> {
+        std::mem::take(&mut self.source_checks)
     }
     /// Why this Mac does not run a recipe: a "One runner" job in a Space stored on GitHub
     /// runs only on its runner's Mac.
@@ -550,9 +582,9 @@ impl Host {
         notes.push(format!("{row_name}: {}", pick.reason));
         Ok((pick.profile, notes.join(" "), pick.waits))
     }
-    /// What a recipe card shows: its schedule in words, its next runs, its sources checked now
-    /// for the provider it would run on, and its model.
-    pub fn preview_job(&self, recipe: &Recipe) -> Result<RecipePreview> {
+    /// What a recipe card shows: its schedule in words, its next runs, its model, and once
+    /// checked, its sources as the provider it would run on finds them.
+    pub(crate) fn preview_job(&self, recipe: &Recipe) -> Result<PendingPreview> {
         validate(recipe)?;
         let (provider, model) = match self.job_model(recipe) {
             Ok((profile, reason, _)) => {
@@ -560,11 +592,14 @@ impl Host {
             }
             Err(error) => (Provider::Claude, format!("{error:#}")),
         };
-        Ok(RecipePreview {
-            schedule: schedule_words(&recipe.schedule),
-            next_runs: next_times(recipe, now(), NEXT_SHOWN),
-            sources: self.check_sources(provider, &recipe.sources),
-            model,
+        Ok(PendingPreview {
+            preview: RecipePreview {
+                schedule: schedule_words(&recipe.schedule),
+                next_runs: next_times(recipe, now(), NEXT_SHOWN),
+                sources: vec![],
+                model,
+            },
+            checks: self.source_checks(provider, &recipe.sources),
         })
     }
     /// Saves a job as the user confirmed it: the one way a job is created or changed. A "One
@@ -858,7 +893,8 @@ impl Host {
         ensure!(!running, "The job is running now");
         self.run_job(key, None, 0, now())
     }
-    /// Starts one run and records it, or records why it did not start.
+    /// Records one run and, for a recipe, queues the check of its sources; `sources_checked`
+    /// starts its thread or records why it did not start. A built-in job runs now.
     fn run_job(
         &mut self,
         key: &JobKey,
@@ -895,35 +931,60 @@ impl Host {
             return Ok(run);
         }
         let recipe = self.recipe(key)?;
-        let not_started = |mut run: JobRun, reason: String| {
-            run.outcome = RunOutcome::NotStarted;
-            run.ended_at = Some(at);
-            run.reason = reason;
-            run
-        };
-        let (profile, reason, waits) = match self.job_model(&recipe) {
-            Ok(model) => model,
-            Err(error) => {
-                let run = not_started(run, format!("{error:#}"));
-                self.save_run(&run)?;
-                return Ok(run);
+        match self.job_model(&recipe) {
+            Ok((profile, reason, _)) => {
+                let checks = self.source_checks(profile.provider, &recipe.sources);
+                self.source_checks.push((run.id.clone(), checks));
+                run.profile = Some(profile);
+                run.model_reason = reason;
             }
-        };
-        run.profile = Some(profile.clone());
-        run.model_reason = reason.clone();
-        run.sources = self.check_sources(profile.provider, &recipe.sources);
+            Err(error) => {
+                run.outcome = RunOutcome::NotStarted;
+                run.ended_at = Some(at);
+                run.reason = format!("{error:#}");
+            }
+        }
+        self.save_run(&run)?;
+        Ok(run)
+    }
+    /// Starts a run's thread once its sources passed their checks, or records what is missing.
+    /// A run stopped while its sources were checked stays stopped.
+    pub(crate) fn sources_checked(&mut self, run_id: &str, checks: Vec<SourceCheck>) -> Result<()> {
+        let mut run = self.job_run(run_id)?;
+        if run.outcome != RunOutcome::Running || run.thread_id.is_some() {
+            return Ok(());
+        }
+        run.sources = checks;
         let missing: Vec<&str> = (run.sources.iter())
             .filter_map(|check| check.problem.as_deref())
             .collect();
         if !missing.is_empty() {
-            let reason = missing.join(" ");
-            let run = not_started(run, reason);
-            self.save_run(&run)?;
-            return Ok(run);
+            run.reason = missing.join(" ");
+            run.outcome = RunOutcome::NotStarted;
+            run.ended_at = Some(now());
+            return self.save_run(&run);
         }
+        let started = self.start_run_thread(&mut run);
+        if let Err(error) = started {
+            run.outcome = RunOutcome::Failed;
+            run.ended_at = Some(now());
+            run.reason = format!("Could not start: {error:#}");
+            run.thread_id = None;
+            self.save_run(&run)?;
+        }
+        Ok(())
+    }
+    /// Opens a checked run's thread on the model its record names, with the recipe's prompt.
+    fn start_run_thread(&mut self, run: &mut JobRun) -> Result<()> {
+        let key = run.job.clone();
+        let recipe = self.recipe(&key)?;
+        let profile = run.profile.clone().context("The run has no model")?;
+        let reason = run.model_reason.clone();
+        let waits = self.job_model(&recipe).is_ok_and(|(_, _, waits)| waits);
         let thread_id = new_id();
         let zone = timezone(&recipe.schedule.timezone)?;
-        let when = (zone.timestamp_millis_opt(scheduled.unwrap_or(at)).single())
+        let at = run.scheduled_at.unwrap_or(run.started_at);
+        let when = (zone.timestamp_millis_opt(at).single())
             .map(|t| t.format("%a %b %-d %H:%M").to_string())
             .unwrap_or_default();
         let title =
@@ -939,7 +1000,7 @@ impl Host {
         };
         run.thread_id = Some(thread_id.clone());
         self.atomically(|host| {
-            host.save_run(&run)?;
+            host.save_run(run)?;
             let model = (profile, Chooser::Wiffletree, reason, waits);
             host.open_thread(
                 &thread_id,
@@ -948,9 +1009,9 @@ impl Host {
                 Some(job),
                 model,
                 first,
-            )
-        })?;
-        Ok(run)
+            )?;
+            Ok(())
+        })
     }
     /// The run a job run's thread is, while it runs.
     fn running_run_of(&self, thread: &str) -> Result<Option<JobRun>> {
@@ -982,21 +1043,21 @@ impl Host {
             [],
         )?;
         for mut run in running {
-            let Some(thread) = run.thread_id.clone() else {
-                continue;
-            };
-            let queued: i64 = self.db.query_row(
-                "SELECT count(*) FROM messages WHERE recipient=?1 AND receipt='queued'",
-                [&thread],
-                |r| r.get(0),
-            )?;
-            if queued > 0 {
-                continue;
+            // A run without a thread was still having its sources checked.
+            if let Some(thread) = run.thread_id.clone() {
+                let queued: i64 = self.db.query_row(
+                    "SELECT count(*) FROM messages WHERE recipient=?1 AND receipt='queued'",
+                    [&thread],
+                    |r| r.get(0),
+                )?;
+                if queued > 0 {
+                    continue;
+                }
+                self.db.execute(
+                    "UPDATE messages SET receipt='completed' WHERE recipient=?1 AND receipt='held'",
+                    [&thread],
+                )?;
             }
-            self.db.execute(
-                "UPDATE messages SET receipt='completed' WHERE recipient=?1 AND receipt='held'",
-                [&thread],
-            )?;
             run.outcome = RunOutcome::Failed;
             run.ended_at = Some(now());
             run.long_minutes = None;
@@ -1020,14 +1081,16 @@ impl Host {
     pub fn stop_job_run(&mut self, run_id: &str) -> Result<Option<String>> {
         let mut run = self.job_run(run_id)?;
         ensure!(run.outcome == RunOutcome::Running, "The run has ended");
-        let thread = run.thread_id.clone().context("The run has no thread")?;
-        if self.in_turn.contains(&thread) {
-            return Ok(Some(thread));
+        // A run still having its sources checked has no thread, and never gets one now.
+        if let Some(thread) = run.thread_id.clone() {
+            if self.in_turn.contains(&thread) {
+                return Ok(Some(thread));
+            }
+            self.db.execute(
+                "UPDATE messages SET receipt='completed' WHERE recipient=?1 AND receipt IN ('queued','held')",
+                [&thread],
+            )?;
         }
-        self.db.execute(
-            "UPDATE messages SET receipt='completed' WHERE recipient=?1 AND receipt IN ('queued','held')",
-            [&thread],
-        )?;
         run.outcome = RunOutcome::Stopped;
         run.ended_at = Some(now());
         run.reason = STOPPED_BY_YOU.into();
@@ -1074,8 +1137,31 @@ impl Host {
     }
 }
 
-/// Why a run the user stopped ended.
 pub(crate) const STOPPED_BY_YOU: &str = "Stopped: you stopped the run.";
+
+/// Starts and proposes jobs as the service does, with sources checked here, not off the thread.
+#[cfg(test)]
+impl Host {
+    pub(crate) fn run_now(&mut self, key: &JobKey) -> Result<JobRun> {
+        let run = self.run_job_now(key)?;
+        self.check_queued_sources();
+        self.job_run(&run.id)
+    }
+    pub(crate) fn fire_and_check(&mut self, now: i64) -> Result<JobPass> {
+        let pass = self.fire_due_jobs(now)?;
+        self.check_queued_sources();
+        Ok(pass)
+    }
+    fn check_queued_sources(&mut self) {
+        for (run, checks) in self.take_source_checks() {
+            self.sources_checked(&run, checks.run()).unwrap();
+        }
+    }
+    pub(crate) fn propose(&mut self, session: &Session, args: &Value) -> Result<Value> {
+        let (recipe, pending) = self.propose_job(session, args)?;
+        self.add_recipe_card(&session.id, recipe, pending.check())
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1275,7 +1361,7 @@ mod tests {
             .unwrap();
         let session = s.host.session(&thread.id).unwrap();
         let args = json!({"name":"Morning brief","prompt":"Brief me.","cron":"0 7 * * 1-5","timezone":"America/New_York","sources":[]});
-        s.host.thread_tool(&session, "propose_job", &args).unwrap();
+        s.host.propose(&session, &args).unwrap();
         let card = s.host.thread("t1").unwrap().cards.remove(0);
         let CardKind::Recipe { recipe, preview } = card.kind else {
             panic!("a recipe card");
@@ -1338,11 +1424,11 @@ mod tests {
             .unwrap())
         .recipe
         .key();
-        let pass = s.host.fire_due_jobs(ny("2026-10-29 09:10")).unwrap();
+        let pass = s.host.fire_and_check(ny("2026-10-29 09:10")).unwrap();
         assert_eq!(pass.next, Some(ny("2026-10-29 10:00")));
         assert!(s.host.job_runs(&key, 10).unwrap().is_empty());
         // Asleep from 09:10 to 12:20.
-        let pass = s.host.fire_due_jobs(ny("2026-10-29 12:20")).unwrap();
+        let pass = s.host.fire_and_check(ny("2026-10-29 12:20")).unwrap();
         assert_eq!(pass.next, Some(ny("2026-10-29 13:00")));
         let runs = s.host.job_runs(&key, 10).unwrap();
         assert_eq!(runs.len(), 1);
@@ -1375,7 +1461,9 @@ mod tests {
             (RunOutcome::Finished, 0)
         );
         // The next time runs on time, in a thread of its own.
-        s.host.fire_due_jobs(ny("2026-10-29 13:00") + 1000).unwrap();
+        s.host
+            .fire_and_check(ny("2026-10-29 13:00") + 1000)
+            .unwrap();
         let runs = s.host.job_runs(&key, 10).unwrap();
         assert_eq!((runs.len(), runs[0].catch_up), (2, 0));
         assert_ne!(runs[0].thread_id, runs[1].thread_id);
@@ -1390,19 +1478,19 @@ mod tests {
             .unwrap())
         .recipe
         .key();
-        s.host.fire_due_jobs(ny("2026-10-29 09:10")).unwrap();
+        s.host.fire_and_check(ny("2026-10-29 09:10")).unwrap();
         s.host
             .set_job_enabled(&s.personal.id, "hourly", false)
             .unwrap();
-        s.host.fire_due_jobs(ny("2026-10-29 12:20")).unwrap();
+        s.host.fire_and_check(ny("2026-10-29 12:20")).unwrap();
         assert!(s.host.job_runs(&key, 10).unwrap().is_empty());
         s.host
             .set_job_enabled(&s.personal.id, "hourly", true)
             .unwrap();
-        let pass = s.host.fire_due_jobs(ny("2026-10-29 12:30")).unwrap();
+        let pass = s.host.fire_and_check(ny("2026-10-29 12:30")).unwrap();
         assert_eq!(pass.next, Some(ny("2026-10-29 13:00")));
         assert!(s.host.job_runs(&key, 10).unwrap().is_empty());
-        s.host.fire_due_jobs(ny("2026-10-29 13:00")).unwrap();
+        s.host.fire_and_check(ny("2026-10-29 13:00")).unwrap();
         assert_eq!(s.host.job_runs(&key, 10).unwrap()[0].catch_up, 0);
     }
 
@@ -1413,7 +1501,7 @@ mod tests {
         let mut brief = recipe(&s.personal, "Morning brief", "0 7 * * 1-5");
         brief.sources = vec![gh(), linear()];
         let key = s.host.save_job(brief).unwrap().recipe.key();
-        let run = s.host.run_job_now(&key).unwrap();
+        let run = s.host.run_now(&key).unwrap();
         assert_eq!(run.outcome, RunOutcome::NotStarted);
         assert_eq!(run.thread_id, None);
         assert!(
@@ -1430,7 +1518,7 @@ mod tests {
         s.cli("gh", 0);
         s.mcp_server("linear-mcp", Some(&["list_issues", "create_issue"]));
         s.claude_servers(&[("linear", "linear-mcp")]);
-        let run = s.host.run_job_now(&key).unwrap();
+        let run = s.host.run_now(&key).unwrap();
         assert_eq!(run.outcome, RunOutcome::Running);
         assert!(run.sources.iter().all(|check| check.problem.is_none()));
         // The run is offered only its recipe's sources: gh's commands and linear's tool.
@@ -1464,10 +1552,7 @@ mod tests {
             ("aws --profile readonly ec2 describe-instances", None),
         ] {
             let args = propose(prefix, check);
-            assert!(
-                s.host.thread_tool(&session, "propose_job", &args).is_err(),
-                "{prefix}"
-            );
+            assert!(s.host.propose(&session, &args).is_err(), "{prefix}");
             let mut write = recipe(&s.personal, "Brief", "0 7 * * *");
             write.sources = vec![Source::Cli {
                 command: prefix.split(' ').next().unwrap().into(),
@@ -1485,11 +1570,11 @@ mod tests {
         assert!(s.host.recipes().unwrap().is_empty());
         // A read is proposed, saved and run, and the host runs only `gh auth status`.
         let args = propose("gh pr list", None);
-        s.host.thread_tool(&session, "propose_job", &args).unwrap();
+        s.host.propose(&session, &args).unwrap();
         let mut brief = recipe(&s.personal, "Brief", "0 7 * * *");
         brief.sources = vec![gh()];
         let key = s.host.save_job(brief).unwrap().recipe.key();
-        s.host.run_job_now(&key).unwrap();
+        s.host.run_now(&key).unwrap();
         assert_eq!(
             fs::read_to_string(&calls).unwrap(),
             "auth status\nauth status\n"
@@ -1519,7 +1604,8 @@ mod tests {
                 extra: Default::default(),
             };
             s.host
-                .check_sources(Provider::Claude, &[source])
+                .source_checks(Provider::Claude, &[source])
+                .run()
                 .remove(0)
                 .problem
         };
@@ -1554,7 +1640,7 @@ mod tests {
             .unwrap())
         .recipe
         .key();
-        let run = s.host.run_job_now(&key).unwrap();
+        let run = s.host.run_now(&key).unwrap();
         let session = s.host.session(run.thread_id.as_ref().unwrap()).unwrap();
         let text = s.host.thread_instructions(&session).unwrap();
         assert!(text.contains("# Job run core — v1"), "{text}");
@@ -1573,10 +1659,7 @@ mod tests {
             .unwrap();
         let session = s.host.session(&thread.id).unwrap();
         let args = json!({"name":"Morning brief","prompt":"Other.","cron":"0 8 * * *","timezone":"America/New_York","sources":[]});
-        let refused = s
-            .host
-            .thread_tool(&session, "propose_job", &args)
-            .unwrap_err();
+        let refused = s.host.propose(&session, &args).unwrap_err();
         assert!(
             refused
                 .to_string()
@@ -1605,13 +1688,13 @@ mod tests {
         brief.sources = vec![gh()];
         let key = s.host.save_job(brief.clone()).unwrap().recipe.key();
         assert_eq!(
-            s.host.run_job_now(&key).unwrap().outcome,
+            s.host.run_now(&key).unwrap().outcome,
             RunOutcome::NotStarted
         );
         brief.sources = vec![];
         s.host.save_job(brief).unwrap();
         for _ in 0..MAX_RUNS_SHOWN {
-            let run = s.host.run_job_now(&key).unwrap();
+            let run = s.host.run_now(&key).unwrap();
             s.host
                 .job_run_ended(run.thread_id.as_ref().unwrap(), RunEnd::Finished)
                 .unwrap();
@@ -1637,7 +1720,7 @@ mod tests {
         brief.sources = vec![gh()];
         brief.model = Some(codex.clone());
         let key = s.host.save_job(brief).unwrap().recipe.key();
-        let run = s.host.run_job_now(&key).unwrap();
+        let run = s.host.run_now(&key).unwrap();
         assert_eq!(run.profile.map(|p| p.provider), Some(Provider::Claude));
         assert!(
             run.model_reason
@@ -1655,7 +1738,7 @@ mod tests {
             then: Then::Wait,
         }));
         s.host.set_model_selection(&selection).unwrap();
-        let run = s.host.run_job_now(&key).unwrap();
+        let run = s.host.run_now(&key).unwrap();
         assert_eq!(run.outcome, RunOutcome::NotStarted);
         assert_eq!(
             run.reason,
@@ -1673,7 +1756,7 @@ mod tests {
         .recipe
         .key();
         for (version, body) in [(1, "<p>one</p>"), (2, "<p>two</p>")] {
-            let run = s.host.run_job_now(&key).unwrap();
+            let run = s.host.run_now(&key).unwrap();
             let thread = s.thread_of(&run);
             let session = s.host.session(&thread.id).unwrap();
             let scratch = assistant::scratch_folder(s.home.path(), &thread.id);
@@ -1728,9 +1811,9 @@ mod tests {
             },
         });
         let key = JobKey::built_in("brain-compile");
-        s.host.fire_due_jobs(ny("2026-10-30 01:00")).unwrap();
+        s.host.fire_and_check(ny("2026-10-30 01:00")).unwrap();
         // Asleep from 01:00 to 07:00.
-        let pass = s.host.fire_due_jobs(ny("2026-10-30 07:00")).unwrap();
+        let pass = s.host.fire_and_check(ny("2026-10-30 07:00")).unwrap();
         assert_eq!(pass.next, Some(ny("2026-10-31 02:00")));
         let runs = s.host.job_runs(&key, 10).unwrap();
         assert_eq!(runs.len(), 1);
@@ -1742,7 +1825,7 @@ mod tests {
         assert_eq!(COMPILES.load(std::sync::atomic::Ordering::SeqCst), 1);
         // No Space lists it, and Run now is all a command can do to it.
         assert!(s.host.job_states().unwrap().is_empty());
-        s.host.run_job_now(&key).unwrap();
+        s.host.run_now(&key).unwrap();
         assert_eq!(COMPILES.load(std::sync::atomic::Ordering::SeqCst), 2);
         for command in [
             Command::SetJobEnabled {
@@ -1801,7 +1884,7 @@ mod tests {
         );
 
         let key = saved.recipe.key();
-        let run = s.host.run_job_now(&key).unwrap();
+        let run = s.host.run_now(&key).unwrap();
         let thread = s.thread_of(&run);
         let scratch = assistant::scratch_folder(s.home.path(), &thread.id);
         fs::write(scratch.join("dashboard.html"), "<p>one</p>").unwrap();
@@ -1822,10 +1905,10 @@ mod tests {
             machine: "Jamie's Mac".into(),
         });
         s.host.save_job(theirs).unwrap();
-        s.host.fire_due_jobs(ny("2026-11-02 07:00")).unwrap();
-        s.host.fire_due_jobs(ny("2026-11-02 08:00")).unwrap();
+        s.host.fire_and_check(ny("2026-11-02 07:00")).unwrap();
+        s.host.fire_and_check(ny("2026-11-02 08:00")).unwrap();
         assert_eq!(s.host.job_runs(&key, 10).unwrap().len(), 1);
-        let refused = s.host.run_job_now(&key).unwrap_err().to_string();
+        let refused = s.host.run_now(&key).unwrap_err().to_string();
         assert!(refused.contains("Runs on Jamie's Mac"), "{refused}");
     }
 
@@ -1863,8 +1946,8 @@ mod tests {
             .unwrap())
         .recipe
         .key();
-        let run = s.host.run_job_now(&key).unwrap();
-        assert!(s.host.run_job_now(&key).is_err(), "one run at a time");
+        let run = s.host.run_now(&key).unwrap();
+        assert!(s.host.run_now(&key).is_err(), "one run at a time");
         assert_eq!(s.host.stop_job_run(&run.id).unwrap(), None);
         let stopped = s.host.job_run(&run.id).unwrap();
         assert_eq!(
@@ -1878,7 +1961,7 @@ mod tests {
         );
         assert!(!s.host.note_long_job_run(&thread, 30).unwrap());
 
-        let run = s.host.run_job_now(&key).unwrap();
+        let run = s.host.run_now(&key).unwrap();
         let thread = run.thread_id.clone().unwrap();
         assert!(s.host.note_long_job_run(&thread, 30).unwrap());
         assert_eq!(s.host.job_run(&run.id).unwrap().long_minutes, Some(30));
@@ -1886,6 +1969,31 @@ mod tests {
         s.host
             .advance_receipt(&prompt.id, Receipt::Delivered)
             .unwrap();
+        drop(s.host);
+        let host = Host::open_set_up(s.home.path()).unwrap();
+        let ended = host.job_run(&run.id).unwrap();
+        assert_eq!(ended.outcome, RunOutcome::Failed);
+        assert_eq!(ended.reason, "Wiffletree stopped during the run.");
+    }
+
+    #[test]
+    fn a_run_stopped_or_cut_off_while_its_sources_are_checked_never_starts() {
+        let mut s = jobs();
+        let key = (s.host.save_job(recipe(&s.personal, "Brief", "0 7 * * *")))
+            .unwrap()
+            .recipe
+            .key();
+        let run = s.host.run_job_now(&key).unwrap();
+        let (checked, checks) = s.host.take_source_checks().remove(0);
+        assert_eq!(s.host.stop_job_run(&run.id).unwrap(), None);
+        s.host.sources_checked(&checked, checks.run()).unwrap();
+        let stopped = s.host.job_run(&run.id).unwrap();
+        assert_eq!(
+            (stopped.outcome, stopped.thread_id),
+            (RunOutcome::Stopped, None)
+        );
+
+        let run = s.host.run_job_now(&key).unwrap();
         drop(s.host);
         let host = Host::open_set_up(s.home.path()).unwrap();
         let ended = host.job_run(&run.id).unwrap();

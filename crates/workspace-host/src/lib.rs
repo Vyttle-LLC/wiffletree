@@ -193,6 +193,8 @@ pub struct Host {
     pub(crate) built_ins: Vec<jobs::BuiltIn>,
     /// Where jobs' sources are checked; the host's own when `None`. Tests give their own.
     pub(crate) source_env: Option<jobs::SourceEnv>,
+    /// Runs whose sources wait to be checked, for the service to check off the host thread.
+    source_checks: Vec<(String, jobs::SourceChecks)>,
 }
 /// A report that set its ticket's state while the reporter's turn ran.
 pub(crate) struct MidTurnReport {
@@ -403,6 +405,7 @@ impl Host {
             linear: linear_import::Linear::new(linear_import::Tools::real(&home)),
             built_ins: vec![],
             source_env: None,
+            source_checks: vec![],
         };
         // Before anything reads or writes a shared setting, so the shared folder is in place:
         // clones an earlier release named `<owner>-<name>` first, then one still in `shared/`.
@@ -1751,7 +1754,10 @@ impl Host {
                 }
                 serde_json::to_value(self.save_job(*recipe)?)?
             }
-            Command::PreviewJob { recipe } => serde_json::to_value(self.preview_job(&recipe)?)?,
+            // The service checks a preview's sources off the host thread instead.
+            Command::PreviewJob { recipe } => {
+                serde_json::to_value(self.preview_job(&recipe)?.check())?
+            }
             Command::SetJobEnabled {
                 space_id,
                 job_id,

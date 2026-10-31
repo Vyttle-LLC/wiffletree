@@ -26,7 +26,6 @@ pub(super) fn starts_at_login() -> bool {
     status == ENABLED || status == REQUIRES_APPROVAL
 }
 
-/// Turns opening at login on or off.
 pub(super) fn set_starts_at_login(on: bool) -> Result<()> {
     let mut error: *mut Object = std::ptr::null_mut();
     // SAFETY: both selectors take an `NSError **` and return a `BOOL`.

@@ -5,7 +5,7 @@ use workspace_core::assistant::{
     CardKind, JobRunOf, Thread, ThreadCard, ThreadHit, ThreadTab, title_from_message,
     validate_title,
 };
-use workspace_core::job::{OutputKind, Recipe, Sharing, job_id};
+use workspace_core::job::{OutputKind, Recipe, RecipePreview, Sharing, job_id};
 
 /// The message a thread is sent when the human asks for Make this a project's brief.
 pub(crate) const BRIEF_REQUEST: &str = "Make this a project: write a project brief from our conversation, with a short project name, and show it to me with project_brief.";
@@ -659,13 +659,6 @@ impl Host {
             return Ok(json!({"version": output.version, "kept": output.kept}));
         }
         match name {
-            "propose_job" => {
-                let recipe = proposed_recipe(&thread, args)?;
-                self.refuse_taken_job(&recipe)?;
-                let preview = self.preview_job(&recipe)?;
-                let recipe = Box::new(recipe);
-                self.add_card(&mut thread, CardKind::Recipe { recipe, preview })
-            }
             "save_output" => {
                 let title = card_text(args, "title", 200)?;
                 let path = card_text(args, "path", 1024)?;
@@ -694,6 +687,34 @@ impl Host {
             }
             other => bail!("{other} is not one of a thread's tools"),
         }
+    }
+    /// The recipe a thread's `propose_job` describes, with its card's preview waiting for its
+    /// sources' checks, which the service runs off the host thread.
+    pub(crate) fn propose_job(
+        &self,
+        session: &Session,
+        args: &Value,
+    ) -> Result<(Recipe, jobs::PendingPreview)> {
+        let thread = self.thread(&session.id)?;
+        ensure!(
+            thread.job.is_none(),
+            "propose_job is not one of a job run's tools"
+        );
+        let recipe = proposed_recipe(&thread, args)?;
+        self.refuse_taken_job(&recipe)?;
+        let preview = self.preview_job(&recipe)?;
+        Ok((recipe, preview))
+    }
+    /// Shows a proposed recipe's card, its sources checked, in the thread.
+    pub(crate) fn add_recipe_card(
+        &self,
+        thread: &str,
+        recipe: Recipe,
+        preview: RecipePreview,
+    ) -> Result<Value> {
+        let mut thread = self.thread(thread)?;
+        let recipe = Box::new(recipe);
+        self.add_card(&mut thread, CardKind::Recipe { recipe, preview })
     }
     /// Copies a scratch file into the board store under the thread's Space and commits it; a
     /// title saved before gets a new version. Each output is a folder holding only its file,

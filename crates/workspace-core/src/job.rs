@@ -453,6 +453,14 @@ pub fn validate_source(source: &Source) -> Result<()> {
                     "{prefix:?} is not a read a job may run: a job may list only the read commands Wiffletree allows for {command}"
                 );
             }
+            if command == "aws" {
+                let profile = |prefix: &String| prefix.split_whitespace().nth(2).map(str::to_owned);
+                let first = profile(&prefixes[0]);
+                ensure!(
+                    prefixes.iter().all(|prefix| profile(prefix) == first),
+                    "An aws source's commands name two profiles; use one source per profile"
+                );
+            }
         }
     }
     Ok(())
@@ -784,6 +792,17 @@ mod tests {
             let refused = validate_source(&cli(command, prefix)).unwrap_err();
             assert!(refused.to_string().contains(command), "{prefix}: {refused}");
         }
+        let two_profiles = Source::Cli {
+            command: "aws".into(),
+            prefixes: vec![
+                "aws --profile readonly logs filter-log-events".into(),
+                "aws --profile admin ecs list-tasks".into(),
+            ],
+            check: None,
+            extra: Default::default(),
+        };
+        let refused = validate_source(&two_profiles).unwrap_err();
+        assert!(refused.to_string().contains("one source per profile"));
         let mut own = gh(&["gh pr list"]);
         if let Source::Cli { check, .. } = &mut own {
             *check = Some("gh pr list".into());

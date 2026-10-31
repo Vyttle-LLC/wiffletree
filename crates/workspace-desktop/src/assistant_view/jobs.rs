@@ -9,7 +9,6 @@ use workspace_core::job::{
 
 /// What the recipe card says a job may do, as the mockup words it.
 const ONLY_READ: &str = "Jobs only read. Each run is a fresh read-only thread; it never sends, posts or changes anything in these apps. Runs need Wiffletree running; missed runs come back as one catch-up run.";
-/// What the Jobs list says about when jobs run.
 const WHILE_RUNNING: &str = "Jobs run only while Wiffletree runs on this Mac, and never wake it. Missed runs come back as one catch-up run when it runs again.";
 
 /// What the assistant shows in place of a thread.
@@ -392,7 +391,6 @@ impl AssistantPage {
             )
     }
 
-    /// What the assistant shows while a jobs view is open.
     pub(super) fn jobs_body(
         &self,
         view: &JobsView,

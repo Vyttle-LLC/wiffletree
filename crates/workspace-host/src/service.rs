@@ -639,6 +639,15 @@ enum Event {
         router::RouterRun,
         std::result::Result<workspace_core::assistant::router::RouterAnswer, String>,
     ),
+    /// A job run's sources were checked on their own thread.
+    SourcesChecked(String, Vec<workspace_core::job::SourceCheck>),
+    /// A thread's proposed recipe had its sources checked on their own thread, for its card.
+    JobProposed {
+        thread: String,
+        recipe: Box<workspace_core::job::Recipe>,
+        preview: workspace_core::job::RecipePreview,
+        reply: Reply,
+    },
     /// A settings repository's clone is ready, off the host thread, to replace the shared folder.
     SettingsRepositoryPrepared {
         prepared: Result<sync::Prepared>,
@@ -1474,6 +1483,14 @@ impl Actor {
                     });
                 });
             }
+            Command::PreviewJob { recipe } => {
+                let pending = self.host.preview_job(recipe)?;
+                let reply = reply.clone();
+                std::thread::spawn(move || {
+                    let preview = serde_json::to_value(pending.check());
+                    let _ = reply.try_send(preview.map_err(|e| e.to_string()));
+                });
+            }
             Command::CheckSettingsRepository { repository } => {
                 let (home, input, reply) =
                     (self.host.home.clone(), repository.clone(), reply.clone());
@@ -1687,6 +1704,7 @@ impl Actor {
         self.refresh_brains(now());
         self.start_skill_merges();
         self.start_router_runs();
+        self.start_source_checks();
         self.signal(dirty || syncing);
         if !self.checkout_deferred.is_empty()
             && self
@@ -1769,6 +1787,25 @@ impl Actor {
     fn start_router_runs(&mut self) {
         for run in self.host.take_router_runs() {
             spawn_router_run(self.sender.clone(), run);
+        }
+    }
+    fn start_source_checks(&mut self) {
+        for (run, checks) in self.host.take_source_checks() {
+            spawn_job(
+                self.sender.clone(),
+                (run, checks),
+                |(_, checks)| checks.run(),
+                // A check that panicked keeps the run from starting.
+                |_| {
+                    vec![workspace_core::job::SourceCheck {
+                        source: "Sources".into(),
+                        problem: Some(
+                            "The check of the run's sources stopped unexpectedly.".into(),
+                        ),
+                    }]
+                },
+                |(run, _), checked| Event::SourcesChecked(run, checked),
+            );
         }
     }
 
@@ -2322,6 +2359,22 @@ impl Actor {
                 self.host.finish_merge_run(run, answered);
                 true
             }
+            Event::SourcesChecked(run, checks) => {
+                if let Err(e) = self.host.sources_checked(&run, checks) {
+                    eprintln!("Starting job run {run}: {e:#}");
+                }
+                true
+            }
+            Event::JobProposed {
+                thread,
+                recipe,
+                preview,
+                reply,
+            } => {
+                let card = self.host.add_recipe_card(&thread, *recipe, preview);
+                let _ = reply.try_send(card.map_err(|e| format!("{e:#}")));
+                true
+            }
             Event::Routed(run, answered) => {
                 let message = run.message_id.clone();
                 if let Err(e) = self.host.finish_router_run(run, answered) {
@@ -2686,6 +2739,19 @@ impl Actor {
                     // A thread is offered its own tools, and only those.
                     let session = self.host.session(&id)?;
                     if session.role.is_thread() {
+                        if name == "propose_job" {
+                            let (recipe, pending) = self.host.propose_job(&session, &args)?;
+                            let (sender, reply) = (self.sender.clone(), reply.clone());
+                            std::thread::spawn(move || {
+                                let _ = sender.send_blocking(Event::JobProposed {
+                                    thread: session.id,
+                                    recipe: Box::new(recipe),
+                                    preview: pending.check(),
+                                    reply,
+                                });
+                            });
+                            return Ok(None);
+                        }
                         return self.host.thread_tool(&session, &name, &args).map(Some);
                     }
                     ensure!(
@@ -8112,7 +8178,7 @@ mod tests {
         let key = host.save_job(recipe).unwrap().recipe.key();
         let (mut actor, _, _) = idle_actor(host);
         let turn = |actor: &mut Actor| {
-            let run = actor.host.run_job_now(&key).unwrap();
+            let run = actor.host.run_now(&key).unwrap();
             let thread = actor.host.session(run.thread_id.as_ref().unwrap()).unwrap();
             let prompt = actor.host.messages(&thread.id, None, 1).unwrap().remove(0);
             actor.host.turn_started(&thread.id).unwrap();
@@ -8138,6 +8204,76 @@ mod tests {
         assert_eq!(
             (finished.outcome, finished.outputs.len()),
             (RunOutcome::Finished, 0)
+        );
+    }
+
+    #[test]
+    fn a_hanging_source_check_leaves_the_actor_free_and_the_run_names_it() {
+        use std::os::unix::fs::PermissionsExt;
+        use workspace_core::Source;
+        use workspace_core::job::{JobRun, Recipe, RunOutcome, Schedule, Sharing};
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let (bin, user) = (home.path().join("bin"), home.path().join("user"));
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&user).unwrap();
+        let server = bin.join("hangs");
+        fs::write(&server, "#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
+        fs::set_permissions(&server, fs::Permissions::from_mode(0o755)).unwrap();
+        let config = json!({"mcpServers": {"linear": {"command": "hangs"}}});
+        fs::write(user.join(".claude.json"), config.to_string()).unwrap();
+        let limit = std::time::Duration::from_secs(3);
+        host.source_env = Some(crate::jobs::SourceEnv {
+            path: vec![bin],
+            home: user,
+            mcp_limit: limit,
+        });
+        let recipe = Recipe {
+            id: "brief".into(),
+            name: "Brief".into(),
+            space_id: host.default_space().unwrap(),
+            prompt: "Brief me.".into(),
+            schedule: Schedule {
+                cron: "0 7 * * *".into(),
+                timezone: "America/New_York".into(),
+            },
+            model: None,
+            sources: vec![Source::Mcp {
+                server: "linear".into(),
+                tools: vec!["list_issues".into()],
+                extra: Default::default(),
+            }],
+            output: None,
+            sharing: Sharing::OneRunner,
+            runner: None,
+            enabled: true,
+            extra: Default::default(),
+        };
+        let key = host.save_job(recipe).unwrap().recipe.key();
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::unbounded();
+        actor.sender = sender;
+        let started = std::time::Instant::now();
+        let ask = |actor: &mut Actor, command: Command| {
+            let (reply, replies) = async_channel::bounded(1);
+            actor.process(Event::Command(command, reply));
+            replies.try_recv().unwrap().unwrap()
+        };
+        let run: JobRun =
+            serde_json::from_value(ask(&mut actor, Command::RunJobNow { job: key.clone() }))
+                .unwrap();
+        assert_eq!((run.outcome, run.thread_id), (RunOutcome::Running, None));
+        // The actor answers another command while the server's handshake hangs.
+        ask(&mut actor, Command::SeeJobRuns { job: key });
+        assert!(started.elapsed() < limit, "{:?}", started.elapsed());
+        let checked = events.recv_blocking().unwrap();
+        assert!(matches!(checked, Event::SourcesChecked(..)));
+        actor.process(checked);
+        let ended = actor.host.job_run(&run.id).unwrap();
+        assert_eq!(ended.outcome, RunOutcome::NotStarted);
+        assert_eq!(
+            ended.reason,
+            "The linear MCP server did not answer within 3 seconds."
         );
     }
 
