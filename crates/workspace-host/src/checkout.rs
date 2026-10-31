@@ -81,7 +81,11 @@ impl KeeperPoll {
         let tickets = if host.settings().keeper.rebase {
             host.tickets()?
                 .into_iter()
-                .filter(|t| t.repository_id == repository.id && t.open_pull_request().is_some())
+                .filter(|t| {
+                    t.repository_id == repository.id
+                        && t.is_open()
+                        && t.open_pull_request().is_some()
+                })
                 .map(|t| {
                     let base = host.keeper_base(&t).map(str::to_owned);
                     let ticket_base = host.ticket_base(&t)?;
@@ -1239,6 +1243,7 @@ mod tests {
                         base_head: base.into(),
                         worktree_head: None,
                     }],
+                    finished: vec![],
                     rate_limit: pr_watch::RateLimit {
                         remaining: 4000,
                         reset_at: 0,

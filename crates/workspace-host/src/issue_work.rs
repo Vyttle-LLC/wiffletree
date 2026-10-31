@@ -498,8 +498,8 @@ impl Host {
 /// The state linked work derives: In review while a ticket's PR is open; Done once every
 /// ticket's PR has merged, or the ticket was accepted, and no linked project has an open ticket;
 /// else In progress. A ticket closed without a merged PR was dropped and no longer counts. An
-/// accepted ticket is finished whatever its PR was last seen as, since its PR is no longer
-/// watched. Canceled is never derived.
+/// accepted ticket is finished whatever its PR reads, even a PR left open. Canceled is never
+/// derived.
 fn derive(tickets: &[(Ticket, bool)]) -> IssueState {
     let pr_is = |ticket: &Ticket, state: PrState| {
         (ticket.pull_request.as_ref()).is_some_and(|pr| pr.state == state)
@@ -1037,6 +1037,36 @@ pub(crate) mod tests {
             IssueState::Done,
             "it keeps its state"
         );
+    }
+
+    #[test]
+    fn a_finished_tickets_pr_ending_is_noted_once_and_only_a_merge_can_move_the_issue() {
+        let (_home, mut host, ticket) = host_with_ticket();
+        let space = personal(&host);
+        let issue = file(&mut host, &space, &[], "");
+        let project = host.session(&ticket.coordinator_id).unwrap().project_id;
+        host.link_issue(&issue.id, &project, Some(&ticket.id))
+            .unwrap();
+        let record = |host: &mut Host, state: PrState| {
+            let pr = PullRequest {
+                state,
+                ..open_pr(MergeState::Clean)
+            };
+            (host.record_pull_requests(&ticket.repository_id, &found(&ticket, pr), 0, 0)).unwrap();
+        };
+        let prs = |host: &Host| events(host, &issue.id, "pr").len();
+        record(&mut host, PrState::Open);
+        host.close_ticket(&ticket.id).unwrap();
+        assert_eq!(state(&host, &issue.id), IssueState::InProgress, "dropped");
+        record(&mut host, PrState::Merged);
+        assert_eq!(
+            state(&host, &issue.id),
+            IssueState::Done,
+            "merged after all"
+        );
+        assert_eq!(prs(&host), 2);
+        record(&mut host, PrState::Merged);
+        assert_eq!(prs(&host), 2);
     }
 
     #[test]
