@@ -450,6 +450,20 @@ fn every_tracker_write_is_the_humans_and_reading_issues_is_not() {
             project_id: text(),
             ticket_id: Some(text()),
         },
+        // Every step of an import from Linear, which no agent can start or steer.
+        Command::LinearTeams {
+            space_id: space().id,
+            key: LinearKey(text()),
+        },
+        Command::PreviewLinearImport {
+            space_id: space().id,
+            team_id: text(),
+        },
+        Command::ImportFromLinear {
+            space_id: space().id,
+            logins: Default::default(),
+        },
+        Command::CancelLinearImport,
     ];
     for command in writes {
         assert!(command.is_human_only() && !command.is_read(), "{command:?}");

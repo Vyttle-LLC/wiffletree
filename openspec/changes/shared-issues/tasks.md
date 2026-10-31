@@ -39,8 +39,8 @@ Moved to `assistant-spaces-jobs-boards` stage 6 (decided by Michael, 2026-10-29)
 
 ## 6. Linear import
 
-- [ ] 6.1 `workspace-host`: new `linear_import.rs`: the key in `keychain.rs` for the import only, teams, a dry-run summary, state and user mapping, commits of at most 100 issues, Linear identifiers in front matter so a rerun adds only new issues. Verify against recorded API responses; nothing is ever sent to Linear but reads.
-- [ ] 6.2 `workspace-desktop`: Import from Linear… in `spaces`' Storage and issues box, with the summary, the user mapping and progress.
+- [x] 6.1 `workspace-host`: new `linear_import.rs`: the key in `keychain.rs` for the import only, teams, a dry-run summary, state and user mapping, commits of at most 100 issues, Linear identifiers in front matter so a rerun adds only new issues. Verify against recorded API responses; nothing is ever sent to Linear but reads.
+- [x] 6.2 `workspace-desktop`: Import from Linear… in `spaces`' Storage and issues box, with the summary, the user mapping and progress.
 
 ## 7. Docs for this change
 

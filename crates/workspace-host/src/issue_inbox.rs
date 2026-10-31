@@ -27,7 +27,7 @@ pub(crate) struct PeopleRead {
 }
 
 /// Whether `login` is one GitHub could have given, so it is safe in an API path.
-fn is_login(login: &str) -> bool {
+pub(crate) fn is_login(login: &str) -> bool {
     !login.is_empty()
         && login.len() <= 39
         && !login.starts_with('-')

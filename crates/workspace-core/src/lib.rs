@@ -788,6 +788,9 @@ pub struct Snapshot {
     /// filter.
     #[serde(default)]
     pub last_filed_space: Option<SpaceId>,
+    /// The Linear import running on this Mac, or the last one until the human closes it.
+    #[serde(default)]
+    pub linear_import: Option<LinearImportStatus>,
     pub repositories: Vec<Repository>,
     /// The sessions that are not archived and open tickets' archived agents, in the order they
     /// were created, then archived sessions still in a turn.
@@ -3307,6 +3310,28 @@ pub enum Command {
     IssuePeople {
         space_id: SpaceId,
     },
+    /// Starts an import from Linear into the Space's tracker: keeps `key` in the Keychain until
+    /// the import ends and answers with the `LinearTeam`s it reads.
+    LinearTeams {
+        space_id: SpaceId,
+        key: LinearKey,
+    },
+    /// Reads the Linear team and answers with the `LinearImportPlan`; nothing is written.
+    PreviewLinearImport {
+        space_id: SpaceId,
+        team_id: String,
+    },
+    /// Writes the previewed team's issues not imported before, naming each Linear user by the
+    /// GitHub login the human confirmed in `logins`, keyed by Linear user ID. Its progress is
+    /// the snapshot's `linear_import`.
+    ImportFromLinear {
+        space_id: SpaceId,
+        #[serde(default)]
+        logins: BTreeMap<String, String>,
+    },
+    /// Ends the import: stops one that runs after its current batch, removes the key from the
+    /// Keychain and closes its status.
+    CancelLinearImport,
     /// Replaces a Space's definition; its id and storage stay as they are.
     UpdateSpace {
         space: Box<Space>,
@@ -3832,6 +3857,10 @@ impl Command {
             | Self::LinkIssue { .. }
             | Self::UnlinkIssue { .. }
             | Self::FollowIssue { .. }
+            | Self::LinearTeams { .. }
+            | Self::PreviewLinearImport { .. }
+            | Self::ImportFromLinear { .. }
+            | Self::CancelLinearImport
             | Self::SetWorkspacesDir { .. }
             | Self::SetVerification { .. }
             | Self::SetBuildsAtOnce { .. }
@@ -3877,9 +3906,9 @@ impl Command {
     /// project into one and choosing which repositories it lists, and reading where its storage
     /// is on this Mac. So are brains: the push grant, forgetting one, Set up, the compiler,
     /// amending a batch, Send now and the legacy import, and fixing or releasing a held entry.
-    /// Every write to a tracker is the human's, settling a paused issue file and following an issue
-    /// too; reading issues is not. Remote access is the human's too: its state carries the pairing
-    /// code.
+    /// Every write to a tracker is the human's, settling a paused issue file, following an issue
+    /// and every step of a Linear import too; reading issues is not. Remote access is the human's
+    /// too: its state carries the pairing code.
     pub fn is_human_only(&self) -> bool {
         matches!(
             self,
@@ -3909,6 +3938,10 @@ impl Command {
                 | Self::LinkIssue { .. }
                 | Self::UnlinkIssue { .. }
                 | Self::FollowIssue { .. }
+                | Self::LinearTeams { .. }
+                | Self::PreviewLinearImport { .. }
+                | Self::ImportFromLinear { .. }
+                | Self::CancelLinearImport
                 | Self::SetSpaceBrain { .. }
                 | Self::SpaceStorage { .. }
                 | Self::ConfirmBrain { .. }

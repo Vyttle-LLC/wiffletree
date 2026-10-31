@@ -358,9 +358,86 @@ pub struct IssueTracker {
     pub error: Option<String>,
 }
 
+/// A Linear personal API key as the human pasted it. Never printed: its `Debug` hides it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LinearKey(pub String);
+impl fmt::Debug for LinearKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("LinearKey(…)")
+    }
+}
+
+/// A Linear team a key can read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinearTeam {
+    pub id: String,
+    /// The prefix of its issue identifiers, such as `CEL`.
+    pub key: String,
+    pub name: String,
+}
+
+/// How issues in one Linear workflow state are filed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinearStateMapping {
+    pub name: String,
+    pub state: IssueState,
+    /// The issues the import would write in it.
+    pub issues: usize,
+}
+
+/// A Linear user the import would name, and the GitHub login suggested for them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinearUser {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub email: Option<String>,
+    /// A suggestion only: the import uses the logins the human confirms.
+    #[serde(default)]
+    pub login: Option<String>,
+}
+
+/// What importing a Linear team would write, shown before anything is written.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinearImportPlan {
+    pub space_id: SpaceId,
+    pub team: LinearTeam,
+    /// The issues not imported before, which the import writes.
+    pub issues: usize,
+    /// The team's issues an earlier import wrote, which it skips.
+    pub imported_before: usize,
+    pub comments: usize,
+    /// How many of `issues` keep their Linear number.
+    pub keeping_numbers: usize,
+    pub states: Vec<LinearStateMapping>,
+    pub users: Vec<LinearUser>,
+}
+
+/// How a Linear import is going, while it runs and once it ended.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinearImportStatus {
+    pub space_id: SpaceId,
+    /// The Linear team's key.
+    pub team: String,
+    /// Issues written so far, of `total`.
+    pub written: usize,
+    pub total: usize,
+    pub finished: bool,
+    /// Why it stopped early.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_linear_key_is_never_printed() {
+        let key = LinearKey("lin_api_secret".into());
+        assert_eq!(format!("{key:?}"), "LinearKey(…)");
+    }
 
     #[test]
     fn ids_are_numbered_or_temporary_and_nothing_else() {

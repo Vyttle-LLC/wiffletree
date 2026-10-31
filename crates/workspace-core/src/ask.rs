@@ -264,6 +264,18 @@ pub fn follow_issue(id: IssueId, follow: bool) -> Ask<()> {
 pub fn issue_people(space_id: SpaceId) -> Ask<Vec<IssuePerson>> {
     Ask::new(Command::IssuePeople { space_id })
 }
+pub fn linear_teams(space_id: SpaceId, key: LinearKey) -> Ask<Vec<LinearTeam>> {
+    Ask::new(Command::LinearTeams { space_id, key })
+}
+pub fn preview_linear_import(space_id: SpaceId, team_id: String) -> Ask<LinearImportPlan> {
+    Ask::new(Command::PreviewLinearImport { space_id, team_id })
+}
+pub fn import_from_linear(space_id: SpaceId, logins: BTreeMap<String, String>) -> Ask<()> {
+    Ask::new(Command::ImportFromLinear { space_id, logins })
+}
+pub fn cancel_linear_import() -> Ask<()> {
+    Ask::new(Command::CancelLinearImport)
+}
 pub fn issue_project_defaults(id: IssueId, space_id: Option<SpaceId>) -> Ask<IssueProjectDefaults> {
     Ask::new(Command::IssueProjectDefaults { id, space_id })
 }

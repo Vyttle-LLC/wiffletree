@@ -9,6 +9,7 @@ use gpui_component::{
     input::{Input, Textarea, TextareaState},
     menu::{DropdownMenu, PopupMenuItem},
 };
+use linear_import_view::LinearImportPanel;
 use std::collections::BTreeMap;
 use ui::{banner, card, hint, icon, mono, section};
 use wording::{age, counted};
@@ -77,6 +78,8 @@ pub(super) struct SpacesPage {
     error: Option<String>,
     /// The local Space whose prefix a join was refused for, which the error offers to open.
     refused_by: Option<SpaceId>,
+    /// Import from Linear…, open in the Space it was opened for.
+    linear: Option<(SpaceId, Entity<LinearImportPanel>)>,
 }
 impl EventEmitter<Intent> for SpacesPage {}
 impl SpacesPage {
@@ -117,7 +120,22 @@ impl SpacesPage {
             busy: false,
             error: None,
             refused_by: None,
+            linear: None,
         }
+    }
+
+    /// Opens Import from Linear… for the Space, or shows how its import is going.
+    fn open_linear_import(&mut self, space: SpaceId, window: &mut Window, cx: &mut Context<Self>) {
+        let (bridge, shared) = (self.bridge.clone(), self.shared.clone());
+        let id = space.clone();
+        let panel = cx.new(|cx| LinearImportPanel::new(bridge, shared, id, window, cx));
+        cx.subscribe(&panel, |view, _, _: &linear_import_view::Closed, cx| {
+            view.linear = None;
+            cx.notify();
+        })
+        .detach();
+        self.linear = Some((space, panel));
+        cx.notify();
     }
 
     /// Redraws while shown, loads the shown Space into the form, and reads its storage again
@@ -128,6 +146,10 @@ impl SpacesPage {
         self.shared = shared;
         if self.shared.page != Page::Spaces {
             return;
+        }
+        if moved && let Some((_, panel)) = &self.linear {
+            let shared = self.shared.clone();
+            panel.update(cx, |panel, cx| panel.share(shared, cx));
         }
         self.load_shown(window, cx);
         let stale = ui::now() - self.storage_asked_at > STORAGE_FRESH_MS;
@@ -1068,17 +1090,33 @@ impl SpacesPage {
             )
             .on_click(cx.listener(|view, _, window, cx| view.request(Command::SyncNow, window, cx)))
         });
-        if open_issues.is_some() || sync_now.is_some() {
+        let panel = (self.linear.as_ref())
+            .filter(|(shown, _)| shown == &space.id)
+            .map(|(_, panel)| panel.clone());
+        let import = (status.prefix.is_some() && panel.is_none()).then(|| {
+            let space_id = space.id.clone();
+            ui::gated(
+                button("space-import-linear")
+                    .ghost()
+                    .label("Import from Linear…"),
+                &self.shared.host,
+            )
+            .on_click(cx.listener(move |view, _, window, cx| {
+                view.open_linear_import(space_id.clone(), window, cx)
+            }))
+        });
+        if open_issues.is_some() || sync_now.is_some() || import.is_some() {
             box_ = box_.child(
                 div()
                     .flex()
                     .justify_end()
                     .gap_2()
+                    .children(import)
                     .children(open_issues)
                     .children(sync_now),
             );
         }
-        box_
+        box_.children(panel)
     }
 
     fn issues_field(

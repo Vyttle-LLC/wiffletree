@@ -26,6 +26,7 @@ mod inspector;
 mod issue_view;
 mod issues_view;
 mod leftovers;
+mod linear_import_view;
 mod live_work;
 mod memory_view;
 mod menu_bar;

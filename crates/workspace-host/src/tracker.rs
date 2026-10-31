@@ -147,7 +147,7 @@ pub(crate) fn issue_from_parts(front: &serde_yaml::Mapping, description: &str) -
     with_front(&front, description)
 }
 
-fn comment_md(comment: &Comment) -> Result<Vec<u8>> {
+pub(crate) fn comment_md(comment: &Comment) -> Result<Vec<u8>> {
     let front = CommentFront {
         author: comment.author.clone(),
         created: comment.created.clone(),
@@ -460,7 +460,7 @@ pub(crate) fn event(by: &str, at: &str, kind: &str, from: Value, to: Value) -> I
     }
 }
 
-fn validate_title(title: &str) -> Result<String> {
+pub(crate) fn validate_title(title: &str) -> Result<String> {
     let title = title.trim();
     ensure!(!title.is_empty(), "An issue needs a title");
     ensure!(
@@ -794,19 +794,9 @@ impl Host {
                     number: committed.max(here) + 1,
                 }
             }
-            StorageRepository::GitHub { .. } => loop {
-                let id = IssueId::Temporary {
-                    prefix: prefix.clone(),
-                    letters: temporary_letters(),
-                };
-                if !folder.join(issue_folder(&id)).exists() {
-                    self.db.execute(
-                        "INSERT INTO issue_temporary(storage,temporary) VALUES (?1,?2)",
-                        params![space.storage.repository.key(), id.to_string()],
-                    )?;
-                    break id;
-                }
-            },
+            StorageRepository::GitHub { .. } => {
+                self.temporary_id(&space.storage.repository, &prefix)?
+            }
         };
         let issue = Issue {
             id: id.clone(),
@@ -840,6 +830,28 @@ impl Host {
             [space.id.as_str()],
         )?;
         Ok(issue)
+    }
+    /// A temporary ID no issue folder of the GitHub tracker has, recorded as this Mac's until a
+    /// pass numbers it.
+    pub(crate) fn temporary_id(
+        &self,
+        storage: &StorageRepository,
+        prefix: &str,
+    ) -> Result<IssueId> {
+        let folder = self.storage_folder(storage);
+        loop {
+            let id = IssueId::Temporary {
+                prefix: prefix.to_owned(),
+                letters: temporary_letters(),
+            };
+            if !folder.join(issue_folder(&id)).exists() {
+                self.db.execute(
+                    "INSERT INTO issue_temporary(storage,temporary) VALUES (?1,?2)",
+                    params![storage.key(), id.to_string()],
+                )?;
+                return Ok(id);
+            }
+        }
     }
     /// The Space of the last issue filed on this Mac, while it is here.
     pub(crate) fn last_filed_space(&self) -> Result<Option<SpaceId>> {
@@ -965,34 +977,50 @@ impl Host {
     /// last wrote nor what it last synced, such as an agent's shell edit: building on it would
     /// record that edit as the host's, and the next pass would push it.
     pub(crate) fn write_issue_files(&mut self, space: &Space, write: Write) -> Result<()> {
+        let message = format!("{}: {}", write.id, write.did);
+        self.write_issues(space, vec![write], &message)
+    }
+    /// `write_issue_files` for several issues at once, as one commit with `message` in a local
+    /// tracker; none is written while any file would be written over an outside edit.
+    pub(crate) fn write_issues(
+        &mut self,
+        space: &Space,
+        writes: Vec<Write>,
+        message: &str,
+    ) -> Result<()> {
         let storage = &space.storage.repository;
-        let paths: Vec<&str> = write.files.iter().map(|(p, _)| p.as_str()).collect();
-        ensure!(
-            !self.changed_outside(storage, &paths)?,
-            "{} was changed outside Wiffletree on this Mac; settle it in the Inbox first",
-            write.id
-        );
+        for write in &writes {
+            let paths: Vec<&str> = write.files.iter().map(|(p, _)| p.as_str()).collect();
+            ensure!(
+                !self.changed_outside(storage, &paths)?,
+                "{} was changed outside Wiffletree on this Mac; settle it in the Inbox first",
+                write.id
+            );
+        }
         let folder = self.storage_folder(storage);
-        for (path, content) in &write.files {
+        let files = || writes.iter().flat_map(|write| &write.files);
+        for (path, content) in files() {
             shared::write_atomically(&folder.join(path), content)?;
         }
         match storage {
             StorageRepository::Local { .. } => {
-                let paths: Vec<&str> = write.files.iter().map(|(p, _)| p.as_str()).collect();
-                let message = format!("{}: {}", write.id, write.did);
-                storage::commit_local(&folder, &paths, &message)?;
+                let paths: Vec<&str> = files().map(|(p, _)| p.as_str()).collect();
+                storage::commit_local(&folder, &paths, message)?;
             }
             StorageRepository::GitHub { .. } => {
                 let key = repos::key(&storage.key());
-                for (path, content) in &write.files {
+                for (path, content) in files() {
                     Record::wrote(&self.db, &key, path, Some(content))?;
                 }
                 self.issues_written.borrow_mut().insert(key);
             }
         }
         // The human's own change is no news to them.
-        self.reindex_issue(storage, &write.id)?;
-        self.mark_read(&storage.key(), &write.id)
+        for write in &writes {
+            self.reindex_issue(storage, &write.id)?;
+            self.mark_read(&storage.key(), &write.id)?;
+        }
+        Ok(())
     }
     /// Whether any of these files of a GitHub tracker's clone holds neither what the host last
     /// wrote nor what it last synced, which a pass pauses as changed outside Wiffletree. A file

@@ -257,7 +257,15 @@ impl IssueRules {
         let pushed: BTreeMap<String, Vec<u8>> = repos::files_at(clone, remote, &|path| {
             path.ends_with("/issue.md") && !synced.contains_key(path)
         })?;
-        let mut next = tracker::highest_number(clone, remote, prefix)?;
+        // Numbered issues new in this commit, as an import keeping Linear's numbers writes,
+        // take theirs first.
+        let new_here = (committed.iter())
+            .filter_map(|(path, _)| match issue_of(path)? {
+                IssueId::Numbered { prefix: p, number } if &p == prefix => Some(number),
+                _ => None,
+            })
+            .max();
+        let mut next = tracker::highest_number(clone, remote, prefix)?.max(new_here.unwrap_or(0));
         let (mut numbered, mut adopted) = (vec![], vec![]);
         for id in temporary {
             let mine = (committed.iter())
@@ -319,7 +327,8 @@ impl IssueRules {
             let (subject, change) = match issue_of(path) {
                 None => ("the tracker".to_owned(), "changed"),
                 Some(id) => {
-                    let new = found.numbered.iter().any(|(_, number)| number == &id);
+                    let new = found.numbered.iter().any(|(_, number)| number == &id)
+                        || self.files.synced.get(path).is_none_or(Option::is_none);
                     let change = match (path.rsplit('/').next(), content) {
                         (_, None) => "removed",
                         (Some("issue.md"), _) if new => "filed",

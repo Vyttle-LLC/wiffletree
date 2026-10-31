@@ -1,6 +1,6 @@
-//! The client credential of a signed launchd host and the host's remote-access key, each kept in a
-//! login Keychain item whose access list names only the programs given: the signed app and the
-//! host's own copy. Keychain matches them by their signing requirement, and asks any other
+//! The client credential of a signed launchd host, the host's remote-access key and, while an
+//! import from Linear runs, the human's Linear key, each kept in a login Keychain item whose
+//! access list names only the programs given: the signed app and the host's own copy. Keychain matches them by their signing requirement, and asks any other
 //! program, an agent's shell among them, for the login password in a dialog.
 //!
 //! Design §2 of `openspec/changes/archive/2026-10-19-standalone-host` settles which keychain,
@@ -30,6 +30,63 @@ pub fn host_key(data: &Path, trusted: &[&Path]) -> Result<workspace_core::pairin
         Ok(hex(&KeyPair::generate()?.secret()))
     })?;
     KeyPair::from_secret(&unhex(&secret)?)
+}
+
+/// The Linear personal API key's login Keychain item, kept only while an import from Linear
+/// runs; its account is the data folder like the others'.
+pub const LINEAR_KEY_SERVICE: &str = "com.vyttle.wiffletree.linear-key";
+
+/// Keeps `key` as the Linear key, replacing any kept before, readable by the host only.
+#[cfg(target_os = "macos")]
+pub fn keep_linear_key(data: &Path, key: &str) -> Result<()> {
+    use anyhow::Context as _;
+    remove_linear_key(data)?;
+    let host = std::env::current_exe()?;
+    let list = access::list(&[host.as_path()]).context("Limit the Linear key to Wiffletree")?;
+    access::add(
+        LINEAR_KEY_SERVICE,
+        &data.to_string_lossy(),
+        key.as_bytes(),
+        &list,
+    )
+}
+
+/// The Linear key `keep_linear_key` kept.
+#[cfg(target_os = "macos")]
+pub fn linear_key(data: &Path) -> Result<String> {
+    use anyhow::Context as _;
+    use security_framework::os::macos::{keychain::SecKeychain, passwords::find_generic_password};
+    let _quiet = SecKeychain::disable_user_interaction()?;
+    let (password, _) = find_generic_password(None, LINEAR_KEY_SERVICE, &data.to_string_lossy())
+        .context("The Linear key is no longer in the Keychain; paste it again")?;
+    String::from_utf8(password.to_owned()).context("The Keychain item is not text")
+}
+
+/// Removes the Linear key, if one is kept.
+#[cfg(target_os = "macos")]
+pub fn remove_linear_key(data: &Path) -> Result<()> {
+    use security_framework::os::macos::{keychain::SecKeychain, passwords::find_generic_password};
+    let _quiet = SecKeychain::disable_user_interaction()?;
+    if let Ok((_, item)) = find_generic_password(None, LINEAR_KEY_SERVICE, &data.to_string_lossy())
+    {
+        item.delete();
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn keep_linear_key(_data: &Path, _key: &str) -> Result<()> {
+    anyhow::bail!("Importing from Linear needs the macOS Keychain")
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn linear_key(_data: &Path) -> Result<String> {
+    anyhow::bail!("Importing from Linear needs the macOS Keychain")
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn remove_linear_key(_data: &Path) -> Result<()> {
+    Ok(())
 }
 
 /// The generic-password item `service`, the `label`, for the data folder, created with

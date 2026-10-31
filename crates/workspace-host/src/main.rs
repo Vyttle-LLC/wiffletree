@@ -164,6 +164,10 @@ fn serve(args: &[String]) -> Result<()> {
         trusted.extend(app.as_deref());
         workspace_host::keychain::credential(&data, &trusted)?
     };
+    // A Linear import ends with its host, so a key a stopped host left in the Keychain goes.
+    if let Err(error) = workspace_host::keychain::remove_linear_key(&data) {
+        eprintln!("Removing a Linear key left in the Keychain: {error:#}");
+    }
     let remote = {
         let (data, mut trusted) = (data.clone(), vec![binary.clone()]);
         trusted.extend(app.clone());

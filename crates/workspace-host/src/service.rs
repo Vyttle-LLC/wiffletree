@@ -667,6 +667,12 @@ enum Event {
     GhLogin(spaces::GhAccount),
     /// A tracker's collaborators and the profile names of its people, read on their own thread.
     IssuePeople(issue_inbox::PeopleRead),
+    /// A Linear team, read on its own thread for the import begun in the Space.
+    LinearRead {
+        space_id: SpaceId,
+        team: Result<linear_import::Team>,
+        reply: Reply,
+    },
     /// A publish step finished on its own thread.
     Published(publish::Outcome),
     /// A merge decision finished on its own thread, with the `merge_ticket` call waiting for
@@ -1490,20 +1496,43 @@ impl Actor {
                 let _ = reply.try_send(Ok(Value::Null));
             }
             Command::SyncIssues { space_id } => {
-                let settings = self.host.settings_key();
-                for key in self.host.issue_sync_keys(space_id.as_ref())? {
-                    match self.storage_paces.get_mut(&key) {
-                        _ if Some(&key) == settings.as_ref() => self.sync_pace.sync_now(),
-                        Some(pace) => pace.sync_now(),
-                        None => {}
-                    }
-                }
+                self.sync_issues_now(space_id.as_ref())?;
                 // A login found since launch lets the human write issues, a local tracker's too.
                 if self.host.gh_login.is_none() {
                     let (tools, home) = (self.publish_tools.clone(), self.host.home.clone());
                     spawn_gh_login_read(self.sender.clone(), tools, home);
                 }
                 let _ = reply.try_send(Ok(Value::Null));
+            }
+            // Linear is read off the host thread; the key never leaves this host but for Linear.
+            Command::LinearTeams { space_id, key } => {
+                self.host.begin_linear_import(space_id, key)?;
+                let (api, key, reply) = (
+                    self.host.linear.tools.api.clone(),
+                    key.clone(),
+                    reply.clone(),
+                );
+                std::thread::spawn(move || {
+                    let teams = linear_import::teams(api.as_ref(), &key)
+                        .and_then(|teams| Ok(serde_json::to_value(teams)?));
+                    let _ = reply.try_send(teams.map_err(|e| format!("{e:#}")));
+                });
+            }
+            Command::PreviewLinearImport { space_id, team_id } => {
+                self.host.linear_began(space_id)?;
+                let tools = self.host.linear.tools.clone();
+                let (space_id, team_id) = (space_id.clone(), team_id.clone());
+                let (sender, reply) = (self.sender.clone(), reply.clone());
+                std::thread::spawn(move || {
+                    let team = (tools.keys.read())
+                        .and_then(|key| linear_import::team(tools.api.as_ref(), &key, &team_id));
+                    let read = Event::LinearRead {
+                        space_id,
+                        team,
+                        reply,
+                    };
+                    let _ = sender.send_blocking(read);
+                });
             }
             Command::RefreshCodexQuota => {
                 let (sender, reply) = (self.sender.clone(), reply.clone());
@@ -1591,6 +1620,7 @@ impl Actor {
         }
         self.scheduling.observe(&event);
         let mut dirty = self.handle(event);
+        dirty |= self.refresh_linear_import();
         if self.scheduling.take_due() {
             dirty |= self.end_keeper_reviews();
             if let Err(e) = self.schedule() {
@@ -1933,6 +1963,51 @@ impl Actor {
         }
     }
 
+    /// Makes a pass of the Space's tracker, or of every GitHub tracker here, due at once.
+    fn sync_issues_now(&mut self, space_id: Option<&SpaceId>) -> Result<()> {
+        let settings = self.host.settings_key();
+        for key in self.host.issue_sync_keys(space_id)? {
+            match self.storage_paces.get_mut(&key) {
+                _ if Some(&key) == settings.as_ref() => self.sync_pace.sync_now(),
+                Some(pace) => pace.sync_now(),
+                None => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Writes the next batch of a Linear import that has one, one batch per event so agents
+    /// are never held up long; `true` when the import's status changed.
+    fn refresh_linear_import(&mut self) -> bool {
+        if !self.host.linear_ready() {
+            return false;
+        }
+        let step = self.host.linear_step();
+        self.follow_linear(step);
+        true
+    }
+
+    /// After the pass of the storage repository `key`: the import waiting on it goes on.
+    fn linear_pass_ended(&mut self, key: &str) -> bool {
+        let Some(step) = self.host.linear_pass_ended(key) else {
+            return false;
+        };
+        self.follow_linear(step);
+        true
+    }
+
+    fn follow_linear(&mut self, step: linear_import::Step) {
+        match step {
+            linear_import::Step::Next => self.wake(now()),
+            linear_import::Step::Push(space_id) => {
+                if let Err(e) = self.sync_issues_now(Some(&space_id)) {
+                    eprintln!("Linear import: {e:#}");
+                }
+            }
+            linear_import::Step::Done => {}
+        }
+    }
+
     /// Reads the human's login again once `gh`'s account file changed, as signing in, out or to
     /// another account does, so tracker writes use the account `gh` has now. `stamp` is the
     /// file's, from `spaces::gh_account_stamp`.
@@ -2119,6 +2194,7 @@ impl Actor {
                     .unwrap_or_else(|e| {
                         eprintln!("Syncing {key}: {e:#}");
                     });
+                self.linear_pass_ended(&key);
                 true
             }
             Event::StorageStaged {
@@ -2161,10 +2237,23 @@ impl Actor {
             Event::Synced(passed) => {
                 let at = now();
                 self.sync_pace.finish(at, passed.is_ok());
-                self.host.finish_sync(at, passed).unwrap_or_else(|e| {
+                let changed = self.host.finish_sync(at, passed).unwrap_or_else(|e| {
                     eprintln!("Workspace sync: {e:#}");
                     false
-                })
+                });
+                let key = self.host.settings_key();
+                changed | key.is_some_and(|key| self.linear_pass_ended(&key))
+            }
+            Event::LinearRead {
+                space_id,
+                team,
+                reply,
+            } => {
+                let plan = team
+                    .and_then(|team| self.host.linear_plan(&space_id, team))
+                    .and_then(|plan| Ok(serde_json::to_value(plan)?));
+                let _ = reply.try_send(plan.map_err(|e| format!("{e:#}")));
+                false
             }
             Event::SkillMerged(run, answered) => {
                 self.host.finish_merge_run(run, answered);
@@ -2334,6 +2423,12 @@ impl Actor {
                                 );
                             }
                             self.host.execute(command.clone())?
+                        }
+                        // Only started here: each batch is written after an event, and a GitHub
+                        // tracker's pass pushes it before the next.
+                        Command::ImportFromLinear { space_id, logins } => {
+                            self.host.start_linear_import(space_id, logins.clone())?;
+                            Value::Null
                         }
                         _ => self.host.execute(command.clone())?,
                     };
@@ -5433,6 +5528,49 @@ mod tests {
         assert!(refused.contains("Sign gh in"), "{refused}");
         login_read(&mut actor, &events);
         assert_eq!(reads.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn an_import_from_linear_writes_a_batch_per_event_and_the_next_once_a_pass_pushed_it() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = storage::tests::shared_storage(folder.path(), Some("CEL"));
+        let (_home, mut host) = storage::tests::host();
+        host.record_gh_login(Some("jlin".into()));
+        storage::tests::join_sage(&mut host, &github).unwrap();
+        let sage = storage::tests::space_named(&host, "Sage");
+        let (keys, _) = linear_import::tests::recorded(&mut host, linear_import::tests::many(150));
+        linear_import::tests::begin(&mut host, &sage).unwrap();
+        linear_import::tests::preview(&mut host, &sage).unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(64);
+        actor.sender = sender;
+        actor.publish_tools = github.tools();
+        let before = github.log("%s").len();
+        let (reply, replies) = async_channel::bounded(1);
+        let import = Command::ImportFromLinear {
+            space_id: sage.id.clone(),
+            logins: Default::default(),
+        };
+        actor.process(Event::Command(import, reply));
+        assert_eq!(replies.try_recv().unwrap(), Ok(Value::Null));
+        let status = |actor: &Actor| actor.host.snapshot().unwrap().linear_import.unwrap();
+        assert_eq!(
+            status(&actor).written,
+            100,
+            "the first batch, written at once"
+        );
+        let mut pushed_at = vec![];
+        while !status(&actor).finished {
+            let event = events.recv_blocking().unwrap();
+            if matches!(event, Event::StorageSynced(..)) {
+                pushed_at.push(status(&actor).written);
+            }
+            actor.process(event);
+        }
+        assert_eq!(pushed_at, [100, 150], "each batch waits for its push");
+        assert_eq!(github.log("%s").len() - before, 2);
+        assert!(status(&actor).error.is_none());
+        assert!(keys.kept().is_none());
     }
 
     /// An actor over a reviewed ticket in `allowed-org/app`, which is allowed, with a local bare

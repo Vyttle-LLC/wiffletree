@@ -128,6 +128,10 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::LinkIssue { .. }
         | Command::UnlinkIssue { .. }
         | Command::FollowIssue { .. }
+        | Command::LinearTeams { .. }
+        | Command::PreviewLinearImport { .. }
+        | Command::ImportFromLinear { .. }
+        | Command::CancelLinearImport
         | Command::SetWorkspacesDir { .. }
         | Command::SetVerification { .. }
         | Command::SetBuildsAtOnce { .. }
