@@ -183,9 +183,6 @@ impl AssistantPage {
             }
             None => {}
         }
-        if let Some(edit) = self.editing.as_ref().filter(|e| e.proposal == proposal.id) {
-            return self.edit_form(proposal, edit, heading, p, cx);
-        }
         let view = (self.proposal_views.iter()).find(|v| v.proposal_id == proposal.id);
         let current = view
             .and_then(|v| v.current.as_ref())
@@ -208,6 +205,14 @@ impl AssistantPage {
                     ),
                 )),
             );
+        }
+        // While the human edits it, a changed issue still shows above the form: the banner,
+        // and the proposal against the current version.
+        if let Some(edit) = self.editing.as_ref().filter(|e| e.proposal == proposal.id) {
+            let changed = view.and_then(|v| v.changed_since.as_ref()).and(current);
+            let lines = changed.and_then(|c| Some(diff(c, &proposal.change.applied_to(c)?)));
+            let top = body.children(lines.map(|lines| diff_lines(&lines, p)));
+            return self.edit_form(proposal, edit, top, p, cx);
         }
         body = match &proposal.change {
             ProposalChange::Comment { body: text, .. } => {
@@ -272,60 +277,58 @@ impl AssistantPage {
         )
     }
 
-    /// The proposal in the form its kind matches: a title, or for a duplicate the issue it
-    /// names, and its text; saving there is the apply.
+    /// The proposal in the form its kind matches, below `top`, the card's heading and what
+    /// changed since: a title, or for a duplicate the issue it names, and its text; saving there
+    /// is the apply.
     fn edit_form(
         &self,
         proposal: &Proposal,
         edit: &ProposalEdit,
-        heading: Div,
+        top: Div,
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
         let (title, body) = form_labels(&proposal.change);
         let id = proposal.id.clone();
-        card(p)
-            .gap_2()
-            .child(heading)
-            .children(title.map(|label| {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(hint(label, p))
-                    .child(Input::new(&edit.title).small())
-            }))
-            .children(body.map(|label| {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(hint(label, p))
-                    .child(Textarea::new(&edit.body).w_full())
-            }))
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .justify_end()
-                    .child(
-                        button("proposal-edit-cancel")
-                            .ghost()
-                            .xsmall()
-                            .label("Cancel")
-                            .on_click(cx.listener(|v, _, _, c| {
-                                v.editing = None;
-                                c.notify();
-                            })),
-                    )
-                    .child(
-                        button("proposal-edit-apply")
-                            .primary()
-                            .xsmall()
-                            .label("Save and apply")
-                            .on_click(cx.listener(move |v, _, w, c| v.apply_edited(&id, w, c))),
-                    ),
-            )
+        top.children(title.map(|label| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(hint(label, p))
+                .child(Input::new(&edit.title).small())
+        }))
+        .children(body.map(|label| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(hint(label, p))
+                .child(Textarea::new(&edit.body).w_full())
+        }))
+        .child(
+            div()
+                .flex()
+                .gap_2()
+                .justify_end()
+                .child(
+                    button("proposal-edit-cancel")
+                        .ghost()
+                        .xsmall()
+                        .label("Cancel")
+                        .on_click(cx.listener(|v, _, _, c| {
+                            v.editing = None;
+                            c.notify();
+                        })),
+                )
+                .child(
+                    button("proposal-edit-apply")
+                        .primary()
+                        .xsmall()
+                        .label("Save and apply")
+                        .on_click(cx.listener(move |v, _, w, c| v.apply_edited(&id, w, c))),
+                ),
+        )
     }
 
     fn start_edit(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {

@@ -151,13 +151,26 @@ pub struct IssueChanges {
     pub state: Option<IssueState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<Priority>,
-    /// `Some(None)` unassigns.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `Some(None)` unassigns, stored as `null`; left out, the assignee stays.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub assignee: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repositories: Option<Vec<String>>,
+}
+/// A field that is present, `null` included: serde reads a present `null` as `None` for an
+/// `Option<Option<_>>`, which would lose "unassign".
+fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 impl IssueChanges {
     pub fn apply(&self, issue: &Issue) -> Issue {

@@ -392,8 +392,12 @@ fn changes(args: &Value) -> Result<IssueChanges> {
         }
     }
     text(args, "description")?;
-    let changes: IssueChanges = serde_json::from_value(Value::Object(fields))
+    let mut changes: IssueChanges = serde_json::from_value(Value::Object(fields))
         .context("state is one of triage, backlog, todo, in_progress, in_review, done or canceled; priority one of urgent, high, medium, low or none; labels and repositories are lists")?;
+    // An assignee given as null unassigns; one left out stays.
+    if args.get("assignee").is_some_and(Value::is_null) {
+        changes.assignee = Some(None);
+    }
     if let Some(title) = &changes.title {
         tracker::validate_title(title)?;
     }
@@ -744,6 +748,30 @@ mod tests {
         assert_eq!(count(&host), 3, "trying again files neither twice");
         let original = host.read_issue(&issue.id).unwrap().issue.unwrap();
         assert_eq!(original.related.len(), 2);
+    }
+
+    #[test]
+    fn an_edit_unassigns_with_a_null_assignee_and_keeps_one_left_out() {
+        let (_home, mut host, _sage, issue) = sage_here();
+        let mut assigned = host.read_issue(&issue.id).unwrap().issue.unwrap();
+        assigned.assignee = Some("jlin".into());
+        host.edit_issue(assigned).unwrap();
+        let (thread, session) = issue_thread(&mut host, &issue);
+        let assignee = |host: &Host| host.read_issue(&issue.id).unwrap().issue.unwrap().assignee;
+        let kept = json!({"id": issue.id, "labels": ["bug", "watch"]});
+        call(&mut host, &session, "propose_edit", kept).unwrap();
+        host.apply_proposal(&thread.id, &pending_id(&host, &thread.id), None)
+            .unwrap();
+        assert_eq!(
+            assignee(&host).as_deref(),
+            Some("jlin"),
+            "left out, it stays"
+        );
+        let unassigned = json!({"id": issue.id, "assignee": null});
+        call(&mut host, &session, "propose_edit", unassigned).unwrap();
+        host.apply_proposal(&thread.id, &pending_id(&host, &thread.id), None)
+            .unwrap();
+        assert_eq!(assignee(&host), None, "null unassigns, even alone");
     }
 
     #[test]

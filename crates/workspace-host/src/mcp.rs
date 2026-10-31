@@ -280,6 +280,8 @@ pub fn issue_thread_tools() -> Value {
     let string = json!({"type":"string"});
     let tool = |name: &str, description: &str, properties: Value, required: Vec<&str>| json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}});
     let mut fields = issue_fields();
+    fields["assignee"] =
+        json!({"type":["string","null"],"description":"A login, or null to unassign the issue"});
     let changes = fields.clone();
     fields["id"] = string.clone();
     let mut tools = thread_tools();
