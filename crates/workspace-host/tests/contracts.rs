@@ -316,7 +316,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
     }
     for role in agent_roles() {
         let core = core(role);
-        assert!(core.contains("Wiffletree communication contract — v11"));
+        assert!(core.contains("Wiffletree communication contract — v12"));
         // The core outranks the skill that follows it.
         assert!(core.contains(
             "where it disagrees with this contract, the contract's tools and rules still apply"
@@ -327,6 +327,10 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         assert!(core.contains("save its process id from `$!` and kill those ids"));
         assert!(core.contains("do not use `jobs -p`, which is empty in a zsh subshell"));
         assert!(core.contains("confirm by name"));
+        // Every role is told not to end a turn while it waits on work.
+        assert!(core.contains("Do not end a turn while you wait on checks"));
+        assert!(core.contains("Run checks in the foreground"));
+        assert!(core.contains("Report the result only after it has finished"));
         // Every role is asked for a checklist, which is display only.
         assert!(core.contains("record a checklist of the steps you expect with set_plan"));
         assert!(core.contains("never replaces report"));
