@@ -48,6 +48,9 @@ pub(super) struct Settings {
     assistant_error: Option<String>,
 }
 
+/// The router thresholds Settings offers; the host accepts any from 0.5 to 1.0.
+const ROUTER_THRESHOLDS: [f64; 6] = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+
 /// A check-in threshold's presets, the unit they count and how a choice sets it.
 struct Threshold {
     name: &'static str,
@@ -509,6 +512,20 @@ impl Settings {
                         })),
                 ),
         };
+        let threshold = self.host.as_ref().map(|h| h.router_threshold);
+        let mut thresholds = div().flex().gap_1();
+        for preset in ROUTER_THRESHOLDS {
+            thresholds = thresholds.child(
+                segment(
+                    SharedString::from(format!("router-threshold-{preset}")),
+                    format!("{preset:.1}"),
+                    threshold == Some(preset),
+                )
+                .disabled(threshold.is_none())
+                .map(|b| ui::gated(b, &self.driving))
+                .on_click(cx.listener(move |v, _, _, c| v.set_router_threshold(preset, c))),
+            );
+        }
         div()
             .flex()
             .flex_col()
@@ -518,6 +535,12 @@ impl Settings {
                 "Name",
                 control,
                 "Shown in the sidebar and the composer. Your other Macs get it with the shared settings.",
+                p,
+            ))
+            .child(setting(
+                "Ask below",
+                thresholds,
+                "When the router is less sure than this where a message goes, it asks you. Your other Macs get it with the shared settings.",
                 p,
             ))
             .children(
@@ -543,6 +566,29 @@ impl Settings {
                         if let Some(host) = &mut view.host {
                             host.assistant_name = name;
                         }
+                    }
+                    Err(error) => view.assistant_error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    fn set_router_threshold(&mut self, threshold: f64, cx: &mut Context<Self>) {
+        let answer = match self.bridge.ask(ask::set_router_threshold(threshold)) {
+            Ok(answer) => answer,
+            Err(error) => {
+                self.assistant_error = Some(error);
+                return cx.notify();
+            }
+        };
+        cx.spawn(async move |this, cx| {
+            let answer = answer.await;
+            let _ = this.update(cx, |view, cx| {
+                match answer {
+                    Ok(settings) => {
+                        view.host = Some(settings);
+                        view.assistant_error = None;
                     }
                     Err(error) => view.assistant_error = Some(error),
                 }

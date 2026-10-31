@@ -6,7 +6,8 @@ WORKSPACE_TEST_THREAD_DIR. It lists the tools its workspace server offers, then 
 prompt: "save <file> as <title>" writes the file in the working folder and saves it with
 save_output; "offer github" reports an MCP server no source lists. It replies with the prompt's
 first line. A Codex turn, `exec`, reports no inventory at its start, as Codex does: it calls
-the tool the prompt names, as "call <server> <tool>", then replies."""
+the tool the prompt names, as "call <server> <tool>", then replies. A Claude run with
+`--json-schema` is the router's, logged to `router.jsonl`."""
 import json
 import os
 from pathlib import Path
@@ -34,6 +35,31 @@ if args[:1] == ['exec']:
         {'type': 'turn.completed', 'usage': {'input_tokens': 10, 'output_tokens': 5}},
     ]:
         print(json.dumps(value), flush=True)
+    sys.exit(0)
+if '--json-schema' in args:
+    # A router run: log what it was given, then answer from the message. A message naming a
+    # Space goes to a new thread there, "same thread" continues the current one, and anything
+    # else is unsure.
+    given = json.loads(sys.stdin.read())
+    with open(Path(os.environ['WORKSPACE_TEST_THREAD_DIR']) / 'router.jsonl', 'a') as runs:
+        runs.write(json.dumps({'args': args, 'input': given, 'cwd': os.getcwd(),
+                               'socket': 'WORKSPACE_SOCKET' in os.environ}) + '\n')
+    message = given['message']
+    named = [s for s in given['spaces'] if s['name'] in message]
+    current = given['current_thread']
+    if named:
+        thread, space, sure = {'kind': 'new', 'thread_id': ''}, named[0]['id'], 0.95
+    elif 'same thread' in message and current:
+        thread, space, sure = {'kind': 'continue', 'thread_id': ''}, current['space_id'], 0.95
+    else:
+        thread, space, sure = {'kind': 'new', 'thread_id': ''}, given['spaces'][0]['id'], 0.4
+    answer = {'thread': {'pick': thread, 'confidence': sure, 'alternatives': []},
+              'space': {'pick': space, 'confidence': sure, 'alternatives': []},
+              'title': 'Routed' if thread['kind'] == 'new' else ''}
+    print(json.dumps({'type': 'system', 'subtype': 'init', 'tools': ['StructuredOutput'],
+                      'mcp_servers': []}), flush=True)
+    print(json.dumps({'type': 'result', 'is_error': False, 'structured_output': answer,
+                      'usage': {}}), flush=True)
     sys.exit(0)
 if '--mcp-config' not in args:
     sys.exit(0)

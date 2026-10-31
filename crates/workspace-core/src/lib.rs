@@ -902,6 +902,9 @@ pub struct Snapshot {
     /// `sessions`: no project, panel or tree lists them.
     #[serde(default)]
     pub threads: Vec<assistant::ThreadTab>,
+    /// The messages the router holds unsent, oldest first.
+    #[serde(default)]
+    pub held: Vec<assistant::HeldMessage>,
 }
 fn assistant_name() -> String {
     assistant::DEFAULT_NAME.into()
@@ -1103,7 +1106,7 @@ pub fn duration_label(ms: i64) -> String {
     }
 }
 /// Host-owned settings, kept in the host's `settings.json`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HostSettings {
     /// Where new projects and ticket worktrees are created.
     pub workspaces_dir: String,
@@ -1134,6 +1137,12 @@ pub struct HostSettings {
     /// The assistant's name. Shared: read from `settings/assistant.json`.
     #[serde(default = "assistant_name")]
     pub assistant_name: String,
+    /// The confidence below which the router asks. Shared: read from `settings/assistant.json`.
+    #[serde(default = "router_threshold")]
+    pub router_threshold: f64,
+}
+fn router_threshold() -> f64 {
+    assistant::router::DEFAULT_THRESHOLD
 }
 /// A private GitHub repository the shared folder syncs with, as this machine recorded it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1323,6 +1332,7 @@ impl HostSettings {
             remote_access: false,
             builds_at_once: DEFAULT_BUILDS_AT_ONCE,
             assistant_name: assistant_name(),
+            router_threshold: router_threshold(),
         }
     }
     pub fn validate_check_ins(child_turns: u32, human_turns: u32) -> Result<()> {
@@ -3271,6 +3281,30 @@ pub enum Command {
     SetAssistantName {
         name: String,
     },
+    /// Sends `body` where the router decides, from the thread open in the assistant, if any.
+    /// Unsure, the message is held unsent and the user asked. Answered with `null`.
+    RouteMessage {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        body: String,
+    },
+    /// Sends a held message where the user chose.
+    AnswerHeld {
+        id: String,
+        destination: assistant::router::Destination,
+    },
+    /// Change on a routed message: stops the turn it started if that still runs, marks it and
+    /// its reply as moved there, and sends it to `destination`.
+    ChangeRoute {
+        thread_id: String,
+        message_id: String,
+        destination: assistant::router::Destination,
+    },
+    /// Sets the router's confidence threshold, a shared setting; answers with `HostSettings`.
+    SetRouterThreshold {
+        threshold: f64,
+    },
     /// Creates a Space with local storage and a local tracker, or, with `storage`, stored in
     /// that private GitHub repository (`owner/name` or its URL), whose tracker it shares; without
     /// `prefix`, a new tracker gets the one proposed from the Space's name.
@@ -3935,6 +3969,10 @@ impl Command {
             | Self::MakeProject { .. }
             | Self::DismissThreadCard { .. }
             | Self::SetAssistantName { .. }
+            | Self::RouteMessage { .. }
+            | Self::AnswerHeld { .. }
+            | Self::ChangeRoute { .. }
+            | Self::SetRouterThreshold { .. }
             | Self::SetSpaceBrain { .. }
             | Self::CreateSpace { .. }
             | Self::UpdateSpace { .. }
@@ -4032,6 +4070,10 @@ impl Command {
                 | Self::ScratchFiles { .. }
                 | Self::DismissThreadCard { .. }
                 | Self::SetAssistantName { .. }
+                | Self::RouteMessage { .. }
+                | Self::AnswerHeld { .. }
+                | Self::ChangeRoute { .. }
+                | Self::SetRouterThreshold { .. }
                 | Self::ResolveAttention { .. }
                 | Self::DismissAttention { .. }
                 | Self::SetOwnerAllowed { .. }

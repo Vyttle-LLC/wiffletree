@@ -4,6 +4,7 @@ mod codex_compaction;
 mod constrained;
 mod output;
 mod restricted;
+mod router;
 use crate::compaction::CompactionRecord;
 use crate::processes::{self, Sighting, Watch};
 use crate::runtime::LowPriority as _;
@@ -12,6 +13,7 @@ use crate::*;
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
 use output::{Next, Output, StopReading};
 pub use restricted::{ThreadLaunch, server_definition};
+pub use router::{ROUTER_LIMIT, RouterProvider};
 use std::os::unix::process::CommandExt;
 use std::{
     io::{Read, Write},
@@ -370,8 +372,55 @@ pub fn merge_run(
     input: Vec<u8>,
     limit: Duration,
 ) -> Result<MergeAnswer> {
+    let configure = |cmd: &mut ProcessCommand, _: &Path| {
+        constrained::configure(
+            cmd,
+            profile,
+            skills::model::MERGING,
+            skills::model::ANSWER_SCHEMA,
+        )
+    };
+    let mut run = constrained::Run::new("merge");
+    answer_run(claude, Provider::Claude, configure, input, limit, |value| {
+        let Some(result) = run.event(value)? else {
+            return Ok(None);
+        };
+        ensure!(
+            result.answer.is_some(),
+            "The merge run failed: {}.",
+            value["subtype"]
+        );
+        Ok(Some(MergeAnswer {
+            answer: result.answer.unwrap(),
+            tokens: result.tokens,
+        }))
+    })
+}
+
+/// A run that went past its time limit and was stopped.
+#[derive(Debug)]
+pub struct TookTooLong;
+impl std::fmt::Display for TookTooLong {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("The model took too long to answer, so the run was stopped.")
+    }
+}
+impl std::error::Error for TookTooLong {}
+
+/// Runs `program`, set up by `configure`, of no session and in an empty temporary folder, with
+/// `input` on stdin, until `answer` finds the answer in its events and it exits, or until
+/// `limit`, when it is stopped.
+fn answer_run<T>(
+    program: &Path,
+    provider: Provider,
+    configure: impl FnOnce(&mut ProcessCommand, &Path),
+    input: Vec<u8>,
+    limit: Duration,
+    mut answer: impl FnMut(&Value) -> Result<Option<T>>,
+) -> Result<T> {
+    let who = provider.label();
     let folder = tempfile::tempdir()?;
-    let mut cmd = ProcessCommand::new(claude);
+    let mut cmd = ProcessCommand::new(program);
     cmd.current_dir(folder.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -379,51 +428,50 @@ pub fn merge_run(
         .process_group(0)
         .at_low_priority()
         .own_descriptors_only();
-    constrained::configure(
-        &mut cmd,
-        profile,
-        skills::model::MERGING,
-        skills::model::ANSWER_SCHEMA,
-    );
-    let mut child = cmd.spawn().context("Claude could not be started")?;
-    let mut stdin = child.stdin.take().context("No Claude stdin")?;
-    let output = Output::spawn(child.stdout.take().context("No Claude stdout")?)?;
+    configure(&mut cmd, folder.path());
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("{who} could not be started"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .with_context(|| format!("No {who} stdin"))?;
+    let output = Output::spawn(
+        child
+            .stdout
+            .take()
+            .with_context(|| format!("No {who} stdout"))?,
+    )?;
     let _stop_reading = StopReading(output.clone());
-    let errors = constrained::Errors::spawn(child.stderr.take().context("No Claude stderr")?);
+    let stderr = child
+        .stderr
+        .take()
+        .with_context(|| format!("No {who} stderr"))?;
+    let errors = constrained::Errors::spawn(stderr);
     let mut process = Process {
         child,
         status: None,
     };
     std::thread::spawn(move || stdin.write_all(&input));
     let deadline = Instant::now() + limit;
-    let mut run = constrained::Run::new("merge");
-    let mut answer = None;
+    let in_time = || match Instant::now() < deadline {
+        true => Ok(()),
+        false => Err(TookTooLong),
+    };
+    let mut answered = None;
     loop {
         if process.exited()? {
             output.provider_exited();
         }
-        ensure!(
-            Instant::now() < deadline,
-            "The model took too long to answer, so the run was stopped."
-        );
+        in_time()?;
         match output.next(Duration::from_millis(20)) {
             Next::Event(Ok(value)) => {
-                if answer.is_none()
-                    && let Some(result) = run.event(&value)?
-                {
-                    ensure!(
-                        result.answer.is_some(),
-                        "The merge run failed: {}.",
-                        value["subtype"]
-                    );
-                    answer = Some(MergeAnswer {
-                        answer: result.answer.unwrap(),
-                        tokens: result.tokens,
-                    });
+                if answered.is_none() {
+                    answered = answer(&value)?;
                 }
             }
             Next::Event(Err(error))
-                if answer.is_none() && error == "Provider event exceeds bound" =>
+                if answered.is_none() && error == "Provider event exceeds bound" =>
             {
                 bail!("{error}")
             }
@@ -433,19 +481,16 @@ pub fn merge_run(
         }
     }
     while !process.exited()? {
-        ensure!(
-            Instant::now() < deadline,
-            "The model took too long to answer, so the run was stopped."
-        );
+        in_time()?;
         std::thread::sleep(Duration::from_millis(20));
     }
     let status = process.stop()?;
-    if let Some(answer) = answer {
-        return Ok(answer);
+    if let Some(answered) = answered {
+        return Ok(answered);
     }
     let stderr = errors.finish();
     let said = stderr.trim().chars().take(1500).collect::<String>();
-    let ended = format!("Claude ended without an answer ({status}). {said}");
+    let ended = format!("{who} ended without an answer ({status}). {said}");
     bail!("{}", ended.trim_end())
 }
 

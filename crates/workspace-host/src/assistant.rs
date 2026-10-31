@@ -30,6 +30,13 @@ pub(crate) fn board_store(home: &Path) -> PathBuf {
     home.join("boards")
 }
 
+/// A new thread's first message.
+pub(crate) struct FirstMessage<'a> {
+    pub id: &'a str,
+    pub body: &'a str,
+    pub files: &'a [PathBuf],
+}
+
 /// The tables a thread's session writes to that named a project for every row.
 const PROJECT_OPTIONAL: [&str; 4] = ["sessions", "messages", "activity", "usage_requests"];
 
@@ -168,7 +175,7 @@ impl Host {
             .optional()?
             .context("Thread not found")
     }
-    fn threads(&self) -> Result<Vec<Thread>> {
+    pub(crate) fn threads(&self) -> Result<Vec<Thread>> {
         self.list_data("SELECT data FROM threads ORDER BY rowid", [])
     }
     pub(crate) fn save_thread(&self, thread: &Thread) -> Result<()> {
@@ -209,6 +216,22 @@ impl Host {
         files: &[PathBuf],
         chosen: Option<ModelProfile>,
     ) -> Result<Thread> {
+        let first = FirstMessage {
+            id: &new_id(),
+            body,
+            files,
+        };
+        self.begin_thread(id, space, &title_from_message(body), first, chosen)
+    }
+    /// Starts a thread titled `title` in `space` with its `first` message.
+    pub(crate) fn begin_thread(
+        &mut self,
+        id: &str,
+        space: &SpaceId,
+        title: &str,
+        first: FirstMessage,
+        chosen: Option<ModelProfile>,
+    ) -> Result<Thread> {
         ensure!(
             Path::new(id).file_name() == Some(id.as_ref())
                 && !id.starts_with('.')
@@ -230,7 +253,7 @@ impl Host {
         );
         let (profile, chooser, reason, waits) = self.thread_model(&record, chosen)?;
         let at = now();
-        let title = title_from_message(body);
+        let title = title.to_owned();
         let session = Session {
             id: id.into(),
             project_id: String::new(),
@@ -259,6 +282,8 @@ impl Host {
             position,
             project_id: None,
             cards: vec![],
+            routed: vec![],
+            moved: vec![],
         };
         let scratch = scratch_folder(&self.home, id);
         fs::create_dir_all(&scratch)?;
@@ -272,7 +297,7 @@ impl Host {
             runtime.waiting = waits;
             runtime.workdir = Some(scratch.to_string_lossy().into_owned());
             host.save_runtime(&runtime)?;
-            host.send_with_files(&new_id(), None, &session.id, body, files)?;
+            host.send_with_files(first.id, None, &session.id, first.body, first.files)?;
             Ok(())
         })?;
         Ok(thread)

@@ -277,3 +277,96 @@ fn a_run_offered_an_unlisted_mcp_server_is_stopped_and_says_so() {
         "{shown:?}"
     );
 }
+
+fn route(service: &workspace_host::service::Service, id: &str, from: Option<&str>, body: &str) {
+    request(
+        service,
+        Command::RouteMessage {
+            id: id.into(),
+            thread_id: from.map(str::to_owned),
+            body: body.into(),
+        },
+    );
+}
+fn router_runs(fixture: &Fixture) -> Vec<Value> {
+    let log = std::fs::read_to_string(fixture.turns.join("router.jsonl")).unwrap_or_default();
+    log.lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+#[test]
+fn the_router_sends_each_message_where_it_answers_and_holds_it_when_unsure() {
+    let _environment = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
+    let fixture = fixture();
+    let service = service(&fixture);
+    start(&service, "t1", &fixture.sage, "release notes");
+    after_turns(&service, "t1", 1);
+    let deadline = || Instant::now() + Duration::from_secs(60);
+
+    // A clear continuation goes to the current thread.
+    route(
+        &service,
+        "m1",
+        Some("t1"),
+        "the same thread, and the watch app?",
+    );
+    after_turns(&service, "t1", 2);
+    let run = &router_runs(&fixture)[0];
+    // Started with every tool off, of no session, outside the thread's folder, without the
+    // workspace's socket, and told only the router's input.
+    assert_eq!(argument(run, "--tools"), "");
+    assert!(
+        run["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a == "--no-session-persistence")
+    );
+    assert_ne!(
+        Path::new(run["cwd"].as_str().unwrap()),
+        fixture.home.join("assistant/threads/t1")
+    );
+    assert_eq!(run["socket"], false);
+    let current = &run["input"]["current_thread"];
+    assert_eq!(current["id"], "t1");
+    assert_eq!(current["last_messages"][0], "User: release notes");
+
+    // A new topic opens a new thread in its Space and leaves a line in the current one.
+    route(&service, "m2", Some("t1"), "for Personal: book the dentist");
+    let snapshot = until_changed(&service, deadline(), |s| {
+        tab(s, "t1").is_some_and(|t| !t.thread.routed.is_empty())
+    });
+    let line = tab(&snapshot, "t1").unwrap().thread.routed[0].clone();
+    assert!(line.new);
+    let routed = tab(&snapshot, &line.to).unwrap();
+    assert_eq!(routed.thread.title, "Routed");
+    after_turns(&service, &line.to, 1);
+
+    // Unsure, the message waits unsent, and no turn starts until the user answers.
+    let ran = turns(&fixture).len();
+    route(&service, "m3", Some("t1"), "hmm");
+    let snapshot = until_changed(&service, deadline(), |s| {
+        s.held.first().is_some_and(|h| h.question.is_some())
+    });
+    let question = snapshot.held[0].question.clone().unwrap();
+    assert!(
+        question.why.starts_with("Not sure where this belongs"),
+        "{question:?}"
+    );
+    assert_eq!(turns(&fixture).len(), ran);
+    let continue_here = workspace_core::assistant::router::Destination::Thread {
+        thread_id: "t1".into(),
+    };
+    assert!(question.choices.contains(&continue_here));
+    request(
+        &service,
+        Command::AnswerHeld {
+            id: "m3".into(),
+            destination: continue_here,
+        },
+    );
+    let snapshot = after_turns(&service, "t1", 3);
+    assert!(snapshot.held.is_empty());
+    assert_eq!(turns(&fixture).len(), ran + 1);
+}

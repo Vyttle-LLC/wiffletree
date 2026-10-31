@@ -1,6 +1,9 @@
 //! The assistant (OpenSpec change `assistant-spaces-jobs-boards`, screen 1 of its mockup): one
 //! view of thread tabs, each a small read-only provider session in a Space, with search, the
-//! cards a thread's tools show, and a composer whose Space chip the user picks by hand.
+//! cards a thread's tools show, and a composer whose Space chip is the router's until the user
+//! picks one by hand.
+mod routing;
+
 use super::*;
 use gpui_component::{
     Disableable, Sizable,
@@ -12,7 +15,9 @@ use gpui_component::{
 };
 use spaces_view::{space_color, space_mark};
 use ui::{card, hint, icon};
-use workspace_core::assistant::{CardKind, DEFAULT_NAME, ThreadCard, ThreadHit, ThreadTab};
+use workspace_core::assistant::{
+    CardKind, DEFAULT_NAME, ThreadCard, ThreadHit, ThreadTab, is_notice,
+};
 
 /// What the composer says about a thread's authority, as the mockup words it.
 const AUTHORITY: &str = "Read-only · scratch folder";
@@ -63,12 +68,6 @@ fn saved_line(title: &str, version: u32) -> String {
         n => format!("Saved “{title}” to Boards · Only on this Mac · version {n}"),
     }
 }
-/// A message the host wrote about a turn, such as why it stopped, rather than the thread's reply.
-fn is_notice(message: &Message) -> bool {
-    ["error:", "start-error:", "stopped:"]
-        .iter()
-        .any(|prefix| message.id.starts_with(prefix))
-}
 
 /// A search the box asked for. Its reply shows only while the box still asks for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,8 +112,11 @@ pub(super) struct AssistantPage {
     shared: Shared,
     /// The tab shown: a thread, or with `None` a new tab.
     open: Option<String>,
-    /// A new tab's Space, picked with the composer's chip.
-    new_space: Option<SpaceId>,
+    /// The Space picked with the composer's chip for the next message; `None` lets the router
+    /// choose.
+    chosen_space: Option<SpaceId>,
+    /// A message sent from a new tab, whose thread the view opens once it has one.
+    following: Option<String>,
     composer: Entity<TextareaState>,
     /// The open thread's messages, and the thread and revision they were read at.
     messages: Vec<Message>,
@@ -166,7 +168,8 @@ impl AssistantPage {
             bridge,
             shared: Shared::default(),
             open: None,
-            new_space: None,
+            chosen_space: None,
+            following: None,
             composer,
             messages: vec![],
             read: None,
@@ -190,17 +193,16 @@ impl AssistantPage {
         let open = self.open.as_ref()?;
         self.tabs().iter().find(|tab| &tab.thread.id == open)
     }
-    /// The Space a message from the composer goes to: the open thread's, which never changes,
-    /// else the one picked for the new tab, else the first one on.
+    /// The Space the composer's chip shows: the one picked by hand, else the open thread's,
+    /// else the first one on.
     fn composer_space(&self) -> Option<SpaceId> {
-        if let Some(tab) = self.open_tab() {
-            return Some(tab.thread.space_id.clone());
-        }
         let on = |id: &SpaceId| {
             let locals = self.shared.snapshot().map(|s| &s.space_locals);
             locals.and_then(|l| l.get(id)).is_none_or(|l| l.enabled)
         };
-        (self.new_space.clone().filter(&on))
+        let open = self.open_tab().map(|tab| tab.thread.space_id.clone());
+        (self.chosen_space.clone().filter(&on))
+            .or(open)
             .or_else(|| self.spaces().iter().map(|s| s.id.clone()).find(on))
     }
 
@@ -219,6 +221,13 @@ impl AssistantPage {
         }
         if self.open.is_some() && self.open_tab().is_none() {
             self.open = self.tabs().first().map(|tab| tab.thread.id.clone());
+        }
+        if let Some(sent) = &self.following
+            && let Some(found) = routing::thread_of(self.tabs(), sent)
+        {
+            self.following = None;
+            self.open = Some(found);
+            self.read = None;
         }
         if shown {
             self.read_messages(window, cx);
@@ -275,8 +284,10 @@ impl AssistantPage {
             return;
         }
         self.sending = true;
-        match self.open.clone() {
-            Some(thread) => {
+        let open_space = self.open_tab().map(|tab| tab.thread.space_id.clone());
+        // A Space picked by hand skips the router: its thread, or a new one there.
+        match (self.chosen_space.take(), self.open.clone()) {
+            (Some(space), Some(thread)) if Some(&space) == open_space.as_ref() => {
                 let send = Command::Send {
                     id: new_id(),
                     sender: None,
@@ -287,11 +298,7 @@ impl AssistantPage {
                 };
                 self.request(send, window, cx);
             }
-            None => {
-                let Some(space) = self.composer_space() else {
-                    self.sending = false;
-                    return toast_error("Add a Space in Settings › Spaces first", window, cx);
-                };
+            (Some(space), _) => {
                 let ask = ask::start_thread(space, body, None);
                 self.ask(ask, window, cx, |view, thread, window, cx| {
                     view.sending = false;
@@ -301,6 +308,23 @@ impl AssistantPage {
                             view.select(Some(thread.id), window, cx);
                         }
                         Err(error) => toast_error(error, window, cx),
+                    }
+                });
+            }
+            (None, open) => {
+                let id = new_id();
+                if open.is_none() {
+                    self.following = Some(id.clone());
+                }
+                let ask = ask::route_message(id, open, body);
+                self.ask(ask, window, cx, |view, routed, window, cx| {
+                    view.sending = false;
+                    match routed {
+                        Ok(()) => view.clear_composer(window, cx),
+                        Err(error) => {
+                            view.following = None;
+                            toast_error(error, window, cx)
+                        }
                     }
                 });
             }
@@ -799,18 +823,28 @@ impl AssistantPage {
         let space = (self.spaces().iter())
             .find(|s| s.id == tab.thread.space_id)
             .map_or(String::new(), |s| s.name.clone());
+        let thread = &tab.thread;
         let mut column = div().flex().flex_col().gap_3().px_5().py_4();
-        for message in &self.messages {
+        // A message Change moved out, and the replies after it, show dimmed.
+        let mut moved: Option<&str> = None;
+        for entry in routing::timeline(&self.messages, thread) {
+            let message = match entry {
+                routing::Entry::Away(line) => {
+                    column = column
+                        .child(Self::bubble(&line.body, p))
+                        .child(self.route_line(thread, line, p, cx));
+                    continue;
+                }
+                routing::Entry::Message(message) => message,
+            };
+            if message.sender.is_none() {
+                moved = (thread.moved.iter())
+                    .find(|m| m.message_id == message.id)
+                    .map(|m| m.to.as_str());
+            }
             let body: SharedString = message.body.clone().into();
-            column = column.child(match (message.sender.is_none(), is_notice(message)) {
-                (true, _) => div()
-                    .self_end()
-                    .max_w(relative(0.85))
-                    .px_3()
-                    .py_2()
-                    .rounded_lg()
-                    .bg(p.overlay)
-                    .child(body),
+            let shown = match (message.sender.is_none(), is_notice(&message.id)) {
+                (true, _) => Self::bubble(&message.body, p),
                 (false, true) => hint(body, p).text_color(p.red),
                 (false, false) => div()
                     .max_w(relative(0.9))
@@ -826,7 +860,16 @@ impl AssistantPage {
                         .selectable(true)
                         .text_size(px(font::BODY)),
                     ),
-            });
+            };
+            column = column.child(shown.when(moved.is_some(), |d| d.opacity(0.5)));
+            if let Some(to) = moved.filter(|_| message.sender.is_none()) {
+                column = column.child(self.moved_line(to, p));
+            }
+            // A message from a new tab keeps its line, with Change, in the thread it went to.
+            let here = (thread.routed.iter()).find(|l| l.message_id == message.id);
+            if let Some(line) = here {
+                column = column.child(self.route_line(thread, line, p, cx));
+            }
         }
         if tab.status == Status::Working {
             column = column.child(
@@ -840,6 +883,9 @@ impl AssistantPage {
         }
         for card in &tab.thread.cards {
             column = column.child(self.card(card, p, cx));
+        }
+        for held in self.held_for(Some(&thread.id)) {
+            column = column.child(self.held_message(&held, p, cx));
         }
         column
     }
@@ -1004,6 +1050,10 @@ impl AssistantPage {
         let chip_name = (spaces.iter())
             .find(|s| Some(&s.id) == space.as_ref())
             .map_or("No Space".into(), |s| s.name.clone());
+        let chip_name = match self.chosen_space {
+            Some(_) => chip_name,
+            None => format!("{chip_name} · auto"),
+        };
         // A thread shows its own model; a new tab what its thread would start on.
         let model = match tab {
             Some(tab) => tab.profile.clone(),
@@ -1015,38 +1065,32 @@ impl AssistantPage {
             .border_1()
             .border_color(p.edge)
             .child(model.map_or("Who runs what".into(), |m| m.short()));
+        let weak = cx.weak_entity();
+        let chosen = self.chosen_space.clone();
+        // Auto lets the router choose; a Space picked by hand sends the next message there.
         let chip = button("composer-space")
             .xsmall()
             .when_some(space.clone(), |b, id| {
                 b.child(space_mark(space_color(&spaces, &id, p)))
             })
             .label(chip_name)
-            .disabled(tab.is_some());
-        let chip = match tab {
-            // A thread never changes its Space.
-            Some(_) => chip
-                .tooltip("A thread stays in its Space")
-                .into_any_element(),
-            None => {
-                let weak = cx.weak_entity();
-                chip.dropdown_caret(true)
-                    .dropdown_menu(move |mut menu, _, _| {
-                        for space in &spaces {
-                            let (id, weak) = (space.id.clone(), weak.clone());
-                            menu = menu.item(PopupMenuItem::new(space.name.clone()).on_click(
-                                move |_, _, cx| {
-                                    let _ = weak.update(cx, |view, cx| {
-                                        view.new_space = Some(id.clone());
-                                        cx.notify();
-                                    });
-                                },
-                            ));
-                        }
-                        menu
-                    })
-                    .into_any_element()
-            }
-        };
+            .dropdown_caret(true)
+            .dropdown_menu(move |mut menu, _, _| {
+                let choices = std::iter::once((None, "Auto".to_owned()))
+                    .chain(spaces.iter().map(|s| (Some(s.id.clone()), s.name.clone())));
+                for (space, name) in choices {
+                    let (weak, checked) = (weak.clone(), space == chosen);
+                    menu = menu.item(PopupMenuItem::new(name).checked(checked).on_click(
+                        move |_, _, cx| {
+                            let _ = weak.update(cx, |view, cx| {
+                                view.chosen_space = space.clone();
+                                cx.notify();
+                            });
+                        },
+                    ));
+                }
+                menu
+            });
         let empty = self.composer.read(cx).value().trim().is_empty();
         div()
             .flex_none()
@@ -1129,19 +1173,33 @@ impl Render for AssistantPage {
                         .child(self.conversation(&tab, p, cx)),
                 )
                 .into_any_element(),
-            (None, None) => div()
-                .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(hint(
-                    format!(
-                        "Ask {} anything. Each thread is read-only plus its own scratch folder, and stays on this Mac.",
-                        assistant_name(self.shared.snapshot())
-                    ),
-                    p,
-                ))
-                .into_any_element(),
+            (None, None) => {
+                let held = self.held_for(None);
+                match held.is_empty() {
+                    true => div()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(hint(
+                            format!(
+                                "Ask {} anything. Each thread is read-only plus its own scratch folder, and stays on this Mac.",
+                                assistant_name(self.shared.snapshot())
+                            ),
+                            p,
+                        ))
+                        .into_any_element(),
+                    false => div()
+                        .id("held-messages")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .child(div().flex().flex_col().gap_3().px_5().py_4().children(
+                            held.iter().map(|held| self.held_message(held, p, cx)),
+                        ))
+                        .into_any_element(),
+                }
+            }
         };
         div()
             .size_full()
@@ -1176,6 +1234,8 @@ mod tests {
                 position: 0,
                 project_id: None,
                 cards: vec![],
+                routed: vec![],
+                moved: vec![],
             },
             status,
             profile: None,

@@ -446,3 +446,27 @@ pub fn dismiss_thread_card(thread_id: String, card_id: String) -> Ask<assistant:
 pub fn set_assistant_name(name: String) -> Ask<String> {
     Ask::new(Command::SetAssistantName { name })
 }
+pub fn set_router_threshold(threshold: f64) -> Ask<HostSettings> {
+    Ask::new(Command::SetRouterThreshold { threshold })
+}
+pub fn route_message(id: String, thread_id: Option<String>, body: String) -> Ask<()> {
+    Ask::new(Command::RouteMessage {
+        id,
+        thread_id,
+        body,
+    })
+}
+pub fn answer_held(id: String, destination: assistant::router::Destination) -> Ask<()> {
+    Ask::new(Command::AnswerHeld { id, destination })
+}
+pub fn change_route(
+    thread_id: String,
+    message_id: String,
+    destination: assistant::router::Destination,
+) -> Ask<()> {
+    Ask::new(Command::ChangeRoute {
+        thread_id,
+        message_id,
+        destination,
+    })
+}

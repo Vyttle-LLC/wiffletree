@@ -755,9 +755,9 @@ impl Host {
             }
             Err(error) => json!({"cannot_start": format!("{error:#}")}),
         };
-        // Only the human starts the assistant's threads.
+        // Only the human starts the assistant's threads, and only their messages run the router.
         let jobs: Vec<Value> = (selection.jobs.iter())
-            .filter(|row| row.job != Job::Assistant)
+            .filter(|row| !matches!(row.job, Job::Assistant | Job::Router))
             .map(|row| {
                 let mut entry = json!({"job": row.job, "name": row.job.name(),
                     "main": line(&row.main), "right_now": right_now(row, false)});

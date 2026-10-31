@@ -17,7 +17,7 @@ const CLAUDE_TOOLS: [&str; 7] = [
     "Edit",
 ];
 /// Codex features that act outside the sandbox or start other agents, turned off for threads.
-const CODEX_FEATURES_OFF: [&str; 11] = [
+pub(super) const CODEX_FEATURES_OFF: [&str; 11] = [
     "apps",
     "browser_use",
     "browser_use_external",

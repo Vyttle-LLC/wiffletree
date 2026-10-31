@@ -186,7 +186,8 @@ fn current_big_small_policies_become_the_approved_table() {
         "the selection's migration, then the table's"
     );
     // No PR keeper model was chosen, so there is no PR keeper row; the default reviewers were
-    // Claude's and Codex's second opinions, so they wait. The Assistant row is seeded too.
+    // Claude's and Codex's second opinions, so they wait. The Assistant and Router rows are
+    // seeded too.
     assert_eq!(
         rows(&selection),
         [
@@ -197,6 +198,7 @@ fn current_big_small_policies_become_the_approved_table() {
             "Correctness: claude · opus · high → wait",
             "Regressions: codex · gpt-6.1-sol · high → wait",
             "Assistant: claude · sonnet · medium → codex · gpt-6.1-sol · medium",
+            "Router: claude · haiku · low → codex · gpt-6-luna · low",
         ]
     );
     let implementer = selection.row(&Job::Implementer).unwrap();

@@ -23,9 +23,23 @@ pub(crate) const ASSISTANT: &str = "settings/assistant.json";
 struct Assistant {
     #[serde(default = "default_assistant_name")]
     name: String,
+    /// The confidence below which the router asks.
+    #[serde(default = "default_router_threshold")]
+    threshold: f64,
+}
+impl Default for Assistant {
+    fn default() -> Self {
+        Self {
+            name: default_assistant_name(),
+            threshold: default_router_threshold(),
+        }
+    }
 }
 fn default_assistant_name() -> String {
     workspace_core::assistant::DEFAULT_NAME.into()
+}
+fn default_router_threshold() -> f64 {
+    workspace_core::assistant::router::DEFAULT_THRESHOLD
 }
 
 /// The settings repository chosen on the machine whose data folder is `home`, as its host
@@ -157,8 +171,9 @@ pub(crate) fn check(path: &str, content: &[u8]) -> Result<()> {
             Ok(())
         }
         ASSISTANT => {
-            let name = serde_json::from_str::<Assistant>(text)?.name;
-            workspace_core::assistant::validate_name(&name)?;
+            let assistant = serde_json::from_str::<Assistant>(text)?;
+            workspace_core::assistant::validate_name(&assistant.name)?;
+            workspace_core::assistant::router::validate_threshold(assistant.threshold)?;
             Ok(())
         }
         FORMAT => {
@@ -281,7 +296,20 @@ impl SharedStore<'_> {
     }
     pub(crate) fn set_assistant_name(&self, name: &str) -> Result<()> {
         let name = workspace_core::assistant::validate_name(name)?.into();
-        self.write_json(ASSISTANT, &Assistant { name })
+        let saved: Assistant = self.read_json(ASSISTANT).unwrap_or_default();
+        self.write_json(ASSISTANT, &Assistant { name, ..saved })
+    }
+    /// The confidence below which the router asks; 0.8 until the user changes it.
+    pub(crate) fn router_threshold(&self) -> f64 {
+        let saved: Option<Assistant> = self.read_json(ASSISTANT);
+        (saved.map(|a| a.threshold))
+            .and_then(|t| workspace_core::assistant::router::validate_threshold(t).ok())
+            .unwrap_or_else(default_router_threshold)
+    }
+    pub(crate) fn set_router_threshold(&self, threshold: f64) -> Result<()> {
+        let threshold = workspace_core::assistant::router::validate_threshold(threshold)?;
+        let saved: Assistant = self.read_json(ASSISTANT).unwrap_or_default();
+        self.write_json(ASSISTANT, &Assistant { threshold, ..saved })
     }
     /// `None` when no guide was saved; an empty guide is a saved one.
     pub(crate) fn guide(&self) -> Option<String> {

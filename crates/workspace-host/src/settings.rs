@@ -120,6 +120,7 @@ impl Host {
             checkin_human_turns,
             keeper,
             assistant_name: shared.assistant_name(),
+            router_threshold: shared.router_threshold(),
             ..local
         }
     }
@@ -201,6 +202,10 @@ impl Host {
     pub fn set_check_ins(&mut self, child_turns: u32, human_turns: u32) -> Result<HostSettings> {
         HostSettings::validate_check_ins(child_turns, human_turns)?;
         self.shared().set_check_ins(child_turns, human_turns)?;
+        Ok(self.settings())
+    }
+    pub fn set_router_threshold(&mut self, threshold: f64) -> Result<HostSettings> {
+        self.shared().set_router_threshold(threshold)?;
         Ok(self.settings())
     }
     /// Saves the PR keeper's settings. An invalid setting is refused and the saved one stays.

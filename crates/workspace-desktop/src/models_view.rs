@@ -514,9 +514,12 @@ impl ModelsPage {
     ) -> impl IntoElement {
         let catalog = self.catalog.clone();
         let may_skip = which.then && matches!(job, Job::Verifier { .. });
+        // The router never waits: with every choice spent, it asks you instead.
+        let router = *job == Job::Router;
         let label = match (&current, which) {
             (Some(profile), _) => models::cell_label(&catalog, profile),
             (None, Cell { then: true, .. }) if skips => "skip".to_owned(),
+            (None, Cell { then: true, .. }) if router => "ask you".to_owned(),
             (None, Cell { then: true, .. }) => "wait".to_owned(),
             (None, Cell { small: true, .. }) => "same".to_owned(),
             (None, _) => "No model".to_owned(),
@@ -533,6 +536,7 @@ impl ModelsPage {
             })
             .collect();
         let none = match which {
+            Cell { then: true, .. } if router => Some("Ask me where it goes"),
             Cell { then: true, .. } => Some("Wait for the reset"),
             Cell { small: true, .. } => Some("Same as the first line"),
             _ if *job == Job::Keeper => Some("No model"),
@@ -987,6 +991,10 @@ fn job_label(job: &Job, verifiers: &[VerifierConfig]) -> (String, String) {
         Job::Tester => ("Tester".into(), "Runs build, lint, tests".into()),
         Job::Keeper => ("PR keeper".into(), "Fixes conflicts, sorts comments".into()),
         Job::Assistant => ("Assistant".into(), "Answers in your threads".into()),
+        Job::Router => (
+            "Router".into(),
+            "Picks each message's thread; never waits".into(),
+        ),
         Job::Verifier { focus } => {
             let verifier = (verifiers.iter()).find(|v| v.focus.eq_ignore_ascii_case(focus));
             let role = verifier.map_or(Role::Reviewer, |v| v.role);

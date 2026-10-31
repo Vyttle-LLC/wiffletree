@@ -334,7 +334,7 @@ impl Session {
             );
         }
         // A Space's machine-local facts are the human's, like the commands that change them, and
-        // so are the assistant's threads.
+        // so are the assistant's threads and the messages the router holds.
         let hides_space_locals = local && !human && matches!(command, Command::Snapshot);
         let sent = match &self.peer {
             Peer::Local { .. } => self.requests.request(command),
@@ -360,6 +360,7 @@ impl Session {
             {
                 fields.remove("space_locals");
                 fields.remove("threads");
+                fields.remove("held");
             }
             let mut answer = response(version, id, result);
             answer.host_ms = Some(read_at.elapsed().as_millis() as u64);

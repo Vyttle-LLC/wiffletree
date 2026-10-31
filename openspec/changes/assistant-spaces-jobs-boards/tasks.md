@@ -13,11 +13,11 @@ Six stages, each a ticket or a few, each landing on its own. Every stage needs `
 
 ## 2. The router
 
-- [ ] 2.1 Core: `RouterInput`, `RouterAnswer`, `Choice`; `Job::Router`.
-- [ ] 2.2 Host: `RouterProvider` with Claude (`--json-schema`) and Codex (`--output-schema`) runs started with tools off; discard answers from runs that report tools.
-- [ ] 2.3 Host: the host rules, the threshold setting in `settings/assistant.json`, held messages that survive a restart, Change. Verify each unsure path (low confidence, mismatched Space, unknown id, timeout, spent router, bad shape) and that nothing reaches a brain before the user answers.
-- [ ] 2.4 Models: the Router row, its upgrade default, and "never waits".
-- [ ] 2.5 Desktop: routed-message line with Change; inline question with one-click choices and "Somewhere else…"; threshold in Settings.
+- [x] 2.1 Core: `RouterInput`, `RouterAnswer`, `Choice`; `Job::Router`.
+- [x] 2.2 Host: `RouterProvider` with Claude (`--json-schema`) and Codex (`--output-schema`) runs started with tools off; discard answers from runs that report tools.
+- [x] 2.3 Host: the host rules, the threshold setting in `settings/assistant.json`, held messages that survive a restart, Change. Verify each unsure path (low confidence, mismatched Space, unknown id, timeout, spent router, bad shape) and that nothing reaches a brain before the user answers.
+- [x] 2.4 Models: the Router row, its upgrade default, and "never waits".
+- [x] 2.5 Desktop: routed-message line with Change; inline question with one-click choices and "Somewhere else…"; threshold in Settings.
 
 ## 3. Jobs
 

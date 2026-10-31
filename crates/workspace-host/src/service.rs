@@ -273,6 +273,16 @@ fn stopped_by_parent_notice(reason: &str) -> String {
         "Stopped by its parent: {reason}\nIts input will not be retried; the next message runs normally. Partial work may remain."
     )
 }
+/// Why Change stopped a thread's turn.
+const MOVED: &str = "Stopped: you moved its message to another thread.";
+/// The notice a turn stopped on purpose leaves: a thread has no parent, and only Change stops
+/// one this way.
+fn stopped_notice(session: &Session, reason: &str) -> String {
+    match session.role {
+        Role::Assistant => reason.into(),
+        _ => stopped_by_parent_notice(reason),
+    }
+}
 /// What says a failed turn hit its provider's usage limit: a quota reading during the turn,
 /// or, when none did, the provider's error text.
 fn limit_signal(reading_said_so: bool, error: &str) -> Option<&'static str> {
@@ -499,6 +509,23 @@ fn spawn_skill_merge(sender: Sender<Event>, run: skills::MergeRun) {
         Event::SkillMerged,
     );
 }
+fn spawn_router_run(sender: Sender<Event>, run: router::RouterRun) {
+    spawn_job(
+        sender,
+        run,
+        |run| {
+            let executable = provider::executable(run.profile.provider)
+                .map_err(|e| format!("The router could not start: {e:#}"))?;
+            let router = provider::RouterProvider {
+                executable,
+                profile: run.profile.clone(),
+            };
+            router.decide(&run.input, provider::ROUTER_LIMIT)
+        },
+        |_| Err("The router stopped unexpectedly.".into()),
+        Event::Routed,
+    );
+}
 fn spawn_keeper_rebase(sender: Sender<Event>, job: keeper::Job) {
     spawn_job(
         sender,
@@ -607,6 +634,11 @@ enum Event {
     Synced(Result<sync::Passed>),
     /// A skill merge's model run finished on its own thread.
     SkillMerged(skills::MergeRun, Result<provider::MergeAnswer>),
+    /// A router run answered on its own thread, or said why it could not.
+    Routed(
+        router::RouterRun,
+        std::result::Result<workspace_core::assistant::router::RouterAnswer, String>,
+    ),
     /// A settings repository's clone is ready, off the host thread, to replace the shared folder.
     SettingsRepositoryPrepared {
         prepared: Result<sync::Prepared>,
@@ -1654,6 +1686,7 @@ impl Actor {
         let syncing = self.refresh_settings_sync(now()) || storing;
         self.refresh_brains(now());
         self.start_skill_merges();
+        self.start_router_runs();
         self.signal(dirty || syncing);
         if !self.checkout_deferred.is_empty()
             && self
@@ -1731,6 +1764,11 @@ impl Actor {
     fn start_skill_merges(&mut self) {
         for run in self.host.take_merge_runs() {
             spawn_skill_merge(self.sender.clone(), run);
+        }
+    }
+    fn start_router_runs(&mut self) {
+        for run in self.host.take_router_runs() {
+            spawn_router_run(self.sender.clone(), run);
         }
     }
 
@@ -2284,6 +2322,13 @@ impl Actor {
                 self.host.finish_merge_run(run, answered);
                 true
             }
+            Event::Routed(run, answered) => {
+                let message = run.message_id.clone();
+                if let Err(e) = self.host.finish_router_run(run, answered) {
+                    eprintln!("Routing message {message}: {e:#}");
+                }
+                true
+            }
             Event::ProviderInspected {
                 provider,
                 report,
@@ -2377,6 +2422,18 @@ impl Actor {
                 let result = (|| -> Result<Value> {
                     // Sessions this command stops on the human's behalf.
                     let mut human_stops = Vec::new();
+                    // Where Change moves a message from, read before the change removes its line.
+                    let moving = match &command {
+                        Command::ChangeRoute {
+                            thread_id,
+                            message_id,
+                            ..
+                        } => Some((
+                            self.host.routed_to(thread_id, message_id)?,
+                            message_id.clone(),
+                        )),
+                        _ => None,
+                    };
                     match &command {
                         Command::SetLive {
                             project_id,
@@ -2457,6 +2514,14 @@ impl Actor {
                         }
                         _ => self.host.execute(command.clone())?,
                     };
+                    // The turn a moved message started ends as finished, so it is not retried.
+                    if let Some((went_to, message)) = moving
+                        && let Some(active) = self.active.get_mut(&went_to)
+                        && active.messages.contains(&message)
+                    {
+                        active.stopped_by_parent = Some(MOVED.into());
+                        active.cancel.store(true, Ordering::Relaxed);
+                    }
                     // Stopping an agent stops what it started, before the command returns: for
                     // every agent of a stopped project, and for a paused session.
                     let stopped = match &command {
@@ -3161,7 +3226,7 @@ impl Actor {
                     self.host.append_output(
                         &session,
                         &format!("stopped:{run}"),
-                        &stopped_by_parent_notice(reason),
+                        &stopped_notice(&session, reason),
                     )?;
                     Host::event(
                         &self.host.db,
@@ -7901,6 +7966,65 @@ mod tests {
             status: Status::Paused,
         };
         command(actor, paused).unwrap();
+    }
+
+    #[test]
+    fn change_stops_the_turn_its_message_started_and_that_turn_is_not_retried() {
+        use workspace_core::assistant::router::{Choice, Destination, RouterAnswer, ThreadPick};
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let sage = (host.create_space("Sage", "", "", None).unwrap().space).id;
+        let notes = host
+            .start_thread("notes", &sage, "notes", &[], None)
+            .unwrap();
+        let personal = (host.spaces().unwrap().into_iter())
+            .find(|s| s.space.id != sage)
+            .unwrap()
+            .space
+            .id;
+        host.route_message("m1", Some(&notes.id), "book the dentist")
+            .unwrap();
+        let run = host.take_router_runs().remove(0);
+        fn sure<T>(pick: T) -> Choice<T> {
+            Choice {
+                pick,
+                confidence: 0.95,
+                alternatives: vec![],
+            }
+        }
+        let answer = RouterAnswer {
+            thread: sure(ThreadPick::New),
+            space: sure(personal),
+            title: String::new(),
+        };
+        host.finish_router_run(run, Ok(answer)).unwrap();
+        let dentist = host
+            .session(&host.message("m1").unwrap().recipient)
+            .unwrap();
+        host.advance_receipt("m1", Receipt::Delivered).unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+        actor
+            .active
+            .insert(dentist.id.clone(), active_turn("run", vec!["m1".into()]));
+
+        let change = Command::ChangeRoute {
+            thread_id: notes.id.clone(),
+            message_id: "m1".into(),
+            destination: Destination::NewThread { space_id: sage },
+        };
+        command(&mut actor, change).unwrap();
+        assert!(actor.active[&dentist.id].cancel.load(Ordering::Relaxed));
+        cancelled_turn_ends(&mut actor, &dentist);
+        assert_eq!(
+            actor.host.message("m1").unwrap().receipt,
+            Receipt::Completed
+        );
+        let notice = actor.host.message(&reply_id("stopped:run")).unwrap();
+        assert_eq!(notice.body, MOVED);
+        assert_ne!(
+            actor.host.session(&dentist.id).unwrap().status,
+            Status::Disconnected
+        );
     }
 
     fn cancelled_turn_ends(actor: &mut Actor, session: &Session) {

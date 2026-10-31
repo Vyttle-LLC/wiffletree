@@ -3,7 +3,7 @@
 //! limited by the table.
 use crate::{
     ModelProfile, Provider, QuotaReading, QuotaWindow, Role, VerificationSettings, model_name,
-    same_name,
+    same_name, smallest_model,
 };
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -67,6 +67,8 @@ pub enum Job {
     Keeper,
     /// The assistant's threads.
     Assistant,
+    /// The router, which decides where each message to the assistant goes. It never waits.
+    Router,
 }
 impl Job {
     /// "Implementer", or a verifier's focus.
@@ -78,6 +80,7 @@ impl Job {
             Self::Verifier { focus } => focus.clone(),
             Self::Keeper => "PR keeper".into(),
             Self::Assistant => "Assistant".into(),
+            Self::Router => "Router".into(),
         }
     }
     /// Verifier focuses compare ignoring surrounding spaces and ASCII case, as levels do.
@@ -268,8 +271,9 @@ impl ModelSelection {
     /// its row, and one without a row gets a copy, named in `copied`: a reviewer the first
     /// reviewer's row, and a tester, or a reviewer with no reviewer row to copy, the Tester
     /// row. A table saved before the Assistant row existed gets one copied from the
-    /// Implementer row's small-work line, or its main line without one, named in `copied`.
-    /// Rows are put in the page's order.
+    /// Implementer row's small-work line, or its main line without one, and a Router row on
+    /// the smallest model of the Assistant row's provider at low effort, both named in
+    /// `copied`. Rows are put in the page's order.
     pub fn fit(&mut self, verification: &VerificationSettings) {
         self.copied.clear();
         if self.row(&Job::Assistant).is_none()
@@ -285,6 +289,25 @@ impl ModelSelection {
                 small: None,
             });
             self.copied.push(Job::Assistant.name());
+        }
+        if self.row(&Job::Router).is_none()
+            && let Some(assistant) = self.row(&Job::Assistant)
+        {
+            let provider = assistant.main.first.provider;
+            let first = ModelProfile {
+                provider,
+                model: smallest_model(provider).into(),
+                effort: "low".into(),
+            };
+            self.jobs.push(JobRow {
+                job: Job::Router,
+                main: Line {
+                    first,
+                    then: Then::Wait,
+                },
+                small: None,
+            });
+            self.copied.push(Job::Router.name());
         }
         let tester = self.row(&Job::Tester).cloned();
         let reviewer = (verification.verifiers.iter())
@@ -328,6 +351,7 @@ impl ModelSelection {
         }
         fitted.extend(take(&mut rest, &Job::Keeper));
         fitted.extend(take(&mut rest, &Job::Assistant));
+        fitted.extend(take(&mut rest, &Job::Router));
         self.jobs = fitted;
     }
     pub fn validate(&self) -> Result<()> {
@@ -336,6 +360,7 @@ impl ModelSelection {
             Job::Implementer,
             Job::Tester,
             Job::Assistant,
+            Job::Router,
         ] {
             let rows = self.jobs.iter().filter(|row| row.job == job).count();
             ensure!(rows == 1, "Choose who runs the {} job", job.name());

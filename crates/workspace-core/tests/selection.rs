@@ -327,9 +327,72 @@ fn table() -> ModelSelection {
                 Then::Wait,
             ),
             row(Job::Assistant, sonnet(), Then::Model(sol())),
+            row(Job::Router, haiku(), Then::Wait),
         ],
         ..ModelSelection::default()
     }
+}
+fn haiku() -> ModelProfile {
+    profile(Provider::Claude, "haiku", "low")
+}
+
+#[test]
+fn a_table_saved_before_the_router_gets_one_on_the_assistants_smallest_model() {
+    let mut older = table();
+    older
+        .jobs
+        .retain(|row| !matches!(row.job, Job::Assistant | Job::Router));
+    older.fit(&VerificationSettings::default());
+    // The Implementer's small work is Sonnet · high then GPT 6.1 Sol · medium.
+    assert_eq!(
+        older.row(&Job::Assistant).unwrap().main,
+        implementer().small.unwrap()
+    );
+    let router = older.row(&Job::Router).unwrap();
+    assert_eq!(router.main.first, haiku());
+    assert_eq!(router.main.first.short(), "Haiku · low");
+    assert_eq!(router.main.then, Then::Wait);
+    assert_eq!(older.copied[..2], ["Assistant", "Router"]);
+    older.validate().unwrap();
+    // On a Codex assistant, Codex's smallest.
+    let mut codex = table();
+    codex.jobs.retain(|row| row.job != Job::Router);
+    codex.row_mut(&Job::Assistant).unwrap().main.first = sol();
+    codex.fit(&VerificationSettings::default());
+    let first = &codex.row(&Job::Router).unwrap().main.first;
+    assert_eq!(
+        (first.provider, first.model.as_str()),
+        (Provider::Codex, "gpt-6-luna")
+    );
+    // The router is a fixed job; its then cannot be skip.
+    let mut missing = table();
+    missing.jobs.retain(|row| row.job != Job::Router);
+    assert_eq!(
+        missing.validate().unwrap_err().to_string(),
+        "Choose who runs the Router job"
+    );
+    let mut skipping = table();
+    skipping.row_mut(&Job::Router).unwrap().main.then = Then::Skip;
+    assert!(skipping.validate().is_err());
+}
+
+#[test]
+fn a_spent_router_with_then_wait_resolves_to_a_wait_the_host_never_takes() {
+    let quotas = [reading(
+        Provider::Claude,
+        vec![window("Weekly", Some(97.), Some(MONDAY))],
+    )];
+    let unusable = BTreeSet::new();
+    let pick = table()
+        .resolve(
+            &Job::Router,
+            false,
+            false,
+            &limits(&quotas, &unusable),
+            &when,
+        )
+        .unwrap();
+    assert!(pick.waits, "{pick:?}");
 }
 
 #[test]
@@ -511,7 +574,8 @@ fn rows_follow_the_configured_verifiers() {
             "Tests",
             "Correctness",
             "Regressions",
-            "Assistant"
+            "Assistant",
+            "Router"
         ]
     );
     assert_eq!(selection.copied, ["Tests", "Regressions"]);

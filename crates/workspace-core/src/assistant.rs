@@ -1,7 +1,10 @@
-//! The assistant's threads (OpenSpec change `assistant-spaces-jobs-boards`, stage 1). A thread is
-//! a provider session of role `Assistant` owned by its Space, read-only but for its scratch
-//! folder, kept only on this Mac.
+//! The assistant's threads (OpenSpec change `assistant-spaces-jobs-boards`, stages 1 and 2). A
+//! thread is a provider session of role `Assistant` owned by its Space, read-only but for its
+//! scratch folder, kept only on this Mac. The router sends each message to its thread.
+pub mod router;
+
 use crate::{ModelProfile, Selection, SpaceId, Status};
+use router::{Destination, Question};
 use serde::{Deserialize, Serialize};
 
 /// What the assistant is called until the user names it.
@@ -37,6 +40,12 @@ pub struct Thread {
     /// What the thread's tools asked to show, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cards: Vec<ThreadCard>,
+    /// The messages sent from this thread that went to another one, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routed: Vec<RoutedLine>,
+    /// Its messages that Change moved to another thread, with their replies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub moved: Vec<MovedMessage>,
 }
 impl Thread {
     /// Whether its tab is in the strip at `now`: not closed, and a message or an opening within
@@ -44,6 +53,46 @@ impl Thread {
     pub fn in_strip(&self, now: i64) -> bool {
         !self.closed && now - self.last_message_at.max(self.opened_at) < IDLE_AFTER_MS
     }
+}
+
+/// A message the router holds unsent, while it decides and then until the user answers. It
+/// is kept in the store, so it survives a restart.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldMessage {
+    pub id: String,
+    /// The thread open when the user sent it; `None` from an empty tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    pub body: String,
+    pub created_at: i64,
+    /// What the user is asked; `None` while the router decides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<Question>,
+    /// The router's title for a new thread, when it gave one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+}
+/// The line a message leaves in the thread it was sent from when it went to another thread:
+/// "New thread in Personal · Change".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutedLine {
+    /// The message's id in the thread it went to.
+    pub message_id: String,
+    pub body: String,
+    pub created_at: i64,
+    /// The thread it went to.
+    pub to: String,
+    /// It started that thread.
+    pub new: bool,
+    /// What Change offers before "Somewhere else…".
+    pub choices: Vec<Destination>,
+}
+/// A message Change moved out of this thread; it and its reply show as moved.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MovedMessage {
+    pub message_id: String,
+    /// The thread it went to.
+    pub to: String,
 }
 
 /// A card a thread's tool put in its conversation.
@@ -94,6 +143,19 @@ pub struct ThreadHit {
     /// The matching line of a message, when the title did not match.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub excerpt: Option<String>,
+}
+
+/// Whether a thread's message is one the host wrote about a turn, such as why it stopped,
+/// rather than the thread's reply: stored as the turn's output under `error:`, `start-error:`
+/// or `stopped:` and its run.
+pub fn is_notice(message_id: &str) -> bool {
+    message_id
+        .strip_prefix(crate::REPLY_PREFIX)
+        .is_some_and(|run| {
+            ["error:", "start-error:", "stopped:"]
+                .iter()
+                .any(|kind| run.starts_with(kind))
+        })
 }
 
 /// The title a new thread takes from its first message: its first line, at most 60
@@ -150,6 +212,8 @@ mod tests {
             position: 0,
             project_id: None,
             cards: vec![],
+            routed: vec![],
+            moved: vec![],
         }
     }
 

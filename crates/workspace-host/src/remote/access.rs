@@ -110,6 +110,10 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::MakeProject { .. }
         | Command::DismissThreadCard { .. }
         | Command::SetAssistantName { .. }
+        | Command::RouteMessage { .. }
+        | Command::AnswerHeld { .. }
+        | Command::ChangeRoute { .. }
+        | Command::SetRouterThreshold { .. }
         | Command::SetSpaceBrain { .. }
         | Command::CreateSpace { .. }
         | Command::UpdateSpace { .. }
