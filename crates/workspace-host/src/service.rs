@@ -8229,14 +8229,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_hanging_source_check_leaves_the_actor_free_and_the_run_names_it() {
+    /// How long the hanging MCP server's handshake may take before its check gives up.
+    const HANG_LIMIT: std::time::Duration = std::time::Duration::from_secs(3);
+    const HUNG: &str = "The linear MCP server did not answer within 3 seconds.";
+
+    /// An idle actor whose Claude configures a Linear MCP server that never answers, and a
+    /// recipe listing it; the actor's events arrive on the receiver.
+    fn hanging_linear(home: &Path) -> (Actor, workspace_core::job::Recipe, Receiver<Event>) {
         use std::os::unix::fs::PermissionsExt;
         use workspace_core::Source;
-        use workspace_core::job::{JobRun, Recipe, RunOutcome, Schedule, Sharing};
-        let home = tempfile::tempdir().unwrap();
-        let mut host = Host::open_set_up(home.path()).unwrap();
-        let (bin, user) = (home.path().join("bin"), home.path().join("user"));
+        use workspace_core::job::{Recipe, Schedule, Sharing};
+        let mut host = Host::open_set_up(home).unwrap();
+        let (bin, user) = (home.join("bin"), home.join("user"));
         fs::create_dir_all(&bin).unwrap();
         fs::create_dir_all(&user).unwrap();
         let server = bin.join("hangs");
@@ -8244,11 +8248,10 @@ mod tests {
         fs::set_permissions(&server, fs::Permissions::from_mode(0o755)).unwrap();
         let config = json!({"mcpServers": {"linear": {"command": "hangs"}}});
         fs::write(user.join(".claude.json"), config.to_string()).unwrap();
-        let limit = std::time::Duration::from_secs(3);
         host.source_env = Some(crate::jobs::SourceEnv {
             path: vec![bin],
             home: user,
-            mcp_limit: limit,
+            mcp_limit: HANG_LIMIT,
         });
         let recipe = Recipe {
             id: "brief".into(),
@@ -8271,31 +8274,120 @@ mod tests {
             enabled: true,
             extra: Default::default(),
         };
-        let key = host.save_job(recipe).unwrap().recipe.key();
         let (mut actor, _, _) = idle_actor(host);
         let (sender, events) = async_channel::unbounded();
         actor.sender = sender;
+        (actor, recipe, events)
+    }
+    /// Sends a command and takes its answer, which must have come at once.
+    fn ask_now(actor: &mut Actor, command: Command) -> Value {
+        let (reply, replies) = async_channel::bounded(1);
+        actor.process(Event::Command(command, reply));
+        replies.try_recv().unwrap().unwrap()
+    }
+
+    #[test]
+    fn a_hanging_source_check_leaves_the_actor_free_and_the_run_names_it() {
+        use workspace_core::job::{JobRun, RunOutcome};
+        let home = tempfile::tempdir().unwrap();
+        let (mut actor, recipe, events) = hanging_linear(home.path());
+        let key = actor.host.save_job(recipe).unwrap().recipe.key();
         let started = std::time::Instant::now();
-        let ask = |actor: &mut Actor, command: Command| {
-            let (reply, replies) = async_channel::bounded(1);
-            actor.process(Event::Command(command, reply));
-            replies.try_recv().unwrap().unwrap()
-        };
         let run: JobRun =
-            serde_json::from_value(ask(&mut actor, Command::RunJobNow { job: key.clone() }))
+            serde_json::from_value(ask_now(&mut actor, Command::RunJobNow { job: key.clone() }))
                 .unwrap();
         assert_eq!((run.outcome, run.thread_id), (RunOutcome::Running, None));
         // The actor answers another command while the server's handshake hangs.
-        ask(&mut actor, Command::SeeJobRuns { job: key });
-        assert!(started.elapsed() < limit, "{:?}", started.elapsed());
+        ask_now(&mut actor, Command::SeeJobRuns { job: key });
+        assert!(started.elapsed() < HANG_LIMIT, "{:?}", started.elapsed());
         let checked = events.recv_blocking().unwrap();
         assert!(matches!(checked, Event::SourcesChecked(..)));
         actor.process(checked);
         let ended = actor.host.job_run(&run.id).unwrap();
         assert_eq!(ended.outcome, RunOutcome::NotStarted);
+        assert_eq!(ended.reason, HUNG);
+    }
+
+    #[test]
+    fn a_hanging_preview_leaves_the_actor_free_and_its_card_names_the_source() {
+        use workspace_core::job::RecipePreview;
+        let home = tempfile::tempdir().unwrap();
+        let (mut actor, recipe, _) = hanging_linear(home.path());
+        let key = recipe.key();
+        let started = std::time::Instant::now();
+        let (reply, previewed) = async_channel::bounded(1);
+        let preview = Command::PreviewJob {
+            recipe: Box::new(recipe),
+        };
+        actor.process(Event::Command(preview, reply));
+        assert!(previewed.try_recv().is_err());
+        ask_now(&mut actor, Command::SeeJobRuns { job: key });
+        assert!(started.elapsed() < HANG_LIMIT, "{:?}", started.elapsed());
+        let preview: RecipePreview =
+            serde_json::from_value(previewed.recv_blocking().unwrap().unwrap()).unwrap();
+        assert_eq!(preview.sources[0].problem.as_deref(), Some(HUNG));
+    }
+
+    #[test]
+    fn a_hanging_proposal_leaves_the_actor_free_and_its_card_names_the_source() {
+        use workspace_core::assistant::CardKind;
+        let home = tempfile::tempdir().unwrap();
+        let (mut actor, recipe, events) = hanging_linear(home.path());
+        let thread = (actor.host)
+            .start_thread("t1", &recipe.space_id, "Brief me each morning", &[], None)
+            .unwrap();
+        actor
+            .active
+            .insert(thread.id.clone(), active_turn("run", vec![]));
+        let started = std::time::Instant::now();
+        let (reply, proposed) = async_channel::bounded(1);
+        let args = json!({"name":"Brief","prompt":"Brief me.","cron":"0 7 * * *","timezone":"America/New_York","sources":[{"kind":"mcp","server":"linear","tools":["list_issues"]}]});
+        actor.process(Event::Tool {
+            token: String::new(),
+            name: "propose_job".into(),
+            args,
+            reply,
+        });
+        assert!(proposed.try_recv().is_err());
+        ask_now(&mut actor, Command::SeeJobRuns { job: recipe.key() });
+        assert!(started.elapsed() < HANG_LIMIT, "{:?}", started.elapsed());
+        let checked = events.recv_blocking().unwrap();
+        assert!(matches!(checked, Event::JobProposed { .. }));
+        actor.process(checked);
+        proposed.try_recv().unwrap().unwrap();
+        let card = actor.host.thread("t1").unwrap().cards.remove(0);
+        let CardKind::Recipe { preview, .. } = card.kind else {
+            panic!("a recipe card");
+        };
+        assert_eq!(preview.sources[0].problem.as_deref(), Some(HUNG));
+    }
+
+    #[test]
+    fn a_hanging_scheduled_run_leaves_the_actor_free_and_the_run_names_it() {
+        use workspace_core::job::RunOutcome;
+        let home = tempfile::tempdir().unwrap();
+        let (mut actor, recipe, events) = hanging_linear(home.path());
+        let key = actor.host.save_job(recipe).unwrap().recipe.key();
+        // Its time came a moment ago.
+        (actor.host.db)
+            .execute(
+                "INSERT INTO job_due VALUES (?1,?2)",
+                params![key.as_str(), now() - 1_000],
+            )
+            .unwrap();
+        let started = std::time::Instant::now();
+        ask_now(&mut actor, Command::SeeJobRuns { job: key.clone() });
+        let run = actor.host.job_runs(&key, 1).unwrap().remove(0);
+        assert_eq!((run.outcome, &run.thread_id), (RunOutcome::Running, &None));
+        ask_now(&mut actor, Command::SeeJobRuns { job: key });
+        assert!(started.elapsed() < HANG_LIMIT, "{:?}", started.elapsed());
+        let checked = events.recv_blocking().unwrap();
+        assert!(matches!(checked, Event::SourcesChecked(..)));
+        actor.process(checked);
+        let ended = actor.host.job_run(&run.id).unwrap();
         assert_eq!(
-            ended.reason,
-            "The linear MCP server did not answer within 3 seconds."
+            (ended.outcome, ended.reason.as_str()),
+            (RunOutcome::NotStarted, HUNG)
         );
     }
 
