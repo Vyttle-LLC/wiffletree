@@ -11,12 +11,9 @@ pub(super) struct RepositoryGroups<'a> {
     pub(super) open_tickets: Vec<(&'a Repository, Vec<&'a str>)>,
 }
 impl RepositoryGroups<'_> {
-    /// Whether the project uses nothing and its Space lists nothing, cloned here or not.
-    pub(super) fn is_empty(&self) -> bool {
-        self.from_space.is_empty()
-            && self.not_cloned.is_empty()
-            && self.added.is_empty()
-            && self.open_tickets.is_empty()
+    /// Whether the project uses nothing here, whatever its Space lists that is not cloned.
+    pub(super) fn uses_nothing(&self) -> bool {
+        self.from_space.is_empty() && self.added.is_empty() && self.open_tickets.is_empty()
     }
 }
 
@@ -193,9 +190,15 @@ mod tests {
     }
 
     #[test]
-    fn a_space_that_lists_nothing_here_leaves_the_groups_empty() {
-        let snapshot = snapshot(project("personal", &[]), vec![space("personal", &[])], &[]);
-        assert!(groups(&snapshot, &snapshot.projects[0]).is_empty());
+    fn a_space_with_nothing_cloned_here_gives_the_project_nothing() {
+        for listed in [&[][..], &["o/gone"][..]] {
+            let snapshot = snapshot(
+                project("personal", &[]),
+                vec![space("personal", listed)],
+                &[],
+            );
+            assert!(groups(&snapshot, &snapshot.projects[0]).uses_nothing());
+        }
     }
 
     #[test]

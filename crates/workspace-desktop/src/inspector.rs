@@ -860,7 +860,7 @@ impl Inspector {
             if let Some(project) = index.project(&session.project_id) {
                 let space = snapshot.spaces.iter().find(|s| s.id == project.space);
                 let groups = groups(snapshot, project);
-                if groups.is_empty() && !snapshot.repositories.is_empty() {
+                if groups.uses_nothing() && !snapshot.repositories.is_empty() {
                     let name = space.map_or("Its Space", |s| s.name.as_str());
                     repositories = repositories.child(hint(
                         format!(
