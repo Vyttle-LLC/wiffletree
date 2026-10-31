@@ -15,7 +15,9 @@
   4. The Boards library.
   5. An open HTML board.
   6. A Space's settings page.
-  7. A job's page as stage 3 built it, with its paused state, delete and edit. Added October 31, 2026; awaiting approval.
+  7. A job's page, redesigned: active with a run past 30 minutes, paused with delete, a shared job run by another Mac,
+     edit, and the one Jobs list in the assistant. Redesigned October 31, 2026; awaiting approval. Once approved, it
+     replaces study 4's Outputs and Jobs tabs with a Jobs button that opens the assistant's list.
 -->
 <style>
 .light,:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
@@ -148,6 +150,15 @@ code{font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--ov
 .pill.ok{background:color-mix(in srgb,var(--green) 14%,transparent);color:var(--green)}
 .pill.bad{background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red)}
 .pill.live{background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent)}
+.pill.paused{background:color-mix(in srgb,var(--yellow) 16%,transparent);color:var(--yellow);font-weight:600}
+.btn.danger{color:var(--red);border-color:color-mix(in srgb,var(--red) 45%,var(--edge))}
+.btn.danger.fill{background:var(--red);border-color:var(--red);color:var(--on-accent);font-weight:600}
+.btn.off{opacity:.45}
+.jobhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.jobhead h2{margin:0;font-size:16px}
+.run.long{border-color:color-mix(in srgb,var(--yellow) 55%,var(--edge));background:color-mix(in srgb,var(--yellow) 7%,var(--base))}
+.src .when{color:var(--muted)}
+.old{color:var(--muted)}
 .dialog{border:1px solid var(--edge);border-radius:12px;background:var(--surface);box-shadow:0 8px 24px rgba(0,0,0,.18);padding:14px 16px;display:flex;flex-direction:column;gap:8px;max-width:420px}
 ul.legend{margin:6px 0 0;padding-left:18px;color:var(--subtle);font-size:12px;max-width:900px}
 ul.legend li{margin:3px 0}
@@ -420,9 +431,9 @@ ul.legend li{margin:3px 0}
   <p class="caption"><b>Spaces are made here, by the user.</b> The assistant can suggest one but never creates it. Clone paths, allowed models and whether the Space is on stay on this Mac; the rest lives in <code>space.yaml</code> in the storage repository.</p>
 </section>
 
-<!-- 7. A job's page, as built in stage 3 -->
+<!-- 7. A job's page, redesigned -->
 <section class="study wide">
-  <div class="eyebrow">7 · A job's page, as built · <span class="pending" style="margin:0">Added October 31, 2026 · awaiting approval</span></div>
+  <div class="eyebrow">7 · A job's page · active, a run past 30 minutes · <span class="pending" style="margin:0">Redesigned October 31, 2026 · awaiting approval</span></div>
   <div class="frame">
     <div class="window">
       <aside class="side">
@@ -441,17 +452,17 @@ ul.legend li{margin:3px 0}
           <div class="tab"><span class="sp sage"></span>API date format</div>
           <div class="tab"><span class="sp personal"></span>Dentist Tuesday</div>
           <div class="tab add">＋</div>
-          <span class="btn quiet" style="margin:0 0 6px auto;padding:1px 9px">Jobs</span>
+          <span class="btn quiet" style="margin:0 0 6px auto;padding:1px 9px;background:var(--overlay);color:var(--text)">Jobs</span>
           <div class="search" style="margin-left:6px">Search threads</div>
         </div>
         <div class="page">
           <div class="jobbar">
-            <span class="btn quiet">All jobs</span>
+            <span class="btn quiet">‹ All jobs</span>
             <span style="flex:1"></span>
-            <span class="btn quiet">Pause</span><span class="btn quiet">Edit</span><span class="btn quiet">Delete</span>
-            <span class="btn" style="opacity:.45">Run now</span>
+            <span class="btn quiet">Pause</span><span class="btn quiet">Edit</span><span class="btn danger">Delete</span>
+            <span class="btn off">Run now</span>
           </div>
-          <div style="display:flex;align-items:center;gap:8px"><span class="sp sage"></span><h2 style="margin:0;font-size:16px">Morning brief</h2></div>
+          <div class="jobhead"><span class="sp sage"></span><h2>Morning brief</h2><span class="pill ok">Active</span><span class="pill live">Running · 45 min</span></div>
           <div class="card">
             <dl class="kv">
               <dt>Space</dt><dd>Sage</dd>
@@ -460,45 +471,43 @@ ul.legend li{margin:3px 0}
               <dt>Model</dt><dd>Sonnet · medium · Job row: First choice</dd>
               <dt>Sharing</dt><dd>Everyone runs their own · private result</dd>
               <dt>Sources</dt><dd>
+                <div class="note" style="margin-bottom:2px">Checked by today's 07:00 run, 45 min ago</div>
                 <div class="src"><span class="ok">●</span><code>gh</code> pr list, pr view · ready</div>
                 <div class="src"><span class="ok">●</span><code>sentry-cli</code> issues list · ready</div>
-                <div class="src"><span class="bad">●</span>linear MCP · list_issues, get_cycle · The linear MCP server is not configured for Claude. Add it to Claude's MCP configuration.</div>
+                <div class="src"><span class="bad">●</span>linear MCP · list_issues, get_cycle · not configured for Claude. Add it to Claude's MCP configuration.</div>
               </dd>
             </dl>
             <p class="note">Jobs only read, through the commands and tools listed here.</p>
           </div>
           <h3>Runs</h3>
           <div class="runs">
-            <div class="run">
-              <div class="line"><span class="pill live">Running</span><span style="flex:1">today 07:00 · Running</span><span class="btn quiet" style="padding:0 8px">Stop</span></div>
-              <span class="note">Sonnet · medium · Job row: First choice</span>
+            <div class="run long">
+              <div class="line"><span class="pill live">Running</span><span style="flex:1">today 07:00 · 45 min so far</span><span class="btn" style="padding:0 9px">Stop</span></div>
+              <span class="note warn">This run has gone past 30 minutes. Stop ends it; the next run still starts on schedule.</span>
             </div>
             <div class="run">
-              <div class="line"><span class="pill bad">Failed</span><span>Thu Oct 30 07:00 · Failed</span></div>
+              <div class="line"><span class="pill bad">Failed</span><span>Thu Oct 30 07:00</span></div>
               <span class="note">Wiffletree stopped during the run.</span>
-              <span class="note">Sonnet · medium · Job row: First choice</span>
+              <span class="note">Ran on GPT 6.1 Sol · medium: Sonnet · medium was not available</span>
             </div>
             <div class="run">
-              <div class="line"><span class="pill bad">Did not start</span><span>Wed Oct 29 08:30 · Did not start · catch-up for 1 missed run</span></div>
-              <span class="note">The linear MCP server is not configured for Claude. Add it to Claude's MCP configuration.</span>
-              <span class="note">Sonnet · medium · Job row: First choice</span>
+              <div class="line"><span class="pill bad">Did not start</span><span>Wed Oct 29 08:30 · catch-up for 1 missed run</span></div>
+              <span class="note">Missing source: linear MCP is not configured for Claude. Add it to Claude's MCP configuration.</span>
             </div>
             <div class="run">
-              <div class="line"><span class="pill ok">Finished</span><span>Tue Oct 28 07:00 · Finished</span></div>
+              <div class="line"><span class="pill ok">Finished</span><span>Tue Oct 28 07:00</span></div>
               <span class="note">Saved “Morning brief” · version 3 · Only on this Mac</span>
-              <span class="note">Sonnet · medium · Job row: First choice</span>
             </div>
             <div class="run">
-              <div class="line"><span class="pill">Stopped</span><span>Mon Oct 27 09:14 · Stopped · Run now</span></div>
-              <span class="note">Stopped: you stopped the run.</span>
-              <span class="note">Sonnet · medium · Job row: First choice</span>
+              <div class="line"><span class="pill">Stopped</span><span>Mon Oct 27 09:14 · Run now</span></div>
+              <span class="note">You stopped the run.</span>
             </div>
           </div>
         </div>
       </div>
     </div>
   </div>
-  <p class="caption"><b>The job's page, as stage 3 built it.</b> It opens from the assistant's Jobs button, a job in Boards' Jobs list, or the count on the assistant's row, and opening it clears that count. Run now is off while a run is running or when another Mac runs the job. A run that has run 30 minutes, and every 30 minutes after, puts its note with Stop under the assistant's row, not on this page. Each source shows what the newest checked run found.</p>
+  <p class="caption"><b>The job's page, redesigned.</b> The header names the job's state, Active or Paused, and a running run with how long it has run. Each run's pill is its outcome; the line beside it gives only the time, catch-up and Run now. A run past 30 minutes turns yellow on this page with its Stop, and its note with Stop stays under the assistant's row too. The sources say which run checked them and when. The model shows once, in the recipe; a run names its model only when it ran on another one. Delete is red. Run now is off while a run is running or when another Mac runs the job.</p>
 </section>
 
 <section class="study">
@@ -506,25 +515,61 @@ ul.legend li{margin:3px 0}
   <div class="frame">
     <div class="page">
       <div class="jobbar">
-        <span class="btn quiet">All jobs</span>
+        <span class="btn quiet">‹ All jobs</span>
         <span style="flex:1"></span>
-        <span class="btn quiet">Resume</span><span class="btn quiet">Edit</span><span class="btn quiet">Delete</span>
+        <span class="btn quiet">Resume</span><span class="btn quiet">Edit</span><span class="btn danger">Delete</span>
         <span class="btn">Run now</span>
       </div>
-      <div style="display:flex;align-items:center;gap:8px"><span class="sp sage"></span><h2 style="margin:0;font-size:16px">Morning brief</h2></div>
+      <div class="jobhead"><span class="sp sage"></span><h2>Morning brief</h2><span class="pill paused">Paused</span></div>
+      <div class="banner"><b>Paused.</b> Scheduled times are skipped until you resume it; Resume starts from the next time. Run now still works.</div>
       <div class="card">
         <dl class="kv">
-          <dt>Schedule</dt><dd>Weekdays at 07:00 (America/New_York)<br><span class="note">Paused: it does not run until you resume it.</span></dd>
+          <dt>Schedule</dt><dd>Weekdays at 07:00 (America/New_York)<br><span class="note">No next run while paused</span></dd>
+          <dt>Sources</dt><dd>
+            <div class="note" style="margin-bottom:2px">Last checked by the Tue Oct 28 07:00 run, 3 days ago. The next run checks again.</div>
+            <div class="src old"><span>●</span><code>gh</code> pr list, pr view · was ready</div>
+            <div class="src old"><span>●</span><code>sentry-cli</code> issues list · was ready</div>
+            <div class="src old"><span>●</span>linear MCP · list_issues, get_cycle · was not configured</div>
+          </dd>
         </dl>
       </div>
       <div class="dialog">
         <h3>Delete the job Morning brief?</h3>
         <p class="note">Its recipe and its runs are removed. Outputs it saved stay in Boards.</p>
-        <div class="actions"><span class="btn quiet">Cancel</span><span class="btn primary">Delete</span></div>
+        <div class="actions"><span class="btn quiet">Cancel</span><span class="btn danger fill">Delete</span></div>
       </div>
     </div>
   </div>
-  <p class="caption"><b>Pause and Resume are one button.</b> Paused, the schedule says so and the times it misses never run; Resume starts from the next time. Run now still works while paused. Delete asks first, and is refused while a run is running.</p>
+  <p class="caption"><b>Paused shows at the top.</b> A Paused pill and banner replace the old note inside the Schedule row. Pause and Resume stay one button. Sources checked more than a day ago turn grey and read "was ready", so an old check never looks current. Delete is red, in the bar and in its dialog. It asks first, and is refused while a run is running.</p>
+</section>
+
+<section class="study">
+  <div class="eyebrow">7 · A shared job run by another Mac</div>
+  <div class="frame">
+    <div class="page">
+      <div class="jobbar">
+        <span class="btn quiet">‹ All jobs</span>
+        <span style="flex:1"></span>
+        <span class="btn quiet">Pause</span><span class="btn quiet">Edit</span><span class="btn danger">Delete</span>
+        <span class="btn off">Run now</span>
+      </div>
+      <div class="jobhead"><span class="sp sage"></span><h2>Watch crash rate</h2><span class="pill ok">Active</span><span class="pill">Runs on Jamie's Mac</span></div>
+      <div class="banner" style="display:flex;align-items:center;gap:8px;border-color:var(--edge);background:var(--base)"><span style="flex:1"><b style="color:var(--text)">Runs on Jamie's Mac</b> · last run Wed Oct 22 09:00. This Mac doesn't run it.</span><span class="btn">Take over running</span></div>
+      <div class="card">
+        <dl class="kv">
+          <dt>Space</dt><dd>Sage · shared</dd>
+          <dt>Schedule</dt><dd>Daily at 09:00 (America/New_York)</dd>
+          <dt>Model</dt><dd>Sonnet · medium · Job row: First choice</dd>
+          <dt>Sharing</dt><dd>One runner · result shared in Sage</dd>
+          <dt>Sources</dt><dd>
+            <div class="note" style="margin-bottom:2px">Not checked on this Mac. Jamie's Mac checks them before each of its runs.</div>
+            <div class="src old"><span>●</span><code>sentry-cli</code> issues list</div>
+          </dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>The runner is named in the header.</b> A "One runner" job in a shared Space says which Mac runs it and when it last ran, with Take over running beside it, as stage 5 offers whenever another Mac runs the job. Run now is off here.</p>
 </section>
 
 <section class="study">
@@ -543,6 +588,39 @@ ul.legend li{margin:3px 0}
     </div>
   </div>
   <p class="caption"><b>Edit changes the name, prompt, schedule and timezone.</b> Only Save changes the job. Sources, model and sharing are not editable here; they come from the recipe the thread proposed.</p>
+</section>
+
+<section class="study">
+  <div class="eyebrow">7 · One Jobs list, in the assistant</div>
+  <div class="frame">
+    <div class="page" style="gap:8px;border-bottom:1px solid var(--edge);background:var(--base)">
+      <div class="filters">
+        <h2 style="margin-right:10px">Boards</h2>
+        <span class="chip">All Spaces ▾</span><span class="chip">All jobs ▾</span>
+        <span class="btn quiet" style="margin-left:auto">Jobs ›</span>
+        <span class="search" style="margin:0">Search titles</span>
+      </div>
+      <p class="note">Boards keeps only outputs. Its Jobs button opens the assistant's Jobs list.</p>
+    </div>
+    <div class="page">
+      <h2>Jobs</h2>
+      <p class="note">Jobs run only while Wiffletree runs on this Mac.</p>
+      <div class="src">☑ Start Wiffletree at login</div>
+      <div class="card" style="gap:2px;padding:9px 12px">
+        <div class="jobhead"><span class="sp sage"></span><b style="flex:1">Morning brief</b><span class="pill live">Running · 45 min</span></div>
+        <span class="note">Weekdays at 07:00 · Next Mon Nov 3 07:00</span>
+      </div>
+      <div class="card" style="gap:2px;padding:9px 12px">
+        <div class="jobhead"><span class="sp sage"></span><b style="flex:1">Watch crash rate</b><span class="pill">Runs on Jamie's Mac</span></div>
+        <span class="note">Daily at 09:00 · Last run Wed Oct 22 09:00</span>
+      </div>
+      <div class="card" style="gap:2px;padding:9px 12px">
+        <div class="jobhead"><span class="sp personal"></span><b style="flex:1">Weekly reading list</b><span class="pill paused">Paused</span></div>
+        <span class="note">Sundays at 18:00 · Last run Sun Oct 26 18:00 · Finished</span>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>One home: the assistant's Jobs list.</b> Jobs are made in assistant threads, and their page, runs, Stop, the count on the assistant's row and Start at login already live there. Boards is the library of outputs, so its Outputs and Jobs tabs give way to a Jobs button that opens this list; its All jobs filter still narrows outputs by job. Each row shows the same pills as the job's header.</p>
 </section>
 
 </div>
