@@ -58,6 +58,8 @@ fn both_signed_in_is_the_approved_table() {
             "Correctness: claude · opus · high → wait",
             "Regressions: codex · gpt-6.1-sol · high → wait",
             "PR keeper: claude · sonnet · medium → codex · gpt-6.1-sol · medium",
+            "Assistant: claude · sonnet · medium → codex · gpt-6.1-sol · medium",
+            "Router: claude · haiku · low → wait",
         ]
     );
     assert_eq!(

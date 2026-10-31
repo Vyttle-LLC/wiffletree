@@ -66,7 +66,10 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::Issues { .. }
         | Command::Issue { .. }
         | Command::IssueProjectDefaults { .. }
-        | Command::IssuePeople { .. } => Row::Read,
+        | Command::IssuePeople { .. }
+        | Command::SearchThreads { .. }
+        | Command::Proposals { .. }
+        | Command::ScratchFiles { .. } => Row::Read,
         Command::ResolvePaths { .. } | Command::ReadFile { .. } | Command::ListFolder { .. } => {
             Row::HostPath
         }
@@ -99,6 +102,35 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::ResolveAttention { .. }
         | Command::DismissAttention { .. }
         | Command::AppendLog { .. }
+        | Command::StartThread { .. }
+        | Command::RenameThread { .. }
+        | Command::SetThreadOpen { .. }
+        | Command::OrderThreads { .. }
+        | Command::DeleteThread { .. }
+        | Command::DraftProjectBrief { .. }
+        | Command::MakeProject { .. }
+        | Command::DismissThreadCard { .. }
+        | Command::OpenIssueThread { .. }
+        | Command::ApplyProposal { .. }
+        | Command::DiscardProposal { .. }
+        | Command::SetAssistantName { .. }
+        | Command::RouteMessage { .. }
+        | Command::AnswerHeld { .. }
+        | Command::ChangeRoute { .. }
+        | Command::SetRouterThreshold { .. }
+        | Command::SaveJob { .. }
+        | Command::PreviewJob { .. }
+        | Command::SetJobEnabled { .. }
+        | Command::RunJobNow { .. }
+        | Command::DeleteJob { .. }
+        | Command::StopJobRun { .. }
+        | Command::SeeJobRuns { .. }
+        | Command::TakeOverJob { .. }
+        | Command::ApproveJobOutput { .. }
+        | Command::Boards
+        | Command::BoardVersions { .. }
+        | Command::BoardVersionFolder { .. }
+        | Command::ShareBoard { .. }
         | Command::SetSpaceBrain { .. }
         | Command::CreateSpace { .. }
         | Command::UpdateSpace { .. }
@@ -177,7 +209,9 @@ pub(crate) fn check(command: &Command, level: AccessLevel, host: &str) -> Result
         (Row::Read | Row::HostPath, _) => Ok(()),
         (Row::Scan | Row::Change, AccessLevel::ViewOnly) => Err(view_only()),
         (Row::Change, AccessLevel::Control) => match command {
-            Command::Send { attachments, .. } if !attachments.is_empty() => {
+            Command::Send { attachments, .. } | Command::StartThread { attachments, .. }
+                if !attachments.is_empty() =>
+            {
                 Err("Remote devices attach files by uploading them".into())
             }
             _ => Ok(()),

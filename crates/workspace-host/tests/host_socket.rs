@@ -745,7 +745,9 @@ fn space_commands_need_the_apps_credential_and_reads_do_not() {
     let mut agent = fixture.welcomed(None);
     // A Space's machine-local facts, such as where its brain is, are left out.
     let read = agent.result(Command::Snapshot);
-    assert!(read.get("space_locals").is_none());
+    for human_only in ["space_locals", "threads", "held", "jobs"] {
+        assert!(read.get(human_only).is_none(), "{human_only}");
+    }
     let brain_path = std::fs::canonicalize(brain.path()).unwrap();
     assert!(!read.to_string().contains(brain_path.to_str().unwrap()));
     let spaces = snapshot(&mut agent).spaces;

@@ -509,6 +509,7 @@ impl Sidebar {
                             .on_click(cx.listener(|v, _, w, c| v.new_project(w, c))),
                     ),
             )
+            .child(self.assistant_row(p, cx))
             .child(
                 div()
                     .px_4()
@@ -603,6 +604,94 @@ impl Sidebar {
                     .relative()
                     .children(self.update_card(p, cx)),
             )
+    }
+
+    /// The assistant and Boards, pinned above Projects. The assistant goes by the name the user
+    /// gave it, with a working mark while any thread is in a turn, a count of job runs that
+    /// failed or did not start, which opens the job's page, and a note with Stop for each run
+    /// past 30 minutes. Dragging projects never moves them.
+    fn assistant_row(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        let snapshot = self.shared.snapshot();
+        let working = snapshot.is_some_and(|s| assistant_view::any_working(&s.threads));
+        let selected = self.shared.page == Page::Assistant;
+        let jobs = snapshot.map_or(&[][..], |s| &s.jobs);
+        let (attention, failed_job) = assistant_view::jobs::attention(jobs);
+        let mut notes = div().flex().flex_col();
+        for (name, run, minutes) in assistant_view::jobs::long_runs(jobs) {
+            notes = notes.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .pl(px(30.))
+                    .pr_2()
+                    .text_size(px(font::META))
+                    .text_color(p.subtle)
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(assistant_view::jobs::long_run_text(&name, minutes)),
+                    )
+                    .child(
+                        button(SharedString::from(format!("stop-long-run-{run}")))
+                            .ghost()
+                            .xsmall()
+                            .label("Stop")
+                            .on_click(cx.listener(move |_, _, _, c| {
+                                c.emit(Intent::StopJobRun(run.clone()))
+                            })),
+                    ),
+            );
+        }
+        div()
+            .flex_none()
+            .px_2()
+            .pt_2()
+            .pb_1()
+            .border_b_1()
+            .border_color(p.edge.opacity(edge::LIGHT))
+            .child(
+                self.row("assistant-row".into(), selected, p)
+                    .on_click(cx.listener(|_, _, _, c| c.emit(Intent::OpenPage(Page::Assistant))))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(if selected { p.text } else { p.subtle })
+                            .child(icon("people").size(px(14.))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(assistant_view::assistant_name(snapshot)),
+                    )
+                    .when(working, |d| {
+                        d.child(ui::Spinner::new().xsmall().color(p.accent))
+                    })
+                    .when(attention > 0, |d| {
+                        d.child(
+                            div()
+                                .id("assistant-jobs-attention")
+                                .child(needs_you_badge(attention, p))
+                                .on_click(cx.listener(move |_, _, _, c| {
+                                    c.stop_propagation();
+                                    c.emit(Intent::OpenJob(failed_job.clone()))
+                                })),
+                        )
+                    }),
+            )
+            .child(notes)
+            .child({
+                let selected = self.shared.page == Page::Boards;
+                self.row("boards-row".into(), selected, p)
+                    .on_click(cx.listener(|_, _, _, c| c.emit(Intent::OpenPage(Page::Boards))))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(if selected { p.text } else { p.subtle })
+                            .child(icon("book").size(px(14.))),
+                    )
+                    .child(div().flex_1().child("Boards"))
+            })
     }
 
     /// Pages about the whole workspace, kept apart from the per-session tools on the right.

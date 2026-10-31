@@ -755,7 +755,9 @@ impl Host {
             }
             Err(error) => json!({"cannot_start": format!("{error:#}")}),
         };
+        // Only the human starts the assistant's threads, and only their messages run the router.
         let jobs: Vec<Value> = (selection.jobs.iter())
+            .filter(|row| !matches!(row.job, Job::Assistant | Job::Router))
             .map(|row| {
                 let mut entry = json!({"job": row.job, "name": row.job.name(),
                     "main": line(&row.main), "right_now": right_now(row, false)});
@@ -1086,7 +1088,7 @@ impl Host {
         }
         let body = body.chars().take(MAX_TEXT_BYTES / 4).collect::<String>();
         let update = update.map(encode).transpose()?;
-        self.db.execute("INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at,reply_update) VALUES (?1,?2,?3,?3,?4,'completed',?5,?6) ON CONFLICT(id) DO UPDATE SET body=excluded.body,reply_update=excluded.reply_update",params![reply_id(run),session.project_id,session.id,body,now(),update])?;
+        self.db.execute("INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at,reply_update) VALUES (?1,?2,?3,?3,?4,'completed',?5,?6) ON CONFLICT(id) DO UPDATE SET body=excluded.body,reply_update=excluded.reply_update",params![reply_id(run),crate::assistant::project_column(&session.project_id),session.id,body,now(),update])?;
         Ok(())
     }
 }

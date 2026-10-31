@@ -280,7 +280,25 @@ pub(crate) trait RuleSet {
     fn also_held(&self, _held: &[scan::Held]) -> Vec<scan::Held> {
         vec![]
     }
+    /// Forgets what `compare` found, as the pass fetches again after a push was refused.
+    fn reset(&mut self);
+    /// Sits out the pass's next try, after a push was refused: keeps what `compare` found,
+    /// its pauses included, but nothing it would commit, which waits for the next pass.
+    fn sit_out(&mut self);
+    /// Whether a push of this rule set's commit, refused because GitHub's branch moved, fetches
+    /// and pushes again in the same pass. The others wait for the next pass, which pulls the
+    /// other machine's commit before pushing again.
+    fn pushes_again(&self) -> bool {
+        false
+    }
 }
+
+/// How many times a pass fetches and pushes in all when GitHub's branch moves under the push of
+/// a rule set that `pushes_again`. Only the settings pass's runner boards do, which only this
+/// Mac writes, so a few tries are enough. A storage repository's own pass retries whole instead,
+/// up to `issues_sync::PUSH_TRIES`, which is higher because teammates filing at once each take
+/// the next number.
+const PUSH_TRIES: usize = 3;
 
 /// The only URL and branch a clone is fetched from and pushed to.
 pub(crate) struct Remote<'a> {
@@ -303,7 +321,9 @@ pub(crate) struct Outcome {
 /// apart before pushing them together. With `scanner`, the files under the scanned paths are
 /// scanned before they are committed, and a file that fails or cannot be scanned is held: left
 /// out of the commit and kept here. A rule set whose compare fails is told so and commits
-/// nothing; the others go on.
+/// nothing; the others go on. A push refused because the branch moved on GitHub meanwhile,
+/// with a commit of a rule set that `pushes_again`, fetches again and pushes only those rule
+/// sets' changes on the new head; the others' wait for the next pass.
 pub(crate) fn pass(
     clone: &Path,
     remote: Remote,
@@ -312,6 +332,60 @@ pub(crate) fn pass(
     scanner: Option<&scan::Scanner>,
     git: &GitTool,
 ) -> Result<Outcome> {
+    let mut taking_part = vec![true; rule_sets.len()];
+    let mut tries = 1;
+    // What every try held, as the latest scan of each file found it: a rule set that waits for
+    // the next pass keeps its first try's.
+    let mut held: Vec<scan::Held> = vec![];
+    loop {
+        let once = pass_once(
+            clone,
+            &remote,
+            previous,
+            rule_sets,
+            &taking_part,
+            scanner,
+            git,
+        )?;
+        held.retain(|earlier| !once.held.iter().any(|now| now.path == earlier.path));
+        held.extend(once.held);
+        let moved = (once.pushed.as_ref()).is_err_and(|error| error.is::<Moved>());
+        let again = (once.committed.iter()).any(|&at| rule_sets[at].pushes_again());
+        if !moved || !again || tries == PUSH_TRIES {
+            return Ok(Outcome {
+                pushed: once.pushed.map_err(|error| format!("{error:#}")),
+                held,
+            });
+        }
+        tries += 1;
+        for (rule_set, part) in rule_sets.iter_mut().zip(&mut taking_part) {
+            *part = *part && rule_set.pushes_again();
+            match part {
+                true => rule_set.reset(),
+                false => rule_set.sit_out(),
+            }
+        }
+    }
+}
+
+/// One pass's outcome, its push's error kept whole, and the rule sets that committed.
+struct Once {
+    pushed: Result<Option<String>>,
+    held: Vec<scan::Held>,
+    committed: Vec<usize>,
+}
+
+/// One fetch, compare, commit and push of the rule sets `taking_part` marks; the others are
+/// left as they are, their files still theirs.
+fn pass_once(
+    clone: &Path,
+    remote: &Remote,
+    previous: &str,
+    rule_sets: &mut [&mut dyn RuleSet],
+    taking_part: &[bool],
+    scanner: Option<&scan::Scanner>,
+    git: &GitTool,
+) -> Result<Once> {
     let branch = format!("refs/heads/{}", remote.branch);
     let fetch = ["fetch", "--quiet", "--no-tags", "--recurse-submodules=no"];
     run_at(
@@ -324,7 +398,11 @@ pub(crate) fn pass(
         .trim()
         .to_owned();
     let mut compared = vec![];
-    for rule_set in rule_sets.iter_mut() {
+    for (rule_set, &part) in rule_sets.iter_mut().zip(taking_part) {
+        if !part {
+            compared.push(false);
+            continue;
+        }
         let result = rule_set.compare(clone, &head);
         compared.push(result.is_ok());
         if let Err(error) = result {
@@ -338,6 +416,10 @@ pub(crate) fn pass(
         .filter(|(_, (_, compared))| *compared)
         .filter_map(|(at, (rule_set, _))| Some((at, rule_set.commit()?)))
         .collect();
+    let committed = (commits.iter())
+        .filter(|(_, (files, _))| !files.is_empty())
+        .map(|(at, _)| *at)
+        .collect();
     let mut held = vec![];
     let mut scanned_commits = vec![];
     for (at, (mut files, message)) in commits {
@@ -350,10 +432,11 @@ pub(crate) fn pass(
         scanned_commits.push((files, message));
     }
     let owner = |path: &str| rule_sets.iter().position(|rule_set| rule_set.claims(path));
-    let pushed = commit_and_push(clone, &remote, scanned_commits, &owner, git);
-    Ok(Outcome {
-        pushed: pushed.map_err(|error| format!("{error:#}")),
+    let pushed = commit_and_push(clone, remote, scanned_commits, &owner, git);
+    Ok(Once {
+        pushed,
         held,
+        committed,
     })
 }
 
@@ -503,13 +586,11 @@ pub(crate) fn push(
         .to_owned();
     let on = remote_head(clone, remote.url, remote.branch, git)
         .context("This machine cannot read the repository")?;
-    let range = match on {
+    let range = match &on {
         Some(on) => {
-            ensure!(
-                publish::is_ancestor(clone, &on, &head),
-                "{} moved on GitHub since this machine read it",
-                remote.branch
-            );
+            if !publish::is_ancestor(clone, on, &head) {
+                return Err(Moved(remote.branch.to_owned()).into());
+            }
             format!("{on}..{head}")
         }
         None => head.clone(),
@@ -534,14 +615,32 @@ pub(crate) fn push(
     }
     let refspec = format!("{head}:refs/heads/{}", remote.branch);
     let args = ["push", "--no-follow-tags", "--recurse-submodules=no"];
-    run_at(
+    let pushed = run_at(
         git,
         clone,
         remote.url,
         &[&args[..], &[remote.url, &refspec]].concat(),
-    )?;
+    );
+    if let Err(error) = pushed {
+        // Another machine may have pushed since the check above.
+        let now = remote_head(clone, remote.url, remote.branch, git).ok();
+        return match now.is_some_and(|now| now != on) {
+            true => Err(error.context(Moved(remote.branch.to_owned()))),
+            false => Err(error),
+        };
+    }
     Ok(())
 }
+
+/// A push refused because the branch moved on GitHub since the pass read it.
+#[derive(Debug)]
+pub(crate) struct Moved(String);
+impl std::fmt::Display for Moved {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{} moved on GitHub since this machine read it", self.0)
+    }
+}
+impl std::error::Error for Moved {}
 
 /// What this machine last synced and last wrote of each file of a clone, `None` for no file,
 /// and the commit it last synced, kept per repository by its `key`.
@@ -754,6 +853,13 @@ mod tests {
         }
         fn failed(&mut self, error: anyhow::Error) {
             self.failed = Some(format!("{error:#}"));
+        }
+        fn reset(&mut self) {
+            self.changed.clear();
+            self.failed = None;
+        }
+        fn sit_out(&mut self) {
+            self.changed.clear();
         }
     }
 

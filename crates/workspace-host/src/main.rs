@@ -11,7 +11,31 @@ fn main() -> Result<()> {
     if args.first().map(String::as_str) == Some("agent-mcp") {
         let role = (args.get(1))
             .and_then(|role| serde_json::from_value(serde_json::Value::String(role.clone())).ok());
-        return workspace_host::mcp::serve_stdio(role);
+        return workspace_host::mcp::serve_stdio(workspace_host::mcp::tools_for(role));
+    }
+    if args.first().map(String::as_str) == Some("thread-mcp") {
+        return workspace_host::mcp::serve_stdio(workspace_host::mcp::thread_tools());
+    }
+    if args.first().map(String::as_str) == Some("issue-thread-mcp") {
+        return workspace_host::mcp::serve_stdio(workspace_host::mcp::issue_thread_tools());
+    }
+    // Claude's hook before a job run's shell command. Exit 2 is the only refusal Claude
+    // honours; any other failure would let the command run. So input that cannot be read is
+    // refused as unreadable, the reason is written without a panic, and the only exit 0 is an
+    // explicit allow.
+    if args.first().map(String::as_str) == Some("job-bash-check") {
+        let mut input = vec![];
+        if io::stdin().read_to_end(&mut input).is_err() {
+            input.clear();
+        }
+        if let Some(why) = workspace_host::provider::shell_text_refused(&input) {
+            let _ = writeln!(io::stderr(), "{why}");
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("job-mcp") {
+        return workspace_host::mcp::serve_stdio(workspace_host::mcp::job_run_tools());
     }
     if args.first().map(String::as_str) == Some("probe-quota") {
         println!(

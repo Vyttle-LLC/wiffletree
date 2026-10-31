@@ -29,7 +29,7 @@ struct Known {
     /// What reasons call it.
     name: &'static str,
 }
-const LINEUP: [Known; 4] = [
+const LINEUP: [Known; 6] = [
     Known {
         provider: Provider::Claude,
         model: "opus",
@@ -43,6 +43,12 @@ const LINEUP: [Known; 4] = [
         name: "Sonnet",
     },
     Known {
+        provider: Provider::Claude,
+        model: "haiku",
+        label: "Haiku · latest",
+        name: "Haiku",
+    },
+    Known {
         provider: Provider::Codex,
         model: "gpt-6.1-sol",
         label: "GPT 6.1 Sol",
@@ -54,7 +60,21 @@ const LINEUP: [Known; 4] = [
         label: "GPT 6 Astra",
         name: "GPT 6 Astra",
     },
+    Known {
+        provider: Provider::Codex,
+        model: "gpt-6-luna",
+        label: "GPT 6 Luna",
+        name: "GPT 6 Luna",
+    },
 ];
+
+/// Each provider's smallest model, which the router starts on until the human chooses.
+pub fn smallest_model(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Claude => "haiku",
+        Provider::Codex => "gpt-6-luna",
+    }
+}
 
 /// The catalog shown until a provider's CLI lists its own models. It reports no efforts, so
 /// each model offers its provider's usual ones.

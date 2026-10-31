@@ -6,7 +6,7 @@ Provide durable, provider-independent project, ticket and agent ownership and me
 ## Requirements
 
 ### Requirement: Enforced hierarchy
-The host SHALL allow projects without repositories, require each project to belong to one Space, require each ticket to reference a repository its project uses, and require workers to belong to the project coordinator of the same project and to work on one of its tickets. Multiple tickets SHALL share a repository. Every session SHALL have one owner: a project, a Space or a brain. A session owned by a Space or a brain SHALL have no parent session and no ticket; one owned by a Space SHALL have no worktree, and one owned by a brain SHALL work only in a worktree of that brain's host checkout. No such session SHALL be offered the coordination tools (`create_ticket`, `assign_ticket`, `send_message`, `report`, `schedule` and the others). Only the roles this requirement names SHALL run outside projects, and it names none. The host SHALL NOT create a project record to hold sessions that are not project work.
+The host SHALL allow projects without repositories, require each project to belong to one Space, require each ticket to reference a repository its project uses, and require workers to belong to the project coordinator of the same project and to work on one of its tickets. Multiple tickets SHALL share a repository. Every session SHALL have one owner: a project, a Space or a brain. A session owned by a Space or a brain SHALL have no parent session and no ticket; one owned by a Space SHALL have no worktree, and one owned by a brain SHALL work only in a worktree of that brain's host checkout. No such session SHALL be offered the coordination tools (`create_ticket`, `assign_ticket`, `send_message`, `report`, `schedule` and the others). Only the roles this requirement names SHALL run outside projects: assistant threads, issue threads and job runs, each owned by one Space, a job run also belonging to its job. The host SHALL NOT create a project record to hold sessions that are not project work.
 
 #### Scenario: Invalid worker owner
 - **WHEN** a worker is created under a session from another project, or a repository coordinator is created
@@ -20,7 +20,9 @@ The host SHALL allow projects without repositories, require each project to belo
 - **WHEN** a command creates an implementer owned by a Space
 - **THEN** the host rejects creation without persisting anything
 
-<!-- Delta order for "Coordinators create projects": 1 spaces (this). -->
+#### Scenario: A thread is not a worker
+- **WHEN** an assistant thread or an issue thread tries to call `create_ticket` or `report`
+- **THEN** the tool is not offered to it, and no ticket or report is created
 
 ### Requirement: Durable ordered messages
 The host SHALL persist bounded messages before acknowledging queue acceptance, deduplicate stable IDs, reject changed payloads under an existing ID, preserve recipient ordering, paginate transcripts and distinguish queued, delivered, acknowledged and completed receipts.

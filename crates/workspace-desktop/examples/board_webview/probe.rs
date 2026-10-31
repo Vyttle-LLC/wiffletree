@@ -12,7 +12,7 @@ use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType};
 use objc2_foundation::{NSPoint, NSString};
 use wry::WryWebView;
 
-use crate::board::parent;
+use crate::board_web_view::parent;
 use crate::{Overlay, Page, Prototype};
 
 const KEY_A: u16 = 0;
@@ -65,7 +65,7 @@ async fn steps(
         page = eval(
             window,
             cx,
-            "[probe.inline, probe.served, probe.fetch, probe.remote, probe.local].join(',')",
+            "[probe.inline, probe.served, probe.fetch, probe.remote, probe.local, probe.data, probe.socket, probe.camera, probe.stored].join(',')",
         )
         .await;
         if !page.is_empty() && !page.contains("pending") {
@@ -101,6 +101,74 @@ async fn steps(
         "a file:// image failed",
         flags.get(4) == Some(&"blocked"),
         &page,
+    );
+    report.check(
+        "a data: image loaded",
+        flags.get(5) == Some(&"loaded"),
+        &page,
+    );
+    report.check(
+        "a socket over the network failed",
+        flags.get(6) == Some(&"blocked"),
+        &page,
+    );
+    report.check(
+        "the camera was refused",
+        flags.get(7) == Some(&"refused"),
+        &page,
+    );
+    report.check(
+        "the board started with no stored data",
+        flags.get(8) == Some(&"null"),
+        &page,
+    );
+
+    let start = eval(window, cx, "location.href").await;
+    for script in [
+        "document.getElementById('link').click(); 'ok'",
+        "location.href = 'https://example.com/redirect'; 'ok'",
+        "window.open('https://example.com/blocked'); 'ok'",
+    ] {
+        eval(window, cx, script).await;
+        wait(cx, 300).await;
+    }
+    // A new window needs a person's click; WebKit blocks a script's own.
+    let link = eval(window, cx, "(() => { const r = document.getElementById('window').getBoundingClientRect(); return `${r.x + r.width / 2},${r.y + r.height / 2}`; })()").await;
+    let placed = read(cx)?.placed.ok_or("the board is not placed")?;
+    let (x, y) = link.split_once(',').ok_or(format!("no link at {link:?}"))?;
+    let at = |offset: &str| offset.parse::<f32>().map_err(|e| e.to_string());
+    let native = read_native(window, cx)?;
+    click(
+        &native,
+        point(placed.origin.x + px(at(x)?), placed.origin.y + px(at(y)?)),
+    );
+    wait(cx, 500).await;
+    key(&native, "\u{1b}", KEY_ESCAPE, false);
+    drop(native);
+    wait(cx, 300).await;
+    let still = eval(
+        window,
+        cx,
+        "`${location.href} ${window.probe ? 'same' : 'gone'}`",
+    )
+    .await;
+    report.check(
+        "a link, a redirect, window.open and a new-window link leave the board where it is",
+        still == format!("{start} same"),
+        &still,
+    );
+    let offered = window
+        .read_with(cx, |this, _| this.offered.clone())
+        .map_err(|error| error.to_string())?;
+    report.check(
+        "each offers its web address instead",
+        offered
+            == [
+                "https://example.com/link",
+                "https://example.com/redirect",
+                "https://example.com/window",
+            ],
+        format!("{offered:?}"),
     );
 
     let state = read(cx)?;
@@ -311,6 +379,22 @@ async fn steps(
         describe_processes(&remaining),
     );
     report.measure("their footprint after closing", mib(Some(remaining_mib)));
+
+    update(cx, &mut |this, window, cx| this.open_board(window, cx))?;
+    let mut stored = String::new();
+    for _ in 0..50 {
+        wait(cx, 100).await;
+        stored = eval(window, cx, "probe.stored").await;
+        if !stored.is_empty() && stored != "pending" {
+            break;
+        }
+    }
+    report.check(
+        "storage a board wrote is gone when it opens again",
+        stored == "null",
+        &stored,
+    );
+    update(cx, &mut |this, window, cx| this.close_board(window, cx))?;
     Ok(())
 }
 
@@ -335,7 +419,7 @@ impl State {
         Self {
             placed: prototype.placed.get(),
             frame: native.as_deref().map(frame_in_window),
-            hidden: native.as_ref().is_none_or(|native| native.isHidden()),
+            hidden: board.as_ref().is_none_or(|board| !board.is_shown()),
             board_open: board.is_some(),
             board_focus: prototype.board_has_focus(),
             gpui_focus: prototype.focus.is_focused(window),

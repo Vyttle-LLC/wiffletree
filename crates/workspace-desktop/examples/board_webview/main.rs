@@ -1,14 +1,14 @@
-//! The board web view prototype for #163 task 4.1: a WKWebView placed over a GPUI placeholder
-//! element. A development example only; nothing in the app uses it.
+//! The board web view prototype for #163 task 4.1, on the app's own board web view since task
+//! 4.2: a WKWebView placed over a GPUI placeholder element. A development example only.
 //!
 //! ```sh
 //! cargo run -p workspace-desktop --example board_webview              # try it by hand
 //! cargo run -p workspace-desktop --example board_webview -- --probe   # scripted checks
 //! ```
 
-mod board;
+#[path = "../../src/board_web_view.rs"]
+mod board_web_view;
 mod probe;
-mod scheme;
 
 use std::cell::{Cell, RefCell};
 use std::path::Path;
@@ -22,8 +22,7 @@ use gpui::{
     deferred, div, img, point, prelude::*, px, rgb, size,
 };
 
-use board::Board;
-use scheme::BoardFolder;
+use board_web_view::{Board, BoardEvent, BoardFolder, with_rules};
 
 actions!(
     board_webview,
@@ -41,23 +40,29 @@ enum Page {
     Other,
 }
 
+/// How long an overlay waits for the board's snapshot before it opens without one.
+const SNAPSHOT_LIMIT: Duration = Duration::from_millis(500);
+
 #[derive(Clone, Copy, PartialEq)]
 enum Overlay {
     Closed,
-    /// Waiting for the board's snapshot before the menu draws over it.
+    /// Waiting for the board's snapshot before the menu draws over it; the live board shows.
     Opening(Instant),
     Open,
 }
 
-/// What the board reports from AppKit callbacks, which have no GPUI context.
-enum BoardEvent {
-    Focus(bool),
+/// What reaches the prototype from AppKit and WebKit callbacks, which have no GPUI context.
+enum Event {
+    Board(BoardEvent),
     Snapshot(Option<Arc<Image>>),
+    Rules(board_web_view::Rules),
 }
 
 pub struct Prototype {
     board: Rc<RefCell<Option<Board>>>,
-    events: async_channel::Sender<BoardEvent>,
+    events: async_channel::Sender<Event>,
+    /// The web addresses the board offered to open in a browser, in order.
+    offered: Vec<String>,
     page: Page,
     wide_sidebar: bool,
     menu: Overlay,
@@ -88,6 +93,7 @@ impl Prototype {
         Self {
             board: Rc::default(),
             events,
+            offered: vec![],
             page: Page::Board,
             wide_sidebar: false,
             menu: Overlay::Closed,
@@ -101,16 +107,31 @@ impl Prototype {
         }
     }
 
-    fn open_board(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens the board once its content rule list is compiled.
+    fn open_board(&mut self, _: &mut Window, _: &mut Context<Self>) {
         if self.board.borrow().is_some() {
             return;
         }
+        let events = self.events.clone();
+        with_rules(move |rules| {
+            let _ = events.try_send(Event::Rules(rules));
+        });
+    }
+
+    fn rules_ready(
+        &mut self,
+        rules: board_web_view::Rules,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rules = rules.expect("the board's content rule list");
         let folder = BoardFolder::new("fixture", Path::new(FIXTURE)).expect("fixture folder");
         let events = self.events.clone();
-        let on_focus = move |inside| {
-            let _ = events.try_send(BoardEvent::Focus(inside));
+        let on_event = move |event| {
+            let _ = events.try_send(Event::Board(event));
         };
-        let board = Board::open(window, folder, on_focus).expect("child web view");
+        let board =
+            Board::open(window, folder, "index.html", &rules, on_event).expect("child web view");
         *self.board.borrow_mut() = Some(board);
         self.page = Page::Board;
         cx.notify();
@@ -131,8 +152,18 @@ impl Prototype {
             self.menu = Overlay::Opening(Instant::now());
             let events = self.events.clone();
             board.snapshot(move |image| {
-                let _ = events.try_send(BoardEvent::Snapshot(image));
+                let _ = events.try_send(Event::Snapshot(image));
             });
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SNAPSHOT_LIMIT).await;
+                let _ = this.update(cx, |this, cx| {
+                    if matches!(this.menu, Overlay::Opening(_)) {
+                        this.menu = Overlay::Open;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
         } else {
             self.menu = Overlay::Open;
         }
@@ -144,11 +175,19 @@ impl Prototype {
         self.snapshot = None;
     }
 
-    fn board_event(&mut self, event: BoardEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn board_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         match event {
-            BoardEvent::Focus(true) => window.focus(&self.board_focus, cx),
-            BoardEvent::Focus(false) => window.focus(&self.focus, cx),
-            BoardEvent::Snapshot(image) => {
+            Event::Rules(rules) => self.rules_ready(rules, window, cx),
+            Event::Board(BoardEvent::Focus(true)) => window.focus(&self.board_focus, cx),
+            // GPUI's focus moved elsewhere since, such as to a field the click landed in.
+            Event::Board(BoardEvent::Focus(false)) => {
+                if self.board_focus.is_focused(window) {
+                    window.focus(&self.focus, cx)
+                }
+            }
+            Event::Board(BoardEvent::Link(url)) => self.offered.push(url),
+            Event::Board(BoardEvent::Loaded) => {}
+            Event::Snapshot(image) => {
                 if let Overlay::Opening(started) = self.menu {
                     self.snapshot_took = Some(started.elapsed());
                     self.snapshot = image;
@@ -233,7 +272,7 @@ impl Prototype {
 
 impl Render for Prototype {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let frozen = self.menu != Overlay::Closed;
+        let frozen = self.menu == Overlay::Open;
         let (board, painted, placed) = (
             self.board.clone(),
             self.painted.clone(),

@@ -14,6 +14,7 @@ use new_issue::{NewIssueForm, Trackable};
 use ui::{empty_state, hint, icon, pill, segment};
 // GPUI exports a `Priority` too; the issue's wins over both globs.
 use workspace_core::Priority;
+use workspace_core::assistant::proposal::Attached;
 
 pub(super) const PRIORITIES: [Priority; 5] = [
     Priority::Urgent,
@@ -200,6 +201,10 @@ impl IssuesPage {
                 view.start_project(id.clone(), title.clone(), window, cx)
             }
             IssueViewEvent::OpenSession(id) => cx.emit(Intent::Select(id.clone())),
+            IssueViewEvent::AskAssistant(id) => cx.emit(Intent::AskAssistant {
+                attached: Attached::Issue { id: id.clone() },
+                space: view.space.clone(),
+            }),
         })
         .detach();
         self.open = Some(issue);
@@ -521,20 +526,41 @@ impl IssuesPage {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(title.text_ellipsis())
+                    // The title gives way first, ellipsized, as the docked thread narrows the list.
+                    .child(
+                        title
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis(),
+                    )
                     .when(listing.unread, |d| d.child(unread_dot(p))),
             )
-            .children(
-                listing
-                    .labels
-                    .iter()
-                    .map(|l| pill(l.clone(), label_color(l, p))),
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .gap_1()
+                    .children(
+                        listing
+                            .labels
+                            .iter()
+                            .map(|l| pill(l.clone(), label_color(l, p))),
+                    )
+                    .children(
+                        (listing.repositories.iter())
+                            .map(|r| pill(short_repository(r).to_owned(), p.subtle)),
+                    ),
             )
-            .children(
-                (listing.repositories.iter())
-                    .map(|r| pill(short_repository(r).to_owned(), p.subtle)),
+            .child(
+                hint(work_line(listing), p)
+                    .min_w_0()
+                    .max_w(px(200.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis(),
             )
-            .child(hint(work_line(listing), p).flex_none())
             .child(avatar(listing.assignee.as_deref(), me, p))
     }
 
@@ -731,6 +757,17 @@ impl Render for IssuesPage {
                     ),
             )
             .child(div().flex_1())
+            .child(
+                button("issues-ask-assistant")
+                    .icon(icon("agent"))
+                    .label("Ask the assistant")
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        cx.emit(Intent::AskAssistant {
+                            attached: Attached::Issues,
+                            space: view.space.clone(),
+                        })
+                    })),
+            )
             .child(
                 ui::gated(
                     button("issues-new")

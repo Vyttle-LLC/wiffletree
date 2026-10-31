@@ -514,9 +514,12 @@ impl ModelsPage {
     ) -> impl IntoElement {
         let catalog = self.catalog.clone();
         let may_skip = which.then && matches!(job, Job::Verifier { .. });
+        // The router never waits: with every choice spent, it asks you instead.
+        let router = *job == Job::Router;
         let label = match (&current, which) {
             (Some(profile), _) => models::cell_label(&catalog, profile),
             (None, Cell { then: true, .. }) if skips => "skip".to_owned(),
+            (None, Cell { then: true, .. }) if router => "ask you".to_owned(),
             (None, Cell { then: true, .. }) => "wait".to_owned(),
             (None, Cell { small: true, .. }) => "same".to_owned(),
             (None, _) => "No model".to_owned(),
@@ -533,9 +536,11 @@ impl ModelsPage {
             })
             .collect();
         let none = match which {
+            Cell { then: true, .. } if router => Some("Ask me where it goes"),
             Cell { then: true, .. } => Some("Wait for the reset"),
             Cell { small: true, .. } => Some("Same as the first line"),
             _ if *job == Job::Keeper => Some("No model"),
+            _ if *job == Job::Job => Some("Same as the Assistant row"),
             _ => None,
         };
         let id = SharedString::from(format!(
@@ -637,6 +642,7 @@ impl ModelsPage {
             Now::Skips(Some(at)) => pill(format!("Skips · {at}"), p.subtle),
             Now::Skips(None) => pill("Skips", p.subtle),
             Now::Cannot => pill("Cannot start", p.red),
+            Now::AsksYou => pill("Asks you", p.yellow),
             Now::Checking => pill("Checking…", p.subtle),
         };
         div()
@@ -781,6 +787,9 @@ impl ModelsPage {
         if self.model_selection.keeper().is_none() {
             table = table.child(self.keeper_placeholder(p, cx));
         }
+        if self.model_selection.row(&Job::Job).is_none() {
+            table = table.child(self.job_placeholder(p, cx));
+        }
         let error = self.model_selection.validate().err();
         card(p)
             .gap_3()
@@ -834,6 +843,34 @@ impl ModelsPage {
                     .child(self.cell_menu(&Job::Keeper, first, None, false, None, cx)),
             )
             .child(hint("No PR keeper model: its model triggers stay off.", p).flex_1())
+    }
+    /// The Job row while it has none: one menu to choose one, as jobs follow the Assistant row.
+    fn job_placeholder(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        let first = Cell {
+            small: false,
+            then: false,
+        };
+        let (name, about) = job_label(&Job::Job, &[]);
+        div()
+            .py_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .w(px(170.))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(name))
+                    .child(hint(about, p)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .child(self.cell_menu(&Job::Job, first, None, false, None, cx)),
+            )
+            .child(hint("No Job row: jobs run on the Assistant row.", p).flex_1())
     }
 
     fn review_card(&self, p: Palette) -> Div {
@@ -986,6 +1023,12 @@ fn job_label(job: &Job, verifiers: &[VerifierConfig]) -> (String, String) {
         Job::Implementer => ("Implementer".into(), "Writes the change".into()),
         Job::Tester => ("Tester".into(), "Runs build, lint, tests".into()),
         Job::Keeper => ("PR keeper".into(), "Fixes conflicts, sorts comments".into()),
+        Job::Assistant => ("Assistant".into(), "Answers in your threads".into()),
+        Job::Router => (
+            "Router".into(),
+            "Picks each message's thread; never waits".into(),
+        ),
+        Job::Job => ("Job".into(), "Runs your scheduled jobs".into()),
         Job::Verifier { focus } => {
             let verifier = (verifiers.iter()).find(|v| v.focus.eq_ignore_ascii_case(focus));
             let role = verifier.map_or(Role::Reviewer, |v| v.role);

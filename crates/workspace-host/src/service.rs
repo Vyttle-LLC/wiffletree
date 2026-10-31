@@ -85,6 +85,15 @@ fn turn_prompt(
     )
 }
 
+/// A thread's turn is the human's messages alone: a thread has no team to be told about.
+fn thread_prompt(input: &[Message]) -> String {
+    input
+        .iter()
+        .map(|m| format!("{}{}", m.body, provider::attachment_list(&m.attachments)))
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n")
+}
+
 /// Lists the coordinator's unsettled inbox questions so each turn can close the ones it resolved.
 fn open_questions_reminder(questions: &[Attention]) -> String {
     if questions.is_empty() {
@@ -263,6 +272,16 @@ fn stopped_by_parent_notice(reason: &str) -> String {
     format!(
         "Stopped by its parent: {reason}\nIts input will not be retried; the next message runs normally. Partial work may remain."
     )
+}
+/// Why Change stopped a thread's turn.
+const MOVED: &str = "Stopped: you moved its message to another thread.";
+/// The notice a turn stopped on purpose leaves: a thread has no parent, and only Change stops
+/// one this way.
+fn stopped_notice(session: &Session, reason: &str) -> String {
+    match session.role {
+        Role::Assistant | Role::JobRun => reason.into(),
+        _ => stopped_by_parent_notice(reason),
+    }
 }
 /// What says a failed turn hit its provider's usage limit: a quota reading during the turn,
 /// or, when none did, the provider's error text.
@@ -490,6 +509,23 @@ fn spawn_skill_merge(sender: Sender<Event>, run: skills::MergeRun) {
         Event::SkillMerged,
     );
 }
+fn spawn_router_run(sender: Sender<Event>, run: router::RouterRun) {
+    spawn_job(
+        sender,
+        run,
+        |run| {
+            let executable = provider::executable(run.profile.provider)
+                .map_err(|e| format!("The router could not start: {e:#}"))?;
+            let router = provider::RouterProvider {
+                executable,
+                profile: run.profile.clone(),
+            };
+            router.decide(&run.input, provider::ROUTER_LIMIT)
+        },
+        |_| Err("The router stopped unexpectedly.".into()),
+        Event::Routed,
+    );
+}
 fn spawn_keeper_rebase(sender: Sender<Event>, job: keeper::Job) {
     spawn_job(
         sender,
@@ -598,6 +634,24 @@ enum Event {
     Synced(Result<sync::Passed>),
     /// A skill merge's model run finished on its own thread.
     SkillMerged(skills::MergeRun, Result<provider::MergeAnswer>),
+    /// A router run answered on its own thread, or said why it could not.
+    Routed(
+        router::RouterRun,
+        std::result::Result<workspace_core::assistant::router::RouterAnswer, String>,
+    ),
+    /// A job run's sources were checked on their own thread.
+    SourcesChecked(
+        String,
+        Box<crate::jobs::SourceChecks>,
+        Vec<workspace_core::job::SourceCheck>,
+    ),
+    /// A thread's proposed recipe had its sources checked on their own thread, for its card.
+    JobProposed {
+        thread: String,
+        recipe: Box<workspace_core::job::Recipe>,
+        preview: workspace_core::job::RecipePreview,
+        reply: Reply,
+    },
     /// A settings repository's clone is ready, off the host thread, to replace the shared folder.
     SettingsRepositoryPrepared {
         prepared: Result<sync::Prepared>,
@@ -1433,6 +1487,32 @@ impl Actor {
                     });
                 });
             }
+            Command::Boards
+            | Command::BoardVersions { .. }
+            | Command::BoardVersionFolder { .. } => {
+                let (shelves, command, reply) =
+                    (self.host.shelves()?, command.clone(), reply.clone());
+                std::thread::spawn(move || {
+                    let read = match command {
+                        Command::BoardVersions { board_id } => shelves
+                            .versions(&board_id)
+                            .and_then(|versions| Ok(serde_json::to_value(versions)?)),
+                        Command::BoardVersionFolder { board_id, commit } => shelves
+                            .version_folder(&board_id, &commit)
+                            .map(|folder| json!(folder)),
+                        _ => Ok(serde_json::to_value(shelves.list()).unwrap_or_default()),
+                    };
+                    let _ = reply.try_send(read.map_err(|e| format!("{e:#}")));
+                });
+            }
+            Command::PreviewJob { recipe } => {
+                let pending = self.host.preview_job(recipe)?;
+                let reply = reply.clone();
+                std::thread::spawn(move || {
+                    let preview = serde_json::to_value(pending.check());
+                    let _ = reply.try_send(preview.map_err(|e| e.to_string()));
+                });
+            }
             Command::CheckSettingsRepository { repository } => {
                 let (home, input, reply) =
                     (self.host.home.clone(), repository.clone(), reply.clone());
@@ -1645,6 +1725,8 @@ impl Actor {
         let syncing = self.refresh_settings_sync(now()) || storing;
         self.refresh_brains(now());
         self.start_skill_merges();
+        self.start_router_runs();
+        self.start_source_checks();
         self.signal(dirty || syncing);
         if !self.checkout_deferred.is_empty()
             && self
@@ -1722,6 +1804,30 @@ impl Actor {
     fn start_skill_merges(&mut self) {
         for run in self.host.take_merge_runs() {
             spawn_skill_merge(self.sender.clone(), run);
+        }
+    }
+    fn start_router_runs(&mut self) {
+        for run in self.host.take_router_runs() {
+            spawn_router_run(self.sender.clone(), run);
+        }
+    }
+    fn start_source_checks(&mut self) {
+        for (run, checks) in self.host.take_source_checks() {
+            spawn_job(
+                self.sender.clone(),
+                (run, checks),
+                |(_, checks)| checks.run(),
+                // A check that panicked keeps the run from starting.
+                |_| {
+                    vec![workspace_core::job::SourceCheck {
+                        source: "Sources".into(),
+                        problem: Some(
+                            "The check of the run's sources stopped unexpectedly.".into(),
+                        ),
+                    }]
+                },
+                |(run, checks), checked| Event::SourcesChecked(run, Box::new(checks), checked),
+            );
         }
     }
 
@@ -2275,6 +2381,29 @@ impl Actor {
                 self.host.finish_merge_run(run, answered);
                 true
             }
+            Event::SourcesChecked(run, checked, checks) => {
+                if let Err(e) = self.host.sources_checked(&run, &checked, checks) {
+                    eprintln!("Starting job run {run}: {e:#}");
+                }
+                true
+            }
+            Event::JobProposed {
+                thread,
+                recipe,
+                preview,
+                reply,
+            } => {
+                let card = self.host.add_recipe_card(&thread, *recipe, preview);
+                let _ = reply.try_send(card.map_err(|e| format!("{e:#}")));
+                true
+            }
+            Event::Routed(run, answered) => {
+                let message = run.message_id.clone();
+                if let Err(e) = self.host.finish_router_run(run, answered) {
+                    eprintln!("Routing message {message}: {e:#}");
+                }
+                true
+            }
             Event::ProviderInspected {
                 provider,
                 report,
@@ -2368,6 +2497,23 @@ impl Actor {
                 let result = (|| -> Result<Value> {
                     // Sessions this command stops on the human's behalf.
                     let mut human_stops = Vec::new();
+                    // Where Change moves a message from, read before the change removes its line.
+                    // Changing it to the thread it went to moves nothing.
+                    let moving = match &command {
+                        Command::ChangeRoute {
+                            thread_id,
+                            message_id,
+                            destination,
+                        } => {
+                            let went_to = self.host.routed_to(thread_id, message_id)?;
+                            let stays = *destination
+                                == (workspace_core::assistant::router::Destination::Thread {
+                                    thread_id: went_to.clone(),
+                                });
+                            (!stays).then(|| (went_to, message_id.clone()))
+                        }
+                        _ => None,
+                    };
                     match &command {
                         Command::SetLive {
                             project_id,
@@ -2448,6 +2594,27 @@ impl Actor {
                         }
                         _ => self.host.execute(command.clone())?,
                     };
+                    // The turn a moved message started ends as finished, so it is not retried.
+                    if let Some((went_to, message)) = moving
+                        && let Some(active) = self.active.get_mut(&went_to)
+                        && active.messages.contains(&message)
+                    {
+                        active.stopped_by_parent = Some(MOVED.into());
+                        active.cancel.store(true, Ordering::Relaxed);
+                    }
+                    // Stop on a job's run in its turn ends that turn as stopped.
+                    let stopped_run = match &command {
+                        Command::StopJobRun { .. } => {
+                            response["thread"].as_str().map(str::to_owned)
+                        }
+                        _ => None,
+                    };
+                    if let Some(thread) = &stopped_run
+                        && let Some(active) = self.active.get_mut(thread)
+                    {
+                        active.stopped_by_parent = Some(crate::jobs::STOPPED_BY_YOU.into());
+                        active.cancel.store(true, Ordering::Relaxed);
+                    }
                     // Stopping an agent stops what it started, before the command returns: for
                     // every agent of a stopped project, and for a paused session.
                     let stopped = match &command {
@@ -2465,7 +2632,7 @@ impl Actor {
                             session_id,
                             status: Status::Paused,
                         } => vec![session_id.clone()],
-                        _ => vec![],
+                        _ => stopped_run.into_iter().collect(),
                     };
                     self.stop_processes_of(&stopped);
                     // The stop itself has happened, and human_stopped records who made it before
@@ -2488,7 +2655,7 @@ impl Actor {
                         }
                     }
                     // Speaking to a project, retrying its work or answering its coordinator
-                    // starts it; there is no separate step to go live.
+                    // starts it; there is no separate step to go live. A thread is no project's.
                     let started = match &command {
                         Command::Send {
                             sender: None,
@@ -2498,7 +2665,8 @@ impl Actor {
                         | Command::ReconcileSession {
                             session_id,
                             retry: true,
-                        } => Some(self.host.session(session_id)?.project_id),
+                        } => Some(self.host.session(session_id)?.project_id)
+                            .filter(|project| !project.is_empty()),
                         Command::ResolveAttention { .. } => {
                             response["project_id"].as_str().map(str::to_owned)
                         }
@@ -2590,6 +2758,33 @@ impl Actor {
                     .map(|(id, _)| id.clone());
                 let result = (|| -> Result<Option<Value>> {
                     let id = identity.context("Expired or invalid session credential")?;
+                    // A thread is offered its own tools, and only those.
+                    let session = self.host.session(&id)?;
+                    if session.role.is_thread() {
+                        if name == "propose_job" {
+                            let (recipe, pending) = self.host.propose_job(&session, &args)?;
+                            let (sender, reply) = (self.sender.clone(), reply.clone());
+                            std::thread::spawn(move || {
+                                let _ = sender.send_blocking(Event::JobProposed {
+                                    thread: session.id,
+                                    recipe: Box::new(recipe),
+                                    preview: pending.check(),
+                                    reply,
+                                });
+                            });
+                            return Ok(None);
+                        }
+                        // Repository reads run git, so they answer from off the host thread.
+                        if name == "search_repositories" || name == "read_repository_file" {
+                            let read = self.host.repository_read(&session, &name, &args)?;
+                            let reply = reply.clone();
+                            std::thread::spawn(move || {
+                                let _ = reply.try_send(read.run().map_err(|e| format!("{e:#}")));
+                            });
+                            return Ok(None);
+                        }
+                        return self.host.thread_tool(&session, &name, &args).map(Some);
+                    }
                     ensure!(
                         self.host.session_owner(&id)?.offers_coordination_tools(),
                         "{name} is for project work, and this session is owned by a Space or a brain"
@@ -3110,6 +3305,7 @@ impl Actor {
                             && !active.stopped_by_human
                             && !active.sort
                             && session.role != Role::Keeper
+                            && session.role != Role::JobRun
                             && session.status != Status::Paused
                     })
                     .and_then(|error| limit_signal(active.limit_reached, error));
@@ -3146,7 +3342,7 @@ impl Actor {
                     self.host.append_output(
                         &session,
                         &format!("stopped:{run}"),
-                        &stopped_by_parent_notice(reason),
+                        &stopped_notice(&session, reason),
                     )?;
                     Host::event(
                         &self.host.db,
@@ -3155,6 +3351,16 @@ impl Actor {
                         "turn_stopped_by_parent",
                         &format!("{run}; {reason}"),
                     )?;
+                }
+                // A job's run is one turn, which its record ends with; a failed one is not
+                // retried at a usage limit's reset.
+                if session.role == Role::JobRun {
+                    let end = match (&stop_reason, &error) {
+                        (Some(reason), _) => crate::jobs::RunEnd::Stopped(reason.clone()),
+                        (None, Some(error)) => crate::jobs::RunEnd::Failed(error.clone()),
+                        (None, None) => crate::jobs::RunEnd::Finished,
+                    };
+                    self.host.job_run_ended(id, end)?;
                 }
                 self.settle_check_ins(&session)?;
                 if let Some(error) = &error {
@@ -3987,6 +4193,15 @@ impl Actor {
     fn check_in(&mut self, id: &str, now: i64) -> Result<()> {
         let session = self.host.session(id)?;
         let active = &self.active[id];
+        // A job's run has no time limit: its note on the assistant's row says how long it has
+        // run, with Stop.
+        if session.role == Role::JobRun {
+            let minutes = (now - active.started_at) / 60_000;
+            if self.host.note_long_job_run(id, minutes)? {
+                self.state_changed();
+            }
+            return Ok(());
+        }
         let run = active.run.clone();
         let minutes = (now - active.started_at) / 60_000;
         let ticket = self.ticket_label(id)?;
@@ -4205,6 +4420,7 @@ impl Actor {
             token: format!("{}{}", new_id(), new_id()),
             helper: self.helper.clone(),
             instructions: role_instructions,
+            thread: None,
         };
         self.run_provider(turn, cancel);
         Ok(())
@@ -4305,6 +4521,15 @@ impl Actor {
         self.host.set_status(&session.id, Status::Disconnected)?;
         if session.role == Role::Keeper {
             self.try_ended(session, Some(&format!("{error:#}")));
+        }
+        if session.role == Role::JobRun {
+            let failed = crate::jobs::RunEnd::Failed(format!("Could not start: {error:#}"));
+            self.host.job_run_ended(&session.id, failed)?;
+            // Its prompt is its only message, and the run has ended.
+            self.host.db.execute(
+                "UPDATE messages SET receipt='completed' WHERE recipient=?1 AND receipt='queued'",
+                [&session.id],
+            )?;
         }
         self.host.append_output(
             session,
@@ -4490,7 +4715,15 @@ impl Actor {
         let token = format!("{}{}", new_id(), new_id());
         let (prompt, sorted) = match sort {
             Some((prompt, sorted)) => (prompt, Some(sorted)),
+            None if session.role.is_thread() => (thread_prompt(&input), None),
             None => (self.prompt(&session, &input)?, None),
+        };
+        let (instructions, thread) = match session.role {
+            Role::Assistant | Role::JobRun => (
+                self.host.thread_instructions(&session)?,
+                Some(self.host.thread_launch(&session)?),
+            ),
+            role => (self.host.instructions(role), None),
         };
         let started_at = now();
         let detail = json!({"profile":profile,"provider_session_id":runtime.provider_session_id,"skill_version":1,"selection":runtime.selection,"model_selection_revision":self.host.model_selection()?.revision});
@@ -4519,7 +4752,8 @@ impl Actor {
             socket: self.socket.clone(),
             token: token.clone(),
             helper: self.helper.clone(),
-            instructions: self.host.instructions(session.role),
+            instructions,
+            thread,
         };
         let mut active = Active::new(
             run.clone(),
@@ -7876,6 +8110,294 @@ mod tests {
             status: Status::Paused,
         };
         command(actor, paused).unwrap();
+    }
+
+    #[test]
+    fn change_stops_the_turn_its_message_started_and_that_turn_is_not_retried() {
+        use workspace_core::assistant::router::{Choice, Destination, RouterAnswer, ThreadPick};
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let sage = (host.create_space("Sage", "", "", None).unwrap().space).id;
+        let notes = host
+            .start_thread("notes", &sage, "notes", &[], None)
+            .unwrap();
+        let personal = (host.spaces().unwrap().into_iter())
+            .find(|s| s.space.id != sage)
+            .unwrap()
+            .space
+            .id;
+        host.route_message("m1", Some(&notes.id), "book the dentist")
+            .unwrap();
+        let run = host.take_router_runs().remove(0);
+        fn sure<T>(pick: T) -> Choice<T> {
+            Choice {
+                pick,
+                confidence: 0.95,
+                alternatives: vec![],
+            }
+        }
+        let answer = RouterAnswer {
+            thread: sure(ThreadPick::New),
+            space: sure(personal),
+            title: String::new(),
+        };
+        host.finish_router_run(run, Ok(answer)).unwrap();
+        let dentist = host
+            .session(&host.message("m1").unwrap().recipient)
+            .unwrap();
+        host.advance_receipt("m1", Receipt::Delivered).unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+        actor
+            .active
+            .insert(dentist.id.clone(), active_turn("run", vec!["m1".into()]));
+
+        // Changing it to the thread it already went to stops nothing.
+        let same = Command::ChangeRoute {
+            thread_id: notes.id.clone(),
+            message_id: "m1".into(),
+            destination: Destination::Thread {
+                thread_id: dentist.id.clone(),
+            },
+        };
+        command(&mut actor, same).unwrap();
+        assert!(!actor.active[&dentist.id].cancel.load(Ordering::Relaxed));
+        assert!(actor.host.thread(&dentist.id).unwrap().moved.is_empty());
+
+        let change = Command::ChangeRoute {
+            thread_id: notes.id.clone(),
+            message_id: "m1".into(),
+            destination: Destination::NewThread { space_id: sage },
+        };
+        command(&mut actor, change).unwrap();
+        assert!(actor.active[&dentist.id].cancel.load(Ordering::Relaxed));
+        cancelled_turn_ends(&mut actor, &dentist);
+        assert_eq!(
+            actor.host.message("m1").unwrap().receipt,
+            Receipt::Completed
+        );
+        let notice = actor.host.message(&reply_id("stopped:run")).unwrap();
+        assert_eq!(notice.body, MOVED);
+        assert_ne!(
+            actor.host.session(&dentist.id).unwrap().status,
+            Status::Disconnected
+        );
+    }
+
+    #[test]
+    fn a_job_runs_turn_ends_its_record_and_stop_ends_it_as_stopped() {
+        use workspace_core::job::{Recipe, RunOutcome, Schedule, Sharing};
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let personal = host.default_space().unwrap();
+        let recipe = Recipe {
+            id: "brief".into(),
+            name: "Brief".into(),
+            space_id: personal,
+            prompt: "Brief me.".into(),
+            schedule: Schedule {
+                cron: "0 7 * * *".into(),
+                timezone: "America/New_York".into(),
+            },
+            model: None,
+            sources: vec![],
+            output: None,
+            sharing: Sharing::OneRunner,
+            runner: None,
+            enabled: true,
+            extra: Default::default(),
+        };
+        let key = host.save_job(recipe).unwrap().recipe.key();
+        let (mut actor, _, _) = idle_actor(host);
+        let turn = |actor: &mut Actor| {
+            let run = actor.host.run_now(&key).unwrap();
+            let thread = actor.host.session(run.thread_id.as_ref().unwrap()).unwrap();
+            let prompt = actor.host.messages(&thread.id, None, 1).unwrap().remove(0);
+            actor.host.turn_started(&thread.id).unwrap();
+            actor
+                .active
+                .insert(thread.id.clone(), active_turn("run", vec![prompt.id]));
+            (run.id, thread)
+        };
+        let (run, thread) = turn(&mut actor);
+        let stop = Command::StopJobRun {
+            run_id: run.clone(),
+        };
+        command(&mut actor, stop).unwrap();
+        assert!(actor.active[&thread.id].cancel.load(Ordering::Relaxed));
+        cancelled_turn_ends(&mut actor, &thread);
+        let stopped = actor.host.job_run(&run).unwrap();
+        assert_eq!(stopped.outcome, RunOutcome::Stopped);
+        assert_eq!(stopped.reason, "You stopped the run.");
+
+        let (run, thread) = turn(&mut actor);
+        finish_turn(&mut actor, &thread, "run");
+        let finished = actor.host.job_run(&run).unwrap();
+        assert_eq!(
+            (finished.outcome, finished.outputs.len()),
+            (RunOutcome::Finished, 0)
+        );
+    }
+
+    /// How long the hanging MCP server's handshake may take before its check gives up.
+    const HANG_LIMIT: std::time::Duration = std::time::Duration::from_secs(3);
+    const HUNG: &str = "The linear MCP server did not answer within 3 seconds.";
+
+    /// An idle actor whose Claude configures a Linear MCP server that never answers, and a
+    /// recipe listing it; the actor's events arrive on the receiver.
+    fn hanging_linear(home: &Path) -> (Actor, workspace_core::job::Recipe, Receiver<Event>) {
+        use std::os::unix::fs::PermissionsExt;
+        use workspace_core::Source;
+        use workspace_core::job::{Recipe, Schedule, Sharing};
+        let mut host = Host::open_set_up(home).unwrap();
+        let (bin, user) = (home.join("bin"), home.join("user"));
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&user).unwrap();
+        let server = bin.join("hangs");
+        fs::write(&server, "#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
+        fs::set_permissions(&server, fs::Permissions::from_mode(0o755)).unwrap();
+        let config = json!({"mcpServers": {"linear": {"command": "hangs"}}});
+        fs::write(user.join(".claude.json"), config.to_string()).unwrap();
+        host.source_env = Some(crate::jobs::SourceEnv {
+            path: vec![bin],
+            home: user,
+            mcp_limit: HANG_LIMIT,
+        });
+        let recipe = Recipe {
+            id: "brief".into(),
+            name: "Brief".into(),
+            space_id: host.default_space().unwrap(),
+            prompt: "Brief me.".into(),
+            schedule: Schedule {
+                cron: "0 7 * * *".into(),
+                timezone: "America/New_York".into(),
+            },
+            model: None,
+            sources: vec![Source::Mcp {
+                server: "linear".into(),
+                tools: vec!["list_issues".into()],
+                extra: Default::default(),
+            }],
+            output: None,
+            sharing: Sharing::OneRunner,
+            runner: None,
+            enabled: true,
+            extra: Default::default(),
+        };
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::unbounded();
+        actor.sender = sender;
+        (actor, recipe, events)
+    }
+    /// Sends a command and takes its answer, which must have come at once.
+    fn ask_now(actor: &mut Actor, command: Command) -> Value {
+        let (reply, replies) = async_channel::bounded(1);
+        actor.process(Event::Command(command, reply));
+        replies.try_recv().unwrap().unwrap()
+    }
+
+    #[test]
+    fn a_hanging_source_check_leaves_the_actor_free_and_the_run_names_it() {
+        use workspace_core::job::{JobRun, RunOutcome};
+        let home = tempfile::tempdir().unwrap();
+        let (mut actor, recipe, events) = hanging_linear(home.path());
+        let key = actor.host.save_job(recipe).unwrap().recipe.key();
+        let started = std::time::Instant::now();
+        let run: JobRun =
+            serde_json::from_value(ask_now(&mut actor, Command::RunJobNow { job: key.clone() }))
+                .unwrap();
+        assert_eq!((run.outcome, run.thread_id), (RunOutcome::Running, None));
+        // The actor answers another command while the server's handshake hangs.
+        ask_now(&mut actor, Command::SeeJobRuns { job: key });
+        assert!(started.elapsed() < HANG_LIMIT, "{:?}", started.elapsed());
+        let checked = events.recv_blocking().unwrap();
+        assert!(matches!(checked, Event::SourcesChecked(..)));
+        actor.process(checked);
+        let ended = actor.host.job_run(&run.id).unwrap();
+        assert_eq!(ended.outcome, RunOutcome::NotStarted);
+        assert_eq!(ended.reason, HUNG);
+    }
+
+    #[test]
+    fn a_hanging_preview_leaves_the_actor_free_and_its_card_names_the_source() {
+        use workspace_core::job::RecipePreview;
+        let home = tempfile::tempdir().unwrap();
+        let (mut actor, recipe, _) = hanging_linear(home.path());
+        let key = recipe.key();
+        let started = std::time::Instant::now();
+        let (reply, previewed) = async_channel::bounded(1);
+        let preview = Command::PreviewJob {
+            recipe: Box::new(recipe),
+        };
+        actor.process(Event::Command(preview, reply));
+        assert!(previewed.try_recv().is_err());
+        ask_now(&mut actor, Command::SeeJobRuns { job: key });
+        assert!(started.elapsed() < HANG_LIMIT, "{:?}", started.elapsed());
+        let preview: RecipePreview =
+            serde_json::from_value(previewed.recv_blocking().unwrap().unwrap()).unwrap();
+        assert_eq!(preview.sources[0].problem.as_deref(), Some(HUNG));
+    }
+
+    #[test]
+    fn a_hanging_proposal_leaves_the_actor_free_and_its_card_names_the_source() {
+        use workspace_core::assistant::CardKind;
+        let home = tempfile::tempdir().unwrap();
+        let (mut actor, recipe, events) = hanging_linear(home.path());
+        let thread = (actor.host)
+            .start_thread("t1", &recipe.space_id, "Brief me each morning", &[], None)
+            .unwrap();
+        actor
+            .active
+            .insert(thread.id.clone(), active_turn("run", vec![]));
+        let started = std::time::Instant::now();
+        let (reply, proposed) = async_channel::bounded(1);
+        let args = json!({"name":"Brief","prompt":"Brief me.","cron":"0 7 * * *","timezone":"America/New_York","sources":[{"kind":"mcp","server":"linear","tools":["list_issues"]}]});
+        actor.process(Event::Tool {
+            token: String::new(),
+            name: "propose_job".into(),
+            args,
+            reply,
+        });
+        assert!(proposed.try_recv().is_err());
+        ask_now(&mut actor, Command::SeeJobRuns { job: recipe.key() });
+        assert!(started.elapsed() < HANG_LIMIT, "{:?}", started.elapsed());
+        let checked = events.recv_blocking().unwrap();
+        assert!(matches!(checked, Event::JobProposed { .. }));
+        actor.process(checked);
+        proposed.try_recv().unwrap().unwrap();
+        let card = actor.host.thread("t1").unwrap().cards.remove(0);
+        let CardKind::Recipe { preview, .. } = card.kind else {
+            panic!("a recipe card");
+        };
+        assert_eq!(preview.sources[0].problem.as_deref(), Some(HUNG));
+    }
+
+    #[test]
+    fn a_hanging_scheduled_run_leaves_the_actor_free_and_the_run_names_it() {
+        use workspace_core::job::RunOutcome;
+        let home = tempfile::tempdir().unwrap();
+        let (mut actor, recipe, events) = hanging_linear(home.path());
+        let key = actor.host.save_job(recipe).unwrap().recipe.key();
+        // Its time came a moment ago.
+        (actor.host.db)
+            .execute(
+                "INSERT INTO job_due VALUES (?1,?2)",
+                params![key.as_str(), now() - 1_000],
+            )
+            .unwrap();
+        let started = std::time::Instant::now();
+        ask_now(&mut actor, Command::SeeJobRuns { job: key.clone() });
+        let run = actor.host.job_runs(&key, 1).unwrap().remove(0);
+        assert_eq!((run.outcome, &run.thread_id), (RunOutcome::Running, &None));
+        ask_now(&mut actor, Command::SeeJobRuns { job: key });
+        assert!(started.elapsed() < HANG_LIMIT, "{:?}", started.elapsed());
+        let checked = events.recv_blocking().unwrap();
+        assert!(matches!(checked, Event::SourcesChecked(..)));
+        actor.process(checked);
+        let ended = actor.host.job_run(&run.id).unwrap();
+        assert_eq!(
+            (ended.outcome, ended.reason.as_str()),
+            (RunOutcome::NotStarted, HUNG)
+        );
     }
 
     fn cancelled_turn_ends(actor: &mut Actor, session: &Session) {

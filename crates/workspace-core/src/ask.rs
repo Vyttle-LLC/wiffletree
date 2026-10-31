@@ -392,3 +392,161 @@ pub fn list_folder(path: PathBuf) -> Ask<FolderListing> {
 pub fn core_instructions() -> Ask<Vec<crate::skills::CoreText>> {
     Ask::new(Command::CoreInstructions)
 }
+pub fn start_thread(
+    space_id: SpaceId,
+    body: String,
+    profile: Option<ModelProfile>,
+) -> Ask<assistant::Thread> {
+    Ask::new(Command::StartThread {
+        id: new_id(),
+        space_id,
+        body,
+        attachments: vec![],
+        profile,
+    })
+}
+pub fn rename_thread(thread_id: String, title: String) -> Ask<assistant::Thread> {
+    Ask::new(Command::RenameThread { thread_id, title })
+}
+pub fn set_thread_open(thread_id: String, open: bool) -> Ask<assistant::Thread> {
+    Ask::new(Command::SetThreadOpen { thread_id, open })
+}
+pub fn order_threads(thread_ids: Vec<String>) -> Ask<()> {
+    Ask::new(Command::OrderThreads { thread_ids })
+}
+pub fn delete_thread(thread_id: String) -> Ask<()> {
+    Ask::new(Command::DeleteThread { thread_id })
+}
+pub fn search_threads(query: String, space_id: Option<SpaceId>) -> Ask<Vec<assistant::ThreadHit>> {
+    Ask::new(Command::SearchThreads { query, space_id })
+}
+pub fn draft_project_brief(thread_id: String) -> Ask<Message> {
+    Ask::new(Command::DraftProjectBrief { thread_id })
+}
+pub fn make_project(
+    thread_id: String,
+    name: String,
+    brief: String,
+    files: Vec<String>,
+) -> Ask<Project> {
+    Ask::new(Command::MakeProject {
+        thread_id,
+        name,
+        brief,
+        files,
+    })
+}
+pub fn scratch_files(thread_id: String) -> Ask<Vec<String>> {
+    Ask::new(Command::ScratchFiles { thread_id })
+}
+pub fn dismiss_thread_card(thread_id: String, card_id: String) -> Ask<assistant::Thread> {
+    Ask::new(Command::DismissThreadCard { thread_id, card_id })
+}
+pub fn open_issue_thread(
+    attached: assistant::proposal::Attached,
+    space_id: Option<SpaceId>,
+) -> Ask<assistant::Thread> {
+    Ask::new(Command::OpenIssueThread { attached, space_id })
+}
+pub fn proposals(thread_id: String) -> Ask<Vec<assistant::proposal::ProposalView>> {
+    Ask::new(Command::Proposals { thread_id })
+}
+pub fn apply_proposal(
+    thread_id: String,
+    proposal_id: String,
+    edited: Option<assistant::proposal::ProposalChange>,
+) -> Ask<assistant::Thread> {
+    Ask::new(Command::ApplyProposal {
+        thread_id,
+        proposal_id,
+        edited: edited.map(Box::new),
+    })
+}
+pub fn discard_proposal(thread_id: String, proposal_id: String) -> Ask<assistant::Thread> {
+    Ask::new(Command::DiscardProposal {
+        thread_id,
+        proposal_id,
+    })
+}
+/// Answered with the name as saved.
+pub fn set_assistant_name(name: String) -> Ask<String> {
+    Ask::new(Command::SetAssistantName { name })
+}
+pub fn set_router_threshold(threshold: f64) -> Ask<HostSettings> {
+    Ask::new(Command::SetRouterThreshold { threshold })
+}
+pub fn route_message(id: String, thread_id: Option<String>, body: String) -> Ask<()> {
+    Ask::new(Command::RouteMessage {
+        id,
+        thread_id,
+        body,
+    })
+}
+pub fn answer_held(id: String, destination: assistant::router::Destination) -> Ask<()> {
+    Ask::new(Command::AnswerHeld { id, destination })
+}
+pub fn change_route(
+    thread_id: String,
+    message_id: String,
+    destination: assistant::router::Destination,
+) -> Ask<()> {
+    Ask::new(Command::ChangeRoute {
+        thread_id,
+        message_id,
+        destination,
+    })
+}
+/// With `new`, from a recipe card, refused when a job of that name exists.
+pub fn save_job(recipe: job::Recipe, new: bool) -> Ask<job::JobState> {
+    Ask::new(Command::SaveJob {
+        recipe: Box::new(recipe),
+        new,
+    })
+}
+pub fn preview_job(recipe: job::Recipe) -> Ask<job::RecipePreview> {
+    Ask::new(Command::PreviewJob {
+        recipe: Box::new(recipe),
+    })
+}
+pub fn set_job_enabled(space_id: SpaceId, job_id: String, enabled: bool) -> Ask<job::JobState> {
+    Ask::new(Command::SetJobEnabled {
+        space_id,
+        job_id,
+        enabled,
+    })
+}
+pub fn run_job_now(job: job::JobKey) -> Ask<job::JobRun> {
+    Ask::new(Command::RunJobNow { job })
+}
+pub fn delete_job(space_id: SpaceId, job_id: String) -> Ask<()> {
+    Ask::new(Command::DeleteJob { space_id, job_id })
+}
+pub fn stop_job_run(run_id: String) -> Ask<Value> {
+    Ask::new(Command::StopJobRun { run_id })
+}
+pub fn see_job_runs(job: job::JobKey) -> Ask<()> {
+    Ask::new(Command::SeeJobRuns { job })
+}
+pub fn take_over_job(space_id: SpaceId, job_id: String) -> Ask<job::JobState> {
+    Ask::new(Command::TakeOverJob { space_id, job_id })
+}
+/// Share with `share`, else Keep private.
+pub fn approve_job_output(run_id: String, title: String, share: bool) -> Ask<()> {
+    Ask::new(Command::ApproveJobOutput {
+        run_id,
+        title,
+        share,
+    })
+}
+pub fn boards() -> Ask<Vec<board::BoardOutput>> {
+    Ask::new(Command::Boards)
+}
+pub fn board_versions(board_id: String) -> Ask<Vec<board::BoardVersion>> {
+    Ask::new(Command::BoardVersions { board_id })
+}
+pub fn board_version_folder(board_id: String, commit: String) -> Ask<String> {
+    Ask::new(Command::BoardVersionFolder { board_id, commit })
+}
+pub fn share_board(board_id: String, space_id: SpaceId) -> Ask<board::BoardOutput> {
+    Ask::new(Command::ShareBoard { board_id, space_id })
+}

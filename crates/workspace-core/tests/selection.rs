@@ -326,9 +326,118 @@ fn table() -> ModelSelection {
                 opus(),
                 Then::Wait,
             ),
+            row(Job::Assistant, sonnet(), Then::Model(sol())),
+            row(Job::Router, haiku(), Then::Wait),
         ],
         ..ModelSelection::default()
     }
+}
+fn haiku() -> ModelProfile {
+    profile(Provider::Claude, "haiku", "low")
+}
+
+#[test]
+fn a_table_saved_before_the_router_gets_one_on_the_assistants_smallest_model() {
+    let mut older = table();
+    older
+        .jobs
+        .retain(|row| !matches!(row.job, Job::Assistant | Job::Router));
+    older.fit(&VerificationSettings::default());
+    // The Implementer's small work is Sonnet · high then GPT 6.1 Sol · medium.
+    assert_eq!(
+        older.row(&Job::Assistant).unwrap().main,
+        implementer().small.unwrap()
+    );
+    let router = older.row(&Job::Router).unwrap();
+    assert_eq!(router.main.first, haiku());
+    assert_eq!(router.main.first.short(), "Haiku · low");
+    assert_eq!(router.main.then, Then::Wait);
+    assert_eq!(older.copied[..2], ["Assistant", "Router"]);
+    older.validate().unwrap();
+    // Claude anywhere in the table puts the router on Haiku, even for a Codex assistant.
+    let mut codex_assistant = table();
+    codex_assistant.jobs.retain(|row| row.job != Job::Router);
+    codex_assistant.row_mut(&Job::Assistant).unwrap().main.first = sol();
+    codex_assistant.fit(&VerificationSettings::default());
+    let router = codex_assistant.row(&Job::Router).unwrap();
+    assert_eq!(router.main.first, haiku());
+    // A table on Codex only gets Codex's smallest model, which always asks.
+    let mut codex = table();
+    codex.jobs.retain(|row| row.job != Job::Router);
+    for row in &mut codex.jobs {
+        row.main = Line {
+            first: sol(),
+            then: Then::Wait,
+        };
+        row.small = None;
+    }
+    codex.fit(&VerificationSettings::default());
+    let first = &codex.row(&Job::Router).unwrap().main.first;
+    assert_eq!(
+        (first.provider, first.model.as_str()),
+        (Provider::Codex, "gpt-6-luna")
+    );
+    codex.validate().unwrap();
+    let unusable = BTreeSet::new();
+    let refused = codex
+        .resolve(&Job::Router, false, false, &limits(&[], &unusable), &when)
+        .unwrap_err();
+    assert_eq!(refused.to_string(), CODEX_ROUTER);
+    // The router is a fixed job; its then cannot be skip.
+    let mut missing = table();
+    missing.jobs.retain(|row| row.job != Job::Router);
+    assert_eq!(
+        missing.validate().unwrap_err().to_string(),
+        "Choose who runs the Router job"
+    );
+    let mut skipping = table();
+    skipping.row_mut(&Job::Router).unwrap().main.then = Then::Skip;
+    assert!(skipping.validate().is_err());
+}
+
+#[test]
+fn a_spent_router_with_then_wait_resolves_to_a_wait_the_host_never_takes() {
+    let quotas = [reading(
+        Provider::Claude,
+        vec![window("Weekly", Some(97.), Some(MONDAY))],
+    )];
+    let unusable = BTreeSet::new();
+    let pick = table()
+        .resolve(
+            &Job::Router,
+            false,
+            false,
+            &limits(&quotas, &unusable),
+            &when,
+        )
+        .unwrap();
+    assert!(pick.waits, "{pick:?}");
+}
+
+#[test]
+fn a_table_saved_before_the_assistant_row_gets_one_copied_from_the_implementers_small_work() {
+    let mut older = table();
+    older.jobs.retain(|row| row.job != Job::Assistant);
+    assert_eq!(
+        older.validate().unwrap_err().to_string(),
+        "Choose who runs the Assistant job"
+    );
+    older.fit(&VerificationSettings::default());
+    let assistant = older.row(&Job::Assistant).unwrap();
+    assert_eq!(assistant.main, implementer().small.unwrap());
+    assert!(older.copied.contains(&"Assistant".to_owned()));
+    older.validate().unwrap();
+    // Without a small-work line, its main line.
+    let mut plain = table();
+    plain.jobs.retain(|row| row.job != Job::Assistant);
+    plain.jobs[1].small = None;
+    plain.fit(&VerificationSettings::default());
+    assert_eq!(plain.row(&Job::Assistant).unwrap().main, implementer().main);
+    // A saved row is kept as it is.
+    let mut saved = table();
+    saved.fit(&VerificationSettings::default());
+    assert!(!saved.copied.contains(&"Assistant".to_owned()));
+    assert_eq!(saved.row(&Job::Assistant).unwrap().main.first, sonnet());
 }
 
 #[test]
@@ -362,6 +471,40 @@ fn the_table_needs_each_fixed_job_once_and_a_then_on_another_subscription() {
     };
     keepers.jobs.extend([keeper.clone(), keeper]);
     assert!(keepers.validate().is_err());
+}
+
+#[test]
+fn jobs_follow_the_assistant_row_until_they_have_a_row_of_their_own() {
+    let unusable = BTreeSet::new();
+    let pick = |table: &ModelSelection| {
+        (table.resolve(&Job::Job, false, false, &limits(&[], &unusable), &when))
+            .unwrap()
+            .profile
+    };
+    let mut table = table();
+    assert_eq!(pick(&table), sonnet());
+    // An upgrade adds no Job row.
+    table.fit(&VerificationSettings::default());
+    assert!(table.row(&Job::Job).is_none());
+    table.set_job_row(Some(Line {
+        first: opus(),
+        then: Then::Model(sol()),
+    }));
+    table.validate().unwrap();
+    assert_eq!(pick(&table), opus());
+    table.fit(&VerificationSettings::default());
+    assert!(table.row(&Job::Job).is_some(), "fitting keeps it");
+    let mut twice = table.clone();
+    twice.jobs.push(twice.row(&Job::Job).unwrap().clone());
+    assert_eq!(
+        twice.validate().unwrap_err().to_string(),
+        "Jobs have two rows"
+    );
+    let mut skipping = table.clone();
+    skipping.row_mut(&Job::Job).unwrap().main.then = Then::Skip;
+    assert!(skipping.validate().is_err());
+    table.set_job_row(None);
+    assert_eq!(pick(&table), sonnet());
 }
 
 fn skipping_reviewer() -> JobRow {
@@ -433,7 +576,7 @@ fn only_verifier_rows_may_skip() {
     selection.jobs[3] = skipping_reviewer();
     selection.jobs[3].small = Some(selection.jobs[3].main.clone());
     selection.validate().unwrap();
-    for index in 0..3 {
+    for index in [0, 1, 2, 4] {
         let mut refused = table();
         refused.jobs[index].main.then = Then::Skip;
         let name = refused.jobs[index].job.name();
@@ -483,7 +626,9 @@ fn rows_follow_the_configured_verifiers() {
             "Tester",
             "Tests",
             "Correctness",
-            "Regressions"
+            "Regressions",
+            "Assistant",
+            "Router"
         ]
     );
     assert_eq!(selection.copied, ["Tests", "Regressions"]);
@@ -563,5 +708,35 @@ fn sorting_uses_only_the_keepers_claude_choice() {
             .unwrap_err()
             .to_string()
             .contains("Choose a PR keeper model in Models first")
+    );
+}
+
+#[test]
+fn the_router_never_moves_on_to_codex() {
+    let mut selection = table();
+    selection.row_mut(&Job::Router).unwrap().main.then = Then::Model(sol());
+    let quotas = [reading(
+        Provider::Claude,
+        vec![window("Weekly", Some(97.), Some(MONDAY))],
+    )];
+    let unusable = BTreeSet::new();
+    let pick = selection
+        .resolve(
+            &Job::Router,
+            false,
+            false,
+            &limits(&quotas, &unusable),
+            &when,
+        )
+        .unwrap();
+    assert!(
+        pick.waits && pick.profile.provider == Provider::Claude,
+        "{pick:?}"
+    );
+    let signed_out = BTreeSet::from([Provider::Claude]);
+    assert!(
+        selection
+            .resolve(&Job::Router, false, false, &limits(&[], &signed_out), &when)
+            .is_err()
     );
 }

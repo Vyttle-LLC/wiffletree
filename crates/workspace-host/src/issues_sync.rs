@@ -17,7 +17,9 @@ use tracker::{ISSUES, issue_folder, issue_of};
 
 /// How long after the human's last change to an issue its push waits.
 pub(crate) const PUSH_DELAY_MS: i64 = 2_000;
-/// How many times one pass pushes again after GitHub refused because the branch moved.
+/// How many times a storage repository's own pass runs whole again after GitHub refused its
+/// push because the branch moved: higher than `repos::pass`'s boards-only tries, as teammates
+/// filing at once each move the branch and take the next number.
 pub(crate) const PUSH_TRIES: usize = 5;
 
 /// `text` with each whole `old`, an issue ID, written `new`; `CEL-new-abcd` in
@@ -230,7 +232,7 @@ impl IssueRules {
     pub(crate) fn new(input: &Input) -> Self {
         let roots = vec![TRACKER.into(), ISSUES.into()];
         Self {
-            files: WholeFiles::new(input, roots, "Issues".into()),
+            files: WholeFiles::new(input, roots, vec![], "Issues".into()),
             prefix: input.prefix.clone(),
             compared: None,
             references: vec![],
@@ -387,6 +389,16 @@ impl RuleSet for IssueRules {
     }
     fn failed(&mut self, error: anyhow::Error) {
         self.files.failed(error);
+    }
+    fn reset(&mut self) {
+        self.files.reset();
+        self.compared = None;
+        self.references.clear();
+    }
+    /// Its commit is not pushed this pass, so the numbers it gave new issues are not theirs.
+    fn sit_out(&mut self) {
+        self.files.sit_out();
+        self.files.found.numbered.clear();
     }
     /// A new issue whose `issue.md` is held, or that a held file names, stays wholly on this
     /// Mac, unnumbered, and so does every file that would name its number. Holding those may

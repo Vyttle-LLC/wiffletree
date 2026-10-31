@@ -42,7 +42,14 @@ pub(super) struct Settings {
     remote_error: Option<String>,
     /// The page is looking again on a timer.
     watching_remote: bool,
+    /// The assistant's name while the user renames it.
+    assistant_input: Entity<InputState>,
+    renaming_assistant: bool,
+    assistant_error: Option<String>,
 }
+
+/// The router thresholds Settings offers; the host accepts any from 0.5 to 1.0.
+const ROUTER_THRESHOLDS: [f64; 6] = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
 
 /// A check-in threshold's presets, the unit they count and how a choice sets it.
 struct Threshold {
@@ -146,7 +153,15 @@ impl Settings {
                 let repository_input = cx.new(|cx| {
                     InputState::new(window, cx).placeholder("owner/name or a GitHub URL")
                 });
+                let assistant_input =
+                    cx.new(|cx| InputState::new(window, cx).placeholder("Wren, Assistant"));
                 let view = cx.new(|cx| {
+                    cx.subscribe(&assistant_input, |view: &mut Self, _, event, cx| {
+                        if matches!(event, InputEvent::PressEnter { .. }) {
+                            view.save_assistant_name(cx);
+                        }
+                    })
+                    .detach();
                     let mut view = Self {
                         bridge,
                         driving,
@@ -166,6 +181,9 @@ impl Settings {
                         remote: None,
                         remote_error: None,
                         watching_remote: false,
+                        assistant_input,
+                        renaming_assistant: false,
+                        assistant_error: None,
                     };
                     view.ask_host(ask::settings(), cx);
                     view.ask_remote_here(cx);
@@ -454,6 +472,131 @@ impl Settings {
             ))
     }
 
+    /// The assistant's name, which every Mac sharing these settings shows.
+    fn assistant_section(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        let name = self.host.as_ref().map(|h| h.assistant_name.clone());
+        let control = match self.renaming_assistant {
+            true => div()
+                .flex()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(200.))
+                        .child(Input::new(&self.assistant_input).small()),
+                )
+                .child(
+                    button("save-assistant-name")
+                        .primary()
+                        .small()
+                        .label("Save")
+                        .on_click(cx.listener(|v, _, _, c| v.save_assistant_name(c))),
+                ),
+            false => div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(name.clone().unwrap_or_default())
+                .child(
+                    button("rename-assistant")
+                        .small()
+                        .label("Rename")
+                        .disabled(name.is_none())
+                        .on_click(cx.listener(move |v, _, w, c| {
+                            v.renaming_assistant = true;
+                            let current = name.clone().unwrap_or_default();
+                            v.assistant_input.update(c, |input, c| {
+                                input.set_value(current, w, c);
+                                input.focus(w, c);
+                            });
+                            c.notify();
+                        })),
+                ),
+        };
+        let threshold = self.host.as_ref().map(|h| h.router_threshold);
+        let mut thresholds = div().flex().gap_1();
+        for preset in ROUTER_THRESHOLDS {
+            thresholds = thresholds.child(
+                segment(
+                    SharedString::from(format!("router-threshold-{preset}")),
+                    format!("{preset:.1}"),
+                    threshold == Some(preset),
+                )
+                .disabled(threshold.is_none())
+                .map(|b| ui::gated(b, &self.driving))
+                .on_click(cx.listener(move |v, _, _, c| v.set_router_threshold(preset, c))),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(section("ASSISTANT", p))
+            .child(setting(
+                "Name",
+                control,
+                "Shown in the sidebar and the composer. Your other Macs get it with the shared settings.",
+                p,
+            ))
+            .child(setting(
+                "Ask below",
+                thresholds,
+                "When the router is less sure than this where a message goes, it asks you. Your other Macs get it with the shared settings.",
+                p,
+            ))
+            .children(
+                (self.assistant_error.clone()).map(|error| hint(error, p).text_color(p.red)),
+            )
+    }
+    fn save_assistant_name(&mut self, cx: &mut Context<Self>) {
+        let name = self.assistant_input.read(cx).value().to_string();
+        let answer = match self.bridge.ask(ask::set_assistant_name(name)) {
+            Ok(answer) => answer,
+            Err(error) => {
+                self.assistant_error = Some(error);
+                return cx.notify();
+            }
+        };
+        cx.spawn(async move |this, cx| {
+            let answer = answer.await;
+            let _ = this.update(cx, |view, cx| {
+                match answer {
+                    Ok(name) => {
+                        view.renaming_assistant = false;
+                        view.assistant_error = None;
+                        if let Some(host) = &mut view.host {
+                            host.assistant_name = name;
+                        }
+                    }
+                    Err(error) => view.assistant_error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    fn set_router_threshold(&mut self, threshold: f64, cx: &mut Context<Self>) {
+        let answer = match self.bridge.ask(ask::set_router_threshold(threshold)) {
+            Ok(answer) => answer,
+            Err(error) => {
+                self.assistant_error = Some(error);
+                return cx.notify();
+            }
+        };
+        cx.spawn(async move |this, cx| {
+            let answer = answer.await;
+            let _ = this.update(cx, |view, cx| {
+                match answer {
+                    Ok(settings) => {
+                        view.host = Some(settings);
+                        view.assistant_error = None;
+                    }
+                    Err(error) => view.assistant_error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
     fn check_in_section(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let mut section_body = div()
             .flex()
@@ -643,6 +786,8 @@ impl Render for Settings {
                     ))
                     .children(self.driving.changes_refused().map(|reason| hint(reason, p)))
                     .child(self.folder_section(p, cx))
+                    .child(rule())
+                    .child(ui::locked(self.assistant_section(p, cx), &self.driving, p))
                     .child(rule())
                     .child(self.check_in_section(p, cx))
                     .child(rule())

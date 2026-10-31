@@ -10,7 +10,8 @@ use gpui_component::{
     input::{Textarea, TextareaState},
 };
 use issues_view::{PRIORITIES, label_color, picker, priority_label, short_repository};
-use ui::{card, hint, mono, pill};
+use ui::{card, hint, icon, mono, pill};
+use workspace_core::assistant::proposal::filed_for;
 // GPUI exports a `Priority` too; the issue's wins over both globs.
 use workspace_core::Priority;
 
@@ -28,6 +29,8 @@ pub(super) enum IssueViewEvent {
     },
     /// Opens a linked project's coordinator.
     OpenSession(String),
+    /// Ask the assistant: opens the issue's thread beside it.
+    AskAssistant(IssueId),
 }
 
 pub(super) struct IssueView {
@@ -744,7 +747,17 @@ impl Render for IssueView {
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(IssueViewEvent::Back))),
             )
             .child("›")
-            .child(issue_id(&self.id, p));
+            .child(issue_id(&self.id, p))
+            .child(div().flex_1())
+            .child(
+                button("issue-ask-assistant")
+                    .xsmall()
+                    .icon(icon("agent"))
+                    .label("Ask the assistant")
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        cx.emit(IssueViewEvent::AskAssistant(view.id.clone()))
+                    })),
+            );
         let record = match &self.record {
             None => return div().child(crumbs).child(hint("Reading…", p)),
             Some(Err(error)) => {
@@ -791,7 +804,13 @@ impl Render for IssueView {
         let mut thread = div().flex().flex_col().gap_2();
         for entry in timeline(issue, &record) {
             thread = thread.child(match entry {
-                Entry::Filed { by, at } => event_line(by, "filed this", at, p),
+                Entry::Filed { by, at } => match filed_for(issue) {
+                    // Filed from a proposal its author applied.
+                    Some(login) => {
+                        event_line(&format!("Assistant for {login}"), "filed this", at, p)
+                    }
+                    None => event_line(by, "filed this", at, p),
+                },
                 Entry::Event { by, at, text } => event_line(by, &text, at, p),
                 Entry::Comment(comment) => comment_card(comment, p),
             });

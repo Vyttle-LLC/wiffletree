@@ -1,7 +1,10 @@
-//! Noninteractive provider turns with the user's YOLO execution policy.
+//! Noninteractive provider turns with the user's YOLO execution policy, apart from comment
+//! sorting and assistant threads, which the provider holds to what they are given.
 mod codex_compaction;
 mod constrained;
 mod output;
+mod restricted;
+mod router;
 use crate::compaction::CompactionRecord;
 use crate::processes::{self, Sighting, Watch};
 use crate::runtime::LowPriority as _;
@@ -9,6 +12,8 @@ use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
 use output::{Next, Output, StopReading};
+pub use restricted::{ThreadLaunch, server_definition, shell_text_refused};
+pub use router::{ROUTER_LIMIT, RouterProvider};
 use std::os::unix::process::CommandExt;
 use std::{
     io::{Read, Write},
@@ -84,6 +89,8 @@ pub struct Turn {
     pub helper: PathBuf,
     /// The role's instructions as the store held them when the turn was built.
     pub instructions: String,
+    /// An assistant thread's restricted launch; every other turn runs in YOLO mode.
+    pub thread: Option<ThreadLaunch>,
 }
 pub fn executable(provider: Provider) -> Result<PathBuf> {
     let name = match provider {
@@ -113,8 +120,9 @@ pub fn executable(provider: Provider) -> Result<PathBuf> {
         .find(|p| p.is_file())
         .with_context(|| format!("Install {name} CLI and sign in before starting live work"))
 }
-/// The fixed core's parts, each with who gets it: the contract, then each role's core.
-pub const CORE: [(&str, &str); 5] = [
+/// The fixed core's parts, each with who gets it: the contract, then each role's core, then the
+/// contract's thread version, the assistant's core and a job run's.
+pub const CORE: [(&str, &str); 8] = [
     (
         "every agent",
         include_str!("../skills/core/communication.md"),
@@ -132,6 +140,15 @@ pub const CORE: [(&str, &str); 5] = [
         include_str!("../skills/core/verifier.md"),
     ),
     ("the PR keeper", include_str!("../skills/core/keeper.md")),
+    (
+        "assistant threads",
+        include_str!("../skills/core/thread-communication.md"),
+    ),
+    (
+        "assistant threads",
+        include_str!("../skills/core/assistant.md"),
+    ),
+    ("job runs", include_str!("../skills/core/job-run.md")),
 ];
 /// The core's parts with their names and versions, for clients.
 pub fn core_instructions() -> Vec<workspace_core::skills::CoreInstructions> {
@@ -155,8 +172,17 @@ fn core(role: Role) -> &'static str {
         Role::Implementer | Role::Maintenance => 2,
         Role::Tester | Role::Reviewer => 3,
         Role::Keeper => 4,
+        Role::Assistant => 6,
+        Role::JobRun => 7,
     };
     CORE[part].1
+}
+/// The communication contract a role gets: threads and job runs have a parent but no team.
+fn contract(role: Role) -> &'static str {
+    match role {
+        Role::Assistant | Role::JobRun => CORE[5].1,
+        _ => CORE[0].1,
+    }
 }
 /// Part of the fixed core: it says, in Wiffletree's words, that the human's rules win.
 pub(crate) const RULES_SENTENCE: &str = "These are the human's own rules for this skill. Where they disagree with the skill above, follow them.";
@@ -179,7 +205,7 @@ pub fn rules_heading(skill: Skill) -> String {
 /// The communication contract, the role's core, the skill's text, stock or the human's
 /// rewrite, and the human's own rules for that skill, if any, under a heading of Wiffletree's.
 pub fn instructions(role: Role, skill_text: &str, rules: &str) -> String {
-    let mut text = format!("{}\n{}\n{skill_text}", CORE[0].1, core(role));
+    let mut text = format!("{}\n{}\n{skill_text}", contract(role), core(role));
     if !rules.is_empty() {
         let heading = rules_heading(Skill::for_role(role));
         text.push_str(&format!("\n{heading}\n{RULES_SENTENCE}\n{rules}"));
@@ -248,6 +274,11 @@ pub fn command(turn: &Turn) -> Result<ProcessCommand> {
         !matches!(turn.kind, TurnKind::Sort) || turn.session.provider == Provider::Claude,
         "Only Claude can sort comments: Codex cannot be started with every tool off"
     );
+    ensure!(
+        turn.session.provider != Provider::Codex
+            || turn.thread.as_ref().is_none_or(ThreadLaunch::codex_may_run),
+        "A job with a CLI source runs only on Claude: Codex cannot yet hold a CLI to its listed commands"
+    );
     let mut cmd = ProcessCommand::new(executable(turn.session.provider)?);
     configure(&mut cmd, turn);
     Ok(cmd)
@@ -267,6 +298,13 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
     // Credentials go to the MCP subprocess environment, never in the prompt.
     cmd.env("WORKSPACE_SOCKET", &turn.socket)
         .env("WORKSPACE_TOKEN", &turn.token);
+    if let Some(launch) = &turn.thread {
+        match turn.session.provider {
+            Provider::Claude => restricted::configure_claude(cmd, turn, launch),
+            Provider::Codex => restricted::configure_codex(cmd, turn, launch),
+        }
+        return;
+    }
     let instructions = &turn.instructions;
     // The MCP helper lists the tools of the session's role.
     let role = tag(&turn.session.role).unwrap_or_default();
@@ -341,8 +379,54 @@ pub fn merge_run(
     input: Vec<u8>,
     limit: Duration,
 ) -> Result<MergeAnswer> {
+    let configure = |cmd: &mut ProcessCommand, _: &Path| {
+        constrained::configure(
+            cmd,
+            profile,
+            skills::model::MERGING,
+            skills::model::ANSWER_SCHEMA,
+        )
+    };
+    let mut run = constrained::Run::new("merge");
+    answer_run(claude, configure, input, limit, |value| {
+        let Some(result) = run.event(value)? else {
+            return Ok(None);
+        };
+        ensure!(
+            result.answer.is_some(),
+            "The merge run failed: {}.",
+            value["subtype"]
+        );
+        Ok(Some(MergeAnswer {
+            answer: result.answer.unwrap(),
+            tokens: result.tokens,
+        }))
+    })
+}
+
+/// A run that went past its time limit and was stopped.
+#[derive(Debug)]
+pub struct TookTooLong;
+impl std::fmt::Display for TookTooLong {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("The model took too long to answer, so the run was stopped.")
+    }
+}
+impl std::error::Error for TookTooLong {}
+
+/// Runs Claude at `program`, set up by `configure`, of no session and in an empty temporary
+/// folder, with `input` on stdin, until `answer` finds the answer in its events and it exits,
+/// or until `limit`, when it is stopped.
+fn answer_run<T>(
+    program: &Path,
+    configure: impl FnOnce(&mut ProcessCommand, &Path),
+    input: Vec<u8>,
+    limit: Duration,
+    mut answer: impl FnMut(&Value) -> Result<Option<T>>,
+) -> Result<T> {
+    let who = Provider::Claude.label();
     let folder = tempfile::tempdir()?;
-    let mut cmd = ProcessCommand::new(claude);
+    let mut cmd = ProcessCommand::new(program);
     cmd.current_dir(folder.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -350,51 +434,50 @@ pub fn merge_run(
         .process_group(0)
         .at_low_priority()
         .own_descriptors_only();
-    constrained::configure(
-        &mut cmd,
-        profile,
-        skills::model::MERGING,
-        skills::model::ANSWER_SCHEMA,
-    );
-    let mut child = cmd.spawn().context("Claude could not be started")?;
-    let mut stdin = child.stdin.take().context("No Claude stdin")?;
-    let output = Output::spawn(child.stdout.take().context("No Claude stdout")?)?;
+    configure(&mut cmd, folder.path());
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("{who} could not be started"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .with_context(|| format!("No {who} stdin"))?;
+    let output = Output::spawn(
+        child
+            .stdout
+            .take()
+            .with_context(|| format!("No {who} stdout"))?,
+    )?;
     let _stop_reading = StopReading(output.clone());
-    let errors = constrained::Errors::spawn(child.stderr.take().context("No Claude stderr")?);
+    let stderr = child
+        .stderr
+        .take()
+        .with_context(|| format!("No {who} stderr"))?;
+    let errors = constrained::Errors::spawn(stderr);
     let mut process = Process {
         child,
         status: None,
     };
     std::thread::spawn(move || stdin.write_all(&input));
     let deadline = Instant::now() + limit;
-    let mut run = constrained::Run::new("merge");
-    let mut answer = None;
+    let in_time = || match Instant::now() < deadline {
+        true => Ok(()),
+        false => Err(TookTooLong),
+    };
+    let mut answered = None;
     loop {
         if process.exited()? {
             output.provider_exited();
         }
-        ensure!(
-            Instant::now() < deadline,
-            "The model took too long to answer, so the run was stopped."
-        );
+        in_time()?;
         match output.next(Duration::from_millis(20)) {
             Next::Event(Ok(value)) => {
-                if answer.is_none()
-                    && let Some(result) = run.event(&value)?
-                {
-                    ensure!(
-                        result.answer.is_some(),
-                        "The merge run failed: {}.",
-                        value["subtype"]
-                    );
-                    answer = Some(MergeAnswer {
-                        answer: result.answer.unwrap(),
-                        tokens: result.tokens,
-                    });
+                if answered.is_none() {
+                    answered = answer(&value)?;
                 }
             }
             Next::Event(Err(error))
-                if answer.is_none() && error == "Provider event exceeds bound" =>
+                if answered.is_none() && error == "Provider event exceeds bound" =>
             {
                 bail!("{error}")
             }
@@ -404,19 +487,16 @@ pub fn merge_run(
         }
     }
     while !process.exited()? {
-        ensure!(
-            Instant::now() < deadline,
-            "The model took too long to answer, so the run was stopped."
-        );
+        in_time()?;
         std::thread::sleep(Duration::from_millis(20));
     }
     let status = process.stop()?;
-    if let Some(answer) = answer {
-        return Ok(answer);
+    if let Some(answered) = answered {
+        return Ok(answered);
     }
     let stderr = errors.finish();
     let said = stderr.trim().chars().take(1500).collect::<String>();
-    let ended = format!("Claude ended without an answer ({status}). {said}");
+    let ended = format!("{who} ended without an answer ({status}). {said}");
     bail!("{}", ended.trim_end())
 }
 
@@ -624,6 +704,9 @@ fn run_turn(
                     }
                 }
                 "item.started" | "item.updated" | "item.completed" => {
+                    if let Some(launch) = &turn.thread {
+                        launch.check_codex_item(&value["item"])?;
+                    }
                     codex
                         .event(&value)
                         .into_iter()
@@ -672,6 +755,9 @@ fn run_turn(
                 "system" if value["subtype"] == "init" => {
                     if let Some(id) = value["session_id"].as_str() {
                         emit(ProviderEvent::Session(id.into()));
+                    }
+                    if let Some(launch) = &turn.thread {
+                        launch.check_claude_start(&value)?;
                     }
                     ensure!(
                         value["mcp_servers"]
@@ -897,6 +983,7 @@ mod tests {
             token: String::new(),
             helper: PathBuf::new(),
             instructions: String::new(),
+            thread: None,
         };
         let mut cmd = ProcessCommand::new("claude");
         configure(&mut cmd, &turn);
@@ -1030,7 +1117,11 @@ mod tests {
         );
     }
 
-    fn turn(provider: Provider, resume: Option<&str>, attachments: Vec<Attachment>) -> Turn {
+    pub(super) fn turn(
+        provider: Provider,
+        resume: Option<&str>,
+        attachments: Vec<Attachment>,
+    ) -> Turn {
         Turn {
             run_id: "run".into(),
             kind: TurnKind::Prompt,
@@ -1059,6 +1150,7 @@ mod tests {
             token: "t".into(),
             helper: "/tmp/helper".into(),
             instructions: skill(Role::ProjectOrchestrator),
+            thread: None,
         }
     }
 

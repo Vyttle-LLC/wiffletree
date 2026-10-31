@@ -139,10 +139,22 @@ impl Host {
     pub(crate) fn message_revisions(&self) -> Result<std::collections::BTreeMap<String, u64>> {
         Ok(self.db.prepare(&format!(
             "SELECT s.id,coalesce(m.revision,0) FROM sessions s LEFT JOIN message_revisions m ON m.session_id=s.id
-             WHERE {} OR s.id IN (SELECT session_id FROM archive_turns)", sessions_where(true)
+             WHERE {} OR (s.id IN (SELECT session_id FROM archive_turns) AND s.{NOT_THREAD})", sessions_where(true)
         ))?.query_map([], |r| Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The revision of one session's messages; see `message_revisions`.
+    pub(crate) fn message_revision(&self, session: &str) -> Result<u64> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT revision FROM message_revisions WHERE session_id=?1",
+                [session],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
+    }
     pub(crate) fn turn_started(&mut self, session: &str) -> Result<()> {
         self.db
             .execute("INSERT OR IGNORE INTO archive_turns VALUES (?1)", [session])?;

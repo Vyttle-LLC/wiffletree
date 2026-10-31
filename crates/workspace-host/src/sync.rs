@@ -489,7 +489,7 @@ fn unit(path: &str) -> &str {
 }
 
 /// The machine a commit names after its " · ", or else its author.
-fn named<'a>(author: &'a str, subject: &'a str) -> &'a str {
+pub(crate) fn named<'a>(author: &'a str, subject: &'a str) -> &'a str {
     subject
         .rsplit_once(" · ")
         .map_or(author, |(_, machine)| machine)
@@ -517,6 +517,7 @@ fn names(paths: &[String]) -> Vec<String> {
             shared::CHECK_INS => "Check-ins",
             shared::KEEPER => "PR keeper",
             shared::MODELS => "Switch threshold",
+            shared::ASSISTANT => "Assistant",
             path => Skill::ALL
                 .into_iter()
                 .find(|skill| path.starts_with(&format!("skills/{}/", skill.folder())))
@@ -735,6 +736,18 @@ impl RuleSet for Settings {
     fn failed(&mut self, error: anyhow::Error) {
         self.passed.failed = Some(error);
     }
+    fn reset(&mut self) {
+        let passed = &mut self.passed;
+        passed.pulled.clear();
+        passed.alike.clear();
+        passed.committed.clear();
+        passed.paused.clear();
+        passed.failed = None;
+        self.refused = None;
+    }
+    fn sit_out(&mut self) {
+        self.passed.committed.clear();
+    }
 }
 
 /// Runs the settings repository's engine with its settings rule set and, when it is also a
@@ -783,7 +796,7 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
         return Ok(settings.passed);
     }
     let (input, scanner) = storage.unzip();
-    let mut stored = input.map(storage::RuleSets::new);
+    let mut stored = input.map(|input| storage::RuleSets::new(input, true));
     let outcome = {
         let mut rule_sets: Vec<&mut dyn RuleSet> = vec![&mut settings];
         if let Some(stored) = &mut stored {

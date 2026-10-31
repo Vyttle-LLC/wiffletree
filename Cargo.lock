@@ -9649,6 +9649,7 @@ dependencies = [
  "sha2 0.11.0",
  "similar",
  "tempfile",
+ "toml 0.8.23",
  "tungstenite",
  "uuid",
  "workspace-core",

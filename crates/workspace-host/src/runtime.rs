@@ -146,6 +146,57 @@ pub(crate) fn git_bytes_large(path: &Path, args: &[&str], input: &[u8]) -> Resul
     git_bytes_within(path, args, input, (LARGE_TIMEOUT, LARGE_OUTPUT_BOUND))
 }
 
+/// The first `limit` lines a Git query writes, under a query's deadline, with its exit status,
+/// or `None` for the status when it wrote more: it is then killed, so a broad query never runs
+/// on or meets an output bound.
+pub(crate) fn git_lines(
+    path: &Path,
+    args: &[&str],
+    limit: usize,
+) -> Result<(Option<ExitStatus>, Vec<String>)> {
+    let mut command = git_command(path, args);
+    command.env("GIT_OPTIONAL_LOCKS", "0");
+    let mut child = Process(
+        command
+            .own_descriptors_only()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?,
+    );
+    let stdout = child.0.stdout.take().context("Missing Git pipe")?;
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).split(b'\n') {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = Instant::now() + GIT_TIMEOUT;
+    let mut lines = vec![];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match receiver.recv_timeout(remaining) {
+            // Dropping `child` kills it.
+            Ok(_) if lines.len() == limit => return Ok((None, lines)),
+            Ok(line) => lines.push(String::from_utf8_lossy(&line?).into_owned()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => anyhow::bail!("Git query timed out"),
+        }
+    }
+    Ok((Some(child.0.wait()?), lines))
+}
+
+/// A Git query's exit status and output as bytes, under a query's deadline and output bound,
+/// for a query whose failure is part of the answer, as `git grep`'s "nothing matched" is.
+pub(crate) fn git_bytes_answer(path: &Path, args: &[&str]) -> Result<(ExitStatus, Vec<u8>)> {
+    let mut command = git_command(path, args);
+    command.env("GIT_OPTIONAL_LOCKS", "0");
+    let (status, output, _) = bounded_output(command, GIT_TIMEOUT, None)?;
+    Ok((status, output))
+}
+
 fn git_bytes_within(
     path: &Path,
     args: &[&str],

@@ -17,7 +17,8 @@ uuid.workspace = true
 gpui = { package = "gpui-pre", version = "=0.3.8" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit"] }
 gpui-component = { version = "=0.7.1", features = ["tree-sitter-languages"] }
-# The window's text selection, which gpui-component builds on but does not re-export.
+# gpui-component's base, which it does not re-export: the window's text selection, and its
+# tooltip overlay, which a board must never draw over.
 gpui-base = "=0.7.1"
 async-channel = "2.5"
 futures-lite = "2"
@@ -30,23 +31,18 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 chrono-tz = "0.10"
 objc = "0.2"
 sha2 = "0.11"
+# HTML boards (board_web_view.rs): wry places a WKWebView over a GPUI element, and the objc2
+# crates (the versions wry and GPUI already use) reach the WebKit and AppKit calls wry does not
+# wrap: the content rule list, the data store, the UI delegate, snapshots and first responder.
+wry = { version = "=0.57.1", default-features = false }
+objc2 = "=0.6.5"
+objc2-foundation = { version = "=0.3.2", features = ["NSData", "NSError", "NSGeometry", "NSString", "NSURL", "NSURLRequest"] }
+objc2-app-kit = { version = "=0.3.2", features = ["block2", "NSApplication", "NSEvent", "NSGraphicsContext", "NSImage", "NSResponder", "NSView", "NSWindow"] }
+objc2-web-kit = { version = "=0.3.2", features = ["block2", "objc2-app-kit", "WKContentRuleList", "WKContentRuleListStore", "WKFrameInfo", "WKNavigationAction", "WKSecurityOrigin", "WKSnapshotConfiguration", "WKUIDelegate", "WKUserContentController", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "WKWindowFeatures"] }
+block2 = "=0.6.2"
 
 [dev-dependencies]
 # Tests serve a real host in a temporary folder; the app reaches its host only over host.sock.
 workspace-host.workspace = true
 tempfile = "3.23"
 rusqlite = { version = "0.40", features = ["bundled"] }
-# The board web view prototype (examples/board_webview/): wry places a WKWebView over a GPUI
-# element, and the objc2 crates (the versions wry and GPUI already use) reach the WebKit and
-# AppKit calls wry does not wrap: snapshots, first responder and synthetic input.
-wry = { version = "=0.57.1", default-features = false }
-objc2 = "=0.6.5"
-objc2-foundation = { version = "=0.3.2", features = ["NSData", "NSError", "NSGeometry", "NSString"] }
-objc2-app-kit = { version = "=0.3.2", features = ["block2", "NSApplication", "NSEvent", "NSGraphicsContext", "NSImage", "NSResponder", "NSView", "NSWindow"] }
-objc2-web-kit = { version = "=0.3.2", features = ["block2", "objc2-app-kit", "WKSnapshotConfiguration", "WKWebView"] }
-block2 = "=0.6.2"
-
-[[example]]
-name = "board_webview"
-# Runs the board scheme's tests with the others.
-test = true

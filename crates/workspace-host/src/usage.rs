@@ -125,12 +125,16 @@ impl Host {
         };
         let session = self.session(&session_id)?;
         let profile: Value = serde_json::from_str(&detail).unwrap_or(Value::Null);
+        // A thread has no coordinator and counts as its own.
+        let counted = |role| {
+            matches!(
+                role,
+                Role::TaskOrchestrator | Role::ProjectOrchestrator | Role::Assistant | Role::JobRun
+            )
+        };
         let mut owner = session.clone();
         for _ in 0..32 {
-            if matches!(
-                owner.role,
-                Role::TaskOrchestrator | Role::ProjectOrchestrator
-            ) {
+            if counted(owner.role) {
                 break;
             }
             owner = self.session(
@@ -140,13 +144,7 @@ impl Host {
                     .context("Usage session has no coordinator")?,
             )?;
         }
-        ensure!(
-            matches!(
-                owner.role,
-                Role::TaskOrchestrator | Role::ProjectOrchestrator
-            ),
-            "Invalid usage ancestry"
-        );
+        ensure!(counted(owner.role), "Invalid usage ancestry");
         // Inside a caller's unit the writes belong to it; otherwise they are a unit of their own.
         let own_unit = if self.db.is_autocommit() {
             Some(self.db.unchecked_transaction()?)
@@ -185,7 +183,7 @@ impl Host {
                 cache_read=MAX(cache_read,excluded.cache_read),cache_write=MAX(cache_write,excluded.cache_write),
                 reasoning=MAX(reasoning,excluded.reasoning),complete=MAX(complete,excluded.complete),native=excluded.native
             WHERE usage_requests.run_id=excluded.run_id", params![tag(&provider)?, request, run, session_id,
-                session.project_id, owner.id, model.or_else(||profile["profile"]["model"].as_str()).unwrap_or("unreported"),
+                crate::assistant::project_column(&session.project_id), owner.id, model.or_else(||profile["profile"]["model"].as_str()).unwrap_or("unreported"),
                 timestamp, counts.input as i64, counts.output as i64, counts.cache_read as i64,
                 counts.cache_write as i64, counts.reasoning as i64, complete, encode(usage)?])?;
         own_unit.map_or(Ok(()), |unit| unit.commit())?;

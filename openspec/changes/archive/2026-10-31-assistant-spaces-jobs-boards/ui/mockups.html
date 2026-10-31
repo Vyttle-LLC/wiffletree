@@ -1,0 +1,875 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Assistant, Spaces, jobs and Boards study</title>
+<!--
+  Static study for the assistant, Spaces, scheduled jobs and Boards. No script, no network.
+  APPROVED by Michael on 2026-10-29. Study 6's Space page continues, amended, in openspec/changes/archive/2026-10-30-spaces/ui/mockups.html.
+  The theme switch at the top is a CSS-only checkbox. Names, times and figures are drawn by hand.
+  1. The assistant window with thread tabs, in light and dark.
+  2. The router's inline question.
+  3. A job recipe to confirm.
+  4. The Boards library.
+  5. An open HTML board.
+  6. A Space's settings page.
+  7. A job's page, redesigned: active with a run past 30 minutes, paused with delete, a shared job run by another Mac,
+     edit, and the one Jobs list in the assistant. APPROVED by Michael on 2026-10-31.
+  8. Issue threads: Ask the assistant on an issue and on the Issues page, every proposal kind with Apply, Edit
+     and Discard, a proposal whose issue changed since, the authors notice and an applied comment. APPROVED by
+     Michael on 2026-10-31; the issue page follows openspec/changes/archive/2026-10-31-shared-issues/ui/mockups.html.
+  The assistant shows its default name, Assistant, throughout.
+-->
+<style>
+.light,:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}}
+body:has(#force-light:checked){--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+body:has(#force-dark:checked),.dark{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}
+body:has(#force-dark:checked) .light{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+h2{font-size:15px;font-weight:600;margin:0 0 2px}
+h3{font-size:13px;font-weight:600;margin:0}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.intro{max-width:880px;margin-bottom:22px}
+.intro p{color:var(--subtle);font-size:12px;margin-top:4px}
+.pending{display:inline-block;margin:6px 0 4px;padding:3px 10px;border-radius:9px;font-size:11.5px;font-weight:600;color:var(--yellow);background:color-mix(in srgb,var(--yellow) 16%,transparent)}
+.switch{display:flex;gap:6px;margin:10px 0 0;font-size:12px;color:var(--subtle)}
+.switch input{display:none}
+.switch label{padding:3px 10px;border:1px solid var(--edge);border-radius:7px;cursor:pointer}
+.switch input:checked+label{background:var(--overlay);color:var(--text)}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:26px;align-items:start}
+.wide{grid-column:1/-1}
+.study>.eyebrow{margin-bottom:6px}
+.caption{margin:10px 2px 0;font-size:11.5px;color:var(--subtle)}
+.caption b{color:var(--text);font-weight:600}
+.frame{background:var(--surface);border:1px solid var(--edge);border-radius:12px;overflow:hidden;color:var(--text)}
+.window{display:grid;grid-template-columns:200px 1fr;min-height:420px}
+.side{background:var(--base);border-right:1px solid var(--edge);display:flex;flex-direction:column;padding:12px 10px;gap:3px}
+.logo{font-weight:600;font-size:16px;letter-spacing:-.03em;margin:0 4px 10px}
+.logo span{color:var(--focus)}
+.label{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--subtle);margin:8px 6px 2px}
+.row{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:7px;font-size:13px}
+.row.sel{background:var(--overlay)}
+.row .r{margin-left:auto;font-size:11px;color:var(--subtle)}
+.row .ico{width:16px;text-align:center;color:var(--subtle)}
+.pinned{border-bottom:1px solid var(--edge);padding-bottom:6px;margin-bottom:2px}
+.spin{width:10px;height:10px;border-radius:50%;border:1.6px solid var(--accent);border-right-color:transparent;flex:none}
+.count{font-size:10.5px;padding:0 6px;border-radius:9px;background:color-mix(in srgb,var(--yellow) 18%,transparent);color:var(--yellow);font-weight:600}
+.main{display:flex;flex-direction:column;min-width:0}
+.tabs{display:flex;align-items:flex-end;gap:2px;padding:8px 10px 0;border-bottom:1px solid var(--edge);background:var(--base)}
+.tab{display:flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid transparent;border-bottom:0;border-radius:8px 8px 0 0;font-size:12px;color:var(--subtle);max-width:170px;white-space:nowrap;overflow:hidden}
+.tab.on{background:var(--surface);border-color:var(--edge);color:var(--text);margin-bottom:-1px}
+.tab .x{margin-left:4px;color:var(--muted)}
+.tab.add{color:var(--muted)}
+.sp{width:8px;height:8px;border-radius:2px;flex:none}
+.sage{background:var(--focus)}.personal{background:var(--magenta)}.vyttle{background:var(--blue)}
+.search{margin-left:auto;margin-bottom:6px;font-size:11.5px;color:var(--muted);border:1px solid var(--edge);border-radius:7px;padding:2px 10px;background:var(--surface)}
+.convo{flex:1;padding:14px 18px;display:flex;flex-direction:column;gap:10px}
+.msg{max-width:88%}
+.msg.me{align-self:flex-end;background:var(--overlay);padding:7px 11px;border-radius:10px}
+.msg.ai p+p{margin-top:6px}
+.who{font-size:11px;color:var(--subtle);margin-bottom:2px}
+.route{align-self:flex-end;font-size:11px;color:var(--subtle);display:flex;gap:6px;align-items:center}
+.route a{color:var(--accent);text-decoration:none}
+.worked{font-size:11px;color:var(--muted)}
+.composer{margin:0 14px 14px;border:1px solid var(--edge);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:6px;background:var(--surface)}
+.composer .ph{color:var(--muted)}
+.composer .bar{display:flex;gap:6px;align-items:center;font-size:11.5px;color:var(--subtle)}
+.chip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--edge);border-radius:7px;padding:1px 8px;font-size:11.5px;color:var(--subtle)}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--edge);border-radius:7px;padding:4px 11px;font-size:12px;background:var(--surface);color:var(--text)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.btn.quiet{border-color:transparent;color:var(--subtle)}
+.question{border:1px solid var(--edge);border-left:3px solid var(--focus);border-radius:9px;padding:10px 12px;background:var(--base);display:flex;flex-direction:column;gap:8px}
+.question .q{font-weight:600}
+.question .why{font-size:11.5px;color:var(--subtle)}
+.choices{display:flex;gap:6px;flex-wrap:wrap}
+.held{font-size:11px;color:var(--muted)}
+.card{border:1px solid var(--edge);border-radius:10px;background:var(--base);padding:12px 14px;display:flex;flex-direction:column;gap:9px}
+.kv{display:grid;grid-template-columns:110px 1fr;gap:5px 12px;font-size:12px}
+.kv dt{color:var(--subtle)}
+.kv dd{margin:0}
+code{font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--overlay);padding:0 4px;border-radius:4px}
+.src{display:flex;gap:6px;align-items:center;font-size:12px}
+.ok{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--yellow)}
+.note{font-size:11.5px;color:var(--subtle)}
+.actions{display:flex;gap:8px;justify-content:flex-end}
+.page{padding:16px 18px;display:flex;flex-direction:column;gap:12px}
+.filters{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.seg{display:inline-flex;border:1px solid var(--edge);border-radius:7px;overflow:hidden;font-size:11.5px}
+.seg span{padding:3px 10px;color:var(--subtle)}
+.seg span.on{background:var(--overlay);color:var(--text)}
+.boards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.board{border:1px solid var(--edge);border-radius:10px;overflow:hidden;background:var(--surface);display:flex;flex-direction:column}
+.thumb{height:92px;background:var(--base);border-bottom:1px solid var(--edge);padding:10px;display:flex;align-items:flex-end;gap:5px}
+.thumb.md{flex-direction:column;align-items:stretch;justify-content:flex-start;gap:5px}
+.thumb.md i{display:block;height:6px;border-radius:3px;background:var(--overlay)}
+.thumb.md i.h{width:55%;height:8px;background:var(--edge)}
+.thumb .bar{flex:1;background:var(--focus);border-radius:3px 3px 0 0;opacity:.8}
+.board .meta{padding:9px 10px;display:flex;flex-direction:column;gap:3px}
+.board .meta .t{font-weight:600;font-size:12.5px}
+.board .meta .s{font-size:11px;color:var(--subtle);display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.pill{font-size:10.5px;padding:0 7px;border-radius:9px;background:var(--overlay);color:var(--subtle)}
+.pill.stale{background:color-mix(in srgb,var(--yellow) 16%,transparent);color:var(--yellow)}
+.pill.wait{background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent)}
+.viewer-head{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--edge)}
+.viewer-head .r{margin-left:auto;display:flex;gap:6px;align-items:center}
+.sandbox{font-size:11px;color:var(--subtle);display:flex;gap:8px;padding:6px 14px;border-bottom:1px solid var(--edge);background:var(--base)}
+.web{padding:16px;background:#fff;color:#1A262D;min-height:300px;font-family:-apple-system,system-ui,sans-serif}
+.dark .web,body:has(#force-dark:checked) .web{background:#0f1a1f;color:#e9eef0}
+.web h4{margin:0 0 2px;font-size:16px}
+.web .kpis{display:flex;gap:10px;margin:12px 0}
+.web .kpi{flex:1;border:1px solid rgba(120,140,140,.35);border-radius:8px;padding:8px 10px}
+.web .kpi b{display:block;font-size:20px}
+.web .kpi span{font-size:11px;opacity:.7}
+.web .chart{display:flex;align-items:flex-end;gap:8px;height:120px;border-bottom:1px solid rgba(120,140,140,.5);padding:0 4px}
+.web .chart i{flex:1;background:#2D5A5A;border-radius:3px 3px 0 0}
+.web .chart i.r{background:#902818}
+.web .axis{display:flex;gap:8px;padding:3px 4px 0;font-size:10px;opacity:.6}
+.web .axis span{flex:1;text-align:center}
+.versions{width:190px;border-left:1px solid var(--edge);padding:10px;font-size:11.5px;display:flex;flex-direction:column;gap:4px}
+.versions .v{padding:4px 6px;border-radius:6px}
+.versions .v.on{background:var(--overlay)}
+.versions .v small{display:block;color:var(--subtle)}
+.form{display:grid;grid-template-columns:150px 1fr;gap:10px 16px;font-size:12.5px;align-items:start}
+.form>label{color:var(--subtle);padding-top:5px}
+.field{border:1px solid var(--edge);border-radius:7px;padding:5px 9px;background:var(--surface)}
+.field.area{min-height:58px;color:var(--text)}
+.field small{color:var(--subtle)}
+.banner{border:1px solid color-mix(in srgb,var(--yellow) 45%,var(--edge));background:color-mix(in srgb,var(--yellow) 9%,transparent);border-radius:9px;padding:8px 11px;font-size:12px}
+.banner b{color:var(--yellow)}
+.split{display:grid;grid-template-columns:180px 1fr}
+.spaces{border-right:1px solid var(--edge);padding:12px 8px;display:flex;flex-direction:column;gap:2px;background:var(--base)}
+.longrun{display:flex;align-items:center;gap:6px;padding:0 8px 0 30px;font-size:11px;color:var(--subtle)}
+.longrun .btn{padding:0 7px;font-size:11px}
+.jobbar{display:flex;gap:8px;align-items:center}
+.runs{display:flex;flex-direction:column;gap:8px}
+.run{border:1px solid var(--edge);border-radius:9px;background:var(--base);padding:8px 11px;display:flex;flex-direction:column;gap:3px;font-size:12px}
+.run .line{display:flex;align-items:center;gap:8px}
+.pill.ok{background:color-mix(in srgb,var(--green) 14%,transparent);color:var(--green)}
+.pill.bad{background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red)}
+.pill.live{background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent)}
+.pill.paused{background:color-mix(in srgb,var(--yellow) 16%,transparent);color:var(--yellow);font-weight:600}
+.btn.danger{color:var(--red);border-color:color-mix(in srgb,var(--red) 45%,var(--edge))}
+.btn.danger.fill{background:var(--red);border-color:var(--red);color:var(--on-accent);font-weight:600}
+.btn.off{opacity:.45}
+.jobhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.jobhead h2{margin:0;font-size:16px}
+.run.long{border-color:color-mix(in srgb,var(--yellow) 55%,var(--edge));background:color-mix(in srgb,var(--yellow) 7%,var(--base))}
+.old{color:var(--muted)}
+.dialog{border:1px solid var(--edge);border-radius:12px;background:var(--surface);box-shadow:0 8px 24px rgba(0,0,0,.18);padding:14px 16px;display:flex;flex-direction:column;gap:8px;max-width:420px}
+/* 8. Issue threads: the issue page, the Issues list and the thread docked beside them. */
+.issue{display:grid;grid-template-columns:minmax(0,1fr) 168px 310px;min-height:470px}
+.issues{display:grid;grid-template-columns:minmax(0,1fr) 310px;min-height:400px}
+.ihead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.crumbs{font-size:11.5px;color:var(--muted)}
+.ititle{font:400 21px/1.2 Georgia,"Times New Roman",serif;letter-spacing:-.02em;margin:0}
+.prose{font-size:12.5px;display:flex;flex-direction:column;gap:5px}
+.prose ul{margin:0;padding-left:18px}
+.timeline{display:flex;flex-direction:column;gap:7px}
+.comment{border:1px solid var(--edge);background:var(--surface);border-radius:9px;padding:7px 10px;font-size:12px}
+.comment .by{display:flex;gap:6px;align-items:center;font-size:11px;color:var(--subtle);margin-bottom:2px}
+.comment .by b{color:var(--text);font-weight:600}
+.comment.asst{border-color:color-mix(in srgb,var(--magenta) 42%,var(--edge));background:color-mix(in srgb,var(--magenta) 6%,var(--surface))}
+.comment.asst .by b{color:var(--magenta)}
+.event{font-size:11px;color:var(--muted);display:flex;gap:6px;align-items:center}
+.event::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--edge)}
+.props{border-left:1px solid var(--edge);padding:14px 12px;display:flex;flex-direction:column;gap:10px;font-size:12px;background:var(--base)}
+.props .k{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:2px}
+.ilist{display:flex;flex-direction:column}
+.irow{display:grid;grid-template-columns:22px 70px 1fr auto;gap:8px;align-items:center;padding:6px 4px;border-bottom:1px solid var(--edge);font-size:12px}
+.irow .id,.mono{font:11px ui-monospace,SFMono-Regular,monospace;color:var(--subtle)}
+.group{font-size:10.5px;color:var(--subtle);text-transform:uppercase;letter-spacing:.08em;padding:8px 4px 3px}
+.prio{font:600 10.5px ui-monospace,monospace;color:var(--muted)}
+.prio.urgent{color:var(--red)}
+.dock{border-left:1px solid var(--edge);display:flex;flex-direction:column;background:var(--base);min-width:0}
+.dock-head{padding:9px 12px;border-bottom:1px solid var(--edge);display:flex;flex-direction:column;gap:4px}
+.dock-head .t{display:flex;align-items:center;gap:6px}
+.dock-head .t b{font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dock .convo{padding:11px 12px;gap:9px;font-size:12px}
+.dock .composer{margin:0 10px 10px}
+.attached{display:flex;gap:6px;align-items:center;font-size:11px;color:var(--subtle)}
+.tool{font:10.5px ui-monospace,SFMono-Regular,monospace;color:var(--muted)}
+.notice{font-size:11px;color:var(--subtle);border-left:2px solid var(--yellow);padding:2px 8px}
+.proposal{border:1px solid color-mix(in srgb,var(--focus) 45%,var(--edge));background:color-mix(in srgb,var(--focus) 6%,var(--surface));border-radius:10px;padding:9px 10px;display:flex;flex-direction:column;gap:7px;font-size:12px}
+.proposal .kind{font-size:11px;color:var(--subtle)}
+.proposal .kind b{color:var(--text)}
+.proposal.applied{border-color:var(--edge);background:var(--surface)}
+.proposal.moved{border-color:color-mix(in srgb,var(--yellow) 55%,var(--edge))}
+.diff{font:11px/1.55 ui-monospace,SFMono-Regular,monospace;background:var(--surface);border:1px solid var(--edge);border-radius:6px;padding:6px 8px;overflow-wrap:anywhere}
+.diff .add{color:var(--green)}.diff .del{color:var(--red);text-decoration:line-through}.diff .ctx{color:var(--muted)}
+.diff .theirs{color:var(--blue)}
+.draft{border:1px solid var(--edge);border-radius:7px;background:var(--surface);padding:6px 8px;display:flex;flex-direction:column;gap:3px}
+.kinds{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;padding:14px;align-items:start}
+@media(max-width:1100px){.kinds{grid-template-columns:repeat(2,minmax(0,1fr))}.issue{grid-template-columns:1fr}.issues{grid-template-columns:1fr}}
+ul.legend{margin:6px 0 0;padding-left:18px;color:var(--subtle);font-size:12px;max-width:900px}
+ul.legend li{margin:3px 0}
+@media(max-width:1100px){.grid{grid-template-columns:1fr}.boards{grid-template-columns:repeat(2,minmax(0,1fr))}}
+</style>
+</head>
+<body>
+<div class="intro">
+  <div class="eyebrow">Wiffletree · design study</div>
+  <h1>Assistant, Spaces, jobs and Boards</h1>
+  <span class="pending">Approved by Michael, October 29, 2026</span>
+  <p>A static study for <code>openspec/changes/assistant-spaces-jobs-boards</code>. Nothing here runs: no message is sent, no router is asked, no job is scheduled, no repository is touched, and the dashboard is drawn with CSS. Sage, Vyttle and Personal are sample Spaces; names, times and figures are drawn by hand.</p>
+  <div class="switch">
+    <span>Appearance:</span>
+    <input type="radio" name="theme" id="force-system" checked><label for="force-system">System</label>
+    <input type="radio" name="theme" id="force-light"><label for="force-light">Light</label>
+    <input type="radio" name="theme" id="force-dark"><label for="force-dark">Dark</label>
+  </div>
+</div>
+
+<div class="grid">
+
+<!-- 1. Assistant window, light and dark -->
+<section class="study light">
+  <div class="eyebrow">1 · The assistant · light</div>
+  <div class="frame">
+    <div class="window">
+      <aside class="side">
+        <div class="logo">wiffle<span>tree</span></div>
+        <div class="pinned">
+          <div class="row sel"><span class="spin"></span>Assistant<span class="r"><span class="count">1</span></span></div>
+          <div class="row"><span class="ico">▦</span>Boards</div>
+        </div>
+        <div class="label">Projects</div>
+        <div class="row">Sign-in retry</div>
+        <div class="row">Watch onboarding</div>
+        <div class="row">Vyttle pricing page</div>
+      </aside>
+      <div class="main">
+        <div class="tabs">
+          <div class="tab on"><span class="sp sage"></span>API date format<span class="x">×</span></div>
+          <div class="tab"><span class="spin"></span><span class="sp vyttle"></span>Pricing copy</div>
+          <div class="tab"><span class="sp personal"></span>Dentist Tuesday</div>
+          <div class="tab add">＋</div>
+          <div class="search">Search threads</div>
+        </div>
+        <div class="convo">
+          <div class="msg me">What date format did we settle on for the API?</div>
+          <div class="worked">Worked 6s · 2 steps</div>
+          <div class="msg ai"><div class="who">Assistant ·Sage</div><p>ISO 8601 in UTC, such as <code>2026-10-29T14:00:00Z</code>. The Sage brain records it as a decision.</p></div>
+          <div class="msg me">remind me to book the dentist for Tuesday</div>
+          <div class="route"><span class="sp personal"></span>New thread in Personal · <a href="#">Change</a></div>
+        </div>
+        <div class="composer">
+          <span class="ph">Ask Assistant…</span>
+          <div class="bar"><span class="chip"><span class="sp sage"></span>Sage · auto</span><span class="chip">Sonnet · medium</span><span style="margin-left:auto">Read-only · scratch folder</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>One window, many threads.</b> Each tab is its own small provider session with its Space's colour. The router moved the dentist message to a new Personal tab and says so, with Change. The Space chip reads "auto" until the user picks one by hand.</p>
+</section>
+
+<section class="study dark">
+  <div class="eyebrow">1 · The assistant · dark</div>
+  <div class="frame">
+    <div class="window">
+      <aside class="side">
+        <div class="logo">wiffle<span>tree</span></div>
+        <div class="pinned">
+          <div class="row sel"><span class="spin"></span>Assistant<span class="r"><span class="count">1</span></span></div>
+          <div class="row"><span class="ico">▦</span>Boards</div>
+        </div>
+        <div class="label">Projects</div>
+        <div class="row">Sign-in retry</div>
+        <div class="row">Watch onboarding</div>
+        <div class="row">Vyttle pricing page</div>
+      </aside>
+      <div class="main">
+        <div class="tabs">
+          <div class="tab"><span class="sp sage"></span>API date format</div>
+          <div class="tab on"><span class="spin"></span><span class="sp vyttle"></span>Pricing copy<span class="x">×</span></div>
+          <div class="tab"><span class="sp personal"></span>Dentist Tuesday</div>
+          <div class="tab add">＋</div>
+          <div class="search">Search threads</div>
+        </div>
+        <div class="convo">
+          <div class="msg me">Compare our three pricing tiers with the two competitors in the brain</div>
+          <div class="msg ai"><div class="who">Assistant ·Vyttle</div><p>Reading the Vyttle brain's pricing notes and the competitors' public pages…</p></div>
+          <div class="card" style="gap:6px">
+            <h3>This needs code changes</h3>
+            <p class="note">A thread can't edit <code>vyttle-web</code>. Make this a project in Vyttle with this thread as its brief?</p>
+            <div class="actions"><span class="btn quiet">Not now</span><span class="btn primary">Make this a project</span></div>
+          </div>
+        </div>
+        <div class="composer">
+          <span class="ph">Ask Assistant…</span>
+          <div class="bar"><span class="chip"><span class="sp vyttle"></span>Vyttle · auto</span><span class="chip">Sonnet · medium</span><span style="margin-left:auto">Read-only · scratch folder</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>Dark, while a thread works.</b> The working tab spins; the sidebar row spins while any thread or job runs. When a thread reaches code work it offers <b>Make this a project</b> in its own Space.</p>
+</section>
+
+<!-- 2. Router question -->
+<section class="study">
+  <div class="eyebrow">2 · The router asks</div>
+  <div class="frame">
+    <div class="main">
+      <div class="tabs">
+        <div class="tab on"><span class="sp sage"></span>API date format<span class="x">×</span></div>
+        <div class="tab"><span class="sp personal"></span>Dentist Tuesday</div>
+        <div class="tab add">＋</div>
+      </div>
+      <div class="convo">
+        <div class="msg me">Draft a note to the team about my week off in December</div>
+        <div class="question">
+          <div class="q">Is this Sage or Personal?</div>
+          <div class="why">Not sure where this belongs (Sage 62%, Personal 31%). Your message waits until you choose.</div>
+          <div class="choices">
+            <span class="btn"><span class="sp sage"></span>Sage · new thread</span>
+            <span class="btn"><span class="sp personal"></span>Personal · new thread</span>
+            <span class="btn">Continue “API date format”</span>
+            <span class="btn quiet">Somewhere else…</span>
+          </div>
+          <div class="held">Held · nothing is filed in a brain until you answer</div>
+        </div>
+      </div>
+      <div class="composer"><span class="ph">Ask Assistant…</span></div>
+    </div>
+  </div>
+  <p class="caption"><b>Below 0.8, ask.</b> The router answered typed questions with confidence; the host's rule asks one click away. A failed or spent router asks the same way, never guessing.</p>
+</section>
+
+<!-- 3. Job recipe -->
+<section class="study">
+  <div class="eyebrow">3 · Confirm a job</div>
+  <div class="frame">
+    <div class="convo">
+      <div class="msg me">Every weekday at 7, give me a brief: my open Sage PRs, new Sentry issues in mobile-app and today's Linear cycle</div>
+      <div class="card">
+        <h3>New job · Morning brief</h3>
+        <dl class="kv">
+          <dt>Space</dt><dd><span class="sp sage" style="display:inline-block"></span> Sage · shared</dd>
+          <dt>Schedule</dt><dd>Weekdays at 07:00 (America/New_York)<br><span class="note">Next: Thu Oct 30 07:00 · Fri Oct 31 07:00 · Mon Nov 3 07:00</span></dd>
+          <dt>Prompt</dt><dd>Brief me on my open PRs in Sage-Social, new Sentry issues in mobile-app since yesterday, and today's Linear cycle. One page, polished HTML.</dd>
+          <dt>Model</dt><dd>Job row · Sonnet · medium</dd>
+          <dt>Output</dt><dd>“Morning brief” · HTML</dd>
+          <dt>Sharing</dt><dd>Everyone runs their own · private result</dd>
+          <dt>Sources</dt><dd>
+            <div class="src"><span class="ok">●</span><code>gh</code> pr list, pr view · signed in</div>
+            <div class="src"><span class="ok">●</span><code>sentry-cli</code> issues list · signed in</div>
+            <div class="src"><span class="bad">●</span>Linear MCP · list_issues, get_cycle · <b>not configured for Claude</b></div>
+          </dd>
+        </dl>
+        <p class="note">Jobs only read. Each run is a fresh read-only thread; it never sends, posts or changes anything in these apps. Runs need Wiffletree running; missed runs come back as one catch-up run.</p>
+        <div class="actions"><span class="btn quiet">Edit</span><span class="btn quiet">Cancel</span><span class="btn primary">Save job</span></div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>Only Save makes a job.</b> The thread shows the recipe; nothing is scheduled until the user saves it. A source that is missing is named now, and before each run.</p>
+</section>
+
+<!-- 4. Boards library -->
+<section class="study wide">
+  <div class="eyebrow">4 · Boards</div>
+  <div class="frame">
+    <div class="page">
+      <div class="filters">
+        <h2 style="margin-right:10px">Boards</h2>
+        <div class="seg"><span class="on">Outputs</span><span>Jobs</span></div>
+        <span class="chip">All Spaces ▾</span><span class="chip">All jobs ▾</span>
+        <span class="search" style="margin:0 0 0 auto">Search titles</span>
+      </div>
+      <div class="boards">
+        <div class="board">
+          <div class="thumb"><i class="bar" style="height:40%"></i><i class="bar" style="height:65%"></i><i class="bar" style="height:52%"></i><i class="bar" style="height:80%"></i><i class="bar" style="height:70%"></i></div>
+          <div class="meta"><span class="t">Release dashboard</span><span class="s"><span class="sp sage"></span>Sage · Release dashboard job · Mon 08:00</span><span class="s"><span class="pill">Shared in Sage</span>Runs on Michael's Mac</span></div>
+        </div>
+        <div class="board">
+          <div class="thumb md"><i class="h"></i><i></i><i style="width:80%"></i><i></i><i style="width:60%"></i></div>
+          <div class="meta"><span class="t">Morning brief</span><span class="s"><span class="sp sage"></span>Sage · Morning brief job · today 07:00</span><span class="s"><span class="pill">Only on this Mac</span>catch-up for 1 missed run</span></div>
+        </div>
+        <div class="board">
+          <div class="thumb"><i class="bar" style="height:30%"></i><i class="bar" style="height:35%"></i><i class="bar" style="height:28%"></i><i class="bar" style="height:33%"></i></div>
+          <div class="meta"><span class="t">Watch crash rate</span><span class="s"><span class="sp sage"></span>Sage · Crash rate job · 9 days ago</span><span class="s"><span class="pill stale">Stale</span>Runs on Jamie's Mac · <a href="#" style="color:var(--accent)">Take over running</a></span></div>
+        </div>
+        <div class="board">
+          <div class="thumb"><i class="bar" style="height:55%;background:var(--accent)"></i><i class="bar" style="height:45%;background:var(--accent)"></i><i class="bar" style="height:60%;background:var(--accent)"></i></div>
+          <div class="meta"><span class="t">Support volume</span><span class="s"><span class="sp sage"></span>Sage · Support volume job · first run</span><span class="s"><span class="pill wait">Waiting for your approval</span><a href="#" style="color:var(--accent)">Share</a> · <a href="#" style="color:var(--subtle)">Keep private</a></span></div>
+        </div>
+        <div class="board">
+          <div class="thumb md"><i class="h"></i><i style="width:70%"></i><i></i></div>
+          <div class="meta"><span class="t">Competitor pricing</span><span class="s"><span class="sp vyttle"></span>Vyttle · From a thread · yesterday</span><span class="s"><span class="pill">Only on this Mac</span><a href="#" style="color:var(--accent)">Share to Space…</a></span></div>
+        </div>
+        <div class="board">
+          <div class="thumb md"><i class="h"></i><i></i><i style="width:50%"></i></div>
+          <div class="meta"><span class="t">Weekly reading list</span><span class="s"><span class="sp personal"></span>Personal · Reading list job · Sun 18:00</span><span class="s"><span class="pill">Only on this Mac</span>PDF · Quick Look</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>Every output, one library.</b> Title, Space, job or thread, last update, a preview and where it is kept. A shared job's output names its runner; one that missed two runs is stale and anyone can take over. A new shared job's first output waits for its runner's approval.</p>
+</section>
+
+<!-- 5. Open HTML board -->
+<section class="study wide">
+  <div class="eyebrow">5 · An open HTML board</div>
+  <div class="frame">
+    <div class="viewer-head">
+      <span class="sp sage"></span><h2>Release dashboard</h2>
+      <span class="note">Sage · Runs on Michael's Mac · last run Mon 08:00</span>
+      <span class="r"><span class="btn quiet">Reveal in Finder</span><span class="btn quiet">Open in default app</span><span class="btn">Run now</span></span>
+    </div>
+    <div class="sandbox"><span>🔒 Scripts run · no network · can't navigate away</span><span style="margin-left:auto">wiffletree-board://release-dashboard/dashboard.html</span></div>
+    <div style="display:flex">
+      <div class="web" style="flex:1">
+        <h4>mobile-app · release 4.12</h4>
+        <div style="font-size:11px;opacity:.7">Generated Mon Oct 27 08:00 by the Release dashboard job</div>
+        <div class="kpis">
+          <div class="kpi"><b>14</b><span>PRs merged</span></div>
+          <div class="kpi"><b>3</b><span>open blockers</span></div>
+          <div class="kpi"><b>0.21%</b><span>crash-free gap</span></div>
+        </div>
+        <div class="chart"><i style="height:35%"></i><i style="height:55%"></i><i style="height:48%"></i><i style="height:72%"></i><i style="height:64%"></i><i class="r" style="height:20%"></i><i style="height:80%"></i></div>
+        <div class="axis"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div>
+      </div>
+      <div class="versions">
+        <b>Versions</b>
+        <div class="v on">Mon Oct 27 08:00<small>Latest · job run</small></div>
+        <div class="v">Mon Oct 20 08:00<small>job run</small></div>
+        <div class="v">Mon Oct 13 08:00<small>job run · catch-up</small></div>
+        <div class="v">Mon Oct 6 09:12<small>approved first output</small></div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>HTML in an embedded WKWebView.</b> The page's own script draws the chart (drawn with CSS in this study); the chart library is inlined. Fetches and links to the web are blocked; a link offers Open in browser. Each version is a Git commit. Markdown renders natively instead; images and PDFs open in Quick Look.</p>
+</section>
+
+<!-- 6. Space settings page -->
+<section class="study wide">
+  <div class="eyebrow">6 · Settings › Spaces › Sage</div>
+  <div class="frame">
+    <div class="split">
+      <div class="spaces">
+        <div class="label">Spaces</div>
+        <div class="row sel"><span class="sp sage"></span>Sage<span class="r">shared</span></div>
+        <div class="row"><span class="sp vyttle"></span>Vyttle<span class="r">shared</span></div>
+        <div class="row"><span class="sp personal"></span>Personal<span class="r">this Mac</span></div>
+        <div class="row" style="color:var(--accent);margin-top:6px">＋ Add Space ▾</div>
+        <div class="note" style="padding:0 8px">New · From a repository</div>
+      </div>
+      <div class="page">
+        <div class="banner"><b>Shared.</b> Every member of Sage-Social can read <code>Sage-Social/wiffletree-storage</code>. Anyone who can push to it can change these instructions for everyone in this Space. Edits are commits and follow the settings repository's sync, pause and compare rules.</div>
+        <div class="form">
+          <label>Name</label><div class="field">Sage</div>
+          <label>What belongs here</label><div class="field area">Sage work: the mobile and watch apps, the backend services and their infrastructure, Linear tickets and the team brain. Not Vyttle, not personal errands.<br><small>The router reads this to decide where a message goes.</small></div>
+          <label>Instructions</label><div class="field area">Never put personal data in anything you write: no names, message text, phone numbers or locations. Treat production systems as read-only.<br><small>Added to every thread and job in Sage. Last changed by Michael's Mac, Oct 27.</small></div>
+          <label>Brain</label><div class="field"><code>Sage-Social/team-brain</code> · folder <code>brain/</code><br><small>Cloned here at ~/dev/sage/team-brain · this Mac only</small></div>
+          <label>Storage</label><div class="field"><code>Sage-Social/wiffletree-storage</code> · <code>spaces/sage/</code> · synced 2 min ago</div>
+          <label>Code repositories</label><div class="field">Sage-Social/mobile-app · Sage-Social/watch-app · Sage-Social/api <small>· 1 not cloned on this Mac</small></div>
+          <label>Default models</label><div class="field">Threads: Sonnet · medium · Jobs: Opus · high<br><small class="warn">Opus · high is not available here; jobs use GPT 6.1 Sol · medium.</small></div>
+          <label>Sources</label><div class="field"><code>gh</code> read commands · <code>sentry-cli</code> issues · Linear MCP list and read tools · <code>aws</code> read-only profile <code>readonly</code><br><small>Threads in Sage may use these. Jobs list their own.</small></div>
+        </div>
+        <div class="actions"><span class="btn quiet">Remove Space</span><span class="btn primary">Save</span></div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>Spaces are made here, by the user.</b> The assistant can suggest one but never creates it. Clone paths, allowed models and whether the Space is on stay on this Mac; the rest lives in <code>space.yaml</code> in the storage repository.</p>
+</section>
+
+<!-- 7. A job's page, redesigned -->
+<section class="study wide">
+  <div class="eyebrow">7 · A job's page · active, a run past 30 minutes · <span class="pending" style="margin:0">Approved by Michael, October 31, 2026</span></div>
+  <div class="frame">
+    <div class="window">
+      <aside class="side">
+        <div class="logo">wiffle<span>tree</span></div>
+        <div class="pinned">
+          <div class="row sel"><span class="spin"></span>Assistant<span class="r"><span class="count">2</span></span></div>
+          <div class="longrun"><span style="flex:1">Morning brief has run 30 min</span><span class="btn quiet">Stop</span></div>
+          <div class="row"><span class="ico">▦</span>Boards</div>
+        </div>
+        <div class="label">Projects</div>
+        <div class="row">Sign-in retry</div>
+        <div class="row">Watch onboarding</div>
+      </aside>
+      <div class="main">
+        <div class="tabs">
+          <div class="tab"><span class="sp sage"></span>API date format</div>
+          <div class="tab"><span class="sp personal"></span>Dentist Tuesday</div>
+          <div class="tab add">＋</div>
+          <span class="btn quiet" style="margin:0 0 6px auto;padding:1px 9px;background:var(--overlay);color:var(--text)">Jobs</span>
+          <div class="search" style="margin-left:6px">Search threads</div>
+        </div>
+        <div class="page">
+          <div class="jobbar">
+            <span class="btn quiet">‹ All jobs</span>
+            <span style="flex:1"></span>
+            <span class="btn quiet">Pause</span><span class="btn quiet">Edit</span><span class="btn danger">Delete</span>
+            <span class="btn off">Run now</span>
+          </div>
+          <div class="jobhead"><span class="sp sage"></span><h2>Morning brief</h2><span class="pill ok">Active</span><span class="pill live">Running · over 30 min</span></div>
+          <div class="card">
+            <dl class="kv">
+              <dt>Space</dt><dd>Sage</dd>
+              <dt>Schedule</dt><dd>Weekdays at 07:00 (America/New_York)<br><span class="note">Next: Mon Nov 3 07:00 · Tue Nov 4 07:00 · Wed Nov 5 07:00</span></dd>
+              <dt>Prompt</dt><dd>Brief me on my open PRs in Sage-Social, new Sentry issues in mobile-app since yesterday, and today's Linear cycle. One page, polished HTML.</dd>
+              <dt>Model</dt><dd>Sonnet · medium · Job row: First choice</dd>
+              <dt>Sharing</dt><dd>Everyone runs their own · private result</dd>
+              <dt>Sources</dt><dd>
+                <div class="note" style="margin-bottom:2px">Checked by today's 07:00 run, 45 min ago</div>
+                <div class="src"><span class="ok">●</span><code>gh</code> pr list, pr view · ready</div>
+                <div class="src"><span class="ok">●</span><code>sentry-cli</code> issues list · ready</div>
+                <div class="src"><span class="bad">●</span>linear MCP · list_issues, get_cycle · not configured for Claude. Add it to Claude's MCP configuration.</div>
+              </dd>
+            </dl>
+            <p class="note">Jobs only read, through the commands and tools listed here.</p>
+          </div>
+          <h3>Runs</h3>
+          <div class="runs">
+            <div class="run long">
+              <div class="line"><span class="pill live">Running</span><span style="flex:1">today 07:00 · over 30 min so far</span><span class="btn" style="padding:0 9px">Stop</span></div>
+              <span class="note warn">This run has gone past 30 minutes. While it runs, the job's scheduled times are skipped; Stop ends it.</span>
+            </div>
+            <div class="run">
+              <div class="line"><span class="pill bad">Failed</span><span>Thu Oct 30 07:00</span></div>
+              <span class="note">Wiffletree stopped during the run.</span>
+              <span class="note">Ran on GPT 6.1 Sol · medium: Sonnet · medium was not available</span>
+            </div>
+            <div class="run">
+              <div class="line"><span class="pill bad">Did not start</span><span>Wed Oct 29 08:30 · catch-up for 1 missed run</span></div>
+              <span class="note">Missing source: linear MCP is not configured for Claude. Add it to Claude's MCP configuration.</span>
+            </div>
+            <div class="run">
+              <div class="line"><span class="pill ok">Finished</span><span>Tue Oct 28 07:00</span></div>
+              <span class="note">Saved “Morning brief” · version 3 · Only on this Mac</span>
+            </div>
+            <div class="run">
+              <div class="line"><span class="pill">Stopped</span><span>Mon Oct 27 09:14 · Run now</span></div>
+              <span class="note">You stopped the run.</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>The job's page, redesigned.</b> The header names the job's state, Active or Paused, and a running run with how long it has run. Each run's pill is its outcome; the line beside it gives only the time, catch-up and Run now. A run past 30 minutes turns yellow on this page with its Stop, and its note with Stop stays under the assistant's row too. The sources say which run checked them and when. The model shows once, in the recipe; a run names its model only when it ran on another one. Delete is red. Run now is off while a run is running or when another Mac runs the job.</p>
+</section>
+
+<section class="study">
+  <div class="eyebrow">7 · Paused, and Delete</div>
+  <div class="frame">
+    <div class="page">
+      <div class="jobbar">
+        <span class="btn quiet">‹ All jobs</span>
+        <span style="flex:1"></span>
+        <span class="btn quiet">Resume</span><span class="btn quiet">Edit</span><span class="btn danger">Delete</span>
+        <span class="btn">Run now</span>
+      </div>
+      <div class="jobhead"><span class="sp sage"></span><h2>Morning brief</h2><span class="pill paused">Paused</span></div>
+      <div class="banner"><b>Paused.</b> Scheduled times are skipped until you resume it; Resume starts from the next time. Run now still works.</div>
+      <div class="card">
+        <dl class="kv">
+          <dt>Schedule</dt><dd>Weekdays at 07:00 (America/New_York)<br><span class="note">No next run while paused</span></dd>
+          <dt>Sources</dt><dd>
+            <div class="note" style="margin-bottom:2px">Last checked by the Tue Oct 28 07:00 run, 3 days ago. The next run checks again.</div>
+            <div class="src old"><span>●</span><code>gh</code> pr list, pr view · was ready</div>
+            <div class="src old"><span>●</span><code>sentry-cli</code> issues list · was ready</div>
+            <div class="src old"><span>●</span>linear MCP · list_issues, get_cycle · was not configured</div>
+          </dd>
+        </dl>
+      </div>
+      <div class="dialog">
+        <h3>Delete the job Morning brief?</h3>
+        <p class="note">Its recipe and its runs are removed. Outputs it saved stay in Boards.</p>
+        <div class="actions"><span class="btn quiet">Cancel</span><span class="btn danger fill">Delete</span></div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>Paused shows at the top.</b> A Paused pill and banner replace the old note inside the Schedule row. Pause and Resume stay one button. Sources checked more than a day ago turn grey and read "was ready", so an old check never looks current. Delete is red, in the bar and in its dialog. It asks first, and is refused while a run is running.</p>
+</section>
+
+<section class="study">
+  <div class="eyebrow">7 · A shared job run by another Mac</div>
+  <div class="frame">
+    <div class="page">
+      <div class="jobbar">
+        <span class="btn quiet">‹ All jobs</span>
+        <span style="flex:1"></span>
+        <span class="btn quiet">Pause</span><span class="btn quiet">Edit</span><span class="btn danger">Delete</span>
+        <span class="btn off">Run now</span>
+      </div>
+      <div class="jobhead"><span class="sp sage"></span><h2>Watch crash rate</h2><span class="pill ok">Active</span><span class="pill">Runs on Jamie's Mac</span></div>
+      <div class="banner" style="display:flex;align-items:center;gap:8px;border-color:var(--edge);background:var(--base)"><span style="flex:1"><b style="color:var(--text)">Runs on Jamie's Mac</b> · last run Wed Oct 22 09:00. This Mac doesn't run it.</span><span class="btn">Take over running</span></div>
+      <div class="card">
+        <dl class="kv">
+          <dt>Space</dt><dd>Sage · shared</dd>
+          <dt>Schedule</dt><dd>Daily at 09:00 (America/New_York)</dd>
+          <dt>Model</dt><dd>Sonnet · medium · Job row: First choice</dd>
+          <dt>Sharing</dt><dd>One runner · result shared in Sage</dd>
+          <dt>Sources</dt><dd>
+            <div class="note" style="margin-bottom:2px">Not checked on this Mac. Jamie's Mac checks them before each of its runs.</div>
+            <div class="src old"><span>●</span><code>sentry-cli</code> issues list</div>
+          </dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>The runner is named in the header.</b> A "One runner" job in a shared Space says which Mac runs it and when it last ran, with Take over running beside it, as stage 5 offers whenever another Mac runs the job. Run now is off here.</p>
+</section>
+
+<section class="study">
+  <div class="eyebrow">7 · Edit</div>
+  <div class="frame">
+    <div class="page">
+      <div class="card">
+        <h3>Edit Morning brief</h3>
+        <div class="note">Name</div><div class="field">Morning brief</div>
+        <div class="note">Prompt</div><div class="field area">Brief me on my open PRs in Sage-Social, new Sentry issues in mobile-app since yesterday, and today's Linear cycle. One page, polished HTML.</div>
+        <div class="note">Schedule: minute, hour, day of month, month and weekday, such as 0 7 * * 1-5</div><div class="field"><code>0 7 * * 1-5</code></div>
+        <div class="note">Timezone, such as America/New_York</div><div class="field">America/New_York</div>
+        <p class="note">Its sources stay as the recipe listed them. Saving checks the schedule, and the next run follows it.</p>
+        <div class="actions"><span class="btn quiet">Cancel</span><span class="btn primary">Save</span></div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>Edit changes the name, prompt, schedule and timezone.</b> Only Save changes the job. Sources, model and sharing are not editable here; they come from the recipe the thread proposed.</p>
+</section>
+
+<section class="study">
+  <div class="eyebrow">7 · One Jobs list, in the assistant</div>
+  <div class="frame">
+    <div class="page" style="gap:8px;border-bottom:1px solid var(--edge);background:var(--base)">
+      <div class="filters">
+        <h2 style="margin-right:10px">Boards</h2>
+        <span class="chip">All Spaces ▾</span><span class="chip">All jobs ▾</span>
+        <span class="btn quiet" style="margin-left:auto">Jobs ›</span>
+        <span class="search" style="margin:0">Search titles</span>
+      </div>
+      <p class="note">Boards keeps only outputs. Its Jobs button opens the assistant's Jobs list.</p>
+    </div>
+    <div class="page">
+      <h2>Jobs</h2>
+      <p class="note">Jobs run only while Wiffletree runs on this Mac.</p>
+      <div class="src">☑ Start Wiffletree at login</div>
+      <div class="card" style="gap:2px;padding:9px 12px">
+        <div class="jobhead"><span class="sp sage"></span><b style="flex:1">Morning brief</b><span class="pill live">Running · over 30 min</span></div>
+        <span class="note">Weekdays at 07:00 · Next Mon Nov 3 07:00</span>
+      </div>
+      <div class="card" style="gap:2px;padding:9px 12px">
+        <div class="jobhead"><span class="sp sage"></span><b style="flex:1">Watch crash rate</b><span class="pill">Runs on Jamie's Mac</span></div>
+        <span class="note">Daily at 09:00 · Last run Wed Oct 22 09:00</span>
+      </div>
+      <div class="card" style="gap:2px;padding:9px 12px">
+        <div class="jobhead"><span class="sp personal"></span><b style="flex:1">Weekly reading list</b><span class="pill paused">Paused</span></div>
+        <span class="note">Sundays at 18:00 · Last run Sun Oct 26 18:00 · Finished</span>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>One home: the assistant's Jobs list.</b> Jobs are made in assistant threads, and their page, runs, Stop, the count on the assistant's row and Start at login already live there. Boards is the library of outputs, so its Outputs and Jobs tabs give way to a Jobs button that opens this list; its All jobs filter still narrows outputs by job. Each row shows the same pills as the job's header.</p>
+</section>
+
+<!-- 8. Issue threads -->
+<section class="study wide">
+  <div class="eyebrow">8 · Ask the assistant on an issue · <span class="pending" style="margin:0">Approved by Michael, October 31, 2026</span></div>
+  <div class="frame">
+    <div class="issue">
+      <div class="page">
+        <div class="ihead">
+          <span class="crumbs">Issues › <span class="sp sage" style="display:inline-block"></span> Sage › SAGE-151</span>
+          <span class="btn" style="margin-left:auto;background:var(--overlay)">Ask the assistant</span>
+        </div>
+        <h2 class="ititle">Delivery webhook retries forever on a malformed payload</h2>
+        <div class="prose">
+          <p>Since Monday, <code>sage-chat</code> logs the same delivery event every few seconds. The payload is missing <code>message.id</code>, our handler returns 500, and the sender keeps retrying.</p>
+          <ul><li>Started after the chat SDK bump in #388.</li><li>A malformed payload should be rejected with 4xx and logged by ID, not retried.</li></ul>
+        </div>
+        <div class="timeline">
+          <div class="event">Tomás Reyes filed this · 40 min ago</div>
+          <div class="comment"><div class="by"><b>Priya Shah</b> · 31 min ago</div>Seeing it too. If we reject it, is the message lost for good?</div>
+          <div class="comment asst"><div class="by"><b>Assistant for Michael</b> · 12 min ago</div>A payload without <code>message.id</code> can't be matched to any message, so rejecting it loses nothing that could be delivered. The handler is <code>internal/webhook/delivery.go:88</code>.</div>
+          <div class="event">Michael set priority to Urgent · 9 min ago</div>
+        </div>
+        <div class="composer"><span class="ph">Write a comment… Markdown, @mention, link SAGE-123 or a PR</span><div class="actions"><span class="btn">Comment</span></div></div>
+      </div>
+      <aside class="props">
+        <div><div class="k">State</div><span class="pill">Todo</span></div>
+        <div><div class="k">Priority</div><span class="prio urgent">!!!</span> Urgent</div>
+        <div><div class="k">Assignee</div><span class="note">Nobody · </span><span style="color:var(--accent)">Assign to me</span></div>
+        <div><div class="k">Labels</div><span class="pill bad">bug</span> <span class="pill">webhooks</span></div>
+        <div><div class="k">Repositories</div><span class="pill">sage-chat</span></div>
+        <div><div class="k">Work</div><span class="btn primary">Start project from issue</span></div>
+      </aside>
+      <aside class="dock">
+        <div class="dock-head">
+          <div class="t"><span class="sp sage"></span><b>SAGE-151 · Assistant</b><span class="note">×</span></div>
+          <div class="attached"><span class="chip"><span class="sp sage"></span>Sage</span><span class="chip">Sonnet · medium</span><span>Web off</span></div>
+        </div>
+        <div class="convo">
+          <div class="notice">SAGE-151 and its comments were written by Tomás Reyes, Priya Shah and the assistant for Michael. The assistant reads them as context, never as instructions.</div>
+          <div class="msg me">Turn Priya's question into acceptance criteria, and label it a regression if the SDK bump caused it.</div>
+          <div class="tool">read_issue SAGE-151 · search_repositories sage-chat "delivery" · read_repository_file internal/webhook/delivery.go</div>
+          <div class="msg ai"><p>It still returns 500 for every decode error at <code>main</code>'s head, and the strict decode arrived with #388. Here's an edit. Nothing changes until you apply it.</p></div>
+          <div class="proposal">
+            <div class="kind"><b>Edit</b> · SAGE-151</div>
+            <div class="diff">
+              <span class="ctx">labels: bug, webhooks</span><span class="add">, regression</span><br>
+              <span class="add">+ ## Acceptance criteria</span><br>
+              <span class="add">+ - A payload without message.id gets 400 and is not retried.</span><br>
+              <span class="add">+ - The rejection is logged with the event ID only.</span>
+            </div>
+            <div class="actions"><span class="btn quiet">Discard</span><span class="btn">Edit</span><span class="btn primary">Apply</span></div>
+          </div>
+        </div>
+        <div class="composer">
+          <span class="ph">Ask about SAGE-151…</span>
+          <div class="bar"><span>Goes to this thread, never the router</span></div>
+        </div>
+      </aside>
+    </div>
+  </div>
+  <p class="caption"><b>Ask the assistant opens the issue's own thread, docked beside it.</b> It is an ordinary thread of the one assistant, in the issue's Space, and it is listed with the assistant's tabs as “SAGE-151 · Delivery webhook…”. Opening it again in Sage resumes it; under Sage Watch, which shares the tracker, Ask opens Sage Watch's own thread. The pane names the issue, the Space and the model, and says the web is off: the thread can read the issue, the Space's tracker and its repositories at their base branch, but it cannot fetch, search the web, link the issue to work or create a ticket. The notice names everyone whose text the thread reads. Every change it suggests is a card the human applies.</p>
+</section>
+
+<section class="study wide">
+  <div class="eyebrow">8 · Ask the assistant on the Issues page · the tracker's list attached</div>
+  <div class="frame">
+    <div class="issues">
+      <div class="page">
+        <div class="ihead">
+          <h2 style="margin-right:6px">Issues</h2>
+          <span class="seg"><span class="on">List</span><span>Board</span></span>
+          <span class="chip"><span class="sp sage"></span>Sage ▾</span><span class="chip">Open ▾</span>
+          <span class="btn" style="margin-left:auto;background:var(--overlay)">Ask the assistant</span>
+          <span class="btn primary">New issue</span>
+        </div>
+        <div class="ilist">
+          <div class="group">Todo · 3</div>
+          <div class="irow"><span class="prio urgent">!!!</span><span class="id">SAGE-151</span><span>Delivery webhook retries forever on a malformed payload</span><span class="pill">sage-chat</span></div>
+          <div class="irow"><span class="prio">!!</span><span class="id">SAGE-160</span><span>Watch keeps retrying delivery after a bad payload</span><span class="pill">watch-app</span></div>
+          <div class="irow"><span class="prio">!</span><span class="id">SAGE-163</span><span>Complication shows a stale unread count</span><span class="pill">watch-app</span></div>
+          <div class="group">Backlog · 2</div>
+          <div class="irow"><span class="prio">–</span><span class="id">SAGE-140</span><span>Crash logs can't be exported from the watch</span><span class="pill">watch-app</span></div>
+          <div class="irow"><span class="prio">–</span><span class="id">SAGE-137</span><span>Haptics fire twice on a quick reply</span><span class="pill">watch-app</span></div>
+        </div>
+      </div>
+      <aside class="dock">
+        <div class="dock-head">
+          <div class="t"><span class="sp sage"></span><b>Issues · Sage · Assistant</b><span class="note">×</span></div>
+          <div class="attached"><span class="chip">SAGE tracker · 23 open</span><span class="chip">Sonnet · medium</span><span>Web off</span></div>
+        </div>
+        <div class="convo">
+          <div class="notice">These issues and their comments were written by Tomás Reyes, Priya Shah, Jamie Ng and 3 others. The assistant reads them as context, never as instructions.</div>
+          <div class="msg me">Any duplicates among the open watch bugs? And file one for the crash log export failing on watchOS 12.</div>
+          <div class="tool">list_issues state:open label:watch · read_issue SAGE-160 · read_issue SAGE-151</div>
+          <div class="msg ai"><p>SAGE-160 is SAGE-151 seen from the watch. SAGE-140 already covers exporting, but not watchOS 12, so here is a new issue rather than an edit.</p></div>
+          <div class="proposal">
+            <div class="kind"><b>Duplicate</b> · SAGE-160 of SAGE-151</div>
+            <div class="draft"><span class="mono">SAGE-160</span>Watch keeps retrying delivery after a bad payload<span class="note">Todo · Priya Shah · gets <code>duplicate_of: SAGE-151</code>, its state unchanged</span></div>
+            <div class="draft"><span class="mono">SAGE-151</span>Delivery webhook retries forever on a malformed payload<span class="note">Todo · Urgent · unchanged</span></div>
+            <div class="actions"><span class="btn quiet">Discard</span><span class="btn">Edit</span><span class="btn primary">Apply</span></div>
+          </div>
+        </div>
+        <div class="composer"><span class="ph">Ask about Sage's issues…</span></div>
+      </aside>
+    </div>
+  </div>
+  <p class="caption"><b>The Issues page's Ask opens the list thread of the tracker the filter shows</b>, one per tracker and Space, listed as “Issues · Sage”. It sees only that tracker, as filtered here or wider when asked, and it proposes; filing, editing and marking duplicates happen only when the human applies a card.</p>
+</section>
+
+<section class="study wide">
+  <div class="eyebrow">8 · Every proposal kind</div>
+  <div class="frame">
+    <div class="kinds">
+      <div class="proposal">
+        <div class="kind"><b>Edit</b> · SAGE-151</div>
+        <div class="diff"><span class="del">state: Todo</span> <span class="add">state: In progress</span><br><span class="del">assignee: none</span> <span class="add">assignee: mhohlios</span><br><span class="add">+ labels: regression</span></div>
+        <p class="note">The fields and description it changes, as a diff.</p>
+        <div class="actions"><span class="btn quiet">Discard</span><span class="btn">Edit</span><span class="btn primary">Apply</span></div>
+      </div>
+      <div class="proposal">
+        <div class="kind"><b>Comment</b> · SAGE-151</div>
+        <div class="draft">Rejecting with 400 loses nothing: without <code>message.id</code> there is no message to deliver. Proposed fix: validate before decode in <code>delivery.go:88</code>.</div>
+        <p class="note">Posted as “Assistant for Michael”.</p>
+        <div class="actions"><span class="btn quiet">Discard</span><span class="btn">Edit</span><span class="btn primary">Apply</span></div>
+      </div>
+      <div class="proposal">
+        <div class="kind"><b>Split</b> · SAGE-151 into 2</div>
+        <div class="draft"><b>New</b> Reject a payload without message.id with 400<span class="note">Todo · sage-chat</span></div>
+        <div class="draft"><b>New</b> Log rejected deliveries by event ID<span class="note">Backlog · sage-chat</span></div>
+        <div class="diff"><span class="ctx">SAGE-151</span><br><span class="add">+ Split into the two issues above.</span></div>
+        <div class="actions"><span class="btn quiet">Discard</span><span class="btn">Edit</span><span class="btn primary">Apply</span></div>
+      </div>
+      <div class="proposal">
+        <div class="kind"><b>Duplicate</b> · SAGE-160 of SAGE-151</div>
+        <div class="draft"><span class="mono">SAGE-160</span>Watch keeps retrying delivery…<span class="note">gets <code>duplicate_of: SAGE-151</code></span></div>
+        <div class="draft"><span class="mono">SAGE-151</span>Delivery webhook retries forever…<span class="note">unchanged</span></div>
+        <p class="note">A link only: no state changes.</p>
+        <div class="actions"><span class="btn quiet">Discard</span><span class="btn">Edit</span><span class="btn primary">Apply</span></div>
+      </div>
+      <div class="proposal">
+        <div class="kind"><b>New issue</b> · Sage tracker</div>
+        <div class="draft"><b>Crash log export fails on watchOS 12</b><span class="note">Backlog · Medium · bug, watch · watch-app</span><span>Export from Settings › Diagnostics shows “Couldn't prepare the file” since watchOS 12.0.</span></div>
+        <p class="note">Any thread may propose one, only in its own Space.</p>
+        <div class="actions"><span class="btn quiet">Discard</span><span class="btn">Edit</span><span class="btn primary">Apply</span></div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>Five cards, one rule: nothing reaches the tracker until Apply.</b> Apply runs the issue's own write command as the human, one commit authored by them. <b>Edit</b> opens the matching form, the issue's edit form, the comment composer or New issue, filled with the proposal, and saving there is the apply. <b>Discard</b> writes nothing. An edit is a diff of the fields and description; a comment is its text; a split is the new issues and the edit to the original; a duplicate is the two issues and the <code>duplicate_of</code> link it adds; a new issue is its draft.</p>
+</section>
+
+<section class="study">
+  <div class="eyebrow">8 · The issue changed since the proposal</div>
+  <div class="frame">
+    <div class="convo">
+      <div class="proposal moved">
+        <div class="kind"><b>Edit</b> · SAGE-151 description</div>
+        <div class="banner"><b>Changed since this proposal.</b> Priya Shah edited the description 2 minutes ago. Below is the proposal against her version.</div>
+        <div class="diff">
+          <span class="ctx">Since Monday, sage-chat logs the same delivery event…</span><br>
+          <span class="theirs">  Repro: send {"event":"delivered"} with no message.</span><br>
+          <span class="add">+ ## Acceptance criteria</span><br>
+          <span class="add">+ - A payload without message.id gets 400 and is not retried.</span>
+        </div>
+        <p class="note"><span style="color:var(--blue)">Blue</span> is Priya's new line, kept. Green is what Apply adds.</p>
+        <div class="actions"><span class="btn quiet">Discard</span><span class="btn">Edit</span><span class="btn primary">Apply to her version</span></div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>A proposal never overwrites a newer issue.</b> When the issue changed after the card was made, the card says who changed it and when, and shows its change against the current version before Apply.</p>
+</section>
+
+<section class="study">
+  <div class="eyebrow">8 · Applied, and on a teammate's Mac</div>
+  <div class="frame">
+    <div class="convo">
+      <div class="proposal applied">
+        <div class="kind"><b>Comment</b> · SAGE-151 · <span class="ok">Applied by you · 1 commit · 2 min ago</span></div>
+        <div class="draft">Rejecting with 400 loses nothing: without <code>message.id</code> there is no message to deliver.</div>
+      </div>
+      <div class="eyebrow" style="margin-top:6px">Priya's Mac · SAGE-151 timeline</div>
+      <div class="timeline">
+        <div class="comment"><div class="by"><b>Priya Shah</b> · 31 min ago</div>If we reject it, is the message lost for good?</div>
+        <div class="comment asst"><div class="by"><b>Assistant for Michael</b> · 2 min ago</div>Rejecting with 400 loses nothing: without <code>message.id</code> there is no message to deliver.</div>
+        <div class="event">Assistant for Michael filed SAGE-164 · just now</div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>Whose assistant wrote it, on every Mac.</b> An applied comment is the human's, by login, and carries whose assistant wrote it, so it reads “Assistant for Michael”, tinted apart from people's comments. An issue filed from a card says the same.</p>
+</section>
+
+</div>
+
+<div style="margin-top:26px">
+  <h2>How it behaves</h2>
+  <ul class="legend">
+    <li>Threads are private and live only on this Mac. Idle threads leave the tab strip after 24 hours and stay searchable.</li>
+    <li>Threads read repositories, files, the web and their Space's brain, add log entries to that brain, and write only in their scratch folder. The provider enforces this.</li>
+    <li>The router never writes. Below the threshold, or when it fails, it asks.</li>
+    <li>Jobs are user-owned and separate from coordinator timers. Brain notes and other content cannot create one.</li>
+    <li>Issue threads read only their Space's tracker and repositories, with the web off, and change an issue only through a card the human applies.</li>
+    <li>This study is static and was approved by Michael on October 29, 2026; sections 7 and 8 on October 31, 2026. It is not the GPUI implementation.</li>
+  </ul>
+</div>
+</body>
+</html>

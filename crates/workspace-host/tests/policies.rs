@@ -110,7 +110,7 @@ fn current(role: Role) -> Value {
             [("opus", "high"), ("sonnet", "medium")],
             sol,
         ),
-        Role::Maintenance | Role::Keeper => codex_fixed(role),
+        Role::Maintenance | Role::Keeper | Role::Assistant | Role::JobRun => codex_fixed(role),
     }
 }
 
@@ -131,8 +131,9 @@ fn seed_detecting(
     setup(&mut host);
     drop(host);
     let db = Connection::open(home.join("workspace.sqlite3")).unwrap();
-    // Legacy stores predate the PR keeper, which never had a policy row.
-    for role in Role::ALL.into_iter().filter(|&r| r != Role::Keeper) {
+    // Legacy stores predate the PR keeper, the assistant and jobs, which never had a policy row.
+    let new = |r: Role| matches!(r, Role::Keeper | Role::Assistant | Role::JobRun);
+    for role in (Role::ALL.into_iter()).filter(|&r| !new(r)) {
         db.execute(
             "INSERT INTO policies VALUES (?1,?2) ON CONFLICT(role) DO UPDATE SET data=excluded.data",
             rusqlite::params![
@@ -186,7 +187,8 @@ fn current_big_small_policies_become_the_approved_table() {
         "the selection's migration, then the table's"
     );
     // No PR keeper model was chosen, so there is no PR keeper row; the default reviewers were
-    // Claude's and Codex's second opinions, so they wait.
+    // Claude's and Codex's second opinions, so they wait. The Assistant and Router rows are
+    // seeded too.
     assert_eq!(
         rows(&selection),
         [
@@ -196,6 +198,8 @@ fn current_big_small_policies_become_the_approved_table() {
             "Tests: claude · sonnet · high → codex · gpt-6.1-sol · medium",
             "Correctness: claude · opus · high → wait",
             "Regressions: codex · gpt-6.1-sol · high → wait",
+            "Assistant: claude · sonnet · medium → codex · gpt-6.1-sol · medium",
+            "Router: claude · haiku · low → wait",
         ]
     );
     let implementer = selection.row(&Job::Implementer).unwrap();

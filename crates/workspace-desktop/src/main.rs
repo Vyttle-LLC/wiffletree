@@ -1,9 +1,12 @@
 mod activity;
 mod agents_panel;
 mod assets;
+mod assistant_view;
 mod attachment_chips;
 mod automation;
 mod background;
+mod board_web_view;
+mod boards_view;
 mod brain_browser_view;
 mod brain_markdown;
 mod brain_search;
@@ -29,6 +32,7 @@ mod issues_view;
 mod leftovers;
 mod linear_import_view;
 mod live_work;
+mod login_item;
 mod memory_view;
 mod menu_bar;
 mod models;
@@ -219,6 +223,10 @@ enum Page {
     Brains,
     /// One brain's Status, Wiki, Logs and Conflicts, opened from Brains or a Memory panel.
     BrainBrowser,
+    /// The assistant and its thread tabs.
+    Assistant,
+    /// Every output threads and jobs saved, and the jobs.
+    Boards,
 }
 
 struct Workspace {
@@ -245,6 +253,8 @@ struct Workspace {
     brain_browser: Entity<brain_browser_view::BrainBrowser>,
     brain_search: Entity<brain_search::BrainSearch>,
     issues: Entity<issues_view::IssuesPage>,
+    assistant: Entity<assistant_view::AssistantPage>,
+    boards: Entity<boards_view::BoardsPage>,
     usage: Entity<usage_view::UsagePage>,
     sidebar: Entity<sidebar::Sidebar>,
     inspector: Entity<Inspector>,
@@ -305,6 +315,10 @@ impl Workspace {
         cx.observe(&brain_search, |_, _, cx| cx.notify()).detach();
         let issues = cx.new(|cx| issues_view::IssuesPage::new(bridge.clone(), window, cx));
         Self::adopt(&issues, window, cx);
+        let assistant = cx.new(|cx| assistant_view::AssistantPage::new(bridge.clone(), window, cx));
+        Self::adopt(&assistant, window, cx);
+        let boards = cx.new(|cx| boards_view::BoardsPage::new(bridge.clone(), window, cx));
+        Self::adopt(&boards, window, cx);
         let sidebar = cx.new(|cx| sidebar::Sidebar::new(bridge.clone(), window, cx));
         Self::adopt(&sidebar, window, cx);
         let usage = cx.new(|_| usage_view::UsagePage::new(bridge.clone()));
@@ -331,6 +345,8 @@ impl Workspace {
             brain_browser,
             brain_search,
             issues,
+            assistant,
+            boards,
             usage,
             sidebar,
             inspector,
@@ -495,6 +511,30 @@ impl Workspace {
                 title,
                 defaults,
             } => self.open_issue_project(id.clone(), title.clone(), defaults.clone(), window, cx),
+            Intent::SuggestSpace { name, description } => {
+                self.open_page(Page::Spaces, window, cx);
+                self.spaces.update(cx, |spaces, cx| {
+                    spaces.suggested(name, description, window, cx)
+                });
+            }
+            Intent::OpenJob(job) => {
+                self.open_page(Page::Assistant, window, cx);
+                self.assistant.update(cx, |assistant, cx| {
+                    assistant.open_job(job.clone(), window, cx)
+                });
+            }
+            Intent::StopJobRun(run) => self.assistant.update(cx, |assistant, cx| {
+                assistant.stop_run(run.clone(), window, cx)
+            }),
+            Intent::AskAssistant { attached, space } => {
+                self.assistant.update(cx, |assistant, cx| {
+                    assistant.ask_about(attached.clone(), space.clone(), window, cx)
+                });
+            }
+            Intent::IssuesChanged => {
+                self.issues
+                    .update(cx, |issues, cx| issues.reload(window, cx));
+            }
         }
         self.share(window, cx);
         cx.notify();
@@ -521,6 +561,11 @@ impl Workspace {
             .update(cx, |browser, cx| browser.share(shared.clone(), window, cx));
         self.issues
             .update(cx, |issues, cx| issues.share(shared.clone(), window, cx));
+        self.boards
+            .update(cx, |boards, cx| boards.share(shared.clone(), window, cx));
+        self.assistant.update(cx, |assistant, cx| {
+            assistant.share(shared.clone(), window, cx)
+        });
         self.models
             .update(cx, |models, cx| models.share(shared.clone(), window, cx));
         self.skills
@@ -1004,6 +1049,12 @@ impl Workspace {
             Page::Skills => self.skills.update(cx, |skills, cx| {
                 skills.open_skill(skills_view::SkillView::List, window, cx)
             }),
+            Page::Assistant => self
+                .assistant
+                .update(cx, |assistant, cx| assistant.opened(window, cx)),
+            Page::Boards => self
+                .boards
+                .update(cx, |boards, cx| boards.opened(window, cx)),
             _ => {}
         }
         self.share(window, cx);
@@ -1023,7 +1074,12 @@ impl Workspace {
                 .then(|| self.brain_browser.read(cx).searched())
                 .flatten()
         });
-        let selected = brain_search::searched_for(&self.shared, self.last_space.as_ref());
+        // In a thread, its own Space's brain.
+        let thread_space = self.assistant.read(cx).shown_space(self.shared.page);
+        let selected = match &thread_space {
+            Some(space) => brain_search::searched_in_thread(&self.shared, space),
+            None => brain_search::searched_for(&self.shared, self.last_space.as_ref()),
+        };
         let (searched, scope) = match brain {
             None => {
                 let scope = match &selected {
@@ -1562,6 +1618,7 @@ fn main() -> anyhow::Result<()> {
         cx.set_global(preferences);
         cx.set_global(attachment_chips::HostImages::new());
         cx.set_global(staging);
+        boards_view::watch_tooltips(cx);
         apply_theme(cx);
         // Under the System appearance, macOS can switch modes while the app runs. The component
         // theme only changes when told, so every window re-applies it or keeps stale colours.
@@ -1610,6 +1667,16 @@ fn main() -> anyhow::Result<()> {
                 MenuItem::action("Quit Wiffletree", Quit),
             ]),
             Menu::new("File").items([MenuItem::action("New Project", NewProject)]),
+            // A board's web view takes no key equivalent from GPUI, so editing shortcuts reach
+            // it only as these items, which AppKit sends to the first responder.
+            Menu::new("Edit").items([
+                MenuItem::os_action("Copy", gpui_component::input::Copy, OsAction::Copy),
+                MenuItem::os_action(
+                    "Select All",
+                    gpui_component::input::SelectAll,
+                    OsAction::SelectAll,
+                ),
+            ]),
         ]);
         register_window_actions(cx);
         hosts::watch(cx);

@@ -1,6 +1,8 @@
 //! Provider-neutral contracts. No renderer, database or provider runtime dependencies.
 pub mod ask;
+pub mod assistant;
 pub mod backoff;
+pub mod board;
 mod brain;
 mod brain_browser;
 mod client;
@@ -13,6 +15,7 @@ mod host;
 pub mod host_copy;
 mod index;
 mod issues;
+pub mod job;
 mod launch;
 mod merging;
 mod messages;
@@ -83,9 +86,15 @@ pub enum Role {
     Maintenance,
     /// The PR keeper's model runs. Only the host creates these agents; no coordinator tool can.
     Keeper,
+    /// An assistant thread, owned by its Space and outside every project. Only the human
+    /// starts one.
+    Assistant,
+    /// One run of a scheduled job: a read-only thread in the job's Space that only the
+    /// scheduler starts.
+    JobRun,
 }
 impl Role {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 9] = [
         Self::ProjectOrchestrator,
         Self::TaskOrchestrator,
         Self::Implementer,
@@ -93,6 +102,8 @@ impl Role {
         Self::Reviewer,
         Self::Maintenance,
         Self::Keeper,
+        Self::Assistant,
+        Self::JobRun,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -103,10 +114,20 @@ impl Role {
             Self::Reviewer => "Reviewer",
             Self::Maintenance => "Maintenance",
             Self::Keeper => "PR keeper",
+            Self::Assistant => "Assistant",
+            Self::JobRun => "Job run",
         }
     }
     pub fn is_worker(self) -> bool {
-        !matches!(self, Self::ProjectOrchestrator | Self::TaskOrchestrator)
+        !matches!(
+            self,
+            Self::ProjectOrchestrator | Self::TaskOrchestrator | Self::Assistant | Self::JobRun
+        )
+    }
+    /// A thread of the assistant or a job's run: owned by a Space, read-only but for its
+    /// scratch folder, with the thread tools and no coordination.
+    pub fn is_thread(self) -> bool {
+        matches!(self, Self::Assistant | Self::JobRun)
     }
     /// A ticket agent's short name: its role, plus its focus when others share that role.
     pub fn agent_label(self, focus: Option<&str>) -> String {
@@ -125,13 +146,15 @@ pub enum Skill {
     Implementing,
     Reviewing,
     KeepingAPr,
+    Assisting,
 }
 impl Skill {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Coordinating,
         Self::Implementing,
         Self::Reviewing,
         Self::KeepingAPr,
+        Self::Assisting,
     ];
     /// The skill a role's instructions end with. The PR keeper's comment sorting is not a role's
     /// turn and gets none.
@@ -142,6 +165,7 @@ impl Skill {
             Role::Implementer | Role::Maintenance => Self::Implementing,
             Role::Tester | Role::Reviewer => Self::Reviewing,
             Role::Keeper => Self::KeepingAPr,
+            Role::Assistant | Role::JobRun => Self::Assisting,
         }
     }
     pub fn name(self) -> &'static str {
@@ -150,6 +174,7 @@ impl Skill {
             Self::Implementing => "Implementing",
             Self::Reviewing => "Reviewing",
             Self::KeepingAPr => "Keeping a PR",
+            Self::Assisting => "Assisting",
         }
     }
     pub fn purpose(self) -> &'static str {
@@ -166,6 +191,9 @@ impl Skill {
             Self::KeepingAPr => {
                 "How the PR keeper's model resolves a conflict or fixes failed checks in its one try."
             }
+            Self::Assisting => {
+                "How the assistant's threads answer, research, draft in their scratch folder and hand code work to a project."
+            }
         }
     }
     /// The skill's folder in the skills folder.
@@ -175,6 +203,7 @@ impl Skill {
             Self::Implementing => "implementing",
             Self::Reviewing => "reviewing",
             Self::KeepingAPr => "keeping-a-pr",
+            Self::Assisting => "assisting",
         }
     }
 }
@@ -878,6 +907,23 @@ pub struct Snapshot {
     /// Why each keeper trigger the shared settings turn on is off on this machine.
     #[serde(default)]
     pub keeper_held: Vec<String>,
+    /// The assistant's name, a shared setting.
+    #[serde(default = "assistant_name")]
+    pub assistant_name: String,
+    /// The assistant's threads in the tab strip, in strip order. Their sessions are not in
+    /// `sessions`: no project, panel or tree lists them.
+    #[serde(default)]
+    pub threads: Vec<assistant::ThreadTab>,
+    /// The messages the router holds unsent, oldest first.
+    #[serde(default)]
+    pub held: Vec<assistant::HeldMessage>,
+    /// The jobs saved in the Spaces on this Mac, by Space and name. Built-in host jobs are in
+    /// no Space and not listed.
+    #[serde(default)]
+    pub jobs: Vec<job::JobState>,
+}
+fn assistant_name() -> String {
+    assistant::DEFAULT_NAME.into()
 }
 /// What a `Snapshot` leaves out: archived sessions other than open tickets' agents, accepted
 /// and closed tickets no unarchived agent works on, and those sessions' runtimes. Answers
@@ -1076,7 +1122,7 @@ pub fn duration_label(ms: i64) -> String {
     }
 }
 /// Host-owned settings, kept in the host's `settings.json`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HostSettings {
     /// Where new projects and ticket worktrees are created.
     pub workspaces_dir: String,
@@ -1104,6 +1150,15 @@ pub struct HostSettings {
     /// machine; the rest wait. Kept on this machine only.
     #[serde(default = "default_builds_at_once")]
     pub builds_at_once: usize,
+    /// The assistant's name. Shared: read from `settings/assistant.json`.
+    #[serde(default = "assistant_name")]
+    pub assistant_name: String,
+    /// The confidence below which the router asks. Shared: read from `settings/assistant.json`.
+    #[serde(default = "router_threshold")]
+    pub router_threshold: f64,
+}
+fn router_threshold() -> f64 {
+    assistant::router::DEFAULT_THRESHOLD
 }
 /// A private GitHub repository the shared folder syncs with, as this machine recorded it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1292,6 +1347,8 @@ impl HostSettings {
             settings_repository: None,
             remote_access: false,
             builds_at_once: DEFAULT_BUILDS_AT_ONCE,
+            assistant_name: assistant_name(),
+            router_threshold: router_threshold(),
         }
     }
     pub fn validate_check_ins(child_turns: u32, human_turns: u32) -> Result<()> {
@@ -3177,6 +3234,193 @@ pub enum Command {
         before: Option<i64>,
         limit: usize,
     },
+    /// Starts an assistant thread in `space_id` with its first message, `body`, and titles it
+    /// from that message; `profile` is the model the user chose in the composer, if any.
+    /// Answered with the `Thread`. Later messages go to it with `Send`, its id the recipient.
+    StartThread {
+        id: String,
+        space_id: SpaceId,
+        body: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<ModelProfile>,
+    },
+    RenameThread {
+        thread_id: String,
+        title: String,
+    },
+    /// Takes a thread's tab out of the strip, or with `open` brings it back.
+    SetThreadOpen {
+        thread_id: String,
+        open: bool,
+    },
+    /// Puts the strip's tabs in this order.
+    OrderThreads {
+        thread_ids: Vec<String>,
+    },
+    /// Removes a thread's conversation and scratch folder; its brain entries stay.
+    DeleteThread {
+        thread_id: String,
+    },
+    /// Threads whose title or messages contain `query`, open or idle, newest first, in
+    /// `space_id` when given. Answered with `Vec<ThreadHit>`.
+    SearchThreads {
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space_id: Option<SpaceId>,
+    },
+    /// Asks the thread to write a project brief from its conversation with `project_brief`.
+    DraftProjectBrief {
+        thread_id: String,
+    },
+    /// Make this a project: creates a project in the thread's Space with that Space's
+    /// repositories, whose first human message is `brief` with a link back to the thread and
+    /// copies of the scratch files named in `files`. The thread becomes read-only. Answered
+    /// with the `Project`.
+    MakeProject {
+        thread_id: String,
+        name: String,
+        brief: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<String>,
+    },
+    /// The files in a thread's scratch folder, by path relative to it.
+    ScratchFiles {
+        thread_id: String,
+    },
+    DismissThreadCard {
+        thread_id: String,
+        card_id: String,
+    },
+    /// Ask the assistant on an issue or the Issues page: opens the issue thread of `attached`
+    /// in the issue's Space, starting it when this Space has none, and answers with the
+    /// `Thread`. `space_id` is the Issues page's Space filter; without one, or with one that
+    /// does not share the tracker, the Space last used for a new project among those that do.
+    /// `Attached::Issues` names the tracker by `space_id`, or else the Space last used.
+    OpenIssueThread {
+        attached: assistant::proposal::Attached,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space_id: Option<SpaceId>,
+    },
+    /// Read-only: a thread's pending proposals as their cards show them now, as
+    /// `Vec<ProposalView>`.
+    Proposals {
+        thread_id: String,
+    },
+    /// Applies a thread's proposal as the human, through the tracker's own write commands; with
+    /// `edited`, the human's edit of it, which must keep its kind and issue. Answered with the
+    /// `Thread`.
+    ApplyProposal {
+        thread_id: String,
+        proposal_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edited: Option<Box<assistant::proposal::ProposalChange>>,
+    },
+    /// Discards a proposal; nothing is written to the tracker. Answered with the `Thread`.
+    DiscardProposal {
+        thread_id: String,
+        proposal_id: String,
+    },
+    /// Names the assistant, a shared setting.
+    SetAssistantName {
+        name: String,
+    },
+    /// Sends `body` where the router decides, from the thread open in the assistant, if any.
+    /// Unsure, the message is held unsent and the user asked. Answered with `null`.
+    RouteMessage {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        body: String,
+    },
+    /// Sends a held message where the user chose.
+    AnswerHeld {
+        id: String,
+        destination: assistant::router::Destination,
+    },
+    /// Change on a routed message: stops the turn it started if that still runs, marks it and
+    /// its reply as moved there, and sends it to `destination`.
+    ChangeRoute {
+        thread_id: String,
+        message_id: String,
+        destination: assistant::router::Destination,
+    },
+    /// Sets the router's confidence threshold, a shared setting; answers with `HostSettings`.
+    SetRouterThreshold {
+        threshold: f64,
+    },
+    /// Saves a job, new or changed, as the user confirmed it on its recipe card or its page:
+    /// the only way a job is created or changed. With `new`, from a card, it is refused when a
+    /// job of that name exists, so a card never replaces one. Answered with the `JobState`.
+    SaveJob {
+        recipe: Box<job::Recipe>,
+        #[serde(default)]
+        new: bool,
+    },
+    /// What a recipe's card shows before it is saved: its schedule in words, its next runs,
+    /// its sources as checked now and its model. Answered with a `RecipePreview`.
+    PreviewJob {
+        recipe: Box<job::Recipe>,
+    },
+    /// Pauses a job, or with `enabled` resumes it from its next scheduled time.
+    SetJobEnabled {
+        space_id: SpaceId,
+        job_id: String,
+        enabled: bool,
+    },
+    /// Run now, for a job or a built-in job.
+    RunJobNow {
+        job: job::JobKey,
+    },
+    /// Removes a job's recipe and its runs.
+    DeleteJob {
+        space_id: SpaceId,
+        job_id: String,
+    },
+    /// Stops a job's run that is still running.
+    StopJobRun {
+        run_id: String,
+    },
+    /// The user opened a job's page: its failed and unstarted runs, and its outputs waiting for
+    /// approval, stop counting on the assistant's row.
+    SeeJobRuns {
+        job: job::JobKey,
+    },
+    /// Take over running: makes this Mac the runner of a "One runner" job in a Space stored on
+    /// GitHub, as a commit to its recipe. Answered with the `JobState`.
+    TakeOverJob {
+        space_id: SpaceId,
+        job_id: String,
+    },
+    /// Answers a job output that waits for approval before its first push, or its first since
+    /// the recipe's prompt or sources changed: with `share`, Share pushes it into the Space's
+    /// storage and approves the prompt and sources its run had; without, Keep private leaves it
+    /// only on this Mac and the job unapproved.
+    ApproveJobOutput {
+        run_id: String,
+        title: String,
+        share: bool,
+    },
+    /// Every output on Boards, at its latest version. Answered with `Vec<BoardOutput>`.
+    Boards,
+    /// An output's versions: `board::LATEST` first, then its history, newest first. Answered
+    /// with `Vec<BoardVersion>`.
+    BoardVersions {
+        board_id: String,
+    },
+    /// The folder on this Mac that holds one version of an output, for the viewer: the
+    /// output's own folder for `board::LATEST`, else a copy. Answered with the folder's path.
+    BoardVersionFolder {
+        board_id: String,
+        commit: String,
+    },
+    /// Share to Space…: copies an output that is only on this Mac into a Space's storage,
+    /// once the user confirmed who can read it. Answered with the copy's `BoardOutput`.
+    ShareBoard {
+        board_id: String,
+        space_id: SpaceId,
+    },
     /// Creates a Space with local storage and a local tracker, or, with `storage`, stored in
     /// that private GitHub repository (`owner/name` or its URL), whose tracker it shares; without
     /// `prefix`, a new tracker gets the one proposed from the Space's name.
@@ -3802,6 +4046,13 @@ impl Command {
             | Self::Issue { .. }
             | Self::IssueProjectDefaults { .. }
             | Self::IssuePeople { .. }
+            | Self::SearchThreads { .. }
+            | Self::ScratchFiles { .. }
+            | Self::Proposals { .. }
+            | Self::PreviewJob { .. }
+            | Self::Boards
+            | Self::BoardVersions { .. }
+            | Self::BoardVersionFolder { .. }
             | Self::RemoteAccess => true,
             Self::ImportRepositories { .. }
             | Self::RefreshRepositories
@@ -3830,6 +4081,31 @@ impl Command {
             | Self::ResolveAttention { .. }
             | Self::DismissAttention { .. }
             | Self::AppendLog { .. }
+            | Self::StartThread { .. }
+            | Self::RenameThread { .. }
+            | Self::SetThreadOpen { .. }
+            | Self::OrderThreads { .. }
+            | Self::DeleteThread { .. }
+            | Self::DraftProjectBrief { .. }
+            | Self::MakeProject { .. }
+            | Self::DismissThreadCard { .. }
+            | Self::OpenIssueThread { .. }
+            | Self::ApplyProposal { .. }
+            | Self::DiscardProposal { .. }
+            | Self::SetAssistantName { .. }
+            | Self::RouteMessage { .. }
+            | Self::AnswerHeld { .. }
+            | Self::ChangeRoute { .. }
+            | Self::SetRouterThreshold { .. }
+            | Self::SaveJob { .. }
+            | Self::SetJobEnabled { .. }
+            | Self::RunJobNow { .. }
+            | Self::DeleteJob { .. }
+            | Self::StopJobRun { .. }
+            | Self::SeeJobRuns { .. }
+            | Self::TakeOverJob { .. }
+            | Self::ApproveJobOutput { .. }
+            | Self::ShareBoard { .. }
             | Self::SetSpaceBrain { .. }
             | Self::CreateSpace { .. }
             | Self::UpdateSpace { .. }
@@ -3910,11 +4186,46 @@ impl Command {
     /// amending a batch, Send now and the legacy import, and fixing or releasing a held entry.
     /// Every write to a tracker is the human's, settling a paused issue file, following an issue
     /// and every step of a Linear import too; reading issues is not. Remote access is the human's
-    /// too: its state carries the pairing code.
+    /// too: its state carries the pairing code. The assistant is the human's: its threads, their
+    /// text and its name. So are jobs: only the user saves, pauses, runs or deletes one. So are
+    /// Boards, the outputs threads and jobs saved, and only the user shares one into a Space.
+    /// So are issue threads' proposals: only the human applies or discards one.
     pub fn is_human_only(&self) -> bool {
         matches!(
             self,
             Self::Send { sender: None, .. }
+                | Self::StartThread { .. }
+                | Self::RenameThread { .. }
+                | Self::SetThreadOpen { .. }
+                | Self::OrderThreads { .. }
+                | Self::DeleteThread { .. }
+                | Self::SearchThreads { .. }
+                | Self::DraftProjectBrief { .. }
+                | Self::MakeProject { .. }
+                | Self::ScratchFiles { .. }
+                | Self::DismissThreadCard { .. }
+                | Self::OpenIssueThread { .. }
+                | Self::Proposals { .. }
+                | Self::ApplyProposal { .. }
+                | Self::DiscardProposal { .. }
+                | Self::SetAssistantName { .. }
+                | Self::RouteMessage { .. }
+                | Self::AnswerHeld { .. }
+                | Self::ChangeRoute { .. }
+                | Self::SetRouterThreshold { .. }
+                | Self::SaveJob { .. }
+                | Self::PreviewJob { .. }
+                | Self::SetJobEnabled { .. }
+                | Self::RunJobNow { .. }
+                | Self::DeleteJob { .. }
+                | Self::StopJobRun { .. }
+                | Self::SeeJobRuns { .. }
+                | Self::TakeOverJob { .. }
+                | Self::ApproveJobOutput { .. }
+                | Self::Boards
+                | Self::BoardVersions { .. }
+                | Self::BoardVersionFolder { .. }
+                | Self::ShareBoard { .. }
                 | Self::ResolveAttention { .. }
                 | Self::DismissAttention { .. }
                 | Self::SetOwnerAllowed { .. }

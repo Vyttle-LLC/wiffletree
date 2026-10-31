@@ -504,6 +504,9 @@ impl Host {
             }
             host.db
                 .execute("DELETE FROM spaces WHERE id=?1", [id.as_str()])?;
+            // Its jobs stay in its storage, for this Mac to take again if it adds the Space.
+            host.db
+                .execute("DELETE FROM jobs WHERE space_id=?1", [id.as_str()])?;
             let storage = removed.storage.repository.key();
             let shared =
                 (host.spaces()?.iter()).any(|r| r.space.storage.repository.key() == storage);

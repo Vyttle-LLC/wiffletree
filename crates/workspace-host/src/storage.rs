@@ -1,15 +1,16 @@
 //! Storage repositories, where Spaces' definitions and their tracker live (OpenSpec change
 //! `spaces`, stage 3). Local storage is a Git repository at `repos/local-<id>/` with no remote,
 //! committed to on every change and never pushed. GitHub storage is a clone under `repos/` that
-//! its one sync engine runs with two rule sets: Spaces, over the folders of the Spaces this Mac
-//! added, and issues (`issues_sync`), over `wiffletree-issues.yaml` and `issues/`. The store
+//! its one sync engine runs with three rule sets: Spaces, over the folders of the Spaces this Mac
+//! added; boards, over their `boards/`, where the outputs of the jobs this Mac runs push without
+//! comparing; and issues (`issues_sync`), over `wiffletree-issues.yaml` and `issues/`. The store
 //! keeps each Space as the host uses it; the files are what travel.
 use crate::*;
 use issues_sync::IssueRules;
 use publish::Tools;
 use repos::{Content, Record, Remote, RuleSet};
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tempfile::TempDir;
 use tracker::ISSUES;
 
@@ -125,8 +126,21 @@ pub(crate) fn check(path: &str, content: &[u8]) -> Result<()> {
             folder: String::new(),
         };
         read_space(content, storage)?;
+    } else if let Some((_, id)) = recipe_path(path) {
+        // Which Space it names is checked when it is taken in, against its folder's Space.
+        let file: serde_yaml::Value = serde_yaml::from_slice(content)?;
+        let space = SpaceId(file["space"].as_str().unwrap_or_default().into());
+        jobs::read_recipe(content, &space, id)?;
     }
     Ok(())
+}
+
+/// The Space folder and job id of a path `spaces/<folder>/jobs/<id>.yaml`.
+fn recipe_path(path: &str) -> Option<(&str, &str)> {
+    let rest = path.strip_prefix("spaces/")?;
+    let (folder, file) = rest.split_once("/jobs/")?;
+    let id = file.strip_suffix(".yaml")?;
+    (!folder.contains('/') && !id.contains('/') && !id.is_empty()).then_some((folder, id))
 }
 
 /// Rewrites a local tracker's issue IDs from `old` to `new`: each `issues/<old>-<n>/` folder,
@@ -211,10 +225,18 @@ pub(crate) fn commit_local(folder: &Path, paths: &[&str], message: &str) -> Resu
     if !folder.join(".git").exists() {
         runtime::git_output(folder, &["init", "--quiet", "--initial-branch=main"])?;
     }
-    // A tracker with no issue has no `issues/` to add.
+    // A tracker with no issue has no `issues/` to add; a removed file that was committed is
+    // added as its removal.
+    let tracked = |path: &str| {
+        runtime::git_answer(folder, &["ls-files", "--error-unmatch", "--", path])
+            .is_ok_and(|answer| answer.status.success())
+    };
     let present: Vec<&str> = (paths.iter().copied())
-        .filter(|path| folder.join(path).exists())
+        .filter(|path| folder.join(path).exists() || tracked(path))
         .collect();
+    if present.is_empty() {
+        return Ok(());
+    }
     runtime::git_output(folder, &[&["add", "--all", "--"][..], &present].concat())?;
     if runtime::git_answer(folder, &["diff", "--cached", "--quiet"])?
         .status
@@ -394,6 +416,8 @@ pub(crate) struct Input {
     pub(crate) parts: BTreeMap<String, Vec<String>>,
     /// The number each of this Mac's new issues would rather have, by its temporary ID.
     pub(crate) preferred: BTreeMap<IssueId, u64>,
+    /// The board folders of the jobs this Mac is the runner of.
+    runs_here: Vec<String>,
 }
 
 /// A part of an `issue.md` both sides changed to different values, which this Mac keeps and
@@ -435,11 +459,30 @@ pub(crate) struct Found {
     parts: Vec<PausedPart>,
 }
 
-/// A rule set comparing whole files under `roots` with the version last synced, as the settings
-/// rule set does: what changed on both sides, changed outside Wiffletree or arrived in a form
-/// this Mac cannot use is paused and kept here.
+/// The output a file of a job's board folder belongs to, by its place there: its metadata
+/// `spaces/<folder>/boards/<job>/<slug>.json` and its file `…/<job>/<slug>/<file>`, whatever
+/// that file's own type, are both `…/<job>/<slug>`.
+fn output_of(path: &str) -> &str {
+    let end = (path.match_indices('/').nth(4)).map_or(path.len(), |(at, _)| at);
+    let output = &path[..end];
+    match end == path.len() {
+        true => output.strip_suffix(".json").unwrap_or(output),
+        false => output,
+    }
+}
+
+/// A rule set comparing whole files under `roots`, except those under `excluded`, with the
+/// version last synced, as the settings rule set does: what changed on both sides, changed
+/// outside Wiffletree or arrived in a form this Mac cannot use is paused and kept here. A file
+/// under `runs_here` is a runner's output only this Mac writes, so what Wiffletree wrote here is
+/// pushed without comparing it with GitHub's.
 pub(crate) struct WholeFiles {
     roots: Vec<String>,
+    excluded: Vec<String>,
+    runs_here: Vec<String>,
+    /// Whether a runner's output here fetches and pushes again on its own when GitHub moves,
+    /// for a pass that does not run whole again (see `RuleSets::new`).
+    retries_alone: bool,
     subject: String,
     pub(crate) synced: BTreeMap<String, Content>,
     written: BTreeMap<String, Content>,
@@ -450,10 +493,16 @@ pub(crate) struct WholeFiles {
     pub(crate) found: Found,
 }
 impl WholeFiles {
-    pub(crate) fn new(input: &Input, roots: Vec<String>, subject: String) -> Self {
+    pub(crate) fn new(
+        input: &Input,
+        roots: Vec<String>,
+        excluded: Vec<String>,
+        subject: String,
+    ) -> Self {
+        let compares = |path: &str| under(&roots, path) && !under(&excluded, path);
         let mine = |map: &BTreeMap<String, Content>| -> BTreeMap<String, Content> {
             (map.iter())
-                .filter(|(path, _)| under(&roots, path))
+                .filter(|(path, _)| compares(path))
                 .map(|(path, content)| (path.clone(), content.clone()))
                 .collect()
         };
@@ -461,17 +510,23 @@ impl WholeFiles {
             synced: mine(&input.synced),
             written: mine(&input.written),
             two_machines: (input.two_machines.iter())
-                .filter(|path| under(&roots, path))
+                .filter(|path| compares(path))
+                .cloned()
+                .collect(),
+            runs_here: (input.runs_here.iter())
+                .filter(|folder| compares(folder))
                 .cloned()
                 .collect(),
             roots,
+            excluded,
+            retries_alone: false,
             subject,
             parts: None,
             found: Found::default(),
         }
     }
     fn compares(&self, path: &str) -> bool {
-        under(&self.roots, path)
+        under(&self.roots, path) && !under(&self.excluded, path)
     }
     fn here(&self, clone: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
         let mut files = BTreeMap::new();
@@ -554,6 +609,7 @@ impl RuleSet for WholeFiles {
                 .then(|| theirs.as_deref().and_then(|c| check(path, c).err()))
                 .flatten();
             let machine = || "another machine".to_owned();
+            let runs_here = under(&self.runs_here, path);
             let why = if outside {
                 Some(Paused::OutsideWiffletree)
             } else if let Some(error) = refused {
@@ -561,6 +617,8 @@ impl RuleSet for WholeFiles {
                     machine: machine(),
                     reason: format!("{error:#}"),
                 })
+            } else if runs_here {
+                None
             } else if mine != base && theirs != base || self.two_machines.contains(path) {
                 Some(Paused::TwoMachines { machine: machine() })
             } else {
@@ -574,7 +632,16 @@ impl RuleSet for WholeFiles {
         }
         Ok(())
     }
+    /// A runner's output with a file paused this pass waits whole, so its metadata and its
+    /// file are never pushed apart.
     fn commit(&mut self) -> Option<(Vec<(String, Content)>, String)> {
+        let paused: BTreeSet<&str> = (self.found.paused.iter())
+            .filter(|(path, ..)| under(&self.runs_here, path))
+            .map(|(path, ..)| output_of(path))
+            .collect();
+        (self.found.committed).retain(|(path, _)| {
+            !(under(&self.runs_here, path) && paused.contains(output_of(path)))
+        });
         let committed = &self.found.committed;
         (!committed.is_empty()).then(|| {
             let message = format!("{} · {}", self.subject, sync::machine_name());
@@ -585,6 +652,19 @@ impl RuleSet for WholeFiles {
         self.found.failed.push(format!("{error:#}"));
         self.found.failed_roots.extend(self.roots.iter().cloned());
     }
+    fn reset(&mut self) {
+        self.found = Found {
+            key: std::mem::take(&mut self.found.key),
+            ..Found::default()
+        };
+    }
+    fn sit_out(&mut self) {
+        self.found.committed.clear();
+    }
+    /// A runner's output, which only this Mac writes, is pushed again on GitHub's new head.
+    fn pushes_again(&self) -> bool {
+        self.retries_alone && !self.runs_here.is_empty()
+    }
 }
 
 /// Whether `path` is one of `roots` or under one, hidden files aside.
@@ -593,41 +673,58 @@ fn under(roots: &[String], path: &str) -> bool {
         && (roots.iter()).any(|root| path == root || path.starts_with(&format!("{root}/")))
 }
 
-/// A storage repository's two rule sets for one pass.
+/// A storage repository's three rule sets for one pass: its Spaces' files, their boards and
+/// issues.
 pub(crate) struct RuleSets {
     spaces: WholeFiles,
+    boards: WholeFiles,
     issues: IssueRules,
 }
 impl RuleSets {
-    pub(crate) fn new(input: Input) -> Self {
-        let roots = input
-            .names
-            .keys()
-            .map(|folder| format!("spaces/{folder}"))
-            .collect();
+    /// `retries_alone`: a runner's boards fetch and push again on their own when GitHub moves
+    /// under the push, while the others sit that try out. Only the settings pass, which never
+    /// runs whole again, asks for it; a storage repository's own pass (`pass`) fetches,
+    /// compares and pushes every rule set again instead, so issues renumber on the new head.
+    pub(crate) fn new(input: Input, retries_alone: bool) -> Self {
+        let folders = |under: &str| -> Vec<String> {
+            (input.names.keys())
+                .map(|folder| format!("spaces/{folder}{under}"))
+                .collect()
+        };
         let names: Vec<&str> = input.names.values().map(String::as_str).collect();
-        let subject = format!("{}: changed the Space", names.join(", "));
-        let spaces = WholeFiles::new(&input, roots, subject);
+        let names = names.join(", ");
+        let subject = format!("{names}: changed the Space");
+        let spaces = WholeFiles::new(&input, folders(""), folders("/boards"), subject);
+        let subject = format!("{names}: saved outputs");
+        let mut boards = WholeFiles::new(&input, folders("/boards"), vec![], subject);
+        boards.retries_alone = retries_alone;
         let mut issues = IssueRules::new(&input);
         issues.files.parts = Some(input.parts.clone());
-        let mut rule_sets = Self { spaces, issues };
+        let mut rule_sets = Self {
+            spaces,
+            boards,
+            issues,
+        };
         rule_sets.spaces.found.key = input.key;
         rule_sets
     }
-    pub(crate) fn as_mut(&mut self) -> [&mut dyn RuleSet; 2] {
-        [&mut self.spaces, &mut self.issues]
+    pub(crate) fn as_mut(&mut self) -> [&mut dyn RuleSet; 3] {
+        [&mut self.spaces, &mut self.boards, &mut self.issues]
     }
-    /// What both found, with the files `held` back from the push left out of what was
+    /// What all found, with the files `held` back from the push left out of what was
     /// committed, and a new issue held whole kept under its temporary ID.
     pub(crate) fn found(self, mut held: Vec<scan::Held>) -> Found {
-        let (mut found, mut issues) = (self.spaces.found, self.issues.files.found);
+        let (mut found, mut boards) = (self.spaces.found, self.boards.found);
+        let mut issues = self.issues.files.found;
         issues_sync::keep_held_unnumbered(&mut issues, &mut held);
-        found.pulled.extend(issues.pulled);
-        found.alike.extend(issues.alike);
-        found.committed.extend(issues.committed);
-        found.paused.extend(issues.paused);
-        found.failed.extend(issues.failed);
-        found.failed_roots.extend(issues.failed_roots);
+        for other in [&mut boards, &mut issues] {
+            found.pulled.append(&mut other.pulled);
+            found.alike.append(&mut other.alike);
+            found.committed.append(&mut other.committed);
+            found.paused.append(&mut other.paused);
+            found.failed.append(&mut other.failed);
+            found.failed_roots.append(&mut other.failed_roots);
+        }
         found.merged = issues.merged;
         found.parts_compared = issues.parts_compared;
         found.parts = issues.parts;
@@ -671,9 +768,11 @@ pub(crate) struct Synced {
     error: Option<String>,
 }
 
-/// Runs a storage repository's engine with its Space and issue rule sets, scanning what it
-/// pushes. When GitHub refuses the push because the branch moved, the same pass fetches,
-/// compares and numbers again, up to `issues_sync::PUSH_TRIES` times.
+/// Runs a storage repository's engine with its Space, boards and issue rule sets, scanning what
+/// it pushes. When GitHub refuses the push because the branch moved, the same pass fetches,
+/// compares, numbers and pushes every rule set again, a runner's boards included, up to
+/// `issues_sync::PUSH_TRIES` times. This is the pass's one retry: its boards never retry alone
+/// (`RuleSets::new` with `retries_alone` false), as they do in the settings pass.
 pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
     let Pass {
         clone,
@@ -694,7 +793,7 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
     let mut previous = commit;
     let mut again = 0;
     loop {
-        let mut rule_sets = RuleSets::new(input.clone());
+        let mut rule_sets = RuleSets::new(input.clone(), false);
         let outcome = repos::pass(
             &clone,
             remote(),
@@ -799,6 +898,49 @@ impl Host {
         let folder = self.storage_folder(&space.storage.repository);
         let file = space_file(&space.storage.folder);
         self.write_stored(&key, &folder, &file, &space_yaml(space)?)
+    }
+    /// Writes a job's recipe file to its Space's storage, or with `None` removes it: committed
+    /// at once in a local repository, and pushed by the next pass from a GitHub one.
+    pub(crate) fn write_recipe_file(
+        &self,
+        space: &Space,
+        id: &str,
+        content: Option<&[u8]>,
+        message: &str,
+    ) -> Result<()> {
+        let file = jobs::recipe_file(&space.storage.folder, id);
+        self.write_storage_files(space, &[(file, content)], message)
+    }
+    /// Writes files of a Space's storage, relative to the repository, or with `None` removes
+    /// them: committed at once in a local repository, and pushed by the next pass from a GitHub
+    /// one.
+    pub(crate) fn write_storage_files(
+        &self,
+        space: &Space,
+        files: &[(String, Option<&[u8]>)],
+        message: &str,
+    ) -> Result<()> {
+        let folder = self.storage_folder(&space.storage.repository);
+        for (file, content) in files {
+            match content {
+                Some(content) => shared::write_atomically(&folder.join(file), content)?,
+                None => match fs::remove_file(folder.join(file)) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                        return Err(error.into());
+                    }
+                    _ => {}
+                },
+            }
+        }
+        let Some(key) = Self::storage_key(&space.storage.repository) else {
+            let paths: Vec<&str> = files.iter().map(|(file, _)| file.as_str()).collect();
+            return commit_local(&folder, &paths, message);
+        };
+        for (file, content) in files {
+            Record::wrote(&self.db, &key, file, *content)?;
+        }
+        self.storage_written.borrow_mut().insert(key);
+        Ok(())
     }
     /// The prefixes the other storage repositories on this Mac use, with a Space of each.
     fn other_prefixes(&self, except: &str) -> Result<Vec<(String, Space)>> {
@@ -1196,6 +1338,7 @@ impl Host {
             for (at, record) in joined.iter().enumerate() {
                 let tracker = tracker.as_ref().filter(|_| at == 0 && !has_tracker);
                 spaces::insert_space(&host.db, &record.space, &record.local, tracker)?;
+                host.take_cloned_recipes(&record.space)?;
             }
             let clones: Vec<String> = ticked.iter().flat_map(|t| t.clones.clone()).collect();
             if !clones.is_empty() {
@@ -1212,6 +1355,25 @@ impl Host {
             self.reindex_tracker(&joined[0].space, &tracker.prefix)?;
         }
         Ok(joined)
+    }
+    /// Takes the jobs a joined Space's clone already holds into the store; a recipe this Mac
+    /// cannot read is left out, as a pulled one would be held.
+    fn take_cloned_recipes(&mut self, space: &Space) -> Result<()> {
+        let clone = self.storage_folder(&space.storage.repository);
+        let folder = clone
+            .join("spaces")
+            .join(&space.storage.folder)
+            .join("jobs");
+        for file in files_under(&folder)? {
+            let path = file.strip_prefix(&clone)?.to_string_lossy().into_owned();
+            let Some((_, id)) = recipe_path(&path) else {
+                continue;
+            };
+            if let Err(error) = self.take_pulled_recipe(space, id, Some(&fs::read(&file)?)) {
+                eprintln!("Joining {}: {path} cannot be used: {error:#}", space.name);
+            }
+        }
+        Ok(())
     }
     /// The Space page's notes about a model the Space names that this Mac cannot run, and the
     /// Who runs what choice it uses instead.
@@ -1249,6 +1411,13 @@ impl Host {
         };
         let prefix = self.tracker(first).ok().map(|tracker| tracker.prefix);
         let storage = first.storage.repository.key();
+        let mut runs_here = vec![];
+        for recipe in self.recipes()? {
+            let space = stored.iter().find(|space| space.id == recipe.space_id);
+            if let Some(space) = space.filter(|_| jobs::runs_here(&recipe)) {
+                runs_here.push(jobs::board_folder(&space.storage.folder, &recipe.id));
+            }
+        }
         let names: BTreeMap<String, String> = (stored.into_iter())
             .map(|space| (space.storage.folder, space.name))
             .collect();
@@ -1282,6 +1451,7 @@ impl Host {
             two_machines,
             parts,
             preferred,
+            runs_here,
         }))
     }
     /// The GitHub storage repositories that sync on their own, being no settings repository,
@@ -1515,6 +1685,15 @@ impl Host {
         if let Some(id) = tracker::issue_of(path) {
             return self.reindex_issue(storage, &id);
         }
+        if let Some((folder, id)) = recipe_path(path) {
+            let space = (self.spaces()?.into_iter()).find(|r| {
+                &r.space.storage.repository == storage && r.space.storage.folder == folder
+            });
+            return match space {
+                Some(record) => self.take_pulled_recipe(&record.space, id, content),
+                None => Ok(()),
+            };
+        }
         let Some(content) = content else {
             return Ok(());
         };
@@ -1740,7 +1919,7 @@ pub(crate) mod tests {
     }
 
     /// Runs the pass of the storage repository `NAME`.
-    fn sync(host: &mut Host, github: &Arc<GitHub>) {
+    pub(crate) fn sync(host: &mut Host, github: &Arc<GitHub>) {
         let key = repos::key(NAME);
         let pass = host.storage_pass(&key).unwrap().unwrap();
         host.finish_storage_pass(&key, self::pass(pass, &github.tools()))

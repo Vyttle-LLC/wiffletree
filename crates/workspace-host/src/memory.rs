@@ -39,10 +39,14 @@ CREATE TABLE IF NOT EXISTS log_batches (id TEXT PRIMARY KEY, brain TEXT NOT NULL
 CREATE TABLE IF NOT EXISTS log_prompts (session_id TEXT NOT NULL, ticket_id TEXT NOT NULL, milestone TEXT NOT NULL, prompted_at INTEGER NOT NULL, PRIMARY KEY(session_id,ticket_id,milestone));
 ";
 
-/// Who may log: the project coordinator and implementers.
+/// Which agents may log: the project coordinator and implementers. Assistant threads log too,
+/// in their Space's brain, through their own tools; a job's run does not.
 pub(crate) fn logs_work(role: Role) -> bool {
     matches!(role, Role::ProjectOrchestrator | Role::Implementer)
 }
+
+/// The log folder of assistant threads' entries, which name no repository.
+pub(crate) const ASSISTANT_FOLDER: &str = "assistant";
 
 /// Adds the batch tables and the entries' batch column and, once, carries the rows captured
 /// before per-entry files over: an exported row is marked as in its legacy file, and the
@@ -337,8 +341,8 @@ impl Host {
     /// storing nothing, without a brain, a GitHub login, or room under the cap.
     fn capture(&mut self, session: &Session, input: LogInput) -> Result<WorkLog> {
         ensure!(
-            logs_work(session.role),
-            "log_work is for the project coordinator and implementers"
+            logs_work(session.role) || session.role == Role::Assistant,
+            "log_work is for the project coordinator and implementers, and for assistant threads"
         );
         let input = folded(input)?;
         if let Some(milestone) = &input.milestone
@@ -361,19 +365,38 @@ impl Host {
             );
             return Ok(existing);
         }
-        let project = self.project(&session.project_id)?;
-        let space_brain = (self.owner_brain(&SessionOwner::Project(project.id.clone()))?)
-            .context("This project's Space has no brain, so nothing was stored. The human can name one in Settings › Spaces.")?;
+        // A thread logs in its own Space's brain, for no project, repository or ticket.
+        let (project, space_id, owner) = match session.role {
+            Role::Assistant => {
+                let space = self.thread(&session.id)?.space_id;
+                (None, space.clone(), SessionOwner::Space(space))
+            }
+            _ => {
+                let project = self.project(&session.project_id)?;
+                let owner = SessionOwner::Project(project.id.clone());
+                (Some(project.clone()), project.space, owner)
+            }
+        };
+        let space_brain = (self.owner_brain(&owner)?)
+            .context("This Space has no brain, so nothing was stored. The human can name one in Settings › Spaces.")?;
         let BrainRepository::GitHub { owner, name, .. } = &space_brain.repository else {
             bail!(
-                "This project's Space's brain is not a GitHub repository yet, so nothing was stored. See the Brains page."
+                "This Space's brain is not a GitHub repository yet, so nothing was stored. See the Brains page."
             );
         };
         let brain = format!("{owner}/{name}");
         let author = (self.gh_login.clone())
             .filter(|login| valid_login(login))
             .context("Wiffletree has not read your GitHub login, so nothing was stored. Sign gh in (gh auth login), then Sync now on the Brains page.")?;
+        let project_id = project.as_ref().map(|p| p.id.clone()).unwrap_or_default();
         let ticket = match session.role {
+            Role::Assistant => {
+                ensure!(
+                    input.repository.is_none() && input.ticket_id.is_none(),
+                    "A thread's entry names no repository or ticket; leave them out"
+                );
+                None
+            }
             Role::Implementer => {
                 ensure!(
                     input.repository.is_none(),
@@ -402,7 +425,7 @@ impl Host {
                         );
                         let ticket = self.ticket(named).ok().filter(|ticket| {
                             (self.session(&ticket.coordinator_id))
-                                .is_ok_and(|c| c.project_id == project.id)
+                                .is_ok_and(|c| c.project_id == project_id)
                         });
                         Some(ticket.with_context(|| {
                             format!("{named} is not one of this project's tickets")
@@ -418,9 +441,10 @@ impl Host {
                 let reference = self.ticket_reference(ticket)?;
                 (Some(ticket.id.clone()), folder, reference)
             }
+            None if project.is_none() => (None, ASSISTANT_FOLDER.to_owned(), NO_REF.to_owned()),
             None => match &input.repository {
                 Some(named) => {
-                    let repositories = self.project_repositories(&project.id)?;
+                    let repositories = self.project_repositories(&project_id)?;
                     let repository = (repositories.iter())
                         .find(|r| {
                             r.id == *named
@@ -451,14 +475,14 @@ impl Host {
             sequence: 0,
             path: Some(entry_path(&folder, &repository, &date, &id)),
             id,
-            project_id: project.id.clone(),
+            project_id: project_id.clone(),
             task_id,
             repository,
             created_at: at,
             date,
             input,
             reference,
-            space_id: Some(project.space.clone()),
+            space_id: Some(space_id),
             brain: Some(brain),
             batch_id: None,
             author: Some(author.clone()),
@@ -472,13 +496,14 @@ impl Host {
         entry_file(&log, &author)?;
         self.atomically(|host| {
             // By role: an implementer's entries per ticket, the coordinator's and the human's
-            // per coordinator session, whichever ticket names their folder and `ref`.
+            // per coordinator session, whichever ticket names their folder and `ref`, and a
+            // thread's per thread.
             let key = match (session.role, &ticket) {
                 (Role::Implementer, Some(ticket)) => BatchKey::Ticket(&ticket.id),
                 _ => BatchKey::Session(&session.id),
             };
             let brain = log.brain.clone().unwrap_or_default();
-            let batch = host.open_batch(&brain, &project.id, key, at)?;
+            let batch = host.open_batch(&brain, &project_id, key, at)?;
             log.batch_id = Some(batch.clone());
             host.store_log(&mut log)?;
             Self::event(
@@ -507,7 +532,7 @@ impl Host {
             "INSERT INTO work_logs(id,project_id,session_id,milestone,repository,data,space_id,batch_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
             params![
                 log.id,
-                log.project_id,
+                assistant::project_column(&log.project_id),
                 log.input.session_id,
                 log.input.milestone.as_deref().unwrap_or(&log.id),
                 log.repository,
@@ -649,9 +674,18 @@ impl Host {
         if files.is_empty() {
             return Ok(());
         }
-        let about = match ticket {
-            Some(ticket) => self.ticket(ticket)?.title,
-            None => format!("{} coordinator", self.project(project)?.name),
+        // A thread's batch has no project; it names the thread's Space.
+        let space = (project.is_empty())
+            .then(|| logs.first().and_then(|log| log.space_id.clone()))
+            .flatten();
+        let about = match (ticket, &space) {
+            (Some(ticket), _) => self.ticket(ticket)?.title,
+            (None, Some(space)) => format!("{} assistant", self.space(space)?.space.name),
+            (None, None) => format!("{} coordinator", self.project(project)?.name),
+        };
+        let source = match space {
+            Some(space) => BrainSource::Space(space),
+            None => BrainSource::Project(project.into()),
         };
         let entries = match files.len() {
             1 => "1 entry".to_owned(),
@@ -662,14 +696,8 @@ impl Host {
         // The brain batch and the record of it are stored together or not at all, so a failure
         // between them neither loses the log batch nor queues it twice.
         self.atomically(|host| {
-            let batch = host.queue_brain_batch(
-                brain,
-                BrainBatchKind::Log,
-                BrainSource::Project(project.into()),
-                &title,
-                &files,
-                git,
-            )?;
+            let batch =
+                host.queue_brain_batch(brain, BrainBatchKind::Log, source, &title, &files, git)?;
             let recorded = host.db.execute(
                 "UPDATE log_batches SET brain_batch_id=?2 WHERE id=?1",
                 params![id, batch.id],
@@ -799,7 +827,8 @@ impl Host {
         type Row = (String, String);
         let rows: Vec<Row> = self
             .db
-            .prepare("SELECT id,data FROM work_logs WHERE batch_id IS NULL AND json_extract(data,'$.in_legacy_file') IS NOT 1 ORDER BY sequence")?
+            // A thread's entries are batched as they are logged, and have no project.
+            .prepare("SELECT id,data FROM work_logs WHERE batch_id IS NULL AND project_id IS NOT NULL AND json_extract(data,'$.in_legacy_file') IS NOT 1 ORDER BY sequence")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
         let mut newly_held = std::collections::BTreeSet::new();
@@ -1544,6 +1573,85 @@ mod tests {
             fs::read_to_string(worktree.join(log.path.as_ref().unwrap())).unwrap(),
             entry_file(log, "mhohlios").unwrap()
         );
+    }
+
+    #[test]
+    fn a_threads_entry_is_the_assistants_in_its_spaces_brain_and_its_batch_closes_on_delete() {
+        let mut f = fixture();
+        let (_github, tools) = fetched(&mut f);
+        let sage = f.host.project(&f.coordinator.project_id).unwrap().space;
+        let thread = f
+            .host
+            .start_thread("t1", &sage, "Remember", &[], None)
+            .unwrap();
+        let session = f.host.session(&thread.id).unwrap();
+        for (key, value) in [("repository", "app"), ("ticket_id", f.ticket.as_str())] {
+            let mut named = args("Retry once");
+            named[key] = json!(value);
+            let refused = f
+                .host
+                .thread_tool(&session, "log_work", &named)
+                .unwrap_err();
+            assert!(
+                refused
+                    .to_string()
+                    .contains("names no repository or ticket"),
+                "{key}"
+            );
+        }
+        let logged = (f
+            .host
+            .thread_tool(&session, "log_work", &args("Retry once")))
+        .unwrap();
+        let path = logged["path"].as_str().unwrap();
+        assert!(path.starts_with("second-brain/logs/assistant/"), "{path}");
+        assert_eq!(logged["ref"], NO_REF);
+        let log: WorkLog = (f.host.db)
+            .query_row(
+                "SELECT data FROM work_logs WHERE id=?1",
+                [logged["id"].as_str()],
+                |r| decode(r, 0),
+            )
+            .unwrap();
+        assert_eq!(
+            (log.project_id.as_str(), log.space_id.as_ref()),
+            ("", Some(&sage))
+        );
+        // The file follows the entry contract the gate's fixtures hold.
+        let text = entry_file(&log, "mhohlios").unwrap();
+        let (rendered_path, rendered) = rendered_like(&text).unwrap();
+        assert_eq!(rendered, text);
+        assert!(rendered_path.starts_with("second-brain/logs/assistant/"));
+        assert!(text.contains("repo: assistant\n") && text.contains("- ref: —\n"));
+        let open = |f: &Fixture| -> Vec<(String, Option<i64>)> {
+            (f.host
+                .db
+                .prepare("SELECT session_id,closed_at FROM log_batches")
+                .unwrap())
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+        };
+        assert_eq!(
+            open(&f),
+            [("t1".to_owned(), None)],
+            "one batch per brain and thread"
+        );
+        f.host.delete_thread(&thread.id).unwrap();
+        assert!(
+            open(&f)[0].1.is_some(),
+            "deleting the thread closes its batch"
+        );
+        f.host.send_log_batches(now(), &tools.git).unwrap();
+        let batches = f.host.brain_batches(Some(REPO)).unwrap();
+        assert_eq!(batches[0].source, BrainSource::Space(sage));
+        assert_eq!(
+            batches[0].files,
+            [path.to_owned()],
+            "the entry outlives its thread"
+        );
+        assert!(f.host.thread(&thread.id).is_err());
     }
 
     #[test]
