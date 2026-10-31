@@ -36,6 +36,16 @@ pub(super) fn bindings() -> Vec<KeyBinding> {
     ]
 }
 
+/// Whether a plain `/` opens the overlay that no binding can: when the focus path holds neither
+/// the workspace nor a text field, as when nothing has focus at launch or the focused element
+/// left with its page. Keys then dispatch from the window's root, where no context matches the
+/// `!Input` binding. Focus is never moved for it, so a click never takes it from a field.
+pub(super) fn slash_outside_any_field(keystroke: &Keystroke, contexts: &[KeyContext]) -> bool {
+    keystroke.key == "/"
+        && !keystroke.modifiers.modified()
+        && !(contexts.iter()).any(|c| c.contains("Workspace") || c.contains("Input"))
+}
+
 /// What the overlay searches: one brain, with the project whose scope it may narrow to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Searched {
@@ -547,10 +557,37 @@ pub(super) fn space_in_use(shared: &Shared) -> Option<SpaceId> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Searched, excerpt, no_brain_line, searched_for};
+    use super::{Searched, excerpt, no_brain_line, searched_for, slash_outside_any_field};
     use crate::Shared;
+    use gpui::{KeyContext, Keystroke};
     use std::rc::Rc;
     use workspace_core::*;
+
+    #[test]
+    fn a_slash_opens_search_by_itself_only_where_no_binding_and_no_field_can_take_it() {
+        let slash = Keystroke::parse("/").unwrap();
+        let contexts = |names: &[&str]| -> Vec<KeyContext> {
+            names
+                .iter()
+                .map(|n| KeyContext::parse(n).unwrap())
+                .collect()
+        };
+        assert!(slash_outside_any_field(&slash, &[]), "nothing focused");
+        assert!(
+            !slash_outside_any_field(&slash, &contexts(&["Workspace"])),
+            "the binding's"
+        );
+        assert!(
+            !slash_outside_any_field(&slash, &contexts(&["Workspace", "ChatComposer", "Input"])),
+            "typed into the composer"
+        );
+        assert!(
+            !slash_outside_any_field(&slash, &contexts(&["Dialog", "Input"])),
+            "typed into a dialog's field"
+        );
+        let shifted = Keystroke::parse("cmd-/").unwrap();
+        assert!(!slash_outside_any_field(&shifted, &[]));
+    }
 
     #[test]
     fn without_a_selected_project_search_uses_the_brain_of_the_space_last_used() {

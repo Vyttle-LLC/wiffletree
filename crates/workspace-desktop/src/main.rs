@@ -245,9 +245,6 @@ struct Workspace {
     contexts: Entity<context_view::Contexts>,
     last_repository_refresh: Option<std::time::Instant>,
     progress_fetch: activity::StepFetch,
-    /// Holds focus when nothing else does, such as on a page without a text field, so keys
-    /// still pass through the workspace's key context.
-    focus: FocusHandle,
     /// The Space of the project last selected, whose brain ⌘K searches once none is.
     last_space: Option<SpaceId>,
 }
@@ -331,11 +328,8 @@ impl Workspace {
             contexts,
             last_repository_refresh: None,
             progress_fetch: Default::default(),
-            focus: cx.focus_handle(),
             last_space: None,
         };
-        cx.on_focus_lost(window, |view, window, cx| view.focus.focus(window, cx))
-            .detach();
         if let Some(changes) = view.bridge.changes() {
             cx.spawn_in(window, async move |this, cx| {
                 while changes.recv().await.is_ok() {
@@ -1490,6 +1484,20 @@ fn main() -> anyhow::Result<()> {
             KeyBinding::new("cmd-q", Quit, None),
         ]);
         cx.bind_keys(brain_search::bindings());
+        cx.intercept_keystrokes(|event, window, cx| {
+            let main = cx
+                .default_global::<MainWindow>()
+                .0
+                .as_ref()
+                .map(|(h, _)| *h);
+            if main == Some(window.window_handle())
+                && brain_search::slash_outside_any_field(&event.keystroke, &window.context_stack())
+            {
+                cx.stop_propagation();
+                window.dispatch_action(Box::new(brain_search::OpenBrainSearch), cx);
+            }
+        })
+        .detach();
         cx.on_action(|_: &About, _| show_about());
         // Settings needs no main window, so it opens even after that one is closed.
         // Deferred so ⌘, pressed inside Settings can still focus that window.
