@@ -174,10 +174,12 @@ impl RepositoryRead {
 }
 
 /// The commit a read uses: `origin/<base>` as last fetched, else the local base branch; for a
-/// base of `HEAD`, origin's default branch, never the branch checked out here.
+/// base already naming origin's branch, as `origin/main`, that one; for a base of `HEAD`,
+/// origin's default branch, never the branch checked out here.
 fn base_commit(folder: &Path, base: &str) -> Option<String> {
     let references = match base {
         "HEAD" => vec!["refs/remotes/origin/HEAD".to_owned()],
+        _ if base.starts_with("origin/") => vec![format!("refs/remotes/{base}")],
         _ => vec![
             format!("refs/remotes/origin/{base}"),
             format!("refs/heads/{base}"),

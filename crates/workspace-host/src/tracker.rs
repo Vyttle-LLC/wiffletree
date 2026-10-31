@@ -1185,6 +1185,7 @@ impl Host {
                 "DELETE FROM issue_preferred WHERE storage=?1 AND temporary=?2",
                 params![storage.key(), old],
             )?;
+            self.renumber_threads(temporary, number)?;
             for (was, now) in issues {
                 let read = self.is_read(&storage.key(), &was)?;
                 self.reindex_issue(storage, &was)?;

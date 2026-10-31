@@ -234,6 +234,10 @@ impl AssistantPage {
     pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
         self.shared = shared;
         let shown = self.shared.page == Page::Assistant || self.is_docked_now();
+        if shown {
+            // An issue a proposal changes may have changed with this snapshot, by sync or here.
+            self.proposals_read = None;
+        }
         let name = assistant_name(self.shared.snapshot());
         if name != self.named {
             let placeholder = composer_placeholder(&name);

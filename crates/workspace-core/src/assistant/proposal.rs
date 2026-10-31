@@ -32,6 +32,10 @@ pub struct Proposal {
     pub change: ProposalChange,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<Outcome>,
+    /// The new issues a split's Apply filed before it stopped, in order; trying again files
+    /// only the rest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filed: Vec<IssueId>,
 }
 
 /// The five kinds of proposal. Those that change an issue keep the issue as it was read when
@@ -105,6 +109,27 @@ impl ProposalChange {
                 ..current.clone()
             }),
             Self::Comment { .. } | Self::NewIssue { .. } => None,
+        }
+    }
+    /// Names `number` wherever it named `temporary`, once the tracker numbered that issue.
+    pub fn renumber(&mut self, temporary: &IssueId, number: &IssueId) {
+        let swap = |id: &mut IssueId| {
+            if id == temporary {
+                *id = number.clone();
+            }
+        };
+        match self {
+            Self::Edit { id, base, .. } | Self::Split { id, base, .. } => {
+                swap(id);
+                swap(&mut base.id);
+            }
+            Self::Duplicate { id, of, base } => {
+                swap(id);
+                swap(of);
+                swap(&mut base.id);
+            }
+            Self::Comment { id, .. } => swap(id),
+            Self::NewIssue { .. } => {}
         }
     }
     /// Whether `edited` is the same kind of proposal for the same issue, as the human's Edit
@@ -254,16 +279,45 @@ pub fn diff(before: &Issue, after: &Issue) -> Vec<DiffLine> {
     if before.description != after.description {
         let was: Vec<&str> = before.description.lines().collect();
         let now: Vec<&str> = after.description.lines().collect();
-        for line in &was {
-            if !now.contains(line) {
-                lines.push(DiffLine::Removed(line.to_string()));
-            }
+        lines.extend(line_diff(&was, &now));
+    }
+    lines
+}
+
+/// The most line pairs `line_diff` compares; past it, every line shows removed and added.
+const MAX_DIFF_CELLS: usize = 1_000_000;
+
+/// `was` to `now` in order, by their longest common run of lines: each line kept, removed or
+/// added where it is, so a deleted repeat or a move shows.
+fn line_diff(was: &[&str], now: &[&str]) -> Vec<DiffLine> {
+    let line = |text: &&str| text.to_string();
+    if (was.len() + 1) * (now.len() + 1) > MAX_DIFF_CELLS {
+        let removed = was.iter().map(line).map(DiffLine::Removed);
+        return removed
+            .chain(now.iter().map(line).map(DiffLine::Added))
+            .collect();
+    }
+    // `common[i][j]`: the longest common run of `was[i..]` and `now[j..]`.
+    let mut common = vec![vec![0usize; now.len() + 1]; was.len() + 1];
+    for i in (0..was.len()).rev() {
+        for j in (0..now.len()).rev() {
+            common[i][j] = match was[i] == now[j] {
+                true => common[i + 1][j + 1] + 1,
+                false => common[i + 1][j].max(common[i][j + 1]),
+            };
         }
-        for line in &now {
-            match was.contains(line) {
-                true => lines.push(DiffLine::Same(line.to_string())),
-                false => lines.push(DiffLine::Added(line.to_string())),
-            }
+    }
+    let (mut i, mut j, mut lines) = (0, 0, vec![]);
+    while i < was.len() || j < now.len() {
+        if i < was.len() && j < now.len() && was[i] == now[j] {
+            lines.push(DiffLine::Same(line(&was[i])));
+            (i, j) = (i + 1, j + 1);
+        } else if j < now.len() && (i == was.len() || common[i][j + 1] >= common[i + 1][j]) {
+            lines.push(DiffLine::Added(line(&now[j])));
+            j += 1;
+        } else {
+            lines.push(DiffLine::Removed(line(&was[i])));
+            i += 1;
         }
     }
     lines
@@ -337,6 +391,24 @@ mod tests {
                 DiffLine::Same("Since Monday it retries.".into()),
                 DiffLine::Added("## Acceptance criteria".into()),
             ]
+        );
+    }
+
+    #[test]
+    fn the_description_diff_shows_a_deleted_repeat_and_a_move() {
+        let changed = |was: &str, now: &str| diff(&issue(was), &issue(now));
+        let same = |text: &str| DiffLine::Same(text.into());
+        let (removed, added) = (
+            |text: &str| DiffLine::Removed(text.into()),
+            |text: &str| DiffLine::Added(text.into()),
+        );
+        assert_eq!(
+            changed("Required\nRequired\nDone", "Required\nDone"),
+            [same("Required"), removed("Required"), same("Done")]
+        );
+        assert_eq!(
+            changed("First\nThen", "Then\nFirst"),
+            [added("Then"), same("First"), removed("Then")]
         );
     }
 

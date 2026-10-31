@@ -5,7 +5,7 @@
 use crate::*;
 use workspace_core::assistant::Thread;
 use workspace_core::assistant::proposal::{
-    ChangedSince, IssueChanges, Outcome, Proposal, ProposalChange, ProposalView,
+    Attached, ChangedSince, IssueChanges, Outcome, Proposal, ProposalChange, ProposalView,
 };
 
 /// The longest description or comment a proposal may hold, in bytes.
@@ -129,6 +129,7 @@ impl Host {
             created_at: now(),
             change,
             outcome: None,
+            filed: vec![],
         };
         let result = json!({"proposal": proposal.id, "note": SHOWN});
         thread.proposals.push(proposal);
@@ -136,6 +137,38 @@ impl Host {
         Ok(result)
     }
 
+    /// A temporary issue the tracker numbered, in every thread that names it: the issue it is
+    /// attached to, its title and its proposals, so it stays the one thread for that issue and
+    /// its proposals still apply.
+    pub(crate) fn renumber_threads(&self, temporary: &IssueId, number: &IssueId) -> Result<()> {
+        for mut thread in self.threads()? {
+            let before = thread.clone();
+            if let Some(Attached::Issue { id }) = &mut thread.attached
+                && id == temporary
+            {
+                *id = number.clone();
+            }
+            if let Some(rest) = thread.title.strip_prefix(&temporary.to_string()) {
+                thread.title = format!("{number}{rest}");
+            }
+            for proposal in &mut thread.proposals {
+                proposal.change.renumber(temporary, number);
+                let issues = match &mut proposal.outcome {
+                    Some(Outcome::Applied { issues, .. }) => Some(issues),
+                    _ => None,
+                };
+                for id in (proposal.filed.iter_mut()).chain(issues.into_iter().flatten()) {
+                    if id == temporary {
+                        *id = number.clone();
+                    }
+                }
+            }
+            if thread != before {
+                self.save_thread(&thread)?;
+            }
+        }
+        Ok(())
+    }
     /// The thread's pending proposals as their cards show them now: each issue as it stands,
     /// and who changed it since the proposal read it.
     pub fn proposal_views(&self, thread_id: &str) -> Result<Vec<ProposalView>> {
@@ -220,9 +253,20 @@ impl Host {
             ProposalChange::Split {
                 id, changes, new, ..
             } => {
-                let mut filed = vec![];
                 for issue in new {
+                    tracker::validate_title(&issue.title)?;
+                }
+                // Each issue filed is kept as it is filed, so trying again after a failure
+                // files none of them twice.
+                let mut filed = pending(&thread, proposal_id)?.filed.clone();
+                for issue in new.iter().skip(filed.len()) {
                     filed.push(self.file_issue(&space.id, issue.clone(), true)?.id);
+                    let mut kept = self.thread(thread_id)?;
+                    if let Some(proposal) = kept.proposals.iter_mut().find(|p| p.id == proposal_id)
+                    {
+                        proposal.filed = filed.clone();
+                    }
+                    self.save_thread(&kept)?;
                 }
                 let current = self.parsed_issue(id)?;
                 let mut after = changes.apply(&current);
@@ -495,6 +539,13 @@ mod tests {
         assert!(host.read_issue(&issue.id).unwrap().links.is_empty());
         let launch = host.thread_launch(&session).unwrap();
         assert!(launch.issue_thread && launch.sources.is_empty());
+        // Its turns name the attached issue, by ID only.
+        let told = host.thread_instructions(&session).unwrap();
+        assert!(
+            told.contains(&format!("opened this thread on {}", issue.id)),
+            "{told}"
+        );
+        assert!(!told.contains(&issue.title));
         // A thread with nothing attached may propose an issue, and nothing else of these.
         let plain = host
             .start_thread("plain", &sage.id, "Hi", &[], None)
@@ -610,6 +661,89 @@ mod tests {
     }
 
     #[test]
+    fn a_numbered_issue_keeps_its_one_thread_and_its_pending_proposals() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let (_home, mut host) = crate::storage::tests::host();
+        let staged = storage::stage(&host.home, NAME, &github.tools(), &[]).unwrap();
+        let sage = JoinSpace {
+            folder: "sage".into(),
+            brain_path: None,
+            clones: vec![],
+        };
+        host.join_spaces(staged, &[sage]).unwrap();
+        let sage = space_named(&host, "Sage");
+        host.record_gh_login(Some("jlin".into()));
+        let new = NewIssue {
+            title: "Watch app drops replies".into(),
+            ..NewIssue::default()
+        };
+        let issue = host.create_issue(&sage.id, new).unwrap();
+        assert!(issue.id.is_temporary());
+        let (thread, session) = issue_thread(&mut host, &issue);
+        let args = json!({"id": issue.id, "body": "Reject it."});
+        call(&mut host, &session, "propose_comment", args).unwrap();
+        host.sync_issues(None, &github.tools()).unwrap();
+        let numbered = IssueId::parse("SAGE-1").unwrap();
+        let renamed = host.thread(&thread.id).unwrap();
+        let attached = Attached::Issue {
+            id: numbered.clone(),
+        };
+        assert_eq!(renamed.attached.as_ref(), Some(&attached));
+        assert!(renamed.title.starts_with("SAGE-1 · "), "{}", renamed.title);
+        let again = host.open_issue_thread(&attached, None).unwrap();
+        assert_eq!(again.id, thread.id, "still the one thread for the issue");
+        let proposal = pending_id(&host, &thread.id);
+        host.apply_proposal(&thread.id, &proposal, None).unwrap();
+        assert_eq!(host.read_issue(&numbered).unwrap().comments.len(), 1);
+    }
+
+    #[test]
+    fn a_split_files_nothing_on_a_bad_title_and_never_twice_after_a_failed_link() {
+        let (_home, mut host, sage, issue) = sage_here();
+        let (thread, session) = issue_thread(&mut host, &issue);
+        let args = json!({"id": issue.id, "new": [{"title": "Reject a bad payload"}, {"title": "Log by event ID"}]});
+        call(&mut host, &session, "propose_split", args).unwrap();
+        let proposal = pending_id(&host, &thread.id);
+        let count = |host: &Host| host.list_issues(Some(&sage.id), None).unwrap().len();
+        let ProposalChange::Split {
+            id,
+            base,
+            changes,
+            mut new,
+        } = host.thread(&thread.id).unwrap().proposals[0].change.clone()
+        else {
+            panic!("a split");
+        };
+        new[1].title = "x".repeat(600);
+        let edited = ProposalChange::Split {
+            id,
+            base,
+            changes,
+            new,
+        };
+        assert!(
+            host.apply_proposal(&thread.id, &proposal, Some(edited))
+                .is_err()
+        );
+        assert_eq!(count(&host), 1, "no new issue was filed");
+        // The original can't be read meanwhile, so its link fails after the filings.
+        let file = host
+            .storage_folder(&sage.storage.repository)
+            .join(tracker::issue_file(&issue.id));
+        let written = fs::read_to_string(&file).unwrap();
+        fs::write(&file, "Edited by hand, with no front matter.\n").unwrap();
+        assert!(host.apply_proposal(&thread.id, &proposal, None).is_err());
+        assert_eq!(count(&host), 3);
+        assert_eq!(host.thread(&thread.id).unwrap().proposals[0].filed.len(), 2);
+        fs::write(&file, written).unwrap();
+        host.apply_proposal(&thread.id, &proposal, None).unwrap();
+        assert_eq!(count(&host), 3, "trying again files neither twice");
+        let original = host.read_issue(&issue.id).unwrap().issue.unwrap();
+        assert_eq!(original.related.len(), 2);
+    }
+
+    #[test]
     fn a_proposal_whose_issue_changed_shows_it_and_applies_on_the_new_version() {
         let (_home, mut host, _sage, issue) = sage_here();
         let (thread, session) = issue_thread(&mut host, &issue);
@@ -663,7 +797,6 @@ mod tests {
         let (home, mut host, sage, issue) = sage_here();
         let folder = home.path().join("watch-app");
         let repository = clone_here(&mut host, &folder, "Sage-Social/watch-app");
-        host.set_repository_base(&repository.id, "main").unwrap();
         host.set_repository_spaces("Sage-Social/watch-app", std::slice::from_ref(&sage.id))
             .unwrap();
         let elsewhere = home.path().join("other");
@@ -675,6 +808,10 @@ mod tests {
         fs::write(folder.join("delivery.rs"), &lines).unwrap();
         git(&folder, &["add", "."]);
         git(&folder, &["commit", "-q", "-m", "Delivery"]);
+        // The base as an import records it: origin's branch, as last fetched.
+        git(&folder, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        host.set_repository_base(&repository.id, "origin/main")
+            .unwrap();
         // Neither another branch nor the worktree is read.
         git(&folder, &["checkout", "-q", "-b", "feature"]);
         fs::write(folder.join("feature.rs"), "delivery on a branch\n").unwrap();

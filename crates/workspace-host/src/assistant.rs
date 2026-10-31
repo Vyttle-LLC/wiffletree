@@ -664,6 +664,16 @@ impl Host {
         let space = self.space(&thread.space_id)?.space;
         // A job's run gets the Job run core in place of the Assistant core.
         let mut text = self.instructions(session.role);
+        // Only the ID: the issue's text is untrusted, and the thread reads it with read_issue.
+        match &thread.attached {
+            Some(Attached::Issue { id }) => text.push_str(&format!(
+                "\n## This issue thread\nThe human opened this thread on {id}, an issue of your Space's tracker. \"This issue\" means {id}: read it with `read_issue` before you answer about it.\n"
+            )),
+            Some(Attached::Issues) => text.push_str(
+                "\n## This issue thread\nThe human opened this thread on your Space's tracker's list of issues. Read it with `list_issues` before you answer about it.\n",
+            ),
+            None => {}
+        }
         if !space.instructions.trim().is_empty() {
             let changed = (self.space_changed_by(&space)).map_or(String::new(), |who| {
                 format!(" They were last changed by {who}.")

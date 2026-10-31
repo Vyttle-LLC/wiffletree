@@ -365,14 +365,38 @@ impl AssistantPage {
         let Some(thread) = self.open.clone() else {
             return;
         };
-        let ask = ask::apply_proposal(thread, id.to_owned(), edited);
-        self.ask(ask, window, cx, |view, applied, window, cx| match applied {
-            Ok(_) => {
-                view.editing = None;
-                cx.emit(Intent::IssuesChanged);
+        // The card must show the issue as it is now: one that changed since it was drawn is
+        // drawn again, with its banner, and applied only on the next click.
+        let shown = (self.proposal_views.iter())
+            .find(|v| v.proposal_id == id)
+            .cloned();
+        let id = id.to_owned();
+        let ask = ask::proposals(thread.clone());
+        self.ask(ask, window, cx, move |view, views, window, cx| {
+            let views = match views {
+                Ok(views) => views,
+                Err(error) => return toast_error(error, window, cx),
+            };
+            let now = views.iter().find(|v| v.proposal_id == id).cloned();
+            if now != shown {
+                view.proposal_views = views;
+                toast_error(
+                    "The issue changed since this card was drawn. Check it again, then apply.",
+                    window,
+                    cx,
+                );
                 cx.notify();
+                return;
             }
-            Err(error) => toast_error(error, window, cx),
+            let ask = ask::apply_proposal(thread, id, edited);
+            view.ask(ask, window, cx, |view, applied, window, cx| match applied {
+                Ok(_) => {
+                    view.editing = None;
+                    cx.emit(Intent::IssuesChanged);
+                    cx.notify();
+                }
+                Err(error) => toast_error(error, window, cx),
+            });
         });
     }
     fn discard(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
