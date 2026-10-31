@@ -223,10 +223,6 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
                 state: text(),
             },
         },
-        Command::AttachBrain {
-            project_id: text(),
-            path: text(),
-        },
         Command::CreateSpace {
             name: text(),
             description: text(),
@@ -354,10 +350,6 @@ fn space_commands_are_the_humans() {
         Command::MoveProjectToSpace {
             project_id: text(),
             space_id: space().id,
-        },
-        Command::AttachBrain {
-            project_id: text(),
-            path: text(),
         },
         Command::JoinSpaces {
             repository: text(),

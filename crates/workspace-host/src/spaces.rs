@@ -486,12 +486,6 @@ impl Host {
         tx.commit()?;
         Ok(project)
     }
-    /// Sets the brain of the project's Space to the local folder `path`, keeping the folder in
-    /// it that a local brain already names.
-    pub fn attach_brain(&mut self, project: &str, path: &str) -> Result<()> {
-        let project = self.project(project)?;
-        self.set_local_brain(&project.space, path, Some(&project.id))
-    }
     /// Sets the Space's brain from its page: where a GitHub brain is cloned on this Mac, or else
     /// a local folder.
     pub fn set_space_brain(&mut self, space: &SpaceId, path: &str) -> Result<()> {
@@ -501,7 +495,7 @@ impl Host {
             ..
         }) = &space.brain
         else {
-            return self.set_local_brain(&space.id, path, None);
+            return self.set_local_brain(&space.id, path);
         };
         let brain = format!("{owner}/{name}");
         let path = fs::canonicalize(path).context("The brain's clone must already exist")?;
@@ -522,13 +516,8 @@ impl Host {
         Ok(())
     }
     /// Sets the Space's brain to the local folder `path`, keeping the folder in it that a local
-    /// brain already names; `project`, when it was set from one, records it there.
-    fn set_local_brain(
-        &mut self,
-        space: &SpaceId,
-        path: &str,
-        project: Option<&str>,
-    ) -> Result<()> {
+    /// brain already names.
+    fn set_local_brain(&mut self, space: &SpaceId, path: &str) -> Result<()> {
         let path = fs::canonicalize(path)
             .context("Brain directory must already exist; setup is explicit")?;
         ensure!(path.is_dir(), "Brain attachment must be a directory");
@@ -557,9 +546,6 @@ impl Host {
                 "UPDATE spaces SET data=?2,local=?3 WHERE id=?1",
                 params![space.id.as_str(), encode(&space)?, encode(&local)?],
             )?;
-            if let Some(project) = project {
-                Self::event(&host.db, project, None, "brain_attached", &path)?;
-            }
             host.write_space_file(&space)
         })
     }

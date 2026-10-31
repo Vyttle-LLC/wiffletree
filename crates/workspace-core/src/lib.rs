@@ -1,6 +1,7 @@
 //! Provider-neutral contracts. No renderer, database or provider runtime dependencies.
 pub mod ask;
 pub mod backoff;
+mod brain;
 mod client;
 mod context;
 pub mod data_dir;
@@ -31,6 +32,7 @@ mod steps;
 mod suggestion;
 mod usage;
 use anyhow::{Context, Result, bail, ensure};
+pub use brain::*;
 pub use client::*;
 pub use context::*;
 pub use files::*;
@@ -3094,11 +3096,6 @@ pub enum Command {
         before: Option<i64>,
         limit: usize,
     },
-    /// Sets the brain of the project's Space to a local folder.
-    AttachBrain {
-        project_id: String,
-        path: String,
-    },
     /// Creates a Space with local storage and a local tracker, or, with `storage`, stored in
     /// that private GitHub repository (`owner/name` or its URL), whose tracker it shares; without
     /// `prefix`, a new tracker gets the one proposed from the Space's name.
@@ -3182,6 +3179,40 @@ pub enum Command {
     /// Applies the human's choices for the upgrade's suggestions and stops offering them.
     ConfirmRepositorySuggestions {
         choices: Vec<RepositorySpaces>,
+    },
+    /// The brains this Mac's Spaces name and their batches; answered with `BrainsPage`.
+    Brains,
+    /// The brain to pre-fill for a Space with these code repositories (`owner/name`): the one
+    /// another Space names for their GitHub owner, or none. Answered with an `Option<String>`.
+    SuggestSpaceBrain {
+        repositories: Vec<String>,
+    },
+    /// Allows the host to push batch branches to the brain `owner/name`, open pull requests from
+    /// them into `main` and turn on auto-merge for them.
+    ConfirmBrain {
+        repository: String,
+    },
+    /// Forgets a brain no Space names any longer and deletes the host's checkout of it. GitHub
+    /// is untouched.
+    ForgetBrain {
+        repository: String,
+    },
+    /// Queues the batch that adds `wiffletree-brain.json`, with this host as compiler, and the
+    /// gate's caller, config, allow-list and `CODEOWNERS` lines; answered with the `BrainBatch`.
+    SetUpBrain {
+        repository: String,
+    },
+    /// Queues a batch that changes only the compiler in `wiffletree-brain.json`, keeping the
+    /// keys this host does not know; answered with the `BrainBatch`.
+    SetBrainCompiler {
+        repository: String,
+        compiler: BrainCompiler,
+    },
+    /// Amends or discards a batch whose pull request is open and unmerged; answered with the
+    /// `BrainBatch`.
+    AmendBrainBatch {
+        batch_id: String,
+        amendment: BrainAmendment,
     },
     ExportLogs {
         project_id: String,
@@ -3511,6 +3542,8 @@ impl Command {
             | Self::SuggestRepositorySpace { .. }
             | Self::RepositorySuggestions
             | Self::SpaceStorage { .. }
+            | Self::Brains
+            | Self::SuggestSpaceBrain { .. }
             | Self::OriginBranches { .. }
             | Self::RemoteAccess => true,
             Self::ImportRepositories { .. }
@@ -3540,7 +3573,6 @@ impl Command {
             | Self::ResolveAttention { .. }
             | Self::DismissAttention { .. }
             | Self::AppendLog { .. }
-            | Self::AttachBrain { .. }
             | Self::SetSpaceBrain { .. }
             | Self::CreateSpace { .. }
             | Self::UpdateSpace { .. }
@@ -3551,6 +3583,11 @@ impl Command {
             | Self::JoinSpaces { .. }
             | Self::SetTrackerPrefix { .. }
             | Self::SetUpIssues { .. }
+            | Self::ConfirmBrain { .. }
+            | Self::ForgetBrain { .. }
+            | Self::SetUpBrain { .. }
+            | Self::SetBrainCompiler { .. }
+            | Self::AmendBrainBatch { .. }
             | Self::ExportLogs { .. }
             | Self::SetWorkspacesDir { .. }
             | Self::SetVerification { .. }
@@ -3595,7 +3632,8 @@ impl Command {
     /// the host may merge into, and a settings repository the host pushes to.
     /// Spaces are the human's: creating, editing or removing one, setting its brain, moving a
     /// project into one and choosing which repositories it lists, and reading where its storage
-    /// is on this Mac. Remote access is the human's too: its state carries the pairing code.
+    /// is on this Mac. So are brains: the push grant, forgetting one, Set up, the compiler and
+    /// amending a batch. Remote access is the human's too: its state carries the pairing code.
     pub fn is_human_only(&self) -> bool {
         matches!(
             self,
@@ -3616,9 +3654,13 @@ impl Command {
                 | Self::JoinSpaces { .. }
                 | Self::SetTrackerPrefix { .. }
                 | Self::SetUpIssues { .. }
-                | Self::AttachBrain { .. }
                 | Self::SetSpaceBrain { .. }
                 | Self::SpaceStorage { .. }
+                | Self::ConfirmBrain { .. }
+                | Self::ForgetBrain { .. }
+                | Self::SetUpBrain { .. }
+                | Self::SetBrainCompiler { .. }
+                | Self::AmendBrainBatch { .. }
                 | Self::RemoteAccess
                 | Self::SetRemoteAccess { .. }
                 | Self::OpenPairing

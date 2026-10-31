@@ -55,6 +55,8 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::SuggestRepositorySpace { .. }
         | Command::RepositorySuggestions
         | Command::SpaceStorage { .. }
+        | Command::Brains
+        | Command::SuggestSpaceBrain { .. }
         | Command::OriginBranches { .. } => Row::Read,
         Command::ResolvePaths { .. } | Command::ReadFile { .. } | Command::ListFolder { .. } => {
             Row::HostPath
@@ -88,7 +90,6 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::ResolveAttention { .. }
         | Command::DismissAttention { .. }
         | Command::AppendLog { .. }
-        | Command::AttachBrain { .. }
         | Command::SetSpaceBrain { .. }
         | Command::CreateSpace { .. }
         | Command::UpdateSpace { .. }
@@ -99,6 +100,11 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::JoinSpaces { .. }
         | Command::SetTrackerPrefix { .. }
         | Command::SetUpIssues { .. }
+        | Command::ConfirmBrain { .. }
+        | Command::ForgetBrain { .. }
+        | Command::SetUpBrain { .. }
+        | Command::SetBrainCompiler { .. }
+        | Command::AmendBrainBatch { .. }
         | Command::ExportLogs { .. }
         | Command::SetWorkspacesDir { .. }
         | Command::SetVerification { .. }

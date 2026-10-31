@@ -464,6 +464,20 @@ fn spawn_storage_pass(
         Event::StorageSynced,
     );
 }
+fn spawn_brain_pass(
+    sender: Sender<Event>,
+    repository: String,
+    pass: brains::Pass,
+    tools: publish::Tools,
+) {
+    spawn_job(
+        sender,
+        repository,
+        move |_| Some(brains::pass(pass, &tools)),
+        |_| None,
+        Event::BrainPassed,
+    );
+}
 fn spawn_skill_merge(sender: Sender<Event>, run: skills::MergeRun) {
     spawn_job(
         sender,
@@ -591,6 +605,8 @@ enum Event {
     },
     /// A storage repository's pass finished on its own thread.
     StorageSynced(String, Result<storage::Passed>),
+    /// A brain's pass finished on its own thread; `None` when it panicked.
+    BrainPassed(String, Option<brains::Passed>),
     /// A storage repository was checked and cloned off the host thread, for a new Space or the
     /// Spaces to join.
     StorageStaged {
@@ -892,6 +908,8 @@ struct Actor {
     /// By `repos::key`, the pace of each GitHub storage repository that is not the settings
     /// repository, whose pass runs with the settings rule set.
     storage_paces: std::collections::BTreeMap<String, repos::Pace>,
+    /// By `owner/name`, the pace of each brain a Space names.
+    brain_paces: std::collections::BTreeMap<String, repos::Pace>,
     /// The listener for paired devices, open while remote access is on.
     remote: remote::Remote,
     /// The count of things that need the human, as last sent.
@@ -1042,6 +1060,7 @@ impl Service {
                     publish_tools: publish::Tools::default(),
                     sync_pace: repos::Pace::every(&[sync::CADENCE_MS]),
                     storage_paces: Default::default(),
+                    brain_paces: Default::default(),
                     remote: remote::Remote::new(remote, requests),
                     attention: None,
                 };
@@ -1458,6 +1477,9 @@ impl Actor {
                 self.storage_paces
                     .values_mut()
                     .for_each(repos::Pace::sync_now);
+                self.brain_paces
+                    .values_mut()
+                    .for_each(repos::Pace::sync_now);
                 let _ = reply.try_send(Ok(Value::Null));
             }
             Command::RefreshCodexQuota => {
@@ -1557,6 +1579,7 @@ impl Actor {
         // Storage first, as a write to a Space stored in the settings clone makes its pass due.
         let storing = self.refresh_storage_sync(now());
         let syncing = self.refresh_settings_sync(now()) || storing;
+        self.refresh_brains(now());
         self.start_skill_merges();
         self.signal(dirty || syncing);
         if !self.checkout_deferred.is_empty()
@@ -1766,6 +1789,48 @@ impl Actor {
             self.wake(due);
         }
         started
+    }
+
+    /// Starts a pass of each brain a Space names when one is due, off the host thread, and arms a
+    /// wake-up for the next: every minute while it has a batch in flight, every five otherwise,
+    /// backing off to thirty minutes while GitHub cannot be reached. A brain command makes every
+    /// pass due at once.
+    fn refresh_brains(&mut self, at: i64) {
+        let now_due = std::mem::take(&mut self.host.brains_now);
+        let cadences = self.host.brain_cadences().unwrap_or_else(|e| {
+            eprintln!("Brains: {e:#}");
+            vec![]
+        });
+        self.brain_paces
+            .retain(|key, pace| pace.running() || cadences.iter().any(|(k, _)| k == key));
+        for (repository, every) in cadences {
+            let pace = (self.brain_paces.entry(repository.clone()))
+                .or_insert_with(|| repos::Pace::every(&[every]));
+            pace.set_every(every);
+            if now_due {
+                pace.sync_now();
+            }
+            if !pace.start(at) {
+                continue;
+            }
+            match self.host.brain_pass(&repository) {
+                Ok(Some(pass)) => {
+                    let tools = self.publish_tools.clone();
+                    spawn_brain_pass(self.sender.clone(), repository, pass, tools);
+                }
+                Ok(None) => pace.finish(at, true),
+                Err(e) => {
+                    pace.finish(at, false);
+                    eprintln!("Brain {repository}: {e:#}");
+                }
+            }
+        }
+        if let Some(due) = (self.brain_paces.values())
+            .filter_map(repos::Pace::next_due)
+            .min()
+        {
+            self.wake(due);
+        }
     }
 
     /// Starts a PR pass for each due repository, one per repository at a time, and arms a
@@ -1980,6 +2045,24 @@ impl Actor {
                 let adopted = result.is_ok();
                 let _ = reply.try_send(result);
                 adopted
+            }
+            Event::BrainPassed(repository, passed) => {
+                let reached = passed.as_ref().is_some_and(|p| p.reached);
+                let merged = match passed {
+                    Some(passed) => self.host.finish_brain_pass(passed).unwrap_or_else(|e| {
+                        eprintln!("Brain {repository}: {e:#}");
+                        false
+                    }),
+                    None => false,
+                };
+                if let Some(pace) = self.brain_paces.get_mut(&repository) {
+                    pace.finish(now(), reached);
+                    // The next batch starts from the merged commit.
+                    if merged {
+                        pace.sync_now();
+                    }
+                }
+                true
             }
             Event::StorageSynced(key, passed) => {
                 if let Some(pace) = self.storage_paces.get_mut(&key) {
@@ -4661,6 +4744,7 @@ mod tests {
             publish_tools: publish::Tools::default(),
             sync_pace: repos::Pace::every(&[sync::CADENCE_MS]),
             storage_paces: Default::default(),
+            brain_paces: Default::default(),
             remote: remote::Remote::new(remote::Options::default(), requests),
             attention: None,
         };

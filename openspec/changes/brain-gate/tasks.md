@@ -19,7 +19,8 @@ No dependency on the other brain changes, or on `spaces`, for steps 1–3, which
 
 ## 4. Set up and update
 
-- [ ] 4.1 `brain-registry-sync` Set up: add the caller, the `gate` config, the allow-list and the `CODEOWNERS` lines in one PR. Update gate opens a PR with only the pins and version. Show the pinned and latest versions on the Brains page, warn on a contract mismatch and hold batches.
+- [x] 4.1 `brain-registry-sync` Set up: add the caller, the `gate` config, the allow-list and the `CODEOWNERS` lines in one PR.
+- [ ] 4.2 Update gate opens a PR with only the pins and version. Show the pinned and latest versions on the Brains page, warn on a contract mismatch and hold batches.
 
 ## 5. Release and adopt
 

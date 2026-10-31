@@ -200,6 +200,16 @@ impl SpacesPage {
         self.loaded = Some((space.clone(), read));
     }
 
+    /// Shows one Space's page, as a link from another page does.
+    pub(super) fn open_space(
+        &mut self,
+        space: SpaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show(Shown::Space(space), window, cx);
+    }
+
     fn show(&mut self, shown: Shown, window: &mut Window, cx: &mut Context<Self>) {
         self.error = None;
         self.refused_by = None;

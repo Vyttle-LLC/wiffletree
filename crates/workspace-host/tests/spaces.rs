@@ -233,7 +233,7 @@ fn an_upgraded_project_exports_to_the_same_folder_and_nothing_twice() {
     let mut host = Host::open_set_up(home.path()).unwrap();
     let project = host.create_project("Memory").unwrap();
     let session = coordinator(&host, &project.id);
-    host.attach_brain(&project.id, brain.path().to_str().unwrap())
+    host.set_space_brain(&project.space, brain.path().to_str().unwrap())
         .unwrap();
     let first = host.append_log(log(&session.id, "one")).unwrap();
     host.append_log(log(&session.id, "two")).unwrap();
@@ -269,7 +269,7 @@ fn a_moved_project_exports_later_entries_to_its_new_space() {
     let mut host = Host::open_set_up(home.path()).unwrap();
     let project = host.create_project("Calls").unwrap();
     let session = coordinator(&host, &project.id);
-    host.attach_brain(&project.id, old_brain.path().to_str().unwrap())
+    host.set_space_brain(&project.space, old_brain.path().to_str().unwrap())
         .unwrap();
     let exported = host.append_log(log(&session.id, "one")).unwrap();
     assert_eq!(host.export_logs(&project.id).unwrap().exported, 1);
@@ -281,7 +281,7 @@ fn a_moved_project_exports_later_entries_to_its_new_space() {
     let moved = host.move_project_to_space(&project.id, &vyttle.id).unwrap();
     assert_eq!(moved.space, vyttle.id);
     assert_eq!(moved.repositories, project.repositories);
-    host.attach_brain(&project.id, new_brain.path().to_str().unwrap())
+    host.set_space_brain(&moved.space, new_brain.path().to_str().unwrap())
         .unwrap();
     let later = host.append_log(log(&session.id, "three")).unwrap();
     assert_eq!(host.export_logs(&project.id).unwrap().exported, 2);
@@ -303,11 +303,11 @@ fn a_moved_project_exports_later_entries_to_its_new_space() {
 fn moved_from(host: &mut Host, old: &Path) -> (Project, Session) {
     let project = host.create_project("Calls").unwrap();
     let session = coordinator(host, &project.id);
-    host.attach_brain(&project.id, old.to_str().unwrap())
+    host.set_space_brain(&project.space, old.to_str().unwrap())
         .unwrap();
     let vyttle = host.create_space("Vyttle", "", "", None).unwrap().space;
     host.append_log(log(&session.id, "before")).unwrap();
-    host.move_project_to_space(&project.id, &vyttle.id).unwrap();
+    let project = host.move_project_to_space(&project.id, &vyttle.id).unwrap();
     (project, session)
 }
 
@@ -326,7 +326,7 @@ fn a_space_with_nothing_pending_is_never_touched() {
     // The entry logged before the move reaches the old brain, which is then renamed away.
     assert_eq!(host.export_logs(&project.id).unwrap().exported, 1);
     std::fs::rename(&old, folders.path().join("gone")).unwrap();
-    host.attach_brain(&project.id, new.to_str().unwrap())
+    host.set_space_brain(&project.space, new.to_str().unwrap())
         .unwrap();
     let later = host.append_log(log(&session.id, "after")).unwrap();
     let run = host.export_logs(&project.id).unwrap();
@@ -344,7 +344,7 @@ fn one_spaces_missing_brain_leaves_the_others_entries_delivered() {
     // The entry logged before the move waits for a brain that is no longer there.
     let (project, session) = moved_from(&mut host, &old);
     std::fs::remove_dir(&old).unwrap();
-    host.attach_brain(&project.id, new.to_str().unwrap())
+    host.set_space_brain(&project.space, new.to_str().unwrap())
         .unwrap();
     let later = host.append_log(log(&session.id, "after")).unwrap();
     let error = format!("{:#}", host.export_logs(&project.id).unwrap_err());
@@ -399,7 +399,7 @@ fn attaching_a_brain_sets_it_for_every_project_in_the_space() {
     let one = host.create_project("One").unwrap();
     let two = host.create_project("Two").unwrap();
     assert_eq!(one.space, two.space);
-    host.attach_brain(&one.id, brain.path().to_str().unwrap())
+    host.set_space_brain(&one.space, brain.path().to_str().unwrap())
         .unwrap();
     let record = host.space(&two.space).unwrap();
     assert_eq!(

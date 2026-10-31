@@ -181,6 +181,9 @@ pub fn join_spaces(repository: String, spaces: Vec<JoinSpace>) -> Ask<Vec<SpaceR
 pub fn space_storage(space_id: SpaceId) -> Ask<StorageStatus> {
     Ask::new(Command::SpaceStorage { space_id })
 }
+pub fn brains() -> Ask<BrainsPage> {
+    Ask::new(Command::Brains)
+}
 pub fn set_tracker_prefix(space_id: SpaceId, prefix: String) -> Ask<TrackerConfig> {
     Ask::new(Command::SetTrackerPrefix { space_id, prefix })
 }

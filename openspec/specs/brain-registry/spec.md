@@ -1,4 +1,9 @@
-## ADDED Requirements
+# brain-registry Specification
+
+## Purpose
+The brain registry is how Wiffletree knows and writes the brains its Spaces name: each Mac registers every brain once, reads its shared settings from `wiffletree-brain.json` on `main`, keeps its own checkout as the only writer, and sends every change as a batch branch whose pull request auto-merges once the brain gate's required checks pass, with problems shown on the writing project's Inbox or the Brains page.
+
+## Requirements
 
 ### Requirement: A Space registers its brain
 A brain SHALL be registered on a machine when one of that machine's Spaces names it (see `spaces`, "A Space"). Each brain SHALL be one GitHub repository named `owner/name`, with its push URL, its default branch `main`, the path of the host's checkout and its sync state. Several Spaces MAY name one brain, which is registered once. A brain no Space names any longer SHALL leave the registry, after confirmation, and the host's checkout SHALL be deleted; GitHub SHALL be untouched. Only the human, by editing a Space, SHALL add or remove a brain. Agents SHALL NOT. When the human creates a Space or sets its brain, Wiffletree SHALL suggest a brain from the GitHub owner of the Space's code repositories: the brain another Space already names for that owner, or none. The suggestion SHALL be only pre-filled and never applied without the human's confirmation. Personal and unowned repositories SHALL suggest no brain. The push URL SHALL be found and used as the settings repository's is: the protocol gh is configured with is tried first, with gh's login through a credential helper given for each command only, and no token is stored, logged or put on a command line.
@@ -31,7 +36,7 @@ Confirming a brain for a Space SHALL be what allows the host to push to that rep
 - **THEN** the publish follows `ticket-publishing`'s rules for its owner, unchanged by the brain
 
 ### Requirement: The host owns a separate checkout of each brain
-The host SHALL keep its own clone of each brain at `<data folder>/repos/<owner>-<name>/`, under the one root of `shared-repositories`, and SHALL NOT use a folder the human chose as that checkout. A brain SHALL NOT also be a storage or settings repository on this Mac, and the checkout SHALL NOT be synced by that module's engine. In that checkout the host SHALL only fetch and fast-forward `main`, and SHALL make every change on a batch branch in a worktree of it. It SHALL write a `.git/wiffletree-managed` marker in the checkout. One host process SHALL write to a checkout at a time. When the checkout's `main` cannot be fast-forwarded, or a file in it differs from what the host last wrote or fetched, the host SHALL stop writing to that brain, keep the change, and raise one item on the Brains page. It SHALL NOT reset, stash or overwrite.
+The host SHALL keep its own clone of each brain at `<data folder>/repos/github.com/<owner>/<name>/`, under the one root of `shared-repositories`, and SHALL NOT use a folder the human chose as that checkout. A brain SHALL NOT also be a storage or settings repository on this Mac, and the checkout SHALL NOT be synced by that module's engine. In that checkout the host SHALL only fetch and fast-forward `main`, and SHALL make every change on a batch branch in a worktree of it. It SHALL write a `.git/wiffletree-managed` marker in the checkout. One host process SHALL write to a checkout at a time. When the checkout's `main` cannot be fast-forwarded, or a file in it differs from what the host last wrote or fetched, the host SHALL stop writing to that brain, keep the change, and raise one item on the Brains page. It SHALL NOT reset, stash or overwrite.
 
 #### Scenario: Fetch after a merge
 - **WHEN** a batch PR merges on GitHub
@@ -43,7 +48,7 @@ The host SHALL keep its own clone of each brain at `<data folder>/repos/<owner>-
 
 #### Scenario: Where the checkout lives
 - **WHEN** the Sage Space's brain `Sage-Social/sagehaven-docs` is registered
-- **THEN** the host's checkout is `<data folder>/repos/Sage-Social-sagehaven-docs/`, beside the storage clones
+- **THEN** the host's checkout is `<data folder>/repos/github.com/Sage-Social/sagehaven-docs/`, beside the storage clones
 
 #### Scenario: The human's own clone
 - **WHEN** the human edits `~/dev/sagehaven/sagehaven-docs` in Obsidian
