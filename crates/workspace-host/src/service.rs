@@ -437,12 +437,7 @@ fn spawn_merge_job(
         sender,
         (job, reply),
         move |(job, _)| merge::run(job, &tools),
-        |(job, _)| merge::Outcome {
-            ticket_id: job.ticket_id.clone(),
-            request_id: job.request.id.clone(),
-            result: merge::Decided::Refused("the merge job stopped unexpectedly".into()),
-            children: vec![],
-        },
+        |(job, _)| merge::stopped(job),
         |(_, reply), outcome| Event::Merged(Box::new(outcome), reply),
     );
 }
@@ -2459,7 +2454,7 @@ impl Actor {
                         false
                     });
                 // Each waiting merge is decided again on what this pass recorded.
-                match self.host.merges_due(&repository) {
+                match (self.host).merges_due(&repository, outcome.leaves_headroom()) {
                     Ok(jobs) => jobs
                         .into_iter()
                         .for_each(|job| self.run_merge_job(job, None)),

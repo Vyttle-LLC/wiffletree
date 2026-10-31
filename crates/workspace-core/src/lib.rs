@@ -11,6 +11,7 @@ mod host;
 pub mod host_copy;
 mod index;
 mod launch;
+mod merging;
 mod messages;
 mod models;
 mod owners;
@@ -36,6 +37,7 @@ pub use files::*;
 pub use host::*;
 pub use index::WorkspaceIndex;
 pub use launch::*;
+pub use merging::*;
 pub use messages::*;
 pub use models::*;
 pub use owners::*;
@@ -1981,10 +1983,25 @@ pub struct MergeRequest {
     /// The human approved merging this head.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub approved: bool,
-    /// The method the merge is sent with, recorded once every check held and before it is sent.
+    /// The method the merge is sent with, recorded once every check held and before it is sent,
+    /// and when the human is asked, so the approval card names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<MergeMethod>,
+    /// The commits no review checked that the merge would take, as the approval card lists them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreviewed: Vec<String>,
+    /// What GitHub last said about the pull request while the request waits for the human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read: Option<MergeRead>,
     pub stage: MergeStage,
+}
+/// The pull request's checks and mergeability as the host last read them from GitHub for a
+/// merge request, never from the PR watcher's record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeRead {
+    pub checks: CheckState,
+    /// GitHub had worked out that it merges with no conflict.
+    pub mergeable: bool,
 }
 impl MergeRequest {
     /// Whether the host may merge without asking the human.
@@ -2273,6 +2290,13 @@ fn serde_name(value: &impl Serialize) -> String {
 /// The first seven characters of a commit id.
 pub fn short_sha(sha: &str) -> &str {
     &sha[..sha.len().min(7)]
+}
+/// `text` with its first letter in upper case, such as "Squash" for "squash".
+pub fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or(String::new(), |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

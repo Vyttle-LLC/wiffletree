@@ -104,15 +104,42 @@ pub(crate) struct PrPart {
     pub tone: Tone,
 }
 
+/// What an open PR's line says about merging it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MergePart {
+    /// The coordinator asked to merge it, and the merge waits for its checks.
+    WhenChecksPass,
+    /// The merge waits for the human's approval in the Inbox.
+    WaitsForApproval,
+    /// It opens into a protected branch, which only the human merges into.
+    YoursToMerge,
+}
+
+/// The merge part of the ticket's open PR: a waiting merge request, or a protected base.
+pub(crate) fn merge_part(ticket: &Ticket, repository: Option<&Repository>) -> Option<MergePart> {
+    let pr = ticket.open_pull_request()?;
+    match ticket.merging.as_ref().map(|request| &request.stage) {
+        Some(MergeStage::WaitingForChecks | MergeStage::Rechecking) => {
+            Some(MergePart::WhenChecksPass)
+        }
+        Some(MergeStage::WaitingForHuman { .. }) => Some(MergePart::WaitsForApproval),
+        _ => repository
+            .is_some_and(|r| ProtectedBranches::of(r).protects(&pr.base))
+            .then_some(MergePart::YoursToMerge),
+    }
+}
+
 /// A ticket row's PR line, such as "#142 · checks ✓ · 1 thread · behind", in parts. Only the
-/// parts that apply appear, and an open PR ends with the keeper's part: the commits it adopted
-/// that no review has checked, what it is doing, if anything, and the sorted comments waiting,
-/// which replace "up to date"; a finished PR shows `merged` or `closed` instead of its checks.
+/// parts that apply appear: a protected base after the merge state, then the keeper's part: the
+/// commits it adopted that no review has checked, what it is doing, if anything, and the sorted
+/// comments waiting, which replace "up to date"; then a merge that waits. A finished PR shows
+/// `merged`, or whose merge it was, or `closed` instead of its checks.
 pub(crate) fn pr_line(
     pr: &PullRequest,
     unreviewed: Option<&Unreviewed>,
     keeper: Option<KeeperPart>,
     comments: Option<&KeeperComments>,
+    merge: Option<MergePart>,
     now: i64,
 ) -> Vec<PrPart> {
     let part = |text: &str, tone| PrPart {
@@ -121,6 +148,10 @@ pub(crate) fn pr_line(
     };
     let mut parts = vec![part(&format!("#{}", pr.number), Tone::Muted)];
     match pr.state {
+        PrState::Merged if pr.merged_by_host.is_some() => {
+            parts.push(part(&format!("merged into {}", pr.base), Tone::Merged));
+            parts.push(part("by Wiffletree", Tone::Muted));
+        }
         PrState::Merged => parts.push(part("merged", Tone::Merged)),
         PrState::Closed => parts.push(part("closed", Tone::Muted)),
         PrState::Open => {
@@ -147,6 +178,10 @@ pub(crate) fn pr_line(
             if let Some((word, tone)) = merge_word {
                 parts.push(part(word, tone));
             }
+            if merge == Some(MergePart::YoursToMerge) {
+                parts.push(part(&format!("into {}", pr.base), Tone::Muted));
+                parts.push(part("yours to merge", Tone::Muted));
+            }
             if let Some(unreviewed) = unreviewed {
                 parts.push(part(&not_reviewed(unreviewed), Tone::Warn));
             }
@@ -162,9 +197,53 @@ pub(crate) fn pr_line(
             if let Some(comments) = comments {
                 parts.extend(waiting_comments(comments).map(|(text, tone)| part(&text, tone)));
             }
+            match merge {
+                Some(MergePart::WhenChecksPass) => {
+                    parts.push(part("merges when they pass", Tone::Busy))
+                }
+                Some(MergePart::WaitsForApproval) => {
+                    parts.push(part("merge waits for your approval", Tone::Warn))
+                }
+                Some(MergePart::YoursToMerge) | None => {}
+            }
         }
     }
     parts
+}
+
+/// A PR the host merged, for its Team card: at whose request, then the method, the head and
+/// why the merge was allowed.
+pub(crate) fn host_merge_lines(
+    ticket: &Ticket,
+    repository: Option<&Repository>,
+) -> Option<(String, String)> {
+    let pr = ticket.pull_request.as_ref()?;
+    let merge = pr.merged_by_host.as_ref()?;
+    let line = match merge.approved {
+        true => "at the coordinator’s request, with your approval",
+        false => "at the coordinator’s request",
+    };
+    let head = short_sha(&merge.head);
+    let mut detail = vec![match merge.method {
+        Some(method) => format!("{} · head {head}", capitalized(method.label())),
+        None => format!("Finished after a restart · head {head}"),
+    }];
+    let verified = ticket
+        .verification
+        .as_ref()
+        .and_then(|v| v.verified_commit());
+    if verified == Some(merge.head.as_str()) {
+        detail[0].push_str(", the reviewed commit");
+    }
+    detail.push(match merge.approved {
+        true => "you approved the merge".into(),
+        false => "its review passed".into(),
+    });
+    detail.push(format!("{} was not protected", pr.base));
+    if let Some(owner) = repository.and_then(owner_entry) {
+        detail.push(format!("{owner} is allowed"));
+    }
+    Some((line.into(), detail.join(" · ")))
 }
 
 const MINUTE: i64 = 60_000;
@@ -339,18 +418,11 @@ fn try_lines(tried: &KeeperTry, base: &str, now: i64) -> Option<(String, String)
             format!("tried once at head {head} and threw the try away, {ago}"),
             format!(
                 "{} Nothing was pushed. Handed to the coordinator; the keeper will not try this head again.",
-                capitalize_first(why)
+                capitalized(why)
             ),
         )),
         Some(TryEnd::Pushed | TryEnd::NotPushed) => None,
     }
-}
-
-fn capitalize_first(words: &str) -> String {
-    let mut chars = words.chars();
-    chars.next().map_or(String::new(), |first| {
-        first.to_uppercase().chain(chars).collect()
-    })
 }
 
 /// Each keeper review that was withdrawn, newest first, for the card: kept on the keeper's
@@ -1125,19 +1197,101 @@ mod tests {
     }
     /// The line of a PR with the keeper's part, a minute after the epoch.
     fn kept_line(pr: &PullRequest, keeper: Option<KeeperPart>) -> String {
-        pr_line(pr, None, keeper, None, MINUTE)
+        pr_line(pr, None, keeper, None, None, MINUTE)
             .iter()
             .map(|p| p.text.as_str())
             .collect::<Vec<_>>()
             .join(" · ")
     }
     fn tones(pr: &PullRequest) -> Vec<Tone> {
-        pr_line(pr, None, None, None, 0)
+        pr_line(pr, None, None, None, None, 0)
             .iter()
             .map(|p| p.tone)
             .collect()
     }
     const MINUTE: i64 = 60_000;
+
+    #[test]
+    fn the_pr_line_says_who_merges_and_when() {
+        use {CheckState as C, MergeState as M, PrState as S};
+        let repository: Repository = serde_json::from_value(serde_json::json!({
+            "id": "r", "name": "wiffletree", "path": "/w", "base": "origin/main",
+            "github": {"owner": "Vyttle-LLC", "name": "wiffletree", "facts": {
+                "name_with_owner": "Vyttle-LLC/wiffletree", "organization": true, "fork": false,
+                "public": true, "checked_at": 1}}
+        }))
+        .unwrap();
+        let mut ticket: Ticket = serde_json::from_value(serde_json::json!({
+            "id": "t", "coordinator_id": "c", "repository_id": "r", "title": "Spaces into main",
+            "brief": "B", "worktree": "/w", "branch": "feature/spaces", "state": "passed"
+        }))
+        .unwrap();
+        let parts = |ticket: &Ticket| {
+            let merge = merge_part(ticket, Some(&repository));
+            let pr = ticket.pull_request.as_ref().unwrap();
+            let parts = pr_line(pr, None, None, None, merge, 0);
+            (parts.iter().map(|p| p.text.as_str()).collect::<Vec<_>>()).join(" · ")
+        };
+        ticket.pull_request = Some(pr(S::Open, C::Success, M::Clean));
+        assert_eq!(
+            parts(&ticket),
+            "#142 · checks ✓ · into main · yours to merge"
+        );
+
+        let into_feature = PullRequest {
+            base: "feature/spaces".into(),
+            ..pr(S::Open, C::Pending, M::Clean)
+        };
+        ticket.pull_request = Some(into_feature.clone());
+        assert_eq!(parts(&ticket), "#142 · checks …");
+        let mut request = MergeRequest {
+            id: "m".into(),
+            caller: "c".into(),
+            repository: "Vyttle-LLC/wiffletree".into(),
+            number: 142,
+            branch: "wiffletree/t".into(),
+            base: "feature/spaces".into(),
+            head: "3daf610aa".into(),
+            cycle: 1,
+            waived: None,
+            needs_approval: false,
+            approved: false,
+            method: None,
+            unreviewed: vec![],
+            read: None,
+            stage: MergeStage::WaitingForChecks,
+        };
+        ticket.merging = Some(request.clone());
+        assert_eq!(parts(&ticket), "#142 · checks … · merges when they pass");
+        request.stage = MergeStage::WaitingForHuman { item: "a".into() };
+        ticket.merging = Some(request);
+        assert_eq!(
+            parts(&ticket),
+            "#142 · checks … · merge waits for your approval"
+        );
+
+        ticket.merging = None;
+        ticket.pull_request = Some(PullRequest {
+            state: S::Merged,
+            merged_by_host: Some(HostMerge {
+                method: Some(MergeMethod::Squash),
+                head: "3daf610aa".into(),
+                approved: false,
+            }),
+            ..into_feature
+        });
+        assert_eq!(
+            parts(&ticket),
+            "#142 · merged into feature/spaces · by Wiffletree"
+        );
+        assert_eq!(
+            host_merge_lines(&ticket, Some(&repository)),
+            Some((
+                "at the coordinator’s request".into(),
+                "Squash · head 3daf610 · its review passed · feature/spaces was not protected · Vyttle-LLC is allowed".into()
+            ))
+        );
+    }
 
     #[test]
     fn the_pr_line_shows_only_the_parts_that_apply() {
@@ -1200,7 +1354,7 @@ mod tests {
             "#143 · checks … · rebased 1 min ago"
         );
         assert_eq!(
-            pr_line(&rebased, None, Some(K::Rebased(0)), None, 0)[2].text,
+            pr_line(&rebased, None, Some(K::Rebased(0)), None, None, 0)[2].text,
             "rebased 1 min ago",
             "a moment ago"
         );
@@ -1221,7 +1375,7 @@ mod tests {
             "#142 · checks ✓ · up to date"
         );
         assert_eq!(
-            pr_line(&current, None, Some(K::UpToDate), None, 0)[2].tone,
+            pr_line(&current, None, Some(K::UpToDate), None, None, 0)[2].tone,
             Tone::Muted
         );
         // Not kept: no part. A finished PR has none either.
@@ -1241,7 +1395,7 @@ mod tests {
             ..KeeperComments::default()
         };
         let text = |keeper, comments: &KeeperComments| {
-            let parts = pr_line(&waiting, None, keeper, Some(comments), 0);
+            let parts = pr_line(&waiting, None, keeper, Some(comments), None, 0);
             parts
                 .iter()
                 .map(|p| p.text.clone())
@@ -1256,7 +1410,7 @@ mod tests {
             text(Some(K::Waiting), &comments(0, 2)),
             "#88 · checks ✓ · 1 thread · rebase waiting · 2 questions"
         );
-        let parts = pr_line(&waiting, None, None, Some(&comments(1, 0)), 0);
+        let parts = pr_line(&waiting, None, None, Some(&comments(1, 0)), None, 0);
         assert_eq!(parts.last().unwrap().tone, Tone::Warn);
         // Once the next review starts the ticket has none waiting, and the line names none.
         let mut ticket: Ticket = serde_json::from_value(serde_json::json!({
@@ -1286,7 +1440,7 @@ mod tests {
         };
         let mut adopted = pr(S::Open, C::Pending, M::Clean);
         adopted.number = 141;
-        let parts = pr_line(&adopted, Some(&unreviewed(1)), None, None, MINUTE);
+        let parts = pr_line(&adopted, Some(&unreviewed(1)), None, None, None, MINUTE);
         let texts: Vec<&str> = parts.iter().map(|p| p.text.as_str()).collect();
         assert_eq!(texts, ["#141", "checks …", "1 commit not reviewed"]);
         assert_eq!(parts[2].tone, Tone::Warn);
@@ -1294,6 +1448,7 @@ mod tests {
             &adopted,
             Some(&unreviewed(2)),
             Some(K::UpToDate),
+            None,
             None,
             MINUTE,
         );
@@ -1375,7 +1530,7 @@ mod tests {
             "#139 · conflict · keeper resolving"
         );
         assert_eq!(
-            pr_line(&conflicted, None, part, None, 0)[2].tone,
+            pr_line(&conflicted, None, part, None, None, 0)[2].tone,
             Tone::Busy
         );
         assert_eq!(
@@ -1429,7 +1584,10 @@ mod tests {
         let part = ticket.try_part();
         assert_eq!(part, Some(KeeperPart::Fixing));
         assert_eq!(kept_line(&failed, part), "#142 · checks ✗ · keeper fixing");
-        assert_eq!(pr_line(&failed, None, part, None, 0)[2].tone, Tone::Busy);
+        assert_eq!(
+            pr_line(&failed, None, part, None, None, 0)[2].tone,
+            Tone::Busy
+        );
         assert_eq!(
             keeper_lines(&ticket).unwrap(),
             (

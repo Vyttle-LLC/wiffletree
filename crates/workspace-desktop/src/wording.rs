@@ -6,7 +6,7 @@ pub(super) use tickets::*;
 use crate::ui::now;
 use chrono::{DateTime, Local, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
-use workspace_core::Status;
+use workspace_core::{Status, capitalized};
 
 /// How long ago, "Just now", "5m ago", "3h ago" or "2d ago".
 pub(super) fn age(at: i64) -> String {
@@ -140,12 +140,7 @@ pub(super) fn counted(count: usize, noun: &str) -> String {
 
 /// Turns a host identifier such as `ready_for_testing` into a readable label.
 pub(super) fn humanize(identifier: &str) -> String {
-    let text = identifier.replace('_', " ");
-    let mut chars = text.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
+    capitalized(&identifier.replace('_', " "))
 }
 
 /// Reasoning effort as shown in menus; provider identifiers such as `xhigh` are not words.

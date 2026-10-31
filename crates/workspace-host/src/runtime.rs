@@ -9,7 +9,7 @@ use std::{
     sync::mpsc,
     time::{Duration, Instant},
 };
-use workspace_core::{ModelOption, OwnDescriptors as _, Provider};
+use workspace_core::{ModelOption, OwnDescriptors as _, Provider, capitalized};
 
 struct Process(Child);
 impl Drop for Process {
@@ -489,11 +489,7 @@ fn codex_option(model: &Value) -> Result<ModelOption> {
                         if part == "gpt" {
                             return "GPT".to_owned();
                         }
-                        let mut chars = part.chars();
-                        chars
-                            .next()
-                            .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
-                            .unwrap_or_default()
+                        capitalized(part)
                     })
                     .collect::<Vec<_>>()
                     .join(" ")
@@ -604,11 +600,7 @@ fn claude_version_label(id: &str) -> String {
     };
     let mut parts = rest.split('-');
     let name = parts.next().unwrap_or(rest);
-    let mut chars = name.chars();
-    let name = chars
-        .next()
-        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
-        .unwrap_or_default();
+    let name = capitalized(name);
     let version = parts
         .take_while(|part| part.len() != 8)
         .collect::<Vec<_>>()

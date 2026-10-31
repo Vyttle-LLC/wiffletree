@@ -126,6 +126,8 @@ impl Inspector {
                 p,
             ));
         }
+        let repository_of =
+            |ticket: &Ticket| (snapshot.repositories.iter()).find(|r| r.id == ticket.repository_id);
         // Archived agents appear only while the sidebar is showing them.
         let agents_of = |ticket: &Ticket| {
             (index.agents(&ticket.id))
@@ -170,6 +172,10 @@ impl Inspector {
                     .children(ticket.pull_request.as_ref().map(|pr| {
                         pr_block(&ticket.id, pr, wording::pr_checked(snapshot, ticket), p)
                     }))
+                    .children(
+                        wording::host_merge_lines(ticket, repository_of(ticket))
+                            .map(|lines| labelled_block("Merged by Wiffletree", lines, p)),
+                    )
                     .children(wording::keeper_lines(ticket).map(|lines| keeper_block(lines, p)))
                     .children(
                         wording::withdrawn_lines(ticket)
@@ -335,7 +341,12 @@ fn pr_block(ticket_id: &str, pr: &PullRequest, checked: Option<String>, p: Palet
 }
 
 /// What the PR keeper last did to the ticket's branch.
-fn keeper_block((line, detail): (String, String), p: Palette) -> Div {
+fn keeper_block(lines: (String, String), p: Palette) -> Div {
+    labelled_block("PR keeper", lines, p)
+}
+
+/// Who acted on the ticket's PR, with a line and a detail line.
+fn labelled_block(label: &'static str, (line, detail): (String, String), p: Palette) -> Div {
     div()
         .border_l_2()
         .border_color(p.accent)
@@ -348,7 +359,7 @@ fn keeper_block((line, detail): (String, String), p: Palette) -> Div {
             div()
                 .flex()
                 .gap_x(px(4.))
-                .child(div().font_weight(FontWeight::MEDIUM).child("PR keeper"))
+                .child(div().font_weight(FontWeight::MEDIUM).child(label))
                 .child(div().flex_1().min_w_0().child(format!("· {line}"))),
         )
         .child(hint(detail, p).text_size(px(font::CAPTION)))

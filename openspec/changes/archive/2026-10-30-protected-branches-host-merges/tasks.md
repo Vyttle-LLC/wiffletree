@@ -25,11 +25,11 @@
 ## 4. Desktop
 
 - [x] 4.1 Draw the Protected branches block on each repository row, as in `design/mockups/current/protected-branches.html`.
-- [ ] 4.2 Draw the merge approval card in the Inbox.
-- [ ] 4.3 Show "merges when they pass", "merge waits for your approval", "yours to merge" and "merged into … · by Wiffletree" on the PR line, and the host's merge on the Team card.
-- [ ] 4.4 Reword the owners block's and the keeper block's lines about merging.
+- [x] 4.2 Draw the merge approval card in the Inbox.
+- [x] 4.3 Show "merges when they pass", "merge waits for your approval", "yours to merge" and "merged into … · by Wiffletree" on the PR line, and the host's merge on the Team card.
+- [x] 4.4 Reword the owners block's and the keeper block's lines about merging.
 
 ## 5. Text and docs
 
-- [ ] 5.1 Reword the communication contract (bump its version) and the coordinator core to name `merge_ticket` and the protected rule; update the contract tests.
-- [ ] 5.2 Update `docs/PRD.md` ("Git and PR lifecycle", "Managed feature integration"), `README.md` ("Humans own integration" and the warning), `docs/DEVELOPMENT.md` and `design/README.md`.
+- [x] 5.1 Reword the communication contract (bump its version) and the coordinator core to name `merge_ticket` and the protected rule; update the contract tests.
+- [x] 5.2 Update `docs/PRD.md` ("Git and PR lifecycle", "Managed feature integration"), `README.md` ("Humans own integration" and the warning), `docs/DEVELOPMENT.md` and `design/README.md`.
