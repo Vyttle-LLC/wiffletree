@@ -48,6 +48,7 @@ fn the_tool_list_offers_ticket_tools_and_no_repository_coordinator_tools() {
             "merge_ticket",
             "close_ticket",
             "archive_agent",
+            "log_work",
             "ask_user",
             "close_question",
             "request_permission",
@@ -282,7 +283,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = core(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator core — v9"));
+    assert!(coordinator.contains("Project coordinator core — v10"));
     // A background reply the records show unchanged folds; news keeps it full.
     assert!(
         coordinator
@@ -474,7 +475,7 @@ fn the_assignment_tools_ask_for_a_job_and_small_work_never_a_model() {
 #[test]
 fn the_implementer_may_object_to_a_finding_instead_of_implementing_it() {
     let core = core(Role::Implementer);
-    assert!(core.contains("Implementer core — v2"));
+    assert!(core.contains("Implementer core — v3"));
     assert!(core.contains("may rebase this ticket's branch onto its base between your turns"));
     assert!(core.contains("Change files with your edit tools"));
     let implementer = provider::skill(Role::Implementer);
@@ -485,6 +486,29 @@ fn the_implementer_may_object_to_a_finding_instead_of_implementing_it() {
     ));
     assert!(implementer.contains("smallest change"));
     assert!(!implementer.contains("Do not argue"));
+}
+
+#[test]
+fn the_coordinator_and_implementer_are_told_when_and_how_to_log_work() {
+    for role in [Role::ProjectOrchestrator, Role::Implementer] {
+        let core = core(role);
+        for phrase in [
+            "Record each meaningful milestone with log_work: a decision, a finished assignment, a handoff or a blocker",
+            "Give one terse entry",
+            "When a tool result asks for one log_work call at a milestone, make it",
+            "An entry never holds transcripts, step-by-step narration or pasted output",
+            "never child personal information (names, message text, phone numbers, locations), credentials or secrets",
+        ] {
+            assert!(core.contains(phrase), "{role:?}: {phrase}");
+        }
+    }
+    assert!(
+        core(Role::ProjectOrchestrator)
+            .contains("Pass ticket_id for an entry about one of your tickets")
+    );
+    for role in [Role::Tester, Role::Reviewer, Role::Keeper] {
+        assert!(!core(role).contains("log_work"), "{role:?}");
+    }
 }
 
 #[test]

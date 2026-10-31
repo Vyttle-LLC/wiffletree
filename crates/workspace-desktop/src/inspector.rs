@@ -115,7 +115,13 @@ pub(super) struct Inspector {
     pub(super) panel_data: PanelData,
     pub(super) memory_title: Entity<InputState>,
     pub(super) memory_body: Entity<TextareaState>,
+    pub(super) memory_why: Entity<InputState>,
+    pub(super) memory_state: Entity<InputState>,
     pub(super) memory_kind: LogKind,
+    /// The held entry the capture form is fixing, with its `ref` and folder fields.
+    pub(super) memory_fixing: Option<WorkLog>,
+    pub(super) memory_ref: Entity<InputState>,
+    pub(super) memory_folder: Entity<InputState>,
     /// What the Files panel shows; fetched only while that panel is open.
     pub(super) files: files_view::Files,
     /// What the Processes panel shows; read only while that panel is open.
@@ -153,9 +159,17 @@ impl Inspector {
             memory_body: cx.new(|cx| {
                 TextareaState::new(window, cx)
                     .auto_grow(3, 8)
-                    .placeholder("What was decided or observed, and why it matters")
+                    .placeholder("What changed: what was decided or observed")
             }),
+            memory_why: cx.new(|cx| InputState::new(window, cx).placeholder("Why it matters")),
+            memory_state: cx
+                .new(|cx| InputState::new(window, cx).placeholder("Where things stand now")),
             memory_kind: LogKind::Decision,
+            memory_fixing: None,
+            memory_ref: cx
+                .new(|cx| InputState::new(window, cx).placeholder("ref: —, or <branch> @ <sha>")),
+            memory_folder: cx
+                .new(|cx| InputState::new(window, cx).placeholder("Folder under logs/")),
             files: Default::default(),
             processes: Default::default(),
             agents_clock: false,
@@ -181,6 +195,12 @@ impl Inspector {
         }
         if selection || panel {
             self.panel_data = PanelData::Loading;
+        }
+        // A held entry is fixed only from its own project's Memory panel.
+        let fixing_elsewhere = (self.memory_fixing.as_ref())
+            .is_some_and(|held| self.shared.project_id().as_ref() != Some(&held.project_id));
+        if fixing_elsewhere {
+            self.clear_capture(window, cx);
         }
         if selection || panel || moved {
             self.load_panel(window, cx);
@@ -259,26 +279,82 @@ impl Inspector {
         };
         let title = self.memory_title.read(cx).value().trim().to_string();
         let changed = self.memory_body.read(cx).value().trim().to_string();
-        if title.is_empty() || changed.is_empty() {
-            toast_error("Add a title and a description first.", window, cx);
+        let why = self.memory_why.read(cx).value().trim().to_string();
+        let state = self.memory_state.read(cx).value().trim().to_string();
+        if [&title, &changed, &why, &state]
+            .iter()
+            .any(|s| s.is_empty())
+        {
+            toast_error(
+                "Fill in the title, what changed, why and the state first.",
+                window,
+                cx,
+            );
             return;
         }
-        self.request(
-            Command::AppendLog {
-                input: LogInput {
-                    session_id,
-                    milestone: new_id(),
+        let command = match &self.memory_fixing {
+            Some(held) => Command::FixHeldLog {
+                log_id: held.id.clone(),
+                fix: LogFix {
                     kind: self.memory_kind.clone(),
                     title,
-                    reference: "—".into(),
+                    repository: self.memory_folder.read(cx).value().trim().to_string(),
+                    reference: self.memory_ref.read(cx).value().trim().to_string(),
                     changed,
-                    why: "Captured directly in native prototype".into(),
-                    state: "Source report; evidence not independently verified".into(),
+                    why,
+                    state,
                 },
             },
-            window,
-            cx,
-        );
+            None => Command::AppendLog {
+                input: LogInput {
+                    session_id,
+                    milestone: None,
+                    kind: self.memory_kind.clone(),
+                    title,
+                    repository: None,
+                    ticket_id: None,
+                    changed,
+                    why,
+                    state,
+                },
+            },
+        };
+        self.request(command, window, cx);
+    }
+
+    /// Fills the capture form with a held entry's text, its `ref` and its folder, to fix it.
+    pub(super) fn fix_held(&mut self, held: WorkLog, window: &mut Window, cx: &mut Context<Self>) {
+        let input = &held.input;
+        self.memory_kind = input.kind.clone();
+        for (field, value) in [
+            (&self.memory_title, &input.title),
+            (&self.memory_why, &input.why),
+            (&self.memory_state, &input.state),
+            (&self.memory_ref, &held.reference),
+            (&self.memory_folder, &held.repository),
+        ] {
+            let value = value.clone();
+            field.update(cx, |field, cx| field.set_value(value, window, cx));
+        }
+        let changed = input.changed.clone();
+        (self.memory_body).update(cx, |field, cx| field.set_value(changed, window, cx));
+        self.memory_fixing = Some(held);
+        cx.notify();
+    }
+
+    pub(super) fn clear_capture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for field in [
+            &self.memory_title,
+            &self.memory_why,
+            &self.memory_state,
+            &self.memory_ref,
+            &self.memory_folder,
+        ] {
+            field.update(cx, |field, cx| field.set_value("", window, cx));
+        }
+        (self.memory_body).update(cx, |field, cx| field.set_value("", window, cx));
+        self.memory_fixing = None;
+        cx.notify();
     }
 
     pub(super) fn panel_view(&self, panel: Panel, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -869,37 +945,27 @@ impl Requests for Inspector {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let value = match reply {
-            Ok(value) => value,
-            Err(error) => {
-                // A refused compaction shows in its form.
-                if let Command::CompactContext { session_id, .. } = &command {
-                    return self.compact_refused(session_id, &error);
-                }
-                return toast_error(error, window, cx);
+        if let Err(error) = reply {
+            // A refused compaction shows in its form.
+            if let Command::CompactContext { session_id, .. } = &command {
+                return self.compact_refused(session_id, &error);
             }
-        };
+            return toast_error(error, window, cx);
+        }
         match command {
             Command::CompactContext { session_id, .. } => self.compact_accepted(&session_id),
-            Command::AppendLog { .. } => {
-                self.memory_title
-                    .update(cx, |input, cx| input.set_value("", window, cx));
-                self.memory_body
-                    .update(cx, |input, cx| input.set_value("", window, cx));
-                toast("Saved to project memory", window, cx);
+            Command::AppendLog { .. } | Command::FixHeldLog { .. } => {
+                let saved = match command {
+                    Command::FixHeldLog { .. } => "Fixed; it goes to the brain with its batch",
+                    _ => "Saved to project memory",
+                };
+                self.clear_capture(window, cx);
+                toast(saved, window, cx);
                 self.load_panel(window, cx);
             }
-            Command::ExportLogs { .. } => {
-                let exported = value["exported"].as_u64().unwrap_or_default();
-                toast(
-                    if exported == 0 {
-                        "Nothing new to export".to_owned()
-                    } else {
-                        format!("Exported {exported} memories to the brain")
-                    },
-                    window,
-                    cx,
-                );
+            Command::ReleaseHeldLog { .. } => {
+                toast("Released; it stays here and is not sent", window, cx);
+                self.load_panel(window, cx);
             }
             _ => {}
         }

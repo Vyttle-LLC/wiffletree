@@ -483,6 +483,7 @@ impl Host {
             }
             ticket.state = state;
             host.save_ticket(&ticket)?;
+            host.close_logs(memory::Closing::Ticket(&ticket.id))?;
             let coordinator = host.session(&ticket.coordinator_id)?;
             let body = match &ticket.waiver {
                 Some(waiver) => {
@@ -949,14 +950,24 @@ impl Host {
                         .context("Each finding needs a severity of blocking, non_blocking or pre_existing, a location and a summary")?,
                     None => vec![],
                 };
-                self.report(
+                let kind = string("kind")?;
+                let reported = self.report(
                     &session,
-                    string("kind")?,
+                    kind,
                     string("body")?,
                     string("message_id")?,
                     &findings,
-                )
+                )?;
+                let ticket = self.session_runtime(id)?.ticket_id;
+                match ticket {
+                    Some(ticket) if kind == "ready_for_testing" => {
+                        let ticket = self.ticket(&ticket)?;
+                        self.with_milestone_prompt(reported, &session, &ticket, kind)
+                    }
+                    _ => Ok(reported),
+                }
             }
+            "log_work" => self.log_work(&session, &args),
             "verify_ticket" => {
                 let ticket = self.owned_ticket(id, string("ticket_id")?)?;
                 refuse_model_arguments(&args, &["verifiers", "profile", "reason"])?;
@@ -980,9 +991,9 @@ impl Host {
             }
             "accept_ticket" => {
                 let ticket = self.owned_ticket(id, string("ticket_id")?)?;
-                Ok(serde_json::to_value(
-                    self.accept_ticket(&ticket.id, args["waived"].as_str())?,
-                )?)
+                let accepted = self.accept_ticket(&ticket.id, args["waived"].as_str())?;
+                let result = serde_json::to_value(&accepted)?;
+                self.with_milestone_prompt(result, &session, &accepted, "accepted")
             }
             "close_ticket" => {
                 let ticket = self.owned_ticket(id, string("ticket_id")?)?;

@@ -672,34 +672,97 @@ pub enum LogKind {
     Decision,
     Observation,
 }
+/// What a log entry's author gives (OpenSpec change `brain-log-capture`). The host fills in the
+/// rest; nothing here names the entry's id, date, `ref` or author.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogInput {
     pub session_id: String,
-    pub milestone: String,
+    /// A deduplication key: repeating it with the same content returns the first entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub milestone: Option<String>,
     pub kind: LogKind,
     pub title: String,
+    /// The coordinator's choice of one of its project's repositories, by id or name. Without
+    /// one, its entry is a planning entry in the brain repository's own folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    /// The coordinator's choice of one of its project's tickets: the entry is that ticket's,
+    /// for its repository, with its `ref`, and stays in the coordinator session's batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket_id: Option<String>,
+    pub changed: String,
+    pub why: String,
+    pub state: String,
+}
+/// The human's fix of a held entry: its whole text, its folder and its `ref`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogFix {
+    pub kind: LogKind,
+    pub title: String,
+    /// The folder under `logs/`.
+    pub repository: String,
     pub reference: String,
     pub changed: String,
     pub why: String,
     pub state: String,
 }
+/// A stored log entry. An entry captured before `brain-log-capture` keeps its old id and has no
+/// brain fields while it is in a legacy `logs/<repo>.md` file or waits for a brain; once queued
+/// into a batch it gains an entry id, its brain and its path like any other.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkLog {
     pub sequence: i64,
+    /// The entry's lowercase ULID.
     pub id: String,
     pub project_id: String,
     pub task_id: Option<String>,
+    /// The entry's folder under `logs/`: the GitHub repository's name.
     pub repository: String,
     pub created_at: i64,
+    /// The host's local date at capture, `YYYY-MM-DD`.
+    #[serde(default)]
+    pub date: String,
     pub input: LogInput,
+    /// The entry's `ref`, which the host computed.
+    #[serde(default)]
+    pub reference: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<SpaceId>,
+    /// The brain repository, `owner/name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brain: Option<String>,
+    /// The entry's file in the brain repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    /// The human's GitHub login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<Provider>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
+    /// Exported to a legacy `logs/<repo>.md` file before per-entry files; the legacy import
+    /// brings it over, so it is never written again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_legacy_file: bool,
+    /// Why an entry captured before per-entry files is held in its batch and not sent: as it
+    /// stands it breaks the entry contract or the cap. Its text is never changed; it waits for
+    /// the human, who fixes or releases it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<String>,
+    /// The human released this held entry: it stays here and is never sent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub released: bool,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MaintenanceRun {
-    pub id: String,
-    pub project_id: String,
-    pub outcome: String,
-    pub exported: usize,
-    pub created_at: i64,
+impl WorkLog {
+    /// Neither in a batch nor in a legacy file: it waits for its project's Space to have a brain.
+    pub fn is_unsent(&self) -> bool {
+        self.batch_id.is_none() && !self.in_legacy_file
+    }
 }
 /// The live workspace. Archived sessions, accepted and closed tickets and those sessions'
 /// runtimes are left to the `Archive`; `WorkspaceIndex` joins the two for views.
@@ -3214,11 +3277,26 @@ pub enum Command {
         batch_id: String,
         amendment: BrainAmendment,
     },
-    ExportLogs {
-        project_id: String,
+    /// Send now: closes every open log batch of the brain `owner/name`, or of every brain, so
+    /// each opens its pull request on the brain's next pass; answered with how many closed.
+    SendLogsNow {
+        repository: Option<String>,
     },
-    Runs {
-        project_id: String,
+    /// Import legacy logs: queues the brain's legacy `logs/<repo>.md` entries as entry files in
+    /// log-only batches; answered with the `LegacyImport`.
+    ImportLegacyLogs {
+        repository: String,
+    },
+    /// Replaces a held entry's text with the human's fix, which must then fit the entry
+    /// contract and the cap; answered with the `WorkLog`.
+    FixHeldLog {
+        log_id: String,
+        fix: LogFix,
+    },
+    /// Releases a held entry: it stays in the project's memory and is never sent; answered with
+    /// the `WorkLog`.
+    ReleaseHeldLog {
+        log_id: String,
     },
     Activity {
         project_id: String,
@@ -3520,7 +3598,6 @@ impl Command {
             | Self::Progress { .. }
             | Self::RunSummaries { .. }
             | Self::Logs { .. }
-            | Self::Runs { .. }
             | Self::Activity { .. }
             | Self::GitHistory { .. }
             | Self::Settings
@@ -3588,7 +3665,10 @@ impl Command {
             | Self::SetUpBrain { .. }
             | Self::SetBrainCompiler { .. }
             | Self::AmendBrainBatch { .. }
-            | Self::ExportLogs { .. }
+            | Self::SendLogsNow { .. }
+            | Self::ImportLegacyLogs { .. }
+            | Self::FixHeldLog { .. }
+            | Self::ReleaseHeldLog { .. }
             | Self::SetWorkspacesDir { .. }
             | Self::SetVerification { .. }
             | Self::SetBuildsAtOnce { .. }
@@ -3632,8 +3712,8 @@ impl Command {
     /// the host may merge into, and a settings repository the host pushes to.
     /// Spaces are the human's: creating, editing or removing one, setting its brain, moving a
     /// project into one and choosing which repositories it lists, and reading where its storage
-    /// is on this Mac. So are brains: the push grant, forgetting one, Set up, the compiler and
-    /// amending a batch. Remote access is the human's too: its state carries the pairing code.
+    /// is on this Mac. So are brains: the push grant, forgetting one, Set up, the compiler,
+    /// amending a batch, Send now and the legacy import, and fixing or releasing a held entry. Remote access is the human's too: its state carries the pairing code.
     pub fn is_human_only(&self) -> bool {
         matches!(
             self,
@@ -3661,6 +3741,10 @@ impl Command {
                 | Self::SetUpBrain { .. }
                 | Self::SetBrainCompiler { .. }
                 | Self::AmendBrainBatch { .. }
+                | Self::SendLogsNow { .. }
+                | Self::ImportLegacyLogs { .. }
+                | Self::FixHeldLog { .. }
+                | Self::ReleaseHeldLog { .. }
                 | Self::RemoteAccess
                 | Self::SetRemoteAccess { .. }
                 | Self::OpenPairing

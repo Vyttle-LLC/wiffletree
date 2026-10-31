@@ -9,7 +9,7 @@ Six stages, each a ticket or a few, each landing on its own. Every stage needs `
 - [ ] 1.5 Models: the Assistant row, its upgrade copy, and Space default models with fallback notes.
 - [ ] 1.6 Desktop: sidebar's pinned assistant row; assistant view with tabs, Space chip in the composer, idle threads leaving the strip, search, delete; the assistant's name in Settings.
 - [ ] 1.7 Docs: README and DEVELOPMENT notes on threads' authority.
-- [ ] 1.8 Host: the brain tools, each once its change has landed, so stage 1 does not wait for them: `log_work` to the Space's brain after `brain-log-capture` (its task 2.4), and `query_brain` on the Space's brain after `brain-browser` (its task 2.1). Until then a thread asked to remember something says it cannot yet. Verify the instruction order and tool list before and after each lands.
+- [ ] 1.8 Host: the brain tools, each once its change has landed, so stage 1 does not wait for them: `log_work` to the Space's brain after `brain-log-capture` (task 7.1, moved here from its task 2.4), and `query_brain` on the Space's brain after `brain-browser` (its task 2.1). Until then a thread asked to remember something says it cannot yet. Verify the instruction order and tool list before and after each lands.
 
 ## 2. The router
 
@@ -51,3 +51,7 @@ Six stages, each a ticket or a few, each landing on its own. Every stage needs `
 - [ ] 6.3 Host: `search_repositories` and `read_repository_file` over the Space's repositories at their base branch's fetched head (`git grep`, `git show`), off the command thread, bounded in size.
 - [ ] 6.4 Host: proposals stored with the thread; Apply runs `shared-issues`' human write commands as the human, with `assistant_for` on comments; a proposal whose issue changed shows the new diff.
 - [ ] 6.5 Desktop: Ask the assistant on the issue page and the Issues page; proposal cards (Apply, Edit, Discard) and the authors notice in the thread; "Assistant for ‹name›" on applied comments.
+
+## 7. Assistant threads log work (moved from brain-log-capture)
+
+- [ ] 7.1 Give assistant threads `log_work` (`project-memory` delta here): entries in `logs/assistant/YYYY/MM/` with `repo: assistant` and `ref: —`, a `repository` or `ticket_id` refused, the thread's id and Space in the store, never `logs/assistant.md`. Batch a thread's entries per brain and thread, and close the batch when the thread is deleted. Job runs get no `log_work`. Test a thread entry against the gate fixtures in `gate/tests/fixtures/`, and the batch closing on deletion.

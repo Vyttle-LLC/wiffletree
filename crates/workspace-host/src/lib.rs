@@ -15,6 +15,7 @@ mod github_access;
 pub mod host_files;
 mod keeper;
 pub mod keychain;
+mod legacy_logs;
 pub mod live;
 pub mod login_env;
 pub mod mcp;
@@ -372,6 +373,8 @@ impl Host {
         // After local storage is in place, as turning a brain folder into its repository writes
         // the Space's file.
         brains::migrate(&mut host)?;
+        // After the brains, as an unexported entry is queued for its Space's brain.
+        memory::migrate(&mut host)?;
         host.clear_uploads()?;
         host.recover()?;
         host.end_interrupted_publishes()?;
@@ -958,6 +961,11 @@ impl Host {
         let save = move |host: &mut Self| -> Result<Vec<Session>> {
             let project = affected[0].project_id.clone();
             let stops_project = archived && affected[0].role == Role::ProjectOrchestrator;
+            // An implementer's log entries collect per ticket, not per session.
+            let implemented: Vec<String> = (affected.iter())
+                .filter(|s| s.role == Role::Implementer)
+                .filter_map(|s| host.session_runtime(&s.id).ok()?.ticket_id)
+                .collect();
             // A savepoint, so a ticket close or accept can include this in its own change.
             let tx = host.db.savepoint()?;
             for session in &mut affected {
@@ -983,9 +991,18 @@ impl Host {
                     Self::event(&tx, &project, Some(id), kind, &session.name)?;
                 }
             }
+            let mut closed_logs = 0;
             if archived {
                 let sessions = affected.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
                 Self::stop_schedules_in(&tx, &sessions, None, "archived")?;
+                for session in &sessions {
+                    let closing = memory::Closing::Session(session);
+                    closed_logs += memory::close_log_batches(&tx, closing, now())?;
+                }
+                for ticket in &implemented {
+                    let closing = memory::Closing::Ticket(ticket);
+                    closed_logs += memory::close_log_batches(&tx, closing, now())?;
+                }
             }
             if stops_project {
                 tx.execute(
@@ -1001,6 +1018,7 @@ impl Host {
                 )?;
             }
             tx.commit()?;
+            host.brains_now |= closed_logs > 0;
             Ok(affected)
         };
         if !archived {
@@ -1726,7 +1744,7 @@ impl Host {
                 project_id,
                 before,
                 limit,
-            } => serde_json::to_value(self.logs(&project_id, before, limit)?)?,
+            } => serde_json::to_value(self.logs_page(&project_id, before, limit)?)?,
             Command::CreateSpace {
                 name,
                 description,
@@ -1815,10 +1833,18 @@ impl Host {
                 &amendment,
                 &publish::Tools::default().git,
             )?)?,
-            Command::ExportLogs { project_id } => {
-                serde_json::to_value(self.export_logs(&project_id)?)?
+            Command::SendLogsNow { repository } => {
+                json!({"closed": self.send_logs_now(repository.as_deref())?})
             }
-            Command::Runs { project_id } => serde_json::to_value(self.runs(&project_id)?)?,
+            Command::ImportLegacyLogs { repository } => serde_json::to_value(
+                self.import_legacy_logs(&repository, &publish::Tools::default())?,
+            )?,
+            Command::FixHeldLog { log_id, fix } => {
+                serde_json::to_value(self.fix_held_log(&log_id, fix)?)?
+            }
+            Command::ReleaseHeldLog { log_id } => {
+                serde_json::to_value(self.release_held_log(&log_id)?)?
+            }
             Command::Activity {
                 project_id,
                 before,

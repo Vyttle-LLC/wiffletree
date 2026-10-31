@@ -268,6 +268,8 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
     cmd.env("WORKSPACE_SOCKET", &turn.socket)
         .env("WORKSPACE_TOKEN", &turn.token);
     let instructions = &turn.instructions;
+    // The MCP helper lists the tools of the session's role.
+    let role = tag(&turn.session.role).unwrap_or_default();
     match turn.session.provider {
         Provider::Claude => {
             cmd.args(["-p","--output-format","stream-json","--verbose","--include-partial-messages","--strict-mcp-config","--no-chrome"])
@@ -275,7 +277,7 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
                 .args(["--append-system-prompt",instructions])
                 // Otherwise a resumed session is sent its first turn's instructions.
                 .args(["--system-prompt-snapshot","off"])
-                .args(["--mcp-config",&json!({"mcpServers":{"agent_workspace":{"command":turn.helper,"args":["agent-mcp"]}}}).to_string()])
+                .args(["--mcp-config",&json!({"mcpServers":{"agent_workspace":{"command":turn.helper,"args":["agent-mcp",role]}}}).to_string()])
                 .args(["--allowedTools","mcp__agent_workspace__*"])
                 // Agents work only in the directory Wiffletree assigned them.
                 .args(["--disallowedTools","EnterWorktree,ExitWorktree"]);
@@ -306,7 +308,7 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
             }
             cmd.args(["-c",&format!("model_reasoning_effort={}",json!(turn.profile.effort))])
                 .args(["-c",&format!("developer_instructions={}",json!(instructions))])
-                .args(["-c",&format!("mcp_servers.agent_workspace={{required=true, default_tools_approval_mode=\"approve\", command={}, args=[\"agent-mcp\"], env_vars=[\"WORKSPACE_SOCKET\",\"WORKSPACE_TOKEN\"] }}",json!(turn.helper))]);
+                .args(["-c",&format!("mcp_servers.agent_workspace={{required=true, default_tools_approval_mode=\"approve\", command={}, args=[\"agent-mcp\",{}], env_vars=[\"WORKSPACE_SOCKET\",\"WORKSPACE_TOKEN\"] }}",json!(turn.helper),json!(role))]);
             if compaction {
                 return;
             }

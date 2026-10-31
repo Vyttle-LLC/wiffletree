@@ -79,7 +79,7 @@ fn store_owner_attention_and_blocked_state_are_independent() {
 }
 
 #[test]
-fn messages_and_logs_do_not_cross_project_boundaries() {
+fn messages_and_sessions_do_not_cross_project_boundaries() {
     let directory = tempfile::tempdir().unwrap();
     let mut host = Host::open_set_up(directory.path()).unwrap();
     let (one, a) = project(&mut host, "One");
@@ -110,8 +110,6 @@ fn messages_and_logs_do_not_cross_project_boundaries() {
         )
         .is_err()
     );
-    host.append_log(log(&a.id, "one")).unwrap();
-    assert!(host.logs(&two.id, None, 100).unwrap().is_empty());
 }
 
 #[test]
@@ -123,98 +121,6 @@ fn transcript_pages_and_input_are_bounded() {
     assert!(
         host.send("huge", None, &session.id, &"x".repeat(MAX_TEXT_BYTES + 1))
             .is_err()
-    );
-}
-
-fn log(session: &str, milestone: &str) -> LogInput {
-    LogInput {
-        session_id: session.into(),
-        milestone: milestone.into(),
-        kind: LogKind::Decision,
-        title: format!("Decision {milestone}"),
-        reference: "—".into(),
-        changed: "Use stable source entries".into(),
-        why: "Session replacement".into(),
-        state: "Reported; unverified".into(),
-    }
-}
-
-#[test]
-fn markdown_preserves_external_content_and_recovers_receipt_gap() {
-    let directory = tempfile::tempdir().unwrap();
-    let brain = tempfile::tempdir().unwrap();
-    let mut host = Host::open_set_up(directory.path()).unwrap();
-    let (project, session) = project(&mut host, "Memory");
-    host.set_space_brain(&project.space, brain.path().to_str().unwrap())
-        .unwrap();
-    let first = host.append_log(log(&session.id, "one")).unwrap();
-    let second = host.append_log(log(&session.id, "two")).unwrap();
-    assert_eq!(
-        host.append_log(log(&session.id, "one")).unwrap().id,
-        first.id
-    );
-    let mut changed = log(&session.id, "one");
-    changed.changed = "Different".into();
-    assert!(host.append_log(changed).is_err());
-    let path = brain.path().join("second-brain/logs/project.md");
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let original =
-        "# Existing logs\n<!-- compiled-through:2026-10-02 -->\nExternal editor content\n";
-    std::fs::write(
-        &path,
-        format!(
-            "<!-- workspace-entry:{} -->\nAlready written\n{original}",
-            first.id
-        ),
-    )
-    .unwrap();
-    assert_eq!(host.export_logs(&project.id).unwrap().exported, 2);
-    let content = std::fs::read_to_string(&path).unwrap();
-    assert_eq!(
-        content
-            .matches(&format!("workspace-entry:{}", first.id))
-            .count(),
-        1
-    );
-    assert_eq!(
-        content
-            .matches(&format!("workspace-entry:{}", second.id))
-            .count(),
-        1
-    );
-    assert!(content.contains(original));
-    let before = std::fs::metadata(&path).unwrap().modified().unwrap();
-    assert_eq!(host.export_logs(&project.id).unwrap().exported, 0);
-    assert_eq!(
-        std::fs::metadata(&path).unwrap().modified().unwrap(),
-        before
-    );
-    drop(host);
-    let host = Host::open_set_up(directory.path()).unwrap();
-    assert_eq!(host.logs(&project.id, None, 100).unwrap().len(), 2);
-    assert_eq!(host.runs(&project.id).unwrap().len(), 2);
-}
-
-#[cfg(unix)]
-#[test]
-fn markdown_symlink_destination_is_rejected_and_failure_is_recorded() {
-    let directory = tempfile::tempdir().unwrap();
-    let brain = tempfile::tempdir().unwrap();
-    let outside = tempfile::NamedTempFile::new().unwrap();
-    let mut host = Host::open_set_up(directory.path()).unwrap();
-    let (project, session) = project(&mut host, "Memory");
-    host.set_space_brain(&project.space, brain.path().to_str().unwrap())
-        .unwrap();
-    host.append_log(log(&session.id, "one")).unwrap();
-    let path = brain.path().join("second-brain/logs/project.md");
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::os::unix::fs::symlink(outside.path(), &path).unwrap();
-    assert!(host.export_logs(&project.id).is_err());
-    assert_eq!(std::fs::metadata(outside.path()).unwrap().len(), 0);
-    assert!(
-        host.runs(&project.id).unwrap()[0]
-            .outcome
-            .starts_with("failed:")
     );
 }
 
@@ -318,51 +224,6 @@ fn repository_coordinators_cannot_be_created_and_workers_keep_ownership() {
     drop(host);
     let host = Host::open_set_up(directory.path()).unwrap();
     assert_eq!(host.session(&worker.id).unwrap(), worker);
-}
-
-#[cfg(unix)]
-#[test]
-fn brain_parent_symlink_is_rejected_before_creating_outside_directories() {
-    let directory = tempfile::tempdir().unwrap();
-    let brain = tempfile::tempdir().unwrap();
-    let outside = tempfile::tempdir().unwrap();
-    std::os::unix::fs::symlink(outside.path(), brain.path().join("second-brain")).unwrap();
-    let mut host = Host::open_set_up(directory.path()).unwrap();
-    let (project, session) = project(&mut host, "Memory");
-    host.set_space_brain(&project.space, brain.path().to_str().unwrap())
-        .unwrap();
-    host.append_log(log(&session.id, "one")).unwrap();
-    assert!(host.export_logs(&project.id).is_err());
-    assert!(!outside.path().join("logs").exists());
-}
-
-#[test]
-fn markdown_batches_keep_header_compiler_marker_and_newest_first_order() {
-    let directory = tempfile::tempdir().unwrap();
-    let brain = tempfile::tempdir().unwrap();
-    let mut host = Host::open_set_up(directory.path()).unwrap();
-    let (project, session) = project(&mut host, "Batch memory");
-    host.set_space_brain(&project.space, brain.path().to_str().unwrap())
-        .unwrap();
-    let path = brain.path().join("second-brain/logs/project.md");
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let prefix = "# project — working log\n<!-- compiled-through: 2026-10-02 -->\n\n";
-    std::fs::write(&path, format!("{prefix}## Existing entry\nRetain me\n")).unwrap();
-    for i in 0..101 {
-        host.append_log(log(&session.id, &format!("batch-{i:03}")))
-            .unwrap();
-    }
-    assert_eq!(host.export_logs(&project.id).unwrap().exported, 100);
-    assert_eq!(host.export_logs(&project.id).unwrap().exported, 1);
-    let content = std::fs::read_to_string(&path).unwrap();
-    assert!(content.starts_with(prefix));
-    assert!(
-        content.find("Decision batch-100").unwrap() < content.find("Decision batch-099").unwrap()
-    );
-    assert!(
-        content.find("Decision batch-099").unwrap() < content.find("Decision batch-000").unwrap()
-    );
-    assert_eq!(content.matches("<!-- workspace-entry:").count(), 101);
 }
 
 #[test]

@@ -105,11 +105,17 @@ fn refuse_symlinks(worktree: &Path, path: &str) -> Result<()> {
     Ok(())
 }
 
-/// A lowercase ULID: 48 bits of milliseconds, then 80 random bits, in Crockford's base 32.
-fn new_batch_id() -> String {
+/// A lowercase ULID: 48 bits of `at` in milliseconds, then 80 random bits, in Crockford's base
+/// 32. Batch ids and log entry ids both use it.
+pub(crate) fn new_ulid(at: i64) -> String {
+    ulid(at, u128::from_be_bytes(*uuid::Uuid::new_v4().as_bytes()))
+}
+
+/// A lowercase ULID of `at` and the low 80 bits of `random`.
+pub(crate) fn ulid(at: i64, random: u128) -> String {
     const ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
-    let time = (now() as u128) & ((1 << 48) - 1);
-    let random = u128::from_be_bytes(*uuid::Uuid::new_v4().as_bytes()) & ((1 << 80) - 1);
+    let time = (at as u128) & ((1 << 48) - 1);
+    let random = random & ((1 << 80) - 1);
     let mut value = (time << 80) | random;
     let mut id = [0u8; 26];
     for slot in id.iter_mut().rev() {
@@ -1054,6 +1060,7 @@ impl Host {
                 required_checks: vec![],
                 legacy_pointer: false,
                 last_pull_request: None,
+                legacy_import: false,
             };
             self.db.execute(
                 "INSERT INTO brains(repository,data) VALUES (?1,?2)",
@@ -1142,6 +1149,8 @@ impl Host {
                 && named
                     .as_deref()
                     .is_some_and(|n| n.eq_ignore_ascii_case(&brain.repository));
+            // A checkout that cannot be read offers no import; its problem shows already.
+            brain.legacy_import = self.offers_legacy_import(brain).unwrap_or(false);
         }
         let this_host = BrainCompiler {
             host_id: self.host_id()?,
@@ -1373,7 +1382,7 @@ impl Host {
             );
         }
         let checkout = PathBuf::from(&brain.checkout);
-        let id = new_batch_id();
+        let id = new_ulid(now());
         let worktree = self.batch_folder(&id);
         fs::create_dir_all(self.home.join(BATCHES))?;
         let into = worktree
@@ -1429,7 +1438,7 @@ impl Host {
         Ok(batch)
     }
 
-    fn remove_batch_worktree(&self, checkout: &Path, id: &str) {
+    pub(crate) fn remove_batch_worktree(&self, checkout: &Path, id: &str) {
         let _ = fs::remove_dir_all(self.batch_folder(id));
         let _ = runtime::git_output(checkout, &["worktree", "prune"]);
     }
@@ -1833,7 +1842,7 @@ impl Host {
         Ok(())
     }
 
-    fn coordinator_of(&self, project: &str) -> Result<Option<String>> {
+    pub(crate) fn coordinator_of(&self, project: &str) -> Result<Option<String>> {
         Ok(self
             .db
             .query_row(
@@ -1846,14 +1855,14 @@ impl Host {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::publish::tests::exit;
     use crate::test_support::git;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
-    const REPO: &str = "Sage-Social/sagehaven-docs";
+    pub(crate) const REPO: &str = "Sage-Social/sagehaven-docs";
     const URL: &str = "https://github.com/Sage-Social/sagehaven-docs.git";
     /// A value the sensitive scan would match, planted in check output that must never be kept.
     const PLANTED: &str = "555-867-5309";
@@ -1869,7 +1878,7 @@ mod tests {
 
     /// The brain on GitHub as a local bare repository, a `gh` that answers from what it holds, and
     /// every command each tool was sent. No test reaches GitHub.
-    struct GitHub {
+    pub(crate) struct GitHub {
         folder: PathBuf,
         bare: PathBuf,
         gh: Mutex<Vec<Vec<String>>>,
@@ -1881,9 +1890,11 @@ mod tests {
         annotations: Mutex<Value>,
         /// The checks `main`'s branch protection requires.
         required: Mutex<Vec<&'static str>>,
+        /// The GitHub login of each commit's author GitHub knows, by SHA.
+        pub(crate) commit_authors: Mutex<std::collections::HashMap<String, String>>,
     }
     impl GitHub {
-        fn new(folder: &Path) -> Arc<Self> {
+        pub(crate) fn new(folder: &Path) -> Arc<Self> {
             let bare = folder.join("github.git");
             git(
                 folder,
@@ -1911,9 +1922,10 @@ mod tests {
                 check_runs: Mutex::new(json!({"check_runs": []})),
                 annotations: Mutex::new(json!([])),
                 required: Mutex::new(GATE_CHECKS.to_vec()),
+                commit_authors: Mutex::default(),
             })
         }
-        fn tools(self: &Arc<Self>) -> Tools {
+        pub(crate) fn tools(self: &Arc<Self>) -> Tools {
             let github = self.clone();
             let gh = move |_: &Path, args: &[&str]| -> Result<runtime::GhAnswer> {
                 Ok(github.answer_gh(args))
@@ -2045,6 +2057,10 @@ mod tests {
                 return Some(json!([{"type": "required_status_checks",
                     "parameters": {"required_status_checks": contexts}}]));
             }
+            if let Some(sha) = rest.strip_prefix("commits/").filter(|s| !s.contains('/')) {
+                let login = self.commit_authors.lock().unwrap().get(sha).cloned();
+                return Some(json!({"sha": sha, "author": login.map(|l| json!({"login": l}))}));
+            }
             if rest.starts_with("commits/") {
                 return Some(self.check_runs.lock().unwrap().clone());
             }
@@ -2064,7 +2080,7 @@ mod tests {
                 .then(|| answer.output.trim().to_owned())
         }
         /// GitHub squash-merges the PR, as auto-merge does once its checks pass.
-        fn merge(&self, number: u64) {
+        pub(crate) fn merge(&self, number: u64) {
             let mut prs = self.prs.lock().unwrap();
             let pr = prs.iter_mut().find(|pr| pr.number == number).unwrap();
             let work = self.folder.join(format!("merge-{number}"));
@@ -2078,15 +2094,21 @@ mod tests {
         }
         /// A teammate's commit pushed straight to `main`.
         fn commit_on_main(&self, file: &str) {
+            self.commit_file_on_main(file, "From a teammate.\n");
+        }
+        /// A teammate's commit of `file` with `content` pushed straight to `main`; answers its
+        /// SHA.
+        pub(crate) fn commit_file_on_main(&self, file: &str, content: &str) -> String {
             let work = self.folder.join(format!("teammate-{}", new_id()));
             let bare = self.bare.to_str().unwrap();
             git(&self.folder, &["clone", "-q", bare, work.to_str().unwrap()]);
             let path = work.join(file);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, "From a teammate.\n").unwrap();
+            fs::write(path, content).unwrap();
             git(&work, &["add", "."]);
             git(&work, &["commit", "-q", "-m", "A teammate's change"]);
             git(&work, &["push", "-q", "origin", "main"]);
+            git(&work, &["rev-parse", "HEAD"]).trim().to_owned()
         }
         /// A teammate's commit on `main` of `file` as a symlink to `target`.
         #[cfg(unix)]
@@ -2105,7 +2127,7 @@ mod tests {
             let log = git(&self.bare, &["log", "--format=%s", "main"]);
             log.lines().map(str::to_owned).collect()
         }
-        fn gh_calls(&self, first: &str) -> Vec<Vec<String>> {
+        pub(crate) fn gh_calls(&self, first: &str) -> Vec<Vec<String>> {
             (self.gh.lock().unwrap().iter())
                 .filter(|call| call.first().map(String::as_str) == Some(first))
                 .cloned()
@@ -2159,7 +2181,7 @@ mod tests {
         let sage = name_brain(&mut host, &sage.id, REPO);
         (host, sage)
     }
-    fn name_brain(host: &mut Host, space: &SpaceId, repository: &str) -> SpaceId {
+    pub(crate) fn name_brain(host: &mut Host, space: &SpaceId, repository: &str) -> SpaceId {
         let mut space = host.space(space).unwrap().space;
         let (owner, name) = repository.split_once('/').unwrap();
         space.brain = Some(SpaceBrain {
@@ -2174,7 +2196,7 @@ mod tests {
         host.update_space(space).unwrap().space.id
     }
     /// Runs the brain's pass as the service does, off the host thread's state.
-    fn run(host: &mut Host, tools: &Tools) -> bool {
+    pub(crate) fn run(host: &mut Host, tools: &Tools) -> bool {
         let pass = host.brain_pass(REPO).unwrap().unwrap();
         let passed = super::pass(pass, tools);
         let reached = passed.reached;
@@ -2208,7 +2230,7 @@ mod tests {
              "message": format!("possible phone number {PLANTED} [rule: phone]"), "title": PLANTED, "raw_details": PLANTED},
         ]);
     }
-    fn passing_checks(github: &GitHub) {
+    pub(crate) fn passing_checks(github: &GitHub) {
         *github.check_runs.lock().unwrap() = json!({"check_runs": GATE_CHECKS.iter().enumerate().map(|(i, name)| json!(
             {"id": 100 + i, "name": name, "status": "completed", "conclusion": "success", "output": {"annotations_count": 0}}
         )).collect::<Vec<_>>()});
@@ -2377,6 +2399,9 @@ mod tests {
             Command::AmendBrainBatch {
                 batch_id: "b".into(),
                 amendment: BrainAmendment::Discard,
+            },
+            Command::ImportLegacyLogs {
+                repository: REPO.into(),
             },
             Command::UpdateSpace {
                 space: Box::new(Space {

@@ -79,7 +79,6 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
             before: None,
             limit: 1,
         },
-        Command::Runs { project_id: text() },
         Command::Activity {
             project_id: text(),
             before: None,
@@ -214,10 +213,11 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
         Command::AppendLog {
             input: LogInput {
                 session_id: text(),
-                milestone: text(),
+                milestone: Some(text()),
                 kind: LogKind::Decision,
                 title: text(),
-                reference: text(),
+                repository: None,
+                ticket_id: None,
                 changed: text(),
                 why: text(),
                 state: text(),
@@ -240,7 +240,21 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
             project_id: text(),
             space_id: space().id,
         },
-        Command::ExportLogs { project_id: text() },
+        Command::SendLogsNow { repository: None },
+        Command::ImportLegacyLogs { repository: text() },
+        Command::FixHeldLog {
+            log_id: text(),
+            fix: LogFix {
+                kind: LogKind::Observation,
+                title: text(),
+                repository: text(),
+                reference: text(),
+                changed: text(),
+                why: text(),
+                state: text(),
+            },
+        },
+        Command::ReleaseHeldLog { log_id: text() },
         Command::SetWorkspacesDir { path: text() },
         Command::SetVerification {
             verification: VerificationSettings::default(),
