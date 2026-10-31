@@ -1,7 +1,9 @@
 //! The selected session's conversation: its header, the transcript, and the composer with its
 //! notices and decision card.
 use super::*;
+use composer_focus::ComposerFocus;
 use conversation_header::ConversationHeader;
+use gpui_base::TextSelection;
 use gpui_component::{
     Disableable,
     button::ButtonVariants,
@@ -87,6 +89,8 @@ pub(super) struct Conversation {
     pub(super) done_tickets_open: bool,
     /// The chat's model menu, rebuilt when the catalog or the snapshot changes.
     chat_models: Rc<BTreeMap<(Provider, String), String>>,
+    /// Pressing transcript text focuses it; this hands focus back to the composer.
+    composer_focus: ComposerFocus,
 }
 impl EventEmitter<Intent> for Conversation {}
 impl Conversation {
@@ -132,7 +136,41 @@ impl Conversation {
             minimized_decisions: BTreeSet::new(),
             done_tickets_open: false,
             chat_models: Rc::default(),
+            composer_focus: ComposerFocus::default(),
         }
+    }
+    fn composer_focused(&self, window: &Window, cx: &App) -> bool {
+        self.input.focus_handle(cx).is_focused(window)
+    }
+    /// A left press in the transcript: its text takes focus, so remember whether the composer had it.
+    fn transcript_pressed(&mut self, window: &Window, cx: &App) {
+        let focused = self.composer_focused(window, cx);
+        self.composer_focus.pressed(focused);
+    }
+    /// A left release anywhere, once the selection layer has ended its drag.
+    fn transcript_released(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selecting = TextSelection::has_selection(window, cx);
+        if self.composer_focus.released(selecting) {
+            self.input.update(cx, |input, cx| input.focus(window, cx));
+        }
+    }
+    /// Typing while the text holds focus after a selection goes to the composer.
+    fn typed_in_transcript(
+        &mut self,
+        keystroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let focused = self.composer_focused(window, cx);
+        let Some(text) = self.composer_focus.typed(focused, keystroke) else {
+            return;
+        };
+        self.input.update(cx, |input, cx| {
+            input.focus(window, cx);
+            // Replaces the composer's selected text, as typing there does.
+            input.replace(text.to_owned(), window, cx);
+        });
+        cx.stop_propagation();
     }
     /// A new selection brings its draft back; each snapshot can change the model menu, the
     /// placeholder and which decision cards are left.
@@ -1107,11 +1145,33 @@ impl Render for Conversation {
             .on_drop(cx.listener(|v, paths: &ExternalPaths, w, c| {
                 v.attach_files(paths.paths().to_vec(), w, c)
             }))
+            .capture_key_down(cx.listener(|v, event: &KeyDownEvent, w, c| {
+                v.typed_in_transcript(&event.keystroke, w, c)
+            }))
+            // A drag may end outside the transcript, and the selection layer ends it after us.
+            .capture_any_mouse_up(cx.listener(|_, event: &MouseUpEvent, w, c| {
+                if event.button == MouseButton::Left {
+                    let view = c.entity();
+                    w.defer(c, move |w, c| {
+                        view.update(c, |v, c| v.transcript_released(w, c))
+                    });
+                }
+            }))
             .child(self.header.clone().cached(conversation_header::style()))
             .children(self.ticket_table(session, p, cx))
             .child(
-                (self.transcript.clone())
-                    .cached(StyleRefinement::default().w_full().flex_1().min_h_0()),
+                div()
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .capture_any_mouse_down(cx.listener(|v, event: &MouseDownEvent, w, c| {
+                        if event.button == MouseButton::Left {
+                            v.transcript_pressed(w, c);
+                        }
+                    }))
+                    .child(
+                        (self.transcript.clone()).cached(StyleRefinement::default().size_full()),
+                    ),
             )
             .child(self.composer(session, window, p, cx))
     }
