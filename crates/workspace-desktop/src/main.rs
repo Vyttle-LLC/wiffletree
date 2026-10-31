@@ -5,6 +5,8 @@ mod assistant_view;
 mod attachment_chips;
 mod automation;
 mod background;
+mod board_web_view;
+mod boards_view;
 mod brain_browser_view;
 mod brain_markdown;
 mod brain_search;
@@ -223,6 +225,8 @@ enum Page {
     BrainBrowser,
     /// The assistant and its thread tabs.
     Assistant,
+    /// Every output threads and jobs saved, and the jobs.
+    Boards,
 }
 
 struct Workspace {
@@ -250,6 +254,7 @@ struct Workspace {
     brain_search: Entity<brain_search::BrainSearch>,
     issues: Entity<issues_view::IssuesPage>,
     assistant: Entity<assistant_view::AssistantPage>,
+    boards: Entity<boards_view::BoardsPage>,
     usage: Entity<usage_view::UsagePage>,
     sidebar: Entity<sidebar::Sidebar>,
     inspector: Entity<Inspector>,
@@ -312,6 +317,8 @@ impl Workspace {
         Self::adopt(&issues, window, cx);
         let assistant = cx.new(|cx| assistant_view::AssistantPage::new(bridge.clone(), window, cx));
         Self::adopt(&assistant, window, cx);
+        let boards = cx.new(|cx| boards_view::BoardsPage::new(bridge.clone(), window, cx));
+        Self::adopt(&boards, window, cx);
         let sidebar = cx.new(|cx| sidebar::Sidebar::new(bridge.clone(), window, cx));
         Self::adopt(&sidebar, window, cx);
         let usage = cx.new(|_| usage_view::UsagePage::new(bridge.clone()));
@@ -339,6 +346,7 @@ impl Workspace {
             brain_search,
             issues,
             assistant,
+            boards,
             usage,
             sidebar,
             inspector,
@@ -544,6 +552,8 @@ impl Workspace {
             .update(cx, |browser, cx| browser.share(shared.clone(), window, cx));
         self.issues
             .update(cx, |issues, cx| issues.share(shared.clone(), window, cx));
+        self.boards
+            .update(cx, |boards, cx| boards.share(shared.clone(), window, cx));
         self.assistant.update(cx, |assistant, cx| {
             assistant.share(shared.clone(), window, cx)
         });
@@ -1033,6 +1043,9 @@ impl Workspace {
             Page::Assistant => self
                 .assistant
                 .update(cx, |assistant, cx| assistant.opened(window, cx)),
+            Page::Boards => self
+                .boards
+                .update(cx, |boards, cx| boards.opened(window, cx)),
             _ => {}
         }
         self.share(window, cx);
@@ -1639,6 +1652,16 @@ fn main() -> anyhow::Result<()> {
                 MenuItem::action("Quit Wiffletree", Quit),
             ]),
             Menu::new("File").items([MenuItem::action("New Project", NewProject)]),
+            // A board's web view takes no key equivalent from GPUI, so editing shortcuts reach
+            // it only as these items, which AppKit sends to the first responder.
+            Menu::new("Edit").items([
+                MenuItem::os_action("Copy", gpui_component::input::Copy, OsAction::Copy),
+                MenuItem::os_action(
+                    "Select All",
+                    gpui_component::input::SelectAll,
+                    OsAction::SelectAll,
+                ),
+            ]),
         ]);
         register_window_actions(cx);
         hosts::watch(cx);

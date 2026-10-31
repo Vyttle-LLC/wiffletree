@@ -7,14 +7,17 @@
 </head>
 <body>
 <h1>Fixture board</h1>
-<p>A chart drawn by an inline script, a script and a stylesheet served by the board scheme, and
-three loads that must fail: a fetch over the network, an image over the network, and a
-<code>file://</code> image.</p>
+<p>A chart drawn by an inline script, a script and a stylesheet served by the board scheme, a
+<code>data:</code> image, and what must fail: a fetch over the network, an image over the network,
+a <code>file://</code> image, a socket, the camera, and storage that outlives the board.</p>
+<p><a id="link" href="https://example.com/link">A link to the web</a> ·
+<a id="window" href="https://example.com/window" target="_blank">one to a new window</a></p>
 <canvas id="chart" width="480" height="160"></canvas>
 <p><input id="field" placeholder="Click here and type"></p>
 <pre id="results"></pre>
 <script>
-  window.probe = { inline: true, served: false, fetch: "pending", remote: "pending", local: "pending" };
+  window.probe = { inline: true, served: false, fetch: "pending", remote: "pending", local: "pending",
+    data: "pending", socket: "pending", camera: "pending", stored: "pending" };
   const chart = document.getElementById("chart").getContext("2d");
   [40, 90, 65, 120, 80, 140, 110].forEach((value, index) => {
     chart.fillStyle = `hsl(${150 + index * 12}, 45%, 50%)`;
@@ -27,12 +30,34 @@ three loads that must fail: a fetch over the network, an image over the network,
   const images = {
     remote: "https://example.com/favicon.ico",
     local: "file:///System/Library/CoreServices/Finder.app/Contents/Resources/Finder.icns",
+    data: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
   };
   for (const [id, source] of Object.entries(images)) {
     const image = new Image();
     image.onload = () => { probe[id] = "loaded"; };
     image.onerror = () => { probe[id] = "blocked"; };
     image.src = source;
+  }
+  try {
+    const socket = new WebSocket("wss://example.com/socket");
+    socket.onopen = () => { probe.socket = "loaded"; };
+    socket.onerror = () => { probe.socket = "blocked"; };
+  } catch (error) {
+    probe.socket = "blocked";
+  }
+  if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+    navigator.mediaDevices.getUserMedia({ video: true }).then(
+      () => { probe.camera = "granted"; },
+      () => { probe.camera = "refused"; },
+    );
+  } else {
+    probe.camera = "refused";
+  }
+  try {
+    probe.stored = String(localStorage.getItem("probe"));
+    localStorage.setItem("probe", "kept");
+  } catch (error) {
+    probe.stored = "null";
   }
 </script>
 <script src="board.js"></script>

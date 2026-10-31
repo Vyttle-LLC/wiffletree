@@ -1736,7 +1736,7 @@ fn issues_line(space: &Space, status: &StorageStatus) -> String {
 }
 
 /// Who can read the Space's storage, and so its issues.
-fn readers_line(space: &Space, readers: Option<Readers>) -> String {
+pub(super) fn readers_line(space: &Space, readers: Option<Readers>) -> String {
     let owner = repository_owner(&space.storage.repository.key()).to_owned();
     match readers {
         None => "Only you, on this Mac".into(),

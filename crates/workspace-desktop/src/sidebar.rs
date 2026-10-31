@@ -606,10 +606,10 @@ impl Sidebar {
             )
     }
 
-    /// The assistant, pinned above Projects by the name the user gave it, with a working mark
-    /// while any thread is in a turn, a count of job runs that failed or did not start, which
-    /// opens the job's page, and a note with Stop for each run past 30 minutes. Dragging
-    /// projects never moves it.
+    /// The assistant and Boards, pinned above Projects. The assistant goes by the name the user
+    /// gave it, with a working mark while any thread is in a turn, a count of job runs that
+    /// failed or did not start, which opens the job's page, and a note with Stop for each run
+    /// past 30 minutes. Dragging projects never moves them.
     fn assistant_row(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let snapshot = self.shared.snapshot();
         let working = snapshot.is_some_and(|s| assistant_view::any_working(&s.threads));
@@ -680,6 +680,18 @@ impl Sidebar {
                     }),
             )
             .child(notes)
+            .child({
+                let selected = self.shared.page == Page::Boards;
+                self.row("boards-row".into(), selected, p)
+                    .on_click(cx.listener(|_, _, _, c| c.emit(Intent::OpenPage(Page::Boards))))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(if selected { p.text } else { p.subtle })
+                            .child(icon("book").size(px(14.))),
+                    )
+                    .child(div().flex_1().child("Boards"))
+            })
     }
 
     /// Pages about the whole workspace, kept apart from the per-session tools on the right.
