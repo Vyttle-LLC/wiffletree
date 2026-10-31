@@ -5,12 +5,37 @@ use std::collections::{BTreeMap, BTreeSet};
 use workspace_core::Source;
 
 /// The thread tools, as MCP lists them.
-pub(crate) const THREAD_TOOLS: [&str; 4] = [
+pub(crate) const THREAD_TOOLS: [&str; 7] = [
     "save_output",
     "suggest_space",
     "project_brief",
     "propose_job",
+    "propose_issue",
+    "log_work",
+    "query_brain",
 ];
+/// An issue thread's tools: a thread's, then its tracker's and repositories' reads and its
+/// proposals.
+pub(crate) const ISSUE_THREAD_TOOLS: [&str; 15] = [
+    "save_output",
+    "suggest_space",
+    "project_brief",
+    "propose_job",
+    "propose_issue",
+    "log_work",
+    "query_brain",
+    "list_issues",
+    "read_issue",
+    "search_repositories",
+    "read_repository_file",
+    "propose_edit",
+    "propose_comment",
+    "propose_split",
+    "propose_duplicate",
+];
+/// The built-in Claude tools that reach the web, which an issue thread is never given: issue
+/// text is untrusted, and the web would let it send what the thread read off this Mac.
+const WEB_TOOLS: [&str; 2] = ["WebSearch", "WebFetch"];
 /// Shell text a job run's commands may never hold: redirection, chaining, pipes,
 /// substitution, variables, grouping, escapes and a second line.
 const SHELL_TEXT: [char; 13] = [
@@ -30,8 +55,8 @@ pub fn shell_text_refused(input: &[u8]) -> Option<String> {
         "A job's run may run only its listed commands as they are, with no redirection, chaining, pipe, substitution or variable.".into()
     })
 }
-/// A job run's one tool: it saves its output, and offers no card.
-pub(crate) const JOB_RUN_TOOLS: [&str; 1] = ["save_output"];
+/// A job run's tools: it saves its output and reads its Space's brain, and offers no card.
+pub(crate) const JOB_RUN_TOOLS: [&str; 2] = ["save_output", "query_brain"];
 /// The built-in Claude tools every thread has; `Bash` joins them only for a CLI source.
 const CLAUDE_TOOLS: [&str; 7] = [
     "Read",
@@ -67,6 +92,8 @@ pub struct ThreadLaunch {
     pub servers: BTreeMap<String, Value>,
     /// A job's run, which has only `JOB_RUN_TOOLS` and its recipe's sources.
     pub job_run: bool,
+    /// An issue thread, which has `ISSUE_THREAD_TOOLS`, no source and no web.
+    pub issue_thread: bool,
 }
 impl ThreadLaunch {
     /// Whether Codex may run it: not a job's run with a CLI source, since Codex's command rules
@@ -89,17 +116,23 @@ impl ThreadLaunch {
     }
     /// The workspace tools the run is offered.
     fn workspace_tools(&self) -> &'static [&'static str] {
-        match self.job_run {
-            true => &JOB_RUN_TOOLS,
-            false => &THREAD_TOOLS,
+        match (self.job_run, self.issue_thread) {
+            (true, _) => &JOB_RUN_TOOLS,
+            (false, true) => &ISSUE_THREAD_TOOLS,
+            (false, false) => &THREAD_TOOLS,
         }
     }
     /// The helper's argument that serves those tools.
     fn helper_arg(&self) -> &'static str {
-        match self.job_run {
-            true => "job-mcp",
-            false => "thread-mcp",
+        match (self.job_run, self.issue_thread) {
+            (true, _) => "job-mcp",
+            (false, true) => "issue-thread-mcp",
+            (false, false) => "thread-mcp",
         }
+    }
+    /// Whether the run may search and fetch the web.
+    fn web(&self) -> bool {
+        !self.issue_thread
     }
     fn mcp_sources(&self) -> impl Iterator<Item = (&str, &[String])> {
         self.sources.iter().filter_map(|source| match source {
@@ -129,6 +162,7 @@ impl ThreadLaunch {
         let bash = self.cli_prefixes().next().is_some();
         CLAUDE_TOOLS
             .into_iter()
+            .filter(|tool| self.web() || !WEB_TOOLS.contains(tool))
             .chain(bash.then_some("Bash"))
             .collect()
     }
@@ -136,8 +170,10 @@ impl ThreadLaunch {
     pub(crate) fn claude_allowed(&self) -> Vec<String> {
         let scratch = self.scratch.display();
         let mut allowed: Vec<String> = ["Read", "Glob", "Grep", "WebSearch", "WebFetch"]
+            .into_iter()
+            .filter(|tool| self.web() || !WEB_TOOLS.contains(tool))
             .map(String::from)
-            .into();
+            .collect();
         // `//` makes a rule's path absolute; Edit rules cover every tool that writes files.
         for tool in ["Write", "Edit", "MultiEdit"] {
             allowed.push(format!("{tool}(/{scratch}/**)"));
@@ -221,16 +257,21 @@ impl ThreadLaunch {
     }
 }
 
-/// What Claude may never write, whatever else allows it: its own folder under the home
-/// folder, where `dontAsk` still lets the session write its auto memory.
-fn claude_denied() -> Vec<String> {
+/// What Claude may never do, whatever else allows it: write its own folder under the home
+/// folder, where `dontAsk` still lets the session write its auto memory, and for an issue
+/// thread reach the web.
+fn claude_denied(launch: &ThreadLaunch) -> Vec<String> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
     let claude = home.join(".claude");
-    ["Write", "Edit", "MultiEdit"]
+    let mut denied: Vec<String> = ["Write", "Edit", "MultiEdit"]
         .map(|tool| format!("{tool}(/{}/**)", claude.display()))
-        .into()
+        .into();
+    if !launch.web() {
+        denied.extend(WEB_TOOLS.map(String::from));
+    }
+    denied
 }
 
 /// Claude in `dontAsk` mode, which denies without asking every tool not allowed, with no
@@ -272,7 +313,7 @@ pub(super) fn configure_claude(cmd: &mut ProcessCommand, turn: &Turn, launch: &T
     .args(["--permission-mode", "dontAsk"])
     .args(["--tools", &launch.claude_tools().join(",")])
     .args(["--allowedTools", &launch.claude_allowed().join(",")])
-    .args(["--disallowedTools", &claude_denied().join(",")])
+    .args(["--disallowedTools", &claude_denied(launch).join(",")])
     .args(["--mcp-config", &json!({"mcpServers":servers}).to_string()]);
     if images(turn).next().is_some() {
         cmd.args(["--input-format", "stream-json"]);
@@ -303,7 +344,10 @@ pub(super) fn configure_codex(cmd: &mut ProcessCommand, turn: &Turn, launch: &Th
         "sandbox_workspace_write.exclude_slash_tmp=true".into(),
         "sandbox_workspace_write.exclude_tmpdir_env_var=true".into(),
         "sandbox_workspace_write.writable_roots=[]".into(),
-        "web_search=\"live\"".into(),
+        match launch.web() {
+            true => "web_search=\"live\"".into(),
+            false => "web_search=\"disabled\"".into(),
+        },
         format!("model_reasoning_effort={}", json!(turn.profile.effort)),
         format!("developer_instructions={}", json!(turn.instructions)),
         format!(
@@ -391,6 +435,7 @@ mod tests {
             sources,
             servers,
             job_run: false,
+            issue_thread: false,
         }
     }
     fn linear() -> Source {
@@ -428,9 +473,48 @@ mod tests {
     fn claude_may_never_write_its_own_folder_under_home() {
         let home = std::env::var("HOME").unwrap();
         assert_eq!(
-            claude_denied(),
+            claude_denied(&launch(vec![])),
             ["Write", "Edit", "MultiEdit"].map(|tool| format!("{tool}(/{home}/.claude/**)"))
         );
+    }
+
+    #[test]
+    fn an_issue_thread_has_no_web_tool_on_either_provider() {
+        let issue_thread = ThreadLaunch {
+            issue_thread: true,
+            ..launch(vec![])
+        };
+        for tool in WEB_TOOLS {
+            assert!(!issue_thread.claude_tools().contains(&tool));
+            assert!(!issue_thread.claude_allowed().contains(&tool.to_owned()));
+            assert!(claude_denied(&issue_thread).contains(&tool.to_owned()));
+            assert!(
+                launch(vec![]).claude_tools().contains(&tool),
+                "a thread keeps the web"
+            );
+        }
+        assert!(
+            (issue_thread.claude_allowed().iter())
+                .any(|rule| rule == "mcp__agent_workspace__propose_edit")
+        );
+        assert!(
+            !issue_thread
+                .claude_allowed()
+                .iter()
+                .any(|rule| rule.contains("link_issue"))
+        );
+        let turn = super::super::tests::turn(Provider::Codex, None, vec![]);
+        let mut codex = ProcessCommand::new("codex");
+        configure_codex(&mut codex, &turn, &issue_thread);
+        let args: Vec<String> = (codex.get_args())
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.contains(&"web_search=\"disabled\"".to_owned()),
+            "{args:?}"
+        );
+        assert!(!args.contains(&"web_search=\"live\"".to_owned()));
+        assert!(args.iter().any(|arg| arg.contains("\"issue-thread-mcp\"")));
     }
 
     #[test]
@@ -479,6 +563,10 @@ mod tests {
             .map(|tool| tool["name"].as_str().unwrap().to_owned())
             .collect();
         assert_eq!(offered, THREAD_TOOLS);
+        let offered: Vec<String> = (crate::mcp::issue_thread_tools().as_array().unwrap().iter())
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(offered, ISSUE_THREAD_TOOLS);
         let offered: Vec<String> = (crate::mcp::job_run_tools().as_array().unwrap().iter())
             .map(|tool| tool["name"].as_str().unwrap().to_owned())
             .collect();

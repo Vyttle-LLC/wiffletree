@@ -2774,6 +2774,15 @@ impl Actor {
                             });
                             return Ok(None);
                         }
+                        // Repository reads run git, so they answer from off the host thread.
+                        if name == "search_repositories" || name == "read_repository_file" {
+                            let read = self.host.repository_read(&session, &name, &args)?;
+                            let reply = reply.clone();
+                            std::thread::spawn(move || {
+                                let _ = reply.try_send(read.run().map_err(|e| format!("{e:#}")));
+                            });
+                            return Ok(None);
+                        }
                         return self.host.thread_tool(&session, &name, &args).map(Some);
                     }
                     ensure!(

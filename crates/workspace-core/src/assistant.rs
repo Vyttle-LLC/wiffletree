@@ -1,9 +1,12 @@
 //! The assistant's threads (OpenSpec change `assistant-spaces-jobs-boards`, stages 1 and 2). A
 //! thread is a provider session of role `Assistant` owned by its Space, read-only but for its
-//! scratch folder, kept only on this Mac. The router sends each message to its thread.
+//! scratch folder, kept only on this Mac. The router sends each message to its thread. An issue
+//! thread (stage 6) has an issue or its tracker's list attached, and proposes changes to it.
+pub mod proposal;
 pub mod router;
 
 use crate::{ModelProfile, Selection, SpaceId, Status};
+use proposal::{Attached, Proposal};
 use router::{Destination, Question};
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +52,12 @@ pub struct Thread {
     /// The job run this thread is; such a thread takes no message but its prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job: Option<JobRunOf>,
+    /// What an issue thread works on; such a thread takes its messages without the router.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attached: Option<Attached>,
+    /// The changes it proposed to its Space's tracker, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<Proposal>,
 }
 impl Thread {
     /// Whether its tab is in the strip at `now`: not a job's run, not closed, and a message or
@@ -237,6 +246,8 @@ mod tests {
             routed: vec![],
             moved: vec![],
             job: None,
+            attached: None,
+            proposals: vec![],
         }
     }
 

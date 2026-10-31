@@ -1293,12 +1293,18 @@ fn search(db: &Connection, scope: Option<&Scope>, query: &str) -> Result<Vec<Bra
     )
 }
 
-/// Who may call `query_brain`: the project coordinator and its workers. Reading is safe; the
+/// Who may call `query_brain`: the project coordinator and its workers, and assistant threads,
+/// issue threads among them, and job runs on their own Space's brain. Reading is safe; the
 /// compile session gets its input directly.
 pub(crate) fn queries_brain(role: Role) -> bool {
     matches!(
         role,
-        Role::ProjectOrchestrator | Role::Implementer | Role::Tester | Role::Reviewer
+        Role::ProjectOrchestrator
+            | Role::Implementer
+            | Role::Tester
+            | Role::Reviewer
+            | Role::Assistant
+            | Role::JobRun
     )
 }
 
@@ -1732,7 +1738,7 @@ impl Host {
         service::only_arguments("query_brain", args, &QUERY_BRAIN_ARGUMENTS)?;
         ensure!(
             queries_brain(session.role),
-            "query_brain is for the project coordinator, implementers, testers and reviewers"
+            "query_brain is for the project coordinator, implementers, testers and reviewers, and for assistant threads and job runs"
         );
         let question = args["question"]
             .as_str()
@@ -1743,17 +1749,28 @@ impl Host {
             question.chars().count() <= MAX_QUESTION_CHARS,
             "Keep question to {MAX_QUESTION_CHARS} characters"
         );
-        let whole = match args.get("scope").map(|s| s.as_str()) {
+        let asked_whole = match args.get("scope").map(|s| s.as_str()) {
             None | Some(Some("project")) => false,
             Some(Some("brain")) => true,
             _ => bail!("scope is project or brain"),
         };
-        let space_brain = self
-            .owner_brain(&SessionOwner::Project(session.project_id.clone()))?
-            .context("This project's Space has no brain to query. The human can name one in Settings › Spaces.")?;
+        // A thread has no project, so it reads its own Space's whole brain.
+        let (owner, whole) = match session.role {
+            Role::Assistant | Role::JobRun => {
+                let space = self.thread(&session.id)?.space_id;
+                (SessionOwner::Space(space), true)
+            }
+            _ => (
+                SessionOwner::Project(session.project_id.clone()),
+                asked_whole,
+            ),
+        };
+        let space_brain = self.owner_brain(&owner)?.context(
+            "This Space has no brain to query. The human can name one in Settings › Spaces.",
+        )?;
         let BrainRepository::GitHub { owner, name, .. } = &space_brain.repository else {
             bail!(
-                "This project's Space's brain is not a GitHub repository yet, so it has no index. See the Brains page."
+                "This Space's brain is not a GitHub repository yet, so it has no index. See the Brains page."
             );
         };
         let (brain, db) = self.brain_reader(&format!("{owner}/{name}"))?;
@@ -2896,6 +2913,36 @@ pub(crate) mod tests {
                 .move_project_to_space(&b.f.coordinator.project_id, &lone.id)
                 .unwrap();
             refused(&mut b, json!({"question": "x"}), "has no brain");
+        }
+
+        #[test]
+        fn a_thread_reads_its_own_spaces_whole_brain_and_never_another_spaces() {
+            let mut b = brained();
+            b.merge(&with_app_entry(), "Compile (#81)");
+            let sage = b.sage.clone();
+            let host = &mut b.f.host;
+            host.start_thread("t1", &sage, "Hi", &[], None).unwrap();
+            let thread = host.session("t1").unwrap();
+            let question = json!({"question": "App retries Telnyx webhooks", "scope": "project"});
+            let answer = host.thread_tool(&thread, "query_brain", &question).unwrap();
+            assert_eq!(answer["brain"], REPO);
+            assert_eq!(
+                answer["scope"], "brain",
+                "a thread has no project to narrow to"
+            );
+            assert!(answer.to_string().contains("Telnyx"));
+            let vyttle = host.create_space("Vyttle", "", "", None).unwrap().space;
+            host.start_thread("t2", &vyttle.id, "Hi", &[], None)
+                .unwrap();
+            let elsewhere = host.session("t2").unwrap();
+            let refused = host
+                .thread_tool(&elsewhere, "query_brain", &question)
+                .unwrap_err();
+            assert!(refused.to_string().contains("no brain"), "{refused}");
+            let vyttle = name_brain(host, &vyttle.id, "Vyttle-LLC/vyttle-docs");
+            assert!(vyttle.as_str() != sage.as_str());
+            let unread = host.thread_tool(&elsewhere, "query_brain", &question);
+            assert!(unread.is_err_and(|e| !e.to_string().contains("Telnyx")));
         }
 
         #[test]

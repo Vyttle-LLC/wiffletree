@@ -1117,7 +1117,11 @@ mod tests {
         );
     }
 
-    fn turn(provider: Provider, resume: Option<&str>, attachments: Vec<Attachment>) -> Turn {
+    pub(super) fn turn(
+        provider: Provider,
+        resume: Option<&str>,
+        attachments: Vec<Attachment>,
+    ) -> Turn {
         Turn {
             run_id: "run".into(),
             kind: TurnKind::Prompt,

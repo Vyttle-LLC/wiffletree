@@ -137,7 +137,10 @@ fn a_thread_runs_restricted_in_its_scratch_folder_and_saves_outputs_there_only()
             "save_output",
             "suggest_space",
             "project_brief",
-            "propose_job"
+            "propose_job",
+            "propose_issue",
+            "log_work",
+            "query_brain"
         ])
     );
     assert_eq!(turn["prompt"], "save costs.html as AWS costs");

@@ -14,6 +14,7 @@ use new_issue::{NewIssueForm, Trackable};
 use ui::{empty_state, hint, icon, pill, segment};
 // GPUI exports a `Priority` too; the issue's wins over both globs.
 use workspace_core::Priority;
+use workspace_core::assistant::proposal::Attached;
 
 pub(super) const PRIORITIES: [Priority; 5] = [
     Priority::Urgent,
@@ -200,6 +201,10 @@ impl IssuesPage {
                 view.start_project(id.clone(), title.clone(), window, cx)
             }
             IssueViewEvent::OpenSession(id) => cx.emit(Intent::Select(id.clone())),
+            IssueViewEvent::AskAssistant(id) => cx.emit(Intent::AskAssistant {
+                attached: Attached::Issue { id: id.clone() },
+                space: view.space.clone(),
+            }),
         })
         .detach();
         self.open = Some(issue);
@@ -731,6 +736,17 @@ impl Render for IssuesPage {
                     ),
             )
             .child(div().flex_1())
+            .child(
+                button("issues-ask-assistant")
+                    .icon(icon("agent"))
+                    .label("Ask the assistant")
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        cx.emit(Intent::AskAssistant {
+                            attached: Attached::Issues,
+                            space: view.space.clone(),
+                        })
+                    })),
+            )
             .child(
                 ui::gated(
                     button("issues-new")

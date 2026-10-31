@@ -1,6 +1,7 @@
 //! The assistant's threads: sessions of role `Assistant` owned by a Space, with no project,
 //! parent or ticket, each in its own scratch folder, kept only on this Mac.
 use crate::*;
+use workspace_core::assistant::proposal::Attached;
 use workspace_core::assistant::{
     CardKind, JobRunOf, Thread, ThreadCard, ThreadHit, ThreadTab, title_from_message,
     validate_title,
@@ -40,10 +41,16 @@ pub(crate) struct FirstMessage<'a> {
 }
 
 /// The tables a thread's session writes to that named a project for every row.
-const PROJECT_OPTIONAL: [&str; 4] = ["sessions", "messages", "activity", "usage_requests"];
+const PROJECT_OPTIONAL: [&str; 5] = [
+    "sessions",
+    "messages",
+    "activity",
+    "usage_requests",
+    "work_logs",
+];
 
-/// The thread table, and sessions, messages, activity and usage that need no project, so that
-/// a thread's session holds no project record.
+/// The thread table, and sessions, messages, activity, usage and log entries that need no
+/// project, so that a thread's session holds no project record.
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY REFERENCES sessions(id), space_id TEXT NOT NULL, data TEXT NOT NULL);",
@@ -259,8 +266,22 @@ impl Host {
         space: &SpaceId,
         title: &str,
         job: Option<JobRunOf>,
-        (profile, chooser, reason, waits): (ModelProfile, Chooser, String, bool),
+        model: (ModelProfile, Chooser, String, bool),
         first: FirstMessage,
+    ) -> Result<Thread> {
+        let kind = (job, None);
+        self.create_thread(id, space, title, kind, model, Some(first))
+    }
+    /// Creates a thread, a job's run with `job` or an issue thread with `attached`, on its
+    /// model; with `first`, sends it that message, else it waits for the human's.
+    fn create_thread(
+        &mut self,
+        id: &str,
+        space: &SpaceId,
+        title: &str,
+        (job, attached): (Option<JobRunOf>, Option<Attached>),
+        (profile, chooser, reason, waits): (ModelProfile, Chooser, String, bool),
+        first: Option<FirstMessage>,
     ) -> Result<Thread> {
         let record = self.space(space)?;
         ensure!(
@@ -304,6 +325,8 @@ impl Host {
             routed: vec![],
             moved: vec![],
             job,
+            attached,
+            proposals: vec![],
         };
         let scratch = scratch_folder(&self.home, id);
         fs::create_dir_all(&scratch)?;
@@ -317,10 +340,54 @@ impl Host {
             runtime.waiting = waits;
             runtime.workdir = Some(scratch.to_string_lossy().into_owned());
             host.save_runtime(&runtime)?;
-            host.send_with_files(first.id, None, &session.id, first.body, first.files)?;
+            if let Some(first) = first {
+                host.send_with_files(first.id, None, &session.id, first.body, first.files)?;
+            }
             Ok(())
         })?;
         Ok(thread)
+    }
+    /// Ask the assistant: the issue thread of `attached` in the issue's Space, opened again
+    /// when that Space has one, else started with no message. The Space is `filter` when it
+    /// shares the tracker, else the one of those last used for a new project; a thread never
+    /// changes its Space, so a tracker two Spaces share has a thread in each.
+    pub fn open_issue_thread(
+        &mut self,
+        attached: &Attached,
+        filter: Option<&SpaceId>,
+    ) -> Result<Thread> {
+        let (space, title) = match attached {
+            Attached::Issue { id } => {
+                let space = self.issue_space(id.prefix(), filter)?;
+                let issue = self.read_issue(id)?;
+                let named = (issue.issue.as_ref()).map_or(String::new(), |i| i.title.clone());
+                (space, title_from_message(&format!("{id} · {named}")))
+            }
+            Attached::Issues => {
+                let space = match filter {
+                    Some(space) => self.space(space)?.space,
+                    None => (self.spaces_by_use()?.into_iter())
+                        .find(|space| self.tracker(space).is_ok())
+                        .context("No Space here has issues")?,
+                };
+                let prefix = (self.tracker(&space))
+                    .with_context(|| format!("{} has no issues", space.name))?
+                    .prefix;
+                let space = self.issue_space(&prefix, Some(&space.id))?;
+                let title = format!("Issues · {}", space.name);
+                (space, title)
+            }
+        };
+        let existing = (self.threads()?.into_iter()).find(|thread| {
+            thread.space_id == space.id && thread.attached.as_ref() == Some(attached)
+        });
+        if let Some(thread) = existing {
+            return self.set_thread_open(&thread.id, true);
+        }
+        let record = self.space(&space.id)?;
+        let model = self.thread_model(&record, None)?;
+        let kind = (None, Some(attached.clone()));
+        self.create_thread(&new_id(), &space.id, &title, kind, model, None)
     }
     fn insert_thread_session(&self, session: &Session) -> Result<()> {
         self.db.execute(
@@ -452,7 +519,22 @@ impl Host {
             .prepare("SELECT id FROM messages WHERE recipient=?1")?
             .query_map([id], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        self.atomically(|host| delete_with_dependents(&host.db, "sessions", "id=?1", id))?;
+        // Its brain entries stay and are sent: its batch closes now, and a session with entries
+        // keeps its bare row, which they name, and loses everything else.
+        let closed = self.atomically(|host| {
+            let closed = memory::close_log_batches(&host.db, memory::Closing::Session(id), now())?;
+            let logged: bool = host.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM work_logs WHERE session_id=?1)",
+                [id],
+                |r| r.get(0),
+            )?;
+            match logged {
+                true => delete_dependents(&host.db, "sessions", "id=?1", id, &["work_logs"])?,
+                false => delete_with_dependents(&host.db, "sessions", "id=?1", id)?,
+            }
+            Ok(closed)
+        })?;
+        self.brains_now |= closed > 0;
         for message in messages {
             if let Ok(folder) = attachments_folder(&self.home, &message) {
                 let _ = fs::remove_dir_all(folder);
@@ -609,12 +691,14 @@ impl Host {
     }
     /// What a thread's turn may use beyond reading: its scratch folder and its Space's
     /// sources, or for a job's run only its recipe's, with each MCP source's definition from
-    /// the provider's own configuration.
+    /// the provider's own configuration. An issue thread reads untrusted text, so it gets no
+    /// source and no web: nothing it could send what it read through.
     pub(crate) fn thread_launch(&self, session: &Session) -> Result<provider::ThreadLaunch> {
         let thread = self.thread(&session.id)?;
-        let sources = match &thread.job {
-            Some(job) => self.recipe(&job.job)?.sources,
-            None => self.space(&thread.space_id)?.space.sources,
+        let sources = match (&thread.job, &thread.attached) {
+            (Some(job), _) => self.recipe(&job.job)?.sources,
+            (None, Some(_)) => vec![],
+            (None, None) => self.space(&thread.space_id)?.space.sources,
         };
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
@@ -636,6 +720,7 @@ impl Host {
             sources,
             servers,
             job_run: thread.job.is_some(),
+            issue_thread: thread.attached.is_some(),
         })
     }
     /// A thread's workspace tool. No other tool is offered to a thread, and none of these
@@ -647,8 +732,11 @@ impl Host {
         args: &Value,
     ) -> Result<Value> {
         let mut thread = self.thread(&session.id)?;
-        // A job's run saves its output, and does nothing else.
+        // A job's run saves its output and may read its Space's brain, and does nothing else.
         if let Some(job) = thread.job.clone() {
+            if name == "query_brain" {
+                return self.query_brain(session, args);
+            }
             ensure!(
                 name == "save_output",
                 "{name} is not one of a job run's tools"
@@ -685,6 +773,11 @@ impl Host {
                 let brief = card_text(args, "brief", MAX_CARD_TEXT)?.into();
                 self.add_card(&mut thread, CardKind::ProjectBrief { name, brief })
             }
+            "propose_issue" | "propose_edit" | "propose_comment" | "propose_split"
+            | "propose_duplicate" => self.propose_change(&mut thread, name, args),
+            "list_issues" | "read_issue" => self.issue_tool(session, name, args),
+            "log_work" => self.log_work(session, args),
+            "query_brain" => self.query_brain(session, args),
             other => bail!("{other} is not one of a thread's tools"),
         }
     }
@@ -888,11 +981,27 @@ fn inside_scratch(scratch: &Path, path: &str) -> Result<PathBuf> {
 /// Deletes the rows of `table` matching `filter` (on `?1`) and, first, every row that refers
 /// to them through a foreign key, however deep.
 fn delete_with_dependents(db: &Connection, table: &str, filter: &str, param: &str) -> Result<()> {
+    delete_dependents(db, table, filter, param, &[])?;
+    db.execute(&format!("DELETE FROM {table} WHERE {filter}"), [param])?;
+    Ok(())
+}
+/// Deletes the rows of other tables that refer to `table`'s rows matching `filter`, and
+/// theirs in turn, except those of the tables in `keep`.
+fn delete_dependents(
+    db: &Connection,
+    table: &str,
+    filter: &str,
+    param: &str,
+    keep: &[&str],
+) -> Result<()> {
     let references: Vec<(String, String, String)> = db
         .prepare("SELECT m.name,f.\"from\",f.\"to\" FROM sqlite_master m JOIN pragma_foreign_key_list(m.name) f WHERE m.type='table' AND f.\"table\"=?1 AND m.name<>?1")?
         .query_map([table], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
     for (child, from, to) in references {
+        if keep.contains(&child.as_str()) {
+            continue;
+        }
         let to = if to.is_empty() {
             "rowid".to_owned()
         } else {
@@ -901,7 +1010,6 @@ fn delete_with_dependents(db: &Connection, table: &str, filter: &str, param: &st
         let nested = format!("{from} IN (SELECT {to} FROM {table} WHERE {filter})");
         delete_with_dependents(db, &child, &nested, param)?;
     }
-    db.execute(&format!("DELETE FROM {table} WHERE {filter}"), [param])?;
     Ok(())
 }
 

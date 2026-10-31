@@ -36,11 +36,13 @@ pub mod power;
 mod pr_watch;
 mod processes;
 mod progress;
+mod proposals;
 pub mod provider;
 mod publish;
 pub mod remote;
 mod repos;
 mod repositories;
+mod repository_reads;
 mod revisions;
 mod router;
 pub mod runtime;
@@ -1725,6 +1727,24 @@ impl Host {
             Command::DismissThreadCard { thread_id, card_id } => {
                 serde_json::to_value(self.dismiss_thread_card(&thread_id, &card_id)?)?
             }
+            Command::OpenIssueThread { attached, space_id } => {
+                serde_json::to_value(self.open_issue_thread(&attached, space_id.as_ref())?)?
+            }
+            Command::Proposals { thread_id } => {
+                serde_json::to_value(self.proposal_views(&thread_id)?)?
+            }
+            Command::ApplyProposal {
+                thread_id,
+                proposal_id,
+                edited,
+            } => {
+                let edited = edited.map(|edited| *edited);
+                serde_json::to_value(self.apply_proposal(&thread_id, &proposal_id, edited)?)?
+            }
+            Command::DiscardProposal {
+                thread_id,
+                proposal_id,
+            } => serde_json::to_value(self.discard_proposal(&thread_id, &proposal_id)?)?,
             Command::SetAssistantName { name } => json!(self.set_assistant_name(&name)?),
             Command::RouteMessage {
                 id,

@@ -258,6 +258,14 @@ pub(super) enum Intent {
         name: String,
         description: String,
     },
+    /// Ask the assistant on an issue or the Issues page: opens the issue thread beside it, in
+    /// the Space the page is filtered to, as `OpenIssueThread` resolves it.
+    AskAssistant {
+        attached: workspace_core::assistant::proposal::Attached,
+        space: Option<SpaceId>,
+    },
+    /// The human applied a proposal, so the Issues page reads its list and issue again.
+    IssuesChanged,
     /// Opens the assistant's Jobs list, or one job's page.
     OpenJob(Option<workspace_core::job::JobKey>),
     /// Stop on a job's long run, by its id.

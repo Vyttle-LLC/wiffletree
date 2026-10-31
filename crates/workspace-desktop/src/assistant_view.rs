@@ -2,6 +2,7 @@
 //! view of thread tabs, each a small read-only provider session in a Space, with search, the
 //! cards a thread's tools show, and a composer whose Space chip is the router's until the user
 //! picks one by hand. Its jobs are in the `jobs` view.
+mod issue_threads;
 pub(super) mod jobs;
 mod routing;
 
@@ -137,6 +138,16 @@ pub(super) struct AssistantPage {
     jobs_view: Option<jobs::JobsView>,
     /// Whether the app opens at login, read when the Jobs list first opens.
     login: Option<bool>,
+    /// The issue thread docked beside the Issues page, which Ask the assistant opens.
+    docked: Option<String>,
+    /// The open issue thread's pending proposals as the host read them, and the thread and
+    /// proposals they were read for.
+    proposal_views: Vec<workspace_core::assistant::proposal::ProposalView>,
+    proposals_read: Option<(String, usize)>,
+    /// Who wrote the open issue thread's issue text, by thread, for its notice.
+    authors: Option<(String, Vec<String>)>,
+    /// A proposal the human is editing before applying it.
+    editing: Option<issue_threads::ProposalEdit>,
 }
 impl EventEmitter<Intent> for AssistantPage {}
 impl AssistantPage {
@@ -188,6 +199,11 @@ impl AssistantPage {
             named: DEFAULT_NAME.into(),
             jobs_view: None,
             login: None,
+            docked: None,
+            proposal_views: vec![],
+            proposals_read: None,
+            authors: None,
+            editing: None,
         }
     }
     fn tabs(&self) -> &[ThreadTab] {
@@ -216,8 +232,8 @@ impl AssistantPage {
     /// Takes the shared state, follows the open tab out of the strip, and reads the open
     /// thread's messages again when they changed.
     pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
-        let shown = shared.page == Page::Assistant;
         self.shared = shared;
+        let shown = self.shared.page == Page::Assistant || self.is_docked_now();
         let name = assistant_name(self.shared.snapshot());
         if name != self.named {
             let placeholder = composer_placeholder(&name);
@@ -241,6 +257,10 @@ impl AssistantPage {
             cx.notify();
         }
     }
+    /// Whether the docked issue thread shows now: the Issues page is open beside it.
+    fn is_docked_now(&self) -> bool {
+        self.shared.page == Page::Issues && self.docked().is_some()
+    }
     /// Shows the first tab, or a new tab when there is none, as opening the assistant does.
     pub(super) fn opened(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.open_tab().is_none() {
@@ -250,6 +270,7 @@ impl AssistantPage {
         cx.notify();
     }
     fn read_messages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.read_issue_thread(window, cx);
         let Some(tab) = self.open_tab() else {
             self.messages.clear();
             self.read = None;
@@ -292,6 +313,23 @@ impl AssistantPage {
             return;
         }
         self.sending = true;
+        // An issue thread takes its messages without the router.
+        let issue_thread = (self.open_tab())
+            .filter(|tab| tab.thread.attached.is_some())
+            .map(|tab| tab.thread.id.clone());
+        if let Some(thread) = issue_thread {
+            self.chosen_space = None;
+            let send = Command::Send {
+                id: new_id(),
+                sender: None,
+                recipient: thread,
+                body,
+                attachments: vec![],
+                uploads: vec![],
+            };
+            self.request(send, window, cx);
+            return;
+        }
         let open_space = self.open_tab().map(|tab| tab.thread.space_id.clone());
         // A Space picked by hand skips the router: its thread, or a new one there.
         match (self.chosen_space.take(), self.open.clone()) {
@@ -843,6 +881,7 @@ impl AssistantPage {
             .map_or(String::new(), |s| s.name.clone());
         let thread = &tab.thread;
         let mut column = div().flex().flex_col().gap_3().px_5().py_4();
+        column = column.children(self.authors_notice(tab, p));
         // A message Change moved out, and the replies after it, show dimmed.
         let mut moved: Option<&str> = None;
         for entry in routing::timeline(&self.messages, thread) {
@@ -901,6 +940,9 @@ impl AssistantPage {
         }
         for card in &tab.thread.cards {
             column = column.child(self.card(card, p, cx));
+        }
+        for proposal in &tab.thread.proposals {
+            column = column.child(self.proposal_card(proposal, p, cx));
         }
         for held in self.held_for(Some(&thread.id)) {
             column = column.child(self.held_message(&held, p, cx));
@@ -1066,6 +1108,7 @@ impl AssistantPage {
                 p,
             ));
         }
+        let issue_thread = tab.is_some_and(|t| t.thread.attached.is_some());
         let space = self.composer_space();
         let spaces = self.spaces().to_vec();
         let chip_name = (spaces.iter())
@@ -1140,9 +1183,10 @@ impl AssistantPage {
                     .gap_2()
                     .text_size(px(font::CAPTION))
                     .text_color(p.subtle)
-                    .child(chip)
-                    .child(model)
-                    .child(AUTHORITY)
+                    .map(|bar| match issue_thread {
+                        true => bar.child("Goes to this thread, never the router"),
+                        false => bar.child(chip).child(model).child(AUTHORITY),
+                    })
                     .child(div().flex_1())
                     .child(
                         button("send-to-thread")
@@ -1178,6 +1222,11 @@ impl Requests for AssistantPage {
 impl Render for AssistantPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(is_dark(cx));
+        if self.is_docked_now()
+            && let Some(tab) = self.open_tab().cloned()
+        {
+            return self.docked_body(&tab, p, cx);
+        }
         let body = match (&self.jobs_view, &self.hits, self.open_tab().cloned()) {
             (Some(view), _, _) => self.jobs_body(view, p, cx).into_any_element(),
             (None, Some(hits), _) => self.search_results(hits, p, cx).into_any_element(),
@@ -1261,6 +1310,8 @@ mod tests {
                 routed: vec![],
                 moved: vec![],
                 job: None,
+                attached: None,
+                proposals: vec![],
             },
             status,
             profile: None,

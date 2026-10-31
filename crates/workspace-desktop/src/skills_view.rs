@@ -2473,9 +2473,9 @@ mod tests {
                 "Implementer v4",
                 "Verifier v2",
                 "PR keeper v1",
-                "Thread contract v1",
-                "Assistant v3",
-                "Job run v2"
+                "Thread contract v2",
+                "Assistant v4",
+                "Job run v3"
             ]
         );
     }

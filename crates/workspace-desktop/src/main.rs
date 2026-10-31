@@ -526,6 +526,15 @@ impl Workspace {
             Intent::StopJobRun(run) => self.assistant.update(cx, |assistant, cx| {
                 assistant.stop_run(run.clone(), window, cx)
             }),
+            Intent::AskAssistant { attached, space } => {
+                self.assistant.update(cx, |assistant, cx| {
+                    assistant.ask_about(attached.clone(), space.clone(), window, cx)
+                });
+            }
+            Intent::IssuesChanged => {
+                self.issues
+                    .update(cx, |issues, cx| issues.reload(window, cx));
+            }
         }
         self.share(window, cx);
         cx.notify();
@@ -1065,7 +1074,12 @@ impl Workspace {
                 .then(|| self.brain_browser.read(cx).searched())
                 .flatten()
         });
-        let selected = brain_search::searched_for(&self.shared, self.last_space.as_ref());
+        // In a thread, its own Space's brain.
+        let thread_space = self.assistant.read(cx).shown_space(self.shared.page);
+        let selected = match &thread_space {
+            Some(space) => brain_search::searched_in_thread(&self.shared, space),
+            None => brain_search::searched_for(&self.shared, self.last_space.as_ref()),
+        };
         let (searched, scope) = match brain {
             None => {
                 let scope = match &selected {

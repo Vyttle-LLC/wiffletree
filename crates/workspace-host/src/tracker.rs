@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::time::UNIX_EPOCH;
 use storage::TRACKER;
+use workspace_core::assistant::proposal::FILED_FOR;
 
 pub(crate) const ISSUES: &str = "issues";
 /// Raised when the index's layout changes, so it is rebuilt from the files.
@@ -472,7 +473,7 @@ pub(crate) fn event(by: &str, at: &str, kind: &str, from: Value, to: Value) -> I
     }
 }
 
-fn validate_title(title: &str) -> Result<String> {
+pub(crate) fn validate_title(title: &str) -> Result<String> {
     let title = title.trim();
     ensure!(!title.is_empty(), "An issue needs a title");
     ensure!(
@@ -785,6 +786,16 @@ impl Host {
     /// local tracker, by the same rule as a push; with a temporary ID in a GitHub tracker until
     /// a pass pushes it.
     pub fn create_issue(&mut self, space_id: &SpaceId, new: NewIssue) -> Result<Issue> {
+        self.file_issue(space_id, new, false)
+    }
+    /// Files `new` as the human; `for_assistant` marks it filed by their assistant, from a
+    /// proposal they applied.
+    pub(crate) fn file_issue(
+        &mut self,
+        space_id: &SpaceId,
+        new: NewIssue,
+        for_assistant: bool,
+    ) -> Result<Issue> {
         let author = self.issue_author()?;
         let space = self.space(space_id)?.space;
         let tracker = self.tracker(&space)?;
@@ -822,10 +833,13 @@ impl Host {
             blocked_by: vec![],
             related: vec![],
             duplicate_of: None,
-            author,
             created: schedules::rfc3339(now()),
             description: new.description,
-            extra: Extra::new(),
+            extra: match for_assistant {
+                true => Extra::from([(FILED_FOR.to_owned(), json!(author))]),
+                false => Extra::new(),
+            },
+            author,
         };
         let files = vec![(issue_file(&id), issue_md(&issue)?)];
         self.write_issue_files(
@@ -964,14 +978,24 @@ impl Host {
     }
     /// Adds the human's comment as a file of its own.
     pub fn comment_on_issue(&mut self, id: &IssueId, body: &str) -> Result<Comment> {
+        self.post_comment(id, body, false)
+    }
+    /// Posts the human's comment; `for_assistant` marks it written by their assistant, from a
+    /// proposal they applied, which every Mac shows as "Assistant for ‹name›".
+    pub(crate) fn post_comment(
+        &mut self,
+        id: &IssueId,
+        body: &str,
+        for_assistant: bool,
+    ) -> Result<Comment> {
         let (author, space, store, _) = self.writable(id)?;
         ensure!(!body.trim().is_empty(), "A comment needs text");
         let mut comment = Comment {
             file: String::new(),
             created: schedules::rfc3339(now()),
+            assistant_for: for_assistant.then(|| author.clone()),
             author,
             edited: None,
-            assistant_for: None,
             body: body.trim_end().to_owned(),
         };
         let content = comment_md(&comment)?;

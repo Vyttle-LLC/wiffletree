@@ -549,6 +549,30 @@ pub(super) fn searched_for(shared: &Shared, last_space: Option<&SpaceId>) -> Sea
     }
 }
 
+/// What ⌘K searches in an assistant thread: its Space's whole brain, since a thread has no
+/// project, or the "no brain" panel when that Space names none.
+pub(super) fn searched_in_thread(shared: &Shared, space: &SpaceId) -> Searched {
+    let space = shared
+        .snapshot()
+        .and_then(|snapshot| snapshot.spaces.iter().find(|s| &s.id == space));
+    let Some(space) = space else {
+        return Searched::NoBrain {
+            space: None,
+            local: false,
+        };
+    };
+    match github_brain(space) {
+        Some(repository) => Searched::Brain {
+            repository,
+            project: None,
+        },
+        None => Searched::NoBrain {
+            space: Some((space.id.clone(), space.name.clone())),
+            local: space.brain.is_some(),
+        },
+    }
+}
+
 /// The Space of the project selected, which the overlay falls back to once none is.
 pub(super) fn space_in_use(shared: &Shared) -> Option<SpaceId> {
     let project = shared.project_id()?;
@@ -557,7 +581,9 @@ pub(super) fn space_in_use(shared: &Shared) -> Option<SpaceId> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Searched, excerpt, no_brain_line, searched_for, slash_outside_any_field};
+    use super::{
+        Searched, excerpt, no_brain_line, searched_for, searched_in_thread, slash_outside_any_field,
+    };
     use crate::Shared;
     use gpui::{KeyContext, Keystroke};
     use std::rc::Rc;
@@ -632,6 +658,19 @@ mod tests {
         );
         assert!(matches!(
             searched_for(&shared, None),
+            Searched::NoBrain { space: None, .. }
+        ));
+        // A thread searches its own Space's whole brain; one in a Space with none is told so.
+        assert_eq!(
+            searched_in_thread(&shared, &last),
+            Searched::Brain {
+                repository: "Sage-Social/sagehaven-docs".into(),
+                project: None,
+            }
+        );
+        let personal = SpaceId("personal".into());
+        assert!(matches!(
+            searched_in_thread(&shared, &personal),
             Searched::NoBrain { space: None, .. }
         ));
     }

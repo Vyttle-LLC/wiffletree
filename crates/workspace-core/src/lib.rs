@@ -3293,6 +3293,35 @@ pub enum Command {
         thread_id: String,
         card_id: String,
     },
+    /// Ask the assistant on an issue or the Issues page: opens the issue thread of `attached`
+    /// in the issue's Space, starting it when this Space has none, and answers with the
+    /// `Thread`. `space_id` is the Issues page's Space filter; without one, or with one that
+    /// does not share the tracker, the Space last used for a new project among those that do.
+    /// `Attached::Issues` names the tracker by `space_id`, or else the Space last used.
+    OpenIssueThread {
+        attached: assistant::proposal::Attached,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space_id: Option<SpaceId>,
+    },
+    /// Read-only: a thread's pending proposals as their cards show them now, as
+    /// `Vec<ProposalView>`.
+    Proposals {
+        thread_id: String,
+    },
+    /// Applies a thread's proposal as the human, through the tracker's own write commands; with
+    /// `edited`, the human's edit of it, which must keep its kind and issue. Answered with the
+    /// `Thread`.
+    ApplyProposal {
+        thread_id: String,
+        proposal_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edited: Option<Box<assistant::proposal::ProposalChange>>,
+    },
+    /// Discards a proposal; nothing is written to the tracker. Answered with the `Thread`.
+    DiscardProposal {
+        thread_id: String,
+        proposal_id: String,
+    },
     /// Names the assistant, a shared setting.
     SetAssistantName {
         name: String,
@@ -4019,6 +4048,7 @@ impl Command {
             | Self::IssuePeople { .. }
             | Self::SearchThreads { .. }
             | Self::ScratchFiles { .. }
+            | Self::Proposals { .. }
             | Self::PreviewJob { .. }
             | Self::Boards
             | Self::BoardVersions { .. }
@@ -4059,6 +4089,9 @@ impl Command {
             | Self::DraftProjectBrief { .. }
             | Self::MakeProject { .. }
             | Self::DismissThreadCard { .. }
+            | Self::OpenIssueThread { .. }
+            | Self::ApplyProposal { .. }
+            | Self::DiscardProposal { .. }
             | Self::SetAssistantName { .. }
             | Self::RouteMessage { .. }
             | Self::AnswerHeld { .. }
@@ -4156,6 +4189,7 @@ impl Command {
     /// too: its state carries the pairing code. The assistant is the human's: its threads, their
     /// text and its name. So are jobs: only the user saves, pauses, runs or deletes one. So are
     /// Boards, the outputs threads and jobs saved, and only the user shares one into a Space.
+    /// So are issue threads' proposals: only the human applies or discards one.
     pub fn is_human_only(&self) -> bool {
         matches!(
             self,
@@ -4170,6 +4204,10 @@ impl Command {
                 | Self::MakeProject { .. }
                 | Self::ScratchFiles { .. }
                 | Self::DismissThreadCard { .. }
+                | Self::OpenIssueThread { .. }
+                | Self::Proposals { .. }
+                | Self::ApplyProposal { .. }
+                | Self::DiscardProposal { .. }
                 | Self::SetAssistantName { .. }
                 | Self::RouteMessage { .. }
                 | Self::AnswerHeld { .. }

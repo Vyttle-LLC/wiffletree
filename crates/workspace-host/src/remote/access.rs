@@ -68,6 +68,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::IssueProjectDefaults { .. }
         | Command::IssuePeople { .. }
         | Command::SearchThreads { .. }
+        | Command::Proposals { .. }
         | Command::ScratchFiles { .. } => Row::Read,
         Command::ResolvePaths { .. } | Command::ReadFile { .. } | Command::ListFolder { .. } => {
             Row::HostPath
@@ -109,6 +110,9 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::DraftProjectBrief { .. }
         | Command::MakeProject { .. }
         | Command::DismissThreadCard { .. }
+        | Command::OpenIssueThread { .. }
+        | Command::ApplyProposal { .. }
+        | Command::DiscardProposal { .. }
         | Command::SetAssistantName { .. }
         | Command::RouteMessage { .. }
         | Command::AnswerHeld { .. }

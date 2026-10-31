@@ -146,6 +146,15 @@ pub(crate) fn git_bytes_large(path: &Path, args: &[&str], input: &[u8]) -> Resul
     git_bytes_within(path, args, input, (LARGE_TIMEOUT, LARGE_OUTPUT_BOUND))
 }
 
+/// A Git query's exit status and output as bytes, under a query's deadline and output bound,
+/// for a query whose failure is part of the answer, as `git grep`'s "nothing matched" is.
+pub(crate) fn git_bytes_answer(path: &Path, args: &[&str]) -> Result<(ExitStatus, Vec<u8>)> {
+    let mut command = git_command(path, args);
+    command.env("GIT_OPTIONAL_LOCKS", "0");
+    let (status, output, _) = bounded_output(command, GIT_TIMEOUT, None)?;
+    Ok((status, output))
+}
+
 fn git_bytes_within(
     path: &Path,
     args: &[&str],

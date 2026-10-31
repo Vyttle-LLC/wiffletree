@@ -47,6 +47,13 @@ impl Host {
     fn sharing_spaces(&self, prefix: &str) -> Result<(StorageRepository, Vec<Space>)> {
         let (space, _) = self.tracker_for(prefix)?;
         let storage = space.storage.repository;
+        let spaces = (self.spaces_by_use()?.into_iter())
+            .filter(|space| space.storage.repository == storage)
+            .collect();
+        Ok((storage, spaces))
+    }
+    /// This Mac's Spaces, the one last used for a new project first.
+    pub(crate) fn spaces_by_use(&self) -> Result<Vec<Space>> {
         let used: Vec<String> = (self
             .db
             .prepare("SELECT id FROM spaces ORDER BY used_at DESC, rowid")?)
@@ -54,10 +61,17 @@ impl Host {
         .collect::<rusqlite::Result<_>>()?;
         let mut spaces: Vec<Space> = (self.spaces()?.into_iter())
             .map(|record| record.space)
-            .filter(|space| space.storage.repository == storage)
             .collect();
         spaces.sort_by_key(|space| used.iter().position(|id| id == space.id.as_str()));
-        Ok((storage, spaces))
+        Ok(spaces)
+    }
+    /// The Space an issue of the tracker `prefix` is worked in here ("An issue's Space"):
+    /// `filter` when it shares the tracker, else the one of those last used for a new project.
+    pub(crate) fn issue_space(&self, prefix: &str, filter: Option<&SpaceId>) -> Result<Space> {
+        let (_, spaces) = self.sharing_spaces(prefix)?;
+        let at =
+            (filter.and_then(|filter| spaces.iter().position(|s| &s.id == filter))).unwrap_or(0);
+        (spaces.into_iter().nth(at)).context("No Space here shares this issue's tracker")
     }
     /// The workspace repositories whose GitHub name the issue lists, and the listed ones not on
     /// this Mac; the Space's, as New project ticks them, only when the issue lists none.
@@ -99,7 +113,7 @@ impl Host {
             repositories: self.issue_repositories(&issue, &chosen)?,
         })
     }
-    fn parsed_issue(&self, id: &IssueId) -> Result<Issue> {
+    pub(crate) fn parsed_issue(&self, id: &IssueId) -> Result<Issue> {
         (self.read_issue(id)?.issue)
             .with_context(|| format!("{id}’s issue.md does not parse; fix it first"))
     }
@@ -420,29 +434,36 @@ impl Host {
             }
         }
     }
-    /// The coordinator's `list_issues`, `read_issue` and `link_issue`, over its project's
-    /// Space's tracker only. Only `link_issue` writes, and only a link, a `work` event and the
-    /// derived state.
+    /// `list_issues`, `read_issue` and `link_issue` over the caller's Space's tracker only: the
+    /// coordinator's project's Space, or an issue thread's own. Only `link_issue` writes, and
+    /// only a link, a `work` event and the derived state; an issue thread does not have it.
     pub(crate) fn issue_tool(
         &mut self,
         session: &Session,
         name: &str,
         args: &Value,
     ) -> Result<Value> {
-        ensure!(
-            session.role == Role::ProjectOrchestrator,
-            "{name} is a project coordinator's tool; your role does not have it"
-        );
-        let project = self.project(&session.project_id)?;
-        let space = self.space(&project.space)?.space;
+        let project = match session.role {
+            Role::ProjectOrchestrator => Some(self.project(&session.project_id)?),
+            Role::Assistant
+                if name != "link_issue" && self.thread(&session.id)?.attached.is_some() =>
+            {
+                None
+            }
+            _ => bail!("{name} is a project coordinator's tool; your role does not have it"),
+        };
+        let space = match &project {
+            Some(project) => self.space(&project.space)?.space,
+            None => self.space(&self.thread(&session.id)?.space_id)?.space,
+        };
         let prefix = (self.tracker(&space))
-            .context("This project's Space has no tracker")?
+            .context("This Space has no tracker")?
             .prefix;
         let issue_id = || -> Result<IssueId> {
             let id = IssueId::parse(args["id"].as_str().context("Missing id")?)?;
             ensure!(
                 id.prefix() == prefix,
-                "{id} is not in the tracker of this project's Space, whose issues are {prefix}-…"
+                "{id} is not in the tracker of this Space, whose issues are {prefix}-…"
             );
             Ok(id)
         };
@@ -480,6 +501,7 @@ impl Host {
             }
             "link_issue" => {
                 service::only_arguments(name, args, &["id", "ticket_id"])?;
+                let project = project.context("link_issue is a project coordinator's tool")?;
                 let id = issue_id()?;
                 let ticket = match args["ticket_id"].as_str() {
                     Some(ticket) => Some(self.owned_ticket(&session.id, ticket)?.id),
@@ -1080,7 +1102,7 @@ pub(crate) mod tests {
             let refused = host.agent_tool(&coordinator, tool, json!({"id":theirs.id}));
             let error = format!("{:#}", refused.unwrap_err());
             assert!(
-                error.contains("not in the tracker of this project's Space"),
+                error.contains("not in the tracker of this Space"),
                 "{error}"
             );
         }

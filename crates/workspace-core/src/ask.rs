@@ -442,6 +442,32 @@ pub fn scratch_files(thread_id: String) -> Ask<Vec<String>> {
 pub fn dismiss_thread_card(thread_id: String, card_id: String) -> Ask<assistant::Thread> {
     Ask::new(Command::DismissThreadCard { thread_id, card_id })
 }
+pub fn open_issue_thread(
+    attached: assistant::proposal::Attached,
+    space_id: Option<SpaceId>,
+) -> Ask<assistant::Thread> {
+    Ask::new(Command::OpenIssueThread { attached, space_id })
+}
+pub fn proposals(thread_id: String) -> Ask<Vec<assistant::proposal::ProposalView>> {
+    Ask::new(Command::Proposals { thread_id })
+}
+pub fn apply_proposal(
+    thread_id: String,
+    proposal_id: String,
+    edited: Option<assistant::proposal::ProposalChange>,
+) -> Ask<assistant::Thread> {
+    Ask::new(Command::ApplyProposal {
+        thread_id,
+        proposal_id,
+        edited: edited.map(Box::new),
+    })
+}
+pub fn discard_proposal(thread_id: String, proposal_id: String) -> Ask<assistant::Thread> {
+    Ask::new(Command::DiscardProposal {
+        thread_id,
+        proposal_id,
+    })
+}
 /// Answered with the name as saved.
 pub fn set_assistant_name(name: String) -> Ask<String> {
     Ask::new(Command::SetAssistantName { name })

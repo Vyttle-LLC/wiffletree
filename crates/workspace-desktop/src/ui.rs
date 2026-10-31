@@ -926,6 +926,24 @@ impl Render for Workspace {
             Page::Spaces => self.spaces.clone().cached(full()).into_any_element(),
             Page::Brains => self.brains.clone().cached(full()).into_any_element(),
             Page::BrainBrowser => self.brain_browser.clone().cached(full()).into_any_element(),
+            // An issue thread docks beside the Issues page; not cached, as the assistant isn't.
+            Page::Issues if self.assistant.read(cx).docked().is_some() => div()
+                .size_full()
+                .flex()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(self.issues.clone().cached(full())),
+                )
+                .child(
+                    div()
+                        .w(px(360.))
+                        .flex_none()
+                        .h_full()
+                        .child(self.assistant.clone()),
+                )
+                .into_any_element(),
             Page::Issues => self.issues.clone().cached(full()).into_any_element(),
             // Not cached: its tabs' working marks turn on the animation clock.
             Page::Assistant => self.assistant.clone().into_any_element(),
