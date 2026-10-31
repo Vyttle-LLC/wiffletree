@@ -273,11 +273,6 @@ pub(crate) trait RuleSet {
     fn compare(&mut self, clone: &Path, remote: &str) -> Result<()>;
     /// The files to commit on GitHub's head, as the pass read them, and the commit's message.
     fn commit(&mut self) -> Option<(Vec<(String, Content)>, String)>;
-    /// Earlier versions this machine saved since the last push, each committed on its own, in
-    /// order, before `commit`'s, so a file's history keeps every one.
-    fn earlier(&mut self) -> Vec<(Vec<(String, Content)>, String)> {
-        vec![]
-    }
     /// `compare` failed: this pass commits nothing of this rule set, and leaves its files as
     /// they are, while the other rule sets go on.
     fn failed(&mut self, error: anyhow::Error);
@@ -287,6 +282,9 @@ pub(crate) trait RuleSet {
     }
     /// Forgets what `compare` found, as the pass fetches again after a push was refused.
     fn reset(&mut self);
+    /// Sits out the pass's next try, after a push was refused: keeps what `compare` found,
+    /// its pauses included, but nothing it would commit, which waits for the next pass.
+    fn sit_out(&mut self);
     /// Whether a push of this rule set's commit, refused because GitHub's branch moved, fetches
     /// and pushes again in the same pass. The others wait for the next pass, which pulls the
     /// other machine's commit before pushing again.
@@ -357,8 +355,11 @@ pub(crate) fn pass(
         }
         tries += 1;
         for (rule_set, part) in rule_sets.iter_mut().zip(&mut taking_part) {
-            rule_set.reset();
-            *part = rule_set.pushes_again();
+            *part = *part && rule_set.pushes_again();
+            match part {
+                true => rule_set.reset(),
+                false => rule_set.sit_out(),
+            }
         }
     }
 }
@@ -409,19 +410,7 @@ fn pass_once(
     runtime::git_output(clone, &["reset", "--quiet", &head])?;
     let commits: Vec<_> = (rule_sets.iter_mut().zip(compared).enumerate())
         .filter(|(_, (_, compared))| *compared)
-        .flat_map(|(at, (rule_set, _))| {
-            let last = rule_set.commit();
-            // Earlier versions go only with a latest one, after it compared clean.
-            let earlier = if last.is_some() {
-                rule_set.earlier()
-            } else {
-                vec![]
-            };
-            earlier
-                .into_iter()
-                .chain(last)
-                .map(move |commit| (at, commit))
-        })
+        .filter_map(|(at, (rule_set, _))| Some((at, rule_set.commit()?)))
         .collect();
     let committed = (commits.iter())
         .filter(|(_, (files, _))| !files.is_empty())
@@ -864,6 +853,9 @@ mod tests {
         fn reset(&mut self) {
             self.changed.clear();
             self.failed = None;
+        }
+        fn sit_out(&mut self) {
+            self.changed.clear();
         }
     }
 

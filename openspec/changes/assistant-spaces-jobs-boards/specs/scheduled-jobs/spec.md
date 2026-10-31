@@ -59,7 +59,7 @@ A job run SHALL NOT send, post, create, change or delete anything in another app
 - **THEN** the run starts on the next choice that is a Claude model, or, with none, does not start and says Codex cannot yet hold gh to read commands
 
 ### Requirement: A run's output is a file
-A run SHALL save its result with `save_output` as a file of any format the user and the recipe chose, such as HTML, Markdown, an image or a PDF. The host SHALL store each output at a stable path for its title under the job's board folder, replacing the previous run's file as a new commit, so Boards shows the latest and its history. A run that saves nothing SHALL be recorded as finished with no output. Each run SHALL be recorded with its start, end, outcome, model and reason, catch-up count, source check and outputs.
+A run SHALL save its result with `save_output` as a file of any format the user and the recipe chose, such as HTML, Markdown, an image or a PDF. The host SHALL store each output at a stable path for its title under the job's board folder, replacing the previous run's file as a new commit, so Boards shows the latest and its history. In a Space stored on GitHub, the shared history SHALL hold every version that reached GitHub; a runner's save that a later save replaced before any sync reached GitHub SHALL be kept only on the runner's Mac, among the output's versions there, and only the newest save SHALL be pushed. A run that saves nothing SHALL be recorded as finished with no output. Each run SHALL be recorded with its start, end, outcome, model and reason, catch-up count, source check and outputs.
 
 #### Scenario: A weekly dashboard
 - **WHEN** the "Release dashboard" job saves `dashboard.html` titled "Release dashboard" on two Mondays

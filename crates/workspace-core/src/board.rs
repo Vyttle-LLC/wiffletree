@@ -111,6 +111,10 @@ pub struct BoardVersion {
     /// Copied in by Share to Space….
     #[serde(default)]
     pub shared: bool,
+    /// A runner's save that a later save replaced before any pass pushed it, kept only on this
+    /// Mac.
+    #[serde(default)]
+    pub local_only: bool,
     /// The file this version saved, which an earlier save of the title may have named
     /// differently.
     pub file: String,

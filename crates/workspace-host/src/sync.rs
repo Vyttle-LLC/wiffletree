@@ -745,6 +745,9 @@ impl RuleSet for Settings {
         passed.failed = None;
         self.refused = None;
     }
+    fn sit_out(&mut self) {
+        self.passed.committed.clear();
+    }
 }
 
 /// Runs the settings repository's engine with its settings rule set and, when it is also a

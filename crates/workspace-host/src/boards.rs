@@ -36,6 +36,8 @@ pub(crate) struct Shelves {
     waiting: HashSet<(String, String)>,
     /// Where an output's earlier versions are copied for the viewer.
     versions: PathBuf,
+    /// This Mac's private board store.
+    store: PathBuf,
     now: i64,
 }
 
@@ -135,15 +137,50 @@ impl Shelves {
             stale: recipe.is_some_and(|r| stale(r, updated_at, self.now)),
         })
     }
-    /// An output's versions, newest first: each commit that rewrote its metadata.
+    /// An output's versions, newest first: each commit that rewrote its metadata, and for a
+    /// shared job's output, the runner's saves that a later save replaced before a push, which
+    /// only this Mac keeps.
     pub(crate) fn versions(&self, id: &str) -> Result<Vec<BoardVersion>> {
         let found = self.find(id)?;
-        let repository = &found.shelf.repository;
-        let metadata = found.metadata();
+        let mut versions = self.logged(&found.shelf.repository, &found.metadata(), false)?;
+        if let Some(folder) = self.unpushed_of(&found) {
+            versions.extend(self.logged(&self.store, &format!("{folder}.json"), true)?);
+            versions.sort_by_key(|version| std::cmp::Reverse(version.saved_at));
+        }
+        Ok(versions)
+    }
+    /// The private board store's folder that keeps the replaced, never pushed saves of a
+    /// shared job's output, by its title.
+    fn unpushed_of(&self, found: &Found) -> Option<String> {
+        let job = found
+            .job
+            .as_ref()
+            .filter(|_| found.shelf.keeping == Keeping::SharedStorage)?;
+        let (_, job) = job.as_str().rsplit_once('/')?;
+        let base = format!(
+            "{}/{}/{job}/{}",
+            found.shelf.space,
+            assistant::JOB_OUTPUTS,
+            jobs::UNPUSHED
+        );
+        let title = found.about["title"].as_str()?;
+        let folder = assistant::output_folder(&self.store.join(&base), title).ok()?;
+        Some(format!("{base}/{folder}"))
+    }
+    /// The versions Git holds of the output whose metadata is `metadata` in `repository`.
+    fn logged(
+        &self,
+        repository: &Path,
+        metadata: &str,
+        local_only: bool,
+    ) -> Result<Vec<BoardVersion>> {
+        if !repository.join(".git").exists() {
+            return Ok(vec![]);
+        }
         let limit = format!("-n{MAX_VERSIONS}");
         let log = runtime::git_output(
             repository,
-            &["log", &limit, "--format=%H %ct", "--", &metadata],
+            &["log", &limit, "--format=%H %ct", "--", metadata],
         )?;
         let mut versions = vec![];
         for line in log.lines() {
@@ -170,22 +207,29 @@ impl Shelves {
                     .unwrap_or_default(),
                 run_id,
                 shared: about["shared"].as_bool().unwrap_or_default(),
+                local_only,
                 file,
             });
         }
         Ok(versions)
     }
-    /// The folder holding the version `commit` of an output: its own folder for the latest,
-    /// else a copy of the commit's files, made once.
+    /// The folder holding the version `commit` of an output: its own folder for the latest it
+    /// keeps, else a copy of the commit's files, made once.
     pub(crate) fn version_folder(&self, id: &str, commit: &str) -> Result<PathBuf> {
         let versions = self.versions(id)?;
         let found = self.find(id)?;
         let at = (versions.iter())
             .position(|version| version.commit == commit)
             .context("That version is not one of the output's")?;
-        let folder = found.shelf.repository.join(&found.folder);
-        if at == 0 {
-            return Ok(folder);
+        let (repository, folder) = match versions[at].local_only {
+            true => (
+                self.store.clone(),
+                self.unpushed_of(&found).context("That version is gone")?,
+            ),
+            false => (found.shelf.repository.clone(), found.folder.clone()),
+        };
+        if at == 0 && !versions[at].local_only {
+            return Ok(repository.join(&folder));
         }
         let copy = self.versions.join(id).join(commit);
         if copy.is_dir() {
@@ -195,18 +239,15 @@ impl Shelves {
         if staged.exists() {
             fs::remove_dir_all(&staged)?;
         }
-        let prefix = format!("{}/", found.folder);
+        let prefix = format!("{folder}/");
         let listed = runtime::git_output(
-            &found.shelf.repository,
+            &repository,
             &["ls-tree", "-r", "-z", "--name-only", commit, "--", &prefix],
         )?;
         for path in listed.split('\0').filter(|path| !path.is_empty()) {
             let relative = path.strip_prefix(&prefix).context("Unexpected path")?;
-            let bytes = runtime::git_bytes(
-                &found.shelf.repository,
-                &["show", &format!("{commit}:{path}")],
-                &[],
-            )?;
+            let bytes =
+                runtime::git_bytes(&repository, &["show", &format!("{commit}:{path}")], &[])?;
             shared::write_atomically(&staged.join(relative), &bytes)?;
         }
         fs::create_dir_all(&staged)?;
@@ -346,6 +387,7 @@ impl Host {
             catch_ups,
             waiting,
             versions: self.home.join("assistant").join("versions"),
+            store,
             now: now(),
         })
     }

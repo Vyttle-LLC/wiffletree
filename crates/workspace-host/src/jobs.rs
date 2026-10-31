@@ -34,8 +34,7 @@ pub(crate) fn migrate(db: &Connection) -> Result<()> {
          CREATE TABLE IF NOT EXISTS job_due (key TEXT PRIMARY KEY, next_at INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS job_runs (id TEXT PRIMARY KEY, key TEXT NOT NULL, started_at INTEGER NOT NULL, data TEXT NOT NULL);
          CREATE INDEX IF NOT EXISTS job_runs_by_key ON job_runs(key, started_at);
-         CREATE TABLE IF NOT EXISTS job_approvals (key TEXT PRIMARY KEY, approved TEXT NOT NULL);
-         CREATE TABLE IF NOT EXISTS unpushed_versions (version INTEGER NOT NULL, repository TEXT NOT NULL, path TEXT NOT NULL, content BLOB);",
+         CREATE TABLE IF NOT EXISTS job_approvals (key TEXT PRIMARY KEY, approved TEXT NOT NULL);",
     )?;
     Ok(())
 }
@@ -1281,6 +1280,10 @@ impl Host {
             .to_string_lossy()
             .into_owned();
         let version = self.push_job_output(space, recipe, &file, fs::read(source)?, about)?;
+        if version.is_some() {
+            // An older output still waiting must never be shared over this one.
+            self.answer_waiting(&recipe.key(), title, None)?;
+        }
         Ok(version.map(|version| RunOutput {
             title: title.into(),
             file,
@@ -1308,28 +1311,26 @@ impl Host {
             assistant::output_folder(&storage.join(&base), title)?
         );
         let metadata = format!("{folder}.json");
-        let Some(unpushed) = self.keep_unpushed_version(space, &folder)? else {
+        let key = repos::key(&space.storage.repository.key());
+        let record = repos::Record::read(&self.db, &key)?.context("The storage has no record")?;
+        if self.edited_outside(&storage, &folder, &record)? {
             return Ok(None);
-        };
+        }
+        let kept_here = self.keep_replaced_here(space, recipe, title, &metadata, &record)?;
         let message = format!("{}: saved an output of {}", space.name, recipe.name);
         self.write_output(space, &base, file, bytes, about, &message)?;
         let pushed =
             runtime::git_output(&storage, &["rev-list", "--count", "HEAD", "--", &metadata]);
         Ok(Some(
-            pushed.map_or(0, |count| count.trim().parse().unwrap_or(0)) + unpushed + 1,
+            pushed.map_or(0, |count| count.trim().parse().unwrap_or(0)) + kept_here + 1,
         ))
     }
-    /// Keeps the version of the output at `folder` that the next pass has not pushed yet, as
-    /// a save is about to replace it, so the pass commits it before the new one. The version
-    /// is what Wiffletree recorded writing, never what is read back. Returns how many versions
-    /// of it wait, or `None` when its files here are not what Wiffletree wrote: an edit made
-    /// outside Wiffletree, which the next pass pauses and no save overwrites.
-    fn keep_unpushed_version(&self, space: &Space, folder: &str) -> Result<Option<u32>> {
-        let key = repos::key(&space.storage.repository.key());
+    /// Whether the files of the output at `folder` in the clone are not what Wiffletree last
+    /// wrote or synced: an edit made outside Wiffletree, which the next pass pauses and no save
+    /// overwrites.
+    fn edited_outside(&self, storage: &Path, folder: &str, record: &repos::Record) -> Result<bool> {
         let metadata = format!("{folder}.json");
-        let record = repos::Record::read(&self.db, &key)?.context("The storage has no record")?;
         let inside = |path: &str| path == metadata || path.starts_with(&format!("{folder}/"));
-        let storage = self.storage_folder(&space.storage.repository);
         let mut here = std::collections::BTreeMap::new();
         if let Ok(content) = fs::read(storage.join(&metadata)) {
             here.insert(metadata.clone(), content);
@@ -1344,36 +1345,47 @@ impl Host {
             .collect();
         // What Wiffletree last wrote or synced of each file, `None` for no file.
         let wrote = |path: &String| record.written.get(path).cloned().flatten();
-        if paths
+        Ok(paths
             .iter()
-            .any(|path| here.get(*path).cloned() != wrote(path))
-        {
-            return Ok(None);
+            .any(|path| here.get(*path).cloned() != wrote(path)))
+    }
+    /// A save is about to replace the version at `metadata` that no pass has pushed: keeps that
+    /// version, as Wiffletree wrote it, in this Mac's private board store, where Boards lists it
+    /// among the output's versions as only on this Mac. Returns how many such versions it has.
+    fn keep_replaced_here(
+        &self,
+        space: &Space,
+        recipe: &Recipe,
+        title: &str,
+        metadata: &str,
+        record: &repos::Record,
+    ) -> Result<u32> {
+        let store = assistant::board_store(&self.home);
+        let base = unpushed_folder(space, recipe);
+        let kept = || -> Result<u32> {
+            let folder = assistant::output_folder(&store.join(&base), title)?;
+            let kept = format!("{base}/{folder}.json");
+            Ok(
+                runtime::git_output(&store, &["rev-list", "--count", "HEAD", "--", &kept])
+                    .map_or(0, |count| count.trim().parse().unwrap_or(0)),
+            )
+        };
+        let wrote = |path: &str| record.written.get(path).cloned().flatten();
+        let written = wrote(metadata);
+        if written.is_none() || written == record.synced.get(metadata).cloned().flatten() {
+            return kept();
         }
-        let mut waiting: u32 = self.db.query_row(
-            "SELECT count(DISTINCT version) FROM unpushed_versions WHERE repository=?1 AND path=?2",
-            params![key, metadata],
-            |r| r.get(0),
-        )?;
-        let written = wrote(&metadata);
-        if written.is_none() || written == record.synced.get(&metadata).cloned().flatten() {
-            return Ok(Some(waiting));
-        }
-        let files: Vec<(&String, repos::Content)> =
-            paths.into_iter().map(|path| (path, wrote(path))).collect();
-        let version: i64 = self.db.query_row(
-            "SELECT coalesce(max(version),0)+1 FROM unpushed_versions",
-            [],
-            |r| r.get(0),
-        )?;
-        for (path, content) in files {
-            self.db.execute(
-                "INSERT INTO unpushed_versions VALUES (?1,?2,?3,?4)",
-                params![version, key, path, content],
-            )?;
-        }
-        waiting += 1;
-        Ok(Some(waiting))
+        let about: Value = serde_json::from_slice(written.as_deref().unwrap_or_default())?;
+        let file = about["file"].as_str().unwrap_or_default().to_owned();
+        let folder = metadata.strip_suffix(".json").unwrap_or(metadata);
+        let (Some(bytes), true) = (wrote(&format!("{folder}/{file}")), plain_file_name(&file))
+        else {
+            return kept();
+        };
+        let staged = tempfile::tempdir_in(&self.home)?;
+        fs::write(staged.path().join(&file), bytes)?;
+        assistant::store_output(&store, &base, title, &staged.path().join(&file), about)?;
+        kept()
     }
     /// Share or Keep private, for the latest output of `title` that waits for approval, which
     /// `run_id` saved. Share pushes it with its Space's storage, takes it out of the private
@@ -1432,14 +1444,27 @@ impl Host {
             )?;
         }
         // Every earlier output of the title is answered with the latest.
-        for mut earlier in self.job_runs(&run.job, usize::MAX)? {
-            let shared = share && earlier.id == run.id;
+        let shared = share.then(|| (run.id.as_str(), format!("Shared in {}", space.name)));
+        self.answer_waiting(&run.job, title, shared)
+    }
+    /// Ends the wait of every output of `title` of the job, which a later output answered:
+    /// `shared` names the run whose output was shared, and where it is now kept.
+    fn answer_waiting(
+        &self,
+        job: &JobKey,
+        title: &str,
+        shared: Option<(&str, String)>,
+    ) -> Result<()> {
+        for mut earlier in self.job_runs(job, usize::MAX)? {
+            let kept = (shared.as_ref())
+                .filter(|(run, _)| *run == earlier.id)
+                .map(|(_, kept)| kept.clone());
             let waited = (earlier.outputs.iter_mut())
                 .filter(|output| output.title == title && output.waiting)
                 .map(|output| {
                     output.waiting = false;
-                    if shared {
-                        output.kept = format!("Shared in {}", space.name);
+                    if let Some(kept) = &kept {
+                        output.kept = kept.clone();
                     }
                 })
                 .count();
@@ -1454,6 +1479,14 @@ impl Host {
 /// Where a job's outputs kept only on this Mac are, in the private board store.
 fn private_folder(space: &Space, recipe: &Recipe) -> String {
     format!("{}/{}/{}", space.id, assistant::JOB_OUTPUTS, recipe.id)
+}
+
+/// The folder of the private board store, under a job's own, that keeps a runner's saves that
+/// a later save replaced before any pass pushed them. Boards lists them among the shared
+/// output's versions, never as outputs of their own.
+pub(crate) const UNPUSHED: &str = "_unpushed";
+pub(crate) fn unpushed_folder(space: &Space, recipe: &Recipe) -> String {
+    format!("{}/{UNPUSHED}", private_folder(space, recipe))
 }
 
 pub(crate) const STOPPED_BY_YOU: &str = "Stopped: you stopped the run.";
@@ -2416,12 +2449,16 @@ mod tests {
             }
             /// Runs `key` now, saving `body` as its dashboard, to its end.
             fn run_saving(&mut self, key: &JobKey, body: &str) -> JobRun {
+                self.run_saving_as(key, "dashboard.html", body)
+            }
+            /// Runs `key` now, saving `body` as `file`, titled as the dashboard, to its end.
+            fn run_saving_as(&mut self, key: &JobKey, file: &str, body: &str) -> JobRun {
                 let run = self.host.run_now(key).unwrap();
                 let thread = run.thread_id.clone().unwrap();
                 let scratch = assistant::scratch_folder(&self.host.home, &thread);
-                fs::write(scratch.join("dashboard.html"), body).unwrap();
+                fs::write(scratch.join(file), body).unwrap();
                 let session = self.host.session(&thread).unwrap();
-                let args = json!({"path":"dashboard.html","title":TITLE});
+                let args = json!({"path":file,"title":TITLE});
                 (self.host.thread_tool(&session, "save_output", &args)).unwrap();
                 self.host.job_run_ended(&thread, RunEnd::Finished).unwrap();
                 self.host.job_run(&run.id).unwrap()
@@ -2611,41 +2648,28 @@ mod tests {
         }
 
         #[test]
-        fn every_version_saved_before_a_push_is_its_own_commit() {
+        fn of_two_saves_before_a_push_the_newest_is_pushed_and_the_other_kept_here() {
             let mut s = shared(false);
             let key = s.approved();
             let two = s.run_saving(&key, "<p>two</p>");
             let three = s.run_saving(&key, "<p>three</p>");
             assert_eq!((two.outputs[0].version, three.outputs[0].version), (2, 3));
             s.sync();
-            let log = |path: &str| {
-                let log = crate::test_support::git(
-                    &s.github.bare,
-                    &["log", "--format=%H", "main", "--", path],
-                );
-                log.lines().map(str::to_owned).collect::<Vec<_>>()
-            };
-            let versions = log(OUTPUT);
-            assert_eq!(versions.len(), 3, "first, two and three");
-            let shown = |commit: &str| {
-                crate::test_support::git(&s.github.bare, &["show", &format!("{commit}:{OUTPUT}")])
-            };
-            assert_eq!(shown(&versions[0]), "<p>three</p>");
-            assert_eq!(shown(&versions[1]), "<p>two</p>");
-            let listed = s.boards();
+            assert_eq!(s.pushed_versions(ABOUT), 2, "first and three");
+            assert_eq!(s.github.show(OUTPUT).as_deref(), Some("<p>three</p>"));
+            let shared = s.shared_output();
+            let shelves = s.host.shelves().unwrap();
+            let versions = shelves.versions(&shared.id).unwrap();
+            let kept: Vec<_> = versions.iter().filter(|v| v.local_only).collect();
+            assert_eq!((versions.len(), kept.len()), (3, 1));
+            let folder = shelves.version_folder(&shared.id, &kept[0].commit).unwrap();
+            let file = folder.join("dashboard.html");
+            assert_eq!(fs::read_to_string(file).unwrap(), "<p>two</p>");
             assert_eq!(
-                s.host
-                    .shelves()
-                    .unwrap()
-                    .versions(&listed[0].id)
-                    .unwrap()
-                    .len(),
-                3
+                s.boards().len(),
+                1,
+                "a kept save is a version, not an output"
             );
-            let waiting: i64 = (s.host.db)
-                .query_row("SELECT count(*) FROM unpushed_versions", [], |r| r.get(0))
-                .unwrap();
-            assert_eq!(waiting, 0);
         }
 
         impl Shared {
@@ -2659,14 +2683,16 @@ mod tests {
                     .lines()
                     .count()
             }
-            fn kept_versions(&self) -> i64 {
-                (self.host.db)
-                    .query_row(
-                        "SELECT count(DISTINCT version) FROM unpushed_versions",
-                        [],
-                        |r| r.get(0),
-                    )
+            fn shared_output(&self) -> BoardOutput {
+                (self.boards().into_iter())
+                    .find(|output| output.keeping == Keeping::SharedStorage)
                     .unwrap()
+            }
+            /// The shared output's versions kept only on this Mac.
+            fn kept_versions(&self) -> usize {
+                let shelves = self.host.shelves().unwrap();
+                let versions = shelves.versions(&self.shared_output().id).unwrap();
+                versions.iter().filter(|v| v.local_only).count()
             }
         }
 
@@ -2681,7 +2707,7 @@ mod tests {
             assert_eq!(
                 s.kept_versions(),
                 0,
-                "an outside edit is never kept as a version"
+                "nothing is kept or replaced over an outside edit"
             );
             let clone = s.host.storage_folder(&s.sage.storage.repository);
             assert_eq!(
@@ -2698,7 +2724,7 @@ mod tests {
         }
 
         #[test]
-        fn kept_versions_of_an_output_paused_this_pass_wait_with_it() {
+        fn an_output_with_a_file_paused_this_pass_pushes_none_of_its_files() {
             let mut s = shared(false);
             let key = s.approved();
             s.run_saving(&key, "<p>two</p>");
@@ -2712,11 +2738,102 @@ mod tests {
                 (s.pushed_versions(OUTPUT), s.pushed_versions(ABOUT)),
                 (1, 1)
             );
+        }
+
+        #[test]
+        fn a_newest_save_equal_to_githubs_is_githubs_latest_tree() {
+            let mut s = shared(false);
+            let key = s.approved();
+            s.run_saving(&key, "<p>changed</p>");
+            let newest = s.run_saving(&key, "<p>first</p>");
+            s.sync();
+            assert_eq!(s.pushed_versions(ABOUT), 2);
+            assert_eq!(s.github.show(OUTPUT).as_deref(), Some("<p>first</p>"));
+            let about: Value = serde_json::from_str(&s.github.show(ABOUT).unwrap()).unwrap();
+            assert_eq!(about["run_id"], json!(newest.id));
+            assert_eq!(s.kept_versions(), 1);
+            s.sync();
+            let clone = s.host.storage_folder(&s.sage.storage.repository);
             assert_eq!(
-                s.kept_versions(),
-                1,
-                "still kept for when the pause is settled"
+                fs::read_to_string(clone.join(OUTPUT)).unwrap(),
+                "<p>first</p>"
             );
+        }
+
+        #[test]
+        fn a_paused_json_output_file_holds_its_whole_output_with_its_metadata() {
+            let mut s = shared(false);
+            let key = s.approved();
+            s.run_saving(&key, "<p>two</p>");
+            s.run_saving_as(&key, "dashboard.json", "{\"three\":3}");
+            assert_eq!(s.kept_versions(), 1);
+            let json = OUTPUT.replace("dashboard.html", "dashboard.json");
+            let clone = s.host.storage_folder(&s.sage.storage.repository);
+            fs::write(clone.join(&json), "{\"outside\":true}").unwrap();
+            s.sync();
+            assert_eq!(s.paused(), std::slice::from_ref(&json));
+            assert_eq!(s.github.show(OUTPUT).as_deref(), Some("<p>first</p>"));
+            assert_eq!(s.github.show(&json), None);
+            assert_eq!(
+                (s.pushed_versions(OUTPUT), s.pushed_versions(ABOUT)),
+                (1, 1)
+            );
+            assert_eq!(s.kept_versions(), 1);
+        }
+
+        #[test]
+        fn a_retry_for_a_runners_output_keeps_the_pauses_of_the_rule_sets_that_sit_it_out() {
+            let mut s = shared(false);
+            let key = s.approved();
+            s.run_saving(&key, "<p>two</p>");
+            let file = "spaces/sage/space.yaml";
+            let here = Space {
+                description: "Changed here".into(),
+                ..s.sage.clone()
+            };
+            s.host.update_space(here).unwrap();
+            let theirs = s
+                .github
+                .show(file)
+                .unwrap()
+                .replace("Secure family messaging", "Changed by a teammate");
+            s.github.commit(file, theirs);
+            let github = s.github.clone();
+            *s.github.before.lock().unwrap() = Some((
+                "push",
+                Box::new(move || github.commit("README.md", "Changed meanwhile.\n")),
+            ));
+            s.sync();
+            assert_eq!(s.github.show(OUTPUT).as_deref(), Some("<p>two</p>"));
+            assert_eq!(s.paused(), [file]);
+            assert!(
+                s.github
+                    .show(file)
+                    .unwrap()
+                    .contains("Changed by a teammate")
+            );
+        }
+
+        #[test]
+        fn an_approved_push_ends_the_wait_of_an_older_output_of_its_title() {
+            let mut s = shared(false);
+            let key = s.approved();
+            let approved = s.host.recipe(&key).unwrap();
+            let changed = Recipe {
+                prompt: "Brief me on the release.".into(),
+                ..approved.clone()
+            };
+            s.host.save_job(changed).unwrap();
+            let older = s.run_saving(&key, "<p>older</p>");
+            assert!(older.outputs[0].waiting);
+            s.host.save_job(approved).unwrap();
+            let newer = s.run_saving(&key, "<p>newer</p>");
+            assert!(!newer.outputs[0].waiting);
+            assert!(!s.host.job_run(&older.id).unwrap().outputs[0].waiting);
+            let refused = (s.host.approve_job_output(&older.id, TITLE, true)).unwrap_err();
+            assert!(format!("{refused:#}").contains("no longer waits"));
+            s.sync();
+            assert_eq!(s.github.show(OUTPUT).as_deref(), Some("<p>newer</p>"));
         }
 
         #[test]

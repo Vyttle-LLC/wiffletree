@@ -45,7 +45,7 @@ The embedded web view SHALL follow the bounds of the board pane as the window re
 - **THEN** the menu draws above a still image of the board, and the live board returns when the menu closes
 
 ### Requirement: Every output keeps its history
-Every version of an output SHALL be a Git commit in the repository that holds it: the Space's storage for shared outputs, and this Mac's private board store for the rest. An open output SHALL offer its versions with their time and the job run or thread that wrote them, and opening one SHALL show that version without changing the latest.
+Every version of an output SHALL be a Git commit in the repository that holds it: the Space's storage for shared outputs, and this Mac's private board store for the rest. A shared output's history SHALL hold every version that reached GitHub. A runner's save that a later save replaced before any sync reached GitHub SHALL be kept in the runner's private board store, and its Boards SHALL list it among the output's versions as "Only on this Mac · not pushed". An open output SHALL offer its versions with their time and the job run or thread that wrote them, and opening one SHALL show that version without changing the latest.
 
 #### Scenario: Last week's dashboard
 - **WHEN** the user picks last Monday's version of the release dashboard

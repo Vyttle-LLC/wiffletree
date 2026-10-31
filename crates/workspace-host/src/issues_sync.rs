@@ -393,6 +393,9 @@ impl RuleSet for IssueRules {
         self.compared = None;
         self.references.clear();
     }
+    fn sit_out(&mut self) {
+        self.files.sit_out();
+    }
     /// A new issue whose `issue.md` is held, or that a held file names, stays wholly on this
     /// Mac, unnumbered, and so does every file that would name its number. Holding those may
     /// hold more new issues in turn, so this repeats until nothing more is held.

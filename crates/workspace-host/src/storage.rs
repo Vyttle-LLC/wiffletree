@@ -418,8 +418,6 @@ pub(crate) struct Input {
     pub(crate) preferred: BTreeMap<IssueId, u64>,
     /// The board folders of the jobs this Mac is the runner of.
     runs_here: Vec<String>,
-    /// The versions of runners' outputs saved here and replaced before a push, oldest first.
-    unpushed: Vec<(i64, Vec<(String, Content)>)>,
 }
 
 /// A part of an `issue.md` both sides changed to different values, which this Mac keeps and
@@ -459,16 +457,17 @@ pub(crate) struct Found {
     /// The `issue.md` files whose parts were merged, and the parts that paused.
     parts_compared: Vec<String>,
     parts: Vec<PausedPart>,
-    /// The kept versions committed, which a push makes done.
-    unpushed_done: Vec<i64>,
 }
 
-/// The output a file of a board folder belongs to: `<slug>` for `<slug>.json` and for
-/// `<slug>/<file>`.
+/// The output a file of a job's board folder belongs to, by its place there: its metadata
+/// `spaces/<folder>/boards/<job>/<slug>.json` and its file `…/<job>/<slug>/<file>`, whatever
+/// that file's own type, are both `…/<job>/<slug>`.
 fn output_of(path: &str) -> &str {
-    match path.strip_suffix(".json") {
-        Some(output) => output,
-        None => path.rsplit_once('/').map_or(path, |(output, _)| output),
+    let end = (path.match_indices('/').nth(4)).map_or(path.len(), |(at, _)| at);
+    let output = &path[..end];
+    match end == path.len() {
+        true => output.strip_suffix(".json").unwrap_or(output),
+        false => output,
     }
 }
 
@@ -481,8 +480,6 @@ pub(crate) struct WholeFiles {
     roots: Vec<String>,
     excluded: Vec<String>,
     runs_here: Vec<String>,
-    /// Versions saved under `runs_here` and replaced before a push, committed before the latest.
-    unpushed: Vec<(i64, Vec<(String, Content)>)>,
     subject: String,
     pub(crate) synced: BTreeMap<String, Content>,
     written: BTreeMap<String, Content>,
@@ -515,10 +512,6 @@ impl WholeFiles {
                 .collect(),
             runs_here: (input.runs_here.iter())
                 .filter(|folder| compares(folder))
-                .cloned()
-                .collect(),
-            unpushed: (input.unpushed.iter())
-                .filter(|(_, files)| files.iter().all(|(path, _)| compares(path)))
                 .cloned()
                 .collect(),
             roots,
@@ -635,8 +628,8 @@ impl RuleSet for WholeFiles {
         }
         Ok(())
     }
-    /// A runner's output with a file paused this pass waits whole, its kept versions too, so a
-    /// paused file is never staged and the versions stay in order.
+    /// A runner's output with a file paused this pass waits whole, so its metadata and its
+    /// file are never pushed apart.
     fn commit(&mut self) -> Option<(Vec<(String, Content)>, String)> {
         let paused: BTreeSet<&str> = (self.found.paused.iter())
             .filter(|(path, ..)| under(&self.runs_here, path))
@@ -645,23 +638,11 @@ impl RuleSet for WholeFiles {
         (self.found.committed).retain(|(path, _)| {
             !(under(&self.runs_here, path) && paused.contains(output_of(path)))
         });
-        (self.unpushed).retain(|(_, files)| {
-            !files
-                .iter()
-                .any(|(path, _)| paused.contains(output_of(path)))
-        });
         let committed = &self.found.committed;
         (!committed.is_empty()).then(|| {
             let message = format!("{} · {}", self.subject, sync::machine_name());
             (committed.clone(), message)
         })
-    }
-    fn earlier(&mut self) -> Vec<(Vec<(String, Content)>, String)> {
-        let message = format!("{} · {}", self.subject, sync::machine_name());
-        self.found.unpushed_done = self.unpushed.iter().map(|(version, _)| *version).collect();
-        (self.unpushed.iter())
-            .map(|(_, files)| (files.clone(), message.clone()))
-            .collect()
     }
     fn failed(&mut self, error: anyhow::Error) {
         self.found.failed.push(format!("{error:#}"));
@@ -672,6 +653,9 @@ impl RuleSet for WholeFiles {
             key: std::mem::take(&mut self.found.key),
             ..Found::default()
         };
+    }
+    fn sit_out(&mut self) {
+        self.found.committed.clear();
     }
     /// A runner's output, which only this Mac writes, is pushed again on GitHub's new head.
     fn pushes_again(&self) -> bool {
@@ -731,7 +715,6 @@ impl RuleSets {
             found.paused.append(&mut other.paused);
             found.failed.append(&mut other.failed);
             found.failed_roots.append(&mut other.failed_roots);
-            found.unpushed_done.append(&mut other.unpushed_done);
         }
         found.merged = issues.merged;
         found.parts_compared = issues.parts_compared;
@@ -1448,18 +1431,6 @@ impl Host {
             let (temporary, number): (String, u64) = row?;
             preferred.insert(IssueId::parse(&temporary)?, number);
         }
-        let rows: Vec<(i64, String, Content)> = (self.db.prepare(
-            "SELECT version, path, content FROM unpushed_versions WHERE repository=?1 ORDER BY version, path",
-        )?)
-        .query_map([key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-        let mut unpushed: Vec<(i64, Vec<(String, Content)>)> = vec![];
-        for (version, path, content) in rows {
-            match unpushed.last_mut() {
-                Some((last, files)) if *last == version => files.push((path, content)),
-                _ => unpushed.push((version, vec![(path, content)])),
-            }
-        }
         Ok(Some(Input {
             key: key.to_owned(),
             names,
@@ -1470,7 +1441,6 @@ impl Host {
             parts,
             preferred,
             runs_here,
-            unpushed,
         }))
     }
     /// The GitHub storage repositories that sync on their own, being no settings repository,
@@ -1671,12 +1641,6 @@ impl Host {
             tx.execute(
                 "INSERT INTO sync_held(repository,path,check_name,rule,reason) VALUES (?1,?2,?3,?4,?5)",
                 params![key, held.path, held.check, held.rule, held.reason],
-            )?;
-        }
-        for version in found.unpushed_done.iter().filter(|_| pushed) {
-            tx.execute(
-                "DELETE FROM unpushed_versions WHERE repository=?1 AND version=?2",
-                params![key, version],
             )?;
         }
         tx.commit()?;

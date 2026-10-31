@@ -34,9 +34,11 @@ const MAX_MARKDOWN_BYTES: u64 = 2 * 1024 * 1024;
 /// A shared job's output that waits for its runner, before its first push.
 pub(super) const WAITING: &str = "Waiting for your approval";
 pub(super) const TAKE_OVER: &str = "Take over running";
+/// A runner's save that a later save replaced before any push.
+const LOCAL_ONLY: &str = "Only on this Mac · not pushed";
 
 /// A text action in a line of labels, as the mockup's links are.
-pub(super) fn link(id: String, label: &'static str, color: Hsla) -> Stateful<Div> {
+fn link(id: String, label: &'static str, color: Hsla) -> Stateful<Div> {
     div()
         .id(SharedString::from(id))
         .cursor_pointer()
@@ -162,9 +164,10 @@ fn version_label(version: &BoardVersion, latest: bool) -> (String, String) {
         (Some(_), _) => "job run".into(),
         (None, _) => "from a thread".into(),
     };
-    let by = match latest {
-        true => format!("Latest · {by}"),
-        false => by,
+    let by = match (latest, version.local_only) {
+        (_, true) => format!("{by} · {LOCAL_ONLY}"),
+        (true, false) => format!("Latest · {by}"),
+        (false, false) => by,
     };
     (wording::day_and_time(version.saved_at), by)
 }
@@ -1779,11 +1782,21 @@ mod tests {
             run_id: Some("r".into()),
             catch_up: 2,
             shared: false,
+            local_only: false,
             file: "brief.md".into(),
         };
         assert_eq!(
             version_label(&version, true).1,
             "Latest · job run · catch-up"
+        );
+        let replaced = BoardVersion {
+            local_only: true,
+            catch_up: 0,
+            ..version
+        };
+        assert_eq!(
+            version_label(&replaced, true).1,
+            "job run · Only on this Mac · not pushed"
         );
     }
 }
