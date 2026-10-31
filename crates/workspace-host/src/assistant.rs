@@ -574,13 +574,14 @@ impl Host {
         self.save_thread(thread)?;
         Ok(result)
     }
-    /// The instructions a thread's turns are sent: the thread contract, the Assistant core,
-    /// Assisting as the human left it, then its Space's instructions under Wiffletree's
-    /// heading.
+    /// The instructions a thread's turns are sent: the thread contract, the Assistant core, or
+    /// for a job's run the Job run core, Assisting as the human left it, then its Space's
+    /// instructions under Wiffletree's heading.
     pub(crate) fn thread_instructions(&self, session: &Session) -> Result<String> {
         let thread = self.thread(&session.id)?;
         let space = self.space(&thread.space_id)?.space;
-        let mut text = self.instructions(Role::Assistant);
+        // A job's run gets the Job run core in place of the Assistant core.
+        let mut text = self.instructions(session.role);
         if !space.instructions.trim().is_empty() {
             let changed = (self.space_changed_by(&space)).map_or(String::new(), |who| {
                 format!(" They were last changed by {who}.")
@@ -660,6 +661,7 @@ impl Host {
         match name {
             "propose_job" => {
                 let recipe = proposed_recipe(&thread, args)?;
+                self.refuse_taken_job(&recipe)?;
                 let preview = self.preview_job(&recipe)?;
                 let recipe = Box::new(recipe);
                 self.add_card(&mut thread, CardKind::Recipe { recipe, preview })

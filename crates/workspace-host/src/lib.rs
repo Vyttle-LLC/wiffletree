@@ -1745,7 +1745,12 @@ impl Host {
             Command::SetRouterThreshold { threshold } => {
                 serde_json::to_value(self.set_router_threshold(threshold)?)?
             }
-            Command::SaveJob { recipe } => serde_json::to_value(self.save_job(*recipe)?)?,
+            Command::SaveJob { recipe, new } => {
+                if new {
+                    self.refuse_taken_job(&recipe)?;
+                }
+                serde_json::to_value(self.save_job(*recipe)?)?
+            }
             Command::PreviewJob { recipe } => serde_json::to_value(self.preview_job(&recipe)?)?,
             Command::SetJobEnabled {
                 space_id,

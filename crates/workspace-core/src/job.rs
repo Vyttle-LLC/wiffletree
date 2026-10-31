@@ -7,8 +7,8 @@ use crate::{ModelProfile, Source, SpaceId};
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
-pub const MAX_NAME_CHARS: usize = 80;
-pub const MAX_PROMPT_BYTES: usize = 16 * 1024;
+const MAX_NAME_CHARS: usize = 80;
+const MAX_PROMPT_BYTES: usize = 16 * 1024;
 /// A recipe's file, as this release writes it.
 pub const RECIPE_FORMAT: u32 = 1;
 
@@ -46,11 +46,6 @@ pub struct Recipe {
 impl Recipe {
     pub fn key(&self) -> JobKey {
         JobKey::recipe(&self.space_id, &self.id)
-    }
-    /// Whether a source is a CLI, which only a provider that can hold it to its listed commands
-    /// may run.
-    pub fn has_cli_source(&self) -> bool {
-        (self.sources.iter()).any(|source| matches!(source, Source::Cli { .. }))
     }
 }
 
@@ -225,6 +220,12 @@ pub struct JobState {
     /// Newest first, at most `MAX_RUNS_SHOWN`.
     #[serde(default)]
     pub runs: Vec<JobRun>,
+    /// Every run that failed or did not start and is not seen yet, however old, and when the
+    /// newest of them started.
+    #[serde(default)]
+    pub attention: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_at: Option<i64>,
     /// Why this Mac does not run it, such as another Mac being its runner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_here: Option<String>,
@@ -267,9 +268,10 @@ pub fn job_id(name: &str) -> String {
         .filter(|w| !w.is_empty())
         .map(str::to_lowercase)
         .collect();
-    match words.join("-") {
-        id if id.is_empty() => "job".into(),
-        id => id.chars().take(60).collect(),
+    let id: String = words.join("-").chars().take(60).collect();
+    match id.trim_end_matches('-') {
+        "" => "job".into(),
+        id => id.into(),
     }
 }
 
@@ -311,14 +313,66 @@ pub fn validate(recipe: &Recipe) -> Result<()> {
     Ok(())
 }
 
-/// A source's name is one plain word; a CLI's commands each start with it and are one command
-/// with no shell text; an MCP server lists the tools it may call.
+/// The CLIs a job may read through; every other CLI is refused.
+pub const JOB_CLIS: [&str; 4] = ["gh", "linctl", "sentry-cli", "aws"];
+/// gh's read commands. `gh api` is not among them, as it can write.
+const GH_READS: [&str; 12] = [
+    "pr list",
+    "pr view",
+    "pr diff",
+    "pr checks",
+    "issue list",
+    "issue view",
+    "run list",
+    "run view",
+    "repo view",
+    "release list",
+    "release view",
+    "search",
+];
+const LINCTL_NOUNS: [&str; 6] = ["issue", "project", "team", "user", "label", "comment"];
+const SENTRY_NOUNS: [&str; 5] = ["issues", "releases", "projects", "organizations", "events"];
+const READ_VERBS: [&str; 3] = ["list", "get", "view"];
+/// aws read verbs, by the start of the operation's name.
+const AWS_READS: [&str; 3] = ["list-", "get-", "describe-"];
+/// aws services whose reads return secrets or credentials.
+const AWS_REFUSED: [&str; 3] = ["secretsmanager", "ssm", "sts"];
+
+fn plain(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && (name.chars()).all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Whether the words after a CLI's name start a read this allowlist names (design, decision
+/// 9): an aws command names its profile, then the service and a read operation.
+fn reads(command: &str, words: &[&str]) -> bool {
+    match (command, words) {
+        ("gh", _) => (GH_READS.iter()).any(|read| {
+            let read: Vec<&str> = read.split(' ').collect();
+            words.starts_with(&read)
+        }),
+        ("linctl", [noun, verb, ..]) => LINCTL_NOUNS.contains(noun) && READ_VERBS.contains(verb),
+        ("sentry-cli", [noun, verb, ..]) => {
+            SENTRY_NOUNS.contains(noun) && READ_VERBS.contains(verb)
+        }
+        ("aws", ["--profile", profile, service, operation, ..]) => {
+            plain(profile)
+                && !AWS_REFUSED.contains(service)
+                && AWS_READS.iter().any(|read| operation.starts_with(read))
+                && !["token", "password", "secret", "login"]
+                    .iter()
+                    .any(|word| operation.contains(word))
+        }
+        _ => false,
+    }
+}
+
+/// A source's name is one plain word. A CLI is one of `JOB_CLIS`, each of its commands one
+/// read from the allowlist with no shell text, and it names no sign-in check of its own,
+/// since nothing a recipe supplies is run by the host. An MCP server lists the tools it may
+/// call.
 pub fn validate_source(source: &Source) -> Result<()> {
-    let plain = |name: &str| {
-        !name.is_empty()
-            && name.len() <= 64
-            && (name.chars()).all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    };
     match source {
         Source::Mcp { server, tools, .. } => {
             ensure!(
@@ -331,19 +385,30 @@ pub fn validate_source(source: &Source) -> Result<()> {
             );
         }
         Source::Cli {
-            command, prefixes, ..
+            command,
+            prefixes,
+            check,
+            ..
         } => {
-            ensure!(plain(command), "Name the CLI by its command, such as gh");
+            ensure!(
+                JOB_CLIS.contains(&command.as_str()),
+                "A job reads only through {}, not {command}",
+                JOB_CLIS.join(", ")
+            );
+            ensure!(
+                check.is_none(),
+                "A job's source cannot name its own sign-in check: Wiffletree checks {command} itself"
+            );
             ensure!(!prefixes.is_empty(), "List the commands {command} may run");
             for prefix in prefixes {
                 let words: Vec<&str> = prefix.split_whitespace().collect();
                 ensure!(
-                    words.first() == Some(&command.as_str()) && words.len() > 1,
-                    "Each of {command}'s commands starts with {command} and names what it reads, such as {command} pr list"
-                );
-                ensure!(
                     !prefix.contains(SHELL_TEXT) && words.join(" ") == *prefix,
                     "{prefix:?} must be one command with single spaces and no shell text"
+                );
+                ensure!(
+                    words.first() == Some(&command.as_str()) && reads(command, &words[1..]),
+                    "{prefix:?} is not a read a job may run: a job may list only the read commands Wiffletree allows for {command}"
                 );
             }
         }
@@ -625,11 +690,72 @@ mod tests {
         );
     }
 
+    fn cli(command: &str, prefix: &str) -> Source {
+        Source::Cli {
+            command: command.into(),
+            prefixes: vec![prefix.into()],
+            check: None,
+            extra: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_job_may_list_only_the_allowed_reads_of_the_allowed_clis() {
+        for (command, prefix) in [
+            ("gh", "gh issue view"),
+            ("gh", "gh search prs"),
+            ("linctl", "linctl issue list"),
+            ("sentry-cli", "sentry-cli issues list"),
+            ("aws", "aws --profile readonly ce get-cost-and-usage"),
+            ("aws", "aws --profile readonly ec2 describe-instances"),
+        ] {
+            validate_source(&cli(command, prefix)).unwrap();
+        }
+        for (command, prefix) in [
+            ("gh", "gh pr comment"),
+            ("gh", "gh pr merge"),
+            ("gh", "gh api"),
+            ("gh", "gh pr"),
+            ("linctl", "linctl issue create"),
+            ("linctl", "linctl graphql"),
+            ("sentry-cli", "sentry-cli releases new"),
+            ("aws", "aws s3 ls"),
+            ("aws", "aws --profile readonly s3api put-object"),
+            (
+                "aws",
+                "aws --profile readonly secretsmanager get-secret-value",
+            ),
+            ("aws", "aws --profile readonly ssm get-parameter"),
+            ("aws", "aws --profile readonly ecr get-login-password"),
+            ("touch", "touch listed.txt"),
+            ("git", "git log"),
+        ] {
+            let refused = validate_source(&cli(command, prefix)).unwrap_err();
+            assert!(refused.to_string().contains(command), "{prefix}: {refused}");
+        }
+        let mut own = gh(&["gh pr list"]);
+        if let Source::Cli { check, .. } = &mut own {
+            *check = Some("gh pr list".into());
+        }
+        assert!(
+            validate_source(&own).is_err(),
+            "a job names no check of its own"
+        );
+    }
+
     #[test]
     fn a_name_becomes_a_job_id() {
         assert_eq!(job_id("Morning brief"), "morning-brief");
         assert_eq!(job_id("Release: “dashboard”"), "release-dashboard");
         assert_eq!(job_id("…"), "job");
+        // Cut at 60 characters, it never ends in a hyphen, so it is a valid id.
+        let long =
+            job_id("Weekly summary of open pull requests in Sage and new Sentry issue counts");
+        assert_eq!(
+            long,
+            "weekly-summary-of-open-pull-requests-in-sage-and-new-sentry"
+        );
+        assert_eq!(job_id(&long), long);
         assert_eq!(
             JobKey::recipe(&SpaceId("sage".into()), "brief").as_str(),
             "sage/brief"

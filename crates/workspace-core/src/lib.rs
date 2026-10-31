@@ -3321,9 +3321,12 @@ pub enum Command {
         threshold: f64,
     },
     /// Saves a job, new or changed, as the user confirmed it on its recipe card or its page:
-    /// the only way a job is created or changed. Answered with the `JobState`.
+    /// the only way a job is created or changed. With `new`, from a card, it is refused when a
+    /// job of that name exists, so a card never replaces one. Answered with the `JobState`.
     SaveJob {
         recipe: Box<job::Recipe>,
+        #[serde(default)]
+        new: bool,
     },
     /// What a recipe's card shows before it is saved: its schedule in words, its next runs,
     /// its sources as checked now and its model. Answered with a `RecipePreview`.

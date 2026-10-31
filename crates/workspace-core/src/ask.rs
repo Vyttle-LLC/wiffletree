@@ -470,9 +470,11 @@ pub fn change_route(
         destination,
     })
 }
-pub fn save_job(recipe: job::Recipe) -> Ask<job::JobState> {
+/// With `new`, from a recipe card, refused when a job of that name exists.
+pub fn save_job(recipe: job::Recipe, new: bool) -> Ask<job::JobState> {
     Ask::new(Command::SaveJob {
         recipe: Box::new(recipe),
+        new,
     })
 }
 pub fn preview_job(recipe: job::Recipe) -> Ask<job::RecipePreview> {

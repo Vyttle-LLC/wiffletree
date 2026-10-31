@@ -22,6 +22,8 @@ pub(super) enum JobsView {
 /// A recipe while the user edits it, before Save.
 pub(super) struct JobForm {
     recipe: Recipe,
+    /// The recipe card it was opened from, which saving dismisses; `None` for a saved job.
+    card: Option<String>,
     name: Entity<InputState>,
     prompt: Entity<TextareaState>,
     cron: Entity<InputState>,
@@ -31,12 +33,11 @@ pub(super) struct JobForm {
 
 /// How many runs count on the assistant's row, and the job of the newest of them.
 pub(crate) fn attention(jobs: &[JobState]) -> (usize, Option<JobKey>) {
-    let mut runs: Vec<&JobRun> = (jobs.iter())
-        .flat_map(|job| &job.runs)
-        .filter(|run| run.needs_attention())
-        .collect();
-    runs.sort_by_key(|run| std::cmp::Reverse(run.started_at));
-    (runs.len(), runs.first().map(|run| run.job.clone()))
+    let count = jobs.iter().map(|job| job.attention).sum();
+    let newest = (jobs.iter())
+        .filter(|job| job.attention > 0)
+        .max_by_key(|job| job.attention_at);
+    (count, newest.map(|job| job.recipe.key()))
 }
 
 /// Each run that has run 30 minutes or more: its job's name, its id and its minutes.
@@ -143,6 +144,8 @@ impl AssistantPage {
         }
         cx.notify();
     }
+    /// Saves `recipe`; from a `card`, as a new job, which the host refuses when its name is
+    /// taken, and then the card goes.
     fn save_recipe(
         &mut self,
         recipe: Recipe,
@@ -152,7 +155,7 @@ impl AssistantPage {
     ) {
         let name = recipe.name.clone();
         self.ask(
-            ask::save_job(recipe),
+            ask::save_job(recipe, card.is_some()),
             window,
             cx,
             move |view, saved, window, cx| {
@@ -175,7 +178,13 @@ impl AssistantPage {
             },
         );
     }
-    fn edit_recipe(&mut self, recipe: Recipe, window: &mut Window, cx: &mut Context<Self>) {
+    fn edit_recipe(
+        &mut self,
+        recipe: Recipe,
+        card: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let input = |text: &str, cx: &mut Context<Self>, window: &mut Window| {
             let text = text.to_owned();
             cx.new(|cx| InputState::new(window, cx).default_value(text))
@@ -191,6 +200,7 @@ impl AssistantPage {
         });
         self.jobs_view = Some(JobsView::Edit(Box::new(JobForm {
             recipe,
+            card,
             name,
             prompt,
             cron,
@@ -209,7 +219,8 @@ impl AssistantPage {
         recipe.prompt = form.prompt.read(cx).value().trim().to_owned();
         recipe.schedule.cron = form.cron.read(cx).value().trim().to_owned();
         recipe.schedule.timezone = form.timezone.read(cx).value().trim().to_owned();
-        self.save_recipe(recipe, None, window, cx);
+        let card = form.card.clone();
+        self.save_recipe(recipe, card, window, cx);
     }
     fn set_enabled(
         &mut self,
@@ -328,7 +339,7 @@ impl AssistantPage {
                 format!("“{}” · {}", o.title, file_type_label(&o.file_type))
             });
         let (card_id, edited, saved) = (card_id.to_owned(), recipe.clone(), recipe.clone());
-        let cancel = card_id.clone();
+        let (cancel, from_card) = (card_id.clone(), card_id.clone());
         card(p)
             .gap_2()
             .child(
@@ -356,9 +367,9 @@ impl AssistantPage {
                             .ghost()
                             .xsmall()
                             .label("Edit")
-                            .on_click(
-                                cx.listener(move |v, _, w, c| v.edit_recipe(edited.clone(), w, c)),
-                            ),
+                            .on_click(cx.listener(move |v, _, w, c| {
+                                v.edit_recipe(edited.clone(), Some(from_card.clone()), w, c)
+                            })),
                     )
                     .child(
                         button(SharedString::from(format!("cancel-recipe-{card_id}")))
@@ -439,7 +450,7 @@ impl AssistantPage {
                 (None, true, Some(next)) => format!("Next {next}"),
                 (None, true, None) => "No next run".into(),
             };
-            let attention = job.runs.iter().filter(|r| r.needs_attention()).count();
+            let attention = job.attention;
             list = list.child(
                 card(p)
                     .id(SharedString::from(format!("job-{}", key.as_str())))
@@ -500,11 +511,9 @@ impl AssistantPage {
                     .on_click(cx.listener(move |v, _, w, c| v.set_enabled(&toggled, paused, w, c))),
             )
             .child(
-                button("job-edit")
-                    .ghost()
-                    .xsmall()
-                    .label("Edit")
-                    .on_click(cx.listener(move |v, _, w, c| v.edit_recipe(edited.clone(), w, c))),
+                button("job-edit").ghost().xsmall().label("Edit").on_click(
+                    cx.listener(move |v, _, w, c| v.edit_recipe(edited.clone(), None, w, c)),
+                ),
             )
             .child(
                 button("job-delete")
@@ -654,7 +663,7 @@ impl AssistantPage {
 
     fn job_form(&self, form: &JobForm, p: Palette, cx: &mut Context<Self>) -> Div {
         let key = form.recipe.key();
-        let saved = self.job(&key).is_some();
+        let saved = form.card.is_none();
         let field = |label: &'static str, input: AnyElement| {
             div()
                 .flex()
@@ -764,23 +773,25 @@ mod tests {
             next_runs: vec![],
             model: String::new(),
             runs,
+            attention: 0,
+            attention_at: None,
             not_here: None,
         }
     }
 
     #[test]
-    fn failed_and_unstarted_runs_count_until_seen() {
-        let mut seen = run("r3", RunOutcome::Failed, 3);
-        seen.seen = true;
-        let jobs = [job(vec![
-            run("r1", RunOutcome::NotStarted, 1),
-            run("r2", RunOutcome::Finished, 2),
-            seen,
-            run("r4", RunOutcome::Failed, 4),
-        ])];
-        let (count, open) = attention(&jobs);
-        assert_eq!(count, 2);
-        assert_eq!(open, Some(JobKey::recipe(&SpaceId("sage".into()), "brief")));
+    fn the_row_counts_every_jobs_unseen_runs_and_opens_the_newest() {
+        let mut old = job(vec![]);
+        (old.attention, old.attention_at) = (21, Some(1));
+        let mut newer = job(vec![]);
+        newer.recipe.id = "dashboard".into();
+        (newer.attention, newer.attention_at) = (1, Some(5));
+        let (count, open) = attention(&[old, newer]);
+        assert_eq!(count, 22);
+        assert_eq!(
+            open,
+            Some(JobKey::recipe(&SpaceId("sage".into()), "dashboard"))
+        );
         assert_eq!(attention(&[job(vec![])]), (0, None));
     }
 

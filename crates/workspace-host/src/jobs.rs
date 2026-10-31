@@ -16,7 +16,7 @@ use workspace_core::job::{
 
 /// A due time passed by more than this when the scheduler reaches it is a catch-up.
 const LATE_AFTER_MS: i64 = 60_000;
-/// How long a source's sign-in check may take.
+/// How long a source's sign-in check, or an MCP server's handshake, may take.
 const CHECK_LIMIT: std::time::Duration = std::time::Duration::from_secs(15);
 /// The next runs a recipe card and a job's page show.
 const NEXT_SHOWN: usize = 3;
@@ -235,12 +235,13 @@ fn schedule_words(schedule: &Schedule) -> String {
     }
 }
 
-/// Where a source's CLI is looked for and checked, and the home folder whose provider
-/// configuration names MCP servers.
+/// Where a source's CLI is looked for and checked, the home folder whose provider
+/// configuration names MCP servers, and how long an MCP server may take to answer.
 #[derive(Clone)]
 pub(crate) struct SourceEnv {
     pub(crate) path: Vec<PathBuf>,
     pub(crate) home: PathBuf,
+    pub(crate) mcp_limit: std::time::Duration,
 }
 impl SourceEnv {
     /// The host's own: its `PATH` and the folders the provider CLIs are found in.
@@ -260,6 +261,7 @@ impl SourceEnv {
         Self {
             path: folders,
             home,
+            mcp_limit: CHECK_LIMIT,
         }
     }
     fn find(&self, command: &str) -> Option<PathBuf> {
@@ -303,70 +305,139 @@ fn aws_profile(prefixes: &[String]) -> Option<String> {
         .then(|| first.to_owned())
 }
 
-/// Which sign-in checks a source check may run.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Checks {
-    /// Wiffletree's own, for a recipe no one has saved, such as the one a thread's card shows.
-    Known,
-    /// Also a saved recipe's own check, when it is one of the source's listed commands.
-    Saved,
+/// What keeps an MCP server from serving a run, in words with none of its output: started as
+/// its provider would start it, it must answer `initialize` and list every tool the recipe
+/// names, within the limit. A server reached by URL cannot be checked, so it is refused.
+fn mcp_problem(env: &SourceEnv, definition: &Value, tools: &[String]) -> Option<String> {
+    use std::io::{BufRead, Write};
+    use std::os::unix::process::CommandExt;
+    let Some(command) = definition["command"].as_str().filter(|c| !c.is_empty()) else {
+        return Some("is not a command Wiffletree can start to check it; a job can use only a command-line MCP server".into());
+    };
+    let program = match command.contains('/') {
+        true => Some(PathBuf::from(command)),
+        false => env.find(command),
+    };
+    let Some(program) = program else {
+        return Some(format!(
+            "names {command}, which is not installed on this Mac"
+        ));
+    };
+    let args = (definition["args"].as_array().into_iter().flatten()).filter_map(Value::as_str);
+    let mut start = std::process::Command::new(program);
+    start
+        .args(args)
+        .env("PATH", std::env::join_paths(&env.path).unwrap_or_default())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .process_group(0);
+    for (key, value) in definition["env"].as_object().into_iter().flatten() {
+        if let Some(value) = value.as_str() {
+            start.env(key, value);
+        }
+    }
+    let Ok(mut child) = start.spawn() else {
+        return Some("could not be started".into());
+    };
+    let group = child.id() as libc::pid_t;
+    let (mut stdin, stdout) = (child.stdin.take()?, child.stdout.take()?);
+    let (lines, answers) = std::sync::mpsc::channel::<Value>();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if let Ok(value) = serde_json::from_str::<Value>(&line)
+                && lines.send(value).is_err()
+            {
+                break;
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + env.mcp_limit;
+    let mut answer = |id: i64, message: Value, then: &[Value]| -> Result<Value, String> {
+        let mut send = |message: &Value| writeln!(stdin, "{message}").and_then(|_| stdin.flush());
+        send(&message).map_err(|_| "stopped before it answered".to_owned())?;
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match answers.recv_timeout(left) {
+                Ok(value) if value["id"] == id => {
+                    if !value["error"].is_null() {
+                        return Err(
+                            "answered with an error, such as a sign-in that has expired".into()
+                        );
+                    }
+                    for next in then {
+                        send(next).map_err(|_| "stopped before it answered".to_owned())?;
+                    }
+                    return Ok(value["result"].clone());
+                }
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(format!(
+                        "did not answer within {} seconds",
+                        env.mcp_limit.as_secs()
+                    ));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("stopped before it answered".into());
+                }
+            }
+        }
+    };
+    let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"wiffletree","version":"1"}}});
+    let initialized = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
+    let list = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"});
+    let checked = answer(1, initialize, &[initialized]).and_then(|_| answer(2, list, &[]));
+    // SAFETY: `killpg` only sends a signal; the group is the server's own.
+    unsafe { libc::killpg(group, libc::SIGKILL) };
+    let _ = child.wait();
+    let offered = match checked {
+        Ok(listed) => listed,
+        Err(why) => return Some(why),
+    };
+    let names: Vec<&str> = (offered["tools"].as_array().into_iter().flatten())
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    let missing: Vec<&str> = (tools.iter().map(String::as_str))
+        .filter(|tool| !names.contains(tool))
+        .collect();
+    (!missing.is_empty()).then(|| format!("does not offer {}", missing.join(", ")))
 }
 
-/// Checks one source as a run on `provider` would use it: an MCP server must be in that
-/// provider's configuration; a CLI must be installed and pass its sign-in check. A recipe's
-/// own check runs only for a saved recipe and only when it is one of the source's listed
-/// commands, so neither a thread's card nor a shared recipe can make the host run anything the
-/// user did not confirm a run may.
-fn check_source(
-    provider: Provider,
-    env: &SourceEnv,
-    source: &Source,
-    checks: Checks,
-) -> SourceCheck {
+/// Checks one source as a run on `provider` would use it. An MCP server must be in that
+/// provider's configuration, start, finish its handshake and offer the listed tools. A CLI
+/// must be installed and pass Wiffletree's own sign-in check for it; nothing a recipe supplies
+/// is run, apart from the aws profile name, a plain word the allowlist checked.
+fn check_source(provider: Provider, env: &SourceEnv, source: &Source) -> SourceCheck {
     let label = source_label(source);
     let problem = match source {
-        Source::Mcp { server, .. } => {
-            let configured = provider::server_definition(provider, &env.home, server).is_some();
-            (!configured).then(|| {
-                let who = provider.label();
-                format!("The {server} MCP server is not configured for {who}. Add it to {who}'s MCP configuration.")
-            })
+        Source::Mcp { server, tools, .. } => {
+            match provider::server_definition(provider, &env.home, server) {
+                None => {
+                    let who = provider.label();
+                    Some(format!(
+                        "The {server} MCP server is not configured for {who}. Add it to {who}'s MCP configuration."
+                    ))
+                }
+                Some(definition) => mcp_problem(env, &definition, tools)
+                    .map(|why| format!("The {server} MCP server {why}.")),
+            }
         }
         Source::Cli {
-            command,
-            prefixes,
-            check,
-            ..
+            command, prefixes, ..
         } => match env.find(command) {
             None => Some(format!("{command} is not installed on this Mac.")),
             Some(program) => {
-                let own = check.as_deref().filter(|check| {
-                    checks == Checks::Saved
-                        && (prefixes.iter())
-                            .any(|p| check == p || check.starts_with(&format!("{p} ")))
-                });
-                let known = known_check(command, prefixes);
-                let (args, fix) = match (own, known) {
-                    (Some(own), known) => (
-                        own.split_whitespace().map(str::to_owned).collect(),
-                        known.map_or(format!("Check `{own}` on this Mac."), |(_, fix)| {
-                            format!("Run `{fix}`.")
-                        }),
-                    ),
-                    (None, Some((args, fix))) => (args, format!("Run `{fix}`.")),
-                    (None, None) if command == "aws" => {
-                        return SourceCheck {
-                            source: label,
-                            problem: Some("Name a read-only profile for aws: give each of its commands the same --profile.".into()),
-                        };
-                    }
-                    (None, None) => {
-                        return SourceCheck {
-                            source: label,
-                            problem: None,
-                        };
-                    }
+                let Some((args, fix)) = known_check(command, prefixes) else {
+                    return SourceCheck {
+                        source: label,
+                        problem: Some(format!(
+                            "Wiffletree cannot check {command}; a job reads only through {}.",
+                            workspace_core::job::JOB_CLIS.join(", ")
+                        )),
+                    };
                 };
+                let fix = format!("Run `{fix}`.");
                 let mut run = std::process::Command::new(program);
                 run.args(&args[1..])
                     .env("PATH", std::env::join_paths(&env.path).unwrap_or_default());
@@ -403,15 +474,10 @@ impl Host {
     fn source_env(&self) -> SourceEnv {
         (self.source_env.clone()).unwrap_or_else(SourceEnv::of_host)
     }
-    pub(crate) fn check_sources(
-        &self,
-        provider: Provider,
-        sources: &[Source],
-        checks: Checks,
-    ) -> Vec<SourceCheck> {
+    pub(crate) fn check_sources(&self, provider: Provider, sources: &[Source]) -> Vec<SourceCheck> {
         let env = self.source_env();
         (sources.iter())
-            .map(|source| check_source(provider, &env, source, checks))
+            .map(|source| check_source(provider, &env, source))
             .collect()
     }
     /// Why this Mac does not run a recipe: a "One runner" job in a Space stored on GitHub
@@ -497,7 +563,7 @@ impl Host {
         Ok(RecipePreview {
             schedule: schedule_words(&recipe.schedule),
             next_runs: next_times(recipe, now(), NEXT_SHOWN),
-            sources: self.check_sources(provider, &recipe.sources, Checks::Known),
+            sources: self.check_sources(provider, &recipe.sources),
             model,
         })
     }
@@ -543,6 +609,18 @@ impl Host {
             )
         })?;
         self.job_state(&recipe)
+    }
+    /// Refuses a new job whose name another job in its Space already has, so a card never
+    /// replaces one.
+    pub(crate) fn refuse_taken_job(&self, recipe: &Recipe) -> Result<()> {
+        if let Ok(taken) = self.recipe(&recipe.key()) {
+            let space = self.space(&recipe.space_id)?.space.name;
+            bail!(
+                "A job named {} already exists in {space}. Change it on its page, or give this one another name.",
+                taken.name
+            );
+        }
+        Ok(())
     }
     /// Pauses a job, or resumes it from its next time: what it missed while paused does not run.
     pub fn set_job_enabled(
@@ -632,7 +710,15 @@ impl Host {
             Ok((profile, reason, _)) => format!("{} · {reason}", profile.short()),
             Err(error) => format!("{error:#}"),
         };
+        // Counted apart from the runs shown, so an old unseen failure still counts.
+        let (attention, attention_at): (usize, Option<i64>) = self.db.query_row(
+            "SELECT count(*), max(started_at) FROM job_runs WHERE key=?1 AND json_extract(data,'$.seen')=0 AND json_extract(data,'$.outcome') IN ('failed','not_started')",
+            [recipe.key().as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
         Ok(JobState {
+            attention,
+            attention_at,
             schedule: schedule_words(&recipe.schedule),
             next_runs: match recipe.enabled {
                 true => next_times(recipe, now(), NEXT_SHOWN),
@@ -825,7 +911,7 @@ impl Host {
         };
         run.profile = Some(profile.clone());
         run.model_reason = reason.clone();
-        run.sources = self.check_sources(profile.provider, &recipe.sources, Checks::Saved);
+        run.sources = self.check_sources(profile.provider, &recipe.sources);
         let missing: Vec<&str> = (run.sources.iter())
             .filter_map(|check| check.problem.as_deref())
             .collect();
@@ -1084,6 +1170,7 @@ mod tests {
         host.source_env = Some(SourceEnv {
             path: vec![home.path().join("bin")],
             home: home.path().join("user"),
+            mcp_limit: std::time::Duration::from_secs(2),
         });
         let personal = host.space(&host.default_space().unwrap()).unwrap().space;
         Jobs {
@@ -1095,10 +1182,45 @@ mod tests {
     impl Jobs {
         /// A stand-in CLI whose every command exits with `code`.
         fn cli(&self, name: &str, code: i32) {
+            self.script(name, &format!("exit {code}"));
+        }
+        /// A stand-in program in `bin/` running `body` as a shell script.
+        fn script(&self, name: &str, body: &str) {
             let path = self.home.path().join("bin").join(name);
-            fs::write(&path, format!("#!/bin/sh\nexit {code}\n")).unwrap();
+            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        /// A stand-in MCP server that answers the handshake, offering `tools`, or with an
+        /// error for `initialize` when `tools` is `None`.
+        fn mcp_server(&self, name: &str, tools: Option<&[&str]>) {
+            let initialized = match tools {
+                Some(_) => {
+                    r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fake","version":"1"}}}"#
+                }
+                None => {
+                    r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"token expired"}}"#
+                }
+            };
+            let tools: Vec<Value> = (tools.unwrap_or_default().iter())
+                .map(|name| json!({"name": name}))
+                .collect();
+            let listed = json!({"jsonrpc":"2.0","id":2,"result":{"tools":tools}});
+            self.script(
+                name,
+                &format!(
+                    "while IFS= read -r line; do case \"$line\" in\n*'\"method\":\"initialize\"'*) echo '{initialized}' ;;\n*'\"method\":\"tools/list\"'*) echo '{listed}' ;;\nesac; done"
+                ),
+            );
+        }
+        /// Claude's configuration with these MCP servers, by name and command.
+        fn claude_servers(&self, servers: &[(&str, &str)]) {
+            let servers: serde_json::Map<String, Value> = (servers.iter())
+                .map(|(name, command)| ((*name).to_owned(), json!({"command": command})))
+                .collect();
+            fs::create_dir_all(self.home.path().join("user")).unwrap();
+            let config = json!({ "mcpServers": servers }).to_string();
+            fs::write(self.home.path().join("user/.claude.json"), config).unwrap();
         }
         fn storage(&self) -> PathBuf {
             self.host.storage_folder(&self.personal.storage.repository)
@@ -1181,6 +1303,7 @@ mod tests {
         for command in [
             Command::SaveJob {
                 recipe: Box::new(saved.recipe.clone()),
+                new: true,
             },
             Command::SetJobEnabled {
                 space_id: s.personal.id.clone(),
@@ -1305,9 +1428,8 @@ mod tests {
         assert!(!s.host.job_run(&run.id).unwrap().needs_attention());
 
         s.cli("gh", 0);
-        let config = json!({"mcpServers":{"linear":{"command":"linear-mcp"}}});
-        fs::create_dir_all(s.home.path().join("user")).unwrap();
-        fs::write(s.home.path().join("user/.claude.json"), config.to_string()).unwrap();
+        s.mcp_server("linear-mcp", Some(&["list_issues", "create_issue"]));
+        s.claude_servers(&[("linear", "linear-mcp")]);
         let run = s.host.run_job_now(&key).unwrap();
         assert_eq!(run.outcome, RunOutcome::Running);
         assert!(run.sources.iter().all(|check| check.problem.is_none()));
@@ -1319,35 +1441,183 @@ mod tests {
     }
 
     #[test]
-    fn a_cards_preview_runs_only_wiffletrees_own_sign_in_check() {
-        let s = jobs();
+    fn a_write_command_is_refused_at_propose_and_save_and_the_host_runs_only_its_own_checks() {
+        let mut s = jobs();
         // A stand-in gh that records each command it is given.
         let calls = s.home.path().join("calls.log");
-        let gh_path = s.home.path().join("bin/gh");
-        fs::write(
-            &gh_path,
-            format!("#!/bin/sh\necho \"$*\" >> '{}'\n", calls.display()),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).unwrap();
+        s.script("gh", &format!("echo \"$*\" >> '{}'", calls.display()));
+        let thread = (s.host)
+            .start_thread("t1", &s.personal.id, "Brief me", &[], None)
+            .unwrap();
+        let session = s.host.session(&thread.id).unwrap();
+        let propose = |prefix: &str, check: Option<&str>| {
+            json!({"name":"Brief","prompt":"Brief me.","cron":"0 7 * * *","timezone":"America/New_York",
+                "sources":[{"kind":"cli","command":"gh","prefixes":[prefix],"check":check}]})
+        };
+        for (prefix, check) in [
+            ("gh pr comment", None),
+            ("gh api", None),
+            ("gh pr list", Some("gh pr comment 1 --body hi")),
+        ] {
+            let args = propose(prefix, check);
+            assert!(
+                s.host.thread_tool(&session, "propose_job", &args).is_err(),
+                "{prefix}"
+            );
+            let mut write = recipe(&s.personal, "Brief", "0 7 * * *");
+            write.sources = vec![Source::Cli {
+                command: "gh".into(),
+                prefixes: vec![prefix.into()],
+                check: check.map(str::to_owned),
+                extra: Default::default(),
+            }];
+            let save = Command::SaveJob {
+                recipe: Box::new(write),
+                new: false,
+            };
+            assert!(s.host.execute(save).is_err(), "{prefix}");
+        }
+        assert!(!calls.exists(), "nothing ran for a refused recipe");
+        assert!(s.host.recipes().unwrap().is_empty());
+        // A read is proposed, saved and run, and the host runs only `gh auth status`.
+        let args = propose("gh pr list", None);
+        s.host.thread_tool(&session, "propose_job", &args).unwrap();
         let mut brief = recipe(&s.personal, "Brief", "0 7 * * *");
-        brief.sources = vec![Source::Cli {
-            command: "gh".into(),
-            prefixes: vec!["gh pr comment".into()],
-            check: Some("gh pr comment 1 --body hi".into()),
-            extra: Default::default(),
-        }];
-        s.host.preview_job(&brief).unwrap();
-        assert_eq!(fs::read_to_string(&calls).unwrap(), "auth status\n");
-        let checked = s
-            .host
-            .check_sources(Provider::Claude, &brief.sources, Checks::Saved);
-        assert!(checked[0].problem.is_none());
+        brief.sources = vec![gh()];
+        let key = s.host.save_job(brief).unwrap().recipe.key();
+        s.host.run_job_now(&key).unwrap();
         assert_eq!(
             fs::read_to_string(&calls).unwrap(),
-            "auth status\npr comment 1 --body hi\n"
+            "auth status\nauth status\n"
         );
+    }
+
+    #[test]
+    fn an_mcp_server_must_start_answer_and_offer_its_tools_before_a_run() {
+        let s = jobs();
+        s.mcp_server("answers", Some(&["list_issues"]));
+        s.mcp_server("expired", None);
+        s.mcp_server("lacks", Some(&["get_cycle"]));
+        s.script("exits", "exit 1");
+        s.script("hangs", "exec /bin/sleep 30");
+        s.claude_servers(&[
+            ("answers", "answers"),
+            ("expired", "expired"),
+            ("lacks", "lacks"),
+            ("exits", "exits"),
+            ("hangs", "hangs"),
+            ("gone", "not-installed"),
+        ]);
+        let problem = |server: &str| {
+            let source = Source::Mcp {
+                server: server.into(),
+                tools: vec!["list_issues".into()],
+                extra: Default::default(),
+            };
+            s.host
+                .check_sources(Provider::Claude, &[source])
+                .remove(0)
+                .problem
+        };
+        assert_eq!(problem("answers"), None);
+        let said = |server: &str, why: &str| {
+            assert_eq!(
+                problem(server),
+                Some(format!("The {server} MCP server {why}."))
+            );
+        };
+        said(
+            "expired",
+            "answered with an error, such as a sign-in that has expired",
+        );
+        said("lacks", "does not offer list_issues");
+        said("exits", "stopped before it answered");
+        said("hangs", "did not answer within 2 seconds");
+        said(
+            "gone",
+            "names not-installed, which is not installed on this Mac",
+        );
+        // None of what a server said is repeated.
+        assert!(!problem("expired").unwrap().contains("token expired"));
+    }
+
+    #[test]
+    fn a_runs_instructions_are_the_job_run_core_not_the_assistant_core() {
+        let mut s = jobs();
+        let key = (s
+            .host
+            .save_job(recipe(&s.personal, "Brief", "0 7 * * *"))
+            .unwrap())
+        .recipe
+        .key();
+        let run = s.host.run_job_now(&key).unwrap();
+        let session = s.host.session(run.thread_id.as_ref().unwrap()).unwrap();
+        let text = s.host.thread_instructions(&session).unwrap();
+        assert!(text.contains("# Job run core — v1"), "{text}");
+        assert!(!text.contains("# Assistant core") && !text.contains("`propose_job`"));
+    }
+
+    #[test]
+    fn a_card_never_replaces_a_job_of_the_same_name() {
+        let mut s = jobs();
+        let first = s
+            .host
+            .save_job(recipe(&s.personal, "Morning brief", "0 7 * * *"));
+        first.unwrap();
+        let thread = (s.host)
+            .start_thread("t1", &s.personal.id, "Another brief", &[], None)
+            .unwrap();
+        let session = s.host.session(&thread.id).unwrap();
+        let args = json!({"name":"Morning brief","prompt":"Other.","cron":"0 8 * * *","timezone":"America/New_York","sources":[]});
+        let refused = s
+            .host
+            .thread_tool(&session, "propose_job", &args)
+            .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("A job named Morning brief already exists in Personal"),
+            "{refused}"
+        );
+        let mut other = recipe(&s.personal, "Morning brief", "0 8 * * *");
+        other.prompt = "Other.".into();
+        let save = |new| Command::SaveJob {
+            recipe: Box::new(other.clone()),
+            new,
+        };
+        assert!(s.host.execute(save(true)).is_err());
+        let kept = s.host.recipes().unwrap().remove(0);
+        assert_eq!(kept.prompt, "Brief me on my open PRs.");
+        // Saving from the job's own page changes it.
+        s.host.execute(save(false)).unwrap();
+        assert_eq!(s.host.recipes().unwrap()[0].prompt, "Other.");
+    }
+
+    #[test]
+    fn an_unseen_failure_counts_however_many_runs_follow_it() {
+        let mut s = jobs();
+        s.cli("gh", 1);
+        let mut brief = recipe(&s.personal, "Brief", "0 7 * * *");
+        brief.sources = vec![gh()];
+        let key = s.host.save_job(brief.clone()).unwrap().recipe.key();
+        assert_eq!(
+            s.host.run_job_now(&key).unwrap().outcome,
+            RunOutcome::NotStarted
+        );
+        brief.sources = vec![];
+        s.host.save_job(brief).unwrap();
+        for _ in 0..MAX_RUNS_SHOWN {
+            let run = s.host.run_job_now(&key).unwrap();
+            s.host
+                .job_run_ended(run.thread_id.as_ref().unwrap(), RunEnd::Finished)
+                .unwrap();
+        }
+        let state = s.host.job_states().unwrap().remove(0);
+        assert_eq!(state.runs.len(), MAX_RUNS_SHOWN);
+        assert!(state.runs.iter().all(|run| !run.needs_attention()));
+        assert_eq!(state.attention, 1);
+        s.host.see_job_runs(&key).unwrap();
+        assert_eq!(s.host.job_states().unwrap()[0].attention, 0);
     }
 
     #[test]
