@@ -1,10 +1,11 @@
-//! Follows open tickets' GitHub PRs without a model. Each pass reads every ticket branch of one
-//! repository with one read-only `gh api graphql` query, off the actor thread, and `Watch` paces
-//! the passes. Nothing here writes to GitHub, branches or worktrees.
+//! Follows tickets' GitHub PRs without a model: an open ticket's, and a finished ticket's until
+//! the PR it recorded as open ends, which is only recorded. Each pass reads every ticket branch
+//! of one repository with one read-only `gh api graphql` query, off the actor thread, and `Watch`
+//! paces the passes. Nothing here writes to GitHub, branches or worktrees.
 use crate::*;
 use std::collections::{HashMap, HashSet};
 
-/// The interval while a repository has an open PR, and otherwise.
+/// The interval while a repository has an open ticket with an open PR, and otherwise.
 pub(crate) const ACTIVE_MS: i64 = 60_000;
 pub(crate) const IDLE_MS: i64 = 300_000;
 const MAX_BACKOFF_MS: i64 = 1_800_000;
@@ -31,7 +32,7 @@ fn wake_id(ticket_id: &str, pr: &PullRequest, problem: KeeperProblem) -> String 
 /// A message's id and body.
 type Notice = (String, String);
 
-/// One repository's open tickets, gathered on the host thread and read off it.
+/// One repository's watched tickets, gathered on the host thread and read off it.
 pub(crate) struct Query {
     pub repository: PathBuf,
     /// A base on the remote whose GitHub repository holds the pull requests.
@@ -42,6 +43,7 @@ pub(crate) struct TicketBranch {
     pub ticket_id: String,
     pub branch: String,
     pub worktree: PathBuf,
+    pub finished: bool,
 }
 pub(crate) enum Outcome {
     /// The base has no remote on github.com, so nothing was asked.
@@ -57,8 +59,11 @@ impl Outcome {
     }
 }
 pub(crate) struct Pass {
-    /// The tickets that have a PR.
+    /// The open tickets that have a PR.
     pub found: Vec<Found>,
+    /// The finished tickets' PRs, apart so that only recording ever sees them: they neither pace
+    /// the watch nor reach the keeper, and an ended PR's base head is not the base's.
+    pub finished: Vec<Found>,
     pub rate_limit: RateLimit,
 }
 pub(crate) struct Found {
@@ -66,7 +71,7 @@ pub(crate) struct Found {
     pub pull_request: PullRequest,
     /// The head of the PR's base branch, for the PR keeper; never stored on the ticket.
     pub base_head: String,
-    /// The ticket worktree's HEAD, read only for a merged PR.
+    /// The ticket worktree's HEAD, read only for an open ticket's merged PR.
     pub worktree_head: Option<String>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,6 +98,7 @@ fn read(query: &Query, gh: impl Fn(&Path, &[&str]) -> Result<String>) -> Result<
         return Ok(None);
     };
     let mut found = vec![];
+    let mut finished = vec![];
     let mut rate_limit = None;
     for tickets in query.tickets.chunks(BRANCHES_PER_QUERY) {
         // Raw-string fields only: `-F` would let gh coerce values or read files.
@@ -116,20 +122,25 @@ fn read(query: &Query, gh: impl Fn(&Path, &[&str]) -> Result<String>) -> Result<
         let (pull_requests, limit) = parse(&serde_json::from_str(&output)?, tickets)?;
         rate_limit = Some(limit);
         for (ticket, pull_request, base_head) in pull_requests {
-            let worktree_head = (pull_request.state == PrState::Merged)
+            let worktree_head = (pull_request.state == PrState::Merged && !ticket.finished)
                 .then(|| runtime::git_output(&ticket.worktree, &["rev-parse", "HEAD"]).ok())
                 .flatten()
                 .map(|head| head.trim().to_owned());
-            found.push(Found {
+            let read = Found {
                 ticket_id: ticket.ticket_id.clone(),
                 pull_request,
                 base_head,
                 worktree_head,
-            });
+            };
+            match ticket.finished {
+                true => finished.push(read),
+                false => found.push(read),
+            }
         }
     }
     Ok(Some(Pass {
         found,
+        finished,
         rate_limit: rate_limit.context("No ticket branches to read")?,
     }))
 }
@@ -343,7 +354,7 @@ impl Watch {
     /// Makes a repository due at once, as after the host pushed a ticket's branch there or
     /// opened its PR, so the ticket's row shows the PR without waiting for the interval. One
     /// whose ticket is newer than the last listing joins the watch here; `keep` drops it again
-    /// if it has no open ticket.
+    /// if it has no ticket to watch.
     pub(crate) fn check_now(&mut self, repository: &str) {
         let pace = self.repositories.entry(repository.to_owned()).or_default();
         pace.due_at = 0;
@@ -405,7 +416,8 @@ impl Watch {
 }
 
 impl Host {
-    /// Each repository with an open ticket whose coordinator is not archived, keyed by ID.
+    /// Each repository with a ticket to watch, keyed by ID: an open ticket, or a finished one
+    /// whose recorded PR is open, whose coordinator is not archived.
     pub(crate) fn pull_request_queries(&self) -> Result<Vec<(String, Query)>> {
         let archived: HashSet<String> = self
             .sessions()?
@@ -416,28 +428,29 @@ impl Host {
         let tickets = self.tickets()?;
         let mut queries = vec![];
         for repository in self.repositories()? {
-            let open: Vec<_> = tickets
+            let followed: Vec<_> = tickets
                 .iter()
                 .filter(|t| {
-                    t.is_open()
+                    (t.is_open() || t.open_pull_request().is_some())
                         && t.repository_id == repository.id
                         && !archived.contains(&t.coordinator_id)
                 })
                 .collect();
             // Pull requests open on origin. When the repository's base is elsewhere, only a
             // ticket on its own branch of origin can have one, so the pass reads origin.
-            let base = match open.iter().find(|t| t.base.is_some()) {
+            let base = match followed.iter().find(|t| t.base.is_some()) {
                 Some(own) if origin_branch(&repository.base).is_none() => {
                     stacks::effective_base(own, &repository)
                 }
                 _ => repository.base.clone(),
             };
-            let watched: Vec<_> = open
+            let watched: Vec<_> = followed
                 .iter()
                 .map(|t| TicketBranch {
                     ticket_id: t.id.clone(),
                     branch: t.branch.clone(),
                     worktree: t.worktree.clone().into(),
+                    finished: !t.is_open(),
                 })
                 .collect();
             if !watched.is_empty() {
@@ -453,8 +466,8 @@ impl Host {
         }
         Ok(queries)
     }
-    /// Records one repository's pass: its check status, and each open ticket's PR when it
-    /// changed. A failed pass keeps every recorded PR. Returns whether anything shown changed.
+    /// Records one repository's pass: its check status, and each ticket's PR when it changed. A
+    /// failed pass keeps every recorded PR. Returns whether anything shown changed.
     pub(crate) fn record_pull_requests(
         &mut self,
         repository: &str,
@@ -481,7 +494,7 @@ impl Host {
             previous.is_none_or(|p| p.error != check.error || p.watched != check.watched);
         self.pull_request_checks.insert(repository.into(), check);
         if let Outcome::Read(pass) = outcome {
-            for found in &pass.found {
+            for found in pass.found.iter().chain(&pass.finished) {
                 changed |= self.record_pull_request(found)?;
             }
         }
@@ -489,7 +502,7 @@ impl Host {
     }
     fn record_pull_request(&mut self, found: &Found) -> Result<bool> {
         let mut ticket = self.ticket(&found.ticket_id)?;
-        if !ticket.is_open() {
+        if !ticket.is_open() && ticket.open_pull_request().is_none() {
             return Ok(false);
         }
         let old = ticket.pull_request.clone();
@@ -552,13 +565,17 @@ impl Host {
     }
     /// The coordinator messages a PR's new snapshot calls for that were never sent, and the
     /// wakes held back because the PR keeper will try their problem. Wakes on failed checks and
-    /// conflicts share a budget per PR, after which one budget message is due.
+    /// conflicts share a budget per PR, after which one budget message is due. A finished ticket
+    /// calls for none.
     fn pull_request_notices(
         &self,
         ticket: &Ticket,
         pr: &PullRequest,
         worktree_head: Option<&str>,
     ) -> Result<(Vec<Notice>, Vec<HeldWake>)> {
+        if !ticket.is_open() {
+            return Ok((vec![], vec![]));
+        }
         let named = format!(
             "PR #{} for ticket \"{}\" ({})",
             pr.number, ticket.title, ticket.id
@@ -740,6 +757,7 @@ pub(crate) mod tests {
                 ticket_id: format!("t{i}"),
                 branch: format!("wiffletree/b{i}"),
                 worktree: PathBuf::new(),
+                finished: false,
             })
             .collect()
     }
@@ -926,6 +944,7 @@ pub(crate) mod tests {
                 ticket_id: "t0".into(),
                 branch: "wiffletree/pr-watch".into(),
                 worktree: repository.into(),
+                finished: false,
             }],
         }
     }
@@ -1022,6 +1041,7 @@ pub(crate) mod tests {
                 base_head: BASE.into(),
                 worktree_head: None,
             }],
+            finished: vec![],
             rate_limit: RateLimit {
                 remaining,
                 reset_at,
@@ -1145,7 +1165,7 @@ pub(crate) mod tests {
             Some(3 * MINUTE + ACTIVE_MS)
         );
         // A repository whose ticket is newer than the last listing is due at once too, and
-        // leaves again when the listing shows no open ticket there.
+        // leaves again when the listing shows no ticket to watch there.
         watch.check_now("new");
         assert_eq!(watch.next_due(), Some(0));
         watch.keep(["r"]);
@@ -1153,7 +1173,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_repository_without_open_tickets_leaves_the_watch() {
+    fn a_repository_with_no_ticket_to_watch_leaves_the_watch() {
         let mut watch = Watch::default();
         watch.keep(["web", "docs"]);
         watch.start_due(0);
@@ -1198,11 +1218,20 @@ pub(crate) mod tests {
                 base_head: BASE.into(),
                 worktree_head: None,
             }],
+            finished: vec![],
             rate_limit: RateLimit {
                 remaining: 4000,
                 reset_at: 0,
             },
         })
+    }
+    /// The pass that reads `pr` for a finished ticket.
+    fn found_finished(ticket: &Ticket, pull_request: PullRequest) -> Outcome {
+        let Outcome::Read(mut pass) = found(ticket, pull_request) else {
+            unreachable!()
+        };
+        pass.finished = std::mem::take(&mut pass.found);
+        Outcome::Read(pass)
     }
     fn pull_request_events(host: &Host) -> i64 {
         host.db
@@ -1326,6 +1355,130 @@ pub(crate) mod tests {
         host.record_pull_requests(&ticket.repository_id, &pass, 0, 0)
             .unwrap();
         assert_eq!(host.ticket(&ticket.id).unwrap().pull_request, None);
+    }
+
+    /// An accepted ticket whose open PR, with a problem that would wake an open ticket's
+    /// coordinator, was recorded before it was accepted.
+    fn accepted_with_open_pr() -> (tempfile::TempDir, Host, Ticket) {
+        let (home, mut host, ticket) = host_with_ticket();
+        record(&mut host, &ticket, conflicting("a1"));
+        let mut ticket = host.ticket(&ticket.id).unwrap();
+        ticket.state = TicketState::Accepted;
+        host.save_ticket(&ticket).unwrap();
+        (home, host, ticket)
+    }
+
+    #[test]
+    fn a_finished_tickets_open_pr_is_read_until_it_ends_and_wakes_nobody() {
+        for (state, finished) in [
+            (PrState::Closed, TicketState::Accepted),
+            (PrState::Merged, TicketState::Accepted),
+            (PrState::Closed, TicketState::Closed),
+            (PrState::Merged, TicketState::Closed),
+        ] {
+            let (_home, mut host, mut ticket) = accepted_with_open_pr();
+            ticket.state = finished;
+            host.save_ticket(&ticket).unwrap();
+            let before = notices(&host);
+            let queries = host.pull_request_queries().unwrap();
+            assert_eq!(
+                queries.len(),
+                1,
+                "a repository of finished tickets is watched"
+            );
+            assert!(queries[0].1.tickets[0].finished);
+            let mut ended = conflicting("a1");
+            ended.state = state;
+            let stamp = host.archive_stamp().unwrap();
+            assert!(
+                host.record_pull_requests(
+                    &ticket.repository_id,
+                    &found_finished(&ticket, ended.clone()),
+                    0,
+                    0
+                )
+                .unwrap()
+            );
+            assert_eq!(notices(&host), before);
+            assert_eq!(host.ticket(&ticket.id).unwrap().state, ticket.state);
+            // The desktop rereads the archive, where a finished ticket lives, when this moves.
+            assert!(host.archive_stamp().unwrap() > stamp);
+            let archived = host.archive().unwrap().tickets;
+            assert_eq!(archived[0].pull_request.as_ref().unwrap().state, state);
+            let context = host.agent_context(&ticket.coordinator_id).unwrap();
+            assert_eq!(context["tickets"][0]["pull_request"]["state"], json!(state));
+            assert!(host.pull_request_queries().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_finished_tickets_ended_pr_is_not_read_back_open() {
+        let (_home, mut host, ticket) = accepted_with_open_pr();
+        let mut closed = conflicting("a1");
+        closed.state = PrState::Closed;
+        let repository = &ticket.repository_id;
+        host.record_pull_requests(repository, &found_finished(&ticket, closed.clone()), 0, 0)
+            .unwrap();
+        // A pass listed before the PR ended reports late.
+        host.record_pull_requests(
+            repository,
+            &found_finished(&ticket, conflicting("a1")),
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(host.ticket(&ticket.id).unwrap().pull_request, Some(closed));
+    }
+
+    #[test]
+    fn an_archived_coordinators_finished_ticket_is_not_queried() {
+        let (_home, mut host, ticket) = accepted_with_open_pr();
+        host.set_archived(&ticket.coordinator_id, true).unwrap();
+        assert!(host.pull_request_queries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_an_open_tickets_open_pr_keeps_a_repository_active() {
+        let (_home, mut host, ticket) = accepted_with_open_pr();
+        let abandoned = found_finished(&ticket, open_pr(MergeState::Clean));
+        let mut watch = Watch::default();
+        watch.keep(["web"]);
+        watch.start_due(0);
+        assert_eq!(watch.finish("web", 0, &abandoned), Some(IDLE_MS));
+        // Its base head is not noted for the keeper either.
+        let Outcome::Read(pass) = &abandoned else {
+            unreachable!()
+        };
+        host.note_bases(&ticket.repository_id, pass, 0);
+        assert_eq!(host.keeper_base(&ticket), None);
+    }
+
+    #[test]
+    fn a_finished_tickets_gone_worktree_does_not_matter_to_a_merge() {
+        let folder = repository(Some("https://github.com/o/r"));
+        let mut read = query(folder.path(), "origin/main");
+        read.tickets[0].worktree = folder.path().join("removed");
+        read.tickets[0].finished = true;
+        let fake_gh = |_: &Path, _: &[&str]| -> Result<String> {
+            Ok(answer(vec![vec![node(31, "MERGED")]]).to_string())
+        };
+        let Outcome::Read(pass) = fetch_with(&read, fake_gh) else {
+            panic!("not read");
+        };
+        assert!(pass.found.is_empty());
+        assert_eq!(pass.finished[0].pull_request.state, PrState::Merged);
+    }
+
+    #[test]
+    fn a_finished_ticket_on_a_branch_of_origin_is_read_from_origin() {
+        let (_home, host, mut ticket) = accepted_with_open_pr();
+        assert_eq!(host.pull_request_queries().unwrap()[0].1.base, "HEAD");
+        ticket.base = Some("release".into());
+        host.save_ticket(&ticket).unwrap();
+        assert_eq!(
+            host.pull_request_queries().unwrap()[0].1.base,
+            "origin/release"
+        );
     }
 
     #[test]
