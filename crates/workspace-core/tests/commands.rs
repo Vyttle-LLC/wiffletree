@@ -463,7 +463,9 @@ fn every_tracker_write_is_the_humans_and_reading_issues_is_not() {
             space_id: space().id,
             logins: Default::default(),
         },
-        Command::CancelLinearImport,
+        Command::CancelLinearImport {
+            space_id: space().id,
+        },
     ];
     for command in writes {
         assert!(command.is_human_only() && !command.is_read(), "{command:?}");

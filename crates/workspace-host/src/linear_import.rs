@@ -717,12 +717,23 @@ impl Host {
         self.end_linear_import(Some(stopped));
         Some(Step::Done)
     }
-    /// Ends the import, a running one after the batch it wrote, removes the key from the
-    /// Keychain and closes the import's status.
-    pub(crate) fn cancel_linear_import(&mut self) -> Result<()> {
+    /// Ends the Space's import, a running one after the batch it wrote, removes the key from
+    /// the Keychain and closes the import's status. Another Space's import, and its key, are
+    /// left as they are.
+    pub(crate) fn cancel_linear_import(&mut self, space_id: &SpaceId) -> Result<()> {
+        if (self.linear.status.as_ref()).is_some_and(|status| &status.space_id == space_id) {
+            self.linear.status = None;
+        }
+        let began = self.linear.began.as_ref().map(|(began, _)| began);
+        let ours = match &self.linear.run {
+            Some(run) => &run.space_id == space_id,
+            None => began == Some(space_id),
+        };
+        if !ours {
+            return Ok(());
+        }
         self.linear.run = None;
         self.linear.began = None;
-        self.linear.status = None;
         self.linear.tools.keys.remove()
     }
     /// Runs the whole import on this thread, with `tools` for each pass of a GitHub tracker.
@@ -1155,6 +1166,12 @@ pub(crate) mod tests {
         Ok(serde_json::from_value(plan)?)
     }
 
+    fn cancel(host: &mut Host, space: &Space) {
+        let space_id = space.id.clone();
+        host.execute(Command::CancelLinearImport { space_id })
+            .unwrap();
+    }
+
     /// Begins, previews and runs an import of team CEL, with `tools` for a GitHub tracker's
     /// passes.
     fn import(
@@ -1442,7 +1459,7 @@ pub(crate) mod tests {
         preview(&mut host, &personal).unwrap();
         (host.start_linear_import(&personal.id, BTreeMap::new())).unwrap();
         assert_eq!(host.linear_step(), Step::Next, "the issues are written");
-        host.execute(Command::CancelLinearImport).unwrap();
+        cancel(&mut host, &personal);
         let first = format!("{prefix}-1");
         assert!(issue(&host, &first).issue.unwrap().blocks.is_empty());
         begin(&mut host, &personal).unwrap();
@@ -1460,7 +1477,7 @@ pub(crate) mod tests {
         let (keys, _) = recorded(&mut host, celadon(vec![]));
         begin(&mut host, &personal).unwrap();
         assert!(keys.kept().is_some());
-        host.execute(Command::CancelLinearImport).unwrap();
+        cancel(&mut host, &personal);
         assert!(keys.kept().is_none());
         assert!(preview(&mut host, &personal).is_err(), "it begins again");
 
@@ -1612,6 +1629,47 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn closing_one_spaces_import_leaves_another_spaces_running_import_going() {
+        let (_home, mut host, personal, _) = personal();
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("CEL"));
+        join_sage(&mut host, &github).unwrap();
+        let sage = space_named(&host, "Sage");
+        let (keys, _) = recorded(&mut host, many(150));
+        begin(&mut host, &personal).unwrap();
+        preview(&mut host, &personal).unwrap();
+        (host.start_linear_import(&personal.id, BTreeMap::new())).unwrap();
+        assert_eq!(host.linear_step(), Step::Next, "the first batch is written");
+        // Sage's panel, opened while Personal's import runs, is closed and goes away.
+        cancel(&mut host, &sage);
+        assert!(host.linear_ready(), "Personal's import goes on");
+        assert!(keys.kept().is_some(), "and keeps its key");
+        assert_eq!(
+            host.linear_step(),
+            Step::Next,
+            "the second batch is written"
+        );
+        assert_eq!(host.linear_step(), Step::Done);
+        let status = host.linear.status.clone().unwrap();
+        assert_eq!((status.written, status.total), (150, 150));
+        assert!(status.finished && status.error.is_none(), "{status:?}");
+        cancel(&mut host, &sage);
+        assert!(
+            host.linear.status.is_some(),
+            "Personal's result stays shown"
+        );
+
+        begin(&mut host, &personal).unwrap();
+        cancel(&mut host, &sage);
+        assert!(
+            keys.kept().is_some(),
+            "Personal's key stays while its preview waits"
+        );
+        cancel(&mut host, &personal);
+        assert!(keys.kept().is_none());
+    }
+
+    #[test]
     fn nothing_but_a_query_is_ever_sent_to_linear() {
         let api = Recorded {
             answer: Box::new(|_, _| json!({"data":{}})),
@@ -1629,7 +1687,7 @@ pub(crate) mod tests {
         let (keys, _) = recorded(&mut host, Box::new(|_, _| fixture("unauthorized.json")));
         let refused = begin(&mut host, &personal).unwrap_err().to_string();
         assert!(refused.contains("Authentication required"), "{refused}");
-        host.execute(Command::CancelLinearImport).unwrap();
+        cancel(&mut host, &personal);
         let space_id = personal.id.clone();
         let quoted = LinearKey("lin_api\"\nurl = x".into());
         assert!(

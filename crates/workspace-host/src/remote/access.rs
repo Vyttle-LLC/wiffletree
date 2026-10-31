@@ -131,7 +131,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::LinearTeams { .. }
         | Command::PreviewLinearImport { .. }
         | Command::ImportFromLinear { .. }
-        | Command::CancelLinearImport
+        | Command::CancelLinearImport { .. }
         | Command::SetWorkspacesDir { .. }
         | Command::SetVerification { .. }
         | Command::SetBuildsAtOnce { .. }

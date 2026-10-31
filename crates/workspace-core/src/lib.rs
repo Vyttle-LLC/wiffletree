@@ -3329,9 +3329,11 @@ pub enum Command {
         #[serde(default)]
         logins: BTreeMap<String, String>,
     },
-    /// Ends the import: stops one that runs after its current batch, removes the key from the
-    /// Keychain and closes its status.
-    CancelLinearImport,
+    /// Ends the Space's import: stops one that runs after its current batch, removes the key
+    /// from the Keychain and closes its status. Another Space's import is left as it is.
+    CancelLinearImport {
+        space_id: SpaceId,
+    },
     /// Replaces a Space's definition; its id and storage stay as they are.
     UpdateSpace {
         space: Box<Space>,
@@ -3860,7 +3862,7 @@ impl Command {
             | Self::LinearTeams { .. }
             | Self::PreviewLinearImport { .. }
             | Self::ImportFromLinear { .. }
-            | Self::CancelLinearImport
+            | Self::CancelLinearImport { .. }
             | Self::SetWorkspacesDir { .. }
             | Self::SetVerification { .. }
             | Self::SetBuildsAtOnce { .. }
@@ -3941,7 +3943,7 @@ impl Command {
                 | Self::LinearTeams { .. }
                 | Self::PreviewLinearImport { .. }
                 | Self::ImportFromLinear { .. }
-                | Self::CancelLinearImport
+                | Self::CancelLinearImport { .. }
                 | Self::SetSpaceBrain { .. }
                 | Self::SpaceStorage { .. }
                 | Self::ConfirmBrain { .. }

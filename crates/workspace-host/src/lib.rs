@@ -2061,8 +2061,8 @@ impl Host {
                 self.import_from_linear_now(&space_id, logins, &publish::Tools::default())?;
                 Value::Null
             }
-            Command::CancelLinearImport => {
-                self.cancel_linear_import()?;
+            Command::CancelLinearImport { space_id } => {
+                self.cancel_linear_import(&space_id)?;
                 Value::Null
             }
             Command::SyncNow => {

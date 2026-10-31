@@ -133,12 +133,11 @@ impl LinearImportPanel {
         });
     }
 
-    /// Ends the import, which removes the key, and closes the panel.
+    /// Ends this Space's import, which removes the key, and closes the panel.
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ended = true;
-        self.ask(ask::cancel_linear_import(), window, cx, |_, _, _, cx| {
-            cx.emit(Closed)
-        });
+        let cancel = ask::cancel_linear_import(self.space_id.clone());
+        self.ask(cancel, window, cx, |_, _, _, cx| cx.emit(Closed));
     }
 
     fn key_step(&self, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -316,7 +315,10 @@ impl Drop for LinearImportPanel {
     fn drop(&mut self) {
         let key_kept = matches!(self.stage, Stage::Teams(_) | Stage::Plan(..));
         if key_kept && !self.ended {
-            let _ = self.bridge.request(Command::CancelLinearImport);
+            let space_id = self.space_id.clone();
+            let _ = self
+                .bridge
+                .request(Command::CancelLinearImport { space_id });
         }
     }
 }

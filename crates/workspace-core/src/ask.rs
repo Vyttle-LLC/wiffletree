@@ -273,8 +273,8 @@ pub fn preview_linear_import(space_id: SpaceId, team_id: String) -> Ask<LinearIm
 pub fn import_from_linear(space_id: SpaceId, logins: BTreeMap<String, String>) -> Ask<()> {
     Ask::new(Command::ImportFromLinear { space_id, logins })
 }
-pub fn cancel_linear_import() -> Ask<()> {
-    Ask::new(Command::CancelLinearImport)
+pub fn cancel_linear_import(space_id: SpaceId) -> Ask<()> {
+    Ask::new(Command::CancelLinearImport { space_id })
 }
 pub fn issue_project_defaults(id: IssueId, space_id: Option<SpaceId>) -> Ask<IssueProjectDefaults> {
     Ask::new(Command::IssueProjectDefaults { id, space_id })
