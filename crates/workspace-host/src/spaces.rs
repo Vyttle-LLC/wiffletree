@@ -776,6 +776,7 @@ mod tests {
             }),
             origin_problem: None,
             checks: None,
+            protected_branches: vec![],
         };
         host.db
             .execute(

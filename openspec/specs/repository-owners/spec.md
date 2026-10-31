@@ -86,7 +86,7 @@ A repository SHALL publish without asking only when all of these hold: its `orig
 - **THEN** it does not publish without asking, whatever is allowed
 
 ### Requirement: The Repositories page lists owners to allow
-The Repositories page SHALL show, above the repository list, a block titled "Open pull requests without asking". It SHALL list each owner with a tick box, whether it is an organization or a user, how many workspace repositories it owns and whether they are private or public. It SHALL list each fork separately, with its own tick box, its parent and its visibility. It SHALL list repositories that are not on GitHub without a tick box. It SHALL state in one line that Wiffletree never approves, merges, closes or comments on a pull request, and SHALL say that the list stays on this machine. The page SHALL call a ticked owner "allowed" and SHALL NOT call it approved or the behavior automatic. Each repository row SHALL say which rule applies to it: without asking, asks first, or not on GitHub.
+The Repositories page SHALL show, above the repository list, a block titled "Open pull requests without asking". It SHALL list each owner with a tick box, whether it is an organization or a user, how many workspace repositories it owns and whether they are private or public. It SHALL list each fork separately, with its own tick box, its parent and its visibility. It SHALL list repositories that are not on GitHub without a tick box. It SHALL state in one line that Wiffletree never approves, closes or comments on a pull request and never merges into a protected branch, and SHALL say that the list stays on this machine. The page SHALL call a ticked owner "allowed" and SHALL NOT call it approved or the behavior automatic. Each repository row SHALL say which rule applies to it: without asking, asks first, or not on GitHub.
 
 #### Scenario: Owners with counts
 - **WHEN** the workspace has 29 Sage-Social repositories, all private, and one public Vyttle-LLC repository
@@ -106,7 +106,7 @@ The Repositories page SHALL show, above the repository list, a block titled "Ope
 
 #### Scenario: The line about what Wiffletree never does
 - **WHEN** the human opens the Repositories page
-- **THEN** the block says that Wiffletree never approves, merges, closes or comments on a pull request
+- **THEN** the block says that Wiffletree never approves, closes or comments on a pull request and never merges into a protected branch
 
 ### Requirement: Agents are told each repository's rule
 `workspace_context` SHALL show, for each repository the project uses, its GitHub owner and name, whether it is a fork, whether it is public, and whether it publishes without asking.

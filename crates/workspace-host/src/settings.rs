@@ -89,6 +89,16 @@ fn reason(error: &std::io::Error) -> std::io::Error {
 /// A keeper trigger's switch.
 type Switch = fn(&mut KeeperSettings) -> &mut bool;
 
+/// The owners allowed in the settings saved in `home`, read off the host thread; none when the
+/// file is missing or invalid.
+pub(crate) fn allowed_owners(home: &Path) -> Vec<String> {
+    fs::read(home.join(FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<HostSettings>(&bytes).ok())
+        .map(|settings| settings.allowed_owners)
+        .unwrap_or_default()
+}
+
 impl Host {
     /// The saved settings: each shared one from its file, the rest from `settings.json`. A file
     /// that is missing, unreadable or invalid gives its defaults. A keeper trigger this machine

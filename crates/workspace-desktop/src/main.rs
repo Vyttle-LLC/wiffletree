@@ -143,8 +143,8 @@ struct ArchiveDemand<'a> {
 }
 
 /// The archive is out of date and something shown needs it: Show archived, the Tickets, Agents or
-/// Events panel, the Repositories page, a ticket table's done list or a publish request, or a
-/// selected session or message sender
+/// Events panel, the Repositories page, a ticket table's done list or a publish or merge request,
+/// or a selected session or message sender
 /// that the snapshot does not list, which only the archive holds.
 fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
     let snapshot = index.snapshot();
@@ -158,7 +158,7 @@ fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
             )
             || shown.page == Page::Repositories
             || shown.done_tickets
-            || snapshot.attention.iter().any(Attention::is_publish)
+            || (snapshot.attention.iter()).any(|a| a.is_publish() || a.is_merge())
             || shown.selected.is_some_and(archived)
             || shown
                 .messages

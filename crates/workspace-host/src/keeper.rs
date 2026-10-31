@@ -594,6 +594,11 @@ pub(crate) fn fetch(job: &Fetch, git: &publish::GitTool) -> Fetched {
 
 fn rebase_in_checkout(job: &Job) -> Result<Rebased> {
     let checkout = &job.checkout;
+    // Once a stacked ticket's parent merged, only the commits after the parent's last pushed
+    // head are replayed, since the merge replaced the parent's own.
+    let upstream = (job.base.merged_parent_head())
+        .filter(|parent| publish::is_ancestor(checkout, parent, &job.head))
+        .unwrap_or(&job.base_commit);
     // No hooks, no recorded resolutions, and no other branch moved along with the commits.
     let answer = runtime::git_answer(
         checkout,
@@ -607,7 +612,9 @@ fn rebase_in_checkout(job: &Job) -> Result<Rebased> {
             "--no-update-refs",
             "--no-autosquash",
             "--no-autostash",
+            "--onto",
             &job.base_commit,
+            upstream,
         ],
     )?;
     if !answer.status.success() {

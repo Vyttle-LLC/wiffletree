@@ -587,6 +587,8 @@ impl Host {
             // A waiver covered the cycle it was given on; the new one is judged anew.
             ticket.waiver = None;
             ticket.waived_commits.clear();
+            // A merge was decided on the cycle before.
+            host.withdraw_merge(&mut ticket, "a new verification cycle started")?;
             match review.clone() {
                 Some(review) => ticket.keeper.get_or_insert_default().reviews.push(review),
                 // The review now judges the work done in answer to the waiting comments.

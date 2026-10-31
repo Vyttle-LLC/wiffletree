@@ -114,13 +114,14 @@ fn previous_label(index: &WorkspaceIndex, session: &Session) -> (String, Option<
     }
 }
 
-/// A ticket card's PR line: muted except for passed or failed checks, a conflict, a merge and
-/// commits no review has checked, and the keeper's part at its end.
+/// A ticket card's PR line: muted except for passed or failed checks, a conflict, a merge,
+/// commits no review has checked and a merge that waits, with the keeper's part near its end.
 fn pr_line(
     pr: &PullRequest,
     unreviewed: Option<&Unreviewed>,
     keeper: Option<KeeperPart>,
     comments: Option<&KeeperComments>,
+    merge: Option<wording::MergePart>,
     p: Palette,
 ) -> Div {
     let glyph = if pr.state == PrState::Merged {
@@ -137,7 +138,7 @@ fn pr_line(
         .text_size(px(font::CAPTION))
         .text_color(p.subtle)
         .child(icon(glyph).size(px(11.)));
-    for (i, part) in wording::pr_line(pr, unreviewed, keeper, comments, ui::now())
+    for (i, part) in wording::pr_line(pr, unreviewed, keeper, comments, merge, ui::now())
         .into_iter()
         .enumerate()
     {
@@ -208,11 +209,14 @@ impl Inspector {
                         .and_then(|s| s.keeper_parts.get(&ticket.id))
                         .copied();
                     let keeper = ticket.try_part().or(keeper);
+                    let repository = (index.snapshot().repositories.iter())
+                        .find(|r| r.id == ticket.repository_id);
                     pr_line(
                         pr,
                         ticket.unreviewed(),
                         keeper,
                         ticket.waiting_comments(),
+                        wording::merge_part(ticket, repository),
                         p,
                     )
                 }))

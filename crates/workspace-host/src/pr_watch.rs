@@ -49,6 +49,13 @@ pub(crate) enum Outcome {
     Read(Pass),
     Failed(String),
 }
+impl Outcome {
+    /// Whether the pass read GitHub and left its rate limit above the floor, so a few more
+    /// read-only calls fit.
+    pub(crate) fn leaves_headroom(&self) -> bool {
+        matches!(self, Self::Read(pass) if pass.rate_limit.remaining >= RATE_LIMIT_FLOOR)
+    }
+}
 pub(crate) struct Pass {
     /// The tickets that have a PR.
     pub found: Vec<Found>,
@@ -306,6 +313,7 @@ fn pull_request(node: &Value) -> Result<PullRequest> {
         } else {
             None
         },
+        merged_by_host: None,
     })
 }
 
@@ -494,6 +502,10 @@ impl Host {
                 .filter(|old| old.number == new.number && old.head == new.head)
         {
             new.merge_state = old.merge_state;
+        }
+        // GitHub does not say who merged; the host's own record of its merge stands.
+        if let Some(old) = old.as_ref().filter(|old| old.number == new.number) {
+            new.merged_by_host = old.merged_by_host.clone();
         }
         if old.as_ref() == Some(&new) {
             return Ok(false);

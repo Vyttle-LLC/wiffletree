@@ -58,11 +58,11 @@ pub fn not_allowed_reason(repository: &Repository) -> String {
     }
 }
 
-/// A publish approval as the human sees it, built from the frozen request, the ticket's review
-/// and ledger, and the repository's facts. The agent's only words in it are the pull request's
-/// title and description.
+/// A publish or merge approval as the human sees it, built from the stored request, the ticket's
+/// review and ledger, and the repository's facts. The agent's only words in it are the pull
+/// request's title and description, and a waiver's reason.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PublishCard {
+pub struct ApprovalCard {
     pub title: String,
     /// Each row's label and value, in order.
     pub rows: Vec<(&'static str, String)>,
@@ -76,7 +76,7 @@ pub struct PublishCard {
     /// The approve button's label.
     pub approve: &'static str,
 }
-impl PublishCard {
+impl ApprovalCard {
     /// The card as the Inbox item's text. The description is left to the card, which shows it in
     /// full.
     pub fn text(&self) -> String {
@@ -118,7 +118,7 @@ pub fn waiting_card(
     request: &PublishRequest,
     repository: &Repository,
     allowed: &[String],
-) -> PublishCard {
+) -> ApprovalCard {
     let ask =
         publish_ask(ticket, request, repository, allowed).unwrap_or(PublishAsk::EndedPullRequest);
     publish_card(ticket, request, repository, ask)
@@ -130,7 +130,7 @@ pub fn publish_card(
     request: &PublishRequest,
     repository: &Repository,
     ask: PublishAsk,
-) -> PublishCard {
+) -> ApprovalCard {
     let commit = short_sha(&request.commit);
     let facts = repository.github.as_ref().and_then(|g| g.facts.as_ref());
     let visibility = match facts {
@@ -259,7 +259,7 @@ pub fn publish_card(
             "Update pull request",
         ),
     };
-    PublishCard {
+    ApprovalCard {
         title,
         rows,
         findings,

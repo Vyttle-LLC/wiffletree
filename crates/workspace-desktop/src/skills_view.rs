@@ -78,7 +78,8 @@ fn about(skill: Skill) -> About {
                 "A re-check only after a passed review",
                 "The caps on rounds and full reviews",
                 "Findings are sorted before a ticket is accepted",
-                "Wiffletree has no tool that merges, and its publishing asks you unless the owner is allowed and the review passed",
+                "Its publishing asks you unless the owner is allowed and the review passed",
+                "Its merging never touches a protected branch, and asks you after a blocked review",
             ],
             decides: &[
                 "When to plan, create tickets and start agents",
@@ -94,7 +95,7 @@ fn about(skill: Skill) -> About {
                 "One ticket, in its own worktree and branch",
                 "\u{201c}Ready for testing\u{201d} is refused with uncommitted files",
                 "Wiffletree pushes and opens pull requests only through its publishing, which checks the review and the owners you allowed",
-                "Wiffletree has no tool that merges",
+                "Only the coordinator merges, through Wiffletree, never into a protected branch",
             ],
             decides: &[
                 "How to work and which checks to run",
@@ -2447,8 +2448,8 @@ mod tests {
         assert_eq!(
             tabs,
             [
-                "Contract v10",
-                "Coordinator v8",
+                "Contract v11",
+                "Coordinator v9",
                 "Implementer v2",
                 "Verifier v1",
                 "PR keeper v1"

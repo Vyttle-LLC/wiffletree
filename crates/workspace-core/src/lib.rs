@@ -12,6 +12,7 @@ mod host;
 pub mod host_copy;
 mod index;
 mod launch;
+mod merging;
 mod messages;
 mod models;
 mod owners;
@@ -19,6 +20,7 @@ pub mod pairing;
 pub mod pricing;
 mod process;
 mod progress;
+mod protected;
 mod publishing;
 mod remote;
 pub mod remote_client;
@@ -37,11 +39,13 @@ pub use files::*;
 pub use host::*;
 pub use index::WorkspaceIndex;
 pub use launch::*;
+pub use merging::*;
 pub use messages::*;
 pub use models::*;
 pub use owners::*;
 pub use process::*;
 pub use progress::*;
+pub use protected::*;
 pub use publishing::*;
 pub use remote::*;
 pub use selection::*;
@@ -399,6 +403,10 @@ pub struct Repository {
     /// The human's command that runs the repository's checks, for the PR keeper.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checks: Option<RepositoryChecks>,
+    /// The human's protected branches: exact names and patterns. Only the human's client
+    /// changes them, and they stay on this machine.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protected_branches: Vec<String>,
 }
 /// A repository's checks: the human's own shell text, and how long it may run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -451,6 +459,10 @@ pub struct GitHubFacts {
     pub parent: Option<String>,
     pub public: bool,
     pub checked_at: i64,
+    /// Its default branch, merge methods and rulesets; `None` in facts read before they were
+    /// asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branches: Option<GitHubBranches>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -625,13 +637,17 @@ pub struct Attention {
 }
 impl Attention {
     /// A parked provider operation waiting for Approve or Deny, rather than a question.
-    /// Or a publish step waiting for the human, which is approved or denied in the same way.
+    /// Or a publish step or a merge waiting for the human, approved or denied in the same way.
     pub fn is_permission(&self) -> bool {
-        self.operation_id.starts_with(PERMISSION_PREFIX) || self.is_publish()
+        self.operation_id.starts_with(PERMISSION_PREFIX) || self.is_publish() || self.is_merge()
     }
     /// A step of a ticket's publish request waiting for the human's approval.
     pub fn is_publish(&self) -> bool {
         self.operation_id.starts_with(PUBLISH_PREFIX)
+    }
+    /// A ticket's merge request waiting for the human's approval.
+    pub fn is_merge(&self) -> bool {
+        self.operation_id.starts_with(MERGE_PREFIX)
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1682,6 +1698,9 @@ pub struct Ticket {
     /// The publish request whose step is running or waiting for the human.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publishing: Option<PublishRequest>,
+    /// The coordinator's `merge_ticket` request while it is decided, waits or runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merging: Option<MergeRequest>,
     /// The commit the host last pushed to the ticket's branch on GitHub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pushed: Option<String>,
@@ -1937,6 +1956,90 @@ pub struct PublishRequest {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keeper: bool,
 }
+/// One accepted `merge_ticket` call: the pull request and head the host merges, decided on one
+/// review. Only the host changes it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeRequest {
+    pub id: String,
+    /// The coordinator that called `merge_ticket` and gets the result.
+    pub caller: String,
+    /// GitHub's `owner/name` for the repository.
+    pub repository: String,
+    pub number: u64,
+    pub branch: String,
+    /// The branch the pull request merges into, which is not protected.
+    pub base: String,
+    /// The head the request merges. A request that needs no approval follows the host's own
+    /// pushes of the same change; one that needs approval ends on any other head.
+    pub head: String,
+    /// The verification cycle the request was decided on. A later cycle ends it.
+    pub cycle: u32,
+    /// The acceptance waiver the merge records: the coordinator's, or after a blocked review
+    /// without one, the reason the host records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waived: Option<String>,
+    /// The review ended blocked, or the head stands on commits no review checked, so the human
+    /// approves the merge first.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_approval: bool,
+    /// The human approved merging this head.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub approved: bool,
+    /// The method the merge is sent with, recorded once every check held and before it is sent,
+    /// and when the human is asked, so the approval card names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<MergeMethod>,
+    /// The commits no review checked that the merge would take, as the approval card lists them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreviewed: Vec<String>,
+    /// What GitHub last said about the pull request while the request waits for the human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read: Option<MergeRead>,
+    pub stage: MergeStage,
+}
+/// The pull request's checks and mergeability as the host last read them from GitHub for a
+/// merge request, never from the PR watcher's record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeRead {
+    pub checks: CheckState,
+    /// GitHub had worked out that it merges with no conflict.
+    pub mergeable: bool,
+}
+impl MergeRequest {
+    /// Whether the host may merge without asking the human.
+    pub fn may_merge(&self) -> bool {
+        !self.needs_approval || self.approved
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum MergeStage {
+    /// GitHub is being read for a new or just approved request. This read sends no merge.
+    Checking,
+    /// Every check held and the method is recorded: `gh pr merge` may have been sent, so after a
+    /// restart the request is finished or ended on GitHub's word.
+    Merging,
+    /// GitHub is being read again for a request that waited for its checks. This read sends no
+    /// merge, so after a restart the request waits again unless GitHub reports it merged.
+    Rechecking,
+    /// It waits for the pull request's checks to finish, or for GitHub to work out whether it
+    /// can be merged.
+    WaitingForChecks,
+    /// It waits for the human's answer to this Inbox item.
+    WaitingForHuman { item: String },
+}
+/// A pull request the host merged with `merge_ticket`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostMerge {
+    /// `None` for a merge a restart or a time limit cut short, which GitHub finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<MergeMethod>,
+    /// The head it merged.
+    pub head: String,
+    /// Merged after the human approved it, following a blocked review or a waiver.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub approved: bool,
+}
 /// The coordinator's waiver: its one-line reason and the commits no review checked that it
 /// names, none when it waives only a blocked review's open findings.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2138,6 +2241,9 @@ pub struct PullRequest {
     pub comments: CommentCursors,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_commit: Option<String>,
+    /// Set when the host merged it, which the PR watcher's reading keeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_by_host: Option<HostMerge>,
 }
 impl PullRequest {
     /// What changed from `old`, such as "checks failure, new head 9e03c1b".
@@ -2186,6 +2292,13 @@ fn serde_name(value: &impl Serialize) -> String {
 /// The first seven characters of a commit id.
 pub fn short_sha(sha: &str) -> &str {
     &sha[..sha.len().min(7)]
+}
+/// `text` with its first letter in upper case, such as "Squash" for "squash".
+pub fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or(String::new(), |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2257,6 +2370,9 @@ pub const KEEPER_NOTICE_PREFIX: &str = "keeper:";
 /// The id prefix of a publish request's result message and of its Inbox items. Only the host
 /// creates either.
 pub const PUBLISH_PREFIX: &str = "publish:";
+/// The id prefix of a merge request's result message and of its Inbox item. Only the host
+/// creates either.
+pub const MERGE_PREFIX: &str = "merge:";
 /// The id prefix of the Inbox item for a parked provider permission.
 pub const PERMISSION_PREFIX: &str = "permission:";
 /// The id prefix of the notices about the processes an agent left running and the ones the
@@ -2269,13 +2385,14 @@ const MIGRATION_PREFIX: &str = "migration:";
 /// carries another coordinator's words, never the human's.
 pub const PROJECT_BRIEF_PREFIX: &str = "project-brief:";
 /// The id prefixes of the host's other messages without a sender: verification results, kept
-/// worktrees, migration notices, publish results, process notices and project briefs. Inbox
-/// answers (`answer:`) carry the human's words.
-const HOST_NOTICE_PREFIXES: [&str; 6] = [
+/// worktrees, migration notices, publish and merge results, process notices and project briefs.
+/// Inbox answers (`answer:`) carry the human's words.
+const HOST_NOTICE_PREFIXES: [&str; 7] = [
     VERIFICATION_NOTICE_PREFIX,
     WORKTREE_KEPT_PREFIX,
     MIGRATION_PREFIX,
     PUBLISH_PREFIX,
+    MERGE_PREFIX,
     PROCESS_NOTICE_PREFIX,
     PROJECT_BRIEF_PREFIX,
 ];
@@ -3275,6 +3392,21 @@ pub enum Command {
         repository_id: String,
         base: String,
     },
+    /// Adds an entry to a repository's protected branches, refusing it with the reason, or
+    /// removes one; answers with the `Repository`. Only the human's client sends it: a removed
+    /// entry is a branch the host may then merge into.
+    SetProtectedBranches {
+        repository_id: String,
+        /// One entry, added to the host's current list or removed from it, so a client whose
+        /// list is stale changes nothing else.
+        entry: String,
+        protected: bool,
+    },
+    /// Read-only: the branches on a repository's `origin`, as last fetched, for the protected
+    /// branches each pattern matches.
+    OriginBranches {
+        repository_id: String,
+    },
     /// Read-only listing of leftover worktrees, answered with `Vec<LeftoverWorktree>`.
     LeftoverWorktrees,
     /// Removes the worktrees of the tickets the human selected from the listing, re-checking
@@ -3412,6 +3544,7 @@ impl Command {
             | Self::SpaceStorage { .. }
             | Self::Brains
             | Self::SuggestSpaceBrain { .. }
+            | Self::OriginBranches { .. }
             | Self::RemoteAccess => true,
             Self::ImportRepositories { .. }
             | Self::RefreshRepositories
@@ -3479,6 +3612,7 @@ impl Command {
             | Self::DismissSkillMerge { .. }
             | Self::SetRepositoryChecks { .. }
             | Self::SetRepositoryBase { .. }
+            | Self::SetProtectedBranches { .. }
             | Self::RemoveLeftoverWorktrees { .. }
             | Self::StopProcesses { .. }
             | Self::StopAgentsAndQuit
@@ -3494,7 +3628,8 @@ impl Command {
     /// Commands only the human should give: on the host socket they need the app's client
     /// credential. They send a message as the human, answer the Inbox, which also approves a
     /// publish, or grant publish or push authority without it: owners whose PRs open without
-    /// asking, the PR keeper's rebases and pushes, and a settings repository the host pushes to.
+    /// asking, the PR keeper's rebases and pushes, the protected branches, whose removed entries
+    /// the host may merge into, and a settings repository the host pushes to.
     /// Spaces are the human's: creating, editing or removing one, setting its brain, moving a
     /// project into one and choosing which repositories it lists, and reading where its storage
     /// is on this Mac. So are brains: the push grant, forgetting one, Set up, the compiler and
@@ -3507,6 +3642,7 @@ impl Command {
                 | Self::DismissAttention { .. }
                 | Self::SetOwnerAllowed { .. }
                 | Self::SetKeeper { .. }
+                | Self::SetProtectedBranches { .. }
                 | Self::SetUpSettingsRepository { .. }
                 | Self::JoinSettingsRepository { .. }
                 | Self::CreateSpace { .. }

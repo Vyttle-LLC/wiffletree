@@ -27,6 +27,7 @@ fn a_repository_stored_before_owners_decodes_and_the_new_fields_round_trip() {
                 parent: Some("upstream/app".into()),
                 public: false,
                 checked_at: 7,
+                branches: None,
             }),
             problem: None,
         }),
@@ -274,7 +275,7 @@ fn waiting_ticket(step: &str, outcome: &str) -> (Ticket, Repository) {
     .unwrap();
     (ticket, repository)
 }
-fn card(ticket: &Ticket, repository: &Repository, allowed: &[&str]) -> PublishCard {
+fn card(ticket: &Ticket, repository: &Repository, allowed: &[&str]) -> ApprovalCard {
     let allowed: Vec<String> = allowed.iter().map(|a| (*a).to_owned()).collect();
     let request = ticket.publishing.as_ref().unwrap();
     let ask = publish_ask(ticket, request, repository, &allowed).unwrap();
@@ -493,7 +494,7 @@ fn rechecked_ticket(outcome: &str) -> (Ticket, Repository) {
     (ticket, repository)
 }
 
-fn row<'a>(card: &'a PublishCard, label: &str) -> Option<&'a str> {
+fn row<'a>(card: &'a ApprovalCard, label: &str) -> Option<&'a str> {
     card.rows
         .iter()
         .find(|(name, _)| *name == label)

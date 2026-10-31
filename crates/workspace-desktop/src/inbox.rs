@@ -133,8 +133,8 @@ impl Inbox {
             } else {
                 pill("Question", p.focus)
             });
-        let (body, actions) = match self.publish_card(item) {
-            Some(publish) => publish_approval(item.id.clone(), publish, &self.shared.host, p, cx),
+        let (body, actions) = match self.approval_card(item) {
+            Some(approval) => approval_card(item.id.clone(), approval, &self.shared.host, p, cx),
             None if item.is_permission() => self.permission(item, p, cx),
             None => self.question(item, answering, max_height.is_none(), p, cx),
         };
@@ -361,25 +361,35 @@ impl Inbox {
                     .child(held.text.clone()),
             )
     }
-    /// The card for a publish step waiting on this item, drawn from the ticket's frozen request,
-    /// its review and ledger, and the repository's facts. `None` for any other item.
-    fn publish_card(&self, item: &Attention) -> Option<PublishCard> {
+    /// The card for a publish step or a merge waiting on this item, drawn from the ticket's
+    /// stored request, its review and ledger, and the repository's facts. `None` for any other
+    /// item.
+    fn approval_card(&self, item: &Attention) -> Option<ApprovalCard> {
         let index = self.shared.index.as_ref()?;
         let snapshot = index.snapshot();
-        let (ticket, request) = index.tickets().find_map(|ticket| {
-            let request = ticket.publishing.as_ref()?;
-            (request.waiting.as_deref() == Some(item.id.as_str())).then_some((ticket, request))
-        })?;
-        let repository = snapshot
-            .repositories
-            .iter()
-            .find(|r| r.id == ticket.repository_id)?;
-        Some(waiting_card(
-            ticket,
-            request,
-            repository,
-            &snapshot.allowed_owners,
-        ))
+        let repository_of =
+            |ticket: &Ticket| (snapshot.repositories.iter()).find(|r| r.id == ticket.repository_id);
+        index.tickets().find_map(|ticket| {
+            if let Some(request) = ticket.publishing.as_ref()
+                && request.waiting.as_deref() == Some(item.id.as_str())
+            {
+                let allowed = &snapshot.allowed_owners;
+                return Some(waiting_card(
+                    ticket,
+                    request,
+                    repository_of(ticket)?,
+                    allowed,
+                ));
+            }
+            let request = ticket.merging.as_ref()?;
+            let waiting_here = MergeStage::WaitingForHuman {
+                item: item.id.clone(),
+            };
+            if request.stage != waiting_here {
+                return None;
+            }
+            Some(merge_card(ticket, request, repository_of(ticket)?))
+        })
     }
 }
 impl Requests for Inbox {
@@ -426,10 +436,11 @@ impl Requests for Inbox {
     }
 }
 
-/// A publish approval: what would leave the machine, then Deny and the step's own approve button.
-fn publish_approval(
+/// A publish or merge approval: what would leave the machine or merge, then Deny and the
+/// request's own approve button.
+fn approval_card(
     id: String,
-    card: PublishCard,
+    card: ApprovalCard,
     host: &HostView,
     p: Palette,
     cx: &mut Context<Inbox>,
