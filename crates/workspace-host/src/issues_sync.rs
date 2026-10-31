@@ -393,8 +393,10 @@ impl RuleSet for IssueRules {
         self.compared = None;
         self.references.clear();
     }
+    /// Its commit is not pushed this pass, so the numbers it gave new issues are not theirs.
     fn sit_out(&mut self) {
         self.files.sit_out();
+        self.files.found.numbered.clear();
     }
     /// A new issue whose `issue.md` is held, or that a held file names, stays wholly on this
     /// Mac, unnumbered, and so does every file that would name its number. Holding those may

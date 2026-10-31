@@ -2474,6 +2474,14 @@ mod tests {
             fn boards(&self) -> Vec<BoardOutput> {
                 self.host.shelves().unwrap().list()
             }
+            /// The IDs of Sage's issues listed here.
+            fn issues(&self) -> Vec<String> {
+                let listed = self.host.list_issues(Some(&self.sage.id), None).unwrap();
+                listed
+                    .into_iter()
+                    .map(|issue| issue.id.to_string())
+                    .collect()
+            }
             fn paused(&self) -> Vec<String> {
                 (self
                     .host
@@ -2653,6 +2661,57 @@ mod tests {
         #[test]
         fn in_storage_that_is_the_settings_repository_a_runners_output_pushes_the_same() {
             a_runners_output_pushes_without_comparing_and_again_when_github_moves(true);
+        }
+
+        /// One pass with a runner's output and a new issue, while another Mac files SAGE-1
+        /// before the push. Returns the issues listed here after it, and the new issue's ID.
+        fn an_output_and_a_new_issue_while_github_moves(s: &mut Shared) -> (Vec<String>, String) {
+            let key = s.approved();
+            s.host.record_gh_login(Some("jlin".into()));
+            let new = NewIssue {
+                title: "Watch app drops replies".into(),
+                ..NewIssue::default()
+            };
+            let filed = s.host.create_issue(&s.sage.id, new).unwrap().id;
+            s.run_saving(&key, "<p>mine</p>");
+            let github = s.github.clone();
+            let theirs = tracker::issue_md(&tracker::tests::blurry("SAGE-1")).unwrap();
+            *s.github.before.lock().unwrap() = Some((
+                "push",
+                Box::new(move || github.commit("issues/SAGE-1/issue.md", theirs)),
+            ));
+            s.sync();
+            assert_eq!(s.github.show(OUTPUT).as_deref(), Some("<p>mine</p>"));
+            let theirs = s.github.show("issues/SAGE-1/issue.md").unwrap();
+            assert!(!theirs.contains("Watch app drops replies"), "{theirs}");
+            (s.issues(), filed.to_string())
+        }
+        #[test]
+        fn an_output_and_a_new_issue_push_again_together_and_the_issue_takes_the_next_number() {
+            let mut s = shared(false);
+            let (listed, filed) = an_output_and_a_new_issue_while_github_moves(&mut s);
+            let pushed = s.github.show("issues/SAGE-2/issue.md").unwrap();
+            assert!(
+                pushed.contains("title: Watch app drops replies"),
+                "{pushed}"
+            );
+            assert_eq!(listed, ["SAGE-1", "SAGE-2"], "{filed} took SAGE-2");
+        }
+        #[test]
+        fn in_the_settings_repository_a_new_issue_sits_out_the_outputs_retry_unnumbered() {
+            let mut s = shared(true);
+            let (listed, filed) = an_output_and_a_new_issue_while_github_moves(&mut s);
+            assert_eq!(s.github.show("issues/SAGE-2/issue.md"), None);
+            // Not SAGE-1, which the issue's commit took on the head it was refused on.
+            assert_eq!(listed, [filed], "it waits under its temporary ID");
+            // The next pass pulls SAGE-1 and numbers it on the head it pushes to.
+            s.sync();
+            let pushed = s.github.show("issues/SAGE-2/issue.md").unwrap();
+            assert!(
+                pushed.contains("title: Watch app drops replies"),
+                "{pushed}"
+            );
+            assert_eq!(s.issues(), ["SAGE-1", "SAGE-2"]);
         }
 
         #[test]

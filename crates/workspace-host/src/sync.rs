@@ -796,7 +796,7 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
         return Ok(settings.passed);
     }
     let (input, scanner) = storage.unzip();
-    let mut stored = input.map(storage::RuleSets::new);
+    let mut stored = input.map(|input| storage::RuleSets::new(input, true));
     let outcome = {
         let mut rule_sets: Vec<&mut dyn RuleSet> = vec![&mut settings];
         if let Some(stored) = &mut stored {

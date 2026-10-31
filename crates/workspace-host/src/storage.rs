@@ -480,6 +480,9 @@ pub(crate) struct WholeFiles {
     roots: Vec<String>,
     excluded: Vec<String>,
     runs_here: Vec<String>,
+    /// Whether a runner's output here fetches and pushes again on its own when GitHub moves,
+    /// for a pass that does not run whole again (see `RuleSets::new`).
+    retries_alone: bool,
     subject: String,
     pub(crate) synced: BTreeMap<String, Content>,
     written: BTreeMap<String, Content>,
@@ -516,6 +519,7 @@ impl WholeFiles {
                 .collect(),
             roots,
             excluded,
+            retries_alone: false,
             subject,
             parts: None,
             found: Found::default(),
@@ -659,7 +663,7 @@ impl RuleSet for WholeFiles {
     }
     /// A runner's output, which only this Mac writes, is pushed again on GitHub's new head.
     fn pushes_again(&self) -> bool {
-        !self.runs_here.is_empty()
+        self.retries_alone && !self.runs_here.is_empty()
     }
 }
 
@@ -677,7 +681,11 @@ pub(crate) struct RuleSets {
     issues: IssueRules,
 }
 impl RuleSets {
-    pub(crate) fn new(input: Input) -> Self {
+    /// `retries_alone`: a runner's boards fetch and push again on their own when GitHub moves
+    /// under the push, while the others sit that try out. Only the settings pass, which never
+    /// runs whole again, asks for it; a storage repository's own pass (`pass`) fetches,
+    /// compares and pushes every rule set again instead, so issues renumber on the new head.
+    pub(crate) fn new(input: Input, retries_alone: bool) -> Self {
         let folders = |under: &str| -> Vec<String> {
             (input.names.keys())
                 .map(|folder| format!("spaces/{folder}{under}"))
@@ -688,7 +696,8 @@ impl RuleSets {
         let subject = format!("{names}: changed the Space");
         let spaces = WholeFiles::new(&input, folders(""), folders("/boards"), subject);
         let subject = format!("{names}: saved outputs");
-        let boards = WholeFiles::new(&input, folders("/boards"), vec![], subject);
+        let mut boards = WholeFiles::new(&input, folders("/boards"), vec![], subject);
+        boards.retries_alone = retries_alone;
         let mut issues = IssueRules::new(&input);
         issues.files.parts = Some(input.parts.clone());
         let mut rule_sets = Self {
@@ -782,7 +791,7 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
     let mut previous = commit;
     let mut again = 0;
     loop {
-        let mut rule_sets = RuleSets::new(input.clone());
+        let mut rule_sets = RuleSets::new(input.clone(), false);
         let outcome = repos::pass(
             &clone,
             remote(),
