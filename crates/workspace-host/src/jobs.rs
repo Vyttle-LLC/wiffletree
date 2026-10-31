@@ -805,9 +805,9 @@ impl Host {
     }
     fn job_state(&self, recipe: &Recipe) -> Result<JobState> {
         let space = self.space(&recipe.space_id)?.space;
-        let model = match self.job_model(recipe) {
-            Ok((profile, reason, _)) => format!("{} · {reason}", profile.short()),
-            Err(error) => format!("{error:#}"),
+        let (model, profile) = match self.job_model(recipe) {
+            Ok((profile, reason, _)) => (format!("{} · {reason}", profile.short()), Some(profile)),
+            Err(error) => (format!("{error:#}"), None),
         };
         // Counted apart from the runs shown, so an old unseen failure still counts.
         let (attention, attention_at): (usize, Option<i64>) = self.db.query_row(
@@ -831,6 +831,7 @@ impl Host {
                 false => vec![],
             },
             model,
+            profile,
             runs,
             not_here,
             recipe: recipe.clone(),
@@ -2091,6 +2092,12 @@ mod tests {
         let key = s.host.save_job(brief).unwrap().recipe.key();
         let run = s.host.run_now(&key).unwrap();
         assert_eq!(run.profile.map(|p| p.provider), Some(Provider::Claude));
+        // The job's page names the same model, so the run need not name its own.
+        let state = &s.host.job_states().unwrap()[0];
+        assert_eq!(
+            state.profile.as_ref().map(|p| p.provider),
+            Some(Provider::Claude)
+        );
         assert!(
             run.model_reason
                 .contains("is on Codex, and Codex cannot yet hold gh to read commands"),
@@ -2113,6 +2120,7 @@ mod tests {
             run.reason,
             "Codex cannot yet hold gh to read commands, and the Job row has no Claude choice."
         );
+        assert_eq!(s.host.job_states().unwrap()[0].profile, None);
     }
 
     #[test]

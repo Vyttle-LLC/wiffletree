@@ -7,7 +7,7 @@ mod routing;
 
 use super::*;
 use gpui_component::{
-    Disableable, Sizable,
+    Disableable, Selectable, Sizable,
     button::ButtonVariants,
     checkbox::Checkbox,
     input::{Input, Textarea, TextareaState},
@@ -678,6 +678,7 @@ impl AssistantPage {
                     button("open-jobs")
                         .ghost()
                         .xsmall()
+                        .selected(self.jobs_view.is_some())
                         .label("Jobs")
                         .on_click(cx.listener(|v, _, w, c| v.open_job(None, w, c))),
                 ),

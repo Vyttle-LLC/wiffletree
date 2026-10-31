@@ -234,6 +234,9 @@ pub struct JobState {
     pub next_runs: Vec<String>,
     /// The model its next run would start on, or why it cannot start.
     pub model: String,
+    /// That model; `None` when it cannot start. A run names its own model only when it differs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ModelProfile>,
     /// Newest first, at most `MAX_RUNS_SHOWN`.
     #[serde(default)]
     pub runs: Vec<JobRun>,

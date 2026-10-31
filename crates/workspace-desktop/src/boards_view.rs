@@ -1,6 +1,6 @@
 //! Boards (OpenSpec change `assistant-spaces-jobs-boards`, screens 4 and 5 of its mockup): every
-//! output a thread or job saved, filtered by Space and job and searched by title, beside the
-//! jobs; and one output open by its type, with its versions. Markdown renders natively, HTML in
+//! output a thread or job saved, filtered by Space and job and searched by title, with a Jobs
+//! button that opens the assistant's Jobs list; and one output open by its type, with its versions. Markdown renders natively, HTML in
 //! the board web view, images and PDFs in Quick Look, and anything else in its default app.
 use super::*;
 use board_web_view::{Board, BoardEvent, BoardFolder, with_rules};
@@ -17,11 +17,11 @@ use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use ui::{card, hint, icon, pill};
+use ui::{hint, icon, pill};
 use workspace_core::board::{
     BoardOutput, BoardVersion, FileKind, Keeping, LATEST, plain_file_name,
 };
-use workspace_core::job::{JobKey, JobState, RunOutcome, Runner, Sharing};
+use workspace_core::job::{JobKey, JobState, Runner};
 
 /// What the HTML viewer says about its sandbox, as the mockup words it.
 const SANDBOX: &str = "🔒 Scripts run · no network · can't navigate away";
@@ -46,12 +46,6 @@ fn link(id: String, label: &'static str, color: Hsla) -> Stateful<Div> {
         .cursor_pointer()
         .text_color(color)
         .child(label)
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Tab {
-    Outputs,
-    Jobs,
 }
 
 #[derive(Clone, PartialEq)]
@@ -110,7 +104,6 @@ pub(super) struct BoardsPage {
     outputs: Option<Result<Vec<BoardOutput>, String>>,
     /// What the outputs were last read for, so a snapshot that changed none reads none.
     read_for: Option<u64>,
-    tab: Tab,
     space: Option<SpaceId>,
     job: JobFilter,
     search: Entity<InputState>,
@@ -223,7 +216,6 @@ impl BoardsPage {
             shared: Shared::default(),
             outputs: None,
             read_for: None,
-            tab: Tab::Outputs,
             space: None,
             job: JobFilter::All,
             search,
@@ -663,8 +655,8 @@ impl BoardsPage {
         });
     }
 
-    fn header(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let tab = self.tab;
+    /// Boards keeps outputs only; its Jobs button opens the assistant's Jobs list.
+    fn header(&self, cx: &mut Context<Self>) -> Div {
         div()
             .flex_none()
             .flex()
@@ -678,42 +670,22 @@ impl BoardsPage {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("Boards"),
             )
+            .child(self.space_menu(cx))
+            .child(self.job_menu(cx))
+            .child(
+                div().ml_auto().child(
+                    button("boards-open-jobs")
+                        .ghost()
+                        .xsmall()
+                        .label("Jobs ›")
+                        .on_click(cx.listener(|_, _, _, c| c.emit(Intent::OpenJob(None)))),
+                ),
+            )
             .child(
                 div()
-                    .flex()
-                    .child(
-                        ui::segment("boards-outputs", "Outputs", tab == Tab::Outputs).on_click(
-                            cx.listener(|v, _, _, c| {
-                                v.tab = Tab::Outputs;
-                                c.notify();
-                            }),
-                        ),
-                    )
-                    .child(
-                        ui::segment("boards-jobs", "Jobs", tab == Tab::Jobs).on_click(cx.listener(
-                            |v, _, _, c| {
-                                v.tab = Tab::Jobs;
-                                c.notify();
-                            },
-                        )),
-                    ),
+                    .w(px(220.))
+                    .child(Input::new(&self.search).xsmall().cleanable(true)),
             )
-            .child(self.space_menu(cx))
-            .when(tab == Tab::Outputs, |d| {
-                d.child(self.job_menu(cx)).child(
-                    div()
-                        .ml_auto()
-                        .w(px(220.))
-                        .child(Input::new(&self.search).xsmall().cleanable(true)),
-                )
-            })
-            .child(div().when(tab == Tab::Jobs, |d| d.ml_auto()).child(hint(
-                match tab {
-                    Tab::Outputs => "",
-                    Tab::Jobs => "Jobs run only while Wiffletree runs on this Mac.",
-                },
-                p,
-            )))
     }
     fn space_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let spaces = self.spaces().to_vec();
@@ -935,74 +907,6 @@ impl BoardsPage {
                             }),
                     ),
             )
-    }
-
-    fn jobs_list(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let spaces = self.spaces().to_vec();
-        let jobs: Vec<&JobState> = (self.jobs().iter())
-            .filter(|job| {
-                self.space
-                    .as_ref()
-                    .is_none_or(|s| &job.recipe.space_id == s)
-            })
-            .collect();
-        if jobs.is_empty() {
-            return div().child(ui::empty_state(
-                "activity",
-                "No jobs yet",
-                "Ask the assistant for recurring work, such as a brief every weekday at 7, and save the recipe it shows.",
-                p,
-            ));
-        }
-        let mut list = div().flex().flex_col().gap_2();
-        for job in jobs {
-            let key = job.recipe.key();
-            let next = match (&job.not_here, job.recipe.enabled, job.next_runs.first()) {
-                (Some(why), _, _) => why.clone(),
-                (None, false, _) => "Paused".into(),
-                (None, true, Some(next)) => format!("Next {next}"),
-                (None, true, None) => "No next run".into(),
-            };
-            let last = job.runs.first().map(|run| {
-                let color = match run.outcome {
-                    RunOutcome::Finished => p.green,
-                    RunOutcome::Running => p.accent,
-                    RunOutcome::Stopped => p.subtle,
-                    RunOutcome::Failed | RunOutcome::NotStarted => p.red,
-                };
-                pill(run.outcome.label(), color)
-            });
-            let runner = (job.recipe.sharing == Sharing::OneRunner)
-                .then_some(job.recipe.runner.as_ref())
-                .flatten()
-                .map(Runner::label);
-            list = list.child(
-                card(p)
-                    .id(SharedString::from(format!("boards-job-{}", key.as_str())))
-                    .cursor_pointer()
-                    .hover(|d| d.bg(p.overlay))
-                    .on_click(
-                        cx.listener(move |_, _, _, c| c.emit(Intent::OpenJob(Some(key.clone())))),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(space_mark(space_color(&spaces, &job.recipe.space_id, p)))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(job.recipe.name.clone()),
-                            )
-                            .children(last),
-                    )
-                    .child(hint(format!("{} · {next}", job.schedule), p))
-                    .children(runner.map(|runner| hint(runner, p))),
-            );
-        }
-        list
     }
 
     fn viewer(
@@ -1608,11 +1512,8 @@ impl Render for BoardsPage {
                         .flex()
                         .flex_col()
                         .gap_4()
-                        .child(self.header(p, cx))
-                        .child(match self.tab {
-                            Tab::Outputs => self.library(p, cx),
-                            Tab::Jobs => self.jobs_list(p, cx),
-                        }),
+                        .child(self.header(cx))
+                        .child(self.library(p, cx)),
                 )
                 .into_any_element(),
         };

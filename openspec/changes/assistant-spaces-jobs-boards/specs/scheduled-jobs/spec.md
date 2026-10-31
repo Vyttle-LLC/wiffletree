@@ -102,7 +102,7 @@ Jobs SHALL be owned by the user and SHALL be separate from coordinator timers, w
 - **THEN** it is a coordinator timer as before, and the Jobs list does not show it
 
 ### Requirement: A long job run is shown
-A job run SHALL have no time limit. A run that has run 30 minutes, and every 30 minutes after, SHALL put a note on the assistant's sidebar row naming the job and the elapsed time, with Stop. A failed run, a run that did not start and an output waiting for approval SHALL each count on the assistant's sidebar row until the user opens it.
+A job run SHALL have no time limit. A run that has run 30 minutes, and every 30 minutes after, SHALL put a note on the assistant's sidebar row naming the job and the elapsed time, with Stop, and SHALL show the same on the job's page. A failed run, a run that did not start and an output waiting for approval SHALL each count on the assistant's sidebar row until the user opens it.
 
 #### Scenario: A failed brief
 - **WHEN** the morning brief did not start because gh was signed out

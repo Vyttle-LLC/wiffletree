@@ -2,6 +2,7 @@
 //! shows, the Jobs list with "Start Wiffletree at login", a job's page with its runs, and the
 //! form that edits a recipe. Only the user's Save makes or changes a job.
 use super::*;
+use gpui_component::button::ButtonVariant;
 use ui::{needs_you_badge, pill};
 use workspace_core::job::{
     JobKey, JobRun, JobState, Recipe, RecipePreview, RunOutcome, Runner, Sharing, SourceCheck,
@@ -50,13 +51,22 @@ pub(crate) fn long_runs(jobs: &[JobState]) -> Vec<(String, String, i64)> {
 
 /// "Morning brief has run 45 min", or "… 1 h 30 min".
 pub(crate) fn long_run_text(name: &str, minutes: i64) -> String {
-    let elapsed = match minutes {
+    format!("{name} has run {}", elapsed(minutes))
+}
+
+/// "45 min", "2 h" or "1 h 30 min".
+fn elapsed(minutes: i64) -> String {
+    match minutes {
         0..60 => format!("{minutes} min"),
         _ if minutes % 60 == 0 => format!("{} h", minutes / 60),
         _ => format!("{} h {} min", minutes / 60, minutes % 60),
-    };
-    format!("{name} has run {elapsed}")
+    }
 }
+
+/// A check older than this no longer reads as current.
+const CHECK_FRESH_MS: i64 = 24 * 60 * 60 * 1000;
+const PAST_30_MINUTES: &str = "This run has gone past 30 minutes. While it runs, the job's scheduled times are skipped; Stop ends it.";
+const PAUSED: &str = "Scheduled times are skipped until you resume it; Resume starts from the next time. Run now still works.";
 
 /// "HTML", "Markdown", or the type in capitals.
 fn file_type_label(file_type: &str) -> String {
@@ -74,12 +84,22 @@ fn source_line(check: &SourceCheck) -> (bool, String) {
     }
 }
 
-/// "today 07:00 · Did not start · catch-up for 1 missed run".
+/// A source's line from a check that is no longer current, in the past tense.
+fn stale_source_line(check: &SourceCheck) -> String {
+    match &check.problem {
+        None => format!("{} · was ready", check.source),
+        Some(problem) => format!("{} · then: {problem}", check.source),
+    }
+}
+
+/// "today 07:00 · catch-up for 1 missed run", beside the pill that names its outcome.
 fn run_line(run: &JobRun) -> String {
-    let mut parts = vec![
-        wording::day_and_time(run.scheduled_at.unwrap_or(run.started_at)),
-        run.outcome.label().to_owned(),
-    ];
+    let mut parts = vec![wording::day_and_time(
+        run.scheduled_at.unwrap_or(run.started_at),
+    )];
+    if let (RunOutcome::Running, Some(minutes)) = (run.outcome, run.long_minutes) {
+        parts.push(format!("{} so far", elapsed(minutes)));
+    }
     parts.extend(run.catch_up_label());
     if run.scheduled_at.is_none() {
         parts.push("Run now".into());
@@ -88,6 +108,43 @@ fn run_line(run: &JobRun) -> String {
         parts.push("no output".into());
     }
     parts.join(" · ")
+}
+
+/// The model a run started on, only when it is not the one the job's page names.
+fn run_model(run: &JobRun, job: &JobState) -> Option<String> {
+    let profile = run.profile.as_ref()?;
+    (job.profile.as_ref() != Some(profile))
+        .then(|| format!("Ran on {} · {}", profile.short(), run.model_reason))
+}
+
+/// Which run checked the sources and when, and whether that check still reads as current.
+fn checked_note(run: &JobRun, now: i64) -> (String, bool) {
+    let when = wording::day_and_time(run.scheduled_at.unwrap_or(run.started_at));
+    let ago = wording::age(run.started_at).to_lowercase();
+    match now - run.started_at < CHECK_FRESH_MS {
+        true => (format!("Checked by the run of {when}, {ago}"), true),
+        false => (
+            format!("Last checked by the run of {when}, {ago}. The next run checks again."),
+            false,
+        ),
+    }
+}
+
+/// The pills by a job's name: Active, on its page only, or Paused; a running run and how long it
+/// has run; and the Mac that runs it in this Mac's place.
+fn job_pills(job: &JobState, with_active: bool, p: Palette) -> Vec<Div> {
+    let state = match job.recipe.enabled {
+        true => with_active.then(|| pill("Active", p.green)),
+        false => Some(pill("Paused", p.yellow)),
+    };
+    let running = (job.runs.iter())
+        .find(|run| run.outcome == RunOutcome::Running)
+        .map(|run| match run.long_minutes {
+            Some(minutes) => pill(format!("Running · {}", elapsed(minutes)), p.accent),
+            None => pill("Running", p.accent),
+        });
+    let elsewhere = (job.not_here.clone()).map(|why| pill(why, p.subtle));
+    state.into_iter().chain(running).chain(elsewhere).collect()
 }
 
 /// A label and its value, as the recipe card lists them.
@@ -247,15 +304,12 @@ impl AssistantPage {
         let line: Vec<String> = runs_on.into_iter().chain(last).collect();
         let taken = recipe.clone();
         Some(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(hint(line.join(" · "), p))
+            ui::banner(p.subtle)
+                .text_size(px(font::SMALL))
+                .child(div().flex_1().child(line.join(" · ")))
                 .when(job.can_take_over(), |d| {
                     d.child(
                         button("job-take-over")
-                            .ghost()
                             .xsmall()
                             .label(boards_view::TAKE_OVER)
                             .on_click(cx.listener(move |v, _, w, c| v.take_over(&taken, w, c))),
@@ -314,6 +368,7 @@ impl AssistantPage {
                 .title(format!("Delete the job {name}?"))
                 .confirm()
                 .ok_text("Delete")
+                .ok_variant(ButtonVariant::Danger)
                 .child("Its recipe and its runs are removed. Outputs it saved stay in Boards.")
                 .on_ok(move |_, window, cx| {
                     let ask = ask::delete_job(space.clone(), id.clone());
@@ -493,12 +548,15 @@ impl AssistantPage {
         }
         for job in self.jobs() {
             let key = job.recipe.key();
-            let last = job.runs.first().map(run_line);
-            let state = match (&job.not_here, job.recipe.enabled, job.next_runs.first()) {
-                (Some(why), _, _) => why.clone(),
-                (None, false, _) => "Paused".into(),
-                (None, true, Some(next)) => format!("Next {next}"),
-                (None, true, None) => "No next run".into(),
+            // A running run is in the pills; the line names how an ended one ended.
+            let last = (job.runs.first())
+                .filter(|run| run.outcome != RunOutcome::Running)
+                .map(|run| format!("Last run: {} · {}", run_line(run), run.outcome.label()));
+            // Paused and another Mac's runner are in the pills.
+            let next = match (&job.not_here, job.recipe.enabled, job.next_runs.first()) {
+                (Some(_), _, _) | (None, false, _) => String::new(),
+                (None, true, Some(next)) => format!(" · Next {next}"),
+                (None, true, None) => " · No next run".into(),
             };
             let attention = job.attention;
             list = list.child(
@@ -519,10 +577,11 @@ impl AssistantPage {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(job.recipe.name.clone()),
                             )
+                            .children(job_pills(job, false, p))
                             .when(attention > 0, |d| d.child(needs_you_badge(attention, p))),
                     )
-                    .child(hint(format!("{} · {state}", job.schedule), p))
-                    .children(last.map(|last| hint(format!("Last run: {last}"), p))),
+                    .child(hint(format!("{}{next}", job.schedule), p))
+                    .children(last.map(|last| hint(last, p))),
             );
         }
         list
@@ -549,7 +608,7 @@ impl AssistantPage {
                 button("jobs-back")
                     .ghost()
                     .xsmall()
-                    .label("All jobs")
+                    .label("‹ All jobs")
                     .on_click(cx.listener(|v, _, w, c| v.open_job(None, w, c))),
             )
             .child(div().flex_1())
@@ -567,7 +626,8 @@ impl AssistantPage {
             )
             .child(
                 button("job-delete")
-                    .ghost()
+                    .danger()
+                    .outline()
                     .xsmall()
                     .label("Delete")
                     .on_click(cx.listener(move |v, _, w, c| v.confirm_delete_job(&deleted, w, c))),
@@ -580,24 +640,47 @@ impl AssistantPage {
                     .on_click(cx.listener(move |v, _, w, c| v.run_now(key.clone(), w, c))),
             );
         let next = match (paused, job.next_runs.is_empty()) {
-            (true, _) => "Paused: it does not run until you resume it.".to_owned(),
+            (true, _) => "No next run while paused".to_owned(),
             (false, true) => "No next run".into(),
             (false, false) => format!("Next: {}", job.next_runs.join(" · ")),
         };
         let checked = job.runs.iter().find(|r| !r.sources.is_empty());
-        let mut sources = div().flex().flex_col().gap(px(2.));
+        let (when_checked, fresh) = match (checked, &job.not_here) {
+            (Some(run), _) => checked_note(run, ui::now()),
+            (None, Some(_)) => (
+                "Not checked on this Mac, which does not run it.".into(),
+                false,
+            ),
+            (None, None) => (
+                "Not checked yet: each run checks them before it starts.".into(),
+                false,
+            ),
+        };
+        let mut sources = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .when(!recipe.sources.is_empty(), |d| {
+                d.child(hint(when_checked, p))
+            });
         for source in &recipe.sources {
             let label = workspace_core::job::source_label(source);
             let found = checked.and_then(|r| r.sources.iter().find(|c| c.source == label));
-            let (color, text) = match found.map(source_line) {
-                Some((ok, text)) => (if ok { p.green } else { p.red }, text),
-                None => (p.subtle, label),
+            // A check that is no longer current, or none, is grey, so it never reads as ready now.
+            let (color, text) = match found {
+                Some(check) if fresh => match source_line(check) {
+                    (true, text) => (Some(p.green), text),
+                    (false, text) => (Some(p.red), text),
+                },
+                Some(check) => (None, stale_source_line(check)),
+                None => (None, label),
             };
             sources = sources.child(
                 div()
                     .flex()
                     .gap(px(6.))
-                    .child(div().text_color(color).child("●"))
+                    .when(color.is_none(), |d| d.text_color(p.subtle))
+                    .child(div().text_color(color.unwrap_or(p.subtle)).child("●"))
                     .child(text),
             );
         }
@@ -616,9 +699,14 @@ impl AssistantPage {
                 RunOutcome::Stopped => p.subtle,
                 RunOutcome::Failed | RunOutcome::NotStarted => p.red,
             };
+            let long = run.outcome == RunOutcome::Running && run.long_minutes.is_some();
             runs = runs.child(
                 card(p)
                     .gap_1()
+                    .when(long, |d| {
+                        d.border_color(p.yellow.opacity(0.55))
+                            .bg(p.yellow.opacity(0.07))
+                    })
                     .child(
                         div()
                             .flex()
@@ -634,7 +722,7 @@ impl AssistantPage {
                             .when(run.outcome == RunOutcome::Running, |d| {
                                 d.child(
                                     button(SharedString::from(format!("stop-run-{}", run.id)))
-                                        .ghost()
+                                        .when(!long, |b| b.ghost())
                                         .xsmall()
                                         .label("Stop")
                                         .on_click(cx.listener(move |v, _, w, c| {
@@ -643,6 +731,14 @@ impl AssistantPage {
                                 )
                             }),
                     )
+                    .when(long, |d| {
+                        d.child(
+                            div()
+                                .text_size(px(font::SMALL))
+                                .text_color(p.yellow)
+                                .child(PAST_30_MINUTES),
+                        )
+                    })
                     .when(!run.reason.is_empty(), |d| {
                         d.child(hint(run.reason.clone(), p))
                     })
@@ -686,9 +782,7 @@ impl AssistantPage {
                                     .on_click(answer(false)),
                             )
                     }))
-                    .children(run.profile.as_ref().map(|profile| {
-                        hint(format!("{} · {}", profile.short(), run.model_reason), p)
-                    })),
+                    .children(run_model(run, job).map(|model| hint(model, p))),
             );
         }
         div()
@@ -699,6 +793,7 @@ impl AssistantPage {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap_2()
                     .child(space_mark(space_color(&spaces, &recipe.space_id, p)))
@@ -707,8 +802,27 @@ impl AssistantPage {
                             .text_size(px(font::TITLE))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(recipe.name.clone()),
-                    ),
+                    )
+                    .children(job_pills(job, true, p)),
             )
+            .when(paused, |d| {
+                d.child(
+                    ui::banner(p.yellow).text_size(px(font::SMALL)).child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_wrap()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_color(p.yellow)
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Paused."),
+                            )
+                            .child(PAUSED),
+                    ),
+                )
+            })
             .children(self.runner_line(job, p, cx))
             .child(
                 card(p)
@@ -804,9 +918,14 @@ impl AssistantPage {
 
 #[cfg(test)]
 mod tests {
-    use super::{attention, file_type_label, long_run_text, long_runs, run_line};
-    use workspace_core::SpaceId;
-    use workspace_core::job::{JobKey, JobRun, JobState, Recipe, RunOutcome, Schedule};
+    use super::{
+        CHECK_FRESH_MS, attention, checked_note, file_type_label, long_run_text, long_runs,
+        run_line, run_model, stale_source_line,
+    };
+    use workspace_core::job::{
+        JobKey, JobRun, JobState, Recipe, RunOutcome, Schedule, SourceCheck,
+    };
+    use workspace_core::{ModelProfile, Provider, SpaceId};
 
     fn run(id: &str, outcome: RunOutcome, started_at: i64) -> JobRun {
         JobRun {
@@ -850,6 +969,7 @@ mod tests {
             schedule: "Weekdays at 07:00 (America/New_York)".into(),
             next_runs: vec![],
             model: String::new(),
+            profile: None,
             runs,
             attention: 0,
             attention_at: None,
@@ -903,10 +1023,64 @@ mod tests {
         caught.catch_up = 3;
         let line = run_line(&caught);
         assert!(
-            line.ends_with("Finished · catch-up for 3 missed runs · no output"),
+            line.ends_with(" · catch-up for 3 missed runs · no output"),
             "{line}"
         );
+        assert!(
+            !line.contains("Finished"),
+            "the pill names the outcome: {line}"
+        );
+        let mut long = run("r2", RunOutcome::Running, 0);
+        long.long_minutes = Some(45);
+        assert!(run_line(&long).ends_with(" · 45 min so far"));
         assert_eq!(file_type_label("md"), "Markdown");
         assert_eq!(file_type_label("html"), "HTML");
+    }
+
+    fn profile(model: &str) -> ModelProfile {
+        ModelProfile {
+            provider: Provider::Claude,
+            model: model.into(),
+            effort: "medium".into(),
+        }
+    }
+
+    #[test]
+    fn a_run_names_its_model_only_when_it_is_not_the_jobs() {
+        let mut usual = run("r1", RunOutcome::Finished, 0);
+        usual.profile = Some(profile("sonnet"));
+        let mut other = run("r2", RunOutcome::Failed, 0);
+        other.profile = Some(profile("opus"));
+        other.model_reason = "Job row: Second choice".into();
+        let mut state = job(vec![]);
+        state.profile = Some(profile("sonnet"));
+        assert_eq!(run_model(&usual, &state), None);
+        let named = run_model(&other, &state).unwrap();
+        assert!(named.starts_with("Ran on ") && named.ends_with(" · Job row: Second choice"));
+        assert_eq!(
+            run_model(&run("r3", RunOutcome::NotStarted, 0), &state),
+            None
+        );
+    }
+
+    #[test]
+    fn a_source_check_older_than_a_day_no_longer_reads_as_ready() {
+        let now = 10 * CHECK_FRESH_MS;
+        let (note, fresh) = checked_note(&run("r1", RunOutcome::Finished, now - 60_000), now);
+        assert!(
+            fresh && note.starts_with("Checked by the run of "),
+            "{note}"
+        );
+        let (note, fresh) =
+            checked_note(&run("r2", RunOutcome::Finished, now - CHECK_FRESH_MS), now);
+        assert!(
+            !fresh && note.ends_with("The next run checks again."),
+            "{note}"
+        );
+        let ready = SourceCheck {
+            source: "gh pr list".into(),
+            problem: None,
+        };
+        assert_eq!(stale_source_line(&ready), "gh pr list · was ready");
     }
 }

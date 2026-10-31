@@ -43,6 +43,7 @@ Six stages, each a ticket or a few, each landing on its own. Every stage needs `
 - [x] 5.2 Host: shared jobs, one runner or everyone; Take over running as a commit; staleness; first-push approval and re-approval after a prompt or sources change.
 - [x] 5.3 Desktop: runner and approval in Boards and the job page.
 - [x] 5.4 Docs: README on shared jobs, who can change instructions, and what agents' shells can still do.
+- [x] 5.5 Desktop: the job page redesign (mockup study 7, approved 2026-10-31): the state in the header, one outcome per run, the long-run note on the page, when sources were checked, the model once, a red Delete, the paused banner and the runner banner; one Jobs list in the assistant, opened by Boards' Jobs button.
 
 ## 6. Issue threads
 
