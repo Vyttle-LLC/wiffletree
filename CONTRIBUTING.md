@@ -32,7 +32,7 @@ GitHub shows the mockups' HTML source rather than running them. To preview local
 ## Pull requests
 
 - Keep each change focused, and update the PRD and docs when behavior changes.
-- Run the [validation checks](docs/DEVELOPMENT.md#validation) before opening a PR: formatting, Clippy with warnings as errors, the Rust tests and the deterministic communication tests. CI runs the same checks on every PR, and they must pass before merging.
+- Run the [validation checks](docs/DEVELOPMENT.md#validation) before opening a PR: formatting, Clippy with warnings as errors, the Rust tests and the deterministic communication tests. CI lints every PR and runs the rest of these checks in the merge queue; they must pass before merging.
 - Add tests for meaningful failure modes. The live provider smoke tests are optional and make real model calls.
 - Merging does not release. Maintainers publish a release by pushing a version tag on `main`; installed copies then pick it up automatically.
 
