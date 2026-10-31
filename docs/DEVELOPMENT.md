@@ -434,13 +434,13 @@ Repeat the check with the Developer ID before the first launchd release.
 
 ```sh
 cargo fmt --all --check
-cargo nextest run --locked -p workspace-core -p workspace-host
+cargo nextest run --locked --workspace
 cargo clippy --locked --workspace --all-targets -- -D warnings
 python3 scripts/test_communications.py
 bash scripts/package_macos.sh
 ```
 
-The tests run with cargo-nextest: install it with `cargo install cargo-nextest --locked` or `brew install cargo-nextest`.
+The tests run with cargo-nextest: install it with `cargo install cargo-nextest --locked` or `brew install cargo-nextest`. `--workspace` includes the desktop tests, which `default-members` leaves out of a plain `cargo nextest run`; PRs run only lint and compile, so this command is the only place they run before the merge queue.
 
 The core and host tests also pass on Linux, where the merge queue runs most of them. A test that depends on macOS, such as one that needs the host to read the process table, launchd or `chflags`, is gated with `#[cfg(target_os = "macos")]`, and must be added to the `mac` profile's filter in `.config/nextest.toml` so that the queue's macOS job runs it; `cargo nextest run --profile mac --workspace` runs that set with the desktop tests. CI's `check` job fails and names any core or host test that macOS builds, Linux does not, and the profile misses. To run the Linux suite locally, use Docker, for example a `rust` image with the checkout mounted, run as a user other than root.
 
