@@ -551,7 +551,7 @@ impl RepositoriesPage {
             return body.child(self.repository_roots(snapshot, p, cx));
         }
         body = body.child(hint(
-            "Every project uses all of these unless it chooses its own set in its Overview.",
+            "A project uses its Space’s repositories, plus any added to it from its Overview.",
             p,
         ));
         if let Some(card) = self.suggestions_card(snapshot, p, cx) {
