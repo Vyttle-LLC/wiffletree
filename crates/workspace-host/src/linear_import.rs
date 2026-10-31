@@ -430,6 +430,8 @@ pub(crate) struct Linear {
     began: Option<(SpaceId, Option<Team>)>,
     /// When the human last took a step before the import started.
     stepped_at: i64,
+    /// Counts the imports begun and ended, so a read for one that ended changes nothing.
+    flow: u64,
     run: Option<Run>,
     pub(crate) status: Option<LinearImportStatus>,
 }
@@ -439,6 +441,7 @@ impl Linear {
             tools,
             began: None,
             stepped_at: 0,
+            flow: 0,
             run: None,
             status: None,
         }
@@ -473,14 +476,28 @@ impl Host {
             "A Linear personal API key is letters, digits and underscores, such as lin_api_…"
         );
         self.linear.tools.keys.keep(key)?;
+        self.linear.flow += 1;
         self.linear.began = Some((space_id.clone(), None));
         self.linear.stepped_at = now();
         self.linear.status = None;
         Ok(())
     }
-    /// Passes on a read of Linear for the import begun, ending the import when the read failed
-    /// so the key does not outlast it.
-    pub(crate) fn linear_read<T>(&mut self, read: Result<T>) -> Result<T> {
+    /// The import begun now, for a read of Linear to name.
+    pub(crate) fn linear_flow(&self) -> u64 {
+        self.linear.flow
+    }
+    /// Refuses a read for the import `flow` once it ended, as another may have begun since.
+    fn linear_current(&self, flow: u64) -> Result<()> {
+        ensure!(
+            flow == self.linear.flow,
+            "This import from Linear has ended"
+        );
+        Ok(())
+    }
+    /// Passes on a read of Linear for the import `flow`, ending the import when the read
+    /// failed so the key does not outlast it.
+    pub(crate) fn linear_read<T>(&mut self, flow: u64, read: Result<T>) -> Result<T> {
+        self.linear_current(flow)?;
         if read.is_err() && self.linear.run.is_none() {
             self.end_linear_import(None);
         }
@@ -507,12 +524,19 @@ impl Host {
         );
         Ok(())
     }
-    /// What importing the team read into the Space's tracker would write; nothing is written.
-    pub(crate) fn linear_plan(
+    /// The plan for the team read for the import `flow`, if that import has not ended.
+    pub(crate) fn linear_previewed(
         &mut self,
+        flow: u64,
         space_id: &SpaceId,
-        team: Team,
+        team: Result<Team>,
     ) -> Result<LinearImportPlan> {
+        self.linear_current(flow)?;
+        let plan = team.and_then(|team| self.linear_plan(space_id, team));
+        self.linear_read(flow, plan)
+    }
+    /// What importing the team read into the Space's tracker would write; nothing is written.
+    fn linear_plan(&mut self, space_id: &SpaceId, team: Team) -> Result<LinearImportPlan> {
         self.linear_began(space_id)?;
         let space = self.space(space_id)?.space;
         let store = self.store(&space, &self.tracker(&space)?.prefix);
@@ -734,6 +758,7 @@ impl Host {
         }
         self.linear.run = None;
         self.linear.began = None;
+        self.linear.flow += 1;
         self.linear.tools.keys.remove()
     }
     /// Runs the whole import on this thread, with `tools` for each pass of a GitHub tracker.
@@ -761,6 +786,7 @@ impl Host {
     fn end_linear_import(&mut self, error: Option<String>) {
         self.linear.run = None;
         self.linear.began = None;
+        self.linear.flow += 1;
         if let Some(status) = &mut self.linear.status {
             status.finished = true;
             status.error = error;
@@ -1667,6 +1693,26 @@ pub(crate) mod tests {
         );
         cancel(&mut host, &personal);
         assert!(keys.kept().is_none());
+    }
+
+    #[test]
+    fn a_read_that_returns_after_its_import_ended_changes_nothing() {
+        let (_home, mut host, personal, _) = personal();
+        let (keys, api) = recorded(&mut host, many(2));
+        begin(&mut host, &personal).unwrap();
+        let ended = host.linear_flow();
+        // The panel goes away while its reads are out, and a new import begins.
+        cancel(&mut host, &personal);
+        begin(&mut host, &personal).unwrap();
+        let key = LinearKey(KEY.into());
+        let late = team(api.as_ref(), &key, "team-cel");
+        assert!(host.linear_previewed(ended, &personal.id, late).is_err());
+        let start = host.start_linear_import(&personal.id, BTreeMap::new());
+        assert!(start.is_err(), "the late team was not taken as previewed");
+        let failed: Result<()> = Err(anyhow::anyhow!("Linear could not be reached"));
+        assert!(host.linear_read(ended, failed).is_err());
+        assert!(keys.kept().is_some(), "the new import keeps its key");
+        assert_eq!(preview(&mut host, &personal).unwrap().issues, 2);
     }
 
     #[test]

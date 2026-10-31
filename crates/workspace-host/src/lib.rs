@@ -2047,15 +2047,15 @@ impl Host {
                 self.begin_linear_import(&space_id, &key)?;
                 let api = self.linear.tools.api.clone();
                 let teams = linear_import::teams(api.as_ref(), &key);
-                serde_json::to_value(self.linear_read(teams)?)?
+                serde_json::to_value(self.linear_read(self.linear_flow(), teams)?)?
             }
             Command::PreviewLinearImport { space_id, team_id } => {
                 self.linear_began(&space_id)?;
                 let tools = self.linear.tools.clone();
                 let team = (tools.keys.read())
                     .and_then(|key| linear_import::team(tools.api.as_ref(), &key, &team_id));
-                let plan = team.and_then(|team| self.linear_plan(&space_id, team));
-                serde_json::to_value(self.linear_read(plan)?)?
+                let plan = self.linear_previewed(self.linear_flow(), &space_id, team);
+                serde_json::to_value(plan?)?
             }
             Command::ImportFromLinear { space_id, logins } => {
                 self.import_from_linear_now(&space_id, logins, &publish::Tools::default())?;

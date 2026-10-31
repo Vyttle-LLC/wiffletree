@@ -667,13 +667,15 @@ enum Event {
     GhLogin(spaces::GhAccount),
     /// A tracker's collaborators and the profile names of its people, read on their own thread.
     IssuePeople(issue_inbox::PeopleRead),
-    /// The teams the key reads, read on its own thread for the import begun.
+    /// The teams the key reads, read on its own thread for the import `flow`.
     LinearTeamsRead {
+        flow: u64,
         teams: Result<Vec<LinearTeam>>,
         reply: Reply,
     },
-    /// A Linear team, read on its own thread for the import begun in the Space.
+    /// A Linear team, read on its own thread for the import `flow` begun in the Space.
     LinearRead {
+        flow: u64,
         space_id: SpaceId,
         team: Result<linear_import::Team>,
         reply: Reply,
@@ -1513,21 +1515,25 @@ impl Actor {
             Command::LinearTeams { space_id, key } => {
                 self.host.begin_linear_import(space_id, key)?;
                 let (api, key) = (self.host.linear.tools.api.clone(), key.clone());
-                let (sender, reply) = (self.sender.clone(), reply.clone());
+                let (sender, reply, flow) =
+                    (self.sender.clone(), reply.clone(), self.host.linear_flow());
                 std::thread::spawn(move || {
                     let teams = linear_import::teams(api.as_ref(), &key);
-                    let _ = sender.send_blocking(Event::LinearTeamsRead { teams, reply });
+                    let read = Event::LinearTeamsRead { flow, teams, reply };
+                    let _ = sender.send_blocking(read);
                 });
             }
             Command::PreviewLinearImport { space_id, team_id } => {
                 self.host.linear_began(space_id)?;
                 let tools = self.host.linear.tools.clone();
                 let (space_id, team_id) = (space_id.clone(), team_id.clone());
-                let (sender, reply) = (self.sender.clone(), reply.clone());
+                let (sender, reply, flow) =
+                    (self.sender.clone(), reply.clone(), self.host.linear_flow());
                 std::thread::spawn(move || {
                     let team = (tools.keys.read())
                         .and_then(|key| linear_import::team(tools.api.as_ref(), &key, &team_id));
                     let read = Event::LinearRead {
+                        flow,
                         space_id,
                         team,
                         reply,
@@ -2248,20 +2254,20 @@ impl Actor {
                 let key = self.host.settings_key();
                 changed | key.is_some_and(|key| self.linear_pass_ended(&key))
             }
-            Event::LinearTeamsRead { teams, reply } => {
-                let teams = (self.host.linear_read(teams))
+            Event::LinearTeamsRead { flow, teams, reply } => {
+                let teams = (self.host.linear_read(flow, teams))
                     .and_then(|teams| Ok(serde_json::to_value(teams)?));
                 let _ = reply.try_send(teams.map_err(|e| format!("{e:#}")));
                 false
             }
             Event::LinearRead {
+                flow,
                 space_id,
                 team,
                 reply,
             } => {
-                let plan = team.and_then(|team| self.host.linear_plan(&space_id, team));
-                let plan =
-                    (self.host.linear_read(plan)).and_then(|plan| Ok(serde_json::to_value(plan)?));
+                let plan = (self.host.linear_previewed(flow, &space_id, team))
+                    .and_then(|plan| Ok(serde_json::to_value(plan)?));
                 let _ = reply.try_send(plan.map_err(|e| format!("{e:#}")));
                 false
             }

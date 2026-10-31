@@ -27,6 +27,8 @@ pub(super) struct LinearImportPanel {
     stage: Stage,
     busy: bool,
     error: Option<String>,
+    /// The key was sent to the host, which keeps it until this import ends.
+    key_sent: bool,
     /// The host was asked to end the import, which removes the key.
     ended: bool,
 }
@@ -48,6 +50,7 @@ impl LinearImportPanel {
             stage: Stage::Key,
             busy: false,
             error: None,
+            key_sent: false,
             ended: false,
         }
     }
@@ -69,6 +72,7 @@ impl LinearImportPanel {
             return cx.notify();
         }
         self.busy = true;
+        self.key_sent = true;
         let ask = ask::linear_teams(self.space_id.clone(), LinearKey(key));
         self.ask(ask, window, cx, |view, teams, window, cx| {
             view.busy = false;
@@ -308,13 +312,13 @@ fn confirmed(
         .collect()
 }
 
-/// A panel that goes away holding a key the host keeps for an import not yet started, as when
-/// another Space's import replaces it or the app quits, ends that import so the key does not
-/// wait for it. A started import goes on without the panel.
+/// A panel that goes away after sending a key for an import not yet started, its teams read
+/// still waiting or not, as when another Space's import replaces it or the app quits, ends
+/// that import so the key does not wait for it. A started import goes on without the panel.
 impl Drop for LinearImportPanel {
     fn drop(&mut self) {
-        let key_kept = matches!(self.stage, Stage::Teams(_) | Stage::Plan(..));
-        if key_kept && !self.ended {
+        let started = matches!(self.stage, Stage::Started) || self.status().is_some();
+        if self.key_sent && !started && !self.ended {
             let space_id = self.space_id.clone();
             let _ = self
                 .bridge
