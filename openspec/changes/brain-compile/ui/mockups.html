@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Brain compile study</title>
+<!--
+  Static study for brain-compile. No script, no network.
+  PENDING Michael's approval.
+  The theme switch at the top is a CSS-only checkbox. Names, times, counts and costs are drawn by hand.
+  1. The Models page: the Brain compiler row in Who runs what, empty ("No model") and set, and its then menu.
+  2. The Brains page for a brain this Mac compiles: last and next run, Run now, the paginated run history,
+     the open compile PR in the PR gate, and conflicts that touch no project.
+     2b. The same page with no Brain compiler model, and on a teammate's Mac that does not compile.
+  3. A conflict's Inbox card on a project: a decision note against an entry, two entries that disagree with
+     Keep both open, and the card after a ruling.
+  4. The usage report: "Brain compile · ‹brain›" beside coordinators and threads.
+  The assistant shows its default name, Assistant, throughout.
+-->
+<style>
+.light,:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}}
+body:has(#force-light:checked){--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+body:has(#force-dark:checked),.dark{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+h2{font-size:15px;font-weight:600;margin:0 0 2px}
+h3{font-size:13px;font-weight:600;margin:0}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.intro{max-width:880px;margin-bottom:22px}
+.intro p{color:var(--subtle);font-size:12px;margin-top:4px}
+.pending{display:inline-block;margin:6px 0 4px;padding:3px 10px;border-radius:9px;font-size:11.5px;font-weight:600;color:var(--yellow);background:color-mix(in srgb,var(--yellow) 16%,transparent)}
+.switch{display:flex;gap:6px;margin:10px 0 0;font-size:12px;color:var(--subtle)}
+.switch input{display:none}
+.switch label{padding:3px 10px;border:1px solid var(--edge);border-radius:7px;cursor:pointer}
+.switch input:checked+label{background:var(--overlay);color:var(--text)}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:26px;align-items:start}
+.wide{grid-column:1/-1}
+.study>.eyebrow{margin-bottom:6px}
+.caption{margin:10px 2px 0;font-size:11.5px;color:var(--subtle)}
+.caption b{color:var(--text);font-weight:600}
+.frame{background:var(--surface);border:1px solid var(--edge);border-radius:12px;overflow:hidden;color:var(--text)}
+.window{display:grid;grid-template-columns:190px 1fr;min-height:420px}
+.side{background:var(--base);border-right:1px solid var(--edge);display:flex;flex-direction:column;padding:12px 10px;gap:3px}
+.logo{font-weight:600;font-size:16px;letter-spacing:-.03em;margin:0 4px 10px}
+.logo span{color:var(--focus)}
+.label{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--subtle);margin:8px 6px 2px}
+.row{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:7px;font-size:13px}
+.row.sel{background:var(--overlay)}
+.row .r{margin-left:auto;font-size:11px;color:var(--subtle)}
+.row .ico{width:16px;text-align:center;color:var(--subtle)}
+.count{font-size:10.5px;padding:0 6px;border-radius:9px;background:color-mix(in srgb,var(--yellow) 18%,transparent);color:var(--yellow);font-weight:600}
+.page{padding:16px 18px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.pagehead{display:flex;flex-direction:column;gap:2px}
+.pagehead .t{font:400 21px/1.2 Georgia,"Times New Roman",serif;letter-spacing:-.02em}
+.hint{font-size:11.5px;color:var(--subtle)}
+.section{display:flex;align-items:center;gap:8px;font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle);margin-top:4px}
+.section .r{margin-left:auto}
+.card{border:1px solid var(--edge);border-radius:10px;background:var(--base);padding:12px 14px;display:flex;flex-direction:column;gap:9px}
+.cardhead{display:flex;align-items:center;gap:8px}
+.cardhead b{font-weight:600}
+.cardhead .r{margin-left:auto;display:flex;gap:6px;align-items:center}
+.kv{display:grid;grid-template-columns:110px 1fr;gap:4px 12px;font-size:12px}
+.kv dt{color:var(--subtle)}
+.kv dd{margin:0}
+code,.mono{font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace}
+code{background:var(--overlay);padding:0 4px;border-radius:4px}
+.mono{color:var(--subtle)}
+.ok{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--yellow)}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--edge);border-radius:7px;padding:4px 11px;font-size:12px;background:var(--surface);color:var(--text);white-space:nowrap}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.btn.ghost{border-color:transparent;color:var(--subtle)}
+.btn.link{border-color:transparent;color:var(--accent);padding:0 2px;background:none}
+.btn.off{opacity:.45}
+.btn.small{padding:1px 8px;font-size:11.5px}
+.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.pill{font-size:10.5px;padding:0 7px;border-radius:9px;background:var(--overlay);color:var(--subtle);white-space:nowrap}
+.pill.ok{background:color-mix(in srgb,var(--green) 14%,transparent);color:var(--green)}
+.pill.bad{background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red)}
+.pill.warn{background:color-mix(in srgb,var(--yellow) 16%,transparent);color:var(--yellow)}
+.pill.live{background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent)}
+.pill.focus{background:color-mix(in srgb,var(--focus) 14%,transparent);color:var(--focus)}
+.banner{border:1px solid color-mix(in srgb,var(--yellow) 45%,var(--edge));background:color-mix(in srgb,var(--yellow) 9%,transparent);border-radius:9px;padding:8px 11px;font-size:12px;display:flex;gap:8px;align-items:center}
+.banner .grow{flex:1}
+/* 1. Who runs what */
+.table{display:flex;flex-direction:column}
+.thead{display:grid;grid-template-columns:170px 1fr 112px;gap:10px;padding:0 0 6px;border-bottom:1px solid var(--edge)}
+.trow{display:grid;grid-template-columns:170px 1fr 112px;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid color-mix(in srgb,var(--edge) 55%,transparent);font-size:12px}
+.trow.new{background:color-mix(in srgb,var(--focus) 6%,transparent);margin:0 -10px;padding:8px 10px;border-radius:8px}
+.trow .job b{display:block;font-weight:600}
+.cells{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.menu{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--edge);border-radius:7px;padding:2px 9px;font-size:12px;background:var(--surface)}
+.menu::after{content:"▾";color:var(--muted);font-size:10px}
+.menu.empty{color:var(--muted)}
+.arrow{color:var(--muted)}
+.popup{border:1px solid var(--edge);border-radius:10px;background:var(--surface);box-shadow:0 8px 24px rgba(0,0,0,.18);padding:6px;display:flex;flex-direction:column;gap:1px;width:240px;font-size:12px}
+.popup .it{padding:4px 8px;border-radius:6px;display:flex;flex-direction:column}
+.popup .it.on{background:var(--overlay)}
+.popup .it small{color:var(--subtle)}
+.popup .sep{height:1px;background:var(--edge);margin:4px 2px}
+.new-tag{font:600 9.5px ui-monospace,monospace;letter-spacing:.06em;color:var(--focus);border:1px solid color-mix(in srgb,var(--focus) 45%,transparent);border-radius:5px;padding:0 4px;margin-left:4px;vertical-align:1px}
+/* 2. Runs */
+.runs{display:flex;flex-direction:column;gap:6px}
+.run{border:1px solid var(--edge);border-radius:9px;background:var(--surface);padding:7px 11px;display:grid;grid-template-columns:118px 92px minmax(0,1fr) auto;gap:2px 10px;font-size:12px;align-items:center}
+.run .why{grid-column:3/5;color:var(--subtle);font-size:11.5px}
+.run.failed{border-color:color-mix(in srgb,var(--red) 40%,var(--edge))}
+.pager{display:flex;gap:8px;align-items:center;justify-content:flex-end;font-size:11.5px;color:var(--subtle)}
+.gate{border:1px solid var(--edge);border-radius:9px;background:var(--surface);padding:8px 11px;display:flex;flex-direction:column;gap:6px;font-size:12px}
+.steps{display:flex;gap:4px;align-items:center;font-size:11px}
+.steps span{padding:1px 8px;border-radius:9px;border:1px solid var(--edge);color:var(--muted)}
+.steps span.done{border-color:transparent;background:color-mix(in srgb,var(--green) 14%,transparent);color:var(--green)}
+.steps span.now{border-color:transparent;background:color-mix(in srgb,var(--yellow) 16%,transparent);color:var(--yellow);font-weight:600}
+.steps i{color:var(--muted);font-style:normal}
+/* 3. Conflict cards */
+.inbox{display:flex;flex-direction:column;gap:10px}
+.conflict{border:1px solid color-mix(in srgb,var(--magenta) 40%,var(--edge));border-radius:10px;background:var(--surface);padding:11px 13px;display:flex;flex-direction:column;gap:9px;font-size:12px}
+.conflict.done{border-color:var(--edge);background:var(--base)}
+.vs{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.side-say{border:1px solid var(--edge);border-radius:8px;padding:8px 10px;background:var(--base);display:flex;flex-direction:column;gap:4px}
+.side-say .k{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+.side-say q{quotes:none;font-size:12.5px}
+.side-say .src{font-size:11px;color:var(--subtle)}
+.evidence{margin:0;padding-left:16px;color:var(--subtle);font-size:11.5px}
+.evidence li{margin:1px 0}
+.rec{border-left:2px solid var(--focus);padding:2px 9px;font-size:11.5px;color:var(--subtle)}
+.rec b{color:var(--text)}
+.rulings{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.rulings .tag{font-size:10px;color:var(--focus);font-weight:600;margin-left:-2px}
+.field{border:1px solid var(--focus);border-radius:7px;padding:5px 9px;background:var(--surface);font-size:12.5px;box-shadow:0 0 0 2px color-mix(in srgb,var(--focus) 18%,transparent)}
+.ruled{display:flex;flex-direction:column;gap:3px;font-size:11.5px;color:var(--subtle)}
+.ruled b{color:var(--text)}
+/* 4. Usage */
+.owners{display:flex;flex-direction:column}
+.owner{padding:7px 0;display:flex;flex-direction:column;gap:4px;border-bottom:1px solid color-mix(in srgb,var(--edge) 55%,transparent)}
+.owner .line{display:flex;gap:12px;align-items:baseline;font-size:12.5px}
+.owner .line .n{flex:1;font-weight:500;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.owner .line .c{font-weight:600;width:64px;text-align:right}
+.meter{height:5px;border-radius:3px;background:var(--overlay);overflow:hidden}
+.meter i{display:block;height:100%;background:var(--focus);border-radius:3px}
+.meter i.brain{background:var(--magenta)}
+.owner.new{background:color-mix(in srgb,var(--magenta) 6%,transparent);margin:0 -10px;padding:7px 10px;border-radius:8px}
+.tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tile{border:1px solid var(--edge);border-radius:10px;background:var(--base);padding:9px 12px}
+.tile b{display:block;font-size:19px;font-weight:600}
+.tile span{font-size:11px;color:var(--subtle)}
+.filters{display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:11.5px;color:var(--subtle)}
+.seg{display:inline-flex;border:1px solid var(--edge);border-radius:7px;overflow:hidden;font-size:11.5px}
+.seg span{padding:2px 10px;color:var(--subtle)}
+.seg span.on{background:var(--overlay);color:var(--text)}
+ul.legend{margin:6px 0 0;padding-left:18px;color:var(--subtle);font-size:12px;max-width:900px}
+ul.legend li{margin:3px 0}
+@media(max-width:1100px){.grid{grid-template-columns:1fr}.vs{grid-template-columns:1fr}.window{grid-template-columns:1fr}.side{display:none}}
+</style>
+</head>
+<body>
+<div class="intro">
+  <div class="eyebrow">Wiffletree · design study</div>
+  <h1>Brain compile</h1>
+  <span class="pending">Pending Michael's approval</span>
+  <p>A static study for <code>openspec/changes/brain-compile</code>. Nothing here runs: no compile is scheduled, no model starts, no ref is verified, no ruling is written and no pull request opens. <code>sagehaven-docs</code> and <code>vyttle-docs</code> are sample brains; names, times, counts and costs are drawn by hand.</p>
+  <div class="switch">
+    <span>Appearance:</span>
+    <input type="radio" name="theme" id="force-system" checked><label for="force-system">System</label>
+    <input type="radio" name="theme" id="force-light"><label for="force-light">Light</label>
+    <input type="radio" name="theme" id="force-dark"><label for="force-dark">Dark</label>
+  </div>
+</div>
+
+<div class="grid">
+
+<!-- 1. Models page: the Brain compiler row -->
+<section class="study wide">
+  <div class="eyebrow">1 · Models · Who runs what, ending with the Brain compiler row</div>
+  <div class="frame">
+    <div class="window">
+      <aside class="side">
+        <div class="logo">wiffle<span>tree</span></div>
+        <div class="row"><span class="ico">✦</span>Assistant</div>
+        <div class="row"><span class="ico">▦</span>Boards</div>
+        <div class="label">Workspace</div>
+        <div class="row"><span class="ico">◇</span>Spaces</div>
+        <div class="row"><span class="ico">◎</span>Brains</div>
+        <div class="row sel"><span class="ico">⚙</span>Models</div>
+        <div class="row"><span class="ico">≡</span>Skills</div>
+        <div class="row"><span class="ico">$</span>Usage</div>
+      </aside>
+      <div class="page">
+        <div class="pagehead">
+          <div class="t">Models</div>
+          <div class="hint">Who runs each job, and what happens when a subscription runs low. The table is saved for this Mac.</div>
+        </div>
+        <div class="card" style="background:var(--surface)">
+          <div class="cardhead"><b>Who runs what</b><span class="hint">each job's model</span></div>
+          <div class="table">
+            <div class="thead"><span class="eyebrow">Job</span><span class="eyebrow">First choice → then, and for small work</span><span class="eyebrow">Right now</span></div>
+            <div class="trow"><div class="job"><b>Coordinator</b><span class="hint">Plans, talks to you</span></div><div class="cells"><span class="menu">Opus · high</span><span class="arrow">→</span><span class="menu">GPT 6.1 Sol · high</span></div><span class="pill ok">Opus · high</span></div>
+            <div class="trow"><div class="job"><b>Implementer</b><span class="hint">Writes the change</span></div><div class="cells"><span class="menu">Opus · medium</span><span class="arrow">→</span><span class="menu">GPT 6.1 Sol · medium</span></div><span class="pill ok">Opus · medium</span></div>
+            <div class="trow"><div class="job"><b>PR keeper</b><span class="hint">Fixes conflicts, sorts comments</span></div><div class="cells"><span class="menu">Sonnet · medium</span><span class="arrow">→</span><span class="menu">Wait for the reset</span></div><span class="pill ok">Sonnet · medium</span></div>
+            <div class="trow"><div class="job"><b>Assistant</b><span class="hint">Answers in your threads</span></div><div class="cells"><span class="menu">Sonnet · high</span><span class="arrow">→</span><span class="menu">GPT 6.1 Sol · medium</span></div><span class="pill ok">Sonnet · high</span></div>
+            <div class="trow"><div class="job"><b>Router</b><span class="hint">Picks each message's thread; never waits</span></div><div class="cells"><span class="menu">Haiku · low</span><span class="arrow">→</span><span class="menu">Ask me where it goes</span></div><span class="pill ok">Haiku · low</span></div>
+            <div class="trow"><div class="job"><b>Job</b><span class="hint">Runs your scheduled jobs</span></div><div class="cells"><span class="menu empty">Same as the Assistant row</span></div><span class="hint">No Job row: jobs run on the Assistant row.</span></div>
+            <div class="trow new"><div class="job"><b>Brain compiler <span class="new-tag">NEW</span></b><span class="hint">Compiles brains this Mac compiles</span></div><div class="cells"><span class="menu empty">No model</span></div><span class="hint">No Brain compiler model: brains are not compiled.</span></div>
+          </div>
+        </div>
+        <div class="grid" style="gap:16px">
+          <div>
+            <div class="eyebrow" style="margin-bottom:6px">Set · and Claude spent</div>
+            <div class="card" style="background:var(--surface)">
+              <div class="trow" style="border:0;padding:0"><div class="job"><b>Brain compiler</b><span class="hint">Compiles brains this Mac compiles</span></div><div class="cells"><span class="menu">Sonnet · medium</span><span class="arrow">→</span><span class="menu">GPT 6.1 Sol · medium</span></div><span class="pill warn">GPT 6.1 Sol · medium</span></div>
+              <div class="hint">No small-work line: a compile is one run. Any provider may compile.</div>
+            </div>
+          </div>
+          <div>
+            <div class="eyebrow" style="margin-bottom:6px">Its then menu</div>
+            <div class="popup">
+              <div class="it on">Wait for the reset<small>The run waits until Claude resets</small></div>
+              <div class="sep"></div>
+              <div class="it">GPT 6.1 Sol · medium</div>
+              <div class="it">GPT 6.1 Sol · high</div>
+              <div class="it">GPT 6.1 Mini · low</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>The table ends with Assistant, Router, Job and Brain compiler.</b> The Brain compiler row starts empty, as the PR keeper's did, with <b>No model</b> in its first-choice menu; with no row, no compile starts a model. It has no small-work line, and its then menu offers a model or Wait, never Skip. Only this Mac's own client changes the row; it is not shared with other Macs.</p>
+</section>
+
+<!-- 2. Brains page, this Mac compiles -->
+<section class="study wide">
+  <div class="eyebrow">2 · Brains · a brain this Mac compiles, with a compile PR open</div>
+  <div class="frame">
+    <div class="window">
+      <aside class="side">
+        <div class="logo">wiffle<span>tree</span></div>
+        <div class="row"><span class="ico">✦</span>Assistant</div>
+        <div class="row"><span class="ico">▦</span>Boards</div>
+        <div class="label">Workspace</div>
+        <div class="row"><span class="ico">◇</span>Spaces</div>
+        <div class="row sel"><span class="ico">◎</span>Brains<span class="r"><span class="count">1</span></span></div>
+        <div class="row"><span class="ico">⚙</span>Models</div>
+        <div class="row"><span class="ico">≡</span>Skills</div>
+        <div class="row"><span class="ico">$</span>Usage</div>
+      </aside>
+      <div class="page">
+        <div class="pagehead">
+          <div class="t">Brains</div>
+          <div class="hint">Git-backed Markdown memory shared with your team · every change reaches main through a pull request</div>
+        </div>
+        <div class="section">Brains · 2<span class="r btn ghost small">↻ Sync now</span></div>
+        <div class="card">
+          <div class="cardhead"><span class="mono">◎</span><b>Sage-Social/sagehaven-docs</b><span class="r"><span class="pill ok">Synced 4 min ago</span></span></div>
+          <dl class="kv">
+            <dt>Spaces</dt><dd><span class="btn link">Sage</span> <span class="btn link">Sage Watch</span></dd>
+            <dt>Remote</dt><dd class="mono">github.com/Sage-Social/sagehaven-docs</dd>
+            <dt>Compiles on</dt><dd>This Mac · Michael's Mac</dd>
+            <dt>Last compile</dt><dd>Today 02:00 · 37 entries · <span class="btn link">PR #212</span> open · 2 conflicts queued</dd>
+            <dt>Next compile</dt><dd>Tonight 02:00 America/New_York · <span class="warn">waits while PR #212 is open</span></dd>
+            <dt>Pending</dt><dd>12 entries since the cursor · procedure v1</dd>
+          </dl>
+          <div class="actions">
+            <span class="btn off">▶ Run now</span>
+            <span class="hint">Compile PR #212 is open. Run now starts once it merges or you discard it.</span>
+            <span style="margin-left:auto" class="btn">Open brain browser</span>
+            <span class="btn ghost">Change compiler ▾</span>
+          </div>
+
+          <div class="section">Compile runs<span class="r hint" style="text-transform:none;letter-spacing:0;font-family:inherit">Usage: $3.47 in 7 days</span></div>
+          <div class="runs">
+            <div class="run"><span>Today 02:00</span><span class="pill">Scheduled</span><span>37 pending · 37 processed · Sonnet · medium · 1 model run</span><span class="pill live">PR #212 open</span><span class="why">2 conflicts queued · 418k tokens · $0.86 · procedure v1 · 11 min</span></div>
+            <div class="run"><span>Yesterday 16:40</span><span class="pill">Ruling</span><span>4 pending · 4 processed · Sonnet · medium</span><span class="pill ok">PR #209 merged</span><span class="why">Started when the ruling on conflict c-0f3a merged · 96k tokens · $0.21</span></div>
+            <div class="run"><span>Yesterday 07:12</span><span class="pill">Catch-up</span><span>No pending entries · no model call</span><span class="pill">Skipped</span><span class="why">Missed 02:00 while this Mac slept; one catch-up run on wake</span></div>
+            <div class="run failed"><span>Oct 29 02:00</span><span class="pill">Scheduled</span><span>200 pending · 0 processed · Sonnet · medium</span><span class="pill bad">Failed</span><span class="why">Changed a file outside the wiki: <code>logs/sagechat-call-watch-relay/2026/10/…</code> · no PR · cursor unchanged</span></div>
+            <div class="run failed"><span>Oct 28 02:00</span><span class="pill">Run now</span><span>200 pending · 0 processed · Sonnet · medium</span><span class="pill bad">Timed out</span><span class="why">Stopped after 30 minutes · no PR · cursor unchanged · 1.2M tokens · $2.40</span></div>
+            <div class="run"><span>Oct 27 02:00</span><span class="pill">Scheduled</span><span>Not started</span><span class="pill warn">Waiting for PR #205</span><span class="why">One compile PR per brain</span></div>
+          </div>
+          <div class="pager"><span>1–6 of 23</span><span class="btn small off">Newer</span><span class="btn small">Older</span></div>
+
+          <div class="section">Conflicts with no project · 1</div>
+          <div class="conflict">
+            <div class="cardhead"><span class="pill" style="background:color-mix(in srgb,var(--magenta) 14%,transparent);color:var(--magenta)">Conflict</span><b>Destructive change · sagehaven-infra</b><span class="r hint">No project includes sagehaven-infra</span></div>
+            <div class="vs">
+              <div class="side-say"><span class="k">The note says · notes/ecr-lifecycle.md</span><q>Images are kept for 90 days.</q><span class="src">kind: observation · updated Oct 12 · verified</span></div>
+              <div class="side-say"><span class="k">The new entry says · Oct 30 · Oscar's agent</span><q>Drop the lifecycle policy; ECR keeps every image.</q><span class="src">unverified · not on this machine</span></div>
+            </div>
+            <div class="rulings"><span class="btn">Uphold existing</span><span class="btn">Keep new</span><span class="btn">Keep both…</span><span class="btn ghost">Defer</span><span class="btn link" style="margin-left:auto">Evidence ↗</span></div>
+          </div>
+        </div>
+
+        <div class="section">PR gate</div>
+        <div class="hint">Log batches, compile runs and config changes on their way to main · select one for its checks</div>
+        <div class="gate">
+          <div class="cardhead"><b>Compile run</b><span class="mono">sagehaven-docs · wiffletree/brain/compile/2026-10-31</span><span class="r hint">3 notes · STATUS.md · reconcile-queue.md · INDEX cursor</span></div>
+          <div class="steps"><span class="done">Queued</span><i>›</i><span class="done">PR #212</span><i>›</i><span class="now">Checks</span><i>›</i><span>Auto-merged</span></div>
+        </div>
+        <div class="gate">
+          <div class="cardhead"><b>Log batch</b><span class="mono">sagehaven-docs · wiffletree/brain/mhohlios/…</span><span class="r hint">Ruling on conflict c-7b21</span></div>
+          <div class="steps"><span class="done">Queued</span><i>›</i><span class="done">PR #213</span><i>›</i><span class="done">Checks</span><i>›</i><span class="now">Auto-merging</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>Last and next run, Run now and the history live on the brain's card.</b> Run now says why it waits: a run in progress or an open compile PR. The history pages by six and shows each run's trigger (Scheduled, Catch-up, Run now, Ruling), counts, model, outcome, PR, usage and procedure version. A run with nothing pending reads “No pending entries · no model call”. A failed or timed-out run names its reason and leaves the cursor unchanged. <b>The compile PR travels the PR gate</b> as a “Compile run” batch, like any other. <b>A conflict that touches no project's repository</b> appears here instead of an Inbox.</p>
+</section>
+
+<!-- 2b. No model, and another Mac -->
+<section class="study">
+  <div class="eyebrow">2b · No Brain compiler model</div>
+  <div class="frame"><div class="page">
+    <div class="card">
+      <div class="cardhead"><span class="mono">◎</span><b>vyttle/vyttle-docs</b><span class="r"><span class="pill ok">Synced 1 min ago</span></span></div>
+      <dl class="kv">
+        <dt>Compiles on</dt><dd>This Mac · Michael's Mac</dd>
+        <dt>Last compile</dt><dd>Today 02:00 · waiting for a Brain compiler model</dd>
+        <dt>Next compile</dt><dd>Tonight 02:00 America/New_York</dd>
+        <dt>Pending</dt><dd>8 entries since the cursor</dd>
+      </dl>
+      <div class="banner"><span class="grow">No Brain compiler model is chosen, so this brain is not compiled. Choose one in Models.</span><span class="btn link">Open Models</span></div>
+      <div class="actions"><span class="btn off">▶ Run now</span><span class="hint">Choose a Brain compiler model first.</span></div>
+    </div>
+  </div></div>
+  <p class="caption"><b>Held, not failed.</b> With no row, the scheduled run is recorded as waiting for a model. A run with nothing pending never asks for a model, so an idle brain shows no banner.</p>
+</section>
+
+<section class="study">
+  <div class="eyebrow">2b · On RB's Mac, which does not compile it</div>
+  <div class="frame"><div class="page">
+    <div class="card">
+      <div class="cardhead"><span class="mono">◎</span><b>Sage-Social/sagehaven-docs</b><span class="r"><span class="pill ok">Synced 2 min ago</span></span></div>
+      <dl class="kv">
+        <dt>Compiles on</dt><dd>Michael's Mac</dd>
+        <dt>Last compile</dt><dd>Today 02:00 · <span class="btn link">PR #212</span> open</dd>
+        <dt>Next compile</dt><dd>On Michael's Mac</dd>
+      </dl>
+      <div class="actions"><span class="hint">Only the compiler runs compiles. Logs from this Mac still go in.</span><span style="margin-left:auto" class="btn ghost">Change compiler ▾</span></div>
+    </div>
+  </div></div>
+  <p class="caption"><b>One compiler per brain.</b> Other installs show who compiles and the last compile PR, and offer no Run now or history of their own. Changing the compiler opens a config PR, as today.</p>
+</section>
+
+<!-- 3. Conflict cards in a project's Inbox -->
+<section class="study wide">
+  <div class="eyebrow">3 · A project's Inbox · conflict cards and a ruled card</div>
+  <div class="frame">
+    <div class="window">
+      <aside class="side">
+        <div class="logo">wiffle<span>tree</span></div>
+        <div class="label">Projects</div>
+        <div class="row sel">Call watch relay<span class="r"><span class="count">2</span></span></div>
+        <div class="row">Sign-in retry</div>
+        <div class="row">Watch onboarding<span class="r"><span class="count">1</span></span></div>
+      </aside>
+      <div class="page">
+        <div class="pagehead"><div class="t">Inbox</div><div class="hint">Call watch relay · decisions waiting for you</div></div>
+        <div class="grid" style="gap:16px">
+          <div class="inbox">
+            <div class="conflict">
+              <div class="cardhead"><span class="pill" style="background:color-mix(in srgb,var(--magenta) 14%,transparent);color:var(--magenta)">Brain conflict</span><b>Contradicts a decision</b><span class="r hint">sagehaven-docs · c-7b21</span></div>
+              <div class="vs">
+                <div class="side-say"><span class="k">The decision note says</span><q>Telnyx call retries cap at 5 attempts, backing off from 2 seconds.</q><span class="src"><code>notes/call-watch-relay-retries.md</code> · kind: decision · Michael · Oct 14</span></div>
+                <div class="side-say"><span class="k">The new entry says</span><q>Retries now cap at 3 attempts, to keep a call under the watch's 20-second timeout.</q><span class="src">Oct 30 · Oscar's implementer · <span class="warn">claimed</span></span></div>
+              </div>
+              <ul class="evidence">
+                <li>Entry ref <code>wiffletree/retry-telnyx-timeout @ 7d03b1e · PR #92</code>: commit only on its branch; PR #92 open.</li>
+                <li>Decision sources: 2 entries, verified; PR #81 merged; in release <code>v1.8.0</code>.</li>
+                <li>Authors: Michael (decision), Oscar (entry).</li>
+              </ul>
+              <div class="rec"><b>Recommended: Uphold existing.</b> PR #92 is still open, while the 5-attempt cap is merged and released.</div>
+              <div class="rulings"><span class="btn primary">Uphold existing</span><span class="tag">Recommended</span><span class="btn">Keep new</span><span class="btn">Keep both…</span><span class="btn ghost">Defer</span><span class="btn link" style="margin-left:auto">Evidence ↗</span></div>
+            </div>
+
+            <div class="conflict">
+              <div class="cardhead"><span class="pill" style="background:color-mix(in srgb,var(--magenta) 14%,transparent);color:var(--magenta)">Brain conflict</span><b>Two authors disagree</b><span class="r hint">sagehaven-docs · c-91d4</span></div>
+              <div class="vs">
+                <div class="side-say"><span class="k">RB's entry says · Oct 28</span><q>The relay's health check is <code>/healthz</code>.</q><span class="src">RB's tester · <span class="ok">verified</span> · PR #88 merged</span></div>
+                <div class="side-say"><span class="k">Oscar's entry says · Oct 30</span><q>The relay's health check is <code>/ready</code>.</q><span class="src">Oscar's implementer · <span class="ok">verified</span> · PR #90 merged</span></div>
+              </div>
+              <div class="rec"><b>Recommended: Keep both.</b> Both PRs merged; they may be two different checks.</div>
+              <div class="field">/healthz is the ALB's liveness check; /ready is ECS's readiness check.</div>
+              <div class="rulings"><span class="btn">Uphold existing</span><span class="btn">Keep new</span><span class="btn primary">Keep both</span><span class="tag">Recommended</span><span class="btn ghost">Cancel</span></div>
+            </div>
+          </div>
+
+          <div class="inbox">
+            <div class="conflict done">
+              <div class="cardhead"><span class="pill ok">Ruled</span><b>Contradicts a decision</b><span class="r hint">sagehaven-docs · c-7b21</span></div>
+              <div class="ruled">
+                <span><b>Keep new</b> by you · just now. Retries cap at 3; the 5-attempt decision will be marked superseded.</span>
+                <span>Decision entry <code>Ruling on conflict c-7b21: …</code> in log batch <span class="btn link">PR #213</span> · auto-merging</span>
+                <span class="warn">Compile starts when the ruling merges.</span>
+              </div>
+              
+            </div>
+            <div class="conflict done">
+              <div class="cardhead"><span class="pill ok">Ruled</span><b>Contradicts a decision</b><span class="r hint">sagehaven-docs · c-0f3a</span></div>
+              <div class="ruled">
+                <span><b>Uphold existing</b> by Oscar · yesterday, on Oscar's Mac.</span>
+                <span>Ruling merged in PR #208 · compile run on Michael's Mac opened <span class="btn link">PR #209</span>, merged.</span>
+              </div>
+            </div>
+            <div class="conflict done">
+              <div class="cardhead"><span class="pill">Deferred</span><b>Two authors disagree</b><span class="r hint">sagehaven-docs · c-44e0</span></div>
+              <div class="ruled"><span>Hidden until the next compile, which raises it again if it still holds. No entry was written.</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>One card per conflict, in every project whose Space names the brain and whose repositories include the claim's.</b> Watch onboarding shows c-7b21 too, and a ruling here clears it there. The card puts what each side says next to each other, with verification and authors as evidence, and marks the recommended ruling. <b>Keep both</b> opens a one-line field that scopes both. <b>Defer</b> writes nothing. Every other ruling writes a decision entry by you and opens its batch at once. <b>Only you rule:</b> agents see no ruling tool, and the compile session can only queue.</p>
+</section>
+
+<!-- 4. Usage -->
+<section class="study wide">
+  <div class="eyebrow">4 · Usage · “Brain compile · ‹brain›”</div>
+  <div class="frame">
+    <div class="page">
+      <div class="pagehead"><div class="t">Usage</div></div>
+      <div class="filters">Scope <span class="seg"><span class="on">All projects</span></span> Period <span class="seg"><span>Today</span><span class="on">7 days</span><span>30 days</span></span> Provider <span class="seg"><span class="on">Both</span><span>Claude</span><span>Codex</span></span></div>
+      <div class="tiles">
+        <div class="tile"><b>$48.20</b><span>Estimated API cost · 7 days</span></div>
+        <div class="tile"><b>21.4M</b><span>Tokens</span></div>
+        <div class="tile"><b>$3.53</b><span>Brain compiles · 2 brains</span></div>
+      </div>
+      <div class="card">
+        <div class="cardhead"><span class="eyebrow">By coordinator</span><span class="r eyebrow">Est. cost</span></div>
+        <div class="owners">
+          <div class="owner"><div class="line"><span class="n">Coordinator · Sign-in retry</span><span class="hint">9.8M</span><span class="c">$22.10</span></div><div class="meter"><i style="width:100%"></i></div><span class="hint">Own 1.2M · workers 8.6M</span></div>
+          <div class="owner"><div class="line"><span class="n">Coordinator · Watch onboarding</span><span class="hint">6.1M</span><span class="c">$14.30</span></div><div class="meter"><i style="width:62%"></i></div><span class="hint">Own 0.9M · workers 5.2M</span></div>
+          <div class="owner"><div class="line"><span class="n">Assistant · Sage</span><span class="hint">2.2M</span><span class="c">$5.40</span></div><div class="meter"><i style="width:22%"></i></div><span class="hint">14 threads</span></div>
+          <div class="owner new"><div class="line"><span class="n">Brain compile · sagehaven-docs</span><span class="hint">1.7M</span><span class="c">$3.47</span></div><div class="meter"><i class="brain" style="width:17%"></i></div><span class="hint">5 runs · 2 skipped with no model call · Sonnet · medium</span></div>
+          <div class="owner new"><div class="line"><span class="n">Brain compile · vyttle-docs</span><span class="hint">28k</span><span class="c">$0.06</span></div><div class="meter"><i class="brain" style="width:1%"></i></div><span class="hint">1 run · 6 skipped with no model call</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>Compiles are billed to their brain, not a project.</b> Each brain gets its own line, “Brain compile · ‹brain›”, next to coordinators and threads. Runs skipped with nothing pending cost nothing and are counted only in the hint. Selecting a line opens that brain's run history. The cost by model table below is unchanged.</p>
+</section>
+
+</div>
+
+<div style="margin-top:26px">
+  <h2>How it behaves</h2>
+  <ul class="legend">
+    <li>Only the Mac named in <code>wiffletree-brain.json</code> compiles a brain, nightly at its time, once on wake after a missed time, on Run now and when a ruling merges.</li>
+    <li>At most one run and one open compile PR per brain. A brain's <code>main</code> is never pushed: every compile is a PR through the brain gate.</li>
+    <li>The compile session changes only <code>notes/**</code>, <code>STATUS.md</code> and <code>reconcile-queue.md</code>, has only <code>queue_conflict</code> and <code>finish_compile</code>, and stops after 30 minutes.</li>
+    <li>Rulings are yours alone. Uphold existing, Keep new and Keep both write a decision entry; Defer writes nothing.</li>
+    <li>This study is static and pending Michael's approval. It is not the GPUI implementation.</li>
+  </ul>
+</div>
+</body>
+</html>
