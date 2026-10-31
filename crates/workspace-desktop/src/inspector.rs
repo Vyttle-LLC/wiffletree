@@ -607,6 +607,7 @@ impl Inspector {
             list = list.child(
                 div()
                     .flex()
+                    .items_center()
                     .justify_between()
                     .gap_3()
                     .py_2()
@@ -649,9 +650,31 @@ impl Inspector {
                 "{} · until it closes",
                 project_repositories::tickets_label(&titles)
             );
-            list = list.child(Self::repository_row(repository, p).child(hint(why, p)));
+            list = list.child(Self::open_ticket_row(repository, why, p));
         }
         list
+    }
+
+    /// The repository's name and the ticket that holds it, which takes the row's other space.
+    fn open_ticket_row(repository: &Repository, why: String, p: Palette) -> Stateful<Div> {
+        let path = repository.path.clone();
+        div()
+            .id(SharedString::from(format!("held-{}", repository.id)))
+            .flex()
+            .items_center()
+            .gap_3()
+            .py_2()
+            .border_b_1()
+            .border_color(p.edge.opacity(edge::HAIRLINE))
+            .tooltip(move |w, c| Tooltip::new(path.clone()).build(w, c))
+            .child(icon("folder").text_color(p.subtle))
+            .child(
+                div()
+                    .flex_none()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(repository.name.clone()),
+            )
+            .child(hint(why, p).flex_1().min_w_0().text_right().text_ellipsis())
     }
 
     fn repository_row(repository: &Repository, p: Palette) -> Stateful<Div> {

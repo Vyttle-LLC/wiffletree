@@ -1943,7 +1943,7 @@ impl Render for RepositoriesPage {
         let p = palette(is_dark(cx));
         ui::page(
             "Repositories",
-            "Repositories every project can use",
+            "Repositories on this Mac",
             self.body(p, cx),
             None,
             &self.shared.host,

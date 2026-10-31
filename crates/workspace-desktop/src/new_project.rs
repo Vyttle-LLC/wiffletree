@@ -189,6 +189,7 @@ impl NewProjectForm {
                 }
                 RepositoryRow::NotCloned(identity) => div()
                     .flex()
+                    .items_center()
                     .gap_2()
                     .child(
                         div()
