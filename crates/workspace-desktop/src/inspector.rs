@@ -196,6 +196,12 @@ impl Inspector {
         if selection || panel {
             self.panel_data = PanelData::Loading;
         }
+        // A held entry is fixed only from its own project's Memory panel.
+        let fixing_elsewhere = (self.memory_fixing.as_ref())
+            .is_some_and(|held| self.shared.project_id().as_ref() != Some(&held.project_id));
+        if fixing_elsewhere {
+            self.clear_capture(window, cx);
+        }
         if selection || panel || moved {
             self.load_panel(window, cx);
         }

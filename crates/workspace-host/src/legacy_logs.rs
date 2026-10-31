@@ -14,6 +14,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// The most files one import batch adds.
 const MAX_IMPORT_FILES: usize = 200;
+/// The longest `ref` an imported entry keeps as its `ref`.
+const MAX_REF_CHARS: usize = 255;
 /// The entry contract's fields.
 const FIELDS: [&str; 5] = ["type", "ref", "changed", "why", "state"];
 /// The fields a legacy entry may carry that the entry contract has no place for: the old
@@ -197,7 +199,8 @@ fn fitted(repository: &str, entry: &LegacyEntry, sha: &str) -> (LogInput, String
     }
     let mut state = value("state");
     let mut reference = value("ref");
-    if !valid_ref(&reference) {
+    // A ref is never shortened, so one too long to leave room for the rest moves into `state`.
+    if !valid_ref(&reference) || reference.chars().count() > MAX_REF_CHARS {
         if !reference.is_empty() {
             state = format!("{state} (legacy ref: {reference})")
                 .trim()
@@ -554,6 +557,16 @@ mod tests {
         let (input, reference) = fitted("calls", &legacy, "abc1234");
         assert_eq!(reference, NO_REF);
         assert_eq!(input.state, "live (legacy ref: PR 92 on main)");
+        // A well-formed ref too long to fit moves too, so the entry still fits the cap.
+        let long = format!("{} @ 1234567", "a".repeat(2_100));
+        let legacy = only(&entry(
+            "2026-09-02",
+            "Long ref",
+            &format!("- ref: {long}\n- changed: c\n- why: w\n- state: s"),
+        ));
+        let (input, reference) = fitted("calls", &legacy, "abc1234");
+        assert_eq!(reference, NO_REF);
+        assert!(body_chars(&entry_body("2026-09-02", &input, &reference)) <= MAX_BODY_CHARS);
     }
 
     #[test]
