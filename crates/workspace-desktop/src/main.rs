@@ -6,6 +6,7 @@ mod automation;
 mod background;
 mod bridge;
 mod browse;
+mod composer_focus;
 mod connect_sheet;
 mod context_view;
 mod conversation;

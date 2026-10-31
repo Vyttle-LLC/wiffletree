@@ -9605,6 +9605,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "futures-lite",
+ "gpui-base",
  "gpui-component",
  "gpui-pre",
  "gpui-pre-platform",

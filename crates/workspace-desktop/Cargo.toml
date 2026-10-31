@@ -17,6 +17,8 @@ uuid.workspace = true
 gpui = { package = "gpui-pre", version = "=0.3.8" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit"] }
 gpui-component = { version = "=0.7.1", features = ["tree-sitter-languages"] }
+# The window's text selection, which gpui-component builds on but does not re-export.
+gpui-base = "=0.7.1"
 async-channel = "2.5"
 futures-lite = "2"
 libc = "0.2"
