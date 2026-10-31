@@ -430,12 +430,12 @@ impl Host {
             held: None,
         };
         entry_file(&log, &author)?;
-        // A finished ticket's batch has gone already, so an entry for it goes at once.
-        let finished = ticket.as_ref().is_some_and(|t| !t.is_open());
         self.atomically(|host| {
-            let key = match &log.task_id {
-                Some(ticket) => BatchKey::Ticket(ticket),
-                None => BatchKey::Session(&session.id),
+            // A finished ticket's batch has gone already, so an entry for it joins the session's
+            // batch, keeping the ticket's folder, `ref` and `task_id`.
+            let key = match &ticket {
+                Some(ticket) if ticket.is_open() => BatchKey::Ticket(&ticket.id),
+                _ => BatchKey::Session(&session.id),
             };
             let brain = log.brain.clone().unwrap_or_default();
             let batch = host.open_batch(&brain, &project.id, key, at)?;
@@ -448,7 +448,7 @@ impl Host {
                 "work_log",
                 &log.id,
             )?;
-            host.close_batch_when(&batch, at, finished)
+            host.close_full_batch(&batch, at)
         })?;
         Ok(log)
     }
@@ -526,15 +526,14 @@ impl Host {
         Ok(id)
     }
 
-    /// Closes the batch when `now` says so, or once it holds the most entries one may, so the
-    /// next entry starts another.
-    fn close_batch_when(&mut self, batch: &str, at: i64, now: bool) -> Result<()> {
+    /// Closes the batch once it holds the most entries one may, so the next starts another.
+    fn close_full_batch(&mut self, batch: &str, at: i64) -> Result<()> {
         let entries: i64 = self.db.query_row(
             "SELECT count(*) FROM work_logs WHERE batch_id=?1",
             [batch],
             |r| r.get(0),
         )?;
-        if now || entries >= MAX_BATCH_ENTRIES {
+        if entries >= MAX_BATCH_ENTRIES {
             self.db.execute(
                 "UPDATE log_batches SET closed_at=?2 WHERE id=?1",
                 params![batch, at],
@@ -782,7 +781,7 @@ impl Host {
                 "UPDATE work_logs SET id=?2,data=?3,batch_id=?4,space_id=?5 WHERE id=?1",
                 params![id, entry.id, encode(&entry)?, batch, project.space.as_str()],
             )?;
-            self.close_batch_when(&batch, now(), false)?;
+            self.close_full_batch(&batch, now())?;
         }
         for project in &newly_held {
             self.raise_held_item(project)?;
@@ -1495,19 +1494,40 @@ mod tests {
         assert_eq!(batches, 1, "the ticket's one batch");
 
         // After the accept removed the worktree, an entry for the ticket still has its ref and
-        // goes at once.
+        // its ticket, and joins the coordinator's own batch instead of opening a PR of its own.
         f.host
             .agent_tool(&coordinator, "accept_ticket", json!({"ticket_id": ticket}))
             .unwrap();
+        log_work(&mut f, &coordinator, args("Plan")).unwrap();
         about["title"] = json!("Accepted");
         let after = log_work(&mut f, &coordinator, about).unwrap();
         assert_eq!(after["ref"], mine["ref"]);
+        assert!(
+            after["path"]
+                .as_str()
+                .unwrap()
+                .starts_with("second-brain/logs/app/")
+        );
+        let accepted = stored(&f)
+            .into_iter()
+            .find(|l| l.id == after["id"])
+            .unwrap();
+        assert_eq!(accepted.task_id.as_deref(), Some(ticket.as_str()));
         f.host.send_log_batches(now(), &tools.git).unwrap();
         f.host.send_log_batches(now(), &tools.git).unwrap();
-        let sent: Vec<usize> = (f.host.brain_batches(Some(REPO)).unwrap().iter())
-            .map(|b| b.files.len())
-            .collect();
-        assert_eq!(sent, [2, 1]);
+        let sent = |f: &Fixture| -> Vec<usize> {
+            (f.host.brain_batches(Some(REPO)).unwrap().iter())
+                .map(|b| b.files.len())
+                .collect()
+        };
+        assert_eq!(sent(&f), [2], "no one-file batch for the accept entry");
+        f.host.send_logs_now(None).unwrap();
+        f.host.send_log_batches(now(), &tools.git).unwrap();
+        assert_eq!(
+            sent(&f),
+            [2, 2],
+            "it goes with the coordinator's next batch"
+        );
     }
 
     fn ready(f: &mut Fixture, message: &str) -> Value {
