@@ -2377,11 +2377,14 @@ mod tests {
         let sage = b.f.host.project(&project).unwrap().space;
         let other = b.f.host.create_project("Watch onboarding").unwrap();
         b.f.host.move_project_to_space(&other.id, &sage).unwrap();
-        b.f.host
-            .set_project_repositories(&other.id, Some(vec![]))
-            .unwrap();
         assert!(conflict_notes(&b, &other.id).is_empty());
         assert!(b.f.host.brains_page().unwrap().conflicts.is_empty());
+        // Once the Space lists `app`, every project of it inherits it, and shows the card.
+        let app = (b.f.host.repositories().unwrap().into_iter())
+            .find_map(|r| r.github.map(|g| format!("{}/{}", g.owner, g.name)))
+            .unwrap();
+        b.f.host.set_repository_spaces(&app, &[sage]).unwrap();
+        assert_eq!(conflict_notes(&b, &other.id).len(), 1);
         let git = b.tools.git.clone();
         let card =
             (b.f.host
