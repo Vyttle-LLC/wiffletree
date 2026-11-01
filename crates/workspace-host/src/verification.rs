@@ -69,6 +69,14 @@ fn routing(ticket: &Ticket, session: &Session, kind: &str, answered: Option<&str
     }
 }
 
+/// Whether a round of the ticket's latest cycle already counted the report.
+fn counted(ticket: &Ticket, report_id: &str) -> bool {
+    ticket.verification.as_ref().is_some_and(|v| {
+        (v.rounds.iter().flat_map(|r| &r.verifiers))
+            .any(|run| run.report_id.as_deref() == Some(report_id))
+    })
+}
+
 /// The ticket worktree's checked-out commit.
 pub(crate) fn head(ticket: &Ticket) -> Result<String> {
     worktrees::head(Path::new(&ticket.worktree))
@@ -206,10 +214,10 @@ fn is_failing(ledger: &[LedgerEntry], reported: &ReportedFinding) -> bool {
     reported.finding.is_evidenced_blocking() && !settled
 }
 
-/// Applies a completed check to the ledger: the focus's open entries it did not report again are
-/// fixed, an open entry it reports again stays open with the new report, a noted one becomes open
-/// when reported again as an evidenced blocking finding, and new findings are added. A settled
-/// entry reported again is left alone. A keeper review, which may be withdrawn with exactly the
+/// Applies a check to the ledger: when it `completed`, the focus's open entries it did not report
+/// again are fixed; a blocked check leaves them open. An open entry it reports again stays open
+/// with the new report, a noted one becomes open when reported again as an evidenced blocking
+/// finding, and new findings are added. A settled entry reported again is left alone. A keeper review, which may be withdrawn with exactly the
 /// entries it recorded, leaves a noted entry alone too, recording an evidenced blocking re-report
 /// of it as a new entry.
 fn record_findings(
@@ -217,6 +225,7 @@ fn record_findings(
     focus: &str,
     (cycle, round): (u32, u32),
     keeper: bool,
+    completed: bool,
     findings: &[ReportedFinding],
 ) {
     let withdrawn = ticket.withdrawn_findings();
@@ -232,7 +241,7 @@ fn record_findings(
     };
     for entry in ledger
         .iter_mut()
-        .filter(|e| e.focus == focus && e.status == EntryStatus::Open)
+        .filter(|e| completed && e.focus == focus && e.status == EntryStatus::Open)
     {
         if !findings.iter().any(|f| f.id.as_ref() == Some(&entry.id)) {
             entry.status = EntryStatus::Fixed;
@@ -953,12 +962,12 @@ impl Host {
             .clone()
             .context("You have no parent to report to; answer the human in this chat instead")?;
         let report_id = format!("report:{}:{message_id}", session.id);
-        if let Ok(existing) = self.message(&report_id) {
+        let existing = self.message(&report_id).ok();
+        if let Some(existing) = &existing {
             ensure!(
                 existing.body == content,
                 "Report ID reused with different content"
             );
-            return Ok(serde_json::to_value(existing)?);
         }
         let ticket = self
             .session_runtime(&session.id)?
@@ -972,6 +981,15 @@ impl Host {
             }
             _ => Routing::Plain,
         };
+        // A retry is idempotent, except that it counts a verdict its first send could not, such
+        // as one sent before the verifier took its round input.
+        if let Some(existing) = &existing {
+            let uncounted = matches!(routing, Routing::Verdict)
+                && ticket.as_ref().is_some_and(|t| !counted(t, &report_id));
+            if !uncounted {
+                return Ok(serde_json::to_value(existing)?);
+            }
+        }
         if let (Routing::Verdict, Some(ticket)) = (&routing, &ticket) {
             let focus = ticket
                 .verification
@@ -993,11 +1011,12 @@ impl Host {
             );
         }
         self.atomically(|host| {
-            let message = match routing {
-                Routing::Verdict | Routing::Late | Routing::Ready => {
+            let message = match (existing, &routing) {
+                (Some(existing), _) => existing,
+                (None, Routing::Verdict | Routing::Late | Routing::Ready) => {
                     host.send_quietly(&report_id, Some(&session.id), &parent, &content)?
                 }
-                _ => host.send(&report_id, Some(&session.id), &parent, &content)?,
+                (None, _) => host.send(&report_id, Some(&session.id), &parent, &content)?,
             };
             // Progress is delivered in batches (see the scheduler) and never moves the ticket
             // or the reporter's status.
@@ -1077,10 +1096,10 @@ impl Host {
             .optional()?)
     }
     /// Records a verifier's result on its round: failed when it changed the worktree or reported
-    /// an evidenced blocking finding, else passed, unless it could not verify. While the cycle
-    /// runs, a completed check updates the ledger. A pass is final, since a later round re-runs
-    /// only failed verifiers, so a verifier that passed is archived at once. Ends the round once
-    /// nobody is pending, unless the cycle already ended.
+    /// an evidenced blocking finding, else passed, unless it could not verify and found no such
+    /// finding. While the cycle runs, a report from an unchanged worktree updates the ledger. A
+    /// pass is final, since a later round re-runs only failed verifiers, so a verifier that passed
+    /// is archived at once. Ends the round once nobody is pending, unless the cycle already ended.
     fn record_verdict(
         &mut self,
         mut ticket: Ticket,
@@ -1096,7 +1115,12 @@ impl Host {
             .context("No round")?
             .commit
             .clone();
-        let untouched = kind == "blocked" || (head(&ticket)? == commit && is_clean(&ticket)?);
+        let unchanged = || -> Result<bool> { Ok(head(&ticket)? == commit && is_clean(&ticket)?) };
+        // A verifier may report that it cannot verify because git can no longer read the worktree.
+        let untouched = match unchanged() {
+            Err(_) if kind == "blocked" => false,
+            result => result?,
+        };
         let verification = ticket.verification.as_mut().context("No verification")?;
         let round = verification.rounds.last_mut().context("No round")?;
         let run = round
@@ -1107,13 +1131,17 @@ impl Host {
         run.report_id = Some(report_id.into());
         let failing = findings.iter().any(|f| is_failing(&ticket.ledger, f));
         run.result = match kind {
-            "blocked" => VerifierResult::Blocked,
+            "blocked" if !(untouched && failing) => VerifierResult::Blocked,
             _ if !untouched || failing => VerifierResult::Failed,
             _ => VerifierResult::Passed,
         };
         let passed = run.result == VerifierResult::Passed;
         run.reason = match (kind, run.result) {
+            (_, VerifierResult::Blocked) => None,
             _ if !untouched => Some(WORKTREE_CHANGED),
+            ("blocked", VerifierResult::Failed) => {
+                Some("reported blocked with an evidenced blocking finding")
+            }
             ("failed", VerifierResult::Passed) => {
                 Some("reported failed without an evidenced blocking finding")
             }
@@ -1131,10 +1159,11 @@ impl Host {
         let source = (verification.cycle, round.round);
         let running = verification.outcome == VerificationOutcome::Running;
         let keeper = verification.keeper;
-        // Only a completed check moves the ledger, and not once the coordinator has the cycle's
-        // outcome.
-        if running && untouched && kind != "blocked" {
-            record_findings(&mut ticket, &focus, source, keeper, findings);
+        // Only a report from an unchanged worktree moves the ledger, and not once the coordinator
+        // has the cycle's outcome.
+        if running && untouched {
+            let completed = kind != "blocked";
+            record_findings(&mut ticket, &focus, source, keeper, completed, findings);
         }
         self.save_ticket(&ticket)?;
         if passed {

@@ -1610,6 +1610,69 @@ fn a_re_check_that_cannot_run_leaves_the_entry_open() {
 }
 
 #[test]
+fn a_blocked_verdict_with_an_evidenced_blocking_finding_goes_to_the_implementer() {
+    let mut f = one_tester(2);
+    f.coordinator_reads();
+    let codex = f.verifier("Codex");
+
+    let findings = json!([blocking("Busy line"), finding("non_blocking", "Naming")]);
+    f.report_findings(&codex, "cannot", "blocked", findings)
+        .unwrap();
+
+    assert_eq!(f.entry("F1").status, EntryStatus::Open);
+    assert_eq!(f.entry("F2").status, EntryStatus::Noted);
+    let run = f.run("Codex");
+    assert_eq!(run.result, VerifierResult::Failed);
+    assert_eq!(
+        run.reason.as_deref(),
+        Some("reported blocked with an evidenced blocking finding")
+    );
+    assert_eq!(f.current().state, TicketState::Failed);
+    let told = f.waking(&f.implementer.id);
+    assert!(
+        told[0].body.contains("F1 · src/calls.rs:42 · Busy line"),
+        "{}",
+        told[0].body
+    );
+    assert!(f.waking(&f.coordinator.id).is_empty());
+}
+
+#[test]
+fn a_blocked_verdict_records_its_findings_and_leaves_open_entries_open() {
+    let mut f = one_tester(3);
+    let codex = f.verifier("Codex");
+    f.fail(&codex, "Busy line").unwrap();
+    f.fix("two");
+
+    let findings = json!([
+        finding("non_blocking", "Naming"),
+        finding("blocking", "No proof")
+    ]);
+    f.report_findings(&codex, "cannot", "blocked", findings)
+        .unwrap();
+
+    assert_eq!(f.entry("F1").status, EntryStatus::Open);
+    assert_eq!(f.entry("F2").status, EntryStatus::Noted);
+    assert_eq!(f.entry("F3").status, EntryStatus::Untriaged);
+    assert_eq!(f.run("Codex").result, VerifierResult::Blocked);
+    assert_eq!(f.current().state, TicketState::Blocked);
+}
+
+#[test]
+fn a_blocked_verdict_from_an_unreadable_worktree_blocks_without_recording_findings() {
+    let mut f = one_tester(2);
+    let codex = f.verifier("Codex");
+    std::fs::remove_dir_all(f.worktree()).unwrap();
+
+    f.report_findings(&codex, "gone", "blocked", json!([blocking("Busy line")]))
+        .unwrap();
+
+    assert_eq!(f.run("Codex").result, VerifierResult::Blocked);
+    assert!(f.ledger().is_empty());
+    assert_eq!(f.current().state, TicketState::Blocked);
+}
+
+#[test]
 fn a_re_check_from_a_changed_worktree_fails_and_leaves_the_entry_open() {
     let mut f = one_tester(3);
     let codex = f.verifier("Codex");
@@ -3096,6 +3159,33 @@ fn queue_as_an_earlier_host(home: &Path, ticket: &str) {
         [ticket],
     )
     .unwrap();
+}
+
+#[test]
+fn a_verdict_sent_while_its_cycle_was_queued_counts_when_retried_after_the_cycle_starts() {
+    let mut f = one_tester(2);
+    let project = f.coordinator.project_id.clone();
+    f.host.set_live(&project, true).unwrap();
+    let codex = f.verifier("Codex");
+    // The verifier's turn holds other input when an earlier host's queued cycle is stored.
+    take_input(&mut f.host, &codex);
+    queue_as_an_earlier_host(&f.host.home.clone(), &f.ticket.id);
+    f.report(&codex, "pass", "passed").unwrap();
+    assert_eq!(f.run("Codex").result, VerifierResult::Pending);
+
+    assert!(f.host.start_queued_cycles().unwrap());
+    let retry = f.report(&codex, "pass", "passed").unwrap();
+    f.report(&codex, "pass", "passed").unwrap();
+
+    assert_eq!(retry["id"], format!("report:{codex}:pass"));
+    let ticket = f.current();
+    assert_eq!(ticket.state, TicketState::Passed);
+    let run = &ticket.verification.unwrap().rounds[0].verifiers[0];
+    assert_eq!(run.result, VerifierResult::Passed);
+    assert_eq!(
+        run.report_id.as_deref(),
+        Some(format!("report:{codex}:pass").as_str())
+    );
 }
 
 #[test]
