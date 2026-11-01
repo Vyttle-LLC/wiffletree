@@ -99,7 +99,7 @@ impl SpacesPage {
             loaded: None,
             name: cx.new(|cx| InputState::new(window, cx).placeholder("Sage")),
             description: textarea("What belongs in this Space, and what doesn’t", window, cx),
-            instructions: textarea("Rules for every thread and job in this Space", window, cx),
+            instructions: textarea("Rules for every agent in this Space", window, cx),
             sources: textarea("mcp linear: list_issues, get_issue", window, cx),
             repository_input: cx.new(|cx| {
                 InputState::new(window, cx).placeholder("owner/name, such as Sage-Social/api")
@@ -251,7 +251,7 @@ impl SpacesPage {
             .update(cx, |input, cx| input.set_value(folder, window, cx));
         for (state, value) in [
             (&self.description, space.description.clone()),
-            (&self.instructions, space.instructions.clone()),
+            (&self.instructions, space.additions.clone()),
             (&self.sources, sources),
         ] {
             state.update(cx, |input, cx| input.set_value(value, window, cx));
@@ -345,7 +345,7 @@ impl SpacesPage {
             name,
             brain,
             description: self.description.read(cx).value().trim().to_owned(),
-            instructions: self.instructions.read(cx).value().trim().to_owned(),
+            additions: self.instructions.read(cx).value().trim().to_owned(),
             repositories: self.repositories.clone(),
             models: self.models.clone(),
             sources,
@@ -1650,7 +1650,7 @@ fn merged(read: &Space, form: &Space, latest: &Space) -> Space {
     Space {
         name: pick(&read.name, &form.name, &latest.name),
         description: pick(&read.description, &form.description, &latest.description),
-        instructions: pick(&read.instructions, &form.instructions, &latest.instructions),
+        additions: pick(&read.additions, &form.additions, &latest.additions),
         repositories: pick(&read.repositories, &form.repositories, &latest.repositories),
         models: pick(&read.models, &form.models, &latest.models),
         brain: pick(&read.brain, &form.brain, &latest.brain),
@@ -2110,7 +2110,9 @@ mod tests {
             id: SpaceId(name.to_lowercase()),
             name: name.into(),
             description: String::new(),
-            instructions: String::new(),
+            additions: String::new(),
+            behaviors: Default::default(),
+            repository_settings: Default::default(),
             brain: None,
             storage: SpaceStorage {
                 repository: storage,
@@ -2416,7 +2418,7 @@ mod tests {
         latest.repositories = vec!["Sage-Social/api".into()];
         latest.description = "Pulled from a teammate".into();
         let mut form = read.clone();
-        form.instructions = "Treat production as read-only.".into();
+        form.additions = "Treat production as read-only.".into();
         let saved = merged(&read, &form, &latest);
         assert_eq!(
             saved.repositories,
@@ -2424,7 +2426,7 @@ mod tests {
             "the chip's edit stays"
         );
         assert_eq!(saved.description, "Pulled from a teammate");
-        assert_eq!(saved.instructions, "Treat production as read-only.");
+        assert_eq!(saved.additions, "Treat production as read-only.");
         form.repositories = vec![];
         latest.repositories = vec!["Sage-Social/api".into(), "Sage-Social/web".into()];
         let mut read = read;
@@ -2587,10 +2589,10 @@ mod tests {
     fn a_save_reply_reloads_only_the_draft_it_saved() {
         let sage = sage();
         let mut saved = sage.clone();
-        saved.instructions = "Treat production as read-only.".into();
+        saved.additions = "Treat production as read-only.".into();
         assert!(holds_draft(&sage, &Ok(saved.clone()), &sage, &saved));
         let mut typed_on = saved.clone();
-        typed_on.instructions.push_str(" Never log names.");
+        typed_on.additions.push_str(" Never log names.");
         assert!(
             !holds_draft(&sage, &Ok(typed_on), &sage, &saved),
             "typing after Save keeps the newer text"

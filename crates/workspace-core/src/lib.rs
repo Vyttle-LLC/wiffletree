@@ -5,6 +5,7 @@ pub mod backoff;
 pub mod board;
 mod brain;
 mod brain_browser;
+pub mod cascade;
 mod client;
 mod compile;
 mod context;
@@ -2182,6 +2183,10 @@ pub struct PublishRequest {
     /// keeper's record rather than to an agent.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keeper: bool,
+    /// The ticket's Publishing Behavior said "always ask first" when the request started, so
+    /// each step asks the human even in an allowed owner's repository.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub always_ask: bool,
 }
 /// One accepted `merge_ticket` call: the pull request and head the host merges, decided on one
 /// review. Only the host changes it.
@@ -3543,8 +3548,8 @@ pub enum Command {
         name: String,
         #[serde(default)]
         description: String,
-        #[serde(default)]
-        instructions: String,
+        #[serde(default, alias = "instructions")]
+        additions: String,
         #[serde(default)]
         prefix: Option<String>,
         #[serde(default)]
@@ -3911,6 +3916,28 @@ pub enum Command {
         skill: Skill,
         entry: String,
     },
+    /// Read-only: every Behavior this host knows, by role, with its choices, stock first, and
+    /// the layers that may set it; answered with `Vec<Behavior>`.
+    BehaviorCatalog,
+    /// Read-only: what one layer sets itself, without what it inherits; answered with
+    /// `LayerValues`.
+    LayerValues {
+        scope: cascade::Scope,
+    },
+    /// Replaces what one layer sets, refusing a choice the layer may not make, such as a Space
+    /// loosening a safety Behavior; answered with `LayerValues`. A Behavior id this host does
+    /// not know keeps its saved choice. Only the human's client sends it.
+    SetLayerValues {
+        scope: cascade::Scope,
+        values: cascade::LayerValues,
+    },
+    /// Read-only: what a project's agents get, or with `ticket_id` that ticket's agents, and
+    /// where each value came from; answered with `EffectiveSettings`.
+    EffectiveSettings {
+        project_id: String,
+        #[serde(default)]
+        ticket_id: Option<String>,
+    },
     /// Asks GitHub, read-only, about a repository named as `owner/name` or by its `github.com`
     /// URL, and checks this machine can read it; answers with `SettingsRepositoryCheck`. A
     /// public repository is refused. Writes nothing.
@@ -4159,6 +4186,9 @@ impl Command {
             | Self::CheckStorageRepository { .. }
             | Self::ComparePausedFile { .. }
             | Self::SkillHistory { .. }
+            | Self::BehaviorCatalog
+            | Self::LayerValues { .. }
+            | Self::EffectiveSettings { .. }
             | Self::SkillMergeReview { .. }
             | Self::SkillStockChanges { .. }
             | Self::LeftoverWorktrees
@@ -4292,6 +4322,7 @@ impl Command {
             | Self::SaveSkillRules { .. }
             | Self::ResetSkill { .. }
             | Self::RestoreSkill { .. }
+            | Self::SetLayerValues { .. }
             | Self::SetUpSettingsRepository { .. }
             | Self::JoinSettingsRepository { .. }
             | Self::SyncNow
@@ -4324,6 +4355,8 @@ impl Command {
     /// publish, or grant publish or push authority without it: owners whose PRs open without
     /// asking, the PR keeper's rebases and pushes, the protected branches, whose removed entries
     /// the host may merge into, and a settings repository the host pushes to.
+    /// So are the settings each layer sets: a Space's Behaviors and additions shape every agent
+    /// in it, and the Workspace's every agent the human runs.
     /// Spaces are the human's: creating, editing or removing one, setting its brain, moving a
     /// project into one and choosing which repositories it lists, and reading where its storage
     /// is on this Mac. So are a project's added repositories. So are brains: the push grant,
@@ -4375,6 +4408,7 @@ impl Command {
                 | Self::DismissAttention { .. }
                 | Self::SetOwnerAllowed { .. }
                 | Self::SetKeeper { .. }
+                | Self::SetLayerValues { .. }
                 | Self::SetProtectedBranches { .. }
                 | Self::SetUpSettingsRepository { .. }
                 | Self::JoinSettingsRepository { .. }

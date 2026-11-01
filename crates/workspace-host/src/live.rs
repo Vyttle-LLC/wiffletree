@@ -563,6 +563,7 @@ impl Host {
             "open_questions":self.open_questions(&session)?});
         if session.role == Role::ProjectOrchestrator {
             context["model_selection"] = self.model_context()?;
+            context["behaviors"] = self.behaviors_context(&session.project_id)?;
             let created = self.created_projects(id)?;
             if !created.is_empty() {
                 context["created_projects"] = Value::Array(created);

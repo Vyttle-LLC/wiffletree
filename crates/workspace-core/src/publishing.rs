@@ -16,11 +16,15 @@ pub enum PublishAsk {
     BlockedReview,
     /// The ticket's earlier pull request was closed or merged, so opening another asks.
     EndedPullRequest,
+    /// The ticket's Publishing Behavior is "always ask first", so each step asks even in an
+    /// allowed owner's repository.
+    AlwaysAsk,
 }
 
 /// Whether the request's next step must wait for the human, and why. `None` runs it without
-/// asking: the repository publishes without asking, and the review passed, the coordinator
-/// waived it, or the human already approved this commit's steps.
+/// asking: the repository publishes without asking, the Publishing Behavior does not always
+/// ask, and the review passed, the coordinator waived it, or the human already approved this
+/// commit's steps.
 pub fn publish_ask(
     ticket: &Ticket,
     request: &PublishRequest,
@@ -33,6 +37,8 @@ pub fn publish_ask(
         .is_some_and(|v| v.outcome == VerificationOutcome::Passed);
     if !is_allowed(repository, allowed) {
         Some(PublishAsk::NotAllowed)
+    } else if request.always_ask {
+        Some(PublishAsk::AlwaysAsk)
     } else if request.blocked_review_approved {
         None
     } else if !passed && request.waived.is_none() {
@@ -44,6 +50,9 @@ pub fn publish_ask(
         None
     }
 }
+
+/// Why every step of an allowed owner's publish asks under the Publishing Behavior.
+pub const ALWAYS_ASK_REASON: &str = "its Publishing Behavior is “Always ask first”";
 
 /// Why a repository does not publish without asking, such as "celadon-theme is not an allowed
 /// owner".
@@ -140,6 +149,9 @@ pub fn publish_card(
     };
     let rule = match (ask, owner_entry(repository)) {
         (PublishAsk::NotAllowed, _) | (_, None) => not_allowed_reason(repository),
+        (PublishAsk::AlwaysAsk, Some(owner)) => {
+            format!("{owner} is allowed, but {ALWAYS_ASK_REASON}")
+        }
         (_, Some(fork)) if fork.contains('/') => format!("{fork} is an allowed fork"),
         (_, Some(owner)) => format!("{owner} is an allowed owner"),
     };
@@ -228,7 +240,8 @@ pub fn publish_card(
                 "Wiffletree runs the push itself, for exactly this commit. If the branch has moved by the time you answer, nothing is pushed.{}",
                 match (
                     request.after_push(),
-                    ask == PublishAsk::NotAllowed || ticket.ended_pull_request().is_some(),
+                    matches!(ask, PublishAsk::NotAllowed | PublishAsk::AlwaysAsk)
+                        || ticket.ended_pull_request().is_some(),
                 ) {
                     (None, _) => "",
                     (Some(PublishStep::EditPullRequest), true) => {

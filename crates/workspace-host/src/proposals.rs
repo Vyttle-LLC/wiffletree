@@ -547,7 +547,7 @@ mod tests {
         let launch = host.thread_launch(&session).unwrap();
         assert!(launch.issue_thread && launch.sources.is_empty());
         // Its turns name the attached issue, by ID only.
-        let told = host.thread_instructions(&session).unwrap();
+        let told = host.session_instructions(&session).unwrap();
         assert!(
             told.contains(&format!("opened this thread on {}", issue.id)),
             "{told}"

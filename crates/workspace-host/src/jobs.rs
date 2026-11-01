@@ -2037,7 +2037,7 @@ mod tests {
         .key();
         let run = s.host.run_now(&key).unwrap();
         let session = s.host.session(run.thread_id.as_ref().unwrap()).unwrap();
-        let text = s.host.thread_instructions(&session).unwrap();
+        let text = s.host.session_instructions(&session).unwrap();
         assert!(text.contains("# Job run core — v3"), "{text}");
         assert!(!text.contains("# Assistant core") && !text.contains("`propose_job`"));
     }

@@ -2242,7 +2242,9 @@ mod tests {
             id: SpaceId(name.to_lowercase()),
             name: name.into(),
             description: String::new(),
-            instructions: String::new(),
+            additions: String::new(),
+            behaviors: Default::default(),
+            repository_settings: Default::default(),
             brain,
             storage: SpaceStorage {
                 repository: StorageRepository::Local { id: "l".into() },

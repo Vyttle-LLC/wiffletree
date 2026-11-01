@@ -79,7 +79,7 @@ fn main() -> Result<()> {
             profile: &profile,
             provider_session: session,
             directory: std::path::Path::new(directory),
-            instructions: &workspace_host::skills::store(data_dir.as_ref()).instructions(role),
+            instructions: &workspace_host::skills::instructions(data_dir.as_ref(), role),
         })?;
         println!("{usage:#?}");
         return Ok(());

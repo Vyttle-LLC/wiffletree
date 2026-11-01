@@ -144,13 +144,13 @@ fn a_thread_runs_restricted_in_its_scratch_folder_and_saves_outputs_there_only()
         ])
     );
     assert_eq!(turn["prompt"], "save costs.html as AWS costs");
-    // The contract, the Assistant core, Assisting and then the Space's instructions.
+    // The contract, the Assistant core, Assisting and then the Space's additions.
     let instructions = argument(turn, "--append-system-prompt");
     let order = [
         "# Wiffletree thread contract",
         "# Assistant core",
         "# Assisting",
-        "## Instructions from the Sage Space",
+        "## Additions from the Sage Space",
         "Treat production as read-only.",
     ];
     let at: Vec<usize> = order

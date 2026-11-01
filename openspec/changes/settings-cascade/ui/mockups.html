@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Settings cascade study</title>
+<!--
+  Static study for the settings-cascade change. No script, no network.
+  Drawn 2026-10-31 from the grill decisions in design.md. Michael approved building ahead of a
+  sign-off on this study; it is here to review before the PRs merge.
+  The theme switch at the top is a CSS-only radio group. Names, times and figures are drawn by hand.
+  1. Behaviors (was Skills), Workspace scope.
+  2. Behaviors, Sage scope, with a repository override.
+  3. Models, Sage scope: overridden rows and a fallback note.
+  4. Settings › Spaces › Sage: models and instructions leave the Space page.
+  5. Settings window: Shared with your Macs, and This Mac.
+  6. Effective settings for a project.
+-->
+<style>
+.light,:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}}
+body:has(#force-light:checked){--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+body:has(#force-dark:checked){--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+h2{font-size:15px;font-weight:600;margin:0 0 2px}
+h3{font-size:13px;font-weight:600;margin:14px 0 4px}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.intro{max-width:900px;margin-bottom:22px}
+.intro p{color:var(--subtle);font-size:12px;margin-top:4px}
+.pending{display:inline-block;margin:6px 0 4px;padding:3px 10px;border-radius:9px;font-size:11.5px;font-weight:600;color:var(--yellow);background:color-mix(in srgb,var(--yellow) 16%,transparent)}
+.switch{display:flex;gap:6px;margin:10px 0 0;font-size:12px;color:var(--subtle)}
+.switch input{display:none}
+.switch label{padding:3px 10px;border:1px solid var(--edge);border-radius:7px;cursor:pointer}
+.switch input:checked+label{background:var(--overlay);color:var(--text)}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:26px;align-items:start}
+.wide{grid-column:1/-1}
+.study>.eyebrow{margin-bottom:6px}
+.caption{margin:10px 2px 0;font-size:11.5px;color:var(--subtle)}
+.caption b{color:var(--text);font-weight:600}
+.frame{background:var(--surface);border:1px solid var(--edge);border-radius:12px;overflow:hidden}
+.page{padding:16px 18px}
+.head{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
+.head .r{margin-left:auto}
+.scope{display:flex;align-items:center;gap:4px;padding:3px;border:1px solid var(--edge);border-radius:9px;background:var(--base);width:max-content;margin-bottom:12px;font-size:12px}
+.scope span{padding:3px 10px;border-radius:7px;color:var(--subtle)}
+.scope span.on{background:var(--surface);color:var(--text);box-shadow:0 0 0 1px var(--edge)}
+.scope .dd::after{content:" ▾";color:var(--muted)}
+.role{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--subtle);margin:14px 0 4px;border-bottom:1px solid var(--edge);padding-bottom:3px}
+.b{display:grid;grid-template-columns:1fr auto auto 54px;gap:10px;align-items:center;padding:6px 2px;border-bottom:1px solid color-mix(in srgb,var(--edge) 50%,transparent)}
+.b .n{font-size:13px}
+.b .s{display:block;font-size:11px;color:var(--subtle)}
+.ctl{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--edge);border-radius:7px;padding:2px 9px;font-size:12px;background:var(--surface)}
+.ctl::after{content:"▾";color:var(--muted);font-size:10px}
+.tog{width:28px;height:16px;border-radius:8px;background:var(--edge);position:relative;display:inline-block}
+.tog::after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:6px;background:var(--surface)}
+.tog.on{background:var(--accent)}
+.tog.on::after{left:14px}
+.from{display:inline-flex;align-items:center;gap:5px;border-radius:7px;padding:1px 8px;font-size:11px;white-space:nowrap}
+.from.stock{color:var(--muted);border:1px dashed var(--edge)}
+.from.ws{color:var(--blue);background:color-mix(in srgb,var(--blue) 12%,transparent)}
+.from.space{color:var(--focus);background:color-mix(in srgb,var(--focus) 14%,transparent)}
+.from.repo{color:var(--magenta);background:color-mix(in srgb,var(--magenta) 14%,transparent)}
+.from.here{font-weight:600}
+.reset{font-size:11px;color:var(--accent);text-align:right}
+.reset.none{color:transparent}
+.add{border:1px solid var(--edge);border-radius:8px;padding:8px 10px;background:var(--base);font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--text);min-height:46px;white-space:pre-wrap}
+.add.empty{color:var(--muted);font-family:inherit}
+.adv{margin-top:12px;border:1px solid var(--edge);border-radius:8px;padding:7px 10px;font-size:12px;color:var(--subtle)}
+.adv b{color:var(--text)}
+.note{font-size:11.5px;color:var(--subtle)}
+.warn{color:var(--yellow)}
+.ok{color:var(--green)}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--edge);border-radius:7px;padding:4px 11px;font-size:12px;background:var(--surface);color:var(--text)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.btn.quiet{border-color:transparent;color:var(--subtle)}
+.banner{border-radius:8px;padding:7px 10px;font-size:12px;margin:8px 0;background:color-mix(in srgb,var(--yellow) 12%,transparent);color:var(--text)}
+.banner b{color:var(--yellow)}
+table{border-collapse:collapse;width:100%;font-size:12px}
+th{text-align:left;font-weight:500;color:var(--subtle);font-size:11px;padding:4px 6px;border-bottom:1px solid var(--edge)}
+td{padding:6px;border-bottom:1px solid color-mix(in srgb,var(--edge) 50%,transparent);vertical-align:top}
+td .s{display:block;font-size:11px;color:var(--subtle)}
+tr.over td{background:color-mix(in srgb,var(--focus) 6%,transparent)}
+.win{display:grid;grid-template-columns:190px 1fr;min-height:360px}
+.side{background:var(--base);border-right:1px solid var(--edge);padding:12px 8px}
+.side .g{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--subtle);margin:10px 6px 3px}
+.side .i{padding:4px 8px;border-radius:7px;font-size:12.5px}
+.side .i.sel{background:var(--overlay)}
+.side .i .r{float:right;font-size:11px;color:var(--muted)}
+.kv{display:grid;grid-template-columns:170px 1fr;gap:6px 14px;font-size:12.5px;margin-top:6px}
+.kv .k{color:var(--subtle)}
+.linkrow{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+.sq{width:8px;height:8px;border-radius:2px;display:inline-block;margin-right:4px;background:var(--focus)}
+</style>
+</head>
+<body>
+<input type="radio" name="theme" id="force-system" checked hidden>
+<input type="radio" name="theme" id="force-light" hidden>
+<input type="radio" name="theme" id="force-dark" hidden>
+
+<div class="intro">
+  <div class="eyebrow">Wiffletree · settings-cascade study</div>
+  <h1>One cascade for every setting</h1>
+  <p>Settings resolve <b>Stock → Workspace → Space → Repository</b>, per project. Every value shows where it came from and resets to what it inherits. Machine facts live under <b>This Mac</b> and never cascade.</p>
+  <span class="pending">Pending Michael's review · building ahead of sign-off, as he asked</span>
+  <div class="switch"><label for="force-system">System</label><label for="force-light">Light</label><label for="force-dark">Dark</label></div>
+</div>
+
+<div class="grid">
+
+<!-- 1 -->
+<section class="study">
+  <div class="eyebrow">1 · Behaviors (was Skills) · Workspace</div>
+  <div class="frame"><div class="page">
+    <div class="head"><h2>Behaviors</h2><span class="note">How your agents work. Stock defaults, changed where you need them.</span></div>
+    <div class="scope"><span class="on">Workspace</span><span class="dd">Space</span><span class="dd">Repository</span></div>
+
+    <div class="role">Coordinator</div>
+    <div class="b"><div><span class="n">Mockup before a UI spec</span><span class="s">Draw a static HTML study and get it approved before writing a spec.</span></div><span class="tog on"></span><span class="from ws here">Set here</span><span class="reset">Reset</span></div>
+    <div class="b"><div><span class="n">Fetch before naming a landing order</span><span class="s">Fetch origin and say how far main moved.</span></div><span class="tog on"></span><span class="from ws here">Set here</span><span class="reset">Reset</span></div>
+    <div class="b"><div><span class="n">Confirm a relayed answer moved the child</span></div><span class="tog on"></span><span class="from ws here">Set here</span><span class="reset">Reset</span></div>
+    <div class="b"><div><span class="n">Status table</span></div><span class="ctl">On finish or when asked</span><span class="from stock">Stock</span><span class="reset none">·</span></div>
+    <div class="b"><div><span class="n">Review depth</span></div><span class="ctl">Proportional to risk</span><span class="from stock">Stock</span><span class="reset none">·</span></div>
+    <div class="b"><div><span class="n">Publishing</span><span class="s">Spaces and repositories may only make this stricter.</span></div><span class="ctl">As allowed owners say</span><span class="from stock">Stock</span><span class="reset none">·</span></div>
+
+    <div class="role">Implementer</div>
+    <div class="b"><div><span class="n">Commit work in progress at milestones</span></div><span class="tog on"></span><span class="from stock">Stock</span><span class="reset none">·</span></div>
+
+    <div class="role">Reviewers</div>
+    <div class="b"><div><span class="n">Optional findings per round</span></div><span class="ctl">5</span><span class="from stock">Stock</span><span class="reset none">·</span></div>
+
+    <h3>Additions for every coordinator <span class="note">· free text, after the Behaviors</span></h3>
+    <div class="add empty">Nothing added. Your three earlier lines are now Behaviors above.</div>
+    <div class="adv">▸ <b>Advanced</b> · Rewrite a role's stock text, its history and merges. Rewrites are Workspace-only.</div>
+  </div></div>
+  <p class="caption"><b>Your three one-line additions became Behaviors.</b> The page offers once to remove the matching lines; it never removes them by itself. Chips: dashed = Stock, blue = Workspace.</p>
+</section>
+
+<!-- 2 -->
+<section class="study">
+  <div class="eyebrow">2 · Behaviors · Space Sage, repository sagechat-sms</div>
+  <div class="frame"><div class="page">
+    <div class="head"><h2>Behaviors</h2><span class="note r">Shared with Sage's members</span></div>
+    <div class="scope"><span>Workspace</span><span class="dd on">Space · Sage</span><span class="dd on">sagechat-sms</span></div>
+
+    <div class="role">Coordinator</div>
+    <div class="b"><div><span class="n">Mockup before a UI spec</span></div><span class="tog on"></span><span class="from ws">Workspace</span><span class="reset none">·</span></div>
+    <div class="b"><div><span class="n">Review depth</span></div><span class="ctl">Full review for every ticket</span><span class="from space">Sage</span><span class="reset none">·</span></div>
+    <div class="b"><div><span class="n">Publishing</span></div><span class="ctl">Always ask first</span><span class="from repo here">Set here</span><span class="reset">Reset to Sage</span></div>
+
+    <div class="role">Implementer</div>
+    <div class="b"><div><span class="n">Commit work in progress at milestones</span></div><span class="tog on"></span><span class="from stock">Stock</span><span class="reset none">·</span></div>
+
+    <h3>Sage additions <span class="note">· every role in Sage; was “Space instructions”</span></h3>
+    <div class="add">Never log child PII. Fail closed on moderation and auth paths.</div>
+    <h3>sagechat-sms additions <span class="note">· in Sage only</span></h3>
+    <div class="add">Telnyx webhooks: verify the signature before parsing the body.</div>
+    <p class="note" style="margin-top:8px">A Space or repository may only make <b>Publishing</b> and <b>Review depth</b> stricter. “As allowed owners say” is not offered here.</p>
+  </div></div>
+  <p class="caption"><b>Repository overrides live in the Space.</b> They travel with Sage to its members, and sagechat-sms in another Space resolves differently. Teal = Space, violet = Repository.</p>
+</section>
+
+<!-- 3 -->
+<section class="study wide">
+  <div class="eyebrow">3 · Models · Space Sage</div>
+  <div class="frame"><div class="page">
+    <div class="head"><h2>Who runs what</h2><span class="note">This Mac's table, with Sage's overrides on top for work in Sage.</span><span class="r btn quiet">Switch at 95%</span></div>
+    <div class="scope"><span>This Mac</span><span class="dd on">Space · Sage</span></div>
+    <div class="banner"><b>Falls back here:</b> Sage asks for Opus · high for Assistant threads. Claude is signed out on this Mac, so threads use this Mac's row until it is back.</div>
+    <table>
+      <tr><th>Job</th><th>First choice</th><th>Then</th><th>Small work</th><th>From</th><th>Right now</th><th></th></tr>
+      <tr><td>Coordinator</td><td>Opus · high</td><td>GPT 6.1 Sol · high</td><td>Opus · medium</td><td><span class="from stock">This Mac</span></td><td>Opus · high</td><td></td></tr>
+      <tr><td>Implementer</td><td>Opus · medium</td><td>GPT 6.1 Sol · high</td><td>Sonnet · high</td><td><span class="from stock">This Mac</span></td><td>Opus · medium</td><td></td></tr>
+      <tr class="over"><td>Claude reviewer</td><td>Opus · high</td><td>wait<span class="s">This Mac says skip</span></td><td>Sonnet · high</td><td><span class="from space">Sage</span></td><td>Opus · high</td><td class="reset">Reset</td></tr>
+      <tr><td>Codex reviewer</td><td>GPT 6.1 Sol · high</td><td>skip</td><td>GPT 6.1 Sol · medium</td><td><span class="from stock">This Mac</span></td><td>GPT 6.1 Sol · high</td><td></td></tr>
+      <tr class="over"><td>Assistant</td><td>Opus · high<span class="s">was Sage's “thread model”</span></td><td>wait</td><td>—</td><td><span class="from space">Sage</span></td><td class="warn">Sonnet · medium (fallback)</td><td class="reset">Reset</td></tr>
+      <tr class="over"><td>Job</td><td>Sonnet · high<span class="s">was Sage's “job model”</span></td><td>GPT 6 Luna · high</td><td>—</td><td><span class="from space">Sage</span></td><td>Sonnet · high</td><td class="reset">Reset</td></tr>
+      <tr><td>Brain compiler</td><td>Sonnet · high</td><td>wait</td><td>—</td><td><span class="from stock">This Mac</span></td><td>Sonnet · high</td><td></td></tr>
+    </table>
+    <h3>Reviews in Sage</h3>
+    <div class="kv">
+      <span class="k">Levels the coordinator may use</span><span>Full only <span class="from space">Sage</span> <span class="reset">Reset</span></span>
+      <span class="k">Rounds per review</span><span>2 <span class="from ws">Workspace</span></span>
+      <span class="k">Full reviews per ticket</span><span>3 <span class="from space">Sage</span> <span class="reset">Reset</span></span>
+    </div>
+  </div></div>
+  <p class="caption"><b>One table.</b> Sage overrides rows; repositories cannot. A job recipe's own model still wins for that job. The per-Mac “models this Space may use” list is gone: a model is usable here when its provider is signed in.</p>
+</section>
+
+<!-- 4 -->
+<section class="study">
+  <div class="eyebrow">4 · Settings › Spaces › Sage</div>
+  <div class="frame"><div class="page">
+    <div class="head"><h2><span class="sq"></span>Sage</h2><span class="note r">Sage-Social/wiffletree-storage</span></div>
+    <div class="kv">
+      <span class="k">What belongs here</span><span>Sage Haven work: services, apps, infra.</span>
+      <span class="k">Repositories</span><span>29 · <span class="reset" style="text-align:left">Edit</span></span>
+      <span class="k">Brain</span><span>Sage-Social/sage-brain · <code>second-brain/</code></span>
+      <span class="k">Brain compile</span><span>Daily 06:00 America/Chicago on Mike's MacBook <span class="note">· set in the brain</span></span>
+      <span class="k">Sources</span><span>linear (MCP), gh, aws</span>
+      <span class="k">Tracker</span><span>SH · 4 states · 6 labels</span>
+    </div>
+    <div class="linkrow">
+      <span class="btn">Behaviors for Sage → <span class="note">3 changed</span></span>
+      <span class="btn">Models for Sage → <span class="note">3 rows</span></span>
+    </div>
+    <div class="banner"><b>Moved:</b> Sage's instructions are now “Sage additions” on Behaviors, and reach every role in Sage. Its thread and job models are now Sage's Assistant and Job rows.</div>
+  </div></div>
+  <p class="caption"><b>The Space page says what the Space is.</b> How agents behave and which models run are edited in one place each, scoped to Sage.</p>
+</section>
+
+<!-- 5 -->
+<section class="study">
+  <div class="eyebrow">5 · Settings window</div>
+  <div class="frame"><div class="win">
+    <div class="side">
+      <div class="g">Shared with your Macs</div>
+      <div class="i">Behaviors</div>
+      <div class="i">Reviews</div>
+      <div class="i">PR keeper</div>
+      <div class="i">Check-ins</div>
+      <div class="i">Assistant &amp; router</div>
+      <div class="i">Settings repository <span class="r ok">synced</span></div>
+      <div class="g">Spaces</div>
+      <div class="i"><span class="sq"></span>Sage</div>
+      <div class="i"><span class="sq" style="background:var(--blue)"></span>Vyttle</div>
+      <div class="i"><span class="sq" style="background:var(--magenta)"></span>Personal</div>
+      <div class="g">This Mac</div>
+      <div class="i">Who runs what</div>
+      <div class="i">Subscriptions</div>
+      <div class="i sel">Repositories <span class="r">36</span></div>
+      <div class="i">Publishing</div>
+      <div class="i">Workspace folder</div>
+      <div class="i">Builds &amp; remote access</div>
+      <div class="i">Appearance</div>
+    </div>
+    <div class="page">
+      <div class="head"><h2>Repositories</h2><span class="note">Facts about each clone on this Mac.</span></div>
+      <table>
+        <tr><th>Repository</th><th>Base</th><th>Checks</th><th>Protected</th></tr>
+        <tr><td>wiffletree<span class="s">Vyttle-LLC · Vyttle</span></td><td>main</td><td><code>make check</code> · 20m</td><td>main</td></tr>
+        <tr><td>sagechat-sms<span class="s">Sage-Social · Sage</span></td><td>main</td><td>—</td><td>main, release/*</td></tr>
+        <tr><td>dotfiles<span class="s">MHohlios · Personal</span></td><td>main</td><td>—</td><td>main</td></tr>
+      </table>
+      <p class="note" style="margin-top:10px">Behaviors for a repository are set per Space, on Behaviors. <b>Publishing</b> holds the owners whose PRs open without asking; it stays on this Mac because it is a permission.</p>
+    </div>
+  </div></div>
+  <p class="caption"><b>Two kinds of setting, two groups.</b> Everything under “Shared with your Macs” and Spaces cascades; nothing under This Mac does.</p>
+</section>
+
+<!-- 6 -->
+<section class="study wide">
+  <div class="eyebrow">6 · Effective settings · project “SMS retry” in Sage, ticket on sagechat-sms</div>
+  <div class="frame"><div class="page">
+    <div class="head"><h2>What this ticket's agents get</h2><span class="note">Read-only. Resolved when each agent starts.</span></div>
+    <table>
+      <tr><th>Setting</th><th>Value</th><th>From</th><th>Overrode</th></tr>
+      <tr><td>Review depth</td><td>Full review for every ticket</td><td><span class="from space">Sage</span></td><td class="note">Stock: proportional to risk</td></tr>
+      <tr><td>Publishing</td><td>Always ask first</td><td><span class="from repo">sagechat-sms in Sage</span></td><td class="note">Stock</td></tr>
+      <tr><td>Mockup before a UI spec</td><td>On</td><td><span class="from ws">Workspace</span></td><td class="note">Stock: off</td></tr>
+      <tr><td>Implementer model</td><td>Opus · medium</td><td><span class="from stock">This Mac</span></td><td class="note">—</td></tr>
+      <tr><td>Claude reviewer model</td><td>Opus · high, then wait</td><td><span class="from space">Sage</span></td><td class="note">This Mac: then skip</td></tr>
+      <tr><td>Additions</td><td>Workspace (0 lines) · Sage (2) · sagechat-sms (1)</td><td class="note">all three, in that order</td><td></td></tr>
+      <tr><td>Repository instructions</td><td><code>AGENTS.md</code></td><td class="note">read by the provider</td><td></td></tr>
+    </table>
+  </div></div>
+  <p class="caption"><b>The answer to “why did my agent do that?”</b> Opened from a project's header. The coordinator gets the same provenance in <code>workspace_context</code>.</p>
+</section>
+
+</div>
+</body>
+</html>

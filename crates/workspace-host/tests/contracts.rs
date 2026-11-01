@@ -2,7 +2,7 @@
 use serde_json::json;
 use workspace_core::{Role, Skill};
 use workspace_host::provider;
-use workspace_host::{mcp, skills};
+use workspace_host::{behaviors, mcp, skills};
 
 const RETIRED: [&str; 3] = [
     "repository coordinator",
@@ -19,7 +19,7 @@ fn agent_roles() -> impl Iterator<Item = Role> {
 /// A role's instructions with its skill rewritten to an empty text: the fixed core alone, which
 /// must say whatever the app depends on whatever the human writes.
 fn core(role: Role) -> String {
-    provider::instructions(role, "", "")
+    provider::instructions(role, "", "", "")
 }
 
 #[test]
@@ -386,12 +386,13 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
 #[test]
 fn coordinating_at_stock_states_the_stop_rule_and_when_to_ask_the_human() {
     let coordinator = provider::skill(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Coordinating — v5"));
+    assert!(coordinator.contains("Coordinating — v6"));
     for phrase in [
         // Routine updates are short; the pinned table carries live status.
         "A routine update, such as letting a check-in continue or acknowledging a report, says what is new since your last update in one or two sentences and repeats nothing already said",
         "The table pinned above your chat already shows each ticket's live status and PR",
-        "Only when you tell the human a ticket or the project is finished, accepted, published or ready for them, or when they ask for status, end with a short table",
+        "End with the status table only when you tell the human a ticket or the project is finished, accepted, published or ready for them, or when they ask for status.",
+        "The status table is a short table or bullets",
         "Spend review in proportion to risk",
         "the verifiers by focus, with a model only where the workspace records one",
         "\"Reviewed with Wiffletree: <N> full reviews and <M> re-checks, <R> rounds (<verifier focuses>)\"",
@@ -504,7 +505,7 @@ fn the_implementer_may_object_to_a_finding_instead_of_implementing_it() {
     assert!(core.contains("may rebase this ticket's branch onto its base between your turns"));
     assert!(core.contains("Change files with your edit tools"));
     let implementer = provider::skill(Role::Implementer);
-    assert!(implementer.contains("Implementing — v2"));
+    assert!(implementer.contains("Implementing — v3"));
     assert!(implementer.contains("never by its review round or as \"review fixes\""));
     assert!(implementer.contains(
         "If a finding is wrong or out of scope, tell the coordinator in one sentence with evidence"
@@ -601,7 +602,7 @@ fn verifiers_report_located_evidenced_findings_without_patches() {
         }
         // What counts as blocking is Reviewing's.
         let verifier = provider::skill(role);
-        assert!(verifier.contains("Reviewing — v2"));
+        assert!(verifier.contains("Reviewing — v3"));
         for phrase in [
             "Report at most five non_blocking or pre_existing findings per round, the most consequential first",
             "A finding is blocking only if it breaks an acceptance criterion",
@@ -738,8 +739,12 @@ fn the_humans_own_rules_come_last_as_written_and_leave_the_core_as_it_is() {
         "Push the branch with `git push` when you are done.",
         "Follow my open-pr skill.",
     ] {
-        let implementer =
-            provider::instructions(Role::Implementer, skills::stock(Skill::Implementing), rules);
+        let implementer = provider::instructions(
+            Role::Implementer,
+            skills::stock(Skill::Implementing),
+            &behaviors::stock_sentences(Skill::Implementing),
+            rules,
+        );
         assert!(implementer.starts_with(&stock));
         assert!(implementer.ends_with(&format!(
             "## Your own rules for Implementing\nThese are the human's own rules for this skill. Where they disagree with the skill above, follow them.\n{rules}"

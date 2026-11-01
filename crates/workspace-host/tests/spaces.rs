@@ -315,7 +315,7 @@ fn space_names_and_prefixes_are_unique() {
     moved.storage = sage.space.storage.clone();
     assert!(host.update_space(moved).is_err());
     let mut edited = watch.space.clone();
-    edited.instructions = "Use the watch simulator".into();
+    edited.additions = "Use the watch simulator".into();
     edited.repositories = vec!["Sage-Social/watch-app".into()];
     edited.sources = vec![Source::Cli {
         command: "gh".into(),

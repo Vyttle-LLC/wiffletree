@@ -17,7 +17,9 @@ fn space() -> Space {
         id: SpaceId(text()),
         name: text(),
         description: text(),
-        instructions: text(),
+        additions: text(),
+        behaviors: Default::default(),
+        repository_settings: Default::default(),
         brain: None,
         storage: SpaceStorage {
             repository: StorageRepository::Local { id: text() },
@@ -226,7 +228,7 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
         Command::CreateSpace {
             name: text(),
             description: text(),
-            instructions: text(),
+            additions: text(),
             prefix: None,
             storage: None,
         },
@@ -351,7 +353,7 @@ fn space_commands_are_the_humans() {
         Command::CreateSpace {
             name: text(),
             description: text(),
-            instructions: text(),
+            additions: text(),
             prefix: None,
             storage: Some(text()),
         },

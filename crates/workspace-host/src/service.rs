@@ -611,7 +611,7 @@ enum StorageChoice {
     Create {
         name: String,
         description: String,
-        instructions: String,
+        additions: String,
         prefix: Option<String>,
     },
     Join(Vec<JoinSpace>),
@@ -1546,14 +1546,14 @@ impl Actor {
             Command::CreateSpace {
                 name,
                 description,
-                instructions,
+                additions,
                 prefix,
                 storage: Some(repository),
             } => {
                 let then = StorageChoice::Create {
                     name: name.clone(),
                     description: description.clone(),
-                    instructions: instructions.clone(),
+                    additions: additions.clone(),
                     prefix: prefix.clone(),
                 };
                 self.stage_storage(repository, then, reply)?;
@@ -1924,13 +1924,13 @@ impl Actor {
             StorageChoice::Create {
                 name,
                 description,
-                instructions,
+                additions,
                 prefix,
             } => Some(self.host.precheck_stored_space(
                 &storage::NewSpace {
                     name,
                     description,
-                    instructions,
+                    additions,
                     prefix: prefix.as_deref(),
                 },
                 repository,
@@ -2375,13 +2375,13 @@ impl Actor {
                         StorageChoice::Create {
                             name,
                             description,
-                            instructions,
+                            additions,
                             prefix,
                         } => {
                             let new = storage::NewSpace {
                                 name: &name,
                                 description: &description,
-                                instructions: &instructions,
+                                additions: &additions,
                                 prefix: prefix.as_deref(),
                             };
                             Ok(serde_json::to_value(
@@ -4478,7 +4478,7 @@ impl Actor {
             },
         );
         self.state_changed();
-        let role_instructions = self.host.instructions(session.role);
+        let role_instructions = self.host.session_instructions(&session)?;
         let kind = match session.provider {
             Provider::Claude => TurnKind::Compaction(instructions),
             // Codex's own total for the whole context, as the card shows it.
@@ -4818,16 +4818,11 @@ impl Actor {
             }
             None => (self.prompt(&session, &input)?, None),
         };
-        let (instructions, thread) = match session.role {
-            Role::Assistant | Role::JobRun => (
-                self.host.thread_instructions(&session)?,
-                Some(self.host.thread_launch(&session)?),
-            ),
-            Role::Compiler => (
-                self.host.instructions(Role::Compiler),
-                Some(self.host.compile_launch(&session)?),
-            ),
-            role => (self.host.instructions(role), None),
+        let instructions = self.host.session_instructions(&session)?;
+        let thread = match session.role {
+            Role::Assistant | Role::JobRun => Some(self.host.thread_launch(&session)?),
+            Role::Compiler => Some(self.host.compile_launch(&session)?),
+            _ => None,
         };
         let started_at = now();
         let detail = json!({"profile":profile,"provider_session_id":runtime.provider_session_id,"skill_version":1,"selection":runtime.selection,"model_selection_revision":self.host.model_selection()?.revision});

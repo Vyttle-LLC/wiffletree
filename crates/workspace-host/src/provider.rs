@@ -187,16 +187,21 @@ fn contract(role: Role) -> &'static str {
 }
 /// Part of the fixed core: it says, in Wiffletree's words, that the human's rules win.
 pub(crate) const RULES_SENTENCE: &str = "These are the human's own rules for this skill. Where they disagree with the skill above, follow them.";
-/// A role's bundled instructions: the fixed core and its skill's stock text.
+/// A role's bundled instructions: the fixed core, its skill's stock text and the stock
+/// Behaviors.
 pub fn skill(role: Role) -> String {
-    instructions(role, Skill::for_role(role).map_or("", skills::stock), "")
+    let Some(skill) = Skill::for_role(role) else {
+        return core(role).into();
+    };
+    let behaviors = behaviors::stock_sentences(skill);
+    instructions(role, skills::stock(skill), &behaviors, "")
 }
-/// What a role's turns are sent, with its skill as the human left it: a rewrite in place of the
-/// stock text, or the stock text and the human's rules.
-pub fn role_instructions(role: Role, skill: &SkillState) -> String {
+/// What a role's turns are sent, with its skill as the human left it and its Behaviors as they
+/// resolve: a rewrite in place of the stock text, or the stock text and the human's rules.
+pub fn role_instructions(role: Role, skill: &SkillState, behaviors: &str) -> String {
     match &skill.rewrite {
-        Some(rewrite) => instructions(role, &rewrite.text, ""),
-        None => instructions(role, &skill.stock, &skill.rules),
+        Some(rewrite) => instructions(role, &rewrite.text, behaviors, ""),
+        None => instructions(role, &skill.stock, behaviors, &skill.rules),
     }
 }
 /// The heading the human's own rules follow, as "## Your own rules for Implementing".
@@ -204,13 +209,17 @@ pub fn rules_heading(skill: Skill) -> String {
     format!("## Your own rules for {}", skill.name())
 }
 /// The communication contract, the role's core, the skill's text, stock or the human's
-/// rewrite, and the human's own rules for that skill, if any, under a heading of Wiffletree's.
-/// A brain compile, which has no skill, runs under its bundled procedure alone.
-pub fn instructions(role: Role, skill_text: &str, rules: &str) -> String {
+/// rewrite, the resolved Behaviors' sentences, and the human's own rules for that skill, if
+/// any, under a heading of Wiffletree's. A brain compile, which has no skill, runs under its
+/// bundled procedure alone.
+pub fn instructions(role: Role, skill_text: &str, behaviors: &str, rules: &str) -> String {
     let Some(skill) = Skill::for_role(role) else {
         return core(role).into();
     };
     let mut text = format!("{}\n{}\n{skill_text}", contract(role), core(role));
+    if !behaviors.is_empty() {
+        text.push_str(&format!("\n{behaviors}"));
+    }
     if !rules.is_empty() {
         let heading = rules_heading(skill);
         text.push_str(&format!("\n{heading}\n{RULES_SENTENCE}\n{rules}"));

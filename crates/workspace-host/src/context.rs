@@ -56,7 +56,7 @@ impl crate::Host {
             profile,
             provider_session,
             directory: directory.into(),
-            instructions: self.instructions(session.role),
+            instructions: self.session_instructions(&session)?,
         })
     }
 }

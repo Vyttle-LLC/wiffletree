@@ -621,7 +621,9 @@ mod tests {
             id: SpaceId("sage".into()),
             name: "Sage".into(),
             description: String::new(),
-            instructions: String::new(),
+            additions: String::new(),
+            behaviors: Default::default(),
+            repository_settings: Default::default(),
             brain: Some(SpaceBrain {
                 repository: BrainRepository::GitHub {
                     owner: "Sage-Social".into(),
