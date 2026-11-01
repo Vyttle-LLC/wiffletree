@@ -153,8 +153,9 @@ pub struct SpaceModels {
     /// The Job row's first choice, kept for hosts older than `rows`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jobs: Option<SpaceModel>,
+    /// The rows as written, so that keys this release does not know, within a row too, stay.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub rows: Vec<JobRow>,
+    rows: Vec<serde_json::Value>,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -163,8 +164,11 @@ impl SpaceModels {
     /// and Job rows: either one that differs from its row, as when a host older than `rows`
     /// changed it, replaces the row's first choice, and one without a row is a row of its own
     /// that waits.
+    /// A row this release cannot read, as a newer host's might be, is left out.
     pub fn overrides(&self) -> Vec<JobRow> {
-        let mut rows = self.rows.clone();
+        let mut rows: Vec<JobRow> = (self.rows.iter())
+            .filter_map(|row| serde_json::from_value(row.clone()).ok())
+            .collect();
         for (model, job) in [(&self.threads, Job::Assistant), (&self.jobs, Job::Job)] {
             let Some(first) = model.as_ref().map(SpaceModel::profile) else {
                 continue;
@@ -195,7 +199,9 @@ impl SpaceModels {
         rows
     }
     /// Saves `rows` as the Space's overrides, with `threads` and `jobs` written to match the
-    /// Assistant and Job rows so that older hosts still use them.
+    /// Assistant and Job rows so that older hosts still use them. Each row keeps the keys this
+    /// release does not know from the saved row for its job, and a saved row this release
+    /// cannot read stays.
     pub fn set_overrides(&mut self, rows: Vec<JobRow>) {
         let first = |job: Job, kept: &Option<SpaceModel>| {
             let row = rows.iter().find(|row| row.job == job)?;
@@ -206,7 +212,53 @@ impl SpaceModels {
         };
         self.threads = first(Job::Assistant, &self.threads);
         self.jobs = first(Job::Job, &self.jobs);
-        self.rows = rows;
+        let saved: Vec<(serde_json::Value, Option<JobRow>)> = (std::mem::take(&mut self.rows))
+            .into_iter()
+            .map(|raw| {
+                let row = serde_json::from_value(raw.clone()).ok();
+                (raw, row)
+            })
+            .collect();
+        for row in &rows {
+            let mut raw = serde_json::to_value(row).expect("a row serializes");
+            let before = saved.iter().find_map(|(raw, saved)| {
+                saved
+                    .as_ref()
+                    .filter(|s| s.job.is(&row.job))
+                    .map(|s| (raw, s))
+            });
+            if let Some((before, read)) = before {
+                let known = serde_json::to_value(read).expect("a row serializes");
+                keep_unknown(&mut raw, before, &known);
+            }
+            self.rows.push(raw);
+        }
+        (self.rows).extend(
+            saved
+                .into_iter()
+                .filter(|(_, row)| row.is_none())
+                .map(|(raw, _)| raw),
+        );
+    }
+}
+
+/// Copies into `into` each key of `before` that reading it left out of `known`, at any depth.
+fn keep_unknown(
+    into: &mut serde_json::Value,
+    before: &serde_json::Value,
+    known: &serde_json::Value,
+) {
+    let (Some(into), Some(before)) = (into.as_object_mut(), before.as_object()) else {
+        return;
+    };
+    for (key, value) in before {
+        match (known.get(key), into.get_mut(key)) {
+            (None, None) => {
+                into.insert(key.clone(), value.clone());
+            }
+            (Some(known), Some(into)) => keep_unknown(into, value, known),
+            _ => {}
+        }
     }
 }
 
@@ -509,6 +561,7 @@ pub fn validate_repository_identity(identity: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn a_prefix_comes_from_the_name_and_avoids_those_taken() {
@@ -586,6 +639,36 @@ mod tests {
         // Without the rows, neither old key is written.
         models.set_overrides(vec![]);
         assert!(models.threads.is_none() && models.jobs.is_none());
+    }
+
+    #[test]
+    fn a_newer_hosts_keys_within_a_row_stay_through_a_save() {
+        let profile = |model: &str| json!({"provider": "claude", "model": model, "effort": "high"});
+        let mut first = profile("opus");
+        first["future_profile"] = json!(1);
+        let mut models: SpaceModels = serde_json::from_value(json!({"rows": [
+            {"job": {"kind": "implementer"}, "future_row": 2,
+             "main": {"first": first, "future_line": 3}},
+            {"job": {"kind": "future_job"}, "main": {"first": profile("sonnet")}},
+        ]}))
+        .unwrap();
+        let mut rows = models.overrides();
+        assert_eq!(rows.len(), 1, "the unreadable row is left out");
+        rows[0].main.then = Then::Model(ModelProfile {
+            provider: crate::Provider::Codex,
+            model: "gpt-6.1-sol".into(),
+            effort: "high".into(),
+        });
+        models.set_overrides(rows.clone());
+
+        let saved = serde_json::to_value(&models).unwrap();
+        let row = &saved["rows"][0];
+        assert_eq!(row["future_row"], json!(2));
+        assert_eq!(row["main"]["future_line"], json!(3));
+        assert_eq!(row["main"]["first"]["future_profile"], json!(1));
+        assert_eq!(saved["rows"][1]["job"], json!({"kind": "future_job"}));
+        let read: SpaceModels = serde_json::from_value(saved).unwrap();
+        assert_eq!(read.overrides(), rows);
     }
 
     #[test]

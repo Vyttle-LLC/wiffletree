@@ -515,14 +515,17 @@ pub fn validate_overrides(rows: &[JobRow]) -> Result<()> {
 }
 
 /// Who runs what as one Space resolves it on this Mac: this Mac's table with each of the Space's
-/// rows on top that this Mac can run. A Space row none of whose choices is signed in here falls
-/// back to this Mac's row.
+/// rows on top that this Mac can run. A Space row none of whose choices on the line in use is
+/// signed in here falls back to this Mac's row.
 #[derive(Clone, Debug)]
 pub struct SpaceTable {
     /// The table agents in the Space resolve, overrides in place.
     pub selection: ModelSelection,
     /// Each row's provenance, in the table's order.
     pub rows: Vec<ResolvedRow>,
+    /// The table small work resolves: a Space row stays where its small-work line, or its main
+    /// line without one, can run here.
+    small: ModelSelection,
     /// The Space's name; `None` outside a Space, where every row is this Mac's.
     space: Option<String>,
     overrides: Vec<JobRow>,
@@ -538,6 +541,25 @@ impl ModelSelection {
         overrides: &[JobRow],
         unusable: &BTreeSet<Provider>,
     ) -> SpaceTable {
+        let (selection, rows) = self.merge(overrides, unusable, false);
+        let (small, _) = self.merge(overrides, unusable, true);
+        SpaceTable {
+            selection,
+            rows,
+            small,
+            space: space.map(Into::into),
+            overrides: overrides.to_vec(),
+            unusable: unusable.clone(),
+        }
+    }
+    /// This table with the `overrides` this Mac can run on top, for small work when `small`,
+    /// with each row's provenance.
+    fn merge(
+        &self,
+        overrides: &[JobRow],
+        unusable: &BTreeSet<Provider>,
+        small: bool,
+    ) -> (ModelSelection, Vec<ResolvedRow>) {
         let mut jobs: Vec<Job> = self.jobs.iter().map(|row| row.job.clone()).collect();
         for row in overrides {
             let configured = !matches!(row.job, Job::Verifier { .. });
@@ -553,6 +575,7 @@ impl ModelSelection {
         for job in jobs {
             let setting = RowSetting {
                 job: &job,
+                small,
                 unusable,
             };
             let mut set = vec![];
@@ -586,13 +609,7 @@ impl ModelSelection {
                 },
             });
         }
-        SpaceTable {
-            selection,
-            rows,
-            space: space.map(Into::into),
-            overrides: overrides.to_vec(),
-            unusable: unusable.clone(),
-        }
+        (selection, rows)
     }
 }
 impl SpaceTable {
@@ -606,17 +623,24 @@ impl SpaceTable {
         limits: &Limits,
         when: &dyn Fn(i64) -> String,
     ) -> Result<Pick> {
-        let mut pick = self.selection.resolve(job, small, may_skip, limits, when)?;
-        pick.reason = self.explain(job, pick.reason);
+        let selection = if small { &self.small } else { &self.selection };
+        let mut pick = selection.resolve(job, small, may_skip, limits, when)?;
+        pick.reason = self.explain(selection, job, small, pick.reason);
         Ok(pick)
     }
-    /// `reason`, for a pick of `job`, prefixed with the Space's part in it.
-    pub fn explain(&self, job: &Job, reason: String) -> String {
+    /// `reason`, for a pick of `job` from `selection`, prefixed with the Space's part in it.
+    fn explain(
+        &self,
+        selection: &ModelSelection,
+        job: &Job,
+        small: bool,
+        reason: String,
+    ) -> String {
         let Some(space) = &self.space else {
             return reason;
         };
         // Without a Job row, jobs run as the assistant's threads do.
-        let used = match self.selection.row(job) {
+        let used = match selection.row(job) {
             None if *job == Job::Job => Job::Assistant,
             _ => job.clone(),
         };
@@ -624,15 +648,17 @@ impl SpaceTable {
         let mut said: Vec<String> = looked_at
             .filter_map(|job| {
                 let row = self.overrides.iter().find(|row| row.job.is(job))?;
-                let why = not_runnable(row, &self.unusable)?;
+                let why = not_runnable(row, small, &self.unusable)?;
                 Some(format!(
                     "{space}'s {} row falls back to this Mac's: {why}.",
                     job.name()
                 ))
             })
             .collect();
-        let from_space =
-            (self.rows.iter()).any(|row| row.job.is(&used) && row.resolved.from == Layer::Space);
+        let over = self.overrides.iter().find(|row| row.job.is(&used));
+        let from_space = over
+            .zip(selection.row(&used))
+            .is_some_and(|(over, used)| over.main == used.main && over.small == used.small);
         said.push(match from_space {
             true => format!("{space}'s {} row: {reason}", used.name()),
             false => reason,
@@ -645,6 +671,7 @@ impl SpaceTable {
 /// unless this Mac can run none of its choices.
 struct RowSetting<'a> {
     job: &'a Job,
+    small: bool,
     unusable: &'a BTreeSet<Provider>,
 }
 impl Setting for RowSetting<'_> {
@@ -658,21 +685,23 @@ impl Setting for RowSetting<'_> {
     fn refusal(&self, layer: Layer, _: &Option<JobRow>, value: &Option<JobRow>) -> Option<String> {
         let row = value.as_ref().filter(|_| layer == Layer::Space)?;
         debug_assert!(row.job.is(self.job));
-        not_runnable(row, self.unusable)
+        not_runnable(row, self.small, self.unusable)
     }
 }
 
-/// Why this Mac can run none of `row`'s main choices, such as "Claude is not signed in on this
+/// Why this Mac can run none of the choices on `row`'s line in use, its small-work line for
+/// `small` work when it has one, else its main line, such as "Claude is not signed in on this
 /// Mac"; the router never runs on Codex.
-fn not_runnable(row: &JobRow, unusable: &BTreeSet<Provider>) -> Option<String> {
+fn not_runnable(row: &JobRow, small: bool, unusable: &BTreeSet<Provider>) -> Option<String> {
+    let line = (row.small.as_ref()).filter(|_| small).unwrap_or(&row.main);
     let runs = |p: &ModelProfile| {
         !unusable.contains(&p.provider)
             && !(row.job == Job::Router && p.provider == Provider::Codex)
     };
-    if row.main.choices().any(runs) {
+    if line.choices().any(runs) {
         return None;
     }
-    let mut names: Vec<&str> = row.main.choices().map(|p| p.provider.label()).collect();
+    let mut names: Vec<&str> = line.choices().map(|p| p.provider.label()).collect();
     names.dedup();
     let are = if names.len() > 1 { "are" } else { "is" };
     Some(format!(

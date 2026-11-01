@@ -660,7 +660,7 @@ fn rebase_in_checkout(job: &Job) -> Result<Rebased> {
 impl Host {
     /// The ticket's PR keeper agent for `kind`, created on first use as a child of the ticket's
     /// coordinator working in `workdir`, and pinned before each run to what the PR keeper's row
-    /// resolves to: its Claude choice for a sorting run. Only the host calls this; no agent tool
+    /// resolves to in its project's Space: its Claude choice for a sorting run. Only the host calls this; no agent tool
     /// reaches it.
     pub fn keeper_agent(
         &mut self,
@@ -668,7 +668,9 @@ impl Host {
         kind: KeeperSession,
         workdir: &Path,
     ) -> Result<Session> {
-        let selection = self.model_selection()?;
+        let space = self.ticket_space(ticket)?;
+        let (_, unusable, _) = self.limits()?;
+        let selection = self.space_table(Some(&space), &unusable)?.selection;
         ensure!(
             selection.keeper().is_some(),
             "Choose the PR keeper's model in Models first"
@@ -685,7 +687,6 @@ impl Host {
                     .into(),
             },
             KeeperSession::Try => {
-                let space = self.ticket_space(ticket)?;
                 self.resolve_job(Some(&space), &workspace_core::Job::Keeper, false, false)?
             }
         };
@@ -4298,6 +4299,39 @@ pub(crate) mod tests {
         let sort = run_of(&mut f, &reads.remove(0), answer(later, vec![], vec![])).unwrap();
         assert_eq!(sent_ids(&sort), ["issuecomment-3"]);
         assert!(notices(&f.host).is_empty());
+    }
+
+    #[test]
+    fn a_sorting_run_takes_the_claude_choice_of_its_spaces_keeper_row() {
+        let (mut f, _r) = sorting();
+        let ticket = f.ticket();
+        let opus = ModelProfile {
+            provider: Provider::Claude,
+            model: "opus".into(),
+            effort: "high".into(),
+        };
+        let row = JobRow {
+            job: workspace_core::Job::Keeper,
+            main: Line {
+                first: opus.clone(),
+                then: Then::Wait,
+            },
+            small: None,
+        };
+        let space = f.host.ticket_space(&ticket).unwrap();
+        let settings = workspace_core::cascade::SpaceModelSettings {
+            rows: vec![row],
+            reviews: Default::default(),
+        };
+        f.host.set_space_model_settings(&space, settings).unwrap();
+        let sorting = f
+            .host
+            .keeper_agent(&ticket, KeeperSession::Sorting, f.home.path())
+            .unwrap();
+        assert_eq!(
+            f.host.session_runtime(&sorting.id).unwrap().profile,
+            Some(opus)
+        );
     }
 
     #[test]

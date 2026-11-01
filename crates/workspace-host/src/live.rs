@@ -748,17 +748,16 @@ impl Host {
             now: now(),
         };
         let line = |line: &Line| json!({"first": line.first, "then": line.then});
-        let right_now = |row: &JobRow, small: bool| match resolve(
-            row,
+        let right_now = |row: &JobRow, small: bool| match table.resolve(
+            &row.job,
             small,
             true,
             &limits,
             &policies::reset_time,
         ) {
-            Ok(pick) if pick.skip.is_some() => json!({"skips": true,
-                "reason": table.explain(&row.job, pick.reason)}),
+            Ok(pick) if pick.skip.is_some() => json!({"skips": true, "reason": pick.reason}),
             Ok(pick) => json!({"profile": pick.profile, "waits": pick.waits,
-                "reason": table.explain(&row.job, pick.reason)}),
+                "reason": pick.reason}),
             Err(error) => json!({"cannot_start": format!("{error:#}")}),
         };
         let space_name = self.find_space(&space)?.map(|r| r.space.name);

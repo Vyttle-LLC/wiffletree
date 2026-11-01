@@ -873,3 +873,48 @@ fn a_space_row_overrides_this_macs_unless_none_of_its_choices_is_signed_in() {
             .all(|row| row.resolved.from == cascade::Layer::ThisMac)
     );
 }
+
+#[test]
+fn small_work_resolves_a_space_row_by_its_small_work_line() {
+    let mac = table();
+    let space_row = |main: ModelProfile, small: ModelProfile| JobRow {
+        job: Job::Implementer,
+        main: Line {
+            first: main,
+            then: Then::Wait,
+        },
+        small: Some(Line {
+            first: small,
+            then: Then::Wait,
+        }),
+    };
+    let codex_out = BTreeSet::from([Provider::Codex]);
+    let limits = limits(&[], &codex_out);
+    let haiku = profile(Provider::Claude, "haiku", "low");
+    let pick = |row: JobRow, small: bool| {
+        (mac.for_space(Some("Sage"), &[row], &codex_out))
+            .resolve(&Job::Implementer, small, false, &limits, &when)
+            .unwrap()
+    };
+
+    // Sage's small-work line runs here though its main line does not.
+    let small = pick(space_row(sol(), haiku.clone()), true);
+    assert_eq!(small.profile, haiku);
+    assert_eq!(
+        small.reason,
+        "Sage's Implementer row: First choice for small work"
+    );
+    assert_eq!(pick(space_row(sol(), haiku.clone()), false).profile, opus());
+
+    // Sage's small-work line does not run here: small work falls back to this Mac's row.
+    let small = pick(space_row(haiku.clone(), sol()), true);
+    assert_eq!(small.profile, sonnet());
+    assert!(
+        small
+            .reason
+            .starts_with("Sage's Implementer row falls back to this Mac's: Codex"),
+        "{}",
+        small.reason
+    );
+    assert_eq!(pick(space_row(haiku.clone(), sol()), false).profile, haiku);
+}
