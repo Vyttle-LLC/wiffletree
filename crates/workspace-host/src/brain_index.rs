@@ -19,8 +19,8 @@ const INDEX: &str = "notes/INDEX.md";
 const QUEUE: &str = "reconcile-queue.md";
 const CONFLICT_MARKER: &str = "<!-- conflict:";
 
-/// The claimed entries naming a PR that a pass with no new commit asks GitHub about again,
-/// newest first, so a pass stays bounded.
+/// How many claimed entries naming a PR a pass with no new commit asks GitHub about again, in
+/// turn from where the last pass stopped, so a pass stays bounded and none is left out.
 const RECHECKED_PRS: usize = 50;
 /// How a ruling entry's `state` begins, followed by the conflict's id and a colon.
 pub(crate) const RULING_PREFIX: &str = "Ruling on conflict ";
@@ -718,18 +718,34 @@ fn verify_entries(
     only_named_prs: bool,
 ) -> Result<()> {
     type Unverified = (i64, String, String, Option<String>, Option<String>);
-    let which = match only_named_prs {
-        true => format!(
-            "verification='claimed' AND reference LIKE '% · PR #%' ORDER BY id DESC LIMIT {RECHECKED_PRS}"
-        ),
-        false => "coalesce(verification,'')<>'verified'".into(),
+    let select = |which: &str, after: i64| -> Result<Vec<Unverified>> {
+        Ok(db
+            .prepare(&format!(
+                "SELECT id,coalesce(repository,''),coalesce(reference,''),verification,verification_reason FROM files WHERE class='entry' AND id>?1 AND {which}"
+            ))?
+            .query_map([after], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+            .collect::<rusqlite::Result<_>>()?)
     };
-    let unverified: Vec<Unverified> = db
-        .prepare(&format!(
-            "SELECT id,coalesce(repository,''),coalesce(reference,''),verification,verification_reason FROM files WHERE class='entry' AND {which}"
-        ))?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
-        .collect::<rusqlite::Result<_>>()?;
+    let unverified = match only_named_prs {
+        false => select("coalesce(verification,'')<>'verified'", 0)?,
+        // The next claimed entries naming a PR after the last one asked about, from the first
+        // again past the end, so every one is asked about in turn.
+        true => {
+            let which = format!(
+                "verification='claimed' AND reference LIKE '% · PR #%' ORDER BY id LIMIT {RECHECKED_PRS}"
+            );
+            let from: i64 = (state(db, "pr_recheck_after")?)
+                .and_then(|id| id.parse().ok())
+                .unwrap_or(0);
+            let mut next = select(&which, from)?;
+            if next.is_empty() && from > 0 {
+                next = select(&which, 0)?;
+            }
+            let last = next.last().map(|(id, ..)| id.to_string());
+            set_state(db, "pr_recheck_after", last.as_deref())?;
+            next
+        }
+    };
     let refs: Vec<(&str, &str)> = (unverified.iter())
         .map(|(_, folder, reference, _, _)| (folder.as_str(), reference.as_str()))
         .collect();
@@ -2488,12 +2504,13 @@ pub(crate) mod tests {
         )]));
         let merged = Arc::new(AtomicBool::new(false));
         let state = merged.clone();
+        // PR #92 merges during the test; #93 stays open.
         let gh: publish::Tool<runtime::GhAnswer> = Arc::new(move |_, args| {
-            assert_eq!(
-                args.last().copied(),
-                Some("repos/Sage-Social/relay/pulls/92")
-            );
-            let merged = state.load(Ordering::SeqCst);
+            let merged = match args.last().copied() {
+                Some("repos/Sage-Social/relay/pulls/92") => state.load(Ordering::SeqCst),
+                Some("repos/Sage-Social/relay/pulls/93") => false,
+                other => panic!("unexpected gh call {other:?}"),
+            };
             Ok(runtime::GhAnswer {
                 status: publish::tests::exit(0),
                 output: json!({"state": if merged { "closed" } else { "open" }, "merged": merged})
@@ -2502,16 +2519,25 @@ pub(crate) mod tests {
             })
         });
         let reference = format!("retry @ {} · PR #92", &sha[..7]);
+        let open = format!("retry @ {} · PR #93", &sha[..7]);
         let brain = Checkout::new();
-        let head = brain.commit(
-            &[entry(
+        // Its entry is older than more claimed entries, for a PR still open, than a pass asks
+        // about at once.
+        let mut entries = vec![entry(
+            "relay",
+            &id(7),
+            ("mhohlios", "decision", "Retry once"),
+            &reference,
+        )];
+        entries.extend((100..100 + RECHECKED_PRS as u128).map(|n| {
+            entry(
                 "relay",
-                &id(7),
-                ("mhohlios", "decision", "Retry once"),
-                &reference,
-            )],
-            "Log batch (#80)",
-        );
+                &id(n),
+                ("mhohlios", "observation", "Backoff"),
+                &open,
+            )
+        }));
+        let head = brain.commit(&entries, "Log batch (#80)");
         let refresh_now = || {
             refresh(Refresh {
                 index: &brain.index(),
@@ -2552,7 +2578,9 @@ pub(crate) mod tests {
         );
         // The PR is squash-merged; the brain does not change.
         merged.store(true, Ordering::SeqCst);
+        // Passes take the claimed entries in turn, so within two every one is asked about.
         assert_eq!(refresh_now(), 0, "nothing is read again");
+        assert_eq!(refresh_now(), 0);
         assert_eq!(
             (stored(), compiled()),
             ("verified".to_owned(), RefState::Verified)
