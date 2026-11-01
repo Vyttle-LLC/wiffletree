@@ -17,7 +17,7 @@ A host SHALL compile a brain only when `wiffletree-brain.json` on that brain's `
 - **THEN** no run starts, and the run is recorded as waiting for PR #212
 
 ### Requirement: Compile runs start on schedule, on demand and after a ruling
-Brain compile SHALL be a built-in host job of the scheduler (see `scheduled-jobs`, "Built-in host jobs"), owned by its brain, with one job per brain registered on this Mac, and SHALL take its due times, catch-up, Run now and run records from that scheduler. Only on the compiler host SHALL it be due: each day at the config's compile time in the config's timezone. After sleep, downtime or a quit that missed one or more due times, it SHALL start exactly one catch-up run. Due times SHALL be computed in the config's timezone, so a daylight-saving change never yields two runs for one date. The human SHALL be able to start a run with Run now on the Brains page or the brain's Status view, which SHALL say why when a run is in progress or a compile PR is open. The compiler host SHALL start a run when a fetched `main` adds an entry whose `state` begins `Ruling on conflict`.
+Brain compile SHALL be a built-in host job of the scheduler (see `scheduled-jobs`, "Built-in host jobs"), owned by its brain, with one job per brain registered on this Mac, and SHALL take its due times, catch-up, Run now and run records from that scheduler. Only on the compiler host SHALL it be due: each day at the config's compile time in the config's timezone. A brain whose config has no compile time SHALL never be due, and SHALL compile only on Run now or a merged ruling. After sleep, downtime or a quit that missed one or more due times, it SHALL start exactly one catch-up run. Due times SHALL be computed in the config's timezone, so a daylight-saving change never yields two runs for one date. The human SHALL be able to start a run with Run now on the Brains page or the brain's Status view, which SHALL say why when a run is in progress or a compile PR is open. The compiler host SHALL start a run when a fetched `main` adds an entry whose `state` begins `Ruling on conflict`.
 
 #### Scenario: Asleep at 2:00
 - **WHEN** Michael's Mac sleeps from 1:00 to 7:00 and the compile time is 02:00
@@ -26,6 +26,10 @@ Brain compile SHALL be a built-in host job of the scheduler (see `scheduled-jobs
 #### Scenario: A ruling merges
 - **WHEN** a ruling entry from Oscar's install merges on `main` of `sagehaven-docs`
 - **THEN** Michael's Mac starts a compile run on its next fetch
+
+#### Scenario: No compile time
+- **WHEN** the config of `sagehaven-docs` names Michael's Mac as compiler and has no `compile`
+- **THEN** no run is ever due, Run now and a merged ruling still start one, and the Brains page says so
 
 ### Requirement: Pending entries are found by an entry-ID cursor
 The cursor SHALL be stored in `notes/INDEX.md`'s frontmatter as `compiled-through` (a commit on `main`) and `compiled-after` (the ids of entries added after that commit that are already compiled). Pending entries SHALL be the entry files added under `logs/<repo>/` between `compiled-through` and `main`'s head, minus the ids in `compiled-after`. On a brain with no cursor, every entry file SHALL be pending except those the legacy import recorded as compiled. A run SHALL process at most 200 pending entries, oldest id first. Its compile PR SHALL set the cursor, written by the host: when no pending entry remains up to the run's head commit, `compiled-through` becomes that commit and `compiled-after` is emptied; otherwise the processed ids are added to `compiled-after`. The cursor SHALL change only when the compile PR merges.
