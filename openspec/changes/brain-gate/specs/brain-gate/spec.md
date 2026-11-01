@@ -100,7 +100,7 @@ A missing config value SHALL take the gate's default: 2,000 characters, the lega
 - **THEN** addresses at those domains pass, and no other brain's scan allows them
 
 ### Requirement: Gate releases are versioned and tested
-Gate releases SHALL be tagged `brain-gate-vMAJOR.MINOR.PATCH`, with a moving `brain-gate-vMAJOR` tag. A change that can fail a PR the previous release passed SHALL be a new major version. The fixture tests SHALL run in Wiffletree's CI on every change under `gate/`, and a release SHALL be tagged only from a commit where they pass. Each tag SHALL stay published if the gate later moves to another repository.
+A gate release SHALL be a commit on `main`, named `brain-gate-vMAJOR.MINOR.PATCH` as a label. Brains SHALL pin the release by commit SHA, and no Git tag is required. A change that can fail a PR the previous release passed SHALL be a new major version. The fixture tests SHALL run in Wiffletree's CI on every change under `gate/`, and a release SHALL be a commit where they pass. Each pinned commit SHALL stay reachable if the gate later moves to another repository.
 
 #### Scenario: A stricter rule
 - **WHEN** a change makes `sensitive-info` report a pattern it did not report before

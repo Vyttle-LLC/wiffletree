@@ -15,7 +15,7 @@ Michael decided on October 29, 2026 that the gate belongs in Wiffletree. Wifflet
   - the fixture tests.
 
   Every check behaves exactly as in `sagehaven-docs` PR #1: deterministic, no model calls, no matched value ever echoed, and suppression only by an explicit inline marker, an allow-list entry with a reason, or gitleaks' own mechanisms.
-- **Versioned releases.** The gate is tagged `brain-gate-vX.Y.Z`, with a moving `brain-gate-vX` major tag. Any change that rejects input the previous version accepted, the entry contract included, is a new major version. Wiffletree's CI runs the fixture tests on every change to `gate/`.
+- **Versioned releases.** A gate release is a commit named `brain-gate-vX.Y.Z` as a label; brains pin it by commit SHA and no Git tag is required. Any change that rejects input the previous version accepted, the entry contract included, is a new major version. Wiffletree's CI runs the fixture tests on every change to `gate/`.
 - **One contract, one fixture set.** Wiffletree's log renderer (`brain-log-capture`) is tested against the same fixtures in this repository, so the writer and the gate cannot disagree.
 - **A thin caller in each brain repository**: `.github/workflows/brain-gate.yml`, with one job per check, each using the action pinned to a release by commit SHA. The brain repository keeps its own config:
   - the allowed email domains, the size cap and the legacy-log flag, under `gate` in `wiffletree-brain.json`;

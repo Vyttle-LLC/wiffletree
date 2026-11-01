@@ -1,3 +1,5 @@
+Remaining work: task 4.2 (Update gate); every other task is done or not needed.
+
 No dependency on the other brain changes, or on `spaces`, for steps 1–3, which may start now. `spaces` task 4.4 runs `sensitive-info` and `secret-scan` from `gate/` on this Mac, so it needs steps 1–2. Step 4 needs `brain-registry-sync`.
 
 ## 1. Move the gate into Wiffletree
@@ -10,7 +12,7 @@ No dependency on the other brain changes, or on `spaces`, for steps 1–3, which
 
 - [x] 2.1 `gate/action.yml`: a composite action with input `check`. It installs gitleaks (pinned, checksum) and markdownlint-cli2 (pinned) as needed, runs the check, and writes annotations (file, line, rule) without text. It has no Sage actions.
 - [x] 2.2 The `gate-tests` self-test mode: run the bundled fixtures against the installed tools.
-- [x] 2.3 `.github/workflows/brain-gate-tests.yml`: run the fixture tests on changes under `gate/`. Document the release tagging in `gate/README.md`.
+- [x] 2.3 `.github/workflows/brain-gate-tests.yml`: run the fixture tests on changes under `gate/`. Document the release naming in `gate/README.md`.
 - [x] 2.4 `gate/README.md`: the contract, the rules, suppression, running locally, the caller template, the config keys and the repository settings to apply (from PR #1's README).
 
 ## 3. Shared fixtures
@@ -24,5 +26,5 @@ No dependency on the other brain changes, or on `spaces`, for steps 1–3, which
 
 ## 5. Release and adopt
 
-- [ ] 5.1 Tag `brain-gate-v1.0.0` once the tests pass. Hand the `sagehaven-docs` switch to its follow-up ticket: caller, config values from `gate_config.py`, the allow-list renamed, and the Sage summary job kept in the caller.
+- [x] 5.1 Not needed: brains pin the gate by commit SHA (`GATE_RELEASE`), and Michael chose not to push release tags. ~~Tag `brain-gate-v1.0.0` once the tests pass.~~ Hand the `sagehaven-docs` switch to its follow-up ticket: caller, config values from `gate_config.py`, the allow-list renamed, and the Sage summary job kept in the caller.
 - [x] 5.2 Run `openspec validate --strict` and the gate fixture tests before ready_for_testing.
