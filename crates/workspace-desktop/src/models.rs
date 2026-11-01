@@ -539,15 +539,21 @@ pub(crate) fn reset_space_row(overrides: &mut Vec<JobRow>, job: &Job) {
 /// What each of a Space's rows this Mac cannot run falls back to, as the Models and Space pages
 /// say it.
 pub(crate) fn fallback_lines(table: &SpaceTable, space: &str) -> Vec<String> {
-    (table.fallbacks().into_iter())
-        .map(|(row, why)| {
-            format!(
-                "{space} asks for {} for the {} row, but {why}, so it uses this Mac's row until then.",
-                row.main.first.short(),
-                row.job.name()
-            )
-        })
-        .collect()
+    let main = table.fallbacks(false).into_iter().map(|(row, why)| {
+        format!(
+            "{space} asks for {} for the {} row, but {why}, so it uses this Mac's row until then.",
+            row.main.first.short(),
+            row.job.name()
+        )
+    });
+    let small = table.fallbacks(true).into_iter().filter_map(|(row, why)| {
+        Some(format!(
+            "{space} asks for {} for the {} row's small work, but {why}, so small work uses this Mac's row until then.",
+            row.small.as_ref()?.first.short(),
+            row.job.name()
+        ))
+    });
+    main.chain(small).collect()
 }
 
 /// The model a new thread in `space` starts on when the user picks none: the first choice of
@@ -1033,7 +1039,25 @@ mod tests {
         assert_eq!(fallback_lines(&at(&claude_unchecked), "Sage").len(), 1);
         assert_eq!(
             thread_model(&table, Some(&space), &claude_unchecked),
-            Some(sol)
+            Some(sol.clone())
+        );
+
+        // A Space row whose small-work line alone cannot run falls back for small work only.
+        let mut implementer = job_row(Job::Implementer, &opus, Then::Wait);
+        implementer.small = Some(Line {
+            first: sol,
+            then: Then::Wait,
+        });
+        let space = sage(vec![implementer]);
+        let claude = detected(&[Provider::Claude]);
+        let table = space_table(&table, Some(&space), &space.models.overrides(), &claude);
+        assert!(table.fallbacks(false).is_empty(), "its main line runs here");
+        assert_eq!(table.fallbacks(true).len(), 1);
+        assert_eq!(
+            fallback_lines(&table, "Sage"),
+            [
+                "Sage asks for GPT 6.1 Sol · medium for the Implementer row's small work, but Codex is not signed in on this Mac, so small work uses this Mac's row until then."
+            ]
         );
     }
     #[test]

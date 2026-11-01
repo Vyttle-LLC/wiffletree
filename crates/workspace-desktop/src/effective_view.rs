@@ -13,21 +13,21 @@ pub(super) struct Effective {
 
 /// One setting as the panel lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Row {
-    pub(super) setting: String,
-    pub(super) value: String,
-    pub(super) from: Layer,
+struct Row {
+    setting: String,
+    value: String,
+    from: Layer,
     /// The layer named as the chip says it, such as "Sage" or "sagechat-sms in Sage".
-    pub(super) from_label: String,
+    from_label: String,
     /// The earlier layers it replaced, as "Overrode Stock, Workspace", if any.
-    pub(super) overrode: Option<String>,
+    overrode: Option<String>,
     /// Why a layer's value was ignored.
-    pub(super) notes: Vec<String>,
+    notes: Vec<String>,
 }
 
 /// The panel's sections, each a heading and its rows: Behaviors, models, reviews, and the
 /// instructions agents get on top. `space` names the project's Space.
-pub(super) fn sections(effective: &Effective, space: &str) -> Vec<(&'static str, Vec<Row>)> {
+fn sections(effective: &Effective, space: &str) -> Vec<(&'static str, Vec<Row>)> {
     let settings = &effective.settings;
     let repository = settings.repository.as_deref();
     let row = |setting: String, value: String, resolved: &Resolved<()>| {
@@ -55,19 +55,32 @@ pub(super) fn sections(effective: &Effective, space: &str) -> Vec<(&'static str,
             row(name, value, &erase(&resolved.resolved))
         })
         .collect();
-    let models = (settings.models.iter())
-        .map(|resolved| {
-            let line = &resolved.resolved.value.main;
-            let then = match &line.then {
-                Then::Model(then) => then.short(),
-                Then::Wait => "wait".into(),
-                Then::Skip => "skip".into(),
-            };
-            let value = format!("{}, then {then}", line.first.short());
-            let setting = format!("{} model", resolved.job.name());
-            row(setting, value, &erase(&resolved.resolved))
-        })
-        .collect();
+    let line_value = |line: &Line| {
+        let then = match &line.then {
+            Then::Model(then) => then.short(),
+            Then::Wait => "wait".into(),
+            Then::Skip => "skip".into(),
+        };
+        format!("{}, then {then}", line.first.short())
+    };
+    let mut models = vec![];
+    for resolved in &settings.models {
+        let job = &resolved.job;
+        let value = line_value(&resolved.resolved.value.main);
+        models.push(row(
+            format!("{} model", job.name()),
+            value,
+            &erase(&resolved.resolved),
+        ));
+        // Small work resolves on its own, and may come from another layer.
+        let small = (settings.small_models.iter()).find(|small| small.job.is(job));
+        if let Some(small) = small
+            && let Some(line) = &small.resolved.value.small
+        {
+            let setting = format!("{} model, small work", job.name());
+            models.push(row(setting, line_value(line), &erase(&small.resolved)));
+        }
+    }
     let reviews = &settings.reviews;
     let reviews = vec![
         row(
@@ -276,6 +289,18 @@ mod tests {
             },
             small: None,
         };
+        // Small work falls back to this Mac's row, whose small-work line is Sonnet.
+        let this_macs_small = JobRow {
+            small: Some(Line {
+                first: ModelProfile {
+                    provider: Provider::Claude,
+                    model: "sonnet".into(),
+                    effort: "medium".into(),
+                },
+                then: Then::Wait,
+            }),
+            ..reviewer.clone()
+        };
         let mut levels = resolved(vec!["Full".to_owned()], Layer::Space, &[Layer::Stock]);
         levels.notes = vec!["The Space's levels Quick are not configured here".into()];
         let settings = EffectiveSettings {
@@ -303,7 +328,11 @@ mod tests {
             ],
             models: vec![ResolvedRow {
                 job: reviewer.job.clone(),
-                resolved: resolved(reviewer, Layer::Space, &[Layer::ThisMac]),
+                resolved: resolved(reviewer.clone(), Layer::Space, &[Layer::ThisMac]),
+            }],
+            small_models: vec![ResolvedRow {
+                job: reviewer.job.clone(),
+                resolved: resolved(this_macs_small, Layer::ThisMac, &[]),
             }],
             reviews: ResolvedReviews {
                 levels,
@@ -337,6 +366,18 @@ mod tests {
         assert_eq!(
             (model.from_label.as_str(), model.overrode.as_deref()),
             ("Sage", Some("Overrode This Mac"))
+        );
+        let small = &sections[1].1[1];
+        assert_eq!(
+            (small.setting.as_str(), small.value.as_str()),
+            (
+                "Claude reviewer model, small work",
+                "Sonnet · medium, then wait"
+            )
+        );
+        assert_eq!(
+            (small.from, small.from_label.as_str()),
+            (Layer::ThisMac, "This Mac")
         );
         let reviews = &sections[2].1;
         assert_eq!(reviews[0].notes.len(), 1, "an ignored value says why");

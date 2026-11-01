@@ -781,7 +781,7 @@ impl ModelsPage {
             ),
         };
         let falls_back = table.is_some_and(|table| {
-            (table.fallbacks().iter()).any(|(space_row, _)| space_row.job.is(&row.job))
+            (table.fallbacks(small).iter()).any(|(space_row, _)| space_row.job.is(&row.job))
         });
         let reason = match &pick {
             Ok(pick) if pick.skip.is_some() => {
