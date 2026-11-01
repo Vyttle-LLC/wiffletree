@@ -45,6 +45,8 @@ The full explanation of everything below is in **[docs/FEATURES.md](docs/FEATURE
 - Press **⌘N**, add a repository, and tell the coordinator what you want. See [your first project](docs/DEVELOPMENT.md#first-project).
 - Updates are automatic: a sidebar card offers **Restart to update**.
 
+[More on installing](docs/FEATURES.md#install)
+
 ## Features
 
 <table>
@@ -204,7 +206,7 @@ open target/Wiffletree.app
 ```
 
 - Use `--beta` to build a separate **Wiffletree Beta** with its own store.
-- To try a scratch store without packaging, then save the suggested setup and relaunch to get the demo project:
+- Try a scratch store without packaging:
 
   ```sh
   cargo build --locked --release -p workspace-host -p workspace-desktop
@@ -212,6 +214,7 @@ open target/Wiffletree.app
     --data-dir /tmp/wiffletree-preview --demo-repository "$PWD"
   ```
 
+- Save the suggested setup on the Models page and relaunch to get the demo project.
 - [Development notes](docs/DEVELOPMENT.md) cover configuration, headless commands, validation and releases.
 - [Measured host timings](docs/performance/host-baseline.md) are separate from the performance targets, which are not yet verified.
 

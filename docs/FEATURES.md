@@ -2,6 +2,7 @@
 
 The full explanation of how Wiffletree works. The [README](../README.md) is the short version; this page holds the detail behind each of its sections. [Development notes](DEVELOPMENT.md) cover the implementation.
 
+- [Install](#install)
 - [Safety](#safety)
 - [Projects and the coordinator](#projects-and-the-coordinator)
 - [Tickets](#tickets)
@@ -17,6 +18,16 @@ The full explanation of how Wiffletree works. The [README](../README.md) is the 
 - [Remote access](#remote-access)
 - [Processes panel](#processes-panel)
 - [Performance](#performance)
+
+## Install
+
+**The installer.** The README's one command downloads the signed and notarized app from [Releases](https://github.com/Vyttle-LLC/wiffletree/releases/latest), checks it with Gatekeeper, moves it to `/Applications` and opens it. Run it again any time to reinstall. To install somewhere else, set `WIFFLETREE_INSTALL_DIR=~/Applications`. If you prefer to do it by hand, download `Wiffletree-<version>-macos-arm64.zip`, unzip it and drag `Wiffletree.app` to Applications.
+
+**First run.** The first time you open Wiffletree, a welcome screen lists the CLIs it found signed in and offers a model setup suggested from them. Review it on the Models page and press **Save**; no agent starts until a setup is saved. Then press **⌘N**, add a repository, and tell the coordinator what you want built.
+
+**Updates are automatic.** The app checks hourly, downloads new versions in the background and shows a card in the sidebar with what changed. Click **Restart to update**, or quit Wiffletree from its menu bar icon. To check right away, click the version number at the bottom of the sidebar.
+
+**The menu bar icon.** Agents keep working after you quit the app, and a menu bar icon shows how many are.
 
 ## Safety
 
@@ -72,7 +83,7 @@ A brain is a Git repository of Markdown that keeps what a team has decided and l
 
 **Anyone can read it.** Agents ask the brain with the read-only `query_brain` tool, which walks `STATUS.md`, the note index, the top notes and then the log entries. A project's Memory panel shows its brain, its waiting batches, open conflicts and recent entries. The brain browser has four views, for a project or for the whole brain: Status, Wiki, Logs and Conflicts. Wiki shows each note with its sources and backlinks. ⌘K searches one brain.
 
-**Compile turns logs into notes.** One Mac is a brain's compiler, and it compiles at the time set in the brain's `wiffletree-brain.json`, on Run now, or after a ruling merges. It first checks each pending entry's commit or pull request and marks the entry verified, claimed or unverified. A run with nothing pending makes no model call. The model on the Brain compiler row in Who runs what then folds entries into notes and `STATUS.md`, and it can change only those files. With no model on that row, entries wait. What conflicts with an existing note becomes a card in the Inbox, on the Brains page or in the Conflicts view, with a recommended ruling, and your ruling is written back as a decision entry. Compile's result reaches `main` through a pull request like any other.
+**Compile turns logs into notes.** One Mac is a brain's compiler, and it compiles at the time set in the brain's `wiffletree-brain.json`, on Run now, or after a ruling merges. It first checks each pending entry's commit or pull request and marks the entry verified, claimed or unverified. A run with nothing pending makes no model call. The model on the Brain compiler row in Who runs what then folds entries into notes and `STATUS.md`, and it can change only `notes/**`, `STATUS.md` and `reconcile-queue.md`. With no model on that row, entries wait. What conflicts with an existing note becomes a card in the Inbox, on the Brains page or in the Conflicts view, with a recommended ruling, and your ruling is written back as a decision entry. Compile's result reaches `main` through a pull request like any other.
 
 **The brain gate guards `main`.** Every pull request to a brain runs seven deterministic checks: `secret-scan`, `sensitive-info`, `markdown-lint`, `wikilinks`, `log-schema`, `path-ownership` and `gate-tests`. No check calls a model, and none prints a matched value. Wiffletree ships the gate as a GitHub Action, and each brain pins it with a thin caller. Set up on the Brains page opens the pull request that installs the gate, and Update gate moves its pin; both wait for the code owner's review. Batches auto-merge once the required checks pass. If a brain's gate would reject its logs, they wait on your Mac.
 
@@ -128,7 +139,7 @@ With "Sort new comments" ticked and a Claude model in the PR keeper's row, it al
 
 ## Settings sync
 
-**Your settings can follow you to every Mac.** In Settings, name a private GitHub repository that you created, empty or already used by your other Mac. Wiffletree then keeps the skills with your rules, rewrites and their history, the review settings, the model notes, the switch threshold, the check-in thresholds and the PR keeper's triggers the same on every Mac that names it. It pulls at launch and every 5 minutes and pushes a few seconds after you change something, with no model. What belongs to one Mac stays there: who runs each job, the PR keeper's model included, the workspace folder, the owners allowed to get pull requests, the repositories and their checks, and the appearance. Passwords, tokens, the database, conversations, projects and tickets are never shared.
+**Your settings can follow you to every Mac.** In Settings, name a private GitHub repository that you created, empty or already used by your other Mac. Wiffletree then keeps the skills with your rules, rewrites and their history, the review settings, the model notes, the switch threshold, the check-in thresholds and the PR keeper's triggers the same on every Mac that names it. It also shares the assistant's name, the router's confidence threshold, and the PR keeper's quiet period and review level. It pulls at launch and every 5 minutes and pushes a few seconds after you change something, with no model. What belongs to one Mac stays there: who runs each job, the PR keeper's model included, the workspace folder, the owners allowed to get pull requests, the repositories and their checks, and the appearance. Passwords, tokens, the database, conversations, projects and tickets are never shared.
 
 Choosing the repository on a Mac is what lets Wiffletree push to it, only to its default branch, only its own files and never by force; the owners you allow for pull requests neither grant nor need that. Skills are part of every agent's instructions, so whoever can push to the repository can change how your agents work on every Mac, and an organization's members may be able to read a private repository it owns: Settings says who can before you choose. When two Macs change the same setting, or something other than Wiffletree changes one, that setting pauses until you choose, with a note at the top of every project's Inbox and a comparison of both versions. An agent's shell can still write the shared folder and push to the repository with your credentials. Sync does not prevent that, but it does not spread an edit it did not make: such an edit waits for you on that Mac.
 
