@@ -830,7 +830,7 @@ impl Host {
             {
                 continue;
             }
-            if ticket.keeper.as_ref().is_some_and(|k| k.waiting.is_some()) {
+            if ticket.is_open() && ticket.keeper.as_ref().is_some_and(|k| k.waiting.is_some()) {
                 due.waiting.push(ticket.id.clone());
             }
             let part = self
@@ -1310,7 +1310,7 @@ impl Host {
         Ok(!ended && self.will_try(ticket, problem)?)
     }
     /// Sends each of the watcher's held wakes once the keeper no longer holds it, and drops it
-    /// once a try started, the PR's head changed or the problem is gone.
+    /// once a try started, the PR's head changed, the problem is gone or the ticket finished.
     fn release_held(&mut self, ticket_id: &str) -> Result<()> {
         let mut ticket = self.ticket(ticket_id)?;
         let held = ticket
@@ -1322,7 +1322,7 @@ impl Host {
             let pr = ticket
                 .open_pull_request()
                 .filter(|pr| pr.head == wake.head && shows(wake.problem, pr))
-                .filter(|_| !ticket.tried(wake.problem, &wake.head));
+                .filter(|_| ticket.is_open() && !ticket.tried(wake.problem, &wake.head));
             let Some(pr) = pr else {
                 continue;
             };
@@ -2452,6 +2452,7 @@ pub(crate) mod tests {
         };
         let pass = pr_watch::Pass {
             found: vec![found],
+            finished: vec![],
             rate_limit: pr_watch::RateLimit {
                 remaining: 4000,
                 reset_at: 0,
@@ -3071,6 +3072,7 @@ pub(crate) mod tests {
         };
         let pass = pr_watch::Pass {
             found: vec![found],
+            finished: vec![],
             rate_limit: pr_watch::RateLimit {
                 remaining: 4000,
                 reset_at: 0,
@@ -4143,6 +4145,7 @@ pub(crate) mod tests {
                 base_head: f.head(),
                 worktree_head: Some(f.head()),
             }],
+            finished: vec![],
             rate_limit: pr_watch::RateLimit {
                 remaining: 4000,
                 reset_at: 0,
@@ -5704,6 +5707,7 @@ pub(crate) mod tests {
         };
         let outcome = pr_watch::Outcome::Read(pr_watch::Pass {
             found: vec![found],
+            finished: vec![],
             rate_limit,
         });
         // In the actor's order: the base first, then the snapshot.
@@ -5759,6 +5763,22 @@ pub(crate) mod tests {
         watched(&mut f, &base, &head, true, 4 * MINUTE);
         assert!(wakes(&f).is_empty());
         told(&f);
+    }
+
+    #[test]
+    fn a_finished_tickets_open_pr_gets_no_keeper_work_and_its_held_wake_is_dropped() {
+        let (mut f, _r, base) = conflicting();
+        let head = f.head();
+        watched(&mut f, &base, &head, true, 0);
+        assert!(held(&f).is_some());
+        let mut ticket = f.ticket();
+        ticket.keeper.get_or_insert_default().waiting = Some(head.clone());
+        f.host.save_ticket(&ticket).unwrap();
+        f.host.close_ticket(&ticket.id).unwrap();
+        let due = watched(&mut f, &base, &head, true, 60 * MINUTE);
+        assert!(due.rebases.is_empty() && due.reproductions.is_empty());
+        assert!(due.fetches.is_empty() && due.waiting.is_empty() && due.reads.is_empty());
+        assert!(held(&f).is_none() && wakes(&f).is_empty());
     }
 
     #[test]

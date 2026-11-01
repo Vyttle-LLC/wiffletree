@@ -11533,6 +11533,7 @@ mod tests {
             };
             let pass = pr_watch::Pass {
                 found: vec![found],
+                finished: vec![],
                 rate_limit: pr_watch::RateLimit {
                     remaining: 4000,
                     reset_at: 0,
