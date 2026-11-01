@@ -3828,8 +3828,8 @@ pub(crate) mod tests {
         contract: 2,
     };
 
-    /// A teammate's commit to `main` of the caller pinned to `commit` (labelled `tag`) and a
-    /// config naming `version`, with a key this host does not know.
+    /// A teammate's commit to `main` of the caller pinned to `commit` (labelled brain-gate-v1.0.0)
+    /// and a config naming `version`, with a key this host does not know.
     fn gate_on_main(github: &GitHub, commit: &'static str, version: &str) {
         let caller = caller(GateRelease {
             tag: "brain-gate-v1.0.0",
@@ -4025,6 +4025,36 @@ pub(crate) mod tests {
         );
         let current = host.update_brain_gate(REPO, &tools.git).unwrap_err();
         assert!(format!("{current:#}").contains("already pins brain-gate-v1.1.0"));
+    }
+
+    #[test]
+    fn the_sidebar_lists_a_held_brain_and_not_one_beside_it_whose_gate_accepts_its_logs() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = GitHub::new(folder.path());
+        let tools = github.tools();
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, _) = host_with_brain(home.path());
+        host.gate = WRITES_V2;
+        gate_on_main(&github, RELEASE.commit, RELEASE.tag);
+        run(&mut host, &tools);
+        host.confirm_brain(REPO).unwrap();
+        queue_log(&mut host, &tools, BrainSource::BrainsPage);
+        // A second brain with the same queued log batch, whose gate accepts the contract.
+        let other = "Vyttle-LLC/other-brain";
+        (host.db.execute(
+            "INSERT INTO brains(repository,data) SELECT ?2, json_set(data,'$.repository',?2,
+               '$.gate.logs_held',json('false')) FROM brains WHERE repository=?1",
+            [REPO, other],
+        ))
+        .unwrap();
+        (host.db.execute(
+            "INSERT INTO brain_batches(id,repository,data) SELECT id||'-other', ?2,
+               json_set(data,'$.repository',?2) FROM brain_batches WHERE repository=?1",
+            [REPO, other],
+        ))
+        .unwrap();
+        assert_eq!(host.brain_batches(Some(other)).unwrap().len(), 1);
+        assert_eq!(host.snapshot().unwrap().brains_logs_held, [REPO]);
     }
 
     #[test]

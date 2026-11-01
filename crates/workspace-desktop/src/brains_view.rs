@@ -282,10 +282,10 @@ impl BrainsPage {
         cx: &mut Context<Self>,
     ) -> Div {
         let repository = brain.repository.clone();
-        let (sync, tone) = sync_state(brain);
         let batches: Vec<&BrainBatch> = (listing.batches.iter())
             .filter(|b| b.repository.eq_ignore_ascii_case(&brain.repository))
             .collect();
+        let (sync, tone) = sync_state(brain, &listing.batches);
         let fact = |label: &'static str, value: AnyElement| {
             div()
                 .flex()
@@ -1211,14 +1211,17 @@ fn same_line(a: &Editing, b: &Editing) -> bool {
     }
 }
 
-/// The brain's sync pill: held, failing, logs held for the gate, waiting for the grant, or when
-/// it last synced.
-pub(super) fn sync_state(brain: &Brain) -> (String, Tone) {
+/// The brain's sync pill: held, failing, a log batch among `batches` held for the gate,
+/// waiting for the grant, or when it last synced.
+pub(super) fn sync_state(brain: &Brain, batches: &[BrainBatch]) -> (String, Tone) {
+    let holds_logs = (batches.iter())
+        .filter(|b| b.repository.eq_ignore_ascii_case(&brain.repository))
+        .any(|b| held_for(brain, b).is_some());
     if brain.held.is_some() {
         ("Writing held".into(), Tone::Bad)
     } else if brain.problem.is_some() {
         ("Sync failed".into(), Tone::Bad)
-    } else if brain.gate.as_ref().is_some_and(|g| g.logs_held) {
+    } else if holds_logs {
         ("Logs held".into(), Tone::Warn)
     } else if !brain.granted {
         ("Waits for your grant".into(), Tone::Warn)
@@ -1560,11 +1563,12 @@ fn logs_held_line(gate: &BrainGate) -> String {
     )
 }
 
-/// The contract a batch waits for while the brain's pinned gate rejects it: a log batch with
-/// no PR yet, which the host keeps on this Mac.
+/// The contract a batch waits for while the brain's pinned gate rejects it: an unfinished log
+/// batch with no PR yet, which the host keeps on this Mac.
 pub(super) fn held_for(brain: &Brain, batch: &BrainBatch) -> Option<u64> {
     let gate = brain.gate.as_ref().filter(|g| g.logs_held)?;
-    (batch.kind == BrainBatchKind::Log && batch.pull_request.is_none()).then_some(gate.contract)
+    let waiting = batch.pull_request.is_none() && !batch.is_finished();
+    (batch.kind == BrainBatchKind::Log && waiting).then_some(gate.contract)
 }
 
 /// How many log entries the brain's held batches keep on this Mac.
@@ -1897,7 +1901,6 @@ mod tests {
         mismatch.logs_held = true;
         held.gate = Some(mismatch.clone());
         held.synced_at = Some(ui::now());
-        assert_eq!(sync_state(&held), ("Logs held".into(), Tone::Warn));
         assert!(logs_held_line(&mismatch).contains(
             "writes log entries in gate contract v2, and this brain's gate (v1.1.0) would reject them"
         ));
@@ -1905,6 +1908,13 @@ mod tests {
         let mut queued = batch(BrainStage::Queued, None);
         queued.files = vec!["a.md".into(); 14];
         let open = batch(BrainStage::Checks, None);
+        let held_pill = sync_state(&held, &[queued.clone(), open.clone()]);
+        assert_eq!(held_pill, ("Logs held".into(), Tone::Warn));
+        assert_eq!(
+            sync_state(&held, std::slice::from_ref(&open)).0,
+            "Synced just now",
+            "a mismatch with no log batch waiting holds nothing"
+        );
         let mut config = batch(BrainStage::Queued, None);
         config.kind = BrainBatchKind::Config;
         assert_eq!(held_for(&held, &queued), Some(2));
@@ -1914,7 +1924,17 @@ mod tests {
             None,
             "config PRs still go through"
         );
-        assert_eq!(held_entries(&held, &[&queued, &open, &config]), 14);
+        let mut discarded = batch(BrainStage::Discarded, None);
+        discarded.pull_request = None;
+        assert_eq!(
+            held_for(&held, &discarded),
+            None,
+            "a discarded batch waits for nothing"
+        );
+        assert_eq!(
+            held_entries(&held, &[&queued, &open, &config, &discarded]),
+            14
+        );
         assert_eq!(
             steps(&queued, Some(2))[0],
             ("Held · waiting for gate v2".into(), Some(Tone::Warn))
@@ -2032,16 +2052,19 @@ mod tests {
         let mut waiting = brain();
         waiting.granted = false;
         assert_eq!(
-            sync_state(&waiting),
+            sync_state(&waiting, &[]),
             ("Waits for your grant".into(), Tone::Warn)
         );
         let mut held = brain();
         held.held = Some(BrainHold::NotFastForward);
         held.synced_at = Some(ui::now());
-        assert_eq!(sync_state(&held).1, Tone::Bad);
+        assert_eq!(sync_state(&held, &[]).1, Tone::Bad);
         let mut synced = brain();
         synced.synced_at = Some(ui::now());
-        assert_eq!(sync_state(&synced), ("Synced just now".into(), Tone::Good));
+        assert_eq!(
+            sync_state(&synced, &[]),
+            ("Synced just now".into(), Tone::Good)
+        );
     }
 
     #[test]

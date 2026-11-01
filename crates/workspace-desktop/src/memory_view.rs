@@ -255,7 +255,8 @@ impl Inspector {
                     .font_weight(FontWeight::MEDIUM)
                     .child(repository.to_owned()),
             );
-        if let Some((sync, tone)) = brain.map(brains_view::sync_state) {
+        let batches = listing.map_or(&[][..], |l| &l.batches);
+        if let Some((sync, tone)) = brain.map(|b| brains_view::sync_state(b, batches)) {
             title = title.child(pill(sync, tone.color(p)));
         }
         let space = self.project_space().map_or("", |s| s.name.as_str());
