@@ -394,11 +394,7 @@ impl BehaviorsPage {
                 match values {
                     Ok(values) if last => {
                         view.behaviors.refusal = None;
-                        if saving == Refused::Additions && view.behaviors.scope == saved {
-                            let text = values.additions.clone();
-                            (view.behaviors.additions)
-                                .update(cx, |input, cx| input.set_value(text, window, cx));
-                        }
+                        // Text typed while the save waited stays, as an unsaved edit.
                         view.store(saved, values, window, cx);
                     }
                     // A later save, sent with this one's values, answers for both.
