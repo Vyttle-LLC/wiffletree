@@ -997,7 +997,7 @@ impl Service {
     pub fn start_with(home: PathBuf, helper: PathBuf, remote: remote::Options) -> Result<Self> {
         ensure!(
             helper.is_file(),
-            "workspace-host helper is missing; rebuild the app bundle"
+            "wiffletree-host helper is missing; rebuild the app bundle"
         );
         let (sender, receiver) = async_channel::bounded(256);
         let events = EventLog::default();
@@ -1009,7 +1009,7 @@ impl Service {
         let (end, ended) = async_channel::bounded::<()>(1);
         let worker = sender.clone();
         let thread = std::thread::Builder::new()
-            .name("workspace-host".into())
+            .name("wiffletree-host".into())
             .spawn(move || {
                 let _end = end;
                 let setup = (|| -> Result<_> {

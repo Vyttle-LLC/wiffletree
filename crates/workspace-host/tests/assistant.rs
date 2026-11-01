@@ -385,7 +385,7 @@ fn the_router_sends_each_message_where_it_answers_and_holds_it_when_unsure() {
 fn the_job_shell_hook_refuses_with_exit_2_unless_it_allows() {
     use std::io::Write;
     let hook = |input: &[u8]| {
-        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_workspace-host"))
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_wiffletree-host"))
             .arg("job-bash-check")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())

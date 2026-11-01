@@ -1,4 +1,4 @@
-//! The launchd host's versioned copies, `<data folder>/host/<version>/workspace-host`. A launchd
+//! The launchd host's versioned copies, `<data folder>/host/<version>/wiffletree-host`. A launchd
 //! host runs from one, and starts its agents' helpers from it, so swapping the app bundle never
 //! touches a running host. A child host runs from the bundle and has no copy.
 use std::{
@@ -11,7 +11,7 @@ pub const FOLDER: &str = "host";
 
 /// Where `version`'s copy of the host lives.
 pub fn path(data: &Path, version: &str) -> PathBuf {
-    data.join(FOLDER).join(version).join("workspace-host")
+    data.join(FOLDER).join(version).join("wiffletree-host")
 }
 
 /// Copies `source`, the app bundle's host, to `version`'s copy and returns it. It replaces an
@@ -21,7 +21,7 @@ pub fn install(source: &Path, data: &Path, version: &str) -> io::Result<PathBuf>
     let copy = path(data, version);
     let folder = copy.parent().expect("a copy is in its version's folder");
     fs::create_dir_all(folder)?;
-    let partial = folder.join("workspace-host.partial");
+    let partial = folder.join("wiffletree-host.partial");
     fs::copy(source, &partial)?;
     fs::rename(&partial, &copy)?;
     Ok(copy)
@@ -102,7 +102,7 @@ mod tests {
     fn a_host_outside_the_copies_removes_nothing() {
         let data = tempfile::tempdir().unwrap();
         let copy = install(data.path(), "0.1.0");
-        let elsewhere = data.path().join("workspace-host");
+        let elsewhere = data.path().join("wiffletree-host");
         fs::write(&elsewhere, "").unwrap();
 
         remove_unused(data.path(), &elsewhere);

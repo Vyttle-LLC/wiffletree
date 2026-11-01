@@ -1204,7 +1204,7 @@ fn a_restart_stops_what_a_killed_host_left_running_mid_turn_and_between_turns() 
     }
     // A host of its own, so it can be killed as a crash would kill it. Its command input stays
     // open: closing it would be a quit.
-    let mut headless = std::process::Command::new(env!("CARGO_BIN_EXE_workspace-host"))
+    let mut headless = std::process::Command::new(env!("CARGO_BIN_EXE_wiffletree-host"))
         .arg("--data-dir")
         .arg(home.path())
         .stdin(std::process::Stdio::piped())

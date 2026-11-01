@@ -599,7 +599,7 @@ mod tests {
             assert!(shell_text_refused(unreadable).is_some());
         }
         // Only a job's run with a CLI source gets the hook, which runs Wiffletree's helper.
-        let helper = Path::new("/Apps/Wiffle tree/workspace-host");
+        let helper = Path::new("/Apps/Wiffle tree/wiffletree-host");
         let mut run = launch(vec![gh()]);
         assert!(run.claude_settings(helper)["hooks"].is_null());
         run.job_run = true;
@@ -607,7 +607,7 @@ mod tests {
         assert_eq!(settings["autoMemoryEnabled"], false);
         assert_eq!(
             settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
-            "'/Apps/Wiffle tree/workspace-host' job-bash-check"
+            "'/Apps/Wiffle tree/wiffletree-host' job-bash-check"
         );
         run.sources.clear();
         assert!(run.claude_settings(helper)["hooks"].is_null());

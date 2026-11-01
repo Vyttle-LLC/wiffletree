@@ -6,8 +6,8 @@ How a client talks to a Wiffletree host: the desktop app today, and later `remot
 
 | Transport | Started as | Handshake | Protocol |
 | --- | --- | --- | --- |
-| `<data folder>/host.sock` | `workspace-host serve --data-dir <dir>` | `Hello` first | 2, or 1 if the client asks for it |
-| Standard input and output | `workspace-host --data-dir <dir>` | none | 1 only |
+| `<data folder>/host.sock` | `wiffletree-host serve --data-dir <dir>` | `Hello` first | 2, or 1 if the client asks for it |
+| Standard input and output | `wiffletree-host --data-dir <dir>` | none | 1 only |
 
 The standard-input mode is for scripts such as `scripts/test_communications.py`: one request per line on standard input, one response per line on standard output, and the host stops when its input closes. Everything else on this page is about the socket.
 
@@ -18,7 +18,7 @@ The standard-input mode is for scripts such as `scripts/test_communications.py`:
 - A child host, `serve --data-dir <dir> --child`, reads the app's client credential from the first line of its standard input and stops when that input closes. The app keeps the pipe open for as long as it runs, so the credential is never in the host's environment, which agents inherit, or in a file. `workspace_core::ChildHost` starts one this way.
 - Without `--child`, the credential is the data folder's login Keychain item, created at the first start with an access list of the host's own binary and the app given with `--app <Wiffletree.app>` (`crates/workspace-host/src/keychain.rs`).
 - SIGTERM, SIGINT and SIGHUP run the host's shutdown, which stops running turns as a quit does, then remove the socket.
-- A launchd host runs from a versioned copy of its binary, `<data folder>/host/<version>/workspace-host`, which an update of the app does not replace, and starts its agents' helpers from that same copy. Started from a copy, it removes the other version folders under `host/`. A child host runs from the app bundle (or `target/`) and has no copy.
+- A launchd host runs from a versioned copy of its binary, `<data folder>/host/<version>/wiffletree-host`, which an update of the app does not replace, and starts its agents' helpers from that same copy. Started from a copy, it removes the other version folders under `host/`. A child host runs from the app bundle (or `target/`) and has no copy.
 
 ### Remote devices
 
@@ -62,7 +62,7 @@ The first line a client sends is `Hello`:
 The host chooses the newest protocol both ranges include. It accepts its own protocol version and the one before it (`PROTOCOLS`, `[1, 2]` today), so an app one release ahead or behind still works. It answers with one of:
 
 ```json
-{"welcome": {"protocol": 2, "host_id": "…", "host_version": "0.9.0", "epoch": "…", "capabilities": ["events", "files", "folders"], "binary": "/…/workspace-host"}}
+{"welcome": {"protocol": 2, "host_id": "…", "host_version": "0.9.0", "epoch": "…", "capabilities": ["events", "files", "folders"], "binary": "/…/wiffletree-host"}}
 {"refused": {"host_protocols": [1, 2], "client_protocols": [3, 4], "host_version": "0.9.0", "working": 2}}
 ```
 

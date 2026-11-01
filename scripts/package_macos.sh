@@ -26,7 +26,7 @@ app_bundle="$repo_root/target/$name.app"
 # Start clean so files from an earlier build, such as a stapled ticket, never get re-signed.
 rm -rf "$app_bundle"
 mkdir -p "$app_bundle/Contents/MacOS" "$app_bundle/Contents/Resources"
-cp target/release/workspace-host "$app_bundle/Contents/MacOS/workspace-host"
+cp target/release/wiffletree-host "$app_bundle/Contents/MacOS/wiffletree-host"
 cp target/release/workspace-desktop "$app_bundle/Contents/MacOS/wiffletree"
 
 # Build every standard and Retina representation from the canonical brand exports.
@@ -70,9 +70,10 @@ if [ "$identity" = "-" ]; then
     codesign --force --sign - "$app_bundle"
 else
     # Notarization requires the hardened runtime and a timestamp on every executable.
-    for target in "$app_bundle/Contents/MacOS/workspace-host" "$app_bundle"; do
-        codesign --force --options runtime --timestamp --sign "$identity" \
-            ${CODESIGN_KEYCHAIN:+--keychain "$CODESIGN_KEYCHAIN"} "$target"
-    done
+    signing=(--force --options runtime --timestamp --sign "$identity"
+        ${CODESIGN_KEYCHAIN:+--keychain "$CODESIGN_KEYCHAIN"})
+    # Keychain items match the host by this identifier, so changing it locks upgraded hosts out.
+    codesign "${signing[@]}" --identifier workspace-host "$app_bundle/Contents/MacOS/wiffletree-host"
+    codesign "${signing[@]}" "$app_bundle"
 fi
 printf 'Development bundle: %s\n' "$app_bundle"

@@ -101,7 +101,7 @@ fn launched_turn(
         attachments: vec![],
         socket: folders.scratch.join("no-socket"),
         token: String::new(),
-        helper: env!("CARGO_BIN_EXE_workspace-host").into(),
+        helper: env!("CARGO_BIN_EXE_wiffletree-host").into(),
         instructions: provider::skill(role),
         thread: Some(launch),
     };

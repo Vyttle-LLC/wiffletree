@@ -533,8 +533,8 @@ mod tests {
             .unwrap()
             .parent()
             .unwrap()
-            .join("workspace-host");
-        assert!(binary.is_file(), "build workspace-host first: {binary:?}");
+            .join("wiffletree-host");
+        assert!(binary.is_file(), "build wiffletree-host first: {binary:?}");
         binary
     }
 

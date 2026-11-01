@@ -83,7 +83,7 @@ fn main() -> Result<()> {
     }
     if args.len() != 2 || args[0] != "--data-dir" {
         eprintln!(
-            "Usage: workspace-host --data-dir <directory>\nReads version-1 JSON-line commands on stdin; writes correlated responses on stdout.\n       workspace-host serve --data-dir <directory> [--child | --app <Wiffletree.app>]  (clients on <directory>/host.sock; see docs/host-protocol.md)\n       workspace-host probe-codex  (model discovery, no inference)\n       workspace-host probe-quota  (Codex account limits, no inference)\n       workspace-host --data-dir <directory> probe-context <claude|codex> <role> <model> <provider-session> <directory>  (context window use, no inference)"
+            "Usage: wiffletree-host --data-dir <directory>\nReads version-1 JSON-line commands on stdin; writes correlated responses on stdout.\n       wiffletree-host serve --data-dir <directory> [--child | --app <Wiffletree.app>]  (clients on <directory>/host.sock; see docs/host-protocol.md)\n       wiffletree-host probe-codex  (model discovery, no inference)\n       wiffletree-host probe-quota  (Codex account limits, no inference)\n       wiffletree-host --data-dir <directory> probe-context <claude|codex> <role> <model> <provider-session> <directory>  (context window use, no inference)"
         );
         return Ok(());
     }

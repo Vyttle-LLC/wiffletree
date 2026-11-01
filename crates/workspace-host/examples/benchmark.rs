@@ -59,7 +59,7 @@ fn edit_diff() -> FileDiff {
 }
 
 /// What the desktop waits for from its own host process: a request written to `host.sock`,
-/// the host's actor and JSON, and the reply decoded. The host is the `workspace-host` built
+/// the host's actor and JSON, and the reply decoded. The host is the `wiffletree-host` built
 /// beside this example, started as a child the way the app starts one, with no provider found.
 fn over_the_socket(directory: &std::path::Path, session: &str) -> Result<Vec<serde_json::Value>> {
     let examples = std::env::current_exe()?;
@@ -67,10 +67,10 @@ fn over_the_socket(directory: &std::path::Path, session: &str) -> Result<Vec<ser
         .parent()
         .and_then(|p| p.parent())
         .unwrap()
-        .join("workspace-host");
+        .join("wiffletree-host");
     anyhow::ensure!(
         binary.is_file(),
-        "Build {} first: cargo build --release -p workspace-host --bin workspace-host",
+        "Build {} first: cargo build --release -p workspace-host --bin wiffletree-host",
         binary.display()
     );
     let launch = ChildLaunch::new(&binary, directory)

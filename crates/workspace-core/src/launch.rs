@@ -422,7 +422,7 @@ mod tests {
     #[test]
     fn the_launchd_plist_runs_the_versioned_copy_for_the_app_and_restarts_only_after_a_failure() {
         let job = LaunchdJob::new(
-            Path::new("/Applications/Wiffletree.app/Contents/MacOS/workspace-host"),
+            Path::new("/Applications/Wiffletree.app/Contents/MacOS/wiffletree-host"),
             Path::new("/Users/me/Library/Application Support/R&D"),
             Path::new("/Applications/Wiffletree.app"),
         );
@@ -435,7 +435,7 @@ mod tests {
         let plist = job.plist();
         let version = build_version();
         let arguments = format!(
-            "<string>/Users/me/Library/Application Support/R&amp;D/host/{version}/workspace-host</string>\n\t\t<string>serve</string>\n\t\t<string>--data-dir</string>\n\t\t<string>/Users/me/Library/Application Support/R&amp;D</string>\n\t\t<string>--app</string>\n\t\t<string>/Applications/Wiffletree.app</string>"
+            "<string>/Users/me/Library/Application Support/R&amp;D/host/{version}/wiffletree-host</string>\n\t\t<string>serve</string>\n\t\t<string>--data-dir</string>\n\t\t<string>/Users/me/Library/Application Support/R&amp;D</string>\n\t\t<string>--app</string>\n\t\t<string>/Applications/Wiffletree.app</string>"
         );
         assert!(plist.contains(&arguments), "{plist}");
         assert!(plist.contains("<key>SuccessfulExit</key>\n\t\t<false/>"));

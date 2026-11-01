@@ -63,7 +63,7 @@ struct Fixture {
 impl Fixture {
     fn new(prepare: impl FnOnce(&mut Host)) -> Self {
         Self::from(
-            Path::new(env!("CARGO_BIN_EXE_workspace-host")),
+            Path::new(env!("CARGO_BIN_EXE_wiffletree-host")),
             None,
             tempfile::tempdir().unwrap(),
             prepare,
@@ -243,7 +243,7 @@ fn the_handshake_chooses_the_newest_common_protocol() {
         ]
     );
     assert_eq!(welcome.host_version, env!("CARGO_PKG_VERSION"));
-    assert!(welcome.binary.ends_with("workspace-host"));
+    assert!(welcome.binary.ends_with("wiffletree-host"));
     // The host id stays with the store; the epoch is this start's.
     let again = fixture.connect().hello(PROTOCOLS, None);
     assert_eq!(again["welcome"]["host_id"], json!(welcome.host_id));
@@ -322,7 +322,7 @@ fn with_no_common_protocol_the_refusal_counts_working_agents_and_restart_now_sto
     std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut main = None;
     let mut fixture = Fixture::from(
-        Path::new(env!("CARGO_BIN_EXE_workspace-host")),
+        Path::new(env!("CARGO_BIN_EXE_wiffletree-host")),
         Some(&provider),
         tempfile::tempdir().unwrap(),
         |host| {
@@ -395,8 +395,8 @@ fn stop_agents_and_quit_is_answered_and_the_host_exits_successfully() {
 #[test]
 fn a_host_run_from_a_versioned_copy_keeps_its_path_and_removes_unused_copies() {
     let scratch = tempfile::tempdir().unwrap();
-    let source = scratch.path().join("workspace-host");
-    std::fs::copy(env!("CARGO_BIN_EXE_workspace-host"), &source).unwrap();
+    let source = scratch.path().join("wiffletree-host");
+    std::fs::copy(env!("CARGO_BIN_EXE_wiffletree-host"), &source).unwrap();
     let data = tempfile::tempdir().unwrap();
     let copy = |version: &str| {
         let copy = host_copy::path(data.path(), version);
@@ -430,13 +430,13 @@ fn a_second_host_from_another_copy_is_refused_and_leaves_the_running_hosts_copy(
     let data = tempfile::tempdir().unwrap();
     let running = host_copy::path(data.path(), "1.0.0");
     std::fs::create_dir_all(running.parent().unwrap()).unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_workspace-host"), &running).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_wiffletree-host"), &running).unwrap();
     let data_path = data.path().to_owned();
     let fixture = Fixture::from(&running, None, data, |_| {});
     // An update arrives while the host runs: the app copies the new version beside it.
     let second = host_copy::path(&data_path, "2.0.0");
     std::fs::create_dir_all(second.parent().unwrap()).unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_workspace-host"), &second).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_wiffletree-host"), &second).unwrap();
 
     let mut command = process::Command::new(&second);
     command
@@ -944,7 +944,7 @@ fn a_message_from_the_human_needs_the_apps_credential() {
 /// The app's client of a child host on `data`, started as the app starts one; it records the
 /// events it reads.
 fn app_client(data: &Path, shell: &Path) -> (HostClient, Arc<Mutex<Vec<EventKind>>>) {
-    let mut launch = ChildLaunch::new(Path::new(env!("CARGO_BIN_EXE_workspace-host")), data);
+    let mut launch = ChildLaunch::new(Path::new(env!("CARGO_BIN_EXE_wiffletree-host")), data);
     for (key, value) in isolated(shell) {
         launch = launch.env(key, value);
     }
@@ -1061,7 +1061,7 @@ fn stopping_the_client_while_it_starts_a_host_again_stops_that_host_at_once() {
     let wrapper = scratch.path().join("host");
     let script = format!(
         "#!/bin/sh\nif [ ! -e \"$0.ran\" ]; then touch \"$0.ran\"; exec '{}' \"$@\"; fi\necho $$ > '{}'\nexec cat >/dev/null\n",
-        env!("CARGO_BIN_EXE_workspace-host"),
+        env!("CARGO_BIN_EXE_wiffletree-host"),
         started.display()
     );
     std::fs::write(&wrapper, script).unwrap();

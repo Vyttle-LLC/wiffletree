@@ -46,7 +46,7 @@ The host SHALL expose versioned bounded commands over JSON-lines and build witho
 - **THEN** it fails visibly instead of becoming a competing writer
 
 #### Scenario: A script on standard input
-- **WHEN** a script writes a version-1 `Snapshot` request to `workspace-host --data-dir <dir>` without a handshake
+- **WHEN** a script writes a version-1 `Snapshot` request to `wiffletree-host --data-dir <dir>` without a handshake
 - **THEN** the host answers it as before
 
 ### Requirement: The coordinator receives the model configuration

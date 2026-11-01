@@ -34,7 +34,7 @@ core-foundation = "0.10"
 security-framework = "3.7"
 
 [[bin]]
-name = "workspace-host"
+name = "wiffletree-host"
 path = "src/main.rs"
 
 [[example]]

@@ -182,6 +182,6 @@ impl ServiceFixture {
                 std::env::set_var(key, value);
             }
         }
-        Service::start(self.home, env!("CARGO_BIN_EXE_workspace-host").into()).unwrap()
+        Service::start(self.home, env!("CARGO_BIN_EXE_wiffletree-host").into()).unwrap()
     }
 }

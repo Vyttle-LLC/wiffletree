@@ -487,7 +487,7 @@ impl World {
             host.send("waiting", None, &self.main.id, "JUST_REPLY waiting")
                 .unwrap();
         }
-        let mut headless = std::process::Command::new(env!("CARGO_BIN_EXE_workspace-host"))
+        let mut headless = std::process::Command::new(env!("CARGO_BIN_EXE_wiffletree-host"))
             .arg("--data-dir")
             .arg(self.home.path())
             .stdin(std::process::Stdio::piped())
