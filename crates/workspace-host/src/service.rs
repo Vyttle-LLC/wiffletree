@@ -3800,7 +3800,7 @@ impl Actor {
         if self.stopping {
             return false;
         }
-        if !self.host.settings().keeper.rebase {
+        if !self.host.settings().keeper.works_on_branches() {
             return match self.host.keeper_due_checked(
                 repository,
                 at,

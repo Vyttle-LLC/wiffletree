@@ -58,7 +58,7 @@ The host SHALL keep the keeper's settings in the shared folder's `settings/pr-ke
 - **THEN** the keeper does not try failed checks on this machine, `settings/pr-keeper.json` is unchanged, and the Repositories page says the trigger is on from the other machine and needs a PR keeper model here
 
 ### Requirement: The base must be quiet before a rebase
-With the rebase trigger on, a rebase SHALL be due for a kept ticket whose branch may be changed when the head commit of the PR's base branch, as the watcher last read it from GitHub, is not contained in the PR's head, and every pass for at least the quiet period has reported that same base commit. The host SHALL remember, for each repository and base branch, the base commit of the latest pass and when a pass first reported it. A pass that reports another base commit SHALL start the wait again. The record SHALL be kept in memory only, so a host restart SHALL start the wait again. An error while deciding for one ticket SHALL NOT change what is decided or done for any other ticket. No model SHALL be used to decide that a rebase is due.
+The keeper SHALL want a rebase of a kept ticket's PR while the rebase trigger is on, or while the PR shows a conflict or failed checks that it would try. With the rebase trigger off and no such problem, it SHALL rebase nothing, push nothing and start nothing. A finished rebase that is no try's result SHALL move, and its review SHALL push, only while the rebase trigger is on or the PR still shows a problem whose trigger is on. While a rebase is wanted, one SHALL be due for a kept ticket whose branch may be changed when the head commit of the PR's base branch, as the watcher last read it from GitHub, is not contained in the PR's head, and every pass for at least the quiet period has reported that same base commit. The host SHALL remember, for each repository and base branch, the base commit of the latest pass and when a pass first reported it. A pass that reports another base commit SHALL start the wait again. The record SHALL be kept in memory only, so a host restart SHALL start the wait again. An error while deciding for one ticket SHALL NOT change what is decided or done for any other ticket. No model SHALL be used to decide that a rebase is due.
 
 #### Scenario: Quiet for the period
 - **WHEN** the quiet period is 2 minutes, `main` moved to `4a1c2e9`, and passes have reported `4a1c2e9` for 2 minutes
@@ -73,8 +73,16 @@ With the rebase trigger on, a rebase SHALL be due for a kept ticket whose branch
 - **THEN** no rebase starts
 
 #### Scenario: Trigger off
-- **WHEN** the rebase trigger is off and a kept ticket's PR is behind a base that has been quiet for an hour
+- **WHEN** the rebase trigger is off and a kept ticket's PR is behind a base that has been quiet for an hour, with no conflict or failed checks the keeper would try
 - **THEN** no rebase starts
+
+#### Scenario: Trigger off with a problem to try
+- **WHEN** the rebase trigger is off, the conflicts trigger is on, and a kept ticket's PR conflicts with a base that has been quiet for the period
+- **THEN** a rebase starts, and the conflict gets its try
+
+#### Scenario: Trigger turned off while a rebase is finishing
+- **WHEN** a rebase of a clean PR has finished and waits to be moved, and the human turns the rebase trigger off and leaves the conflicts trigger on
+- **THEN** the result is dropped and nothing is pushed
 
 #### Scenario: Restart
 - **WHEN** the host restarts while a base has been quiet for 90 seconds of a 2 minute period
@@ -451,19 +459,19 @@ Each workspace repository SHALL be able to hold one checks command and its time 
 - **THEN** no tool changes a repository's checks command
 
 ### Requirement: The conflicts trigger needs a model and a re-check level
-The keeper's settings SHALL hold the review level a fix is reviewed at. They SHALL refuse to turn the conflicts trigger on unless the rebase trigger is on, the table has a PR keeper row and the review level names a configured level whose kind is re-check, and SHALL refuse to turn the rebase trigger off while the conflicts trigger is on: a conflict is found by the keeper's own rebase, so without the rebase trigger no try could ever start. A verification setting that removes that level or makes it a full review while the trigger is on SHALL be refused, naming the trigger.
+The keeper's settings SHALL hold the review level a fix is reviewed at. They SHALL refuse to turn the conflicts trigger on unless the table has a PR keeper row and the review level names a configured level whose kind is re-check. The conflicts and rebase triggers SHALL be independent, so either can be on alone. A verification setting that removes that level or makes it a full review while the trigger is on SHALL be refused, naming the trigger.
 
 #### Scenario: No re-check level
 - **WHEN** the only review level is "Full" and the human ticks "Try to resolve conflicts"
 - **THEN** the save is refused, saying to add a re-check level in Models → Reviews
 
 #### Scenario: Without the rebase trigger
-- **WHEN** the rebase trigger is off and the human ticks "Try to resolve conflicts"
-- **THEN** the save is refused, saying it needs "Rebase when the base branch moves"
+- **WHEN** the rebase trigger is off and the human turns the conflicts trigger on with a re-check level
+- **THEN** the save is accepted and the rebase trigger stays off
 
 #### Scenario: Turning the rebase trigger off
-- **WHEN** both triggers are on and the human unticks the rebase trigger alone
-- **THEN** the save is refused and both stay on
+- **WHEN** both triggers are on and the human turns the rebase trigger off alone
+- **THEN** the save is accepted and the conflicts trigger stays on
 
 #### Scenario: The level is removed later
 - **WHEN** the conflicts trigger is on with the level "Light" and the human removes "Light"

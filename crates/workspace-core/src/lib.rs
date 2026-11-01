@@ -1462,7 +1462,7 @@ impl HostSettings {
 /// is off until the human turns it on; only the human's client changes them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeeperSettings {
-    /// Rebase a kept ticket's PR when its base branch moves.
+    /// Rebase a kept ticket's PR whenever its base branch moves, with no problem to fix.
     #[serde(default)]
     pub rebase: bool,
     /// How long the base must stay at one commit before a rebase.
@@ -1506,23 +1506,15 @@ impl KeeperSettings {
             KEEPER_QUIET_MINUTES.start(),
             KEEPER_QUIET_MINUTES.end()
         );
-        self.check_rebase()
-    }
-    /// Refuses a trigger for tries without the rebase trigger, on every machine, since a try
-    /// waits for the keeper's own rebase.
-    pub fn check_rebase(&self) -> Result<()> {
-        for problem in [KeeperProblem::Conflict, KeeperProblem::Checks] {
-            ensure!(
-                self.rebase || !self.tries(problem),
-                "\"{}\" needs \"{KEEPER_REBASE}\"",
-                problem.trigger()
-            );
-        }
         Ok(())
     }
     /// Whether any trigger is on, so repositories are said to be kept or not.
     pub fn is_on(&self) -> bool {
-        self.rebase || self.comments || self.conflicts || self.checks
+        self.works_on_branches() || self.comments
+    }
+    /// Whether a trigger that lets the keeper work on a branch is on.
+    pub fn works_on_branches(&self) -> bool {
+        self.rebase || self.conflicts || self.checks
     }
     /// Whether the trigger for tries at `problem` is on.
     pub fn tries(&self, problem: KeeperProblem) -> bool {
@@ -1532,9 +1524,8 @@ impl KeeperSettings {
         }
     }
 }
-/// Refuses a trigger for tries unless the rebase trigger is on, the table has a PR keeper row
-/// and the review level names a configured re-check level: a try waits for the keeper's own
-/// rebase, and what the keeper makes is reviewed at that level.
+/// Refuses a trigger for tries unless the table has a PR keeper row and the review level names
+/// a configured re-check level: what the keeper makes is reviewed at that level.
 pub fn check_tries(
     keeper: &KeeperSettings,
     model: Option<&JobRow>,
@@ -1546,7 +1537,6 @@ pub fn check_tries(
         .filter(|l| l.kind == LevelKind::Recheck)
         .map(|l| l.name.as_str())
         .collect();
-    keeper.check_rebase()?;
     for problem in [KeeperProblem::Conflict, KeeperProblem::Checks] {
         if !keeper.tries(problem) {
             continue;
@@ -1970,7 +1960,7 @@ pub struct Keeper {
 }
 /// The Repositories page's names for the PR keeper's rebase trigger and its trigger for tries.
 pub const KEEPER_REBASE: &str = "Keep it rebased";
-pub const KEEPER_TRIES: &str = "Try once to fix a conflict or failed checks";
+pub const KEEPER_TRIES: &str = "Keep it free of conflicts and failed checks";
 /// What a try by the keeper's model fixes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

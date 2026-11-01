@@ -79,7 +79,7 @@ pub(crate) struct Ancestry {
 impl KeeperPoll {
     pub(crate) fn prepare(host: &Host, repository: &str) -> Result<Self> {
         let repository = host.repository(repository)?;
-        let tickets = if host.settings().keeper.rebase {
+        let tickets = if host.settings().keeper.works_on_branches() {
             host.tickets()?
                 .into_iter()
                 .filter(|t| {

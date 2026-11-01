@@ -211,7 +211,7 @@ impl Host {
     /// Saves the PR keeper's settings. An invalid setting is refused and the saved one stays.
     /// Turning comment sorting on starts every PR's comments afresh at the next pass. A trigger
     /// held off on this machine stays on in the file unless the save turns it on, which is
-    /// checked as any other, and still needs the rebase trigger.
+    /// checked as any other.
     pub fn set_keeper(&mut self, keeper: KeeperSettings) -> Result<HostSettings> {
         keeper.validate()?;
         let selection = self.model_selection()?;
@@ -227,8 +227,6 @@ impl Host {
         for (switch, _) in self.held(&self.shared().keeper(), &settings.verification) {
             *switch(&mut saved) = true;
         }
-        (saved.check_rebase())
-            .map_err(|e| anyhow::anyhow!("{e:#}, and is on from another machine that runs it"))?;
         self.shared().set_keeper(&saved)?;
         Ok(self.settings())
     }
@@ -541,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn the_conflicts_trigger_needs_the_rebase_trigger_a_keeper_model_and_a_re_check_level() {
+    fn the_conflicts_trigger_needs_a_keeper_model_and_a_re_check_level() {
         let (_home, mut host) = rebasing();
         let saved = host.settings();
         let no_recheck = refusal(host.set_keeper(conflicts("Full")));
@@ -552,24 +550,17 @@ mod tests {
         with_light(&mut host);
         let full = refusal(host.set_keeper(conflicts("Full")));
         assert!(full.contains("choose Light"), "{full}");
+        assert_eq!(host.settings().keeper, saved.keeper);
+        // The rebase trigger can be off, and turned on and off under it.
         let alone = KeeperSettings {
             rebase: false,
             ..conflicts("Light")
         };
-        let alone = refusal(host.set_keeper(alone));
-        assert!(
-            alone.contains(&format!("needs \"{KEEPER_REBASE}\"")),
-            "{alone}"
-        );
-        assert_eq!(host.settings().keeper, saved.keeper);
+        host.set_keeper(alone.clone()).unwrap();
+        assert_eq!(host.settings().keeper, alone);
         host.set_keeper(conflicts("Light")).unwrap();
-        // Turning the rebase trigger off alone is refused, and both stay on.
-        let off = KeeperSettings {
-            rebase: false,
-            ..host.settings().keeper
-        };
-        assert!(host.set_keeper(off).is_err());
-        assert_eq!(host.settings().keeper, conflicts("Light"));
+        host.set_keeper(alone.clone()).unwrap();
+        assert_eq!(host.settings().keeper, alone);
         // Without a keeper model.
         let mut selection = host.model_selection().unwrap();
         selection.set_keeper(None);
@@ -601,25 +592,17 @@ mod tests {
         );
         let (_home, mut host) = rebasing();
         with_light(&mut host);
-        let alone = refusal(host.set_keeper(checks(false)));
-        assert!(
-            alone.contains(&format!("needs \"{KEEPER_REBASE}\"")),
-            "{alone}"
-        );
         let full = refusal(host.set_keeper(KeeperSettings {
             review_level: Some("Full".into()),
             ..checks(true)
         }));
         assert!(full.contains("choose Light"), "{full}");
         host.set_keeper(checks(true)).unwrap();
-        assert!(
-            host.set_keeper(checks(false)).is_err(),
-            "the rebase trigger stays on"
-        );
+        host.set_keeper(checks(false)).unwrap();
         let mut selection = host.model_selection().unwrap();
         selection.set_keeper(None);
         assert!(host.set_model_selection(&selection).is_err());
-        assert_eq!(host.settings().keeper, checks(true));
+        assert_eq!(host.settings().keeper, checks(false));
     }
 
     #[test]
@@ -751,25 +734,18 @@ mod tests {
     }
 
     #[test]
-    fn a_held_trigger_still_needs_the_rebase_trigger() {
+    fn a_held_trigger_stays_on_in_the_file_when_the_rebase_trigger_is_turned_off() {
         let (home, mut host) = held_by_another_machine();
         let file = home.path().join("shared/settings/pr-keeper.json");
-        let before = fs::read(&file).unwrap();
         let rebase_off = KeeperSettings {
             rebase: false,
             ..host.settings().keeper
         };
-        let refused = refusal(host.set_keeper(rebase_off));
-        assert!(
-            refused.contains(&format!(
-                "needs \"{KEEPER_REBASE}\", and is on from another machine"
-            )),
-            "{refused}"
-        );
-        assert_eq!(fs::read(&file).unwrap(), before);
-        // Nor is such a file pulled from another machine.
+        host.set_keeper(rebase_off).unwrap();
+        let saved: KeeperSettings = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        assert!(!saved.rebase && saved.conflicts && saved.checks);
+        // Such a file is pulled from another machine as any other.
         let pulled = br#"{"rebase": false, "conflicts": true, "quiet_minutes": 2}"#;
-        let refused = format!("{:#}", shared::check(shared::KEEPER, pulled).unwrap_err());
-        assert!(refused.contains("needs \"Keep it rebased"), "{refused}");
+        shared::check(shared::KEEPER, pulled).unwrap();
     }
 }

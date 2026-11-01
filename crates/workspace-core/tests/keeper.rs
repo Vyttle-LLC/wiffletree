@@ -85,6 +85,20 @@ fn rows_say_kept_or_not_kept_only_while_a_trigger_is_on() {
         ..KeeperSettings::default()
     };
     assert_eq!(kept_label(&wiffletree, &allowed, &sorting), Some("kept"));
+    assert!(on.works_on_branches() && !sorting.works_on_branches());
+    for fixes in [
+        KeeperSettings {
+            conflicts: true,
+            ..KeeperSettings::default()
+        },
+        KeeperSettings {
+            checks: true,
+            ..KeeperSettings::default()
+        },
+    ] {
+        assert!(fixes.validate().is_ok() && fixes.works_on_branches());
+        assert_eq!(kept_label(&wiffletree, &allowed, &fixes), Some("kept"));
+    }
     let off = KeeperSettings::default();
     assert_eq!(kept_label(&wiffletree, &allowed, &off), None);
     assert_eq!(kept_label(&celadon, &allowed, &off), None);
