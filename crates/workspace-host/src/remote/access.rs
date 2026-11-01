@@ -151,6 +151,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::SetUpBrain { .. }
         | Command::UpdateBrainGate { .. }
         | Command::SetBrainCompiler { .. }
+        | Command::SetBrainCompileTime { .. }
         | Command::AmendBrainBatch { .. }
         | Command::SendLogsNow { .. }
         | Command::ImportLegacyLogs { .. }

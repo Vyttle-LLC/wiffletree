@@ -102,6 +102,11 @@ impl Job {
             _ => self == other,
         }
     }
+    /// Whether a Space may set this job's row. Routing happens before a message has a Space and a
+    /// brain can belong to several Spaces, so the Router and Brain compiler rows are this Mac's.
+    pub fn space_may_set(&self) -> bool {
+        !matches!(self, Self::Router | Self::Compiler)
+    }
     /// The job an agent of `role` does: a configured verifier's when `focus` names one, and for
     /// any other reviewer the first configured reviewer's, else the tester's.
     pub fn for_role(
@@ -511,8 +516,20 @@ fn validate_rows(rows: &[JobRow]) -> Result<()> {
     Ok(())
 }
 
-/// A Space's overrides: at most one row a job, each kept to the table's rules.
-pub fn validate_overrides(rows: &[JobRow]) -> Result<()> {
+/// A Space's overrides, saved over `saved`: at most one row a job, each kept to the table's
+/// rules. A Router or Brain compiler row `saved` does not hold is refused; one it holds is ignored
+/// at read, so it stays out of the rules and blocks nothing.
+pub fn validate_space_rows(rows: &[JobRow], saved: &[JobRow]) -> Result<()> {
+    if let Some(row) = (rows.iter()).find(|row| !row.job.space_may_set() && !saved.contains(row)) {
+        bail!(
+            "The {} row belongs to this Mac, so a Space can't set it",
+            row.job.name()
+        );
+    }
+    let rows: Vec<JobRow> = (rows.iter())
+        .filter(|row| row.job.space_may_set())
+        .cloned()
+        .collect();
     for (at, row) in rows.iter().enumerate() {
         ensure!(
             !rows[..at].iter().any(|before| before.job.is(&row.job)),
@@ -520,7 +537,7 @@ pub fn validate_overrides(rows: &[JobRow]) -> Result<()> {
             row.job.name()
         );
     }
-    validate_rows(rows)
+    validate_rows(&rows)
 }
 
 /// Who runs what as one Space resolves it on this Mac: this Mac's table with each of the Space's
@@ -547,22 +564,26 @@ pub struct SpaceTable {
 impl ModelSelection {
     /// This table as the Space `space` resolves it with its `overrides`, when `unusable` are the
     /// providers this Mac cannot run. A Space's verifier row counts only for a configured
-    /// verifier, which already has a row here.
+    /// verifier, which already has a row here, and a row no Space may set is ignored.
     pub fn for_space(
         &self,
         space: Option<&str>,
         overrides: &[JobRow],
         unusable: &BTreeSet<Provider>,
     ) -> SpaceTable {
-        let (selection, rows) = self.merge(overrides, unusable, false);
-        let (small, small_rows) = self.merge(overrides, unusable, true);
+        let overrides: Vec<JobRow> = (overrides.iter())
+            .filter(|row| row.job.space_may_set())
+            .cloned()
+            .collect();
+        let (selection, rows) = self.merge(&overrides, unusable, false);
+        let (small, small_rows) = self.merge(&overrides, unusable, true);
         SpaceTable {
             selection,
             rows,
             small,
             small_rows,
             space: space.map(Into::into),
-            overrides: overrides.to_vec(),
+            overrides,
             unusable: unusable.clone(),
             held: BTreeMap::new(),
         }

@@ -1,9 +1,9 @@
-//! The Settings window. Its sidebar groups every setting as the settings-cascade study does:
-//! Shared with your Macs, the Spaces, and This Mac, opening the pages that live in the main
-//! window there. Its body keeps the parts of design 10 of `remote-hosts`: the shared settings,
-//! this Mac's app, with its appearance, layout, finding other Macs and the computers it is
-//! paired with, and the host the window drives, with its workspace folder, builds at once and,
-//! on This Mac, its remote access. A setting belongs to the Mac whose agents it runs.
+//! The Settings window. Its sidebar groups every setting as the settings-brain-fixes study does:
+//! Shared with your Macs, Spaces & brains, and This Mac, opening the pages that live in the main
+//! window there, each at its own card. Its body keeps the parts of design 10 of `remote-hosts`:
+//! the shared settings, this Mac's app, with its appearance, layout, finding other Macs and the
+//! computers it is paired with, and the host the window drives, with its workspace folder, builds
+//! at once and, on This Mac, its remote access. A setting belongs to the Mac whose agents it runs.
 mod remote_access;
 mod repository;
 
@@ -232,7 +232,8 @@ impl Settings {
         let intent = match to {
             Go::Section(block) => return self.scroll_to(*block, cx),
             Go::Page(page) => Intent::OpenPage(*page),
-            Go::Models => Intent::OpenModels(None),
+            Go::Models(card) => Intent::OpenModelsCard(*card),
+            Go::Repositories(card) => Intent::OpenRepositories(*card),
             Go::Space(id) => Intent::OpenSpace(id.clone()),
         };
         with_workspace(cx, move |view, window, cx| {
@@ -306,7 +307,7 @@ impl Settings {
                 };
                 return part(
                     &title,
-                    "Workspace folder · builds at once · remote access. Who runs what, repositories and their checks, and publishing open in the main window.",
+                    "Workspace folder · builds at once · remote access. Who runs what, repositories and their checks, and allowed owners open in the main window.",
                     p,
                 )
                 .children(self.driving.changes_refused().map(|reason| hint(reason, p)));
@@ -835,8 +836,10 @@ impl Block {
 enum Go {
     Section(Block),
     Page(Page),
-    /// The Models page at this Mac's scope.
-    Models,
+    /// A card of the Models page at this Mac's scope.
+    Models(ModelsCard),
+    /// A card of the Repositories page, or its top with `None`.
+    Repositories(Option<RepositoriesCard>),
     Space(SpaceId),
 }
 
@@ -851,26 +854,33 @@ fn sidebar_groups(spaces: &[(SpaceId, String)]) -> Vec<(&'static str, Vec<(Strin
     if space_entries.is_empty() {
         space_entries.push(entry("Spaces", Go::Page(Page::Spaces)));
     }
+    space_entries.push(entry("Brains", Go::Page(Page::Brains)));
     vec![
         (
             "Shared with your Macs",
             vec![
                 entry("Behaviors", Go::Page(Page::Behaviors)),
-                entry("Reviews", Go::Models),
-                entry("PR keeper", Go::Page(Page::Repositories)),
+                entry("Reviews", Go::Models(ModelsCard::Reviews)),
+                entry(
+                    "PR keeper",
+                    Go::Repositories(Some(RepositoriesCard::Keeper)),
+                ),
                 entry("Check-ins", Go::Section(Block::CheckIns)),
                 entry("Assistant & router", Go::Section(Block::Assistant)),
                 entry("Settings repository", Go::Section(Block::Repository)),
             ],
         ),
-        ("Spaces", space_entries),
+        ("Spaces & brains", space_entries),
         (
             "This Mac",
             vec![
-                entry("Who runs what", Go::Models),
-                entry("Subscriptions", Go::Models),
-                entry("Repositories", Go::Page(Page::Repositories)),
-                entry("Publishing", Go::Page(Page::Repositories)),
+                entry("Who runs what", Go::Models(ModelsCard::WhoRunsWhat)),
+                entry("Subscriptions", Go::Models(ModelsCard::Subscriptions)),
+                entry("Repositories", Go::Repositories(None)),
+                entry(
+                    "Allowed owners",
+                    Go::Repositories(Some(RepositoriesCard::AllowedOwners)),
+                ),
                 entry("Workspace folder", Go::Section(Block::Folder)),
                 entry("Builds & remote access", Go::Section(Block::Builds)),
                 entry("Appearance", Go::Section(Block::Appearance)),
@@ -1007,7 +1017,7 @@ impl Render for Settings {
 #[cfg(test)]
 mod tests {
     use super::{BLOCKS, Block, Go, sidebar_groups};
-    use crate::Page;
+    use crate::{ModelsCard, Page, RepositoriesCard};
     use workspace_core::SpaceId;
 
     #[test]
@@ -1018,7 +1028,10 @@ mod tests {
         ];
         let groups = sidebar_groups(&spaces);
         let names: Vec<&str> = groups.iter().map(|(group, _)| *group).collect();
-        assert_eq!(names, ["Shared with your Macs", "Spaces", "This Mac"]);
+        assert_eq!(
+            names,
+            ["Shared with your Macs", "Spaces & brains", "This Mac"]
+        );
         let labels = |at: usize| -> Vec<&str> {
             (groups[at].1.iter())
                 .map(|(label, _)| label.as_str())
@@ -1026,13 +1039,36 @@ mod tests {
         };
         assert_eq!(labels(0)[0], "Behaviors");
         assert_eq!(groups[0].1[0].1, Go::Page(Page::Behaviors));
-        assert_eq!(labels(1), ["Sage", "Vyttle"]);
+        assert_eq!(labels(1), ["Sage", "Vyttle", "Brains"]);
         assert_eq!(groups[1].1[0].1, Go::Space(SpaceId("sage".into())));
+        assert_eq!(groups[1].1[2].1, Go::Page(Page::Brains));
+        // Each entry on Models or Repositories opens its own place, so none looks a duplicate.
+        let destination = |label: &str| {
+            let entries = groups.iter().flat_map(|(_, entries)| entries);
+            let found = entries.into_iter().find(|(l, _)| l == label);
+            found.map(|(_, to)| to.clone()).unwrap()
+        };
+        for (label, to) in [
+            ("Reviews", Go::Models(ModelsCard::Reviews)),
+            ("Who runs what", Go::Models(ModelsCard::WhoRunsWhat)),
+            ("Subscriptions", Go::Models(ModelsCard::Subscriptions)),
+            (
+                "PR keeper",
+                Go::Repositories(Some(RepositoriesCard::Keeper)),
+            ),
+            ("Repositories", Go::Repositories(None)),
+            (
+                "Allowed owners",
+                Go::Repositories(Some(RepositoriesCard::AllowedOwners)),
+            ),
+        ] {
+            assert_eq!(destination(label), to, "{label}");
+        }
         // Repository facts and the allowed owners are permissions of this Mac, not shared.
         for this_macs in [
             "Who runs what",
             "Repositories",
-            "Publishing",
+            "Allowed owners",
             "Workspace folder",
         ] {
             assert!(
@@ -1062,7 +1098,10 @@ mod tests {
         // With no Space yet, the Spaces page is where to add one.
         assert_eq!(
             sidebar_groups(&[])[1].1,
-            [("Spaces".to_owned(), Go::Page(Page::Spaces))]
+            [
+                ("Spaces".to_owned(), Go::Page(Page::Spaces)),
+                ("Brains".to_owned(), Go::Page(Page::Brains)),
+            ]
         );
     }
 }

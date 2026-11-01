@@ -92,6 +92,7 @@ pub(super) struct RepositoriesPage {
     seen: Option<BTreeSet<String>>,
     arriving: BTreeSet<String>,
     adding: Vec<Adding>,
+    scroll: ui::PageScroll,
 }
 
 /// The Space chosen for a repository: one of them, Personal before it exists, or none.
@@ -150,7 +151,13 @@ impl RepositoriesPage {
             seen: None,
             arriving: BTreeSet::new(),
             adding: vec![],
+            scroll: ui::PageScroll::new(RepositoriesCard::COUNT),
         }
+    }
+    /// Shows the page at one of its cards, or at its top with `None`.
+    pub(super) fn show_card(&mut self, card: Option<RepositoriesCard>, cx: &mut Context<Self>) {
+        self.scroll.open_at(card.map(|card| card as usize));
+        cx.notify();
     }
     /// Redraws while shown, as the repositories it lists change; asks for the upgrade's
     /// suggestions at the first open, and a Space for each repository as it is added.
@@ -508,12 +515,18 @@ impl RepositoriesPage {
         let mut body = div().flex().flex_col().gap_3();
         if !snapshot.repositories.is_empty() {
             body = body
-                .child(ui::locked(
-                    self.keeper_block(&snapshot.keeper, &snapshot.keeper_held, p, cx),
-                    &self.shared.host,
-                    p,
+                .child(self.scroll.mark(
+                    ui::locked(
+                        self.keeper_block(&snapshot.keeper, &snapshot.keeper_held, p, cx),
+                        &self.shared.host,
+                        p,
+                    ),
+                    RepositoriesCard::Keeper as usize,
                 ))
-                .child(self.owners_block(snapshot, p, cx));
+                .child(self.scroll.mark(
+                    self.owners_block(snapshot, p, cx),
+                    RepositoriesCard::AllowedOwners as usize,
+                ));
         }
         body = body.child(
             section(
@@ -1939,14 +1952,16 @@ impl Requests for RepositoriesPage {
     }
 }
 impl Render for RepositoriesPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         render_counts::count("Repositories");
+        self.scroll.follow(window, cx);
         let p = palette(is_dark(cx));
-        ui::page(
+        ui::page_with_cards(
             "Repositories",
             "Repositories on this Mac",
             self.body(p, cx),
             None,
+            &self.scroll,
             &self.shared.host,
             p,
             cx,

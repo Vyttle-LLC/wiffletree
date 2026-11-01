@@ -2056,9 +2056,14 @@ impl Host {
                 self.forget_brain(&repository)?;
                 json!({"forgotten":true})
             }
-            Command::SetUpBrain { repository } => serde_json::to_value(
-                self.set_up_brain(&repository, &publish::Tools::default().git)?,
-            )?,
+            Command::SetUpBrain {
+                repository,
+                compile,
+            } => serde_json::to_value(self.set_up_brain(
+                &repository,
+                &compile,
+                &publish::Tools::default().git,
+            )?)?,
             Command::UpdateBrainGate { repository } => serde_json::to_value(
                 self.update_brain_gate(&repository, &publish::Tools::default().git)?,
             )?,
@@ -2068,6 +2073,14 @@ impl Host {
             } => serde_json::to_value(self.set_brain_compiler(
                 &repository,
                 &compiler,
+                &publish::Tools::default().git,
+            )?)?,
+            Command::SetBrainCompileTime {
+                repository,
+                compile,
+            } => serde_json::to_value(self.set_brain_compile_time(
+                &repository,
+                &compile,
                 &publish::Tools::default().git,
             )?)?,
             Command::AmendBrainBatch {

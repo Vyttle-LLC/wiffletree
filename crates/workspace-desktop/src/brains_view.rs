@@ -1,10 +1,10 @@
 //! The Brains page (OpenSpec change `brain-registry-sync`, `design/mockups/current/brains.html`
 //! without its repository mapping): each brain this Mac's Spaces name, with the Spaces that name
 //! it, its grant, sync and compiler, and for a brain this Mac compiles its last and next compile,
-//! Run now and its runs (`brain-compile`); then the conflicts no project's Inbox shows, then the
-//! PR gate's batches with their checks. Brains are added and removed in a Space's settings. Every
-//! action here is the human's, and nothing on the page shows a check's output. Only a conflict
-//! card quotes brain text, as plain text.
+//! Run now and its runs (`brain-compile`), and its compile time (`settings-brain-fixes`); then the
+//! conflicts no project's Inbox shows, then the PR gate's batches with their checks. Brains are
+//! added and removed in a Space's settings. Every action here is the human's, and nothing on the
+//! page shows a check's output. Only a conflict card quotes brain text, as plain text.
 use super::*;
 use brain_browser_view::{BrainOpening, BrainTarget, BrainView};
 use gpui_component::{
@@ -12,6 +12,7 @@ use gpui_component::{
     button::ButtonVariants,
     input::Input,
     menu::{DropdownMenu, PopupMenuItem},
+    select::{SearchableVec, Select, SelectState},
 };
 use std::collections::HashMap;
 use ui::{banner, card, empty_state, hint, icon, mono, pill, section};
@@ -30,6 +31,12 @@ const GATE_RELEASE_NOTES: &str =
 const FRESH_MS: i64 = 10_000;
 /// After Sync now, how long the passes get before the page reads again.
 const AFTER_SYNC: std::time::Duration = std::time::Duration::from_secs(5);
+/// The Next compile line of a brain with no compile time.
+pub(super) const NOT_SCHEDULED: &str = "Not scheduled";
+const SET_UP_NOTE: &str = "Opens one PR adding wiffletree-brain.json with this Mac as compiler, and the brain gate. It waits for your review.";
+const NEW_TIME_NOTE: &str = "The new time applies once the config PR merges.";
+/// The zone a form fills in when the host names none.
+const FALLBACK_TIMEZONE: &str = "UTC";
 
 /// What the human is in the middle of on the page.
 #[derive(Clone, PartialEq, Eq)]
@@ -39,6 +46,10 @@ enum Editing {
     Forget(String),
     /// Naming another host, by id, as a brain's compiler.
     Compiler(String),
+    /// Set up's form, which asks for a compile time.
+    SetUp(String),
+    /// Setting or changing a brain's compile time.
+    CompileTime(String),
     Discard(String),
     /// Giving the reason a reported line is not sensitive.
     NotSensitive {
@@ -59,6 +70,8 @@ pub(super) struct BrainsPage {
     host_id: Entity<InputState>,
     host_name: Entity<InputState>,
     reason: Entity<InputState>,
+    compile_at: Entity<InputState>,
+    compile_timezone: Entity<SelectState<SearchableVec<String>>>,
     /// Why the host refused the last action.
     error: Option<String>,
     /// Each compiled brain's page of compile runs, and where that page starts.
@@ -78,6 +91,12 @@ impl BrainsPage {
         let input = |placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
         };
+        let zones: Vec<String> = (chrono_tz::TZ_VARIANTS.iter())
+            .map(|zone| zone.name().to_owned())
+            .collect();
+        let compile_timezone = cx.new(|cx| {
+            SelectState::new(SearchableVec::new(zones), None, window, cx).searchable(true)
+        });
         Self {
             bridge,
             shared: Shared::default(),
@@ -92,6 +111,8 @@ impl BrainsPage {
                 window,
                 cx,
             ),
+            compile_at: input(BrainCompile::DEFAULT_AT, window, cx),
+            compile_timezone,
             error: None,
             runs: HashMap::new(),
             run_offsets: HashMap::new(),
@@ -182,6 +203,39 @@ impl BrainsPage {
         self.editing = editing;
         self.error = None;
         cx.notify();
+    }
+
+    /// Opens a compile time form on the brain's time, or else 06:00 in the host's timezone.
+    fn edit_compile_time(
+        &mut self,
+        editing: Editing,
+        compile: Option<BrainCompile>,
+        this_timezone: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.edit(Some(editing), window, cx);
+        let (at, timezone) = match compile {
+            Some(compile) => (compile.at, compile.timezone),
+            None => (
+                BrainCompile::DEFAULT_AT.to_owned(),
+                this_timezone.unwrap_or_else(|| FALLBACK_TIMEZONE.to_owned()),
+            ),
+        };
+        (self.compile_at).update(cx, |input, cx| input.set_value(at, window, cx));
+        (self.compile_timezone).update(cx, |zone, cx| {
+            zone.set_selected_value(&timezone, window, cx)
+        });
+    }
+
+    /// The compile time the form holds, for the host to validate.
+    fn compile_in_form(&self, cx: &App) -> BrainCompile {
+        BrainCompile {
+            at: self.compile_at.read(cx).value().trim().to_owned(),
+            timezone: (self.compile_timezone.read(cx).selected_value().cloned())
+                .unwrap_or_default(),
+            extra: Extra::new(),
+        }
     }
 
     fn space_name(&self, id: &SpaceId) -> String {
@@ -301,6 +355,12 @@ impl BrainsPage {
                 .child(div().min_w_0().flex_1().child(value))
         };
         let text = |value: String| div().child(value).into_any_element();
+        let scheduled = |line: String| {
+            div()
+                .when(line == NOT_SCHEDULED, |d| d.text_color(p.yellow))
+                .child(line)
+                .into_any_element()
+        };
         let mut spaces = div().flex().flex_wrap().gap_1();
         for space in &brain.spaces {
             let id = space.clone();
@@ -371,8 +431,13 @@ impl BrainsPage {
                     "Last compile",
                     text(last_compile(compile.last_run.as_ref())),
                 ))
-                .child(fact("Next compile", text(next_run(compile, &brain.config)))),
-            None => card.child(fact("Next compile", text(next_compile(&brain.config)))),
+                .child(fact(
+                    "Next compile",
+                    scheduled(next_run(compile, &brain.config)),
+                )),
+            // Set up's form sets what this would say.
+            None if self.editing == Some(Editing::SetUp(repository.clone())) => card,
+            None => card.child(fact("Next compile", scheduled(next_compile(&brain.config)))),
         };
         let pending = pending_line(compile.map(|c| c.pending), held_entries(brain, &batches));
         card = card.children(pending.map(|line| fact("Pending", text(line))));
@@ -424,11 +489,117 @@ impl BrainsPage {
                     ),
             );
         }
+        card = card.children(self.no_time_banner(brain, listing, p, cx));
         card = card.child(self.brain_actions(brain, listing, &batches, p, cx));
         match compile {
             Some(compile) => card.child(self.compile_runs(compile, p, cx)),
             None => card,
         }
+    }
+
+    /// For a brain with a config and no compile time: that it never compiles on its own, with
+    /// Set compile time…, until that form is open.
+    fn no_time_banner(
+        &self,
+        brain: &Brain,
+        listing: &Listing,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let repository = brain.repository.clone();
+        let editing = Editing::CompileTime(repository.clone());
+        if self.editing.as_ref() == Some(&editing) || brain.config.config()?.compile.is_some() {
+            return None;
+        }
+        let this_timezone = listing.this_timezone.clone();
+        Some(
+            banner(p.yellow)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_wrap()
+                        .gap_1()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(p.yellow)
+                                .child("No compile time."),
+                        )
+                        .child("This brain compiles only on Run now or a merged ruling."),
+                )
+                .child(
+                    ui::gated(
+                        button(SharedString::from(format!("set-compile-time-{repository}")))
+                            .small()
+                            .label("Set compile time…"),
+                        &self.shared.host,
+                    )
+                    .on_click(cx.listener(move |v, _, w, c| {
+                        v.edit_compile_time(editing.clone(), None, this_timezone.clone(), w, c)
+                    })),
+                ),
+        )
+    }
+
+    /// The form that opens a PR with a compile time: Set up's, or changing one.
+    fn compile_time_form(
+        &self,
+        title: Option<&'static str>,
+        note: &'static str,
+        open_pr: fn(String, BrainCompile) -> Command,
+        repository: String,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        div()
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(p.edge)
+            .bg(p.base)
+            .children(title.map(|title| div().font_weight(FontWeight::SEMIBOLD).child(title)))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child("Compile daily at")
+                    .child(div().w(px(80.)).child(Input::new(&self.compile_at).small()))
+                    .child(
+                        div()
+                            .w(px(240.))
+                            .child(Select::new(&self.compile_timezone).small()),
+                    ),
+            )
+            .child(hint(note, p))
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        button("cancel-compile-time")
+                            .ghost()
+                            .label("Cancel")
+                            .on_click(cx.listener(|v, _, w, c| v.edit(None, w, c))),
+                    )
+                    .child(
+                        ui::gated(
+                            button("save-compile-time").primary().label("Open the PR"),
+                            &self.shared.host,
+                        )
+                        .on_click(cx.listener(move |v, _, w, c| {
+                            let compile = v.compile_in_form(c);
+                            v.request(open_pr(repository.clone(), compile), w, c)
+                        })),
+                    ),
+            )
     }
 
     /// Run now and the brain's compile runs, a page at a time, newest first.
@@ -642,6 +813,32 @@ impl BrainsPage {
                             ),
                     );
             }
+            Some(Editing::SetUp(r)) if *r == repository => {
+                return self.compile_time_form(
+                    Some("Set up this brain"),
+                    SET_UP_NOTE,
+                    |repository, compile| Command::SetUpBrain {
+                        repository,
+                        compile,
+                    },
+                    repository,
+                    p,
+                    cx,
+                );
+            }
+            Some(Editing::CompileTime(r)) if *r == repository => {
+                return self.compile_time_form(
+                    None,
+                    NEW_TIME_NOTE,
+                    |repository, compile| Command::SetBrainCompileTime {
+                        repository,
+                        compile,
+                    },
+                    repository,
+                    p,
+                    cx,
+                );
+            }
             _ => {}
         }
         let mut actions = div().flex().flex_wrap().gap_2();
@@ -679,14 +876,18 @@ impl BrainsPage {
             .iter()
             .any(|b| b.kind == BrainBatchKind::SetUp && !b.is_finished());
         if brain.config == BrainConfigReading::Missing && !setting_up {
-            let r = repository.clone();
+            let editing = Editing::SetUp(repository.clone());
+            let this_timezone = listing.this_timezone.clone();
             actions = actions.child(
-                ui::gated(button(SharedString::from(format!("set-up-{repository}"))).outline().label("Set up"), host)
-                    .tooltip("Opens one PR adding wiffletree-brain.json with this Mac as compiler, and the brain gate. It waits for your review.")
-                    .on_click(cx.listener(move |v, _, w, c| {
-                        let repository = r.clone();
-                        v.request(Command::SetUpBrain { repository }, w, c)
-                    })),
+                ui::gated(
+                    button(SharedString::from(format!("set-up-{repository}")))
+                        .outline()
+                        .label("Set up"),
+                    host,
+                )
+                .on_click(cx.listener(move |v, _, w, c| {
+                    v.edit_compile_time(editing.clone(), None, this_timezone.clone(), w, c)
+                })),
             );
         }
         if !brain.spaces.is_empty() {
@@ -709,6 +910,22 @@ impl BrainsPage {
                         let repository = r.clone();
                         v.request(Command::ImportLegacyLogs { repository }, w, c)
                     })),
+            );
+        }
+        if let Some(compile) = brain.config.config().and_then(|c| c.compile.clone()) {
+            let editing = Editing::CompileTime(repository.clone());
+            actions = actions.child(
+                ui::gated(
+                    button(SharedString::from(format!(
+                        "change-compile-time-{repository}"
+                    )))
+                    .outline()
+                    .label("Change compile time"),
+                    host,
+                )
+                .on_click(cx.listener(move |v, _, w, c| {
+                    v.edit_compile_time(editing.clone(), Some(compile.clone()), None, w, c)
+                })),
             );
         }
         if brain.config.config().is_some() {
@@ -1268,7 +1485,7 @@ pub(super) fn compiler_line(
 pub(super) fn next_compile(config: &BrainConfigReading) -> String {
     match config.config().and_then(|c| c.compile.as_ref()) {
         Some(compile) => format!("Daily at {} {}", compile.at, compile.timezone),
-        None => "Not scheduled".into(),
+        None => NOT_SCHEDULED.into(),
     }
 }
 

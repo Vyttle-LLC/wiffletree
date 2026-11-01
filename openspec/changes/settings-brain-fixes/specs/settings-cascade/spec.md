@@ -63,7 +63,7 @@ Routing happens before a message has a Space, and a brain can belong to several 
 The Behaviors page SHALL offer, once per line, to delete an additions line of the scope shown that equals a Behavior's sentence, ignoring case and surrounding whitespace. A Workspace line SHALL match only its own skill's Behaviors, and a skill with a rewrite SHALL offer nothing; a Space's or repository's line SHALL match any Behavior. The page SHALL never remove a line unasked. Delete this line SHALL save through the scope's normal path. Keep it SHALL be remembered on this Mac for that scope and line, and the page SHALL not offer that line again.
 
 #### Scenario: A line a Behavior now says
-- **WHEN** Sage's additions hold "before recommending a landing order, fetch origin and report how far main has moved." in another case
+- **WHEN** Sage's additions hold "before recommending a landing order or claiming a branch is current, fetch origin and report how far main has moved." in another case
 - **THEN** the page at Sage names "Fetch before naming a landing order", quotes the line, and offers Delete this line and Keep it
 
 #### Scenario: Keep it

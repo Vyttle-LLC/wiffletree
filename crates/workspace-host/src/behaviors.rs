@@ -625,9 +625,12 @@ impl Host {
         }
         let (_, unusable, _) = self.limits()?;
         let table = self.space_table(Some(&project.space), &unusable)?;
+        let (mut models, mut small_models) = (table.rows, table.small_rows);
+        models.retain(|row| row.job.space_may_set());
+        small_models.retain(|row| row.job.space_may_set());
         Ok(EffectiveSettings {
-            models: table.rows,
-            small_models: table.small_rows,
+            models,
+            small_models,
             reviews: self.space_reviews(&project.space)?,
             space_id: project.space,
             repository: layers.repository.clone(),
@@ -721,6 +724,37 @@ mod tests {
         let project = &f.coordinator.project_id;
         let settings = f.host.effective_settings(project, Some(&f.ticket)).unwrap();
         settings.behaviors.into_iter().find(|b| b.id == id).unwrap()
+    }
+
+    #[test]
+    fn effective_settings_leave_out_the_router_and_brain_compiler_rows() {
+        let mut f = fixture();
+        let sage = in_space(&mut f, "Sage");
+        let mut table = f.host.model_selection().unwrap();
+        let main = table.row(&Job::Implementer).unwrap().main.clone();
+        table.jobs.push(JobRow {
+            job: Job::Compiler,
+            main: main.clone(),
+            small: None,
+        });
+        let compiler_row = table.jobs.last().cloned().unwrap();
+        f.host.set_model_selection(&table).unwrap();
+        // A row left by an older host is left out with this Mac's.
+        let mut space = f.host.space(&sage).unwrap().space;
+        space.models.set_overrides(vec![compiler_row]);
+        f.host
+            .db
+            .execute(
+                "UPDATE spaces SET data=?2 WHERE id=?1",
+                params![sage.as_str(), encode(&space).unwrap()],
+            )
+            .unwrap();
+        let project = &f.coordinator.project_id;
+        let settings = f.host.effective_settings(project, None).unwrap();
+        for rows in [&settings.models, &settings.small_models] {
+            assert!(rows.iter().any(|row| row.job == Job::Implementer));
+            assert!(rows.iter().all(|row| row.job.space_may_set()));
+        }
     }
 
     #[test]

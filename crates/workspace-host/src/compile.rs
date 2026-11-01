@@ -753,6 +753,21 @@ fn ruling_merged(host: &Host, repository: &str) -> bool {
             .is_ok_and(|waits| waits.is_none())
 }
 
+/// The daily schedule a brain's `compile` asks for, or why it can't be scheduled.
+pub(crate) fn compile_schedule(compile: &BrainCompile) -> Result<Schedule> {
+    let at = compile.at.split_once(':').and_then(|(hour, minute)| {
+        let (hour, minute): (u32, u32) = (hour.parse().ok()?, minute.parse().ok()?);
+        (hour < 24 && minute < 60).then_some((hour, minute))
+    });
+    let (hour, minute) =
+        at.with_context(|| format!("{:?} is not a time; use HH:MM, such as 06:00", compile.at))?;
+    jobs::timezone(&compile.timezone)?;
+    Ok(Schedule {
+        cron: format!("{minute} {hour} * * *"),
+        timezone: compile.timezone.clone(),
+    })
+}
+
 impl Host {
     /// Registers one built-in compile job per brain whose config names this host as compiler,
     /// due at the config's time in its timezone, and drops the others'. A changed time starts
@@ -763,17 +778,8 @@ impl Host {
             if !self.compiles_here(&brain)? {
                 continue;
             }
-            let schedule =
-                (brain.config.config().and_then(|c| c.compile.as_ref())).and_then(|compile| {
-                    let (hour, minute) = compile.at.split_once(':')?;
-                    let (hour, minute): (u32, u32) = (hour.parse().ok()?, minute.parse().ok()?);
-                    (hour < 24 && minute < 60 && jobs::timezone(&compile.timezone).is_ok()).then(
-                        || Schedule {
-                            cron: format!("{minute} {hour} * * *"),
-                            timezone: compile.timezone.clone(),
-                        },
-                    )
-                });
+            let schedule = (brain.config.config().and_then(|c| c.compile.as_ref()))
+                .and_then(|compile| compile_schedule(compile).ok());
             wanted.push(jobs::BuiltIn {
                 name: format!("{JOB}{}", brain.repository.to_ascii_lowercase()),
                 subject: brain.repository.clone(),

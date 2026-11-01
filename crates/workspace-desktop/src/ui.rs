@@ -653,6 +653,49 @@ pub(super) fn locked(controls: Div, host: &HostView, p: Palette) -> Div {
         )
 }
 
+/// The widest a page's column gets.
+const COLUMN: f32 = 980.;
+
+/// A page's scroll position and the cards it can open at. A card has no position until it is
+/// painted, so a request waits for the page's next render.
+pub(super) struct PageScroll {
+    handle: ScrollHandle,
+    cards: Vec<ScrollAnchor>,
+    pending: Option<usize>,
+}
+impl PageScroll {
+    pub(super) fn new(cards: usize) -> Self {
+        let handle = ScrollHandle::new();
+        Self {
+            cards: (0..cards)
+                .map(|_| ScrollAnchor::for_handle(handle.clone()))
+                .collect(),
+            handle,
+            pending: None,
+        }
+    }
+    /// `card` as the page's card `at`.
+    pub(super) fn mark(&self, card: Div, at: usize) -> Stateful<Div> {
+        card.id(("page-card", at))
+            .anchor_scroll(self.cards.get(at).cloned())
+    }
+    /// Opens the page at card `at` on its next render, or at its top with `None`.
+    pub(super) fn open_at(&mut self, at: Option<usize>) {
+        self.pending = at;
+        if at.is_none() {
+            self.handle.set_offset(Point::default());
+        }
+    }
+    /// From the page's render: scrolls to the requested card. The cached page repaints after, as
+    /// setting an offset does not.
+    pub(super) fn follow<V: 'static>(&mut self, window: &mut Window, cx: &mut Context<V>) {
+        if let Some(card) = self.pending.take().and_then(|at| self.cards.get(at)) {
+            card.scroll_to(window, cx);
+            cx.on_next_frame(window, |_, _, cx| cx.notify());
+        }
+    }
+}
+
 /// A full-width page about the whole workspace, shown in place of the conversation. On a remote
 /// host it is that host's, and says so; on one that refuses changes, it says why saving is off.
 pub(super) fn page<V: EventEmitter<Intent>>(
@@ -664,7 +707,62 @@ pub(super) fn page<V: EventEmitter<Intent>>(
     p: Palette,
     cx: &mut Context<V>,
 ) -> Div {
-    const COLUMN: f32 = 980.;
+    let scrolled = div()
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scrollbar()
+        .px_6()
+        .py_5()
+        .child(page_column(body, host, p));
+    page_frame(title, subtitle, scrolled, footer, host, p, cx)
+}
+
+/// [`page`], scrolled by `scroll`, so it can open at one of its cards.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn page_with_cards<V: EventEmitter<Intent>>(
+    title: &'static str,
+    subtitle: &'static str,
+    body: impl IntoElement,
+    footer: Option<Div>,
+    scroll: &PageScroll,
+    host: &HostView,
+    p: Palette,
+    cx: &mut Context<V>,
+) -> Div {
+    let scrolled = div()
+        .id("page-body")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .track_scroll(&scroll.handle)
+        .vertical_scrollbar(&scroll.handle)
+        .px_6()
+        .py_5()
+        .child(page_column(body, host, p));
+    page_frame(title, subtitle, scrolled, footer, host, p, cx)
+}
+
+fn page_column(body: impl IntoElement, host: &HostView, p: Palette) -> Div {
+    div()
+        .w_full()
+        .max_w(px(COLUMN))
+        .mx_auto()
+        .children(
+            host.changes_refused()
+                .map(|reason| hint(reason, p).pb_3().flex().items_center().gap_2()),
+        )
+        .child(body)
+}
+
+fn page_frame<V: EventEmitter<Intent>>(
+    title: &'static str,
+    subtitle: &'static str,
+    scrolled: impl IntoElement,
+    footer: Option<Div>,
+    host: &HostView,
+    p: Palette,
+    cx: &mut Context<V>,
+) -> Div {
     div()
         .size_full()
         .flex()
@@ -688,25 +786,7 @@ pub(super) fn page<V: EventEmitter<Intent>>(
                     ),
             ),
         )
-        .child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scrollbar()
-                .px_6()
-                .py_5()
-                .child(
-                    div()
-                        .w_full()
-                        .max_w(px(COLUMN))
-                        .mx_auto()
-                        .children(
-                            host.changes_refused()
-                                .map(|reason| hint(reason, p).pb_3().flex().items_center().gap_2()),
-                        )
-                        .child(body),
-                ),
-        )
+        .child(scrolled)
         .when_some(footer, |d, footer| {
             d.child(
                 div()

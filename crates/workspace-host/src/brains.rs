@@ -1388,6 +1388,7 @@ impl Host {
             brains,
             batches,
             this_host: Some(this_host),
+            this_timezone: Some(jobs::local_timezone()),
             compiles: self.brain_compile_states()?,
             conflicts,
         })
@@ -1672,10 +1673,17 @@ impl Host {
         let _ = runtime::git_output(checkout, &["worktree", "prune"]);
     }
 
-    /// Set up: one batch adding `wiffletree-brain.json` with this host as compiler, the gate's
-    /// pinned caller, its config and allow-list, and the `CODEOWNERS` lines that make the PR wait
-    /// for the code owner's review. Files already on `main` are kept.
-    pub fn set_up_brain(&mut self, repository: &str, git: &GitTool) -> Result<BrainBatch> {
+    /// Set up: one batch adding `wiffletree-brain.json` with this host as compiler and `compile`
+    /// as its compile time, the gate's pinned caller, its config and allow-list, and the
+    /// `CODEOWNERS` lines that make the PR wait for the code owner's review. Files already on
+    /// `main` are kept.
+    pub fn set_up_brain(
+        &mut self,
+        repository: &str,
+        compile: &BrainCompile,
+        git: &GitTool,
+    ) -> Result<BrainBatch> {
+        compile::compile_schedule(compile)?;
         let release = self.gate.latest();
         let brain = self.brain(repository)?;
         match &brain.config {
@@ -1701,6 +1709,7 @@ impl Host {
             "version": BrainConfig::VERSION,
             "brain_dir": folder,
             "compiler": {"host_id": self.host_id()?, "name": sync::machine_name()},
+            "compile": compile,
             "gate": {"version": release.tag, "allowlist": ALLOWLIST},
         });
         let on_main = |path: &str| {
@@ -1803,6 +1812,34 @@ impl Host {
             BrainBatchKind::Config,
             BrainSource::BrainsPage,
             &format!("Config: compile on {}", compiler.name),
+            &[(BrainConfig::FILE.into(), pretty(&config)?)],
+            git,
+        )
+    }
+
+    /// A batch that changes only the compile time in `wiffletree-brain.json` on `main`, keeping
+    /// every key this host does not know. The time stays the merged one until it merges.
+    pub fn set_brain_compile_time(
+        &mut self,
+        repository: &str,
+        compile: &BrainCompile,
+        git: &GitTool,
+    ) -> Result<BrainBatch> {
+        compile::compile_schedule(compile)?;
+        let brain = self.brain(repository)?;
+        let mut config = config_on_main(&brain)?;
+        let (at, timezone) = (&compile.at, &compile.timezone);
+        ensure!(
+            config["compile"]["at"] != *at || config["compile"]["timezone"] != *timezone,
+            "{repository} already compiles at {at} {timezone}"
+        );
+        config["compile"]["at"] = Value::from(at.as_str());
+        config["compile"]["timezone"] = Value::from(timezone.as_str());
+        self.queue_brain_batch(
+            &brain.repository,
+            BrainBatchKind::Config,
+            BrainSource::BrainsPage,
+            &format!("Config: compile daily at {at} {timezone}"),
             &[(BrainConfig::FILE.into(), pretty(&config)?)],
             git,
         )
@@ -2671,6 +2708,11 @@ pub(crate) mod tests {
             },
             Command::SetUpBrain {
                 repository: REPO.into(),
+                compile: six_chicago(),
+            },
+            Command::SetBrainCompileTime {
+                repository: REPO.into(),
+                compile: six_chicago(),
             },
             Command::SetBrainCompiler {
                 repository: REPO.into(),
@@ -3250,6 +3292,129 @@ pub(crate) mod tests {
         assert_eq!(github.assert_pushes_are_batch_branches_only(), 0);
     }
 
+    fn six_chicago() -> BrainCompile {
+        BrainCompile {
+            at: BrainCompile::DEFAULT_AT.into(),
+            timezone: "America/Chicago".into(),
+            extra: Extra::new(),
+        }
+    }
+
+    /// `wiffletree-brain.json` as `batch` writes it.
+    fn written_config(home: &Path, batch: &BrainBatch) -> Value {
+        let file = home.join(BATCHES).join(&batch.id).join(BrainConfig::FILE);
+        serde_json::from_slice(&fs::read(file).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn set_up_writes_the_compile_time_and_the_merged_config_schedules_it() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = GitHub::new(folder.path());
+        let tools = github.tools();
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, _) = host_with_brain(home.path());
+        run(&mut host, &tools);
+        let batch = host.set_up_brain(REPO, &six_chicago(), &tools.git).unwrap();
+        let written = written_config(home.path(), &batch);
+        assert_eq!(written["compile"]["at"], "06:00");
+        assert_eq!(written["compile"]["timezone"], "America/Chicago");
+
+        github.commit_file_on_main(BrainConfig::FILE, &written.to_string());
+        run(&mut host, &tools);
+        host.refresh_compile_jobs().unwrap();
+        let scheduled = (host.built_ins.iter())
+            .find(|job| job.subject == REPO)
+            .and_then(|job| job.schedule.clone())
+            .expect("this host compiles the brain it set up");
+        assert_eq!(
+            (scheduled.cron.as_str(), scheduled.timezone.as_str()),
+            ("0 6 * * *", "America/Chicago")
+        );
+    }
+
+    #[test]
+    fn a_compile_time_the_schedule_cannot_read_opens_no_pr() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = GitHub::new(folder.path());
+        let tools = github.tools();
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, _) = host_with_brain(home.path());
+        run(&mut host, &tools);
+        for (at, timezone, says) in [
+            ("25:00", "America/Chicago", "is not a time"),
+            ("06:60", "America/Chicago", "is not a time"),
+            ("soon", "America/Chicago", "is not a time"),
+            ("06:00", "Mars/Olympus", "is not a timezone"),
+            ("06:00", "", "is not a timezone"),
+        ] {
+            let compile = BrainCompile {
+                at: at.into(),
+                timezone: timezone.into(),
+                extra: Extra::new(),
+            };
+            let error = host.set_up_brain(REPO, &compile, &tools.git).unwrap_err();
+            assert!(format!("{error:#}").contains(says), "{at} {timezone}");
+        }
+        assert!(host.brain_batches(Some(REPO)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn changing_the_compile_time_keeps_every_other_key_and_waits_for_the_merge() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = GitHub::new(folder.path());
+        let tools = github.tools();
+        let config = json!({"version": 1, "brain_dir": "second-brain", "future": {"kept": true},
+            "compiler": {"host_id": "h", "name": "Old Mac"},
+            "compile": {"at": "06:00", "timezone": "America/Chicago", "jitter": 5}});
+        github.commit_file_on_main(BrainConfig::FILE, &config.to_string());
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, _) = host_with_brain(home.path());
+        run(&mut host, &tools);
+
+        let same = host.set_brain_compile_time(REPO, &six_chicago(), &tools.git);
+        assert!(format!("{:#}", same.unwrap_err()).contains("already compiles at 06:00"));
+        let bad = BrainCompile {
+            at: "24:00".into(),
+            ..six_chicago()
+        };
+        assert!(host.set_brain_compile_time(REPO, &bad, &tools.git).is_err());
+
+        let two = BrainCompile {
+            at: "02:00".into(),
+            ..six_chicago()
+        };
+        let batch = host.set_brain_compile_time(REPO, &two, &tools.git).unwrap();
+        assert_eq!(
+            (batch.kind, batch.files.clone()),
+            (BrainBatchKind::Config, vec![BrainConfig::FILE.to_owned()])
+        );
+        let written = written_config(home.path(), &batch);
+        assert_eq!(written["compile"]["at"], "02:00");
+        assert_eq!(written["compile"]["jitter"], 5, "unknown keys in compile");
+        assert_eq!(written["future"]["kept"], true);
+        assert_eq!(written["compiler"]["name"], "Old Mac");
+        let merged = host.brain(REPO).unwrap();
+        let merged = merged.config.config().unwrap().compile.as_ref().unwrap();
+        assert_eq!(merged.at, "06:00", "main's time stands until the PR merges");
+    }
+
+    #[test]
+    fn a_brain_with_no_compile_time_can_be_given_one() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = GitHub::new(folder.path());
+        let tools = github.tools();
+        let config = json!({"version": 1, "compiler": {"host_id": "h", "name": "Mac"}});
+        github.commit_file_on_main(BrainConfig::FILE, &config.to_string());
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, _) = host_with_brain(home.path());
+        run(&mut host, &tools);
+        let batch = host
+            .set_brain_compile_time(REPO, &six_chicago(), &tools.git)
+            .unwrap();
+        let written = written_config(home.path(), &batch);
+        assert_eq!(written["compile"]["timezone"], "America/Chicago");
+    }
+
     #[test]
     fn set_up_queues_the_config_the_pinned_caller_and_the_codeowners_lines_in_one_batch() {
         let folder = tempfile::tempdir().unwrap();
@@ -3257,10 +3422,12 @@ pub(crate) mod tests {
         let tools = github.tools();
         let home = tempfile::tempdir().unwrap();
         let (mut host, _) = host_with_brain(home.path());
-        let error = host.set_up_brain(REPO, &tools.git).unwrap_err();
+        let error = host
+            .set_up_brain(REPO, &six_chicago(), &tools.git)
+            .unwrap_err();
         assert!(format!("{error:#}").contains("Sync now"), "not fetched yet");
         run(&mut host, &tools);
-        let batch = host.set_up_brain(REPO, &tools.git).unwrap();
+        let batch = host.set_up_brain(REPO, &six_chicago(), &tools.git).unwrap();
         assert_eq!(RELEASE.commit, "083ab25267aa260569ab61106ff8fdff5bb2ba0e");
         assert_eq!(batch.kind, BrainBatchKind::SetUp);
         assert_eq!(
@@ -3283,7 +3450,9 @@ pub(crate) mod tests {
         );
         let owners = fs::read_to_string(worktree.join(".github/CODEOWNERS")).unwrap();
         assert!(owners.contains("/wiffletree-brain.json") && owners.contains("@mhohlios"));
-        let error = host.set_up_brain(REPO, &tools.git).unwrap_err();
+        let error = host
+            .set_up_brain(REPO, &six_chicago(), &tools.git)
+            .unwrap_err();
         assert!(
             format!("{error:#}").contains("already open"),
             "one Set up PR"
@@ -3303,7 +3472,9 @@ pub(crate) mod tests {
         github.commit_symlink_on_main(".github/CODEOWNERS", &victim);
         let (mut host, _) = host_with_brain(home.path());
         run(&mut host, &tools);
-        let error = host.set_up_brain(REPO, &tools.git).unwrap_err();
+        let error = host
+            .set_up_brain(REPO, &six_chicago(), &tools.git)
+            .unwrap_err();
         assert!(format!("{error:#}").contains("symlink"), "{error:#}");
         assert_eq!(fs::read_to_string(&victim).unwrap(), "Not the brain's.\n");
         assert!(host.brain_batches(None).unwrap().is_empty());
@@ -3318,7 +3489,7 @@ pub(crate) mod tests {
         let (mut host, _) = host_with_brain(home.path());
         run(&mut host, &tools);
         host.confirm_brain(REPO).unwrap();
-        let batch = host.set_up_brain(REPO, &tools.git).unwrap();
+        let batch = host.set_up_brain(REPO, &six_chicago(), &tools.git).unwrap();
         run(&mut host, &tools);
         passing_checks(&github);
         run(&mut host, &tools);
