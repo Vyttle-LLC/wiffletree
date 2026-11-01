@@ -2692,7 +2692,9 @@ pub(crate) mod tests {
                     id: SpaceId("s".into()),
                     name: "S".into(),
                     description: String::new(),
-                    instructions: String::new(),
+                    additions: String::new(),
+                    behaviors: Default::default(),
+                    repository_settings: Default::default(),
                     brain: None,
                     storage: SpaceStorage {
                         repository: StorageRepository::Local { id: "l".into() },

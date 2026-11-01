@@ -5,7 +5,7 @@ mod common;
 use common::{git, request, snapshot, until};
 use std::path::Path;
 use workspace_core::*;
-use workspace_host::{Host, context, provider, service::Service};
+use workspace_host::{Host, behaviors, context, provider, service::Service};
 
 #[test]
 fn a_running_implementer_gets_saved_rules_from_its_next_turn() {
@@ -102,13 +102,14 @@ fn a_running_implementer_gets_saved_rules_from_its_next_turn() {
     assert!(next.starts_with(&running));
     assert!(next.ends_with(&format!("## Your own rules for Implementing\nThese are the human's own rules for this skill. Where they disagree with the skill above, follow them.\n{rules}")));
 
-    // The context probe sizes what the turns are sent, as the desktop builds it.
+    // The context probe sizes what the turns are sent.
     let snapshot = snapshot(&service);
     let state = snapshot
         .skills
         .iter()
         .find(|s| s.skill == Skill::Implementing);
-    let instructions = provider::role_instructions(Role::Implementer, state.unwrap());
+    let behaviors = behaviors::stock_sentences(Skill::Implementing);
+    let instructions = provider::role_instructions(Role::Implementer, state.unwrap(), &behaviors);
     let runtime = runtime(&service);
     let profile = runtime.profile.unwrap();
     context::usage(&context::Probe {

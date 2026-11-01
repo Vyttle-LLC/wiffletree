@@ -13,6 +13,7 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use tempfile::TempDir;
 use tracker::ISSUES;
+use workspace_core::cascade::{Choices, RepositorySettings};
 
 /// The tracker's config at a storage repository's root.
 pub(crate) const TRACKER: &str = "wiffletree-issues.yaml";
@@ -36,8 +37,14 @@ struct SpaceFile {
     name: String,
     #[serde(default)]
     description: String,
-    #[serde(default)]
-    instructions: String,
+    /// Stored as `instructions`, the name every release reads, so a teammate on an older host
+    /// keeps getting them and no save leaves two keys.
+    #[serde(default, rename = "instructions")]
+    additions: String,
+    #[serde(default, skip_serializing_if = "Choices::is_empty")]
+    behaviors: Choices,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    repository_settings: BTreeMap<String, RepositorySettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     brain: Option<SpaceBrain>,
     #[serde(default)]
@@ -58,7 +65,9 @@ fn space_yaml(space: &Space) -> Result<Vec<u8>> {
         id: space.id.clone(),
         name: space.name.clone(),
         description: space.description.clone(),
-        instructions: space.instructions.clone(),
+        additions: space.additions.clone(),
+        behaviors: space.behaviors.clone(),
+        repository_settings: space.repository_settings.clone(),
         brain: space.brain.clone(),
         repositories: space.repositories.clone(),
         models: space.models.clone(),
@@ -84,7 +93,9 @@ fn read_space(content: &[u8], storage: SpaceStorage) -> Result<Space> {
         id: file.id,
         name: file.name,
         description: file.description,
-        instructions: file.instructions,
+        additions: file.additions,
+        behaviors: file.behaviors,
+        repository_settings: file.repository_settings,
         brain: file.brain,
         storage,
         repositories: file.repositories,
@@ -390,7 +401,7 @@ pub(crate) fn github(name: &str) -> StorageRepository {
 pub(crate) struct NewSpace<'a> {
     pub(crate) name: &'a str,
     pub(crate) description: &'a str,
-    pub(crate) instructions: &'a str,
+    pub(crate) additions: &'a str,
     pub(crate) prefix: Option<&'a str>,
 }
 
@@ -1229,7 +1240,7 @@ impl Host {
         let NewSpace {
             name,
             description,
-            instructions,
+            additions,
             prefix,
         } = *new;
         self.ensure_unused_name(name, None)?;
@@ -1263,7 +1274,9 @@ impl Host {
             id: SpaceId(new_id()),
             name: name.trim().into(),
             description: description.into(),
-            instructions: instructions.into(),
+            additions: additions.into(),
+            behaviors: Default::default(),
+            repository_settings: Default::default(),
             brain: None,
             storage: SpaceStorage {
                 repository: storage,
@@ -1865,7 +1878,9 @@ pub(crate) mod tests {
             id: SpaceId("sage-id".into()),
             name: "Sage".into(),
             description: description.into(),
-            instructions: "Name the ticket.".into(),
+            additions: "Name the ticket.".into(),
+            behaviors: Default::default(),
+            repository_settings: Default::default(),
             brain: None,
             storage: SpaceStorage {
                 repository: github(NAME),
@@ -1884,7 +1899,7 @@ pub(crate) mod tests {
         NewSpace {
             name,
             description: "",
-            instructions: "",
+            additions: "",
             prefix,
         }
     }
@@ -2058,6 +2073,55 @@ sources:
 
     fn written(space: &Space) -> serde_yaml::Value {
         serde_yaml::from_slice(&space_yaml(space).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_spaces_additions_are_stored_as_instructions_as_older_hosts_read_them() {
+        let storage = SpaceStorage {
+            repository: super::github(NAME),
+            folder: "sage".into(),
+        };
+        let old = "format: 1\nid: sage-id\nname: Sage\ninstructions: Never log names.\n";
+        let space = read_space(old.as_bytes(), storage).unwrap();
+        assert_eq!(space.additions, "Never log names.");
+        let file = written(&space);
+        assert_eq!(file["instructions"], "Never log names.");
+        assert_eq!(file.get("additions"), None);
+    }
+
+    #[test]
+    fn behaviors_and_repository_settings_keep_what_this_release_does_not_know() {
+        let storage = SpaceStorage {
+            repository: super::github(NAME),
+            folder: "sage".into(),
+        };
+        let newer = "\
+format: 1
+id: sage-id
+name: Sage
+repositories: [Sage-Social/api]
+behaviors:
+  review_depth: full
+  future_behavior: often
+repository_settings:
+  Sage-Social/api:
+    instructions: Verify webhook signatures.
+    future_key: 3
+";
+        let space = Space {
+            description: "Changed here".into(),
+            ..read_space(newer.as_bytes(), storage).unwrap()
+        };
+        assert_eq!(space.behaviors["review_depth"], "full");
+        let api = space.repository_settings("sage-social/API").unwrap();
+        assert_eq!(api.additions, "Verify webhook signatures.");
+        let file = written(&space);
+        assert_eq!(file["behaviors"]["future_behavior"], "often");
+        let api = &file["repository_settings"]["Sage-Social/api"];
+        assert_eq!(
+            (&api["future_key"], &api["instructions"]),
+            (&3.into(), &"Verify webhook signatures.".into())
+        );
     }
 
     #[test]
@@ -2298,7 +2362,7 @@ sources:
         let (home, mut host) = host();
         let staged = stage(&host.home, NAME, &github.tools(), &[]).unwrap();
         let new = NewSpace {
-            instructions: "Name the ticket.",
+            additions: "Name the ticket.",
             ..form("Sage", Some("SAGE"))
         };
         let space = host.create_stored_space(&new, staged).unwrap().space;
@@ -2768,7 +2832,7 @@ sources:
         let sage = space_named(&host, "Sage");
         let number = "(415) 555-0134";
         host.update_space(Space {
-            instructions: format!("Text the parent at {number}."),
+            additions: format!("Text the parent at {number}."),
             ..sage
         })
         .unwrap();
@@ -2801,7 +2865,7 @@ sources:
         host.scan_path = Some("/nowhere".into());
         let space = personal(&host);
         host.update_space(Space {
-            instructions: "Text the parent at (415) 555-0134.".into(),
+            additions: "Text the parent at (415) 555-0134.".into(),
             ..space.clone()
         })
         .unwrap();

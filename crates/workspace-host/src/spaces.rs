@@ -164,7 +164,9 @@ fn new_space(name: &str, prefixes: &mut Vec<String>) -> (Space, TrackerConfig) {
         id: SpaceId(new_id()),
         name: name.into(),
         description: String::new(),
-        instructions: String::new(),
+        additions: String::new(),
+        behaviors: Default::default(),
+        repository_settings: Default::default(),
         brain: None,
         storage: SpaceStorage {
             repository: StorageRepository::Local { id: new_id() },
@@ -272,9 +274,15 @@ pub(crate) fn validate(space: &Space) -> Result<()> {
         "A Space's description is at most 4,096 bytes"
     );
     ensure!(
-        space.instructions.len() <= MAX_TEXT_BYTES,
-        "A Space's instructions are at most {MAX_TEXT_BYTES} bytes"
+        space.additions.len() <= MAX_TEXT_BYTES,
+        "A Space's additions are at most {MAX_TEXT_BYTES} bytes"
     );
+    for (repository, settings) in &space.repository_settings {
+        ensure!(
+            settings.additions.len() <= MAX_TEXT_BYTES,
+            "{repository}'s additions are at most {MAX_TEXT_BYTES} bytes"
+        );
+    }
     for (at, identity) in space.repositories.iter().enumerate() {
         validate_repository_identity(identity)?;
         ensure!(
@@ -397,7 +405,7 @@ impl Host {
         &mut self,
         name: &str,
         description: &str,
-        instructions: &str,
+        additions: &str,
         prefix: Option<&str>,
     ) -> Result<SpaceRecord> {
         self.ensure_unused_name(name, None)?;
@@ -411,7 +419,7 @@ impl Host {
         }
         let (mut space, mut tracker) = new_space(name.trim(), &mut prefixes);
         space.description = description.into();
-        space.instructions = instructions.into();
+        space.additions = additions.into();
         if let Some(prefix) = prefix {
             tracker.prefix = prefix.into();
         }
@@ -434,6 +442,7 @@ impl Host {
             "A Space's storage cannot be changed here"
         );
         validate(&space)?;
+        self.check_space_behaviors(&current.space, &space)?;
         self.ensure_unused_name(&space.name, Some(&space.id))?;
         if let Some(SpaceBrain {
             repository: BrainRepository::GitHub { owner, name, .. },

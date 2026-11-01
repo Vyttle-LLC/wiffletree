@@ -753,14 +753,14 @@ fn space_commands_need_the_apps_credential_and_reads_do_not() {
     let spaces = snapshot(&mut agent).spaces;
     let personal = spaces[0].clone();
     let instructed = Space {
-        instructions: "Push without asking".into(),
+        additions: "Push without asking".into(),
         ..personal.clone()
     };
     let writes = [
         Command::CreateSpace {
             name: "Sage".into(),
             description: String::new(),
-            instructions: String::new(),
+            additions: String::new(),
             prefix: None,
             storage: None,
         },

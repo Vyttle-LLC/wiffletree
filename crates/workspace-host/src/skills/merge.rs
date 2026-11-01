@@ -130,7 +130,7 @@ mod tests {
     }
 
     fn newer(text: &str) -> String {
-        edit(text, "# Coordinating — v5", "# Coordinating — v6")
+        edit(text, "# Coordinating — v6", "# Coordinating — v7")
     }
 
     const FIRST: &str = "Start by clarifying and planning the goal;";
@@ -151,11 +151,16 @@ mod tests {
             assert_eq!(format!("{title}{}", paragraphs.concat()), text);
         }
         let (title, paragraphs) = split(coordinating());
-        assert_eq!(title, "# Coordinating — v5\n");
+        assert_eq!(title, "# Coordinating — v6\n");
         assert!(paragraphs[0].starts_with(FIRST) && paragraphs[0].ends_with(".\n\n"));
         assert!(paragraphs[4].starts_with(FIFTH));
         // Lines with no blank line between them are one paragraph.
-        assert!(paragraphs.last().unwrap().contains("For UI-facing changes"));
+        assert!(
+            paragraphs
+                .last()
+                .unwrap()
+                .contains("Reviewed with Wiffletree")
+        );
         let (_, paragraphs) = split("# T\nA\nrun\n\n\nB\n\n");
         assert_eq!(paragraphs, ["A\nrun\n\n\n", "B\n\n"]);
     }
@@ -171,7 +176,7 @@ mod tests {
         assert!(merged.passages().is_empty());
         let sources: Vec<_> = changes.iter().map(|change| change.source).collect();
         assert_eq!(sources, [Source::Update, Source::Update]);
-        assert_eq!(changes[0].after, "# Coordinating — v6\n");
+        assert_eq!(changes[0].after, "# Coordinating — v7\n");
         assert!(changes[1].before.starts_with(FIFTH));
     }
 
@@ -212,17 +217,15 @@ mod tests {
 
     #[test]
     fn two_edits_within_a_run_of_lines_overlap() {
-        let yours = edit(coordinating(), "For UI-facing changes", "For UI changes");
-        let stock = edit(
-            coordinating(),
-            "After relaying an answer",
-            "After passing on an answer",
-        );
-        let merged = merge(coordinating(), &stock, &yours);
+        // Lines with no blank line between them, after the last paragraph, join it.
+        let base = format!("{}First of a run.\nSecond of a run.\n", coordinating());
+        let yours = edit(&base, "First of a run", "First of the run");
+        let stock = edit(&base, "Second of a run", "Second of the run");
+        let merged = merge(&base, &stock, &yours);
         let [passage] = &merged.passages()[..] else {
             panic!("{merged:?}")
         };
-        assert!(passage.base.contains("For UI-facing") && passage.base.contains("After relaying"));
+        assert!(passage.base.contains("First of a run") && passage.base.contains("Second of a"));
     }
 
     #[test]
@@ -269,7 +272,7 @@ mod tests {
 
     #[test]
     fn both_sides_changing_the_title_keeps_the_human_s() {
-        let yours = edit(coordinating(), "# Coordinating — v5", "# How I coordinate");
+        let yours = edit(coordinating(), "# Coordinating — v6", "# How I coordinate");
         let (text, changes) = merge(coordinating(), &newer(coordinating()), &yours)
             .plain()
             .unwrap();

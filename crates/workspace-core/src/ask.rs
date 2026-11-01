@@ -155,14 +155,14 @@ pub fn create_project(name: String, space_id: Option<SpaceId>) -> Ask<Project> {
 pub fn create_space(
     name: String,
     description: String,
-    instructions: String,
+    additions: String,
     prefix: Option<String>,
     storage: Option<String>,
 ) -> Ask<SpaceRecord> {
     Ask::new(Command::CreateSpace {
         name,
         description,
-        instructions,
+        additions,
         prefix,
         storage,
     })

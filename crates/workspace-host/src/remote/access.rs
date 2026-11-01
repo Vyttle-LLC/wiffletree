@@ -44,6 +44,9 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::ComparePausedFile { .. }
         | Command::SkillHistory { .. }
         | Command::SkillMergeReview { .. }
+        | Command::BehaviorCatalog
+        | Command::LayerValues { .. }
+        | Command::EffectiveSettings { .. }
         | Command::SkillStockChanges { .. }
         | Command::LeftoverWorktrees
         | Command::Processes { .. }
@@ -174,6 +177,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::SetCheckIns { .. }
         | Command::SetOwnerAllowed { .. }
         | Command::SetKeeper { .. }
+        | Command::SetLayerValues { .. }
         | Command::SaveSkillRules { .. }
         | Command::ResetSkill { .. }
         | Command::RestoreSkill { .. }

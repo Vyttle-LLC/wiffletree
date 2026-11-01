@@ -609,6 +609,8 @@ impl Host {
             approvals: 0,
             waived: checked.waived,
             keeper,
+            // The keeper's pushes keep its own rules; the Behavior covers `publish_ticket`.
+            always_ask: !keeper && self.always_asks_before_publishing(ticket)?,
         });
         self.save_ticket(ticket)?;
         self.start_step(ticket, &checked.repository)
@@ -691,6 +693,7 @@ impl Host {
             Some(PublishAsk::EndedPullRequest) => {
                 ended_pull_request_notice(ticket).unwrap_or_default()
             }
+            Some(PublishAsk::AlwaysAsk) => ALWAYS_ASK_REASON.to_owned(),
             _ => not_allowed_reason(repository),
         };
         json!({"status": "waiting_for_human", "step": request.step.label(),

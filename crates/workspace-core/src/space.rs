@@ -2,8 +2,10 @@
 //! A `Space` is what its storage repository's `space.yaml` holds; `SpaceLocal` is what stays on
 //! this Mac.
 use crate::ModelProfile;
+use crate::cascade::{Choices, RepositorySettings};
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// Empty for a project from a host older than Spaces, which shows as "No Space".
@@ -35,9 +37,16 @@ pub struct Space {
     /// What belongs in this Space.
     #[serde(default)]
     pub description: String,
-    /// Added to every thread and job run in this Space.
-    #[serde(default)]
-    pub instructions: String,
+    /// Added to every role's instructions in this Space, after the Workspace's additions.
+    /// Stored as `instructions`, the name older hosts read.
+    #[serde(default, rename = "instructions")]
+    pub additions: String,
+    /// The Behaviors this Space sets for its members' agents.
+    #[serde(default, skip_serializing_if = "Choices::is_empty")]
+    pub behaviors: Choices,
+    /// What the Space sets for a repository it covers, by `owner/name`, for its tickets only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub repository_settings: BTreeMap<String, RepositorySettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brain: Option<SpaceBrain>,
     pub storage: SpaceStorage,
@@ -56,6 +65,12 @@ impl Space {
     /// Whether this Space lists `repository`, matched by its GitHub name.
     pub fn lists(&self, repository: &crate::Repository) -> bool {
         self.repositories.iter().any(|i| repository.is_github(i))
+    }
+    /// What the Space sets for the repository named `owner/name`, ignoring case as GitHub does.
+    pub fn repository_settings(&self, identity: &str) -> Option<&RepositorySettings> {
+        (self.repository_settings.iter())
+            .find(|(named, _)| named.eq_ignore_ascii_case(identity))
+            .map(|(_, settings)| settings)
     }
 }
 

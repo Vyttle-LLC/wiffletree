@@ -1584,7 +1584,9 @@ mod tests {
             id: SpaceId(id.into()),
             name: id.into(),
             description: String::new(),
-            instructions: String::new(),
+            additions: String::new(),
+            behaviors: Default::default(),
+            repository_settings: Default::default(),
             brain: Some(SpaceBrain {
                 repository: BrainRepository::GitHub {
                     owner: owner.into(),

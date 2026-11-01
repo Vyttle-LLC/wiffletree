@@ -448,6 +448,14 @@ impl Host {
             "Ticket is {}; verify it once its implementer reports ready_for_testing",
             ticket.state
         );
+        let settings = self.settings().verification;
+        if settings.level(level)?.0.kind == LevelKind::Recheck
+            && self.wants_full_reviews(&ticket)?
+        {
+            bail!(
+                "{level} is a re-check, and this ticket's Review depth Behavior is “Full review for every ticket”. Verify it at a full review level."
+            );
+        }
         self.start_cycle(ticket, level, Starter::Coordinator { small })
     }
     /// Starts the PR keeper's review of the commit it moved onto the ticket's branch, at the

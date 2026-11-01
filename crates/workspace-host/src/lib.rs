@@ -2,6 +2,7 @@
 mod agent_processes;
 mod assistant;
 pub mod attachments;
+pub mod behaviors;
 mod boards;
 mod brain_index;
 mod brains;
@@ -72,7 +73,7 @@ mod verify_refs;
 mod worktrees;
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, params};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     fs::{self, File, OpenOptions},
@@ -1952,26 +1953,26 @@ impl Host {
             Command::CreateSpace {
                 name,
                 description,
-                instructions,
+                additions,
                 prefix,
                 storage: None,
             } => serde_json::to_value(self.create_space(
                 &name,
                 &description,
-                &instructions,
+                &additions,
                 prefix.as_deref(),
             )?)?,
             Command::CreateSpace {
                 name,
                 description,
-                instructions,
+                additions,
                 prefix,
                 storage: Some(repository),
             } => {
                 let new = storage::NewSpace {
                     name: &name,
                     description: &description,
-                    instructions: &instructions,
+                    additions: &additions,
                     prefix: prefix.as_deref(),
                 };
                 let requested = self.precheck_stored_space(&new, &repository)?;
@@ -2287,6 +2288,15 @@ impl Host {
                 serde_json::to_value(self.compare_paused(repository.as_deref(), &path)?)?
             }
             Command::SkillHistory { skill } => serde_json::to_value(self.skills().listing(skill))?,
+            Command::BehaviorCatalog => serde_json::to_value(behaviors::catalog())?,
+            Command::LayerValues { scope } => serde_json::to_value(self.layer_values(&scope)?)?,
+            Command::SetLayerValues { scope, values } => {
+                serde_json::to_value(self.set_layer_values(&scope, values)?)?
+            }
+            Command::EffectiveSettings {
+                project_id,
+                ticket_id,
+            } => serde_json::to_value(self.effective_settings(&project_id, ticket_id.as_deref())?)?,
             Command::StartSkillRewrite { skill } => {
                 self.skills().start_rewrite(skill)?;
                 self.changed_skill(skill)?

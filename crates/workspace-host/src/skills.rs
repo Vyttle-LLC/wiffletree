@@ -516,11 +516,12 @@ impl SkillStore<'_> {
         }
         Ok(())
     }
-    /// What a role's next turn is sent, with its skill as the store holds it; a brain compile's
-    /// is its bundled procedure, which no skill changes.
-    pub fn instructions(&self, role: Role) -> String {
+    /// What a role's next turn is sent, with its skill as the store holds it and `behaviors`,
+    /// the sentences of its resolved Behaviors; a brain compile's is its bundled procedure,
+    /// which no skill changes.
+    pub fn instructions(&self, role: Role, behaviors: &str) -> String {
         match Skill::for_role(role) {
-            Some(skill) => provider::role_instructions(role, &self.state(skill)),
+            Some(skill) => provider::role_instructions(role, &self.state(skill), behaviors),
             None => provider::skill(role),
         }
     }
@@ -711,6 +712,14 @@ impl Moved {
 pub fn store(home: &Path) -> SkillStore<'static> {
     SkillStore::new(shared::SharedStore::of(home).skills_folder())
 }
+/// What a role's turns are sent outside every Space by the host whose data folder is `home`:
+/// its skill and Behaviors as the Workspace sets them.
+pub fn instructions(home: &Path, role: Role) -> String {
+    let behaviors = Skill::for_role(role).map_or(String::new(), |skill| {
+        behaviors::workspace_sentences(home, skill)
+    });
+    store(home).instructions(role, &behaviors)
+}
 impl Host {
     pub fn skills(&self) -> SkillStore<'_> {
         SkillStore {
@@ -718,9 +727,10 @@ impl Host {
             ..store(&self.home)
         }
     }
-    /// What a role's next turn is sent, read from the store each time.
+    /// What a role's turns are sent outside every Space, read from the store each time; a
+    /// session's are `session_instructions`.
     pub fn instructions(&self, role: Role) -> String {
-        self.skills().instructions(role)
+        instructions(&self.home, role)
     }
     pub(crate) fn skill_states(&self) -> Result<Vec<SkillState>> {
         Skill::ALL
@@ -1121,7 +1131,7 @@ mod tests {
         let history = host.skills().history(Skill::Implementing);
         let entry = Entry {
             change: Change::SavedRules,
-            stock_version: "v2".into(),
+            stock_version: "v3".into(),
             edits: Edits {
                 rules: rules.into(),
                 rewrite: None,
@@ -1316,7 +1326,7 @@ mod tests {
         let (_, latest) = host.skills().history(Skill::Implementing).pop().unwrap();
         assert_eq!(
             (latest.stock_version.as_str(), latest.edits.rules.as_str()),
-            ("v2", "Rule")
+            ("v3", "Rule")
         );
     }
 
@@ -1342,7 +1352,7 @@ mod tests {
         host.skills()
             .save_rules(Skill::Implementing, "Rule")
             .unwrap();
-        let probed = store(&host.home).instructions(Role::Implementer);
+        let probed = instructions(&host.home, Role::Implementer);
         assert_eq!(probed, host.instructions(Role::Implementer));
         assert!(probed.ends_with("Rule"));
     }
@@ -1366,13 +1376,18 @@ mod tests {
             [Change::SavedRules, previous.clone()]
         );
         let (_, latest) = host.skills().history(Skill::Reviewing).pop().unwrap();
-        assert_eq!(latest.stock_version, "v2");
+        assert_eq!(latest.stock_version, "v3");
         assert_eq!(latest.edits.rules, "Read the tests first");
         // The new stock text is sent with the same rules, and nothing else gains an entry.
         let reviewing = host.skills().state(Skill::Reviewing);
         assert_eq!(
             host.instructions(Role::Tester),
-            provider::instructions(Role::Tester, stock(Skill::Reviewing), &reviewing.rules)
+            provider::instructions(
+                Role::Tester,
+                stock(Skill::Reviewing),
+                &behaviors::stock_sentences(Skill::Reviewing),
+                &reviewing.rules
+            )
         );
         assert!(!host.home.join("shared/skills/implementing").exists());
         drop(host);
@@ -1387,17 +1402,17 @@ mod tests {
         host.skills()
             .save_rules(Skill::Coordinating, "Rule")
             .unwrap();
-        // The other machine, on v6, recorded its new stock version in the shared history.
+        // The other machine, on v7, recorded its new stock version in the shared history.
         let (name, _) = host.skills().history(Skill::Coordinating).remove(0);
         let history = host.shared().skills_folder().join("coordinating/history");
         let entry = fs::read_to_string(history.join(format!("{name}.json"))).unwrap();
-        let entry = entry.replace("\"v5\"", "\"v6\"");
+        let entry = entry.replace("\"v6\"", "\"v7\"");
         fs::write(history.join("2099-01-01T00-00-00.000Z.json"), entry).unwrap();
         drop(host);
         let host = Host::open(home.path()).unwrap();
         assert_eq!(host.skills().history(Skill::Coordinating).len(), 2);
         let states = host.skill_states().unwrap();
-        assert_eq!(states[0].newer_stock_version.as_deref(), Some("v6"));
+        assert_eq!(states[0].newer_stock_version.as_deref(), Some("v7"));
         assert_eq!(states[1].newer_stock_version, None);
     }
 
@@ -1405,6 +1420,15 @@ mod tests {
         host.shared_folder().join("skills/coordinating").join(file)
     }
 
+    /// The coordinator's instructions up to the sentences of its stock Behaviors, which follow
+    /// its skill's text.
+    fn before_behaviors(host: &Host) -> String {
+        let behaviors = format!("\n{}", behaviors::stock_sentences(Skill::Coordinating));
+        let sent = host.instructions(Role::ProjectOrchestrator);
+        sent.strip_suffix(&behaviors)
+            .expect("the stock Behaviors last")
+            .to_owned()
+    }
     /// Bases Coordinating's rewrite on a stand-in for an earlier stock text, as if it had been
     /// written before a release that changed it.
     fn based_on_an_earlier_release(host: &Host, base: &str) {
@@ -1433,7 +1457,7 @@ mod tests {
         );
         assert_eq!(
             (rewrite.base_version.as_str(), rewrite.out_of_date),
-            ("v5", false)
+            ("v6", false)
         );
         assert_eq!(started.rules, "");
         assert!(!coordinating(&host, "additions.md").exists());
@@ -1451,7 +1475,12 @@ mod tests {
         let instructions = host.instructions(Role::ProjectOrchestrator);
         assert_eq!(
             instructions,
-            provider::instructions(Role::ProjectOrchestrator, text, "")
+            provider::instructions(
+                Role::ProjectOrchestrator,
+                text,
+                &behaviors::stock_sentences(Skill::Coordinating),
+                ""
+            )
         );
         assert!(!instructions.contains(provider::RULES_SENTENCE));
         assert_eq!(
@@ -1477,7 +1506,12 @@ mod tests {
         host.execute(save(String::new())).unwrap();
         assert_eq!(
             host.instructions(Role::Tester),
-            provider::instructions(Role::Tester, "", "")
+            provider::instructions(
+                Role::Tester,
+                "",
+                &behaviors::stock_sentences(Skill::Reviewing),
+                ""
+            )
         );
         let refused = host.execute(save("x".repeat(40_000))).unwrap_err();
         assert!(refused.to_string().contains("32,000"), "{refused}");
@@ -1505,10 +1539,7 @@ mod tests {
             (rewrite.base_version.as_str(), rewrite.out_of_date),
             ("v0", true)
         );
-        assert!(
-            host.instructions(Role::ProjectOrchestrator)
-                .ends_with("My way")
-        );
+        assert!(before_behaviors(&host).ends_with("My way"));
         let lines: Vec<Line> = serde_json::from_value(
             host.execute(Command::SkillStockChanges {
                 skill: Skill::Coordinating,
@@ -1565,7 +1596,7 @@ mod tests {
         let rewrite = host.skills().state(Skill::Coordinating).rewrite.unwrap();
         assert_eq!(
             (rewrite.base_version.as_str(), rewrite.out_of_date),
-            ("v5", true)
+            ("v6", true)
         );
     }
 
@@ -1622,10 +1653,7 @@ mod tests {
             ("Against v0", "v0", true)
         );
         assert!(!coordinating(&host, "additions.md").exists());
-        assert!(
-            host.instructions(Role::ProjectOrchestrator)
-                .ends_with("Against v0")
-        );
+        assert!(before_behaviors(&host).ends_with("Against v0"));
     }
 
     #[test]
@@ -1881,7 +1909,7 @@ mod tests {
     /// rewrite and base as written.
     fn rewritten_against_v0(host: &Host) -> Rewritten {
         let stock = stock(Skill::Coordinating);
-        let base = (stock.replacen("— v5", "— v0", 1)).replacen(FIFTH, "Ask the human when", 1);
+        let base = (stock.replacen("— v6", "— v0", 1)).replacen(FIFTH, "Ask the human when", 1);
         let text = base.replacen("Start by clarifying", "Start by restating", 1);
         let text = format!("{}  ", text.trim_end());
         host.skills().start_rewrite(Skill::Coordinating).unwrap();
@@ -1912,10 +1940,7 @@ mod tests {
         assert_eq!(current(&host), [merged.as_bytes(), stock.as_bytes()]);
         let rewrite = host.skills().state(Skill::Coordinating).rewrite.unwrap();
         assert!(!rewrite.out_of_date);
-        assert!(
-            host.instructions(Role::ProjectOrchestrator)
-                .ends_with(&merged)
-        );
+        assert!(before_behaviors(&host).ends_with(&merged));
         let (entry, recorded) = host.skills().history(Skill::Coordinating).pop().unwrap();
         let Change::Merged {
             from,
@@ -1929,7 +1954,7 @@ mod tests {
         else {
             panic!("{recorded:?}")
         };
-        assert_eq!((from.as_str(), to.as_str()), ("v0", "v5"));
+        assert_eq!((from.as_str(), to.as_str()), ("v0", "v6"));
         assert_eq!((recorded_before, model), (before.clone(), None));
         assert_eq!((machine, automatic), (sync::machine_name(), false));
         let sources: Vec<_> = merged_changes.iter().map(|change| change.source).collect();
@@ -1946,7 +1971,7 @@ mod tests {
         );
         let undid = Change::UndidMerge {
             entry,
-            to: "v5".into(),
+            to: "v6".into(),
         };
         assert_eq!(changes(&host, Skill::Coordinating).last(), Some(&undid));
         assert!(
@@ -1956,10 +1981,7 @@ mod tests {
                 .unwrap()
                 .out_of_date
         );
-        assert!(
-            host.instructions(Role::ProjectOrchestrator)
-                .ends_with(&before.text)
-        );
+        assert!(before_behaviors(&host).ends_with(&before.text));
         assert!(!host.skill_merge_due(Skill::Coordinating).unwrap());
         // Only a merge's entry can be undone.
         let (saved, _) = host.skills().history(Skill::Coordinating).remove(1);
@@ -2043,17 +2065,14 @@ mod tests {
                 .out_of_date
         );
         // A base from a newer release is sent as written, neither out of date nor merged.
-        based_on_an_earlier_release(&host, &stock.replacen("— v5", "— v6", 1));
+        based_on_an_earlier_release(&host, &stock.replacen("— v6", "— v7", 1));
         assert!(!host.skill_merge_due(Skill::Coordinating).unwrap());
         let rewrite = host.skills().state(Skill::Coordinating).rewrite.unwrap();
         assert_eq!(
             (rewrite.base_version.as_str(), rewrite.out_of_date),
-            ("v6", false)
+            ("v7", false)
         );
-        assert!(
-            host.instructions(Role::ProjectOrchestrator)
-                .ends_with(&before.text)
-        );
+        assert!(before_behaviors(&host).ends_with(&before.text));
     }
 
     #[test]
@@ -2152,7 +2171,7 @@ mod tests {
             );
         }
         for role in Role::ALL {
-            let core = provider::instructions(role, "", "");
+            let core = provider::instructions(role, "", "", "");
             assert!(host.instructions(role).starts_with(&core), "{role:?}");
         }
     }
@@ -2228,7 +2247,7 @@ mod tests {
         let note = MergeNote {
             entry: entry.clone(),
             from: "v0".into(),
-            to: "v5".into(),
+            to: "v6".into(),
             from_update: 2,
             by_model: 0,
             model: None,
@@ -2319,15 +2338,15 @@ mod tests {
         };
         let merged = execute(&mut host, merge.clone()).unwrap();
         assert!(!merged.rewrite.unwrap().out_of_date);
-        assert_eq!(merged.merge_note.unwrap().from, "v5");
+        assert_eq!(merged.merge_note.unwrap().from, "v6");
         // Up to date, or based on a newer release, there is nothing to merge.
         let refused = execute(&mut host, merge.clone()).unwrap_err().to_string();
-        assert_eq!(refused, "Your rewrite is already based on v5");
-        based_on_an_earlier_release(&host, &stock.replacen("— v5", "— v6", 1));
+        assert_eq!(refused, "Your rewrite is already based on v6");
+        based_on_an_earlier_release(&host, &stock.replacen("— v6", "— v7", 1));
         let refused = execute(&mut host, merge).unwrap_err().to_string();
         assert_eq!(
             refused,
-            "Your rewrite is based on v6, not an earlier version than v5"
+            "Your rewrite is based on v7, not an earlier version than v6"
         );
         let state = coordinating_state(&host);
         assert_eq!(
@@ -2439,7 +2458,7 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
                 "stock": passage.stock, "yours": passage.yours}]})
         );
         for role in Role::ALL {
-            let core = provider::instructions(role, "", "");
+            let core = provider::instructions(role, "", "", "");
             for line in core.lines().filter(|line| line.len() > 40) {
                 let sent = record["input"].as_str().unwrap();
                 assert!(
@@ -2450,7 +2469,7 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         }
 
         host.finish_merge_run(run, Ok(answered));
-        let text = (before.text.replacen("— v0", "— v5", 1)).replacen(&passage.yours, &merged, 1);
+        let text = (before.text.replacen("— v0", "— v6", 1)).replacen(&passage.yours, &merged, 1);
         let stock = stock(Skill::Coordinating);
         assert_eq!(current(&host), [text.as_bytes(), stock.as_bytes()]);
         let (_, entry) = host.skills().history(Skill::Coordinating).pop().unwrap();
@@ -2473,7 +2492,7 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
             (1, None)
         );
         for role in Role::ALL {
-            let core = provider::instructions(role, "", "");
+            let core = provider::instructions(role, "", "", "");
             assert!(host.instructions(role).starts_with(&core), "{role:?}");
         }
     }
@@ -2494,7 +2513,7 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         let cases = [
             (
                 json!({"passages": [merged("1", &too_long)]}),
-                "The model's text for passage 1 was longer than v5's version and yours together.",
+                "The model's text for passage 1 was longer than v6's version and yours together.",
             ),
             (json!({"passages": []}), once),
             (
@@ -2625,7 +2644,7 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         );
         assert_eq!(
             refused.unwrap_err().to_string(),
-            "Choose one wording for each passage your rewrite and v5 both change"
+            "Choose one wording for each passage your rewrite and v6 both change"
         );
 
         let stock = stock(skill);
@@ -2639,7 +2658,7 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         )
         .unwrap();
         assert_eq!(kept.merge_standing, None);
-        let text = before.text.replacen("— v0", "— v5", 1);
+        let text = before.text.replacen("— v0", "— v6", 1);
         assert_eq!(current(&host), [text.as_bytes(), stock.as_bytes()]);
         let (entry, _) = host.skills().history(skill).pop().unwrap();
         execute(&mut host, Command::UndoSkillMerge { skill, entry }).unwrap();
@@ -2737,11 +2756,11 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         else {
             panic!("{asked:?}")
         };
-        assert_eq!((&**to, &**into), ("v5", stock(skill)));
+        assert_eq!((&**to, &**into), ("v6", stock(skill)));
         assert_eq!(asked.edits.rewrite.as_ref(), Some(&before));
         let question = SkillQuestion {
             skill,
-            to: "v5".into(),
+            to: "v6".into(),
             other_changes: 2,
             model: profile.clone(),
             passages: vec![QuestionedPassage {
@@ -2788,7 +2807,7 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         };
         let kept = execute(&mut host, keep).unwrap();
         assert!(host.take_merge_runs().is_empty());
-        let text = (before.text.replacen("— v0", "— v5", 1)).replacen(&first.yours, &merged, 1);
+        let text = (before.text.replacen("— v0", "— v6", 1)).replacen(&first.yours, &merged, 1);
         assert_eq!(current(&host), [text.as_bytes(), stock(skill).as_bytes()]);
         let (entry, merge) = host.skills().history(skill).pop().unwrap();
         let Change::Merged { changes, model, .. } = merge.change else {
@@ -2840,7 +2859,7 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         };
         execute(&mut host, take).unwrap();
         let text =
-            (before.text.replacen("— v0", "— v5", 1)).replacen(&passage.yours, &passage.stock, 1);
+            (before.text.replacen("— v0", "— v6", 1)).replacen(&passage.yours, &passage.stock, 1);
         assert_eq!(current(&host), [text.as_bytes(), stock(skill).as_bytes()]);
         let (_, merge) = host.skills().history(skill).pop().unwrap();
         let Change::Merged { changes, .. } = merge.change else {
@@ -2967,7 +2986,7 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         let entry = asked_on_another_mac(&overlapping, stock(skill));
         write_entry(&mut host, "2090-01-01T00-00-01.000Z", &entry);
         assert!(coordinating_state(&host).question.is_some());
-        let newer = stock(skill).replacen("— v5", "— v6", 1);
+        let newer = stock(skill).replacen("— v6", "— v7", 1);
         based_on_an_earlier_release(&host, &newer);
         let state = coordinating_state(&host);
         assert_eq!(
@@ -3000,9 +3019,9 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         // A later entry that is not a merge.
         let later = Entry {
             change: Change::NewStockVersion {
-                previous: "v5".into(),
+                previous: "v6".into(),
             },
-            stock_version: "v6".into(),
+            stock_version: "v7".into(),
             ..entry
         };
         write_entry(&mut host, "2999-01-01T00-00-00.000Z", &later);
@@ -3043,7 +3062,7 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         let from_update = merge::MergedChange {
             source: merge::Source::Update,
             before: "# Coordinating — v0\n".into(),
-            after: "# Coordinating — v5\n".into(),
+            after: "# Coordinating — v6\n".into(),
         };
         let paragraph = before.text.split("\n\n").nth(1).unwrap().to_owned() + "\n\n";
         let by_model = merge::MergedChange {
@@ -3070,14 +3089,14 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         let entry = Entry {
             change: Change::Merged {
                 from: "v0".into(),
-                to: "v5".into(),
+                to: "v6".into(),
                 before: before.clone(),
                 changes: vec![from_update, by_model],
                 model: Some(model.clone()),
                 machine: "Mike's MacBook Air".into(),
                 automatic: true,
             },
-            stock_version: "v5".into(),
+            stock_version: "v6".into(),
             edits: Edits {
                 rules: String::new(),
                 rewrite: Some(rewrite.clone()),

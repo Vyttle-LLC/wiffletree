@@ -17,6 +17,7 @@ pub(crate) const CHECK_INS: &str = "settings/check-ins.json";
 pub(crate) const KEEPER: &str = "settings/pr-keeper.json";
 pub(crate) const MODELS: &str = "settings/models.json";
 pub(crate) const ASSISTANT: &str = "settings/assistant.json";
+pub(crate) const BEHAVIORS: &str = "settings/behaviors.json";
 
 /// The assistant's shared settings as `settings/assistant.json` holds them.
 #[derive(Serialize, Deserialize)]
@@ -176,6 +177,10 @@ pub(crate) fn check(path: &str, content: &[u8]) -> Result<()> {
             workspace_core::assistant::router::validate_threshold(assistant.threshold)?;
             Ok(())
         }
+        BEHAVIORS => {
+            let saved = serde_json::from_str::<behaviors::WorkspaceBehaviors>(text)?;
+            behaviors::check_workspace(&saved.behaviors)
+        }
         FORMAT => {
             let format = format(content)?;
             ensure!(
@@ -310,6 +315,17 @@ impl SharedStore<'_> {
         let threshold = workspace_core::assistant::router::validate_threshold(threshold)?;
         let saved: Assistant = self.read_json(ASSISTANT).unwrap_or_default();
         self.write_json(ASSISTANT, &Assistant { threshold, ..saved })
+    }
+    /// The Behaviors the human set for every Mac; none until they set one.
+    pub(crate) fn behaviors(&self) -> workspace_core::cascade::Choices {
+        let saved: Option<behaviors::WorkspaceBehaviors> = self.read_json(BEHAVIORS);
+        saved.unwrap_or_default().behaviors
+    }
+    pub(crate) fn set_behaviors(&self, choices: &workspace_core::cascade::Choices) -> Result<()> {
+        let saved = behaviors::WorkspaceBehaviors {
+            behaviors: choices.clone(),
+        };
+        self.write_json(BEHAVIORS, &saved)
     }
     /// `None` when no guide was saved; an empty guide is a saved one.
     pub(crate) fn guide(&self) -> Option<String> {

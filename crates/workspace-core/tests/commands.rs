@@ -17,7 +17,9 @@ fn space() -> Space {
         id: SpaceId(text()),
         name: text(),
         description: text(),
-        instructions: text(),
+        additions: text(),
+        behaviors: Default::default(),
+        repository_settings: Default::default(),
         brain: None,
         storage: SpaceStorage {
             repository: StorageRepository::Local { id: text() },
@@ -27,6 +29,16 @@ fn space() -> Space {
         models: SpaceModels::default(),
         sources: vec![],
         extra: Extra::new(),
+    }
+}
+
+fn set_layer_values() -> Command {
+    Command::SetLayerValues {
+        scope: cascade::Scope::Repository {
+            space_id: space().id,
+            repository: "Sage-Social/api".into(),
+        },
+        values: cascade::LayerValues::default(),
     }
 }
 
@@ -98,6 +110,14 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
         },
         Command::SkillHistory {
             skill: Skill::Coordinating,
+        },
+        Command::BehaviorCatalog,
+        Command::LayerValues {
+            scope: cascade::Scope::Workspace,
+        },
+        Command::EffectiveSettings {
+            project_id: text(),
+            ticket_id: Some(text()),
         },
         Command::SkillMergeReview {
             skill: Skill::Coordinating,
@@ -226,7 +246,7 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
         Command::CreateSpace {
             name: text(),
             description: text(),
-            instructions: text(),
+            additions: text(),
             prefix: None,
             storage: None,
         },
@@ -270,6 +290,7 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
         Command::SetKeeper {
             keeper: KeeperSettings::default(),
         },
+        set_layer_values(),
         Command::SaveSkillRules {
             skill: Skill::Coordinating,
             rules: text(),
@@ -346,12 +367,37 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
 }
 
 #[test]
+fn create_space_sends_its_additions_as_a_previous_host_reads_them() {
+    let create = Command::CreateSpace {
+        name: text(),
+        description: text(),
+        additions: "Never log child PII.".into(),
+        prefix: None,
+        storage: None,
+    };
+    let sent = serde_json::to_value(&create).unwrap();
+    assert_eq!(sent["instructions"], "Never log child PII.");
+    assert_eq!(sent.get("additions"), None);
+    let mut renamed = sent.clone();
+    let additions = renamed
+        .as_object_mut()
+        .unwrap()
+        .remove("instructions")
+        .unwrap();
+    renamed["additions"] = additions;
+    let read: Command = serde_json::from_value(renamed).unwrap();
+    assert!(
+        matches!(read, Command::CreateSpace { additions, .. } if additions == "Never log child PII.")
+    );
+}
+
+#[test]
 fn space_commands_are_the_humans() {
     let human = [
         Command::CreateSpace {
             name: text(),
             description: text(),
-            instructions: text(),
+            additions: text(),
             prefix: None,
             storage: Some(text()),
         },
@@ -385,6 +431,7 @@ fn space_commands_are_the_humans() {
             space_id: space().id,
             path: text(),
         },
+        set_layer_values(),
     ];
     for command in human {
         assert!(command.is_human_only() && !command.is_read(), "{command:?}");
@@ -397,6 +444,13 @@ fn space_commands_are_the_humans() {
         "it reads where the storage is on this Mac"
     );
     assert!(!Command::Snapshot.is_human_only());
+    // Reading a layer, the catalog or what agents get is not the human's alone.
+    let layer = Command::LayerValues {
+        scope: cascade::Scope::Space {
+            space_id: space().id,
+        },
+    };
+    assert!(!layer.is_human_only() && !Command::BehaviorCatalog.is_human_only());
 }
 
 #[test]

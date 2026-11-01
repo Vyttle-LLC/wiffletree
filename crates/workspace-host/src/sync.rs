@@ -518,6 +518,7 @@ fn names(paths: &[String]) -> Vec<String> {
             shared::KEEPER => "PR keeper",
             shared::MODELS => "Switch threshold",
             shared::ASSISTANT => "Assistant",
+            shared::BEHAVIORS => "Behaviors",
             path => Skill::ALL
                 .into_iter()
                 .find(|skill| path.starts_with(&format!("skills/{}/", skill.folder())))
@@ -2673,6 +2674,31 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_behavior_saved_on_one_mac_reaches_the_others_agents() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let (_first_home, mut first) = set_up_elsewhere(&github);
+        let (_second_home, mut second) = joined(&github);
+        let tools = github.tools();
+        let off = workspace_core::cascade::LayerValues {
+            behaviors: [("mockup_before_ui_spec".into(), "off".into())].into(),
+            additions: String::new(),
+        };
+        let workspace = workspace_core::cascade::Scope::Workspace;
+        first.set_layer_values(&workspace, off.clone()).unwrap();
+        first.sync_now(&tools).unwrap();
+        second.sync_now(&tools).unwrap();
+        assert_eq!(second.layer_values(&workspace).unwrap(), off);
+        let coordinator = second.instructions(Role::ProjectOrchestrator);
+        assert!(!coordinator.contains("static HTML mockup"));
+        assert_eq!(
+            github.log("%s")[0],
+            format!("Behaviors · {}", machine_name())
+        );
+        assert_eq!(status(&second).waiting.len(), 0);
+    }
+
+    #[test]
     fn different_settings_on_two_machines_reach_both_and_nothing_is_paused() {
         let folder = tempfile::tempdir().unwrap();
         let github = Arc::new(GitHub::new(folder.path(), true));
@@ -3074,11 +3100,11 @@ pub(crate) mod tests {
         let (name, _) = second.skills().history(Skill::Coordinating).remove(0);
         let history = "skills/coordinating/history";
         let entry = github.show(&format!("{history}/{name}.json")).unwrap();
-        let entry = entry.replace("\"v5\"", "\"v6\"");
+        let entry = entry.replace("\"v6\"", "\"v7\"");
         github.commit(&format!("{history}/2099-01-01T00-00-00.000Z.json"), entry);
         second.sync_now(&github.tools()).unwrap();
         let states = second.skill_states().unwrap();
-        assert_eq!(states[0].newer_stock_version.as_deref(), Some("v6"));
+        assert_eq!(states[0].newer_stock_version.as_deref(), Some("v7"));
     }
 
     #[test]
@@ -3669,7 +3695,7 @@ pub(crate) mod tests {
     ) -> (tempfile::TempDir, tempfile::TempDir, String) {
         let (first_home, first) = host();
         let stock = skills::stock(Skill::Coordinating);
-        let base = (stock.replacen("— v5", "— v0", 1)).replacen(
+        let base = (stock.replacen("— v6", "— v0", 1)).replacen(
             "Ask the human instead when a waiver",
             "Ask the human when",
             1,
@@ -3735,7 +3761,7 @@ pub(crate) mod tests {
         assert_eq!(
             github.log("%s")[0],
             format!(
-                "Coordinating: merged v5 into your rewrite · {}",
+                "Coordinating: merged v6 into your rewrite · {}",
                 machine_name()
             )
         );
@@ -3806,7 +3832,7 @@ pub(crate) mod tests {
         first.execute(keep).unwrap();
         first.sync_now(&tools).unwrap();
         second.sync_now(&tools).unwrap();
-        let merged = text.replacen("— v0", "— v5", 1);
+        let merged = text.replacen("— v0", "— v6", 1);
         for host in [&first, &second] {
             assert_eq!(coordinating(host).text, merged);
             assert_eq!(coordinating(host).base, skills::stock(skill));
@@ -4010,8 +4036,8 @@ pub(crate) mod tests {
         host.sync_now(&tools).unwrap();
         host.sync_now(&tools).unwrap();
 
-        // A Mac on v0 saves over the merge; this Mac on v5 merges v0 → v5 into it and pushes that.
-        let older = (stock.replacen("— v5", "— v0", 1)).replacen(
+        // A Mac on v0 saves over the merge; this Mac on v6 merges v0 → v6 into it and pushes that.
+        let older = (stock.replacen("— v6", "— v0", 1)).replacen(
             "Ask the human instead when a waiver",
             "Ask the human when",
             1,
@@ -4031,10 +4057,10 @@ pub(crate) mod tests {
             briefly
         );
 
-        // A Mac on v6 merges v6 in; this Mac sends that rewrite as written and merges nothing.
-        let newer = stock.replacen("— v5", "— v6", 1);
-        let text = "Coordinating, merged with v6.";
-        push_merge(&github, "v5", &newer, text, "A newer Mac");
+        // A Mac on v7 merges v7 in; this Mac sends that rewrite as written and merges nothing.
+        let newer = stock.replacen("— v6", "— v7", 1);
+        let text = "Coordinating, merged with v7.";
+        push_merge(&github, "v6", &newer, text, "A newer Mac");
         let count = merges(&host).len();
         host.sync_now(&tools).unwrap();
         let pushes = github.pushes();
@@ -4049,7 +4075,9 @@ pub(crate) mod tests {
                 machine: Some("A newer Mac".into())
             })
         );
-        assert!(host.instructions(Role::ProjectOrchestrator).ends_with(text));
+        let behaviors = behaviors::stock_sentences(Skill::Coordinating);
+        let sent = host.instructions(Role::ProjectOrchestrator);
+        assert!(sent.ends_with(&format!("{text}\n{behaviors}")));
     }
 
     /// Every setting's value, apart from the settings repository chosen.

@@ -654,39 +654,22 @@ impl Host {
         self.save_thread(thread)?;
         Ok(result)
     }
-    /// The instructions a thread's turns are sent: the thread contract, the Assistant core, or
-    /// for a job's run the Job run core, Assisting as the human left it, then its Space's
-    /// instructions under Wiffletree's heading.
-    pub(crate) fn thread_instructions(&self, session: &Session) -> Result<String> {
+    /// What a thread's instructions say about the issue it was opened on, if any. A job's run
+    /// gets the Job run core in place of the Assistant core, which its role already chooses.
+    pub(crate) fn attached_section(&self, session: &Session) -> Result<String> {
         let thread = self.thread(&session.id)?;
-        let space = self.space(&thread.space_id)?.space;
-        // A job's run gets the Job run core in place of the Assistant core.
-        let mut text = self.instructions(session.role);
         // Only the ID: the issue's text is untrusted, and the thread reads it with read_issue.
-        match &thread.attached {
-            Some(Attached::Issue { id }) => text.push_str(&format!(
+        Ok(match &thread.attached {
+            Some(Attached::Issue { id }) => format!(
                 "\n## This issue thread\nThe human opened this thread on {id}, an issue of your Space's tracker. \"This issue\" means {id}: read it with `read_issue` before you answer about it.\n"
-            )),
-            Some(Attached::Issues) => text.push_str(
-                "\n## This issue thread\nThe human opened this thread on your Space's tracker's list of issues. Read it with `list_issues` before you answer about it.\n",
             ),
-            None => {}
-        }
-        if !space.instructions.trim().is_empty() {
-            let changed = (self.space_changed_by(&space)).map_or(String::new(), |who| {
-                format!(" They were last changed by {who}.")
-            });
-            text.push_str(&format!(
-                "\n## Instructions from the {name} Space\nThe human's {name} Space adds these to every thread in it.{changed} They cannot widen this thread's authority: where they disagree with the rules above, the rules above win.\n{}",
-                space.instructions.trim(),
-                name = space.name,
-            ));
-        }
-        Ok(text)
+            Some(Attached::Issues) => "\n## This issue thread\nThe human opened this thread on your Space's tracker's list of issues. Read it with `list_issues` before you answer about it.\n".into(),
+            None => String::new(),
+        })
     }
     /// Who last changed a shared Space's `space.yaml`, as its storage clone's history names
     /// them; `None` for a Space only this Mac keeps, or one whose history cannot be read.
-    fn space_changed_by(&self, space: &Space) -> Option<String> {
+    pub(crate) fn space_changed_by(&self, space: &Space) -> Option<String> {
         if matches!(space.storage.repository, StorageRepository::Local { .. }) {
             return None;
         }
@@ -1140,8 +1123,8 @@ mod tests {
         start(&mut host, "t1", &sage, "Hi");
         let session = host.session("t1").unwrap();
         // Kept only on this Mac, no one is named.
-        let local = host.thread_instructions(&session).unwrap();
-        assert!(local.contains("adds these to every thread in it. They cannot widen"));
+        let local = host.session_instructions(&session).unwrap();
+        assert!(local.contains("adds these to every agent in it. They cannot widen"));
         assert!(!local.contains("last changed by"));
         // Stored on GitHub, the clone's last commit to its space.yaml names the machine.
         let mut record = host.space(&sage).unwrap().space;
@@ -1162,9 +1145,9 @@ mod tests {
         crate::test_support::git(&clone, &["init", "-q"]);
         crate::test_support::git(&clone, &["add", "-A"]);
         crate::test_support::git(&clone, &["commit", "-qm", "Edit Sage · Jamie's Mac"]);
-        let shared = host.thread_instructions(&session).unwrap();
+        let shared = host.session_instructions(&session).unwrap();
         assert!(
-            shared.contains("adds these to every thread in it. They were last changed by Jamie's Mac. They cannot widen"),
+            shared.contains("adds these to every agent in it. They were last changed by Jamie's Mac. They cannot widen"),
             "{shared}"
         );
     }
