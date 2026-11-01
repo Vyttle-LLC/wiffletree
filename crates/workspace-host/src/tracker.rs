@@ -857,8 +857,9 @@ impl Host {
         )?;
         Ok(issue)
     }
-    /// A temporary ID no issue folder of the GitHub tracker has, recorded as this Mac's until a
-    /// pass numbers it.
+    /// A temporary ID no issue folder of the GitHub tracker has and this Mac never gave out,
+    /// recorded as this Mac's until a pass numbers it. Four letters collide often enough that a
+    /// large import draws a recorded one.
     pub(crate) fn temporary_id(
         &self,
         storage: &StorageRepository,
@@ -870,11 +871,12 @@ impl Host {
                 prefix: prefix.to_owned(),
                 letters: temporary_letters(),
             };
-            if !folder.join(issue_folder(&id)).exists() {
-                self.db.execute(
-                    "INSERT INTO issue_temporary(storage,temporary) VALUES (?1,?2)",
+            if !folder.join(issue_folder(&id)).exists()
+                && self.db.execute(
+                    "INSERT OR IGNORE INTO issue_temporary(storage,temporary) VALUES (?1,?2)",
                     params![storage.key(), id.to_string()],
-                )?;
+                )? == 1
+            {
                 return Ok(id);
             }
         }

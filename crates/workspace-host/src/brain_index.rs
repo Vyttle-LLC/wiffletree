@@ -3053,15 +3053,28 @@ pub(crate) mod tests {
         .unwrap();
         search(&db, None, "telnyx retry").unwrap();
         drop(db);
-        // The best of five reads, each opening the index as a host read does, so a loaded
-        // machine's scheduling does not count against the read itself.
+        // The time this thread spends on the CPU: on a loaded machine, waiting for a CPU took
+        // a wall clock past the budget though the read itself was within it.
+        let on_cpu = || {
+            let mut now = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: writes the calling thread's CPU time into `now`.
+            assert_eq!(
+                unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) },
+                0
+            );
+            std::time::Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
+        };
+        // The best of five reads, each opening the index as a host read does.
         let timed = |what: &str, read: &dyn Fn(&Connection) -> usize| {
             let took = (0..5)
                 .map(|_| {
-                    let started = std::time::Instant::now();
+                    let started = on_cpu();
                     let db = open_read(&path).unwrap().unwrap();
                     assert!(read(&db) > 0, "{what} found nothing");
-                    started.elapsed()
+                    on_cpu() - started
                 })
                 .min()
                 .unwrap();
