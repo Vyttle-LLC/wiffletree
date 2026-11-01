@@ -19,13 +19,52 @@ const ADVANCED: &str =
 pub(in crate::skills_view) struct Behaviors {
     scope: Scope,
     catalog: Vec<Behavior>,
-    /// By scope, Workspace first; a scope the list no longer resolves through is dropped.
-    values: Vec<(Scope, LayerValues)>,
+    values: Layers,
     /// The Space's or repository's additions as the human is editing them.
     additions: Entity<TextareaState>,
     /// The host's refusal of the last save, beside the Behavior it names or the additions.
     refusal: Option<(Refused, String)>,
     advanced: bool,
+}
+
+/// What each layer through the scope sets, as last read or saved, and how many saves wait for
+/// the host. A save is shown at once, so a change made before the host answers is sent with
+/// it; each save sends everything the scope sets, so only the last one's reply is kept.
+#[derive(Debug, Default)]
+struct Layers {
+    /// By scope; a scope the list no longer resolves through is dropped.
+    values: Vec<(Scope, LayerValues)>,
+    saving: usize,
+}
+impl Layers {
+    fn get(&self, scope: &Scope) -> Option<&LayerValues> {
+        (self.values.iter()).find_map(|(s, values)| (s == scope).then_some(values))
+    }
+    fn put(&mut self, scope: Scope, values: LayerValues) {
+        self.values.retain(|(s, _)| *s != scope);
+        self.values.push((scope, values));
+    }
+    fn keep(&mut self, chain: &[Scope]) {
+        self.values.retain(|(scope, _)| chain.contains(scope));
+    }
+    /// What the additions editor holds when `scope` opens: its own additions, or nothing until
+    /// they are read.
+    fn additions(&self, scope: &Scope) -> String {
+        self.get(scope)
+            .map_or(String::new(), |values| values.additions.clone())
+    }
+    /// Shows a save before the host answers it, and returns what it replaced.
+    fn send(&mut self, scope: Scope, values: LayerValues) -> Option<LayerValues> {
+        let previous = self.get(&scope).cloned();
+        self.put(scope, values);
+        self.saving += 1;
+        previous
+    }
+    /// The host answered a save: whether it was the last one waiting.
+    fn answered(&mut self) -> bool {
+        self.saving -= 1;
+        self.saving == 0
+    }
 }
 
 /// What a save that the host refused was changing.
@@ -55,14 +94,14 @@ impl Behaviors {
         Self {
             scope: Scope::Workspace,
             catalog: vec![],
-            values: vec![],
+            values: Layers::default(),
             additions,
             refusal: None,
             advanced: false,
         }
     }
     fn saved(&self, scope: &Scope) -> Option<&LayerValues> {
-        (self.values.iter()).find_map(|(s, values)| (s == scope).then_some(values))
+        self.values.get(scope)
     }
     /// What each layer through the scope sets, once every one has been read.
     fn chain(&self) -> Option<Vec<(Layer, &Choices)>> {
@@ -265,13 +304,15 @@ fn shows_advanced(scope: &Scope) -> bool {
 }
 
 impl BehaviorsPage {
-    /// Opens the page at `scope`, as a Space's page does for its own.
+    /// Opens the page at `scope`, as a Space's page does for its own. The additions editor
+    /// takes the new scope's own additions, so another scope's text is never saved to it.
     pub(crate) fn open_scope(&mut self, scope: Scope, window: &mut Window, cx: &mut Context<Self>) {
         if self.behaviors.scope != scope {
             self.behaviors.scope = scope;
             self.behaviors.refusal = None;
-            let kept = chain(&self.behaviors.scope);
-            (self.behaviors.values).retain(|(scope, _)| kept.contains(scope));
+            (self.behaviors.values).keep(&chain(&self.behaviors.scope));
+            let text = (self.behaviors.values).additions(&self.behaviors.scope);
+            (self.behaviors.additions).update(cx, |input, cx| input.set_value(text, window, cx));
         }
         self.open_skill(SkillView::List, window, cx);
     }
@@ -300,6 +341,8 @@ impl BehaviorsPage {
                 window,
                 cx,
                 move |view, values, window, cx| match values {
+                    // A save still waiting holds newer values than this read.
+                    Ok(_) if view.behaviors.values.saving > 0 => {}
                     Ok(values) => view.store(read, values, window, cx),
                     Err(error) => toast_error(error, window, cx),
                 },
@@ -328,11 +371,11 @@ impl BehaviorsPage {
                 (behaviors.additions).update(cx, |input, cx| input.set_value(text, window, cx));
             }
         }
-        behaviors.values.retain(|(s, _)| *s != scope);
-        behaviors.values.push((scope, values));
+        behaviors.values.put(scope, values);
     }
 
-    /// Saves what the scope sets, its Behaviors with one changed or with the additions edited.
+    /// Saves what the scope sets, its Behaviors with one changed or with the additions edited,
+    /// showing it before the host answers.
     fn save_layer(
         &mut self,
         values: LayerValues,
@@ -342,22 +385,41 @@ impl BehaviorsPage {
     ) {
         let scope = self.behaviors.scope.clone();
         let saved = scope.clone();
+        let previous = self.behaviors.values.send(scope.clone(), values.clone());
         self.ask(
             ask::set_layer_values(scope, values),
             window,
             cx,
-            move |view, values, window, cx| match values {
-                Ok(values) => {
-                    view.behaviors.refusal = None;
-                    if saving == Refused::Additions {
-                        // The editor takes what was saved.
-                        let text = values.additions.clone();
-                        (view.behaviors.additions)
-                            .update(cx, |input, cx| input.set_value(text, window, cx));
+            move |view, values, window, cx| {
+                let last = view.behaviors.values.answered();
+                match values {
+                    Ok(values) if last => {
+                        view.behaviors.refusal = None;
+                        if saving == Refused::Additions {
+                            // The editor takes what was saved.
+                            let text = values.additions.clone();
+                            (view.behaviors.additions)
+                                .update(cx, |input, cx| input.set_value(text, window, cx));
+                        }
+                        view.store(saved, values, window, cx);
                     }
-                    view.store(saved, values, window, cx);
+                    // A later save, sent with this one's values, answers for both.
+                    Ok(_) => {}
+                    Err(error) => {
+                        view.behaviors.refusal = Some((saving, error));
+                        // What was shown before the reply goes back to what the host holds. The
+                        // values from before this save come back first, so refused additions
+                        // stay in the editor as unsaved.
+                        if !last {
+                            return;
+                        }
+                        let values = &mut view.behaviors.values;
+                        if let Some(previous) = previous.filter(|_| values.get(&saved).is_some()) {
+                            values.put(saved, previous);
+                        }
+                        view.read_behaviors(window, cx);
+                    }
                 }
-                Err(error) => view.behaviors.refusal = Some((saving, error)),
             },
         );
     }
@@ -802,7 +864,7 @@ fn source_chip(name: String, from: Layer, here: bool, p: Palette) -> Div {
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
     use super::{
-        Row, chain, chip, read_only_note, reset_label, rows, scope_of, shows_advanced,
+        Layers, Row, chain, chip, read_only_note, reset_label, rows, scope_of, shows_advanced,
         tightening_note, with_choice,
     };
     use workspace_core::{
@@ -1049,6 +1111,56 @@ mod tests {
             row.offered.len()
         });
         assert_eq!(editable, 2);
+    }
+
+    #[test]
+    fn going_back_from_a_repository_to_its_space_edits_the_spaces_own_additions() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, sage) = sage(&home);
+        let additions = |text: &str| LayerValues {
+            additions: text.into(),
+            ..LayerValues::default()
+        };
+        save(&mut host, space(&sage), additions("Never log child PII.")).unwrap();
+        save(
+            &mut host,
+            sms(&sage),
+            additions("Verify Telnyx signatures."),
+        )
+        .unwrap();
+        // The scope bar goes Sage → sagechat-sms → Sage, keeping the layers both read.
+        let mut layers = Layers::default();
+        for scope in chain(&sms(&sage)) {
+            let values = read(&mut host, scope.clone());
+            layers.put(scope, values);
+        }
+        assert_eq!(layers.additions(&sms(&sage)), "Verify Telnyx signatures.");
+        layers.keep(&chain(&space(&sage)));
+        assert_eq!(layers.additions(&space(&sage)), "Never log child PII.");
+        assert_eq!(layers.additions(&sms(&sage)), "", "not read again yet");
+    }
+
+    #[test]
+    fn a_second_choice_before_the_host_answers_the_first_keeps_both() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, _) = sage(&home);
+        let workspace = Scope::Workspace;
+        let mut layers = Layers::default();
+        layers.put(workspace.clone(), read(&mut host, workspace.clone()));
+        // Both saves are sent before either reply, each from what the page shows.
+        let mut sent = vec![];
+        for id in ["mockup_before_ui_spec", "fetch_before_landing_order"] {
+            let values = with_choice(layers.get(&workspace).unwrap(), id, Some("off"));
+            layers.send(workspace.clone(), values.clone());
+            sent.push(values);
+        }
+        let replies: Vec<_> = (sent.into_iter())
+            .map(|values| save(&mut host, workspace.clone(), values).unwrap())
+            .collect();
+        assert_eq!([layers.answered(), layers.answered()], [false, true]);
+        let off = |values: &LayerValues| values.behaviors.len();
+        assert_eq!(off(&replies[1]), 2, "the last reply is the one kept");
+        assert_eq!(read(&mut host, workspace).behaviors, replies[1].behaviors);
     }
 
     #[test]
