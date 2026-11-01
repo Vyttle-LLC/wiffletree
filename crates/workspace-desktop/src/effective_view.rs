@@ -72,13 +72,18 @@ fn sections(effective: &Effective, space: &str) -> Vec<(&'static str, Vec<Row>)>
             value,
             &erase(&resolved.resolved),
         ));
-        // Small work resolves on its own, and may come from another layer.
+        // Small work resolves on its own and may come from another layer: it runs its row's
+        // small-work line, or that row's main line without one. Listed when that differs.
         let small = (settings.small_models.iter()).find(|small| small.job.is(job));
-        if let Some(small) = small
-            && let Some(line) = &small.resolved.value.small
-        {
-            let setting = format!("{} model, small work", job.name());
-            models.push(row(setting, line_value(line), &erase(&small.resolved)));
+        if let Some(small) = small {
+            let row_used = &small.resolved.value;
+            let line = row_used.small.as_ref().unwrap_or(&row_used.main);
+            let differs = *line != resolved.resolved.value.main
+                || small.resolved.from != resolved.resolved.from;
+            if differs {
+                let setting = format!("{} model, small work", job.name());
+                models.push(row(setting, line_value(line), &erase(&small.resolved)));
+            }
         }
     }
     let reviews = &settings.reviews;
@@ -301,6 +306,34 @@ mod tests {
             }),
             ..reviewer.clone()
         };
+        // Sage's Implementer row runs its main line here, but its small-work line is on Codex,
+        // signed out: small work falls back to this Mac's row, which has no small-work line, so
+        // it runs that row's main line, Opus.
+        let profile = |provider, model: &str, effort: &str| ModelProfile {
+            provider,
+            model: model.into(),
+            effort: effort.into(),
+        };
+        let line = |first| Line {
+            first,
+            then: Then::Wait,
+        };
+        let sage_implementer = JobRow {
+            job: Job::Implementer,
+            main: line(profile(Provider::Claude, "sonnet", "high")),
+            small: Some(line(profile(Provider::Codex, "gpt-6.1-sol", "high"))),
+        };
+        let this_macs_implementer = JobRow {
+            job: Job::Implementer,
+            main: line(profile(Provider::Claude, "opus", "high")),
+            small: None,
+        };
+        // A row whose small work is its main line, from the same layer, is listed once.
+        let tester = JobRow {
+            job: Job::Tester,
+            main: line(profile(Provider::Claude, "sonnet", "medium")),
+            small: None,
+        };
         let mut levels = resolved(vec!["Full".to_owned()], Layer::Space, &[Layer::Stock]);
         levels.notes = vec!["The Space's levels Quick are not configured here".into()];
         let settings = EffectiveSettings {
@@ -326,14 +359,34 @@ mod tests {
                     text: "Verify the Telnyx signature first.".into(),
                 },
             ],
-            models: vec![ResolvedRow {
-                job: reviewer.job.clone(),
-                resolved: resolved(reviewer.clone(), Layer::Space, &[Layer::ThisMac]),
-            }],
-            small_models: vec![ResolvedRow {
-                job: reviewer.job.clone(),
-                resolved: resolved(this_macs_small, Layer::ThisMac, &[]),
-            }],
+            models: vec![
+                ResolvedRow {
+                    job: reviewer.job.clone(),
+                    resolved: resolved(reviewer.clone(), Layer::Space, &[Layer::ThisMac]),
+                },
+                ResolvedRow {
+                    job: Job::Implementer,
+                    resolved: resolved(sage_implementer.clone(), Layer::Space, &[Layer::ThisMac]),
+                },
+                ResolvedRow {
+                    job: Job::Tester,
+                    resolved: resolved(tester.clone(), Layer::ThisMac, &[]),
+                },
+            ],
+            small_models: vec![
+                ResolvedRow {
+                    job: reviewer.job.clone(),
+                    resolved: resolved(this_macs_small, Layer::ThisMac, &[]),
+                },
+                ResolvedRow {
+                    job: Job::Implementer,
+                    resolved: resolved(this_macs_implementer, Layer::ThisMac, &[]),
+                },
+                ResolvedRow {
+                    job: Job::Tester,
+                    resolved: resolved(tester, Layer::ThisMac, &[]),
+                },
+            ],
             reviews: ResolvedReviews {
                 levels,
                 max_rounds: resolved(2, Layer::Workspace, &[Layer::Stock]),
@@ -378,6 +431,26 @@ mod tests {
         assert_eq!(
             (small.from, small.from_label.as_str()),
             (Layer::ThisMac, "This Mac")
+        );
+        let listed: Vec<(&str, &str, Layer)> = (sections[1].1.iter())
+            .skip(2)
+            .map(|row| (row.setting.as_str(), row.value.as_str(), row.from))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (
+                    "Implementer model",
+                    "Sonnet · high, then wait",
+                    Layer::Space
+                ),
+                (
+                    "Implementer model, small work",
+                    "Opus · high, then wait",
+                    Layer::ThisMac
+                ),
+                ("Tester model", "Sonnet · medium, then wait", Layer::ThisMac),
+            ]
         );
         let reviews = &sections[2].1;
         assert_eq!(reviews[0].notes.len(), 1, "an ignored value says why");

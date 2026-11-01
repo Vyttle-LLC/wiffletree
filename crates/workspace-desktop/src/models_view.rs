@@ -61,6 +61,7 @@ pub(super) struct ModelsPage {
 
 /// What a Space sets about models and reviews: its saved copy, from the snapshot, and the page's
 /// draft of it.
+#[derive(Clone, Debug, PartialEq)]
 struct SpaceScope {
     id: SpaceId,
     saved: SpaceModelSettings,
@@ -90,6 +91,78 @@ fn space_settings(space: &Space) -> SpaceModelSettings {
     SpaceModelSettings {
         rows: space.models.overrides(),
         reviews: space.reviews.clone(),
+    }
+}
+
+/// The scope after switching to `to`: the Space shown keeps its draft, another starts from what
+/// it sets now, dropping the other's draft, and `None` is This Mac's.
+fn switched(
+    scope: Option<SpaceScope>,
+    to: Option<SpaceId>,
+    spaces: &[Space],
+) -> Option<SpaceScope> {
+    if scope.as_ref().map(|scope| &scope.id) == to.as_ref() {
+        return scope;
+    }
+    let id = to?;
+    let saved = space_settings(spaces.iter().find(|space| space.id == id)?);
+    Some(SpaceScope {
+        id,
+        draft: saved.clone(),
+        saved,
+    })
+}
+
+/// The scope after a snapshot: an untouched draft follows what the Space sets now, one with
+/// edits is kept, and a removed Space goes back to This Mac.
+fn synced(scope: Option<SpaceScope>, spaces: &[Space]) -> Option<SpaceScope> {
+    let mut scope = scope?;
+    let saved = space_settings(spaces.iter().find(|space| space.id == scope.id)?);
+    if scope.draft == scope.saved {
+        scope.draft = saved.clone();
+    }
+    scope.saved = saved;
+    Some(scope)
+}
+
+/// Sets one cell of `job`'s row: in This Mac's `draft`, or at a Space, of the Space's row,
+/// started from this Mac's `saved` row so unsaved edits here never reach the Space.
+fn edit_cell(
+    scope: &mut Option<SpaceScope>,
+    draft: &mut ModelSelection,
+    saved: &ModelSelection,
+    job: &Job,
+    which: Cell,
+    profile: Option<ModelProfile>,
+) {
+    match scope {
+        Some(scope) => models::set_space_cell(&mut scope.draft.rows, saved, job, which, profile),
+        None => models::set_cell(draft, job, which, profile),
+    }
+}
+
+/// Makes a then choice skip, as [`edit_cell`] sets a cell.
+fn edit_skip(
+    scope: &mut Option<SpaceScope>,
+    draft: &mut ModelSelection,
+    saved: &ModelSelection,
+    job: &Job,
+    small: bool,
+) {
+    let row = match scope {
+        Some(scope) => {
+            let rows = &mut scope.draft.rows;
+            if !rows.iter().any(|row| row.job.is(job))
+                && let Some(row) = saved.row(job)
+            {
+                rows.push(row.clone());
+            }
+            rows.iter_mut().find(|row| row.job.is(job))
+        }
+        None => draft.row_mut(job),
+    };
+    if let Some(row) = row {
+        models::set_then(row, small, Then::Skip);
     }
 }
 
@@ -138,17 +211,8 @@ impl ModelsPage {
     /// Shows the table at a Space's scope, or this Mac's with `None`. A draft for another Space
     /// is dropped.
     pub(super) fn show_scope(&mut self, space: Option<SpaceId>, cx: &mut Context<Self>) {
-        let shown = self.scope.as_ref().map(|scope| &scope.id);
-        if shown != space.as_ref() {
-            self.scope = space.and_then(|id| {
-                let saved = space_settings(self.space_named(&id)?);
-                Some(SpaceScope {
-                    id,
-                    draft: saved.clone(),
-                    saved,
-                })
-            });
-        }
+        let spaces = self.shared.snapshot().map_or(&[][..], |s| &s.spaces);
+        self.scope = switched(self.scope.take(), space, spaces);
         cx.notify();
     }
     fn space_named(&self, id: &SpaceId) -> Option<&Space> {
@@ -160,26 +224,15 @@ impl ModelsPage {
     }
     /// An untouched Space draft follows what the Space sets now; one with edits is kept.
     fn sync_scope(&mut self) {
-        let Some(id) = self.scope.as_ref().map(|scope| scope.id.clone()) else {
-            return;
-        };
-        let saved = self.space_named(&id).map(space_settings);
-        match (saved, &mut self.scope) {
-            (Some(saved), Some(scope)) => {
-                if scope.draft == scope.saved {
-                    scope.draft = saved.clone();
-                }
-                scope.saved = saved;
-            }
-            // The Space was removed.
-            _ => self.scope = None,
-        }
+        let spaces = self.shared.snapshot().map_or(&[][..], |s| &s.spaces);
+        self.scope = synced(self.scope.take(), spaces);
     }
-    /// The table as the shown Space resolves it on this Mac, its draft included.
+    /// The table as the shown Space resolves it on this Mac, its draft over this Mac's saved
+    /// table, as agents in the Space would get it.
     fn space_table(&self) -> Option<SpaceTable> {
         let scope = self.scope.as_ref()?;
         Some(models::space_table(
-            &self.model_selection,
+            &self.saved_model_selection,
             self.scoped_space(),
             &scope.draft.rows,
             &self.detection,
@@ -187,33 +240,13 @@ impl ModelsPage {
     }
     /// Sets one cell: of this Mac's row, or at a Space, of the Space's row.
     fn edit_cell(&mut self, job: &Job, which: Cell, profile: Option<ModelProfile>) {
-        match &mut self.scope {
-            Some(scope) => models::set_space_cell(
-                &mut scope.draft.rows,
-                &self.model_selection,
-                job,
-                which,
-                profile,
-            ),
-            None => models::set_cell(&mut self.model_selection, job, which, profile),
-        }
+        let (draft, saved) = (&mut self.model_selection, &self.saved_model_selection);
+        edit_cell(&mut self.scope, draft, saved, job, which, profile);
     }
     /// Makes a then choice skip: of this Mac's row, or at a Space, of the Space's row.
     fn edit_skip(&mut self, job: &Job, small: bool) {
-        let row = match &mut self.scope {
-            Some(scope) => {
-                if !scope.draft.rows.iter().any(|row| row.job.is(job))
-                    && let Some(row) = self.model_selection.row(job)
-                {
-                    scope.draft.rows.push(row.clone());
-                }
-                scope.draft.rows.iter_mut().find(|row| row.job.is(job))
-            }
-            None => self.model_selection.row_mut(job),
-        };
-        if let Some(row) = row {
-            models::set_then(row, small, Then::Skip);
-        }
+        let (draft, saved) = (&mut self.model_selection, &self.saved_model_selection);
+        edit_skip(&mut self.scope, draft, saved, job, small);
     }
     fn save_space_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(scope) = &self.scope else { return };
@@ -993,7 +1026,7 @@ impl ModelsPage {
         let space = self.scoped_space().map(|space| space.name.clone());
         let (rows, error) = match (&self.scope, &space_table, &space) {
             (Some(scope), Some(space_table), Some(space)) => {
-                let rows = models::space_rows(&self.model_selection, &scope.draft.rows);
+                let rows = models::space_rows(&self.saved_model_selection, &scope.draft.rows);
                 for (row, overridden) in &rows {
                     let at = Some((space_table, space.as_str(), *overridden));
                     table = table.child(self.job_row(row, &verifiers, at, p, cx));
@@ -1055,30 +1088,12 @@ impl ModelsPage {
     }
     /// The PR keeper's row while it has no model: one menu to choose one.
     fn keeper_placeholder(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let first = Cell {
-            small: false,
-            then: false,
-        };
-        div()
-            .py_2()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(
-                div()
-                    .w(px(170.))
-                    .flex_none()
-                    .flex()
-                    .flex_col()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("PR keeper"))
-                    .child(hint("Fixes conflicts, sorts comments", p)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .child(self.cell_menu(&Job::Keeper, first, None, false, None, cx)),
-            )
-            .child(hint("No PR keeper model: its model triggers stay off.", p).flex_1())
+        self.optional_placeholder(
+            &Job::Keeper,
+            "No PR keeper model: its model triggers stay off.",
+            p,
+            cx,
+        )
     }
     /// The Job row while it has none: one menu to choose one, as jobs follow the Assistant row.
     fn job_placeholder(&self, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -1090,7 +1105,7 @@ impl ModelsPage {
         )
     }
     /// An optional row while it has none: one menu to choose its first choice, and `missing`,
-    /// what having none means.
+    /// what having none means, in the table's columns, the FROM and RIGHT NOW cells empty.
     fn optional_placeholder(
         &self,
         job: &Job,
@@ -1120,9 +1135,17 @@ impl ModelsPage {
             .child(
                 div()
                     .flex_1()
-                    .child(self.cell_menu(job, first, None, false, None, cx)),
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(self.cell_menu(job, first, None, false, None, cx))
+                    .child(hint(missing, p).flex_1().min_w_0()),
             )
-            .child(hint(missing, p).flex_1())
+            .when(self.scope.is_some(), |d| {
+                d.child(div().w(px(110.)).flex_none())
+            })
+            .child(div().w(px(120.)).flex_none())
     }
 
     fn review_card(&self, p: Palette) -> Div {
@@ -1702,4 +1725,120 @@ fn titled(title: &'static str, detail: String) -> PopupMenuItem {
             .child(title)
             .child(hint(detail.clone(), p))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SpaceScope, edit_cell, switched, synced};
+    use crate::models::Cell;
+    use workspace_core::*;
+
+    fn profile(provider: Provider, model: &str, effort: &str) -> ModelProfile {
+        ModelProfile {
+            provider,
+            model: model.into(),
+            effort: effort.into(),
+        }
+    }
+    fn row(job: Job, first: ModelProfile) -> JobRow {
+        JobRow {
+            job,
+            main: Line {
+                first,
+                then: Then::Wait,
+            },
+            small: None,
+        }
+    }
+    fn space(id: &str, rows: Vec<JobRow>) -> Space {
+        let mut space: Space = serde_json::from_value(serde_json::json!({
+            "id": id, "name": id,
+            "storage": {"repository": {"kind": "local", "id": id}, "folder": id}
+        }))
+        .unwrap();
+        space.models.set_overrides(rows);
+        space
+    }
+
+    #[test]
+    fn switching_scope_keeps_each_draft_where_it_belongs() {
+        let opus = profile(Provider::Claude, "opus", "high");
+        let sonnet = profile(Provider::Claude, "sonnet", "medium");
+        let haiku = profile(Provider::Claude, "haiku", "low");
+        let saved = ModelSelection {
+            jobs: vec![row(Job::Implementer, opus.clone())],
+            ..ModelSelection::default()
+        };
+        let first = Cell {
+            small: false,
+            then: false,
+        };
+        // An unsaved edit to This Mac's table.
+        let mut draft = saved.clone();
+        let mut scope: Option<SpaceScope> = None;
+        edit_cell(
+            &mut scope,
+            &mut draft,
+            &saved,
+            &Job::Implementer,
+            first,
+            Some(sonnet.clone()),
+        );
+        let this_macs_draft = draft.clone();
+
+        let sage = space("sage", vec![]);
+        let vyttle = space("vyttle", vec![row(Job::Assistant, haiku.clone())]);
+        let spaces = vec![sage.clone(), vyttle.clone()];
+        scope = switched(scope, Some(sage.id.clone()), &spaces);
+        assert_eq!(scope.as_ref().unwrap().draft.rows, []);
+        // An edit at Sage starts from this Mac's saved row, never its unsaved edit, and leaves
+        // This Mac's draft alone.
+        let then = Cell {
+            then: true,
+            ..first
+        };
+        edit_cell(
+            &mut scope,
+            &mut draft,
+            &saved,
+            &Job::Implementer,
+            then,
+            None,
+        );
+        assert_eq!(
+            scope.as_ref().unwrap().draft.rows,
+            [row(Job::Implementer, opus)]
+        );
+        assert_eq!(draft, this_macs_draft);
+        // Showing Sage again keeps its draft.
+        scope = switched(scope, Some(sage.id.clone()), &spaces);
+        assert_eq!(scope.as_ref().unwrap().draft.rows.len(), 1);
+
+        // Switching to Vyttle drops Sage's unsaved draft.
+        scope = switched(scope, Some(vyttle.id.clone()), &spaces);
+        let shown = scope.clone().unwrap();
+        assert_eq!(shown.id, vyttle.id);
+        assert_eq!(shown.draft, shown.saved);
+        assert_eq!(shown.draft.rows, [row(Job::Assistant, haiku)]);
+
+        // An untouched draft follows a change from another Mac; an edited one is kept.
+        let changed = space("vyttle", vec![row(Job::Assistant, sonnet.clone())]);
+        scope = synced(scope, &[sage.clone(), changed.clone()]);
+        assert_eq!(
+            scope.as_ref().unwrap().draft.rows,
+            [row(Job::Assistant, sonnet.clone())]
+        );
+        scope.as_mut().unwrap().draft.rows.clear();
+        let again = space("vyttle", vec![row(Job::Job, sonnet)]);
+        scope = synced(scope, &[sage.clone(), again.clone()]);
+        let kept = scope.clone().unwrap();
+        assert_eq!(kept.draft.rows, []);
+        assert_eq!(kept.saved.rows, again.models.overrides());
+
+        // A removed Space goes back to This Mac, and This Mac's draft survived the round trip.
+        scope = synced(scope, &[sage]);
+        assert_eq!(scope, None);
+        assert_eq!(switched(None, None, &spaces), None);
+        assert_eq!(draft, this_macs_draft);
+    }
 }
