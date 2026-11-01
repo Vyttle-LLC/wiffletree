@@ -4911,15 +4911,11 @@ mod tests {
         started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
         assert!(!actor.keep_pull_requests(&repository, 2));
         assert_eq!(actor.keeper_polling[&repository], 2);
+        // Git is held until the release below, so a read that waited for the ancestry could
+        // not answer here. A wall clock would also count a loaded machine's scheduling.
         let (reply, replies) = async_channel::bounded(1);
-        let start = Instant::now();
         actor.handle(Event::Command(Command::Snapshot, reply));
         replies.try_recv().unwrap().unwrap();
-        let latency = start.elapsed();
-        assert!(
-            latency < Duration::from_millis(200),
-            "read waited for ancestry: {latency:?}"
-        );
         assert!(events.try_recv().is_err(), "Git is still held");
         release.send(()).unwrap();
         actor.handle(events.recv_blocking().unwrap());
