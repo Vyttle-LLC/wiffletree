@@ -303,7 +303,7 @@ fn gate_reading(caller: &str, config: &BrainConfigReading, shipped: Shipped) -> 
     let pins: Vec<&str> = caller
         .lines()
         .filter_map(gate_pin)
-        .map(|(_, c)| c)
+        .map(|(_, c, _)| c)
         .collect();
     let first = *pins.first()?;
     let release = (shipped.release(first)).filter(|_| pins.iter().all(|p| *p == first));
@@ -331,14 +331,23 @@ fn gate_reading(caller: &str, config: &BrainConfigReading, shipped: Shipped) -> 
     })
 }
 
-/// A caller line's gate step `uses: Vyttle-LLC/wiffletree/gate@<commit>`: where the action
-/// starts in the line, and the commit it pins.
-fn gate_pin(line: &str) -> Option<(usize, &str)> {
+/// A caller line's gate step `uses: Vyttle-LLC/wiffletree/gate@<commit>`, bare or quoted:
+/// where the action starts in the line, the commit it pins, and its quote.
+fn gate_pin(line: &str) -> Option<(usize, &str, &str)> {
     let step = line.trim_start();
     let step = step.strip_prefix('-').unwrap_or(step).trim_start();
     let uses = step.strip_prefix("uses:")?.trim_start();
-    let commit = uses.strip_prefix(GATE_ACTION)?.split_whitespace().next()?;
-    Some((line.len() - uses.len(), commit))
+    let quote = ["\"", "'"]
+        .into_iter()
+        .find(|q| uses.starts_with(q))
+        .unwrap_or("");
+    let action = &uses[quote.len()..];
+    let pinned = action.strip_prefix(GATE_ACTION)?;
+    let commit = match quote {
+        "" => pinned.split_whitespace().next()?,
+        quote => pinned.split_once(quote)?.0,
+    };
+    Some((line.len() - action.len(), commit, quote))
 }
 
 /// The caller with each gate step pinned to `release`, every other byte as it was.
@@ -346,9 +355,12 @@ fn repin(caller: &str, release: GateRelease) -> String {
     let GateRelease { tag, commit } = release;
     (caller.split_inclusive('\n'))
         .map(|line| match gate_pin(line) {
-            Some((at, _)) => {
+            Some((at, _, quote)) => {
                 let ending = &line[line.trim_end_matches(['\r', '\n']).len()..];
-                format!("{}{GATE_ACTION}{commit} # {tag}{ending}", &line[..at])
+                format!(
+                    "{}{GATE_ACTION}{commit}{quote} # {tag}{ending}",
+                    &line[..at]
+                )
             }
             None => line.to_owned(),
         })
@@ -1732,6 +1744,13 @@ impl Host {
             .any(|b| b.kind == BrainBatchKind::GateUpdate && !b.is_finished());
         ensure!(!updating, "{repository}'s gate update PR is already open");
         let mut config = config_on_main(&brain)?;
+        ensure!(
+            matches!(
+                config.get("gate"),
+                None | Some(Value::Null | Value::Object(_))
+            ),
+            "{repository}'s wiffletree-brain.json has a gate that is not an object; fix it on main first"
+        );
         config["gate"]["version"] = Value::from(release.tag);
         let head = brain.head.as_deref().context("The brain has no main yet")?;
         let object = format!("{head}:{CALLER}");
@@ -1751,11 +1770,16 @@ impl Host {
         )
     }
 
-    /// The brains whose log batches are held, as their last pass found the pinned gate rejects
-    /// this Wiffletree's entry contract.
+    /// The brains with a log batch held: their last pass found the pinned gate rejects this
+    /// Wiffletree's entry contract, and an unfinished log batch has no PR yet.
     pub(crate) fn brains_logs_held(&self) -> Result<Vec<String>> {
         Ok((self.db.prepare(
-            "SELECT repository FROM brains WHERE json_extract(data,'$.gate.logs_held') ORDER BY rowid",
+            "SELECT repository FROM brains b WHERE json_extract(b.data,'$.gate.logs_held')
+             AND EXISTS (SELECT 1 FROM brain_batches x WHERE x.repository=b.repository
+               AND json_extract(x.data,'$.kind')='log'
+               AND json_extract(x.data,'$.pull_request') IS NULL
+               AND json_extract(x.data,'$.stage') NOT IN ('merged','discarded'))
+             ORDER BY b.rowid",
         )?)
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?)
@@ -3873,6 +3897,30 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_quoted_pin_is_read_and_repinned_with_its_quotes() {
+        for quote in ["\"", "'"] {
+            let quoted = caller(RELEASE).replace(
+                &format!("{GATE_ACTION}{} # {}", RELEASE.commit, RELEASE.tag),
+                &format!(
+                    "{quote}{GATE_ACTION}{}{quote} # {}",
+                    RELEASE.commit, RELEASE.tag
+                ),
+            );
+            assert_ne!(quoted, caller(RELEASE));
+            let gate = read(&quoted, RELEASE.tag, WITH_NEWER);
+            assert_eq!(gate.update(), Some(&NEWER.named()));
+            let quoted_newer = caller(NEWER).replace(
+                &format!("{GATE_ACTION}{} # {}", NEWER.commit, NEWER.tag),
+                &format!(
+                    "{quote}{GATE_ACTION}{}{quote} # {}",
+                    NEWER.commit, NEWER.tag
+                ),
+            );
+            assert_eq!(repin(&quoted, NEWER), quoted_newer);
+        }
+    }
+
+    #[test]
     fn the_brain_card_reads_the_pin_from_the_caller_on_main() {
         let folder = tempfile::tempdir().unwrap();
         let github = GitHub::new(folder.path());
@@ -3890,6 +3938,26 @@ pub(crate) mod tests {
         let gate = host.brain(REPO).unwrap().gate.unwrap();
         assert!(matches!(gate.pin, BrainGatePin::Unknown { .. }));
         assert_eq!(gate.latest, RELEASE.named());
+    }
+
+    #[test]
+    fn update_gate_refuses_a_config_whose_gate_is_not_an_object() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = GitHub::new(folder.path());
+        let tools = github.tools();
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, _) = host_with_brain(home.path());
+        host.gate = WITH_NEWER;
+        let config = json!({"version": 1, "brain_dir": "second-brain", "gate": "invalid"});
+        let config = String::from_utf8(pretty(&config).unwrap()).unwrap();
+        github.commit_files_on_main(
+            &[(CALLER, &caller(RELEASE)), (BrainConfig::FILE, &config)],
+            "A hand-edited gate",
+        );
+        run(&mut host, &tools);
+        host.confirm_brain(REPO).unwrap();
+        let refused = host.update_brain_gate(REPO, &tools.git).unwrap_err();
+        assert!(format!("{refused:#}").contains("gate that is not an object"));
     }
 
     #[test]
@@ -3971,9 +4039,11 @@ pub(crate) mod tests {
         run(&mut host, &tools);
         host.confirm_brain(REPO).unwrap();
         assert!(host.brain(REPO).unwrap().gate.unwrap().logs_held);
-        assert_eq!(host.snapshot().unwrap().brains_logs_held, [REPO]);
+        let counted = host.snapshot().unwrap().brains_logs_held;
+        assert!(counted.is_empty(), "no log batch waits, so nothing is held");
 
         let log = queue_log(&mut host, &tools, BrainSource::BrainsPage);
+        assert_eq!(host.snapshot().unwrap().brains_logs_held, [REPO]);
         let compiler = BrainCompiler {
             host_id: host.host_id().unwrap(),
             name: "This Mac".into(),
