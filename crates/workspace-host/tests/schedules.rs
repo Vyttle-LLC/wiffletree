@@ -264,7 +264,7 @@ fn a_timer_firing_while_no_turn_starts_still_tells_clients_to_refresh() {
     drop(db);
     let service = Service::start(
         home.path().to_path_buf(),
-        env!("CARGO_BIN_EXE_workspace-host").into(),
+        env!("CARGO_BIN_EXE_wiffletree-host").into(),
     )
     .unwrap();
     let changes = service.changes();

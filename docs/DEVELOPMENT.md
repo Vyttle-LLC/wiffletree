@@ -11,7 +11,7 @@ bash scripts/package_macos.sh
 open "target/Wiffletree.app"
 ```
 
-The bundle includes both the GPUI client and `workspace-host`, the host it runs (see [the host process](#the-host-process)), plus the Interlock macOS app icon. Packaging builds the standard and Retina icon representations from the canonical brand-kit PNGs using the macOS `sips` and `iconutil` tools. It is ad-hoc signed for local development and never updates itself; see [releases and updates](#releases-and-updates) for distributed builds. The default store is `~/Library/Application Support/Wiffletree`, outside your repositories. Existing installations automatically reuse `~/Library/Application Support/Agent Workspace` when no Wiffletree data directory exists. This preserves stored sessions and absolute ticket-worktree paths without moving live data. An explicit `--data-dir` still takes precedence. A new store starts empty. Only one host can own a store.
+The bundle includes both the GPUI client and `wiffletree-host`, the host it runs (see [the host process](#the-host-process)), plus the Interlock macOS app icon. Packaging builds the standard and Retina icon representations from the canonical brand-kit PNGs using the macOS `sips` and `iconutil` tools. It is ad-hoc signed for local development and never updates itself; see [releases and updates](#releases-and-updates) for distributed builds. The default store is `~/Library/Application Support/Wiffletree`, outside your repositories. Existing installations automatically reuse `~/Library/Application Support/Agent Workspace` when no Wiffletree data directory exists. This preserves stored sessions and absolute ticket-worktree paths without moving live data. An explicit `--data-dir` still takes precedence. A new store starts empty. Only one host can own a store.
 
 The settings meant to follow the human to every machine live in the shared folder, through `shared::SharedStore` (`crates/workspace-host/src/shared.rs`): the settings repository's clone at `repos/github.com/<owner>/<name>/` when one is chosen, and the store's `shared/` folder otherwise (`shared::folder`). It holds `wiffletree.json` (`{"format": 1}`), `settings/review.json` (the verifiers, review levels and both caps), `settings/model-guide.md`, `settings/models.json` (the switch threshold), `settings/check-ins.json`, `settings/pr-keeper.json` (the keeper's triggers, quiet period and review level) and the skills in `skills/`. JSON files are written atomically, pretty-printed with sorted keys, keeping fields this release does not know, and a missing or unreadable file means that setting's default. Everything else stays in `settings.json` (the workspace folder and the allowed owners) and the database (the Who runs what table, the PR keeper's row among it). At start, after the model selection's own migration and before anything reads a shared setting, the host copies each shared setting that has no file yet from where an earlier release saved it, exactly as saved, and renames `skills/` into `shared/`, writing `wiffletree.json` last: a move cut short finishes at the next start, and once `wiffletree.json` exists nothing is copied again. The old fields stay in `settings.json` and the database row, unread and never written again, so an older release starts with the values it had.
 
@@ -61,7 +61,7 @@ The optional demo argument creates one project and attaches the supplied reposit
 The app and its host are separate processes. The desktop reaches the host only over `<data folder>/host.sock`, as [docs/host-protocol.md](host-protocol.md) describes, and the host owns the store alone.
 
 - **A signed app on its default data folder** runs the host as the LaunchAgent `com.vyttle.wiffletree.host` (`com.vyttle.wiffletree.beta.host` for the beta). When no host answers, the app copies its bundle's `workspace-host` to `<data folder>/host/<version>/workspace-host`, writes `<data folder>/host/<label>.plist` and loads it with `launchctl bootstrap gui/<uid>`. The plist is deliberately not in `~/Library/LaunchAgents`, so the host **does not start at login**: after a restart or logout nothing runs until the app is opened. launchd restarts the host only after an unsuccessful exit. The host starts its agents' helpers from its copy, so replacing the app bundle never touches a running host, and at each start it removes the copies of other versions.
-- **`--data-dir`, and every unsigned or ad-hoc-signed build**, start `workspace-host serve --data-dir <dir> --child` as the app's own child, straight from the bundle (or `target/`). There is no plist, no versioned copy and no launchd job, and the child stops when the app exits, stopping its turns. Only a Developer ID signature counts as signed here (`workspace_core::developer_id_signed`).
+- **`--data-dir`, and every unsigned or ad-hoc-signed build**, start `wiffletree-host serve --data-dir <dir> --child` as the app's own child, straight from the bundle (or `target/`). There is no plist, no versioned copy and no launchd job, and the child stops when the app exits, stopping its turns. Only a Developer ID signature counts as signed here (`workspace_core::developer_id_signed`).
 - **Its log** is `<data folder>/logs/host.log` for the launchd host. A child host writes to the app's standard error.
 - **To stop it**, choose **Stop agents and quit** from the menu bar icon: the host stops every turn as a quit does, records them as interrupted, and exits cleanly, so launchd leaves it stopped. From a shell, `launchctl bootout gui/$(id -u)/com.vyttle.wiffletree.host` stops it the same way. **To remove it**, boot it out and delete `<data folder>/host/`. Its client credential is the login keychain item `com.vyttle.wiffletree.client-credential` whose account is the data folder; delete it in Keychain Access, or with `security delete-generic-password -s com.vyttle.wiffletree.client-credential -a "<data folder>"`.
 - **The host key** for remote access is the login keychain item `com.vyttle.wiffletree.host-key` whose account is the data folder, created the first time remote access is turned on, with the same access list as the client credential. A child host keeps one too. An unsigned development build cannot read it again after a rebuild, since its access list names that build alone; delete it with `security delete-generic-password -s com.vyttle.wiffletree.host-key -a "<data folder>"` and turn remote access on again.
@@ -375,9 +375,9 @@ codesign --force --options runtime --identifier com.vyttle.wiffletree.spike.host
 
 ```sh
 cargo build --release -p workspace-host --example local_network_probe
-mkdir -p /tmp/ln && cp target/release/examples/local_network_probe /tmp/ln/workspace-host
-codesign --force --options runtime --identifier com.vyttle.wiffletree.spike.lnhost --sign "<identity>" /tmp/ln/workspace-host
-# A plist labelled com.vyttle.wiffletree.spike.lnhost running: /tmp/ln/workspace-host 47831 90 <router>:80
+mkdir -p /tmp/ln && cp target/release/examples/local_network_probe /tmp/ln/wiffletree-host
+codesign --force --options runtime --identifier com.vyttle.wiffletree.spike.lnhost --sign "<identity>" /tmp/ln/wiffletree-host
+# A plist labelled com.vyttle.wiffletree.spike.lnhost running: /tmp/ln/wiffletree-host 47831 90 <router>:80
 launchctl bootstrap gui/$(id -u) /tmp/ln/lnhost.plist && launchctl kickstart gui/$(id -u)/com.vyttle.wiffletree.spike.lnhost
 /usr/bin/log show --last 2m --info --style compact | grep nehelper | grep -E "prompting|response"
 dns-sd -B _wiffletree._tcp   # on this Mac and on another one
@@ -388,22 +388,22 @@ Only a signed build runs its host as a launchd job, so its tests cannot cover th
 
 1. Open the signed app with its default data folder, so it loads the job from `<data folder>/host/com.vyttle.wiffletree.host.plist`.
 2. Quit the app and log out, then log back in without opening Wiffletree.
-3. `launchctl print gui/$(id -u)/com.vyttle.wiffletree.host` finds no job, and `pgrep -fl workspace-host` lists nothing.
+3. `launchctl print gui/$(id -u)/com.vyttle.wiffletree.host` finds no job, and `pgrep -fl wiffletree-host` lists nothing.
 
 ### Checking the client credential on a signed build
 
 `crates/workspace-host/src/keychain.rs` keeps a launchd host's client credential in the login keychain. Check it by hand on a signed build before a release that changes it. Each step names what to expect. The host never shows a Keychain dialog itself: where it cannot read the item silently, it stops with an error instead.
 
-1. Build a signed bundle: `CODESIGN_IDENTITY="<identity>" scripts/package_macos.sh`, then set `APP="$PWD/target/Wiffletree.app"`, `HOST="$APP/Contents/MacOS/workspace-host"` and `SERVICE=com.vyttle.wiffletree.client-credential`.
+1. Build a signed bundle: `CODESIGN_IDENTITY="<identity>" scripts/package_macos.sh`, then set `APP="$PWD/target/Wiffletree.app"`, `HOST="$APP/Contents/MacOS/wiffletree-host"` and `SERVICE=com.vyttle.wiffletree.client-credential`.
 2. Make a scratch data folder: `DATA=$(mktemp -d /tmp/wt-kc.XXXX)` and `ACCOUNT=$(cd "$DATA" && pwd -P)`, since the item's account is the resolved folder.
 3. **Create.** Run `"$HOST" serve --data-dir "$DATA" --app "$APP"`. Expect no dialog, and `$DATA/host.sock` to appear. Stop it with Control-C. `security find-generic-password -s "$SERVICE" -a "$ACCOUNT"` lists the item's attributes, without its secret.
 4. **Read.** Run the same `serve` again. Expect it to start with no dialog: it found the item, because a host that could not read it would fail to add a second one.
 5. **A versioned copy.** Copy the host as the app will and re-sign it with the same identifier and identity:
    ```sh
-   mkdir -p "$DATA/host/9.9.9" && cp "$HOST" "$DATA/host/9.9.9/workspace-host"
+   mkdir -p "$DATA/host/9.9.9" && cp "$HOST" "$DATA/host/9.9.9/wiffletree-host"
    ID=$(codesign -dv "$HOST" 2>&1 | sed -n 's/^Identifier=//p')
-   codesign --force --options runtime --timestamp --identifier "$ID" --sign "<identity>" "$DATA/host/9.9.9/workspace-host"
-   "$DATA/host/9.9.9/workspace-host" serve --data-dir "$DATA" --app "$APP"
+   codesign --force --options runtime --timestamp --identifier "$ID" --sign "<identity>" "$DATA/host/9.9.9/wiffletree-host"
+   "$DATA/host/9.9.9/wiffletree-host" serve --data-dir "$DATA" --app "$APP"
    ```
    Expect it to start with no dialog, then stop it.
 6. **Another program.** Run `security find-generic-password -s "$SERVICE" -a "$ACCOUNT" -w`. Expect a dialog asking for the login keychain password. Click **Deny**; nothing is printed.

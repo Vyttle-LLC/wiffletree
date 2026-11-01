@@ -20,7 +20,7 @@ impl Gate {
         )
         .unwrap();
         symlink(
-            env!("CARGO_BIN_EXE_workspace-host"),
+            env!("CARGO_BIN_EXE_wiffletree-host"),
             home.path().join("wiffletree-build-gate"),
         )
         .unwrap();

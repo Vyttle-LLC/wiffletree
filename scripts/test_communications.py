@@ -19,7 +19,7 @@ with tempfile.TemporaryDirectory(prefix='workspace-protocol-test-') as tmp:
         subprocess.run(['git',*args],cwd=repo,check=True,capture_output=True)
     (tmp/'usage').mkdir();prompts=tmp/'prompts';prompts.mkdir()
     env={**os.environ,'WORKSPACE_TEST_USAGE_DIR':str(tmp/'usage'),'WORKSPACE_TEST_PROMPT_DIR':str(prompts),'WORKSPACE_CODEX_BIN':str(fake),'WORKSPACE_CLAUDE_BIN':str(fake)}
-    def start():return subprocess.Popen([str(target/'debug/workspace-host'),'--data-dir',str(tmp/'home')],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,env=env)
+    def start():return subprocess.Popen([str(target/'debug/wiffletree-host'),'--data-dir',str(tmp/'home')],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,env=env)
     host=start()
     def request(command):
         host.stdin.write(json.dumps({'version':1,'id':'test','command':command})+'\n');host.stdin.flush()

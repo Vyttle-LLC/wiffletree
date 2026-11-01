@@ -72,7 +72,7 @@ The 197,772-byte snapshot costs about 0.3 ms more at p50 over the socket than it
 Reproduce with:
 
 ```sh
-cargo build --locked --release -p workspace-host --bin workspace-host --example benchmark
+cargo build --locked --release -p workspace-host --bin wiffletree-host --example benchmark
 /usr/bin/time -l target/release/examples/benchmark [folder to keep the fixture in]
 WIFFLETREE_BENCH_DIR=<kept folder or a store copy> cargo test --locked --release -p workspace-desktop tree_rows_benchmark -- --ignored --nocapture
 ```

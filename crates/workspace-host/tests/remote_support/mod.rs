@@ -88,11 +88,11 @@ impl Studio {
                 let clock = clock.clone();
                 move || clock.load(Ordering::Relaxed)
             }),
-            binary: env!("CARGO_BIN_EXE_workspace-host").into(),
+            binary: env!("CARGO_BIN_EXE_wiffletree-host").into(),
         };
         let service = Service::start_with(
             data.path().into(),
-            env!("CARGO_BIN_EXE_workspace-host").into(),
+            env!("CARGO_BIN_EXE_wiffletree-host").into(),
             options,
         )
         .unwrap();

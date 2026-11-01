@@ -265,7 +265,7 @@ fn a_live_project_resumes_after_a_restart_except_for_the_session_it_interrupted(
     until("the stopped host to release the store", || {
         restarted = Service::start(
             home.path().to_path_buf(),
-            env!("CARGO_BIN_EXE_workspace-host").into(),
+            env!("CARGO_BIN_EXE_wiffletree-host").into(),
         )
         .ok();
         restarted.is_some()

@@ -136,7 +136,7 @@ impl Bridge {
     ) -> Self {
         let launcher = (|| -> anyhow::Result<_> {
             let app = std::env::current_exe()?;
-            let binary = app.parent().unwrap().join("workspace-host");
+            let binary = app.parent().unwrap().join("wiffletree-host");
             let choice = HostLaunch::choose(developer_id_signed(&app), default_folder);
             // `Wiffletree.app/Contents/MacOS/workspace-desktop`
             let bundle = app.ancestors().nth(3).unwrap_or(&app);
