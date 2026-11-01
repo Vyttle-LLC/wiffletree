@@ -2098,8 +2098,8 @@ mod tests {
         Joining, STORAGE_FRESH_MS, behaviors_changed, brain_after_choosing, brain_label,
         brain_lines, follows_brain, format_sources, holds_draft, issues_line, join_choices,
         join_refused_by, merged, models_changed, new_storage_line, parse_sources, pass_finished,
-        prefix_question, readers_line, reads_storage_again, replaces_github_brain,
-        repository_line, shared_with, storage_banner, sync_line,
+        prefix_question, readers_line, reads_storage_again, replaces_github_brain, repository_line,
+        shared_with, storage_banner, sync_line,
     };
     use crate::wording::counted;
     use workspace_core::*;

@@ -113,6 +113,24 @@ fn switched(
     })
 }
 
+/// The scope after the host saved `sent` for the Space `id` as `saved`: the draft takes the
+/// saved copy only while it still holds what was sent, so edits made meanwhile stay unsaved.
+fn saved_space(
+    scope: Option<SpaceScope>,
+    id: &SpaceId,
+    sent: &SpaceModelSettings,
+    saved: SpaceModelSettings,
+) -> Option<SpaceScope> {
+    let mut scope = scope?;
+    if &scope.id == id {
+        if scope.draft == *sent {
+            scope.draft = saved.clone();
+        }
+        scope.saved = saved;
+    }
+    Some(scope)
+}
+
 /// The scope after a snapshot: an untouched draft follows what the Space sets now, one with
 /// edits is kept, and a removed Space goes back to This Mac.
 fn synced(scope: Option<SpaceScope>, spaces: &[Space]) -> Option<SpaceScope> {
@@ -251,17 +269,15 @@ impl ModelsPage {
     fn save_space_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(scope) = &self.scope else { return };
         let (id, draft) = (scope.id.clone(), scope.draft.clone());
-        let ask = ask::set_space_models(id.clone(), draft);
+        let ask = ask::set_space_models(id.clone(), draft.clone());
         self.ask(
             ask,
             window,
             cx,
             move |view, saved, window, cx| match saved {
                 Ok(saved) => {
-                    if let Some(scope) = view.scope.as_mut().filter(|scope| scope.id == id) {
-                        scope.draft = saved.clone();
-                        scope.saved = saved;
-                    }
+                    let shown = view.scope.take();
+                    view.scope = saved_space(shown, &id, &draft, saved);
                     toast("Models saved", window, cx);
                 }
                 Err(error) => toast_error(error, window, cx),
@@ -1729,7 +1745,7 @@ fn titled(title: &'static str, detail: String) -> PopupMenuItem {
 
 #[cfg(test)]
 mod tests {
-    use super::{SpaceScope, edit_cell, switched, synced};
+    use super::{SpaceScope, edit_cell, saved_space, switched, synced};
     use crate::models::Cell;
     use workspace_core::*;
 
@@ -1840,5 +1856,29 @@ mod tests {
         assert_eq!(scope, None);
         assert_eq!(switched(None, None, &spaces), None);
         assert_eq!(draft, this_macs_draft);
+    }
+
+    #[test]
+    fn a_save_reply_keeps_edits_made_while_it_was_pending() {
+        let sage = space("sage", vec![]);
+        let mut scope = switched(None, Some(sage.id.clone()), std::slice::from_ref(&sage));
+        let sent = cascade::SpaceModelSettings {
+            reviews: cascade::ReviewOverrides {
+                max_cycles: Some(3),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        scope.as_mut().unwrap().draft = sent.clone();
+        // Another edit before the host answers.
+        let mut later = sent.clone();
+        later.reviews.max_rounds = Some(1);
+        scope.as_mut().unwrap().draft = later.clone();
+        let kept = saved_space(scope.clone(), &sage.id, &sent, sent.clone()).unwrap();
+        assert_eq!((kept.draft, kept.saved), (later, sent.clone()));
+        // With nothing edited meanwhile, the page reads as saved.
+        scope.as_mut().unwrap().draft = sent.clone();
+        let saved = saved_space(scope, &sage.id, &sent, sent.clone()).unwrap();
+        assert_eq!(saved.draft, saved.saved);
     }
 }
