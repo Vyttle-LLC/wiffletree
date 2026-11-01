@@ -1,7 +1,9 @@
-//! The Settings window, in two parts (design 10 of `remote-hosts`): this Mac's app, with its
-//! appearance, layout, finding other Macs and the computers it is paired with, and the host the window drives, with its
-//! workspace folder, check-in thresholds, builds at once and settings repository, and on This Mac its remote
-//! access. A setting belongs to the Mac whose agents it runs.
+//! The Settings window. Its sidebar groups every setting as the settings-cascade study does:
+//! Shared with your Macs, the Spaces, and This Mac, opening the pages that live in the main
+//! window there. Its body keeps the parts of design 10 of `remote-hosts`: the shared settings,
+//! this Mac's app, with its appearance, layout, finding other Macs and the computers it is
+//! paired with, and the host the window drives, with its workspace folder, builds at once and,
+//! on This Mac, its remote access. A setting belongs to the Mac whose agents it runs.
 mod remote_access;
 mod repository;
 
@@ -138,7 +140,7 @@ impl Settings {
         }
         let hosts = cx.global::<Hosts>();
         let (bridge, driving) = (hosts.bridge(), hosts.view());
-        let bounds = Bounds::centered(None, size(px(560.), px(820.)), cx);
+        let bounds = Bounds::centered(None, size(px(760.), px(820.)), cx);
         let mut settings = None;
         let opened = cx.open_window(
             WindowOptions {
@@ -218,8 +220,125 @@ impl Settings {
     }
 
     fn show_repository(&mut self, cx: &mut Context<Self>) {
-        self.scroll.scroll_to_top_of_item(repository::SECTION);
+        self.scroll_to(Block::Repository, cx);
+    }
+    fn scroll_to(&mut self, block: Block, cx: &mut Context<Self>) {
+        self.scroll.scroll_to_top_of_item(block.index());
         cx.notify();
+    }
+    /// Follows a sidebar entry: a section of this window, or a page of the main window, which
+    /// comes forward.
+    fn go(&mut self, to: &Go, cx: &mut Context<Self>) {
+        let intent = match to {
+            Go::Section(block) => return self.scroll_to(*block, cx),
+            Go::Page(page) => Intent::OpenPage(*page),
+            Go::Models => Intent::OpenModels(None),
+            Go::Space(id) => Intent::OpenSpace(id.clone()),
+        };
+        with_workspace(cx, move |view, window, cx| {
+            window.activate_window();
+            view.handle(&intent, window, cx)
+        });
+    }
+    /// The sidebar: what is shared with the human's Macs, their Spaces, and what is this Mac's.
+    fn sidebar(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        let mut side = div()
+            .w(px(190.))
+            .flex_none()
+            .h_full()
+            .px_2()
+            .py_3()
+            .flex()
+            .flex_col()
+            .gap(px(1.))
+            .bg(p.base)
+            .border_r_1()
+            .border_color(p.edge.opacity(edge::LIGHT));
+        for (group, entries) in sidebar_groups(&main_window_spaces(cx)) {
+            side = side.child(
+                div()
+                    .px_2()
+                    .pt_3()
+                    .pb_1()
+                    .text_size(px(font::TINY))
+                    .text_color(p.subtle)
+                    .child(group.to_uppercase()),
+            );
+            for (at, (label, to)) in entries.into_iter().enumerate() {
+                side = side.child(
+                    div()
+                        .id(SharedString::from(format!("settings-{group}-{at}")))
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .text_size(px(font::SMALL))
+                        .hover(|d| d.bg(p.overlay))
+                        .child(label)
+                        .on_click(cx.listener(move |view, _, _, cx| view.go(&to, cx))),
+                );
+            }
+        }
+        side
+    }
+    /// One block of the scrolled body, with a rule above each section that follows another.
+    fn block(&self, block: Block, p: Palette, cx: &mut Context<Self>) -> Div {
+        let rule = || div().h(px(1.)).bg(p.edge.opacity(edge::HAIRLINE));
+        let section = match block {
+            Block::Shared => {
+                return part(
+                    "Shared with your Macs",
+                    "Assistant · check-ins · settings repository. Behaviors, reviews and the PR keeper open in the main window.",
+                    p,
+                );
+            }
+            Block::App => {
+                return part(
+                    "This Mac · the app",
+                    "Appearance · layout · other Macs · computers you've paired with",
+                    p,
+                );
+            }
+            Block::Host => {
+                let title = match self.driving.name() {
+                    Some(host) => format!("{host} · the host you're driving"),
+                    None => "This Mac · the host".into(),
+                };
+                return part(
+                    &title,
+                    "Workspace folder · builds at once · remote access. Who runs what, repositories and their checks, and publishing open in the main window.",
+                    p,
+                )
+                .children(self.driving.changes_refused().map(|reason| hint(reason, p)));
+            }
+            Block::Assistant => ui::locked(self.assistant_section(p, cx), &self.driving, p),
+            Block::CheckIns => self.check_in_section(p, cx),
+            Block::Repository => ui::locked(self.repository_section(p, cx), &self.driving, p),
+            Block::Appearance => self.appearance_section(p, cx),
+            Block::Layout => self.layout_section(p, cx),
+            Block::OtherMacs => self.other_macs_section(p, cx),
+            Block::Paired => self.paired_section(p, cx),
+            Block::Folder => self.folder_section(p, cx),
+            Block::Builds => self.builds_section(p, cx),
+            Block::RemoteAccess => match self.driving.name() {
+                None => self.remote_access_section(p, cx),
+                Some(host) => hint(
+                    format!(
+                        "Remote access (pairing and who can control it) changes only at {host} itself."
+                    ),
+                    p,
+                ),
+            },
+        };
+        let follows_a_part = BLOCKS
+            .get(block.index().wrapping_sub(1))
+            .is_some_and(|before| before.is_part());
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .when(!follows_a_part, |d| d.child(rule()))
+            .child(section)
     }
 
     fn choose_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -669,6 +788,111 @@ impl Settings {
     }
 }
 
+/// The scrolled body's children, in order: each group's heading, then its sections.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Block {
+    Shared,
+    Assistant,
+    CheckIns,
+    Repository,
+    App,
+    Appearance,
+    Layout,
+    OtherMacs,
+    Paired,
+    Host,
+    Folder,
+    Builds,
+    RemoteAccess,
+}
+const BLOCKS: [Block; 13] = [
+    Block::Shared,
+    Block::Assistant,
+    Block::CheckIns,
+    Block::Repository,
+    Block::App,
+    Block::Appearance,
+    Block::Layout,
+    Block::OtherMacs,
+    Block::Paired,
+    Block::Host,
+    Block::Folder,
+    Block::Builds,
+    Block::RemoteAccess,
+];
+impl Block {
+    /// Its place among the body's children, which scrolling to it names.
+    fn index(self) -> usize {
+        BLOCKS.iter().position(|block| *block == self).unwrap_or(0)
+    }
+    fn is_part(self) -> bool {
+        matches!(self, Self::Shared | Self::App | Self::Host)
+    }
+}
+
+/// Where a sidebar entry goes: a section of this window, or a page of the main window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Go {
+    Section(Block),
+    Page(Page),
+    /// The Models page at this Mac's scope.
+    Models,
+    Space(SpaceId),
+}
+
+/// The sidebar's groups, as the settings-cascade study's Settings window draws them: what
+/// cascades from the human's Workspace, each Space, and what is this Mac's alone. Pages that
+/// live in the main window open there.
+fn sidebar_groups(spaces: &[(SpaceId, String)]) -> Vec<(&'static str, Vec<(String, Go)>)> {
+    let entry = |label: &str, to: Go| (label.to_owned(), to);
+    let mut space_entries: Vec<(String, Go)> = (spaces.iter())
+        .map(|(id, name)| (name.clone(), Go::Space(id.clone())))
+        .collect();
+    if space_entries.is_empty() {
+        space_entries.push(entry("Spaces", Go::Page(Page::Spaces)));
+    }
+    vec![
+        (
+            "Shared with your Macs",
+            vec![
+                entry("Behaviors", Go::Page(Page::Behaviors)),
+                entry("Reviews", Go::Models),
+                entry("PR keeper", Go::Page(Page::Repositories)),
+                entry("Check-ins", Go::Section(Block::CheckIns)),
+                entry("Assistant & router", Go::Section(Block::Assistant)),
+                entry("Settings repository", Go::Section(Block::Repository)),
+            ],
+        ),
+        ("Spaces", space_entries),
+        (
+            "This Mac",
+            vec![
+                entry("Who runs what", Go::Models),
+                entry("Subscriptions", Go::Models),
+                entry("Repositories", Go::Page(Page::Repositories)),
+                entry("Publishing", Go::Page(Page::Repositories)),
+                entry("Workspace folder", Go::Section(Block::Folder)),
+                entry("Builds & remote access", Go::Section(Block::Builds)),
+                entry("Appearance", Go::Section(Block::Appearance)),
+            ],
+        ),
+    ]
+}
+
+/// The Spaces of the host the main window shows, which is the one this window drives.
+fn main_window_spaces(cx: &App) -> Vec<(SpaceId, String)> {
+    let workspace = (cx.try_global::<MainWindow>())
+        .and_then(|main| main.0.clone())
+        .and_then(|(_, workspace)| workspace.upgrade());
+    let Some(workspace) = workspace else {
+        return vec![];
+    };
+    let snapshot = workspace.read(cx).shared.snapshot();
+    (snapshot.map_or(&[][..], |s| &s.spaces).iter())
+        .map(|space| (space.id.clone(), space.name.clone()))
+        .collect()
+}
+
 /// The heading of one part of the window: whose settings follow, and what they are.
 fn part(title: &str, holds: &'static str, p: Palette) -> Div {
     div()
@@ -753,8 +977,7 @@ impl Render for Settings {
                 ),
             )
             .child({
-                let rule = || div().h(px(1.)).bg(p.edge.opacity(edge::HAIRLINE));
-                let body = div()
+                let mut body = div()
                     .id("settings-body")
                     .size_full()
                     .overflow_y_scroll()
@@ -762,48 +985,15 @@ impl Render for Settings {
                     .p_5()
                     .flex()
                     .flex_col()
-                    .gap_4()
-                    .child(part(
-                        "This Mac · the app",
-                        "Appearance · layout · other Macs · computers you've paired with",
-                        p,
-                    ))
-                    .child(self.appearance_section(p, cx))
-                    .child(rule())
-                    .child(self.layout_section(p, cx))
-                    .child(rule())
-                    .child(self.other_macs_section(p, cx))
-                    .child(rule())
-                    .child(self.paired_section(p, cx))
-                    .child(rule())
-                    .child(part(
-                        &match self.driving.name() {
-                            Some(host) => format!("{host} · the host you're driving"),
-                            None => "This Mac · the host".into(),
-                        },
-                        "Spaces · models · repositories and checks · workspace folder · PR owners allowed · check-ins · builds at once · reviews · skills · settings repository",
-                        p,
-                    ))
-                    .children(self.driving.changes_refused().map(|reason| hint(reason, p)))
-                    .child(self.folder_section(p, cx))
-                    .child(rule())
-                    .child(ui::locked(self.assistant_section(p, cx), &self.driving, p))
-                    .child(rule())
-                    .child(self.check_in_section(p, cx))
-                    .child(rule())
-                    .child(self.builds_section(p, cx))
-                    .child(rule())
-                    .child(ui::locked(self.repository_section(p, cx), &self.driving, p))
-                    .child(rule())
-                    .child(match self.driving.name() {
-                        None => self.remote_access_section(p, cx),
-                        Some(host) => hint(
-                            format!(
-                                "Remote access (pairing and who can control it) changes only at {host} itself."
-                            ),
-                            p,
-                        ),
-                    });
+                    .gap_4();
+                for block in BLOCKS {
+                    body = body.child(self.block(block, p, cx));
+                }
+                let body = div()
+                    .size_full()
+                    .flex()
+                    .child(self.sidebar(p, cx))
+                    .child(div().flex_1().min_w_0().h_full().child(body));
                 let dialog =
                     (self.confirming).and_then(|confirm| self.confirm_dialog(confirm, p, cx));
                 match dialog {
@@ -811,5 +1001,68 @@ impl Render for Settings {
                     None => div().flex_1().min_h_0().relative().child(body),
                 }
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BLOCKS, Block, Go, sidebar_groups};
+    use crate::Page;
+    use workspace_core::SpaceId;
+
+    #[test]
+    fn the_sidebar_groups_shared_settings_spaces_and_this_macs() {
+        let spaces = [
+            (SpaceId("sage".into()), "Sage".to_owned()),
+            (SpaceId("vyttle".into()), "Vyttle".to_owned()),
+        ];
+        let groups = sidebar_groups(&spaces);
+        let names: Vec<&str> = groups.iter().map(|(group, _)| *group).collect();
+        assert_eq!(names, ["Shared with your Macs", "Spaces", "This Mac"]);
+        let labels = |at: usize| -> Vec<&str> {
+            (groups[at].1.iter())
+                .map(|(label, _)| label.as_str())
+                .collect()
+        };
+        assert_eq!(labels(0)[0], "Behaviors");
+        assert_eq!(groups[0].1[0].1, Go::Page(Page::Behaviors));
+        assert_eq!(labels(1), ["Sage", "Vyttle"]);
+        assert_eq!(groups[1].1[0].1, Go::Space(SpaceId("sage".into())));
+        // Repository facts and the allowed owners are permissions of this Mac, not shared.
+        for this_macs in [
+            "Who runs what",
+            "Repositories",
+            "Publishing",
+            "Workspace folder",
+        ] {
+            assert!(
+                labels(2).contains(&this_macs),
+                "{this_macs} is under This Mac"
+            );
+            assert!(!labels(0).contains(&this_macs));
+        }
+        // Each entry for this window scrolls to a section it draws, under its own group.
+        let part_of = |block: Block| {
+            let before = &BLOCKS[..block.index()];
+            *before.iter().rev().find(|b| b.is_part()).unwrap()
+        };
+        for (group, entries) in &groups {
+            for (label, to) in entries {
+                if let Go::Section(block) = to {
+                    assert!(!block.is_part(), "{label}");
+                    let part = if *group == "This Mac" {
+                        [Block::App, Block::Host].contains(&part_of(*block))
+                    } else {
+                        part_of(*block) == Block::Shared
+                    };
+                    assert!(part, "{label} is drawn under {group}");
+                }
+            }
+        }
+        // With no Space yet, the Spaces page is where to add one.
+        assert_eq!(
+            sidebar_groups(&[])[1].1,
+            [("Spaces".to_owned(), Go::Page(Page::Spaces))]
+        );
     }
 }

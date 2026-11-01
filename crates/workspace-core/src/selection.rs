@@ -530,6 +530,8 @@ pub struct SpaceTable {
     /// The table small work resolves: a Space row stays where its small-work line, or its main
     /// line without one, can run here.
     small: ModelSelection,
+    /// Each row's provenance for small work, in the table's order.
+    pub small_rows: Vec<ResolvedRow>,
     /// The Space's name; `None` outside a Space, where every row is this Mac's.
     space: Option<String>,
     overrides: Vec<JobRow>,
@@ -548,11 +550,12 @@ impl ModelSelection {
         unusable: &BTreeSet<Provider>,
     ) -> SpaceTable {
         let (selection, rows) = self.merge(overrides, unusable, false);
-        let (small, _) = self.merge(overrides, unusable, true);
+        let (small, small_rows) = self.merge(overrides, unusable, true);
         SpaceTable {
             selection,
             rows,
             small,
+            small_rows,
             space: space.map(Into::into),
             overrides: overrides.to_vec(),
             unusable: unusable.clone(),
@@ -625,6 +628,19 @@ impl SpaceTable {
     pub fn because(mut self, provider: Provider, why: String) -> Self {
         self.held.insert(provider, why);
         self
+    }
+    /// The table small work resolves when `small`, else the main one.
+    pub fn table(&self, small: bool) -> &ModelSelection {
+        if small { &self.small } else { &self.selection }
+    }
+    /// Each of the Space's rows whose line for `small` work, or main line, this Mac cannot run,
+    /// so this Mac's row is used instead, with why, such as "Claude is not signed in on this
+    /// Mac". For small work, a row without a small-work line is left out: its main line says it.
+    pub fn fallbacks(&self, small: bool) -> Vec<(&JobRow, String)> {
+        (self.overrides.iter())
+            .filter(|row| !small || row.small.is_some())
+            .filter_map(|row| Some((row, refused(row, small, &self.unusable, &self.held)?)))
+            .collect()
     }
     /// What `job` would start on now, as [`ModelSelection::resolve`] says, with the reason
     /// naming the Space when its row was used or fell back.

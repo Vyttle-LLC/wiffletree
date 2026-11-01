@@ -256,6 +256,10 @@ pub struct EffectiveSettings {
     /// Who runs what as the Space resolves it on this Mac, row by row.
     #[serde(default)]
     pub models: Vec<ResolvedRow>,
+    /// The same for small work, whose row may come from another layer when only one line of a
+    /// Space's row can run here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub small_models: Vec<ResolvedRow>,
     pub reviews: ResolvedReviews,
 }
 

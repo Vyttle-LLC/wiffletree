@@ -322,6 +322,34 @@ pub(super) fn pill(text: impl Into<SharedString>, color: Hsla) -> Div {
         .font_weight(FontWeight::MEDIUM)
         .child(text.into())
 }
+/// Where a cascaded value came from, as the settings-cascade study draws it: dashed for Stock and
+/// This Mac, which nobody shares, and a tint per shared layer. `label` names the layer, such as
+/// "Sage" for a Space.
+pub(super) fn from_chip(layer: cascade::Layer, label: impl Into<SharedString>, p: Palette) -> Div {
+    use cascade::Layer;
+    let chip = div()
+        .flex_none()
+        .px(px(7.))
+        .py(px(1.))
+        .rounded(px(7.))
+        .text_size(px(font::META))
+        .whitespace_nowrap()
+        .child(label.into());
+    let tint = match layer {
+        Layer::Stock | Layer::ThisMac => None,
+        Layer::Workspace => Some(p.blue),
+        Layer::Space => Some(p.focus),
+        Layer::Repository => Some(p.magenta),
+    };
+    match tint {
+        Some(color) => chip.bg(color.opacity(0.13)).text_color(color),
+        None => chip
+            .border_1()
+            .border_dashed()
+            .border_color(p.edge)
+            .text_color(p.subtle),
+    }
+}
 pub(super) fn mono(text: impl Into<SharedString>, p: Palette) -> Div {
     div()
         .min_w_0()

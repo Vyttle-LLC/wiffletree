@@ -25,8 +25,8 @@ Four stacked tickets in the wiffletree repository, each with a full review. Pull
 
 ## 4. Models, Spaces and Settings screens
 
-- [ ] 4.1 Models: the scope bar `This Mac · Space ▾`, overridden rows marked, Reset per row.
-- [ ] 4.2 The Space page: models and instructions leave it; links to "Behaviors for ‹Space›" and "Models for ‹Space›"; the brain's compile time and gate shown read-only.
-- [ ] 4.3 The Settings window's two groups, "Shared with your Macs" and "This Mac".
-- [ ] 4.4 Effective settings from a project's header, from `effective_settings`.
-- [ ] 4.5 Run `openspec validate --strict`, sync the specs and archive this change.
+- [x] 4.1 Models: the scope bar `This Mac · Space ▾`, overridden rows marked, Reset per row; the Space-resolved Right now and fallback banner; Reviews in the Space.
+- [x] 4.2 The Space page: models and instructions leave it; links to "Behaviors for ‹Space›" and "Models for ‹Space›"; the brain's compile time and gate shown read-only; the composer's model label and the page's fallback note resolve the Space's Assistant row.
+- [x] 4.3 The Settings window's groups, "Shared with your Macs", "Spaces" and "This Mac".
+- [x] 4.4 Effective settings from a project's header, from `effective_settings`.
+- [ ] 4.5 Run `openspec validate --strict`, sync the specs and archive this change: a follow-up once stages 3 and 4 have both merged, so neither pull request edits an archived change.

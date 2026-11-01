@@ -628,7 +628,12 @@ impl BehaviorsPage {
             .border_color(p.edge.opacity(edge::SEPARATOR))
             .child(about)
             .child(self.control(row, p, cx))
-            .child(source_chip(chip_name, from, from == scope.layer(), p))
+            // Bold when it is the scope's own value.
+            .child(
+                ui::from_chip(from, chip_name, p).when(from == scope.layer(), |d| {
+                    d.font_weight(FontWeight::SEMIBOLD)
+                }),
+            )
             .child(
                 (div().w(px(124.)).flex().justify_end())
                     .text_size(px(font::CAPTION))
@@ -827,30 +832,6 @@ impl BehaviorsPage {
             .child(head)
             .when(open, |d| d.child(self.skills_list(p, cx)))
     }
-}
-
-/// "Stock" dashed, the Workspace blue, a Space teal and a repository violet; bold when it is
-/// the scope's own value.
-fn source_chip(name: String, from: Layer, here: bool, p: Palette) -> Div {
-    let chip = (div().flex_none().px_2().rounded_md())
-        .text_size(px(font::CAPTION))
-        .whitespace_nowrap()
-        .when(here, |d| d.font_weight(FontWeight::SEMIBOLD))
-        .child(name);
-    let color = match from {
-        Layer::Stock => {
-            return chip
-                .border_1()
-                .border_dashed()
-                .border_color(p.edge)
-                .text_color(p.subtle);
-        }
-        // No Behavior comes from This Mac, a layer of the Who runs what table only.
-        Layer::Workspace | Layer::ThisMac => p.blue,
-        Layer::Space => p.focus,
-        Layer::Repository => p.magenta,
-    };
-    chip.text_color(color).bg(color.opacity(0.13))
 }
 
 #[cfg(test)]

@@ -594,8 +594,10 @@ impl Host {
             });
         }
         let (_, unusable, _) = self.limits()?;
+        let table = self.space_table(Some(&project.space), &unusable)?;
         Ok(EffectiveSettings {
-            models: self.space_table(Some(&project.space), &unusable)?.rows,
+            models: table.rows,
+            small_models: table.small_rows,
             reviews: self.space_reviews(&project.space)?,
             space_id: project.space,
             repository: layers.repository.clone(),

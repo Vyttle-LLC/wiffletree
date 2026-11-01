@@ -122,6 +122,22 @@ impl ConversationHeader {
                 .on_click(cx.listener(|_, _, _, c| c.emit(Intent::TogglePanel(Panel::Agents)))),
         )
     }
+    /// Opens and closes Effective settings: what a ticket's agents get, or the project's from
+    /// its coordinator, and where each value came from.
+    fn settings_toggle(&self, cx: &mut Context<Self>) -> Option<Button> {
+        self.shared.project_id()?;
+        Some(
+            button("effective-settings")
+                .outline()
+                .small()
+                .icon(icon("settings"))
+                .selected(self.shared.panel == Some(Panel::Settings))
+                .tooltip("Effective settings · what this project's agents get, and where each value came from")
+                .on_click(
+                    cx.listener(|_, _, _, c| c.emit(Intent::TogglePanel(Panel::Settings))),
+                ),
+        )
+    }
     fn header(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {
         let live = self.shared.live_enabled();
         let paused = session.status == Status::Paused;
@@ -139,6 +155,7 @@ impl ConversationHeader {
         .px_6()
         .gap_3()
         .children(self.agents_toggle(cx))
+        .children(self.settings_toggle(cx))
         .children((self.contexts.read(cx).chip(session, p)).map(|chip| {
             chip.on_click(cx.listener(|_, _, _, c| c.emit(Intent::ShowPanel(Panel::Overview))))
         }))
