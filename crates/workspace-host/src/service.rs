@@ -3766,9 +3766,14 @@ impl Actor {
         due.shown
     }
     /// Moves a ticket's waiting rebase onto its branch and pushes it, unless an agent of the
-    /// ticket is in a turn; then it waits for a later pass.
+    /// ticket is in a turn or its PR is in a merge queue; then it waits for a later pass.
     fn keeper_move(&mut self, ticket_id: &str) {
-        if self.ticket_in_turn(ticket_id) {
+        if self.ticket_in_turn(ticket_id)
+            || self
+                .host
+                .ticket(ticket_id)
+                .is_ok_and(|t| t.in_merge_queue())
+        {
             return;
         }
         self.keeper_checkout(ticket_id, checkout::KeeperAction::Waiting);
@@ -5446,6 +5451,8 @@ mod tests {
                 comments: CommentCursors::default(),
                 merge_commit: None,
                 merged_by_host: None,
+                in_merge_queue: false,
+                queue_removal: None,
             });
             host.save_ticket(&ticket).unwrap();
             finished.push(ticket);
@@ -11429,6 +11436,33 @@ mod tests {
         // After the turn, a later pass moves it, the worktree being clean at the same commit.
         actor.active.clear();
         actor.host.keeper_move(&ticket).unwrap();
+        assert_eq!(worktrees::head(Path::new(&worktree)).unwrap(), result);
+    }
+
+    #[test]
+    fn a_keeper_result_waits_while_the_pr_is_in_a_merge_queue_and_moves_once_it_left() {
+        let (mut f, _remote, result) = keeper::tests::waiting();
+        keeper::tests::set_queued(&mut f, true);
+        let before = f.head();
+        let ticket = f.ticket.clone();
+        let publish::tests::Fixture {
+            host, home: _home, ..
+        } = f;
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(8);
+        actor.sender = sender;
+        actor.keeper_move(&ticket);
+        assert!(events.try_recv().is_err());
+        let held = actor.host.ticket(&ticket).unwrap();
+        let worktree = held.worktree.clone();
+        assert_eq!(held.keeper.unwrap().waiting, Some(result.clone()));
+        assert_eq!(worktrees::head(Path::new(&worktree)).unwrap(), before);
+
+        let mut left = actor.host.ticket(&ticket).unwrap();
+        left.pull_request.as_mut().unwrap().in_merge_queue = false;
+        actor.host.save_ticket(&left).unwrap();
+        actor.keeper_move(&ticket);
+        actor.handle(events.recv_blocking().unwrap());
         assert_eq!(worktrees::head(Path::new(&worktree)).unwrap(), result);
     }
 

@@ -2278,6 +2278,10 @@ impl Ticket {
             .as_ref()
             .filter(|pr| pr.state == PrState::Open)
     }
+    /// Whether the ticket's open pull request is in a merge queue, as the PR watcher last read it.
+    pub fn in_merge_queue(&self) -> bool {
+        self.open_pull_request().is_some_and(|pr| pr.in_merge_queue)
+    }
     /// The ticket's pull request once it was closed or merged; opening another needs the human.
     pub fn ended_pull_request(&self) -> Option<&PullRequest> {
         self.pull_request
@@ -2382,6 +2386,20 @@ pub struct PullRequest {
     /// Set when the host merged it, which the PR watcher's reading keeps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged_by_host: Option<HostMerge>,
+    #[serde(default)]
+    pub in_merge_queue: bool,
+    /// The newest time a merge queue removed it without merging it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_removal: Option<QueueRemoval>,
+}
+/// A merge queue's removal of a PR, from GitHub's timeline event.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueRemoval {
+    /// The event's id, which no other removal shares.
+    pub id: String,
+    /// GitHub's word for it, such as `merge_conflict` or `manual`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 impl PullRequest {
     /// What changed from `old`, such as "checks failure, new head 9e03c1b".
@@ -2413,6 +2431,13 @@ impl PullRequest {
         }
         if old.comments != new.comments {
             changes.push("new comments".into());
+        }
+        if old.in_merge_queue != new.in_merge_queue {
+            let change = match new.in_merge_queue {
+                true => "in the merge queue",
+                false => "out of the merge queue",
+            };
+            changes.push(change.into());
         }
         if changes.is_empty() {
             changes.push("details".into());
