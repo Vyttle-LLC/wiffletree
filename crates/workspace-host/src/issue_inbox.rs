@@ -69,7 +69,7 @@ pub(crate) fn read_people(read: &PeopleRead, tools: &publish::Tools, home: &Path
 }
 
 /// Whether `text` mentions `@login`, in any case, as a whole word.
-pub(crate) fn mentions(text: &str, login: &str) -> bool {
+fn mentions(text: &str, login: &str) -> bool {
     let (text, wanted) = (text.to_lowercase(), format!("@{}", login.to_lowercase()));
     let part_of_login = |c: char| c.is_ascii_alphanumeric() || c == '-';
     text.match_indices(&wanted).any(|(at, _)| {
