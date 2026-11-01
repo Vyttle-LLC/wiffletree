@@ -1072,7 +1072,7 @@ impl Host {
             let reason = "Waiting for a Brain compiler model: choose one in Models".to_owned();
             return self.end_compile(&mut run, CompileOutcome::Waiting, reason);
         }
-        let pick = match self.resolve_job(&Job::Compiler, false, false) {
+        let pick = match self.resolve_job(None, &Job::Compiler, false, false) {
             Ok(pick) if !pick.waits => pick,
             Ok(pick) => return self.end_compile(&mut run, CompileOutcome::Waiting, pick.reason),
             Err(error) => {

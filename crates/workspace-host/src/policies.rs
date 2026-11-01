@@ -19,6 +19,21 @@ pub(crate) fn check_keeper_needs(
     check_tries(keeper, selection.keeper(), verification)
 }
 
+/// The note that the Spaces `names` no longer limit this Mac's models.
+fn retired_lists_note(names: &[&str]) -> String {
+    let (spaces, listed, had) = match names {
+        [rest @ .., last] if !rest.is_empty() => (
+            "Spaces",
+            format!("{} and {last}", rest.join(", ")),
+            "each had",
+        ),
+        _ => ("Space", names.concat(), "had"),
+    };
+    format!(
+        "The {spaces} {listed} {had} a list of the models this Mac may use there. Spaces no longer limit models: a model is usable when its provider is signed in here. To choose a Space's models, override its rows in Who runs what."
+    )
+}
+
 /// A reset time as reasons write it, such as "Mon 09:00", in this machine's time zone.
 pub(crate) fn reset_time(at: i64) -> String {
     chrono::DateTime::from_timestamp_millis(at).map_or_else(String::new, |at| {
@@ -156,10 +171,37 @@ impl Host {
         };
         Ok(limits.spent(provider))
     }
-    /// What `job` starts on now, from its row, for small work when `small`. Only a verifier
-    /// starting a review passes `may_skip`; otherwise a then of skip waits.
-    pub(crate) fn resolve_job(&self, job: &Job, small: bool, may_skip: bool) -> Result<Pick> {
+    /// Who runs what as the Space `space` resolves it when `unusable` cannot run here: this
+    /// Mac's table with the Space's rows on top. Outside a Space, or for one not on this Mac,
+    /// this Mac's table.
+    pub(crate) fn space_table(
+        &self,
+        space: Option<&SpaceId>,
+        unusable: &BTreeSet<Provider>,
+    ) -> Result<SpaceTable> {
         let selection = self.model_selection()?;
+        let record = match space {
+            Some(id) => self.find_space(id)?,
+            None => None,
+        };
+        Ok(match record {
+            Some(record) => {
+                let overrides = record.space.models.overrides();
+                selection.for_space(Some(&record.space.name), &overrides, unusable)
+            }
+            None => selection.for_space(None, &[], unusable),
+        })
+    }
+    /// What `job` starts on now for an agent in the Space `space`, from its row, for small work
+    /// when `small`. Only a verifier starting a review passes `may_skip`; otherwise a then of
+    /// skip waits.
+    pub(crate) fn resolve_job(
+        &self,
+        space: Option<&SpaceId>,
+        job: &Job,
+        small: bool,
+        may_skip: bool,
+    ) -> Result<Pick> {
         let (quotas, unusable, switch_at) = self.limits()?;
         let limits = Limits {
             quotas: &quotas,
@@ -167,20 +209,57 @@ impl Host {
             switch_at,
             now: now(),
         };
-        selection.resolve(job, small, may_skip, &limits, &reset_time)
+        let table = self.space_table(space, &unusable)?;
+        table.resolve(job, small, may_skip, &limits, &reset_time)
     }
-    /// `resolve_job` for a run `without` cannot be started on, as if it were not signed in.
-    pub(crate) fn resolve_job_without(&self, job: &Job, without: Provider) -> Result<Pick> {
-        let selection = self.model_selection()?;
-        let (quotas, mut unusable, switch_at) = self.limits()?;
-        unusable.insert(without);
-        let limits = Limits {
-            quotas: &quotas,
-            unusable: &unusable,
-            switch_at,
-            now: now(),
-        };
-        selection.resolve(job, false, false, &limits, &reset_time)
+    /// The rows of Who runs what the Space `space_id` overrides, `threads` and `jobs` read as
+    /// its Assistant and Job rows, and what it sets about reviews.
+    pub fn space_model_settings(&self, space_id: &SpaceId) -> Result<SpaceModelSettings> {
+        let space = self.space(space_id)?.space;
+        Ok(SpaceModelSettings {
+            rows: space.models.overrides(),
+            reviews: space.reviews,
+        })
+    }
+    /// Replaces what a Space sets about models and reviews in its `space.yaml`. Refuses a row the
+    /// table's rules refuse, a review level this Mac does not configure, levels without a full
+    /// review and a cap out of range. Review keys this release does not know stay.
+    pub fn set_space_model_settings(
+        &mut self,
+        space_id: &SpaceId,
+        settings: SpaceModelSettings,
+    ) -> Result<SpaceModelSettings> {
+        let SpaceModelSettings { rows, mut reviews } = settings;
+        validate_overrides(&rows)?;
+        cascade::check_reviews(&self.settings().verification, &reviews)?;
+        let mut space = self.space(space_id)?.space;
+        for (key, value) in std::mem::take(&mut space.reviews.extra) {
+            reviews.extra.entry(key).or_insert(value);
+        }
+        space.models.set_overrides(rows);
+        space.reviews = reviews;
+        self.update_space(space)?;
+        self.space_model_settings(space_id)
+    }
+    /// Refuses `space`'s model rows or review overrides, where they differ from `current`'s, as
+    /// `set_space_model_settings` would; unchanged ones, as a teammate saved them, stay.
+    pub(crate) fn check_space_models(&self, current: &Space, space: &Space) -> Result<()> {
+        let rows = space.models.overrides();
+        if rows != current.models.overrides() {
+            validate_overrides(&rows)?;
+        }
+        if space.reviews != current.reviews {
+            cascade::check_reviews(&self.settings().verification, &space.reviews)?;
+        }
+        Ok(())
+    }
+    /// The Space of the project `project_id`, whose agents resolve its rows.
+    pub(crate) fn project_space(&self, project_id: &str) -> Result<SpaceId> {
+        Ok(self.project(project_id)?.space)
+    }
+    /// The Space of `ticket`'s project.
+    pub(crate) fn ticket_space(&self, ticket: &Ticket) -> Result<SpaceId> {
+        self.project_space(&self.session(&ticket.coordinator_id)?.project_id)
     }
     /// Pins a session's model and records how it was chosen.
     pub(crate) fn pin(
@@ -221,10 +300,16 @@ impl Host {
             &format!("{}. {}", pick.profile, pick.reason),
         )
     }
-    /// What the human's picker starts on for an agent of `role`: what its row would use now.
-    pub(crate) fn prefill(&self, role: Role, focus: Option<&str>) -> Option<ModelProfile> {
+    /// What the human's picker starts on for an agent of `role` in the Space `space`: what its
+    /// row would use now.
+    pub(crate) fn prefill(
+        &self,
+        space: Option<&SpaceId>,
+        role: Role,
+        focus: Option<&str>,
+    ) -> Option<ModelProfile> {
         let job = Job::for_role(role, focus, &self.settings().verification)?;
-        Some(self.resolve_job(&job, false, false).ok()?.profile)
+        Some(self.resolve_job(space, &job, false, false).ok()?.profile)
     }
     /// Pins a session the human created: "From Who runs what" when it matches the picker's
     /// pre-fill.
@@ -234,12 +319,13 @@ impl Host {
         profile: ModelProfile,
     ) -> Result<()> {
         let focus = self.session_runtime(&session.id)?.focus;
-        let (chosen_by, reason) =
-            if self.prefill(session.role, focus.as_deref()).as_ref() == Some(&profile) {
-                (Chooser::Default, "From Who runs what")
-            } else {
-                (Chooser::Human, "Chosen by you")
-            };
+        let space = self.project_space(&session.project_id).ok();
+        let prefill = self.prefill(space.as_ref(), session.role, focus.as_deref());
+        let (chosen_by, reason) = if prefill.as_ref() == Some(&profile) {
+            (Chooser::Default, "From Who runs what")
+        } else {
+            (Chooser::Human, "Chosen by you")
+        };
         self.pin(&session.id, profile, chosen_by, reason)?;
         Ok(())
     }
@@ -479,6 +565,28 @@ impl Host {
         }
         self.db
             .execute("INSERT INTO policy_migrations VALUES ('who-runs-what')", [])?;
+        Ok(())
+    }
+    /// Leaves the Models page a one-time note naming the Spaces whose list of the models this
+    /// Mac may use in them no longer limits anything. The lists stay stored.
+    pub(crate) fn note_retired_space_model_lists(&mut self) -> Result<()> {
+        if self.migrated("space-model-lists")? {
+            return Ok(());
+        }
+        let listed: Vec<String> = (self.spaces()?.into_iter())
+            .filter(|record| record.local.models.is_some())
+            .map(|record| record.space.name)
+            .collect();
+        if !listed.is_empty() {
+            let names: Vec<&str> = listed.iter().map(String::as_str).collect();
+            let mut row = self.saved_selection()?.unwrap_or_default();
+            row.notes.push(retired_lists_note(&names));
+            self.save_selection_row(&row)?;
+        }
+        self.db.execute(
+            "INSERT INTO policy_migrations VALUES ('space-model-lists')",
+            [],
+        )?;
         Ok(())
     }
     /// Replaces a model guide that is still an earlier starter text with the current one; a guide

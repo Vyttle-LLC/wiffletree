@@ -396,9 +396,8 @@ impl Host {
         )?;
         Self::event(&self.db, "", Some(&session.id), "thread_started", "")
     }
-    /// The model a new thread starts on: the one the user chose, else its Space's default for
-    /// threads when this Mac may use it, else the Assistant row's pick, which says the Space's
-    /// default fell back.
+    /// The model a new thread starts on: the one the user chose, else the Assistant row as its
+    /// Space resolves it, which says when the Space's row fell back to this Mac's.
     fn thread_model(
         &self,
         record: &SpaceRecord,
@@ -407,40 +406,15 @@ impl Host {
         if let Some(profile) = chosen {
             return Ok((profile, Chooser::Human, "Chosen by you".into(), false));
         }
-        let default = record
-            .space
-            .models
-            .threads
-            .as_ref()
-            .map(SpaceModel::profile);
-        if let Some(default) = &default
-            && self.may_use(&record.local, default)
-        {
-            let reason = format!("{}'s default for threads", record.space.name);
-            return Ok((default.clone(), Chooser::Wiffletree, reason, false));
-        }
-        let pick = self.resolve_job(&Job::Assistant, false, false)?;
-        let reason = match default {
-            Some(default) => format!(
-                "{}'s default for threads, {}, is not available on this Mac. {}",
-                record.space.name,
-                default.short(),
-                pick.reason
-            ),
-            None => pick.reason,
-        };
-        Ok((pick.profile, Chooser::Wiffletree, reason, pick.waits))
+        let pick = self.resolve_job(Some(&record.space.id), &Job::Assistant, false, false)?;
+        Ok((pick.profile, Chooser::Wiffletree, pick.reason, pick.waits))
     }
-    /// Whether this Mac may run `profile` in a Space: its provider is not found signed out here
-    /// and the Space's local list, if it has one, allows the model. A provider not detected yet
-    /// counts as signed in, as the Spaces page's fallback note counts it.
-    pub(crate) fn may_use(&self, local: &SpaceLocal, profile: &ModelProfile) -> bool {
+    /// Whether this Mac may run `profile`, a model chosen by hand: its provider is not found
+    /// signed out here. A provider not detected yet counts as signed in.
+    pub(crate) fn may_use(&self, profile: &ModelProfile) -> bool {
         self.detected
             .get(&profile.provider)
             .is_none_or(|signed_in| *signed_in)
-            && local.models.as_ref().is_none_or(|models| {
-                (models.iter()).any(|m| m.provider == profile.provider && m.model == profile.model)
-            })
     }
     /// Called as a message is queued for a thread's session: the human's message counts as its
     /// latest, and a thread that became a project takes no more.
@@ -1083,7 +1057,7 @@ mod tests {
         assert_eq!(runtime.profile, Some(opus.clone()));
         assert_eq!(
             runtime.selection.unwrap().reason,
-            "Sage's default for threads"
+            "Sage's Assistant row: First choice"
         );
         let signed_out = ProviderStatus {
             installed: true,
@@ -1098,10 +1072,8 @@ mod tests {
         assert_eq!(runtime.profile.as_ref(), Some(row));
         assert_eq!(
             runtime.selection.unwrap().reason,
-            format!(
-                "Sage's default for threads, {}, is not available on this Mac. First choice",
-                opus.short()
-            )
+            "Sage's Assistant row falls back to this Mac's: Codex is not signed in on this Mac. \
+             First choice"
         );
         let chosen = host
             .start_thread("t3", &sage, "Hi", &[], Some(opus.clone()))
@@ -1110,11 +1082,88 @@ mod tests {
             host.session_runtime(&chosen.id).unwrap().profile,
             Some(opus.clone())
         );
-        // Not detected yet is not signed out: the Space's default stands, as the Spaces page
-        // shows no fallback for it.
+        // As anywhere in the table, a provider not detected yet is not chosen.
         host.detected.remove(&Provider::Codex);
         start(&mut host, "t4", &sage, "Hi");
-        assert_eq!(host.session_runtime("t4").unwrap().profile, Some(opus));
+        assert_eq!(
+            host.session_runtime("t4").unwrap().profile.as_ref(),
+            Some(row)
+        );
+    }
+
+    #[test]
+    fn a_space_saved_with_a_row_the_table_refuses_is_refused() {
+        let (_home, mut host, sage) = store();
+        let profile = |model: &str| ModelProfile {
+            provider: Provider::Claude,
+            model: model.into(),
+            effort: "high".into(),
+        };
+        let mut space = host.space(&sage).unwrap().space;
+        let row = JobRow {
+            job: Job::Coordinator,
+            main: Line {
+                first: profile("sonnet"),
+                then: Then::Model(profile("opus")),
+            },
+            small: None,
+        };
+        space.models.set_overrides(vec![row]);
+        let error = host.update_space(space.clone()).unwrap_err().to_string();
+        assert!(
+            error.contains("both choices use the Claude subscription"),
+            "{error}"
+        );
+        space.models.set_overrides(vec![]);
+        space.reviews.max_rounds = Some(99);
+        assert!(host.update_space(space).is_err());
+        assert_eq!(host.space(&sage).unwrap().space.reviews.max_rounds, None);
+    }
+
+    #[test]
+    fn a_spaces_list_of_this_macs_models_limits_nothing_and_is_noted_once() {
+        let (home, mut host, sage) = store();
+        let sol = ModelProfile {
+            provider: Provider::Codex,
+            model: "gpt-6.1-sol".into(),
+            effort: "high".into(),
+        };
+        let mut space = host.space(&sage).unwrap().space;
+        space.models.threads = Some(sol.clone().into());
+        host.update_space(space).unwrap();
+        let mut local = host.space(&sage).unwrap().local;
+        local.models = Some(vec![ModelProfile {
+            provider: Provider::Claude,
+            model: "sonnet".into(),
+            effort: "medium".into(),
+        }]);
+        host.db
+            .execute(
+                "UPDATE spaces SET local=?2 WHERE id=?1",
+                params![sage.as_str(), encode(&local).unwrap()],
+            )
+            .unwrap();
+        start(&mut host, "t1", &sage, "Hi");
+        assert_eq!(host.session_runtime("t1").unwrap().profile, Some(sol));
+
+        // An earlier store, before the note.
+        host.db
+            .execute(
+                "DELETE FROM policy_migrations WHERE id='space-model-lists'",
+                [],
+            )
+            .unwrap();
+        drop(host);
+        let host = Host::open_set_up(home.path()).unwrap();
+        let noted = |host: &Host| {
+            (host.model_selection().unwrap().notes.iter())
+                .filter(|note| note.starts_with("The Space Sage had a list"))
+                .count()
+        };
+        assert_eq!(noted(&host), 1);
+        assert_eq!(host.space(&sage).unwrap().local.models, local.models);
+        drop(host);
+        assert_eq!(noted(&Host::open_set_up(home.path()).unwrap()), 1);
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! Spaces: the one home for projects, their brain, storage and tracker (OpenSpec change `spaces`).
 //! A `Space` is what its storage repository's `space.yaml` holds; `SpaceLocal` is what stays on
 //! this Mac.
-use crate::ModelProfile;
-use crate::cascade::{Choices, RepositorySettings};
+use crate::cascade::{Choices, RepositorySettings, ReviewOverrides};
+use crate::{Job, JobRow, Line, ModelProfile, Then};
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -55,6 +55,9 @@ pub struct Space {
     pub repositories: Vec<String>,
     #[serde(default)]
     pub models: SpaceModels,
+    /// What the Space sets about its tickets' reviews.
+    #[serde(default, skip_serializing_if = "ReviewOverrides::is_empty")]
+    pub reviews: ReviewOverrides,
     /// The MCP servers and local CLIs this Space's threads may use.
     #[serde(default)]
     pub sources: Vec<Source>,
@@ -140,14 +143,123 @@ impl StorageRepository {
     }
 }
 
+/// The rows of the Who runs what table a Space overrides, as `space.yaml` stores them. Read and
+/// write them with `overrides` and `set_overrides`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpaceModels {
+    /// The Assistant row's first choice, kept for hosts older than `rows`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threads: Option<SpaceModel>,
+    /// The Job row's first choice, kept for hosts older than `rows`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jobs: Option<SpaceModel>,
+    /// The rows as written, so that keys this release does not know, within a row too, stay.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rows: Vec<serde_json::Value>,
     #[serde(flatten)]
     pub extra: Extra,
+}
+impl SpaceModels {
+    /// The rows the Space overrides. `threads` and `jobs` are the first choices of the Assistant
+    /// and Job rows: either one that differs from its row, as when a host older than `rows`
+    /// changed it, replaces the row's first choice, and one without a row is a row of its own
+    /// that waits.
+    /// A row this release cannot read, as a newer host's might be, is left out.
+    pub fn overrides(&self) -> Vec<JobRow> {
+        let mut rows: Vec<JobRow> = (self.rows.iter())
+            .filter_map(|row| serde_json::from_value(row.clone()).ok())
+            .collect();
+        for (model, job) in [(&self.threads, Job::Assistant), (&self.jobs, Job::Job)] {
+            let Some(first) = model.as_ref().map(SpaceModel::profile) else {
+                continue;
+            };
+            match rows.iter_mut().find(|row| row.job == job) {
+                Some(row) if row.main.first != first => {
+                    if row
+                        .main
+                        .then
+                        .model()
+                        .is_some_and(|t| t.provider == first.provider)
+                    {
+                        row.main.then = Then::Wait;
+                    }
+                    row.main.first = first;
+                }
+                Some(_) => {}
+                None => rows.push(JobRow {
+                    job,
+                    main: Line {
+                        first,
+                        then: Then::Wait,
+                    },
+                    small: None,
+                }),
+            }
+        }
+        rows
+    }
+    /// Saves `rows` as the Space's overrides, with `threads` and `jobs` written to match the
+    /// Assistant and Job rows so that older hosts still use them. Each row keeps the keys this
+    /// release does not know from the saved row for its job, and a saved row this release
+    /// cannot read stays.
+    pub fn set_overrides(&mut self, rows: Vec<JobRow>) {
+        let first = |job: Job, kept: &Option<SpaceModel>| {
+            let row = rows.iter().find(|row| row.job == job)?;
+            Some(match kept {
+                Some(kept) if kept.profile() == row.main.first => kept.clone(),
+                _ => row.main.first.clone().into(),
+            })
+        };
+        self.threads = first(Job::Assistant, &self.threads);
+        self.jobs = first(Job::Job, &self.jobs);
+        let saved: Vec<(serde_json::Value, Option<JobRow>)> = (std::mem::take(&mut self.rows))
+            .into_iter()
+            .map(|raw| {
+                let row = serde_json::from_value(raw.clone()).ok();
+                (raw, row)
+            })
+            .collect();
+        for row in &rows {
+            let mut raw = serde_json::to_value(row).expect("a row serializes");
+            let before = saved.iter().find_map(|(raw, saved)| {
+                saved
+                    .as_ref()
+                    .filter(|s| s.job.is(&row.job))
+                    .map(|s| (raw, s))
+            });
+            if let Some((before, read)) = before {
+                let known = serde_json::to_value(read).expect("a row serializes");
+                keep_unknown(&mut raw, before, &known);
+            }
+            self.rows.push(raw);
+        }
+        (self.rows).extend(
+            saved
+                .into_iter()
+                .filter(|(_, row)| row.is_none())
+                .map(|(raw, _)| raw),
+        );
+    }
+}
+
+/// Copies into `into` each key of `before` that reading it left out of `known`, at any depth.
+fn keep_unknown(
+    into: &mut serde_json::Value,
+    before: &serde_json::Value,
+    known: &serde_json::Value,
+) {
+    let (Some(into), Some(before)) = (into.as_object_mut(), before.as_object()) else {
+        return;
+    };
+    for (key, value) in before {
+        match (known.get(key), into.get_mut(key)) {
+            (None, None) => {
+                into.insert(key.clone(), value.clone());
+            }
+            (Some(known), Some(into)) => keep_unknown(into, value, known),
+            _ => {}
+        }
+    }
 }
 
 /// A Space's default model, written as a `ModelProfile` is, with the keys this release does not
@@ -209,7 +321,8 @@ pub struct SpaceLocal {
     /// Where the brain is on this Mac: a local brain's folder or a GitHub brain's clone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brain_path: Option<String>,
-    /// The models this person may use in the Space; `None` allows every model.
+    /// Retired: the models this person could use in the Space. Kept so a downgrade keeps the
+    /// list; nothing reads it, as a model is usable here when its provider is signed in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<ModelProfile>>,
     /// What the Space's page notes about this Mac, such as a model it falls back from.
@@ -448,6 +561,7 @@ pub fn validate_repository_identity(identity: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn a_prefix_comes_from_the_name_and_avoids_those_taken() {
@@ -471,6 +585,90 @@ mod tests {
         for bad in ["M", "ABCDEF", "Sage", "S1", ""] {
             assert!(validate_prefix(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn threads_and_jobs_read_as_rows_and_are_written_back_while_they_match() {
+        let mut models: SpaceModels = serde_json::from_value(serde_json::json!({
+            "threads": {"provider": "codex", "model": "gpt-6.1-sol", "effort": "high", "tier": "x"},
+            "jobs": {"provider": "claude", "model": "sonnet", "effort": "medium"},
+            "later": "kept",
+        }))
+        .unwrap();
+        let rows = models.overrides();
+        let first = |job: Job| {
+            let row = rows.iter().find(|row| row.job == job).unwrap();
+            (row.main.first.model.clone(), row.main.then.clone())
+        };
+        assert_eq!(first(Job::Assistant), ("gpt-6.1-sol".into(), Then::Wait));
+        assert_eq!(first(Job::Job), ("sonnet".into(), Then::Wait));
+
+        // The Job row's first choice changes and the Assistant row's stays.
+        let mut rows = rows;
+        rows.iter_mut()
+            .find(|row| row.job == Job::Job)
+            .unwrap()
+            .main
+            .first
+            .model = "opus".into();
+        models.set_overrides(rows.clone());
+        let saved = serde_json::to_value(&models).unwrap();
+        let read: SpaceModels = serde_json::from_value(saved).unwrap();
+        assert_eq!(read.overrides(), rows);
+        let threads = read.threads.clone().unwrap();
+        assert_eq!(threads.extra["tier"], "x");
+        assert_eq!(read.jobs.as_ref().unwrap().model, "opus");
+        assert_eq!(read.extra["later"], "kept");
+
+        // A host older than rows changes threads: the Assistant row takes it.
+        let mut older = read.clone();
+        older.threads = Some(
+            ModelProfile {
+                provider: crate::Provider::Claude,
+                model: "haiku".into(),
+                effort: "low".into(),
+            }
+            .into(),
+        );
+        let assistant = older
+            .overrides()
+            .into_iter()
+            .find(|row| row.job == Job::Assistant);
+        assert_eq!(assistant.unwrap().main.first.model, "haiku");
+
+        // Without the rows, neither old key is written.
+        models.set_overrides(vec![]);
+        assert!(models.threads.is_none() && models.jobs.is_none());
+    }
+
+    #[test]
+    fn a_newer_hosts_keys_within_a_row_stay_through_a_save() {
+        let profile = |model: &str| json!({"provider": "claude", "model": model, "effort": "high"});
+        let mut first = profile("opus");
+        first["future_profile"] = json!(1);
+        let mut models: SpaceModels = serde_json::from_value(json!({"rows": [
+            {"job": {"kind": "implementer"}, "future_row": 2,
+             "main": {"first": first, "future_line": 3}},
+            {"job": {"kind": "future_job"}, "main": {"first": profile("sonnet")}},
+        ]}))
+        .unwrap();
+        let mut rows = models.overrides();
+        assert_eq!(rows.len(), 1, "the unreadable row is left out");
+        rows[0].main.then = Then::Model(ModelProfile {
+            provider: crate::Provider::Codex,
+            model: "gpt-6.1-sol".into(),
+            effort: "high".into(),
+        });
+        models.set_overrides(rows.clone());
+
+        let saved = serde_json::to_value(&models).unwrap();
+        let row = &saved["rows"][0];
+        assert_eq!(row["future_row"], json!(2));
+        assert_eq!(row["main"]["future_line"], json!(3));
+        assert_eq!(row["main"]["first"]["future_profile"], json!(1));
+        assert_eq!(saved["rows"][1]["job"], json!({"kind": "future_job"}));
+        let read: SpaceModels = serde_json::from_value(saved).unwrap();
+        assert_eq!(read.overrides(), rows);
     }
 
     #[test]

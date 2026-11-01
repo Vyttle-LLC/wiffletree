@@ -593,7 +593,10 @@ impl Host {
                 text: settings.additions.clone(),
             });
         }
+        let (_, unusable, _) = self.limits()?;
         Ok(EffectiveSettings {
+            models: self.space_table(Some(&project.space), &unusable)?.rows,
+            reviews: self.space_reviews(&project.space)?,
             space_id: project.space,
             repository: layers.repository.clone(),
             behaviors: layers.resolve(),

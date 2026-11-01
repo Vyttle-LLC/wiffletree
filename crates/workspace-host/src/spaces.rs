@@ -174,6 +174,7 @@ fn new_space(name: &str, prefixes: &mut Vec<String>) -> (Space, TrackerConfig) {
         },
         repositories: vec![],
         models: SpaceModels::default(),
+        reviews: Default::default(),
         sources: vec![],
         extra: Extra::new(),
     };
@@ -443,6 +444,7 @@ impl Host {
         );
         validate(&space)?;
         self.check_space_behaviors(&current.space, &space)?;
+        self.check_space_models(&current.space, &space)?;
         self.ensure_unused_name(&space.name, Some(&space.id))?;
         if let Some(SpaceBrain {
             repository: BrainRepository::GitHub { owner, name, .. },

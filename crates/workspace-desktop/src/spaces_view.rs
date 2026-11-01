@@ -1042,7 +1042,7 @@ impl SpacesPage {
         ]
         .into_iter()
         .filter_map(|(which, model)| {
-            fallback_note(which, model.as_ref(), local, &self.shared.detection, row)
+            fallback_note(which, model.as_ref(), &self.shared.detection, row)
         });
         let notes: Vec<String> = (local.map_or(&[][..], |l| &l.notes).iter().cloned())
             .chain(fallbacks)
@@ -1714,18 +1714,17 @@ fn place(named: String, at: String, choose: Button, p: Palette) -> Div {
         .child(choose)
 }
 
-/// What a Space's default model for `which`, threads or jobs, falls back to on this Mac when this
-/// Mac cannot run it: its provider is signed out here, or this Mac's list for the Space leaves
-/// it out. Then they start on the Assistant row's first choice this Mac can run.
+/// What a Space's default model for `which`, threads or jobs, falls back to on this Mac when its
+/// provider is signed out here. Then they start on the Assistant row's first choice this Mac
+/// can run.
 fn fallback_note(
     which: &str,
     model: Option<&SpaceModel>,
-    local: Option<&SpaceLocal>,
     detection: &Detection,
     row: Option<&JobRow>,
 ) -> Option<String> {
     let model = model?.profile();
-    if may_run(&model, local, detection) {
+    if may_run(&model, detection) {
         return None;
     }
     let fallback = row_choice(row, detection);
@@ -1742,19 +1741,12 @@ fn fallback_note(
     })
 }
 
-/// Whether this Mac may run a Space's default model: its provider is not found signed out here
-/// and this Mac's list for the Space, if it has one, allows it. A provider not detected yet
-/// counts as signed in, as the host counts it.
-fn may_run(model: &ModelProfile, local: Option<&SpaceLocal>, detection: &Detection) -> bool {
-    let allowed = (local.and_then(|l| l.models.as_ref())).is_none_or(|models| {
-        models
-            .iter()
-            .any(|m| m.provider == model.provider && m.model == model.model)
-    });
+/// Whether this Mac may run a Space's default model: its provider is not found signed out here.
+/// A provider not detected yet counts as signed in, as the host counts it.
+fn may_run(model: &ModelProfile, detection: &Detection) -> bool {
     detection
         .get(&model.provider)
         .is_none_or(ProviderStatus::usable)
-        && allowed
 }
 /// The Assistant row's first choice this Mac can run.
 fn row_choice<'a>(row: Option<&'a JobRow>, detection: &Detection) -> Option<&'a ModelProfile> {
@@ -1768,13 +1760,11 @@ fn row_choice<'a>(row: Option<&'a JobRow>, detection: &Detection) -> Option<&'a 
 /// for threads when this Mac may run it, else the Assistant row's first choice it can run.
 pub(super) fn thread_model(
     model: Option<&SpaceModel>,
-    local: Option<&SpaceLocal>,
     detection: &Detection,
     row: Option<&JobRow>,
 ) -> Option<ModelProfile> {
     let default = model.map(SpaceModel::profile);
-    (default.filter(|d| may_run(d, local, detection)))
-        .or_else(|| row_choice(row, detection).cloned())
+    (default.filter(|d| may_run(d, detection))).or_else(|| row_choice(row, detection).cloned())
 }
 
 pub(super) fn space_mark(color: Hsla) -> Div {
@@ -2120,6 +2110,7 @@ mod tests {
             },
             repositories: vec![],
             models: SpaceModels::default(),
+            reviews: Default::default(),
             sources: vec![],
             extra: Extra::new(),
         }
@@ -2172,60 +2163,33 @@ mod tests {
             (Provider::Codex, status(true)),
         ]
         .into();
-        assert_eq!(
-            fallback_note("jobs", Some(&opus), None, &both, Some(&row)),
-            None
-        );
-        assert_eq!(fallback_note("jobs", None, None, &both, Some(&row)), None);
+        assert_eq!(fallback_note("jobs", Some(&opus), &both, Some(&row)), None);
+        assert_eq!(fallback_note("jobs", None, &both, Some(&row)), None);
         let no_claude: Detection = [
             (Provider::Claude, status(false)),
             (Provider::Codex, status(true)),
         ]
         .into();
         assert_eq!(
-            fallback_note("jobs", Some(&opus), None, &no_claude, Some(&row)).unwrap(),
+            fallback_note("jobs", Some(&opus), &no_claude, Some(&row)).unwrap(),
             "Opus · high is not available here; jobs use GPT 6.1 Sol · medium."
-        );
-        // This Mac's list for the Space leaves the model out.
-        let only_sonnet = SpaceLocal {
-            models: Some(vec![profile(Provider::Claude, "sonnet", "medium")]),
-            ..SpaceLocal::default()
-        };
-        assert_eq!(
-            fallback_note(
-                "threads",
-                Some(&opus),
-                Some(&only_sonnet),
-                &both,
-                Some(&row)
-            )
-            .unwrap(),
-            "Opus · high is not available here; threads use Sonnet · medium."
         );
         // A new tab's model chip says the same: the default where it runs, else the row.
         let sonnet = profile(Provider::Claude, "sonnet", "medium");
-        let started =
-            |model, local, detection: &Detection| thread_model(model, local, detection, Some(&row));
-        assert_eq!(started(Some(&opus), None, &both), Some(opus.profile()));
-        assert_eq!(started(None, None, &both), Some(sonnet.clone()));
+        let started = |model, detection: &Detection| thread_model(model, detection, Some(&row));
+        assert_eq!(started(Some(&opus), &both), Some(opus.profile()));
+        assert_eq!(started(None, &both), Some(sonnet.clone()));
         assert_eq!(
-            started(Some(&opus), Some(&only_sonnet), &both),
-            Some(sonnet.clone())
-        );
-        assert_eq!(
-            started(Some(&opus), None, &no_claude),
+            started(Some(&opus), &no_claude),
             Some(profile(Provider::Codex, "gpt-6.1-sol", "medium"))
         );
         // Not detected yet counts as signed in, as the host counts it.
         let undetected = Detection::new();
         assert_eq!(
-            fallback_note("jobs", Some(&opus), None, &undetected, Some(&row)),
+            fallback_note("jobs", Some(&opus), &undetected, Some(&row)),
             None
         );
-        assert_eq!(
-            started(Some(&opus), None, &undetected),
-            Some(opus.profile())
-        );
+        assert_eq!(started(Some(&opus), &undetected), Some(opus.profile()));
     }
 
     #[test]

@@ -3231,3 +3231,100 @@ fn a_cycle_an_earlier_host_queued_starts_after_the_upgrade_at_the_current_head_i
         assert!(!host.start_queued_cycles().unwrap());
     }
 }
+
+/// Saves what the fixture's Space sets about reviews, its model rows `rows`.
+fn set_space(f: &mut Fixture, rows: Vec<JobRow>, reviews: cascade::ReviewOverrides) {
+    let space = f.host.project(&f.coordinator.project_id).unwrap().space;
+    f.host
+        .set_space_model_settings(&space, cascade::SpaceModelSettings { rows, reviews })
+        .unwrap();
+}
+
+#[test]
+fn a_space_that_does_not_allow_a_level_refuses_it() {
+    let mut f = Fixture::ready(three_verifiers(), 2);
+    let mut settings = f.host.settings().verification;
+    settings.levels.push(ReviewLevel {
+        name: "Claude only".into(),
+        kind: LevelKind::FullReview,
+        verifiers: vec!["Claude".into()],
+        use_when: "for small tickets.".into(),
+    });
+    f.host.set_verification(settings).unwrap();
+    let reviews = cascade::ReviewOverrides {
+        levels: Some(vec!["claude only".into()]),
+        ..Default::default()
+    };
+    set_space(&mut f, vec![], reviews);
+
+    let error = f.verify().unwrap_err().to_string();
+    assert!(
+        error.contains(
+            "does not let its coordinators use the review level Full. Verify at Claude only."
+        ),
+        "{error}"
+    );
+    let (id, coordinator) = (f.ticket.id.clone(), f.coordinator.id.clone());
+    let ticket: Ticket = serde_json::from_value(
+        f.host
+            .agent_tool(
+                &coordinator,
+                "verify_ticket",
+                json!({"ticket_id": id, "level": "Claude only"}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(ticket.verification.unwrap().rounds[0].verifiers.len(), 1);
+}
+
+#[test]
+fn a_spaces_round_cap_ends_its_tickets_reviews() {
+    let mut f = Fixture::ready(vec![verifier(Role::Tester, "Codex", None)], 3);
+    let reviews = cascade::ReviewOverrides {
+        max_rounds: Some(1),
+        ..Default::default()
+    };
+    set_space(&mut f, vec![], reviews);
+    f.verify().unwrap();
+    assert_eq!(f.current().verification.unwrap().max_rounds, 1);
+    let codex = f.verifier("Codex");
+    f.fail(&codex, "fail-1").unwrap();
+    assert_eq!(f.current().state, TicketState::Blocked);
+}
+
+#[test]
+fn the_coordinator_reads_the_table_and_reviews_its_space_resolves() {
+    let mut f = Fixture::ready(three_verifiers(), 2);
+    let codex = lens(Provider::Codex);
+    let row = JobRow {
+        job: Job::Implementer,
+        main: Line {
+            first: codex.clone(),
+            then: Then::Wait,
+        },
+        small: None,
+    };
+    let reviews = cascade::ReviewOverrides {
+        max_cycles: Some(1),
+        ..Default::default()
+    };
+    set_space(&mut f, vec![row], reviews);
+    take_input(&mut f.host, &f.coordinator.id.clone());
+    let context = f
+        .host
+        .agent_tool(&f.coordinator.id.clone(), "workspace_context", json!({}))
+        .unwrap();
+    let selection = &context["model_selection"];
+    let space = f.host.project(&f.coordinator.project_id).unwrap().space;
+    let name = f.host.space(&space).unwrap().space.name;
+    let jobs = selection["jobs"].as_array().unwrap();
+    let implementer = jobs.iter().find(|j| j["name"] == "Implementer").unwrap();
+    assert_eq!(implementer["from"], json!(name));
+    assert_eq!(implementer["main"]["first"]["model"], json!(codex.model));
+    let coordinator = jobs.iter().find(|j| j["name"] == "Coordinator").unwrap();
+    assert!(coordinator.get("from").is_none(), "{coordinator}");
+    assert_eq!(selection["max_cycles"], json!(1));
+    assert_eq!(selection["max_rounds"], json!(2));
+    assert_eq!(selection["reviews_from_space"], json!(["max_cycles"]));
+}

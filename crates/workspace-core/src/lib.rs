@@ -3932,6 +3932,17 @@ pub enum Command {
         scope: cascade::Scope,
         values: cascade::LayerValues,
     },
+    /// Read-only: the rows of Who runs what a Space overrides and what it sets about reviews;
+    /// answered with `SpaceModelSettings`.
+    SpaceModels {
+        space_id: SpaceId,
+    },
+    /// Replaces a Space's row overrides and review overrides; answered with
+    /// `SpaceModelSettings`. Only the human's client sends it.
+    SetSpaceModels {
+        space_id: SpaceId,
+        settings: cascade::SpaceModelSettings,
+    },
     /// Read-only: what a project's agents get, or with `ticket_id` that ticket's agents, and
     /// where each value came from; answered with `EffectiveSettings`.
     EffectiveSettings {
@@ -4189,6 +4200,7 @@ impl Command {
             | Self::SkillHistory { .. }
             | Self::BehaviorCatalog
             | Self::LayerValues { .. }
+            | Self::SpaceModels { .. }
             | Self::EffectiveSettings { .. }
             | Self::SkillMergeReview { .. }
             | Self::SkillStockChanges { .. }
@@ -4324,6 +4336,7 @@ impl Command {
             | Self::ResetSkill { .. }
             | Self::RestoreSkill { .. }
             | Self::SetLayerValues { .. }
+            | Self::SetSpaceModels { .. }
             | Self::SetUpSettingsRepository { .. }
             | Self::JoinSettingsRepository { .. }
             | Self::SyncNow
@@ -4410,6 +4423,7 @@ impl Command {
                 | Self::SetOwnerAllowed { .. }
                 | Self::SetKeeper { .. }
                 | Self::SetLayerValues { .. }
+                | Self::SetSpaceModels { .. }
                 | Self::SetProtectedBranches { .. }
                 | Self::SetUpSettingsRepository { .. }
                 | Self::JoinSettingsRepository { .. }

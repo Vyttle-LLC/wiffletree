@@ -2,13 +2,14 @@
 //! Workspace → Space → Repository for one project, and the resolver says which layer each value
 //! came from and which layers it overrode. Behaviors are the first settings it resolves: named,
 //! typed choices that each render one sentence into a role's skill.
-use crate::{Skill, SpaceId};
+use crate::{Job, JobRow, LevelKind, ReviewLevel, Skill, SpaceId, VerificationSettings, same_name};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Where a setting's value is set, from the most general to the most specific. This Mac is not a
-/// layer: machine facts never cascade.
+/// Where a setting's value is set, from the most general to the most specific. This Mac is a layer
+/// of the Who runs what table only, its base, as subscriptions differ per Mac; every other machine
+/// fact never cascades.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Layer {
@@ -16,6 +17,8 @@ pub enum Layer {
     Stock,
     /// The human, on every Mac: the shared folder.
     Workspace,
+    /// This Mac's Who runs what table, which a Space's rows override.
+    ThisMac,
     /// One Space, for its members: its `space.yaml`.
     Space,
     /// One repository within a Space: the same `space.yaml`, under `repository_settings`.
@@ -26,6 +29,7 @@ impl Layer {
         match self {
             Self::Stock => "Stock",
             Self::Workspace => "Workspace",
+            Self::ThisMac => "This Mac",
             Self::Space => "Space",
             Self::Repository => "Repository",
         }
@@ -249,6 +253,223 @@ pub struct EffectiveSettings {
     pub repository: Option<String>,
     pub behaviors: Vec<ResolvedBehavior>,
     pub additions: Vec<Addition>,
+    /// Who runs what as the Space resolves it on this Mac, row by row.
+    #[serde(default)]
+    pub models: Vec<ResolvedRow>,
+    pub reviews: ResolvedReviews,
+}
+
+/// A row of the Who runs what table as a Space resolves it: this Mac's, or the Space's on top.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedRow {
+    pub job: Job,
+    #[serde(flatten)]
+    pub resolved: Resolved<JobRow>,
+}
+
+/// What a Space sets about its reviews, under `reviews` in `space.yaml`; unset keys inherit the
+/// Workspace's review settings.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewOverrides {
+    /// The levels its coordinators may use, by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub levels: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rounds: Option<u32>,
+    /// Full reviews per ticket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cycles: Option<u32>,
+    #[serde(flatten)]
+    pub extra: crate::Extra,
+}
+impl ReviewOverrides {
+    pub fn is_empty(&self) -> bool {
+        self.levels.is_none()
+            && self.max_rounds.is_none()
+            && self.max_cycles.is_none()
+            && self.extra.is_empty()
+    }
+}
+
+/// What a Space sets about models and reviews, as the Models page reads and saves it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceModelSettings {
+    /// The rows of Who runs what the Space overrides.
+    pub rows: Vec<JobRow>,
+    pub reviews: ReviewOverrides,
+}
+
+/// The review settings a project's coordinator works under, each with where it came from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedReviews {
+    /// The levels the coordinator may use, by name, in configured order.
+    pub levels: Resolved<Vec<String>>,
+    pub max_rounds: Resolved<u32>,
+    pub max_cycles: Resolved<u32>,
+}
+impl ResolvedReviews {
+    pub fn allows(&self, level: &str) -> bool {
+        self.levels.value.iter().any(|name| same_name(name, level))
+    }
+    /// `settings` with these caps, for one ticket's reviews.
+    pub fn capped(&self, settings: &VerificationSettings) -> VerificationSettings {
+        VerificationSettings {
+            max_rounds: self.max_rounds.value,
+            max_cycles: self.max_cycles.value,
+            ..settings.clone()
+        }
+    }
+}
+
+/// The review settings the Workspace's `settings` and a Space's `overrides` give. A level name
+/// this Mac does not configure, as a teammate's might be, is left out with a note.
+pub fn resolve_reviews(
+    settings: &VerificationSettings,
+    overrides: &ReviewOverrides,
+) -> ResolvedReviews {
+    let stock = VerificationSettings::default();
+    let cap = |name, stock: u32, max: u32, workspace: u32, space: Option<u32>| {
+        let cap = Cap { name, stock, max };
+        let mut set = vec![(Layer::Workspace, workspace)];
+        set.extend(space.map(|value| (Layer::Space, value)));
+        resolve(&cap, &set)
+    };
+    let levels = AllowedLevels(settings);
+    let mut set = vec![(Layer::Workspace, levels.stock())];
+    let mut unknown = vec![];
+    if let Some(names) = &overrides.levels {
+        let (known, missing): (Vec<&String>, Vec<&String>) =
+            names.iter().partition(|name| levels.named(name).is_some());
+        unknown = missing.into_iter().cloned().collect();
+        set.push((Layer::Space, levels.in_order(known)));
+    }
+    let restricted = overrides.levels.is_some();
+    let full = levels.full();
+    let mut levels = resolve(&levels, &set);
+    if !unknown.is_empty() {
+        levels.notes.push(format!(
+            "The Space's levels {} are not configured here",
+            unknown.join(", ")
+        ));
+    }
+    // A restriction that cannot stand still restricts: to the full reviews alone.
+    if restricted && levels.from != Layer::Space {
+        levels.value = full;
+        levels.from = Layer::Space;
+        levels
+            .notes
+            .push("so only this Mac's full-review levels may be used".into());
+    }
+    ResolvedReviews {
+        levels,
+        max_rounds: cap(
+            "Rounds per review",
+            stock.max_rounds,
+            crate::MAX_VERIFICATION_ROUNDS,
+            settings.max_rounds,
+            overrides.max_rounds,
+        ),
+        max_cycles: cap(
+            "Full reviews per ticket",
+            stock.max_cycles,
+            crate::MAX_VERIFICATION_CYCLES,
+            settings.max_cycles,
+            overrides.max_cycles,
+        ),
+    }
+}
+
+/// Refuses a Space's review overrides as `resolve_reviews` would ignore them.
+pub fn check_reviews(settings: &VerificationSettings, overrides: &ReviewOverrides) -> Result<()> {
+    let levels = AllowedLevels(settings);
+    if let Some(names) = &overrides.levels {
+        if let Some(missing) = names.iter().find(|name| levels.named(name).is_none()) {
+            bail!(
+                "No review level is named \"{}\". {}",
+                missing.trim(),
+                settings.name_a_level()
+            );
+        }
+        let known = levels.in_order(names.iter().collect());
+        check(&levels, Layer::Space, &levels.stock(), &known)?;
+    }
+    let stock = VerificationSettings::default();
+    for (name, stock, max, value) in [
+        (
+            "Rounds per review",
+            stock.max_rounds,
+            crate::MAX_VERIFICATION_ROUNDS,
+            overrides.max_rounds,
+        ),
+        (
+            "Full reviews per ticket",
+            stock.max_cycles,
+            crate::MAX_VERIFICATION_CYCLES,
+            overrides.max_cycles,
+        ),
+    ] {
+        if let Some(value) = value {
+            check(&Cap { name, stock, max }, Layer::Space, &stock, &value)?;
+        }
+    }
+    Ok(())
+}
+
+/// A review cap: 1 to `max`.
+struct Cap {
+    name: &'static str,
+    stock: u32,
+    max: u32,
+}
+impl Setting for Cap {
+    type Value = u32;
+    fn stock(&self) -> u32 {
+        self.stock
+    }
+    fn layers(&self) -> &[Layer] {
+        &[Layer::Workspace, Layer::Space]
+    }
+    fn refusal(&self, _: Layer, _: &u32, value: &u32) -> Option<String> {
+        (!(1..=self.max).contains(value)).then(|| format!("{} must be 1–{}", self.name, self.max))
+    }
+}
+
+/// The review levels a coordinator may use: every configured level unless a Space names some.
+struct AllowedLevels<'a>(&'a VerificationSettings);
+impl AllowedLevels<'_> {
+    fn named(&self, name: &str) -> Option<&ReviewLevel> {
+        self.0.levels.iter().find(|l| same_name(&l.name, name))
+    }
+    /// The configured full-review levels' names, in configured order.
+    fn full(&self) -> Vec<String> {
+        (self.0.levels.iter())
+            .filter(|l| l.kind == LevelKind::FullReview)
+            .map(|l| l.name.clone())
+            .collect()
+    }
+    /// The configured names of `names`, in configured order.
+    fn in_order(&self, names: Vec<&String>) -> Vec<String> {
+        (self.0.levels.iter())
+            .filter(|l| names.iter().any(|name| same_name(name, &l.name)))
+            .map(|l| l.name.clone())
+            .collect()
+    }
+}
+impl Setting for AllowedLevels<'_> {
+    type Value = Vec<String>;
+    fn stock(&self) -> Vec<String> {
+        self.0.levels.iter().map(|l| l.name.clone()).collect()
+    }
+    fn layers(&self) -> &[Layer] {
+        &[Layer::Workspace, Layer::Space]
+    }
+    fn refusal(&self, _: Layer, _: &Vec<String>, value: &Vec<String>) -> Option<String> {
+        let full = (value.iter()).any(|name| {
+            self.named(name)
+                .is_some_and(|l| l.kind == LevelKind::FullReview)
+        });
+        (!full).then(|| "the levels must keep at least one full review".into())
+    }
 }
 
 #[cfg(test)]
@@ -348,5 +569,31 @@ mod tests {
                 .to_string()
                 .contains("no choice \"often\"")
         );
+    }
+
+    #[test]
+    fn a_space_restriction_without_a_full_review_allows_only_the_full_reviews() {
+        let mut settings = VerificationSettings::default();
+        let full = settings.levels[0].clone();
+        settings.levels.push(ReviewLevel {
+            name: "Recheck".into(),
+            kind: LevelKind::Recheck,
+            ..full.clone()
+        });
+        for names in [vec!["Recheck"], vec!["A teammate's level"]] {
+            let overrides = ReviewOverrides {
+                levels: Some(names.iter().map(|n| n.to_string()).collect()),
+                ..Default::default()
+            };
+            let levels = resolve_reviews(&settings, &overrides).levels;
+            assert_eq!(levels.value, std::slice::from_ref(&full.name), "{names:?}");
+            assert_eq!(levels.from, Space);
+            let said = levels.notes.join(" ");
+            assert!(
+                said.contains("only this Mac's full-review levels"),
+                "{said}"
+            );
+            assert!(check_reviews(&settings, &overrides).is_err());
+        }
     }
 }

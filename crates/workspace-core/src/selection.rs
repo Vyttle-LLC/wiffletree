@@ -1,13 +1,18 @@
 //! Who runs each job on this machine, when a subscription counts as spent, and what a job
 //! resolves to when an agent starts. Coordinators name jobs, never models; the human is never
 //! limited by the table.
+use crate::cascade::{self, Layer, Resolved, ResolvedRow, Setting};
 use crate::{
     ModelProfile, Provider, QuotaReading, QuotaWindow, Role, VerificationSettings, model_name,
     same_name, smallest_model,
 };
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, fmt, ops::RangeInclusive};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    ops::RangeInclusive,
+};
 
 /// The order pickers and messages list providers in.
 pub const PROVIDERS: [Provider; 2] = [Provider::Claude, Provider::Codex];
@@ -414,49 +419,7 @@ impl ModelSelection {
             let rows = self.jobs.iter().filter(|row| row.job == job).count();
             ensure!(rows <= 1, "{two}");
         }
-        ensure!(
-            self.row(&Job::Compiler)
-                .is_none_or(|row| row.small.is_none()),
-            "The Brain compiler has no small-work line"
-        );
-        let mut focuses = BTreeSet::new();
-        for row in &self.jobs {
-            if let Job::Verifier { focus } = &row.job {
-                ensure!(
-                    focuses.insert(focus.trim().to_lowercase()),
-                    "Two rows are for the verifier \"{}\"",
-                    focus.trim()
-                );
-            }
-            for line in std::iter::once(&row.main).chain(&row.small) {
-                for profile in line.choices() {
-                    ensure!(
-                        !profile.model.trim().is_empty() && profile.model.len() <= 128,
-                        "Invalid model ID"
-                    );
-                    ensure!(
-                        !profile.effort.trim().is_empty() && profile.effort.len() <= 32,
-                        "Invalid effort"
-                    );
-                }
-                match &line.then {
-                    Then::Model(then) => ensure!(
-                        then.provider != line.first.provider,
-                        "{}: both choices use the {} subscription, so they would be spent together. Choose a {} model or wait.",
-                        row.job.name(),
-                        then.provider.label(),
-                        other(then.provider).label()
-                    ),
-                    Then::Skip => ensure!(
-                        matches!(row.job, Job::Verifier { .. }),
-                        "{}: only reviews can be skipped. Choose a {} model or wait.",
-                        row.job.name(),
-                        other(line.first.provider).label()
-                    ),
-                    Then::Wait => {}
-                }
-            }
-        }
+        validate_rows(&self.jobs)?;
         ensure!(
             SWITCH_AT.contains(&self.switch_at),
             "Move on at {}–{}%",
@@ -493,6 +456,296 @@ impl ModelSelection {
         resolve(row, small, may_skip, limits, when)
     }
 }
+
+/// The rules every row keeps, in this Mac's table and in a Space's overrides: one row a
+/// verifier, valid models and efforts, a then on the other subscription, only reviews skipping
+/// and no small-work line for the Brain compiler.
+fn validate_rows(rows: &[JobRow]) -> Result<()> {
+    ensure!(
+        (rows.iter()).all(|row| row.job != Job::Compiler || row.small.is_none()),
+        "The Brain compiler has no small-work line"
+    );
+    let mut focuses = BTreeSet::new();
+    for row in rows {
+        if let Job::Verifier { focus } = &row.job {
+            ensure!(
+                focuses.insert(focus.trim().to_lowercase()),
+                "Two rows are for the verifier \"{}\"",
+                focus.trim()
+            );
+        }
+        for line in std::iter::once(&row.main).chain(&row.small) {
+            for profile in line.choices() {
+                ensure!(
+                    !profile.model.trim().is_empty() && profile.model.len() <= 128,
+                    "Invalid model ID"
+                );
+                ensure!(
+                    !profile.effort.trim().is_empty() && profile.effort.len() <= 32,
+                    "Invalid effort"
+                );
+            }
+            match &line.then {
+                Then::Model(then) => ensure!(
+                    then.provider != line.first.provider,
+                    "{}: both choices use the {} subscription, so they would be spent together. Choose a {} model or wait.",
+                    row.job.name(),
+                    then.provider.label(),
+                    other(then.provider).label()
+                ),
+                Then::Skip => ensure!(
+                    matches!(row.job, Job::Verifier { .. }),
+                    "{}: only reviews can be skipped. Choose a {} model or wait.",
+                    row.job.name(),
+                    other(line.first.provider).label()
+                ),
+                Then::Wait => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A Space's overrides: at most one row a job, each kept to the table's rules.
+pub fn validate_overrides(rows: &[JobRow]) -> Result<()> {
+    for (at, row) in rows.iter().enumerate() {
+        ensure!(
+            !rows[..at].iter().any(|before| before.job.is(&row.job)),
+            "Two rows are for the {} job",
+            row.job.name()
+        );
+    }
+    validate_rows(rows)
+}
+
+/// Who runs what as one Space resolves it on this Mac: this Mac's table with each of the Space's
+/// rows on top that this Mac can run. A Space row none of whose choices on the line in use is
+/// signed in here falls back to this Mac's row.
+#[derive(Clone, Debug)]
+pub struct SpaceTable {
+    /// The table agents in the Space resolve, overrides in place.
+    pub selection: ModelSelection,
+    /// Each row's provenance, in the table's order.
+    pub rows: Vec<ResolvedRow>,
+    /// The table small work resolves: a Space row stays where its small-work line, or its main
+    /// line without one, can run here.
+    small: ModelSelection,
+    /// The Space's name; `None` outside a Space, where every row is this Mac's.
+    space: Option<String>,
+    overrides: Vec<JobRow>,
+    unusable: BTreeSet<Provider>,
+    /// Why a provider this Mac has signed in cannot run here, for the reason a Space row gives.
+    held: BTreeMap<Provider, String>,
+}
+impl ModelSelection {
+    /// This table as the Space `space` resolves it with its `overrides`, when `unusable` are the
+    /// providers this Mac cannot run. A Space's verifier row counts only for a configured
+    /// verifier, which already has a row here.
+    pub fn for_space(
+        &self,
+        space: Option<&str>,
+        overrides: &[JobRow],
+        unusable: &BTreeSet<Provider>,
+    ) -> SpaceTable {
+        let (selection, rows) = self.merge(overrides, unusable, false);
+        let (small, _) = self.merge(overrides, unusable, true);
+        SpaceTable {
+            selection,
+            rows,
+            small,
+            space: space.map(Into::into),
+            overrides: overrides.to_vec(),
+            unusable: unusable.clone(),
+            held: BTreeMap::new(),
+        }
+    }
+    /// This table with the `overrides` this Mac can run on top, for small work when `small`,
+    /// with each row's provenance.
+    fn merge(
+        &self,
+        overrides: &[JobRow],
+        unusable: &BTreeSet<Provider>,
+        small: bool,
+    ) -> (ModelSelection, Vec<ResolvedRow>) {
+        let mut jobs: Vec<Job> = self.jobs.iter().map(|row| row.job.clone()).collect();
+        for row in overrides {
+            let configured = !matches!(row.job, Job::Verifier { .. });
+            if configured && !jobs.iter().any(|job| job.is(&row.job)) {
+                jobs.push(row.job.clone());
+            }
+        }
+        let mut selection = ModelSelection {
+            jobs: vec![],
+            ..self.clone()
+        };
+        let mut rows = vec![];
+        for job in jobs {
+            let setting = RowSetting {
+                job: &job,
+                small,
+                unusable,
+            };
+            let mut set = vec![];
+            set.extend(
+                self.row(&job)
+                    .map(|row| (Layer::ThisMac, Some(row.clone()))),
+            );
+            let over = overrides.iter().find(|row| row.job.is(&job));
+            set.extend(over.map(|row| {
+                (
+                    Layer::Space,
+                    Some(JobRow {
+                        job: job.clone(),
+                        ..row.clone()
+                    }),
+                )
+            }));
+            let resolved = cascade::resolve(&setting, &set);
+            let Some(row) = resolved.value else { continue };
+            selection.jobs.push(row.clone());
+            rows.push(ResolvedRow {
+                job,
+                resolved: Resolved {
+                    value: row,
+                    from: resolved.from,
+                    // The table has no stock rows.
+                    overrode: (resolved.overrode.into_iter())
+                        .filter(|layer| *layer != Layer::Stock)
+                        .collect(),
+                    notes: resolved.notes,
+                },
+            });
+        }
+        (selection, rows)
+    }
+}
+impl SpaceTable {
+    /// This table, saying `why` when a Space row falls back because `provider` cannot run,
+    /// such as for a job whose CLI source Codex cannot yet hold.
+    pub fn because(mut self, provider: Provider, why: String) -> Self {
+        self.held.insert(provider, why);
+        self
+    }
+    /// What `job` would start on now, as [`ModelSelection::resolve`] says, with the reason
+    /// naming the Space when its row was used or fell back.
+    pub fn resolve(
+        &self,
+        job: &Job,
+        small: bool,
+        may_skip: bool,
+        limits: &Limits,
+        when: &dyn Fn(i64) -> String,
+    ) -> Result<Pick> {
+        let selection = if small { &self.small } else { &self.selection };
+        let mut pick = selection.resolve(job, small, may_skip, limits, when)?;
+        pick.reason = self.explain(selection, job, small, pick.reason);
+        Ok(pick)
+    }
+    /// `reason`, for a pick of `job` from `selection`, prefixed with the Space's part in it.
+    fn explain(
+        &self,
+        selection: &ModelSelection,
+        job: &Job,
+        small: bool,
+        reason: String,
+    ) -> String {
+        let Some(space) = &self.space else {
+            return reason;
+        };
+        // Without a Job row, jobs run as the assistant's threads do.
+        let used = match selection.row(job) {
+            None if *job == Job::Job => Job::Assistant,
+            _ => job.clone(),
+        };
+        let looked_at = std::iter::once(job).chain((used != *job).then_some(&used));
+        let mut said: Vec<String> = looked_at
+            .filter_map(|job| {
+                let row = self.overrides.iter().find(|row| row.job.is(job))?;
+                let why = refused(row, small, &self.unusable, &self.held)?;
+                Some(format!(
+                    "{space}'s {} row falls back to this Mac's: {why}.",
+                    job.name()
+                ))
+            })
+            .collect();
+        let over = self.overrides.iter().find(|row| row.job.is(&used));
+        let from_space = over
+            .zip(selection.row(&used))
+            .is_some_and(|(over, used)| over.main == used.main && over.small == used.small);
+        said.push(match from_space {
+            true => format!("{space}'s {} row: {reason}", used.name()),
+            false => reason,
+        });
+        said.join(" ")
+    }
+}
+
+/// A row of the table as the resolver sees it: this Mac's as the base, and a Space's on top
+/// unless this Mac can run none of its choices.
+struct RowSetting<'a> {
+    job: &'a Job,
+    small: bool,
+    unusable: &'a BTreeSet<Provider>,
+}
+impl Setting for RowSetting<'_> {
+    type Value = Option<JobRow>;
+    fn stock(&self) -> Option<JobRow> {
+        None
+    }
+    fn layers(&self) -> &[Layer] {
+        &[Layer::ThisMac, Layer::Space]
+    }
+    fn refusal(&self, layer: Layer, _: &Option<JobRow>, value: &Option<JobRow>) -> Option<String> {
+        let row = value.as_ref().filter(|_| layer == Layer::Space)?;
+        debug_assert!(row.job.is(self.job));
+        refused(row, self.small, self.unusable, &BTreeMap::new())
+    }
+}
+
+/// Why a Space's `row` gives way to this Mac's: it breaks the table's rules, or this Mac can run
+/// none of the choices on its line in use.
+fn refused(
+    row: &JobRow,
+    small: bool,
+    unusable: &BTreeSet<Provider>,
+    held: &BTreeMap<Provider, String>,
+) -> Option<String> {
+    match validate_rows(std::slice::from_ref(row)) {
+        Err(error) => Some(format!("it breaks the table's rules: {error:#}")),
+        Ok(()) => not_runnable(row, small, unusable, held),
+    }
+}
+
+/// Why this Mac can run none of the choices on `row`'s line in use, its small-work line for
+/// `small` work when it has one, else its main line, such as "Claude is not signed in on this
+/// Mac", or what `held` says of a provider; the router never runs on Codex.
+fn not_runnable(
+    row: &JobRow,
+    small: bool,
+    unusable: &BTreeSet<Provider>,
+    held: &BTreeMap<Provider, String>,
+) -> Option<String> {
+    let line = (row.small.as_ref()).filter(|_| small).unwrap_or(&row.main);
+    let runs = |p: &ModelProfile| {
+        !unusable.contains(&p.provider)
+            && !(row.job == Job::Router && p.provider == Provider::Codex)
+    };
+    if line.choices().any(runs) {
+        return None;
+    }
+    let mut providers: Vec<Provider> = line.choices().map(|p| p.provider).collect();
+    providers.dedup();
+    if let Some(why) = providers.iter().find_map(|p| held.get(p)) {
+        return Some(why.clone());
+    }
+    let names: Vec<&str> = providers.iter().map(|p| p.label()).collect();
+    let are = if names.len() > 1 { "are" } else { "is" };
+    Some(format!(
+        "{} {are} not signed in on this Mac",
+        names.join(" and ")
+    ))
+}
+
 fn other(provider: Provider) -> Provider {
     match provider {
         Provider::Claude => Provider::Codex,

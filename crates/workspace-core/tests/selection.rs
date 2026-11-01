@@ -803,3 +803,159 @@ fn the_router_never_moves_on_to_codex() {
             .is_err()
     );
 }
+
+#[test]
+fn a_space_row_overrides_this_macs_unless_none_of_its_choices_is_signed_in() {
+    let mac = table();
+    let space_row = JobRow {
+        job: Job::Coordinator,
+        main: Line {
+            first: sol(),
+            then: Then::Wait,
+        },
+        small: None,
+    };
+    let signed_in = BTreeSet::new();
+    let sage = mac.for_space(Some("Sage"), std::slice::from_ref(&space_row), &signed_in);
+    let from = |table: &SpaceTable, job: &Job| {
+        let row = table.rows.iter().find(|row| row.job.is(job)).unwrap();
+        (row.resolved.from, row.resolved.value.main.first.clone())
+    };
+    assert_eq!(
+        from(&sage, &Job::Coordinator),
+        (cascade::Layer::Space, sol())
+    );
+    assert_eq!(
+        from(&sage, &Job::Implementer),
+        (cascade::Layer::ThisMac, opus())
+    );
+    let pick = (sage.resolve(
+        &Job::Coordinator,
+        false,
+        false,
+        &limits(&[], &signed_in),
+        &when,
+    ))
+    .unwrap();
+    assert_eq!(
+        (pick.profile, pick.reason.as_str()),
+        (sol(), "Sage's Coordinator row: First choice")
+    );
+
+    let codex_out = BTreeSet::from([Provider::Codex]);
+    let sage = mac.for_space(Some("Sage"), &[space_row], &codex_out);
+    assert_eq!(
+        from(&sage, &Job::Coordinator),
+        (cascade::Layer::ThisMac, opus())
+    );
+    let pick = (sage.resolve(
+        &Job::Coordinator,
+        false,
+        false,
+        &limits(&[], &codex_out),
+        &when,
+    ))
+    .unwrap();
+    assert_eq!(pick.profile, opus());
+    assert_eq!(
+        pick.reason,
+        "Sage's Coordinator row falls back to this Mac's: Codex is not signed in on this Mac. \
+         First choice"
+    );
+
+    // Without overrides, the Space resolves exactly as this Mac does.
+    let plain = mac.for_space(Some("Sage"), &[], &signed_in);
+    assert_eq!(plain.selection.jobs, mac.jobs);
+    assert!(
+        plain
+            .rows
+            .iter()
+            .all(|row| row.resolved.from == cascade::Layer::ThisMac)
+    );
+}
+
+#[test]
+fn small_work_resolves_a_space_row_by_its_small_work_line() {
+    let mac = table();
+    let space_row = |main: ModelProfile, small: ModelProfile| JobRow {
+        job: Job::Implementer,
+        main: Line {
+            first: main,
+            then: Then::Wait,
+        },
+        small: Some(Line {
+            first: small,
+            then: Then::Wait,
+        }),
+    };
+    let codex_out = BTreeSet::from([Provider::Codex]);
+    let limits = limits(&[], &codex_out);
+    let haiku = profile(Provider::Claude, "haiku", "low");
+    let pick = |row: JobRow, small: bool| {
+        (mac.for_space(Some("Sage"), &[row], &codex_out))
+            .resolve(&Job::Implementer, small, false, &limits, &when)
+            .unwrap()
+    };
+
+    // Sage's small-work line runs here though its main line does not.
+    let small = pick(space_row(sol(), haiku.clone()), true);
+    assert_eq!(small.profile, haiku);
+    assert_eq!(
+        small.reason,
+        "Sage's Implementer row: First choice for small work"
+    );
+    assert_eq!(pick(space_row(sol(), haiku.clone()), false).profile, opus());
+
+    // Sage's small-work line does not run here: small work falls back to this Mac's row.
+    let small = pick(space_row(haiku.clone(), sol()), true);
+    assert_eq!(small.profile, sonnet());
+    assert!(
+        small
+            .reason
+            .starts_with("Sage's Implementer row falls back to this Mac's: Codex"),
+        "{}",
+        small.reason
+    );
+    assert_eq!(pick(space_row(haiku.clone(), sol()), false).profile, haiku);
+}
+
+#[test]
+fn a_space_row_that_breaks_the_tables_rules_is_left_out_with_a_note() {
+    let mac = table();
+    // Two choices on the one Claude subscription.
+    let row = JobRow {
+        job: Job::Coordinator,
+        main: Line {
+            first: sonnet(),
+            then: Then::Model(opus()),
+        },
+        small: None,
+    };
+    let signed_in = BTreeSet::new();
+    let sage = mac.for_space(Some("Sage"), &[row], &signed_in);
+    let resolved = &sage
+        .rows
+        .iter()
+        .find(|r| r.job == Job::Coordinator)
+        .unwrap()
+        .resolved;
+    assert_eq!(resolved.from, cascade::Layer::ThisMac);
+    assert!(
+        resolved.notes[0].contains("breaks the table's rules"),
+        "{:?}",
+        resolved.notes
+    );
+    let pick = (sage.resolve(
+        &Job::Coordinator,
+        false,
+        false,
+        &limits(&[], &signed_in),
+        &when,
+    ))
+    .unwrap();
+    assert_eq!(pick.profile, opus());
+    assert!(
+        pick.reason
+            .starts_with("Sage's Coordinator row falls back to this Mac's: it breaks")
+    );
+}

@@ -12,10 +12,10 @@ Four stacked tickets in the wiffletree repository, each with a full review. Pull
 
 ## 2. Models cascade
 
-- [ ] 2.1 `space.yaml` `models.rows`: a Space overrides any row of the Who runs what table, in the table's row shape; `models.threads` and `models.jobs` read as the Assistant and Job rows. Resolve recipe model → Space row → this Mac's row with `cascade::resolve`, falling through an unavailable provider with a note.
-- [ ] 2.2 A Space overrides the round cap, the full-review cap and the levels its coordinator may use; it may not drop a verifier with an open finding.
-- [ ] 2.3 Retire `SpaceLocal.models`, with a one-time note for the Spaces page.
-- [ ] 2.4 `workspace_context`'s `model_selection` resolved for the project's Space, with provenance on overridden rows.
+- [x] 2.1 `space.yaml` `models.rows`: a Space overrides any row of the Who runs what table, in the table's row shape; `models.threads` and `models.jobs` read as the Assistant and Job rows. Resolve recipe model → Space row → this Mac's row with `cascade::resolve`, falling through an unavailable provider with a note.
+- [x] 2.2 A Space overrides the round cap, the full-review cap and the levels its coordinator may use; it may not drop a verifier with an open finding.
+- [x] 2.3 Retire `SpaceLocal.models`, with a one-time note for the Spaces page.
+- [x] 2.4 `workspace_context`'s `model_selection` resolved for the project's Space, with provenance on overridden rows.
 
 ## 3. Behaviors page
 
