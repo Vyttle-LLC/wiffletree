@@ -332,22 +332,31 @@ impl Tree {
         line
     }
 
-    /// The form's new draft: what it listed, in its order and spelling, then what was ticked.
-    pub(super) fn finish(&self) -> Choice {
-        let Self {
-            started, choice, ..
-        } = self;
-        let kept = (started.repositories.iter()).filter(|r| listed(&choice.repositories, r));
-        let new = (choice.repositories.iter()).filter(|r| !listed(&started.repositories, r));
+    /// The form's new draft over `form`, its repositories now, which a root check may have added
+    /// to while the dialog was open.
+    pub(super) fn finish(&self, form: &[String]) -> Choice {
         Choice {
-            repositories: kept.chain(new).cloned().collect(),
-            followed: choice.followed.clone(),
+            repositories: merged_list(&self.started.repositories, &self.choice.repositories, form),
+            followed: self.choice.followed.clone(),
         }
     }
 }
 
 fn listed(repositories: &[String], identity: &str) -> bool {
     (repositories.iter()).any(|listed| listed.eq_ignore_ascii_case(identity))
+}
+
+/// `latest` with the edits that turned `read` into `edited`, so a repository a rule, a chip or
+/// another Mac added meanwhile stays: what either side took out of `read` goes, and what the
+/// edit added follows, keeping `latest`'s order and spelling.
+pub(super) fn merged_list(read: &[String], edited: &[String], latest: &[String]) -> Vec<String> {
+    let kept = latest
+        .iter()
+        .filter(|r| !listed(read, r) || listed(edited, r));
+    let added = edited
+        .iter()
+        .filter(|r| !listed(read, r) && !listed(latest, r));
+    kept.chain(added).cloned().collect()
 }
 
 fn not_cloned_row(identity: &str) -> Row {
@@ -586,7 +595,7 @@ mod tests {
 
         tree.set_ticked("Vyttle-LLC/pica-ios", false);
         tree.set_following("/Users/m/dev/vyttle-llc", true);
-        let finished = tree.finish();
+        let finished = tree.finish(&tree.started.repositories);
         assert!(!listed(&finished.repositories, "Vyttle-LLC/pica-ios"));
         assert_eq!(
             finished.followed,
@@ -652,7 +661,7 @@ mod tests {
             tree.footer(&Filter::Everything),
             "1 selected, 1 new. New repositories in ~/two join by themselves."
         );
-        assert_eq!(tree.finish().repositories, ["o/site"]);
+        assert_eq!(tree.finish(&[]).repositories, ["o/site"]);
     }
 
     #[test]
@@ -698,7 +707,8 @@ mod tests {
             shown(&tree, &Filter::Everything, NOT_CLONED).tick,
             Tick::Off
         );
-        assert_eq!(tree.finish().repositories, ["Vyttle-LLC/wiffletree"]);
+        let form = tree.started.repositories.clone();
+        assert_eq!(tree.finish(&form).repositories, ["Vyttle-LLC/wiffletree"]);
     }
 
     #[test]
@@ -734,7 +744,46 @@ mod tests {
         tree.set_ticked("o/c", true);
         tree.set_ticked("o/b", false);
         tree.set_ticked("o/b", true);
-        assert_eq!(tree.finish().repositories, ["O/B", "o/a", "o/c"]);
+        assert_eq!(
+            tree.finish(&spaces[0].repositories).repositories,
+            ["O/B", "o/a", "o/c"]
+        );
+    }
+
+    #[test]
+    fn a_repository_that_joined_while_the_dialog_was_open_survives_done() {
+        let mut tree = tree();
+        tree.set_ticked("Vyttle-LLC/pica-ios", true);
+        tree.set_ticked("Vyttle-LLC/example-web", false);
+        let form = [
+            "Vyttle-LLC/wiffletree".to_owned(),
+            "Vyttle-LLC/example-web".to_owned(),
+            "Vyttle-LLC/joined".to_owned(),
+        ];
+        assert_eq!(
+            tree.finish(&form).repositories,
+            [
+                "Vyttle-LLC/wiffletree",
+                "Vyttle-LLC/joined",
+                "Vyttle-LLC/pica-ios"
+            ]
+        );
+    }
+
+    #[test]
+    fn merging_keeps_what_arrived_and_honors_what_either_side_took_out() {
+        let list = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let read = list(&["o/a", "o/b"]);
+        let edited = list(&["o/a", "o/new"]);
+        let latest = list(&["o/a", "o/b", "o/joined"]);
+        assert_eq!(
+            merged_list(&read, &edited, &latest),
+            ["o/a", "o/joined", "o/new"]
+        );
+        let taken_elsewhere = list(&["o/b"]);
+        assert_eq!(merged_list(&read, &read, &taken_elsewhere), ["o/b"]);
+        let re_cased = list(&["O/A", "o/b"]);
+        assert_eq!(merged_list(&read, &read, &re_cased), ["O/A", "o/b"]);
     }
 
     #[test]

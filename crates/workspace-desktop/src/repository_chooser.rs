@@ -100,8 +100,8 @@ impl RepositoryChooser {
     }
 
     fn done(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let choice = self.tree.finish();
-        let _ = self.page.update(cx, |page, cx| page.chosen(choice, cx));
+        let tree = &self.tree;
+        let _ = self.page.update(cx, |page, cx| page.chosen(tree, cx));
         window.close_dialog(cx);
     }
 

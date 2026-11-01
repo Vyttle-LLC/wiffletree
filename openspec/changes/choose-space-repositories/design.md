@@ -34,6 +34,10 @@ The join goes through `update_space`, so it is an ordinary commit, or an ordinar
 
 `SetFollowedRoots` is its own command, like `SetRepositorySpaces`, with its own row in the remote access table. Save sends it only when the draft changed it, then `UpdateSpace`. It goes first because it is the one that can be refused for a root removed meanwhile, which then leaves the form's draft as it was. If `UpdateSpace` is refused after it, Save reports that and the form keeps the draft, so saving again is the same request.
 
+### The form merges the list instead of replacing it
+
+A join is a writer that needs no second human, so a draft holding the old list must not overwrite it, or the repository would leave with no sign and no later root check would restore it. `merged_list` is a three-way merge over the list the draft started from: what either side took out goes, and what either side added stays. Save uses it over the Space as it is now, and Done over the form as it is now, as the dialog reads its list once.
+
 ### Rows and ticks are plain data
 
 `repository_tree.rs` holds folders, rows, the filter and the choice, with no GPUI, so its tests run without a window. `repository_chooser.rs` only draws them. The dialog works on its own copy, so Cancel has nothing to undo, and it reads the snapshot once, so rows do not move under the pointer. Ticks are `owner/name`, compared ignoring case, so two clones tick together with no extra code.

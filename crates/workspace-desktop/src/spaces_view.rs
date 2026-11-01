@@ -10,7 +10,7 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
 };
 use linear_import_view::LinearImportPanel;
-use repository_tree::{Choice, Tree, shown_path};
+use repository_tree::{Choice, Tree, merged_list, shown_path};
 use std::collections::BTreeMap;
 use ui::{banner, card, hint, icon, mono, section};
 use wording::{age, counted};
@@ -479,7 +479,8 @@ impl SpacesPage {
     }
 
     /// Takes what Done chose into the form's draft; Save writes it.
-    pub(super) fn chosen(&mut self, choice: Choice, cx: &mut Context<Self>) {
+    pub(super) fn chosen(&mut self, tree: &Tree, cx: &mut Context<Self>) {
+        let choice = tree.finish(&self.repositories);
         self.repositories = choice.repositories;
         self.followed = choice.followed;
         cx.notify();
@@ -1796,7 +1797,7 @@ fn merged(read: &Space, form: &Space, latest: &Space) -> Space {
     Space {
         name: pick(&read.name, &form.name, &latest.name),
         description: pick(&read.description, &form.description, &latest.description),
-        repositories: pick(&read.repositories, &form.repositories, &latest.repositories),
+        repositories: merged_list(&read.repositories, &form.repositories, &latest.repositories),
         brain: pick(&read.brain, &form.brain, &latest.brain),
         sources: pick(&read.sources, &form.sources, &latest.sources),
         ..latest.clone()
@@ -2564,9 +2565,10 @@ mod tests {
         latest.repositories = vec!["Sage-Social/api".into(), "Sage-Social/web".into()];
         let mut read = read;
         read.repositories = vec!["Sage-Social/api".into()];
-        assert!(
-            merged(&read, &form, &latest).repositories.is_empty(),
-            "a list the form changed is saved as the form has it"
+        assert_eq!(
+            merged(&read, &form, &latest).repositories,
+            ["Sage-Social/web"],
+            "what the form took out goes, and what joined meanwhile stays"
         );
     }
 

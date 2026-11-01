@@ -84,6 +84,10 @@ Only the human SHALL set a Space's followed roots. No agent, thread or workspace
 - **WHEN** a root check finds a repository and writing to a following Space fails
 - **THEN** the repository stays in the workspace, the human sees a warning, and later root checks do not try again
 
+#### Scenario: A repository joins while the form holds a draft
+- **WHEN** the human has an unsaved change to a Space's repositories, or the dialog open, and a root check adds a repository to that Space
+- **THEN** Done and Save keep the repository that joined and apply the human's own change
+
 #### Scenario: Removing a root
 - **WHEN** the human removes a root that two Spaces follow
 - **THEN** neither Space follows it and their repositories stay listed
