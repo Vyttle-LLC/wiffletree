@@ -665,6 +665,27 @@ impl Host {
             Ok(())
         })
     }
+    /// Replaces the root folders `space` follows; each must be a root folder now. Its list of
+    /// repositories is left as it is.
+    pub fn set_followed_roots(
+        &mut self,
+        space: &SpaceId,
+        mut roots: Vec<String>,
+    ) -> Result<SpaceRecord> {
+        let SpaceRecord { space, mut local } = self.space(space)?;
+        let known = self.repository_roots()?;
+        if let Some(gone) = roots.iter().find(|root| !known.contains(root)) {
+            bail!("{gone} is no longer a root folder");
+        }
+        roots.sort();
+        roots.dedup();
+        local.followed_roots = roots;
+        self.db.execute(
+            "UPDATE spaces SET local=?2 WHERE id=?1",
+            params![space.id.as_str(), encode(&local)?],
+        )?;
+        Ok(SpaceRecord { space, local })
+    }
     /// The Space to suggest for `repository` when it is added: the one listing the most
     /// repositories of its GitHub owner, or `None` for No Space. The owner only suggests.
     pub fn suggest_repository_space(&self, repository: &str) -> Result<Option<SpaceId>> {

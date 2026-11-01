@@ -342,6 +342,10 @@ pub struct SpaceLocal {
     /// its `origin` is not on GitHub, so the Brains page can say why the Space has no brain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brain_without_origin: Option<String>,
+    /// The root folders whose new repositories join this Space. The Space's own list stays the
+    /// record of what it covers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub followed_roots: Vec<String>,
 }
 impl Default for SpaceLocal {
     fn default() -> Self {
@@ -351,6 +355,7 @@ impl Default for SpaceLocal {
             models: None,
             notes: vec![],
             brain_without_origin: None,
+            followed_roots: vec![],
         }
     }
 }

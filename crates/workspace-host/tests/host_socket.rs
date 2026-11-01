@@ -782,6 +782,10 @@ fn space_commands_need_the_apps_credential_and_reads_do_not() {
             repository: "Sage-Social/api".into(),
             space_ids: vec![personal.id.clone()],
         },
+        Command::SetFollowedRoots {
+            space_id: personal.id.clone(),
+            roots: vec![],
+        },
         Command::ConfirmRepositorySuggestions {
             choices: vec![RepositorySpaces {
                 repository: "Sage-Social/api".into(),

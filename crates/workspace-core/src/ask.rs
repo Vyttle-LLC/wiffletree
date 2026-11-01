@@ -184,6 +184,9 @@ pub fn update_space(space: Space) -> Ask<SpaceRecord> {
         space: Box::new(space),
     })
 }
+pub fn set_followed_roots(space_id: SpaceId, roots: Vec<String>) -> Ask<SpaceRecord> {
+    Ask::new(Command::SetFollowedRoots { space_id, roots })
+}
 pub fn check_storage_repository(repository: String) -> Ask<StorageCheck> {
     Ask::new(Command::CheckStorageRepository { repository })
 }

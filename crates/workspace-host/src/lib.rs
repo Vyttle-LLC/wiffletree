@@ -2003,6 +2003,9 @@ impl Host {
                 self.set_repository_spaces(&repository, &space_ids)?;
                 json!({"set":true})
             }
+            Command::SetFollowedRoots { space_id, roots } => {
+                serde_json::to_value(self.set_followed_roots(&space_id, roots)?)?
+            }
             Command::SuggestRepositorySpace { repository } => {
                 serde_json::to_value(self.suggest_repository_space(&repository)?)?
             }

@@ -142,6 +142,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::RemoveSpace { .. }
         | Command::MoveProjectToSpace { .. }
         | Command::SetRepositorySpaces { .. }
+        | Command::SetFollowedRoots { .. }
         | Command::ConfirmRepositorySuggestions { .. }
         | Command::JoinSpaces { .. }
         | Command::SetTrackerPrefix { .. }

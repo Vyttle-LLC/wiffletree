@@ -568,6 +568,12 @@ pub struct RepositoryImport {
 pub struct RepositoryRefresh {
     pub added: Vec<Repository>,
     pub warnings: Vec<String>,
+    /// What each Space following a root folder gained, as lines for the human.
+    #[serde(default)]
+    pub joined: Vec<String>,
+    /// Each write to a following Space that failed; the repository stays in the workspace.
+    #[serde(default)]
+    pub not_joined: Vec<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
@@ -3714,6 +3720,12 @@ pub enum Command {
         repository: String,
         space_ids: Vec<SpaceId>,
     },
+    /// Replaces the root folders the Space follows, so that repositories a root check first
+    /// finds there join it.
+    SetFollowedRoots {
+        space_id: SpaceId,
+        roots: Vec<String>,
+    },
     /// The Space to suggest for a repository being added, from its GitHub owner; answered with
     /// an `Option<SpaceId>`, where `None` suggests No Space.
     SuggestRepositorySpace {
@@ -4294,6 +4306,7 @@ impl Command {
             | Self::RemoveSpace { .. }
             | Self::MoveProjectToSpace { .. }
             | Self::SetRepositorySpaces { .. }
+            | Self::SetFollowedRoots { .. }
             | Self::ConfirmRepositorySuggestions { .. }
             | Self::JoinSpaces { .. }
             | Self::SetTrackerPrefix { .. }
@@ -4432,6 +4445,7 @@ impl Command {
                 | Self::MoveProjectToSpace { .. }
                 | Self::SetAddedRepositories { .. }
                 | Self::SetRepositorySpaces { .. }
+                | Self::SetFollowedRoots { .. }
                 | Self::ConfirmRepositorySuggestions { .. }
                 | Self::JoinSpaces { .. }
                 | Self::SetTrackerPrefix { .. }

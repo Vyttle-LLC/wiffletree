@@ -277,14 +277,21 @@ pub(crate) fn discover(
     Ok(discovery)
 }
 
+/// A repository a root scan found, with the roots it was found under.
+#[derive(Debug)]
+pub(crate) struct ScannedRepository {
+    candidate: RepositoryCandidate,
+    roots: Vec<String>,
+}
+
 /// Lists each root's immediate children and runs Git only for repositories not in `skip`, so a
 /// refresh with nothing new costs one directory listing per root. Linked worktrees (whose `.git`
 /// is a file) and empty repositories are left out; they can still be added by hand.
 pub(crate) fn scan_roots(
     roots: &[String],
     skip: &BTreeSet<String>,
-) -> (Vec<RepositoryCandidate>, Vec<String>) {
-    let mut found = Vec::new();
+) -> (Vec<ScannedRepository>, Vec<String>) {
+    let mut found: Vec<ScannedRepository> = Vec::new();
     let mut warnings = Vec::new();
     let mut seen = BTreeSet::new();
     for root in roots {
@@ -303,11 +310,21 @@ pub(crate) fn scan_roots(
             else {
                 continue;
             };
-            if skip.contains(&path) || !seen.insert(path.clone()) {
+            if skip.contains(&path) {
+                continue;
+            }
+            if !seen.insert(path.clone()) {
+                // A link from a second root: both found it.
+                if let Some(scanned) = found.iter_mut().find(|s| s.candidate.path == path) {
+                    scanned.roots.push(root.clone());
+                }
                 continue;
             }
             match candidate(Path::new(&path), skip) {
-                Ok(repo) => found.push(repo),
+                Ok(candidate) => found.push(ScannedRepository {
+                    candidate,
+                    roots: vec![root.clone()],
+                }),
                 Err(error) if format!("{error:#}").contains("no committed base") => {}
                 Err(error) => warnings.push(format!("{path}: {error:#}")),
             }
@@ -906,9 +923,21 @@ impl Host {
             .collect())
     }
 
+    /// Stops checking the folder, and every Space that followed it stops. Its repositories stay.
     pub fn remove_repository_root(&mut self, path: &str) -> Result<()> {
-        self.db
-            .execute("DELETE FROM repository_roots WHERE path=?1", [path])?;
+        let spaces = self.spaces()?;
+        let tx = self.db.transaction()?;
+        tx.execute("DELETE FROM repository_roots WHERE path=?1", [path])?;
+        for SpaceRecord { space, mut local } in spaces {
+            if local.followed_roots.iter().any(|root| root == path) {
+                local.followed_roots.retain(|root| root != path);
+                tx.execute(
+                    "UPDATE spaces SET local=?2 WHERE id=?1",
+                    params![space.id.as_str(), encode(&local)?],
+                )?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -919,10 +948,12 @@ impl Host {
         Ok((self.repository_roots()?, skip))
     }
 
-    /// Adds what a root scan found, skipping anything added or dismissed since it started.
-    pub fn add_discovered(
+    /// Adds what a root scan found, skipping anything added or dismissed since it started, and
+    /// adds each repository found for the first time to the Spaces following a root it was
+    /// found under.
+    pub(crate) fn add_discovered(
         &mut self,
-        found: Vec<RepositoryCandidate>,
+        found: Vec<ScannedRepository>,
         warnings: Vec<String>,
     ) -> Result<RepositoryRefresh> {
         let (_, skip) = self.refresh_inputs()?;
@@ -930,15 +961,67 @@ impl Host {
             warnings,
             ..Default::default()
         };
-        for candidate in found.into_iter().filter(|c| !skip.contains(&c.path)) {
+        let new = found
+            .into_iter()
+            .filter(|s| !skip.contains(&s.candidate.path));
+        for ScannedRepository { candidate, roots } in new {
+            // Read before it is added, so a clone of itself does not count.
+            let identity = self.first_found_identity(&candidate.path)?;
             match self.add_repository(&candidate.path, &candidate.base) {
-                Ok(repository) => refresh.added.push(repository),
+                Ok(repository) => {
+                    if let Some(identity) = identity {
+                        self.join_following_spaces(&repository, &identity, &roots, &mut refresh)?;
+                    }
+                    refresh.added.push(repository);
+                }
                 Err(error) => refresh
                     .warnings
                     .push(format!("{}: {error:#}", candidate.path)),
             }
         }
         Ok(refresh)
+    }
+
+    /// The `owner/name` of the clone at `path`, unless the workspace already has that
+    /// repository: another clone of one the human took out of a Space must not bring it back.
+    fn first_found_identity(&self, path: &str) -> Result<Option<String>> {
+        let Origin::GitHub { owner, name, .. } = read_origin(Path::new(path)) else {
+            return Ok(None);
+        };
+        let identity = format!("{owner}/{name}");
+        let known = self.repositories()?.iter().any(|r| r.is_github(&identity));
+        Ok((!known).then_some(identity))
+    }
+
+    /// Appends `identity` to each Space following one of `roots`, each as an ordinary edit. A
+    /// write that fails costs that join alone, is reported, and is not tried again.
+    fn join_following_spaces(
+        &mut self,
+        repository: &Repository,
+        identity: &str,
+        roots: &[String],
+        refresh: &mut RepositoryRefresh,
+    ) -> Result<()> {
+        for SpaceRecord { mut space, local } in self.spaces()? {
+            let root = (local.followed_roots.iter()).find(|followed| roots.contains(followed));
+            let Some(root) = root.filter(|_| !space.lists_named(identity)) else {
+                continue;
+            };
+            let name = space.name.clone();
+            space.repositories.push(identity.to_owned());
+            match self.update_space(space) {
+                Ok(_) => refresh.joined.push(format!(
+                    "{} joined {name} from {}.",
+                    repository.name,
+                    settings::shorten_home(root)
+                )),
+                Err(error) => refresh.not_joined.push(format!(
+                    "{} stayed out of {name}: {error:#}",
+                    repository.name
+                )),
+            }
+        }
+        Ok(())
     }
 
     pub fn refresh_repositories(&mut self) -> Result<RepositoryRefresh> {

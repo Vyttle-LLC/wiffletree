@@ -37,6 +37,17 @@ pub(crate) fn expand_home(value: &str) -> Result<PathBuf> {
     })
 }
 
+/// `path` with a leading home directory written as `~`, as the human writes it.
+pub(crate) fn shorten_home(path: &str) -> String {
+    let home = std::env::home_dir();
+    let rest = home.and_then(|home| Path::new(path).strip_prefix(home).ok().map(Path::to_owned));
+    match rest {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.into(),
+    }
+}
+
 /// A readable, lowercase, filesystem-safe name, or `fallback` when nothing readable remains.
 pub(crate) fn slug(text: &str, fallback: &str) -> String {
     let mut slug = String::new();

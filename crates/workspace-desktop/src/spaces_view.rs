@@ -10,6 +10,7 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
 };
 use linear_import_view::LinearImportPanel;
+use repository_tree::{Choice, Tree, merged_list, shown_path};
 use std::collections::BTreeMap;
 use ui::{banner, card, hint, icon, mono, section};
 use wording::{age, counted};
@@ -22,6 +23,8 @@ const SOURCES_FORMAT: &str =
     "One a line: mcp ‹server›: ‹tool›, ‹tool› or cli ‹command›: ‹prefix›, ‹prefix›.";
 /// How long a storage reading stands before a change to the workspace asks again.
 const STORAGE_FRESH_MS: i64 = 10_000;
+/// Rows the page shows before "and N more", so a long list does not push Sources off the screen.
+const REPOSITORY_ROWS: usize = 6;
 
 /// What the page shows beside the list.
 #[derive(Clone, PartialEq, Eq)]
@@ -53,7 +56,6 @@ pub(super) struct SpacesPage {
     description: Entity<TextareaState>,
     instructions: Entity<TextareaState>,
     sources: Entity<TextareaState>,
-    repository_input: Entity<InputState>,
     /// The storage repository for New, or the repository to add Spaces from.
     storage_input: Entity<InputState>,
     prefix_input: Entity<InputState>,
@@ -62,6 +64,9 @@ pub(super) struct SpacesPage {
     /// The form's brain and code repositories, saved with Save.
     brain: Option<SpaceBrain>,
     repositories: Vec<String>,
+    /// The root folders the form follows, saved with Save, and as they read when it was filled.
+    followed: Vec<String>,
+    followed_read: Vec<String>,
     /// New stores the Space in a GitHub repository rather than on this Mac.
     on_github: bool,
     /// The prefix field is open, to rename a tracker's prefix or set up issues.
@@ -102,9 +107,6 @@ impl SpacesPage {
             description: textarea("What belongs in this Space, and what doesn’t", window, cx),
             instructions: textarea("Rules for every agent in this Space", window, cx),
             sources: textarea("mcp linear: list_issues, get_issue", window, cx),
-            repository_input: cx.new(|cx| {
-                InputState::new(window, cx).placeholder("owner/name, such as Sage-Social/api")
-            }),
             storage_input: cx
                 .new(|cx| InputState::new(window, cx).placeholder("owner/name or a GitHub URL")),
             prefix_input: cx
@@ -112,6 +114,8 @@ impl SpacesPage {
             brain_folder: cx.new(|cx| InputState::new(window, cx).placeholder("second-brain")),
             brain: None,
             repositories: vec![],
+            followed: vec![],
+            followed_read: vec![],
             on_github: false,
             editing_prefix: false,
             storage: None,
@@ -189,15 +193,22 @@ impl SpacesPage {
 
     /// Fills the form from the shown Space when it is another than the form holds, or when its
     /// definition changed, by a chip or another Mac, and the form holds no edit. A form with
-    /// edits still takes a brain chosen meanwhile, unless its own brain is one of them.
+    /// edits still takes a brain chosen meanwhile, unless its own brain is one of them. A root
+    /// removed meanwhile leaves the form in any case, as there is nothing left to follow.
     fn load_shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(space) = self.shown_space().cloned() else {
             return;
         };
+        let roots = self
+            .shared
+            .snapshot()
+            .map_or(vec![], |s| s.repository_roots.clone());
+        self.followed.retain(|root| roots.contains(root));
+        self.followed_read.retain(|root| roots.contains(root));
         if let Some((from, _)) = &self.loaded
             && from.id == space.id
         {
-            if *from == space {
+            if *from == space && self.followed_read == self.followed_here(&space.id) {
                 return;
             }
             if self.edits(cx) {
@@ -205,6 +216,10 @@ impl SpacesPage {
             }
         }
         self.load(&space, window, cx);
+    }
+    fn followed_here(&self, space: &SpaceId) -> Vec<String> {
+        self.local(space)
+            .map_or(vec![], |l| l.followed_roots.clone())
     }
     fn follow_brain(&mut self, space: &Space, window: &mut Window, cx: &mut Context<Self>) {
         let follows = self.loaded.as_ref().is_some_and(|(from, read)| {
@@ -232,13 +247,21 @@ impl SpacesPage {
     }
     /// The form holds an edit the human has not saved.
     fn edits(&self, cx: &App) -> bool {
-        self.loaded
-            .as_ref()
-            .is_some_and(|(from, read)| self.edited(from, cx).as_ref() != Ok(read))
+        self.loaded.as_ref().is_some_and(|(from, read)| {
+            self.edited(from, cx).as_ref() != Ok(read) || self.followed != self.followed_read
+        })
+    }
+    /// The form's repositories or followed roots differ from what it was filled with.
+    fn chose_repositories(&self) -> bool {
+        self.followed != self.followed_read
+            || (self.loaded.as_ref())
+                .is_some_and(|(_, read)| self.repositories != read.repositories)
     }
     fn load(&mut self, space: &Space, window: &mut Window, cx: &mut Context<Self>) {
         self.brain = space.brain.clone();
         self.repositories = space.repositories.clone();
+        self.followed = self.followed_here(&space.id);
+        self.followed_read = self.followed.clone();
         self.editing_prefix = false;
         self.error = None;
         self.refused_by = None;
@@ -364,7 +387,8 @@ impl SpacesPage {
     }
 
     /// Saves the form's edits over the Space as it is now, so a field the form did not change
-    /// keeps what a chip or another Mac wrote meanwhile.
+    /// keeps what a chip or another Mac wrote meanwhile. Followed roots go first, as a root
+    /// removed meanwhile can refuse them, which leaves the Space as it was.
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(latest), Some((from, read))) = (self.shown_space().cloned(), self.loaded.clone())
         else {
@@ -380,6 +404,34 @@ impl SpacesPage {
         let edited = merged(&read, &form, &latest);
         self.busy = true;
         self.error = None;
+        if self.followed == self.followed_read {
+            self.save_space(from, form, edited, window, cx);
+            return cx.notify();
+        }
+        self.ask(
+            ask::set_followed_roots(from.id.clone(), self.followed.clone()),
+            window,
+            cx,
+            move |view, followed, window, cx| match followed {
+                Ok(_) => view.save_space(from, form, edited, window, cx),
+                Err(error) => {
+                    view.busy = false;
+                    view.error = Some(error);
+                }
+            },
+        );
+        cx.notify();
+    }
+
+    /// Writes `edited`, the merge of `form` over the Space as it is now.
+    fn save_space(
+        &mut self,
+        from: Space,
+        form: Space,
+        edited: Space,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.ask(
             ask::update_space(edited),
             window,
@@ -403,24 +455,34 @@ impl SpacesPage {
                 }
             },
         );
-        cx.notify();
     }
 
-    fn add_repository(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let identity = self.repository_input.read(cx).value().trim().to_owned();
-        if identity.is_empty() {
+    /// Opens Choose repositories… over the form's draft.
+    fn choose_repositories(&mut self, space: &Space, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.shared.snapshot() else {
             return;
-        }
-        if let Err(error) = validate_repository_identity(&identity) {
-            self.error = Some(error.to_string());
-            return cx.notify();
-        }
-        if !(self.repositories.iter()).any(|r| r.eq_ignore_ascii_case(&identity)) {
-            self.repositories.push(identity);
-        }
-        self.error = None;
-        self.repository_input
-            .update(cx, |input, cx| input.set_value("", window, cx));
+        };
+        let choice = Choice {
+            repositories: self.repositories.clone(),
+            followed: self.followed.clone(),
+        };
+        let tree = Tree::new(
+            &snapshot.spaces,
+            &space.id,
+            &snapshot.repositories,
+            &snapshot.repository_roots,
+            choice,
+            home().as_deref(),
+        );
+        let (spaces, page) = (snapshot.spaces.clone(), cx.weak_entity());
+        repository_chooser::open(page, &space.name, tree, spaces, window, cx);
+    }
+
+    /// Takes what Done chose into the form's draft; Save writes it.
+    pub(super) fn chosen(&mut self, tree: &Tree, cx: &mut Context<Self>) {
+        let choice = tree.finish(&self.repositories);
+        self.repositories = choice.repositories;
+        self.followed = choice.followed;
         cx.notify();
     }
 
@@ -836,7 +898,7 @@ impl SpacesPage {
             .child(row(
                 "Code repositories",
                 self.repositories_field(space, p, cx),
-                Some(format!("Every project in {} uses these.", space.name)),
+                Some(repositories_caption(&space.name, self.chose_repositories())),
                 p,
             ))
             .child(row(
@@ -979,7 +1041,42 @@ impl SpacesPage {
     fn repositories_field(&self, space: &Space, p: Palette, cx: &mut Context<Self>) -> Div {
         let here = self.shared.snapshot().map_or(&[][..], |s| &s.repositories);
         let mut field = div().flex().flex_col().gap_1();
-        for (at, identity) in self.repositories.iter().enumerate() {
+        for (at, root) in self.followed.iter().enumerate() {
+            let line = following_line(root, &space.name, home().as_deref());
+            let stopped = root.clone();
+            field = field.child(
+                div()
+                    .mb_1()
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(p.edge)
+                    .bg(p.base)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(hint(line, p).text_color(p.text)),
+                    )
+                    .child(
+                        button(SharedString::from(format!("stop-following-{at}")))
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("close"))
+                            .tooltip("Stop following. Its repositories stay; saved with Save")
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.followed.retain(|root| *root != stopped);
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+        let shown = self.repositories.iter().take(REPOSITORY_ROWS).enumerate();
+        for (at, identity) in shown {
             let cloned = here.iter().any(|r| r.is_github(identity));
             field = field.child(
                 div()
@@ -1003,27 +1100,29 @@ impl SpacesPage {
                     ),
             );
         }
-        field.child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    Input::new(&self.repository_input)
-                        .small()
-                        .flex_1()
-                        .min_w_0(),
-                )
-                .child(
-                    button("add-space-repository")
-                        .xsmall()
-                        .icon(icon("plus"))
-                        .label("Add")
-                        .on_click(
-                            cx.listener(|view, _, window, cx| view.add_repository(window, cx)),
-                        ),
+        let hidden = self.repositories.len().saturating_sub(REPOSITORY_ROWS);
+        let more = (hidden > 0).then(|| {
+            let shown = space.clone();
+            button("more-space-repositories")
+                .link()
+                .xsmall()
+                .label(format!("and {hidden} more"))
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    view.choose_repositories(&shown, window, cx)
+                }))
+        });
+        let shown = space.clone();
+        field
+            .children(more.map(|more| div().flex().child(more)))
+            .child(
+                div().mt_1().flex().child(
+                    button("choose-space-repositories")
+                        .label("Choose repositories…")
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            view.choose_repositories(&shown, window, cx)
+                        })),
                 ),
-        )
+            )
     }
 
     /// The brain's compile time and gate, read-only here: its `wiffletree-brain.json` says them,
@@ -1698,11 +1797,30 @@ fn merged(read: &Space, form: &Space, latest: &Space) -> Space {
     Space {
         name: pick(&read.name, &form.name, &latest.name),
         description: pick(&read.description, &form.description, &latest.description),
-        repositories: pick(&read.repositories, &form.repositories, &latest.repositories),
+        repositories: merged_list(&read.repositories, &form.repositories, &latest.repositories),
         brain: pick(&read.brain, &form.brain, &latest.brain),
         sources: pick(&read.sources, &form.sources, &latest.sources),
         ..latest.clone()
     }
+}
+
+/// This Mac's home, which paths on the page and in the dialog show as `~`.
+fn home() -> Option<String> {
+    std::env::var("HOME").ok()
+}
+
+fn following_line(root: &str, space: &str, home: Option<&str>) -> String {
+    let folder = shown_path(root, home);
+    format!("Following {folder}: new repositories there join {space}")
+}
+
+fn repositories_caption(space: &str, unsaved: bool) -> String {
+    let saved = if unsaved {
+        " Your changes are kept when you click Save."
+    } else {
+        ""
+    };
+    format!("Every project in {space} uses these.{saved}")
 }
 
 /// A labelled field of a Space's form, with its caption under it.
@@ -2447,9 +2565,10 @@ mod tests {
         latest.repositories = vec!["Sage-Social/api".into(), "Sage-Social/web".into()];
         let mut read = read;
         read.repositories = vec!["Sage-Social/api".into()];
-        assert!(
-            merged(&read, &form, &latest).repositories.is_empty(),
-            "a list the form changed is saved as the form has it"
+        assert_eq!(
+            merged(&read, &form, &latest).repositories,
+            ["Sage-Social/web"],
+            "what the form took out goes, and what joined meanwhile stays"
         );
     }
 
