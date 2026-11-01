@@ -1,7 +1,7 @@
 //! The selected session's conversation: its header, the transcript, and the composer with its
 //! notices and decision card.
 use super::*;
-use composer_focus::ComposerFocus;
+use composer_focus::{ComposerFocus, ComposerInput};
 use conversation_header::ConversationHeader;
 use gpui_base::TextSelection;
 use gpui_component::{
@@ -91,6 +91,8 @@ pub(super) struct Conversation {
     chat_models: Rc<BTreeMap<(Provider, String), String>>,
     /// Pressing transcript text focuses it; this hands focus back to the composer.
     composer_focus: ComposerFocus,
+    /// The text view that kept focus for its selection, which takes the composer's text input.
+    holds_selection: Option<FocusHandle>,
 }
 impl EventEmitter<Intent> for Conversation {}
 impl Conversation {
@@ -137,6 +139,7 @@ impl Conversation {
             done_tickets_open: false,
             chat_models: Rc::default(),
             composer_focus: ComposerFocus::default(),
+            holds_selection: None,
         }
     }
     fn composer_focused(&self, window: &Window, cx: &App) -> bool {
@@ -153,6 +156,44 @@ impl Conversation {
         if self.composer_focus.released(selecting) {
             self.input.update(cx, |input, cx| input.focus(window, cx));
         }
+        let holds = window.focused(cx).filter(|_| self.composer_focus.is_owed());
+        if holds != self.holds_selection {
+            self.holds_selection = holds;
+            cx.notify();
+        }
+    }
+    /// A dead key or an input method wrote into the composer through the selection's text view.
+    fn composed_in_transcript(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer_focus.composed();
+        self.holds_selection = None;
+        self.input.update(cx, |input, cx| input.focus(window, cx));
+    }
+    /// Lends the composer's text input to the text view holding a selection, while the composer
+    /// is owed focus.
+    fn lend_text_input(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let held = self
+            .holds_selection
+            .clone()
+            .filter(|_| self.composer_focus.is_owed())?;
+        let (composer, view) = (self.input.clone(), cx.entity().downgrade());
+        Some(
+            canvas(
+                |_, _, _| {},
+                move |_, _, window, cx| {
+                    let bounds = composer.read(cx).input_bounds();
+                    let took_text = move |window: &mut Window, cx: &mut App| {
+                        let _ = view.update(cx, |view, cx| view.composed_in_transcript(window, cx));
+                    };
+                    let composer = ElementInputHandler::new(bounds, composer);
+                    let input = ComposerInput {
+                        composer,
+                        took_text,
+                    };
+                    window.handle_input(&held, input, cx);
+                },
+            )
+            .absolute(),
+        )
     }
     /// Typing while the text holds focus after a selection goes to the composer.
     fn typed_in_transcript(
@@ -1157,6 +1198,7 @@ impl Render for Conversation {
                     });
                 }
             }))
+            .children(self.lend_text_input(cx))
             .child(self.header.clone().cached(conversation_header::style()))
             .children(self.ticket_table(session, p, cx))
             .child(

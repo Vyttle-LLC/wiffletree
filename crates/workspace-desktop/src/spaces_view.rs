@@ -68,7 +68,8 @@ pub(super) struct SpacesPage {
     /// The prefix field is open, to rename a tracker's prefix or set up issues.
     editing_prefix: bool,
     storage: Option<(SpaceId, Result<StorageStatus, String>)>,
-    storage_asked_at: i64,
+    /// The Space whose storage was last asked about, and when.
+    storage_asked: Option<(SpaceId, i64)>,
     joining: Option<Joining>,
     /// The repository New was asked to store the Space in, as named, and who can read it,
     /// shown before anything is written.
@@ -114,7 +115,7 @@ impl SpacesPage {
             on_github: false,
             editing_prefix: false,
             storage: None,
-            storage_asked_at: 0,
+            storage_asked: None,
             joining: None,
             checked: None,
             busy: false,
@@ -139,7 +140,7 @@ impl SpacesPage {
     }
 
     /// Redraws while shown, loads the shown Space into the form, and reads its storage again
-    /// once the reading is old.
+    /// once the reading is old or is another Space's, as after the shown one is removed.
     pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
         let (_, moved) = shared.moved_from(&self.shared);
         let opened = shared.page == Page::Spaces && self.shared.page != Page::Spaces;
@@ -152,8 +153,11 @@ impl SpacesPage {
             panel.update(cx, |panel, cx| panel.share(shared, cx));
         }
         self.load_shown(window, cx);
-        let stale = ui::now() - self.storage_asked_at > STORAGE_FRESH_MS;
-        if opened || (moved && stale) {
+        let shown = self.shown_space().map(|s| s.id.clone());
+        let again = shown.is_some_and(|shown| {
+            reads_storage_again(self.storage_asked.as_ref(), &shown, moved, ui::now())
+        });
+        if opened || again {
             self.read_storage(window, cx);
         }
         if opened || moved {
@@ -178,18 +182,48 @@ impl SpacesPage {
     }
 
     /// Fills the form from the shown Space when it is another than the form holds, or when its
-    /// definition changed, by a chip or another Mac, and the form holds no edit.
+    /// definition changed, by a chip or another Mac, and the form holds no edit. A form with
+    /// edits still takes a brain chosen meanwhile, unless its own brain is one of them.
     fn load_shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(space) = self.shown_space().cloned() else {
             return;
         };
         if let Some((from, _)) = &self.loaded
             && from.id == space.id
-            && (*from == space || self.edits(cx))
         {
-            return;
+            if *from == space {
+                return;
+            }
+            if self.edits(cx) {
+                return self.follow_brain(&space, window, cx);
+            }
         }
         self.load(&space, window, cx);
+    }
+    fn follow_brain(&mut self, space: &Space, window: &mut Window, cx: &mut Context<Self>) {
+        let unedited = self
+            .loaded
+            .as_ref()
+            .is_some_and(|(from, read)| from.id == space.id && self.form_brain(cx) == read.brain);
+        if unedited {
+            self.adopt_brain(space.brain.clone(), window, cx);
+        }
+    }
+    /// Sets the form's brain to `brain`, as if the form had been filled with it.
+    fn adopt_brain(
+        &mut self,
+        brain: Option<SpaceBrain>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((from, read)) = &mut self.loaded {
+            from.brain = brain.clone();
+            read.brain = brain.clone();
+        }
+        let folder = (brain.as_ref()).map_or(String::new(), |b| b.folder.clone());
+        self.brain_folder
+            .update(cx, |input, cx| input.set_value(folder, window, cx));
+        self.brain = brain;
     }
     /// The form holds an edit the human has not saved.
     fn edits(&self, cx: &App) -> bool {
@@ -274,7 +308,7 @@ impl SpacesPage {
         let Some(id) = self.shown_space().map(|s| s.id.clone()) else {
             return;
         };
-        self.storage_asked_at = ui::now();
+        self.storage_asked = Some((id.clone(), ui::now()));
         let asked = id.clone();
         self.ask(
             ask::space_storage(id),
@@ -299,11 +333,10 @@ impl SpacesPage {
             return Err("Give the Space a name".into());
         }
         let sources = parse_sources(&self.sources.read(cx).value(), &space.sources)?;
-        let folder = self.brain_folder.read(cx).value().trim().to_owned();
-        let brain = match (&self.brain, folder.is_empty()) {
-            (Some(_), true) => return Err("Name the brain’s folder, such as second-brain".into()),
-            (brain, _) => brain.clone().map(|brain| SpaceBrain { folder, ..brain }),
-        };
+        let brain = self.form_brain(cx);
+        if brain.as_ref().is_some_and(|b| b.folder.is_empty()) {
+            return Err("Name the brain’s folder, such as second-brain".into());
+        }
         Ok(Space {
             name,
             brain,
@@ -314,6 +347,13 @@ impl SpacesPage {
             sources,
             ..space.clone()
         })
+    }
+
+    fn form_brain(&self, cx: &App) -> Option<SpaceBrain> {
+        let folder = self.brain_folder.read(cx).value().trim().to_owned();
+        self.brain
+            .clone()
+            .map(|brain| SpaceBrain { folder, ..brain })
     }
 
     /// Saves the form's edits over the Space as it is now, so a field the form did not change
@@ -385,16 +425,53 @@ impl SpacesPage {
                 let _ = this.update(cx, |view, cx| {
                     if let Some(path) = chosen {
                         let path = path.to_string_lossy().into_owned();
-                        let command = Command::SetSpaceBrain {
-                            space_id: space,
-                            path,
-                        };
-                        view.request(command, window, cx);
+                        view.set_brain(space, path, window, cx);
                     }
                 });
             });
         })
         .detach();
+    }
+    /// Makes `path` the Space's brain, or where its GitHub brain is cloned. After No brain on
+    /// a GitHub brain the folder is a new local brain, so No brain is saved first; the host
+    /// would otherwise take the folder for the clone.
+    fn set_brain(
+        &mut self,
+        space: SpaceId,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let command = Command::SetSpaceBrain {
+            space_id: space.clone(),
+            path,
+        };
+        let latest = self.shown_space().filter(|s| s.id == space).cloned();
+        let Some(latest) = latest.filter(|s| replaces_github_brain(&self.brain, &s.brain)) else {
+            return self.request(command, window, cx);
+        };
+        let unbrained = Space {
+            brain: None,
+            ..latest
+        };
+        self.ask(
+            ask::update_space(unbrained),
+            window,
+            cx,
+            move |view, saved, window, cx| match saved {
+                Ok(_) => {
+                    if view
+                        .loaded
+                        .as_ref()
+                        .is_some_and(|(from, _)| from.id == space)
+                    {
+                        view.adopt_brain(None, window, cx);
+                    }
+                    view.request(command, window, cx);
+                }
+                Err(error) => view.error = Some(error),
+            },
+        );
     }
 
     /// Asks first, then removes the Space; the host refuses the last one and one with an open
@@ -1506,6 +1583,26 @@ fn new_storage_line(check: &StorageCheck) -> String {
     )
 }
 
+/// Whether a change to the workspace asks again what `shown`'s storage holds: when the last
+/// question was about another Space, or about this one and has gone stale.
+fn reads_storage_again(
+    asked: Option<&(SpaceId, i64)>,
+    shown: &SpaceId,
+    moved: bool,
+    now: i64,
+) -> bool {
+    match asked {
+        Some((id, at)) if id == shown => moved && now - at > STORAGE_FRESH_MS,
+        _ => true,
+    }
+}
+
+/// Whether a folder chosen while the form says No brain replaces the Space's GitHub brain.
+fn replaces_github_brain(form: &Option<SpaceBrain>, space: &Option<SpaceBrain>) -> bool {
+    let github = |b: &SpaceBrain| matches!(b.repository, BrainRepository::GitHub { .. });
+    form.is_none() && space.as_ref().is_some_and(github)
+}
+
 /// The form's brain once a brain was chosen, which changes only where it is on this Mac or,
 /// for a Space with none, gives it one: an edited brain stays as the form has it, and No brain
 /// gives way to the brain the Space had, so Save keeps the one just chosen.
@@ -1978,9 +2075,10 @@ impl Render for SpacesPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        Joining, brain_after_choosing, brain_label, fallback_note, format_sources, holds_draft,
-        issues_line, join_choices, join_refused_by, merged, new_storage_line, parse_sources,
-        prefix_question, readers_line, repository_line, shared_with, storage_banner, sync_line,
+        Joining, STORAGE_FRESH_MS, brain_after_choosing, brain_label, fallback_note,
+        format_sources, holds_draft, issues_line, join_choices, join_refused_by, merged,
+        new_storage_line, parse_sources, prefix_question, readers_line, reads_storage_again,
+        replaces_github_brain, repository_line, shared_with, storage_banner, sync_line,
         thread_model,
     };
     use workspace_core::*;
@@ -2371,6 +2469,39 @@ mod tests {
             .brain,
             read.brain
         );
+    }
+
+    #[test]
+    fn the_space_shown_after_a_removal_reads_its_own_storage() {
+        let (removed, next) = (SpaceId("sage".into()), SpaceId("personal".into()));
+        let asked = (removed.clone(), 1_000);
+        assert!(reads_storage_again(Some(&asked), &next, false, 1_001));
+        assert!(!reads_storage_again(Some(&asked), &removed, true, 1_001));
+        let stale = 1_001 + STORAGE_FRESH_MS;
+        assert!(reads_storage_again(Some(&asked), &removed, true, stale));
+        assert!(!reads_storage_again(Some(&asked), &removed, false, stale));
+        assert!(reads_storage_again(None, &next, false, 0));
+    }
+
+    #[test]
+    fn a_folder_chosen_after_no_brain_replaces_only_a_github_brain() {
+        let github = SpaceBrain {
+            repository: BrainRepository::GitHub {
+                owner: "Sage-Social".into(),
+                name: "sagehaven-docs".into(),
+                extra: Extra::new(),
+            },
+            folder: "second-brain".into(),
+            extra: Extra::new(),
+        };
+        let local = SpaceBrain {
+            repository: BrainRepository::local(),
+            ..github.clone()
+        };
+        assert!(replaces_github_brain(&None, &Some(github.clone())));
+        assert!(!replaces_github_brain(&Some(github.clone()), &Some(github)));
+        assert!(!replaces_github_brain(&None, &Some(local)));
+        assert!(!replaces_github_brain(&None, &None));
     }
 
     #[test]
