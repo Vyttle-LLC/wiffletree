@@ -19,8 +19,8 @@ Four stacked tickets in the wiffletree repository, each with a full review. Pull
 
 ## 3. Behaviors page
 
-- [ ] 3.1 The Skills page becomes Behaviors: the scope bar `Workspace · Space ▾ · Repository ▾`; per role, each Behavior with its value, a provenance chip and Reset; the scope's additions.
-- [ ] 3.2 Advanced (Workspace only): today's rewrite, history and merges.
+- [x] 3.1 The Skills page becomes Behaviors: the scope bar `Workspace · Space ▾ · Repository ▾`; per role, each Behavior with its value, a provenance chip and Reset; the scope's additions. `Intent::OpenBehaviors` opens it at a scope for stage 4's Space page link.
+- [x] 3.2 Advanced (Workspace only): today's rewrite, history and merges.
 - [ ] 3.3 Offer once to delete additions lines a Behavior now says; never remove them unasked.
 
 ## 4. Models, Spaces and Settings screens

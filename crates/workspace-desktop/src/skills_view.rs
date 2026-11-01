@@ -1,19 +1,22 @@
-//! The Skills page: the four skills and the fixed core, and each skill's page, where the human
-//! adds their own rules after the stock text or rewrites it, resets it to stock, restores an
-//! earlier version from its history, and reviews or undoes a merge of a new stock version. No
-//! agent tool reaches what this page changes.
+//! The Behaviors page, which was the Skills page: each role's Behaviors and additions at a
+//! scope (`behaviors`), and, behind Advanced, the skills and the fixed core, and each skill's
+//! page, where the human adds their own rules after the stock text or rewrites it, resets it to
+//! stock, restores an earlier version from its history, and reviews or undoes a merge of a new
+//! stock version. No agent tool reaches what this page changes.
 use super::*;
+mod behaviors;
 use chrono::{DateTime, Local, NaiveDateTime};
 use gpui_component::{Disableable, Selectable, button::ButtonVariants};
 use ui::{card, confirm_card, eyebrow, hint, icon, over_dimmed, pill, stacked_banner};
 use wording::{counted, date_and_time, time_of_day, when};
+pub(super) use workspace_core::cascade::Scope;
 use workspace_core::skills::{
     Change, CoreInstructions, CoreText, Entry, History, Line, MergeReview, Recorded, Reviewed,
     Rewritten, merge::Source, merge_note, version,
 };
 
-/// What the Skills page shows: the list, the fixed core at one of its parts, one skill, its
-/// history or a review of its merge.
+/// What the Behaviors page shows: the Behaviors list, the fixed core at one of its parts, one
+/// skill, its history or a review of its merge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SkillView {
     List,
@@ -820,16 +823,18 @@ fn core_tab(part: &CoreInstructions) -> String {
     format!("{label} {}", part.version)
 }
 
-/// Any rewrite is out of date, which the sidebar's Skills row marks.
+/// Any rewrite is out of date, which the sidebar's Behaviors row and Advanced mark.
 pub(super) fn a_rewrite_is_out_of_date(shared: &Shared) -> bool {
     (shared.snapshot()).is_some_and(|snapshot| snapshot.skills.iter().any(out_of_date))
 }
 
-/// The Skills page: each skill's rules or rewrite, its history, merges and stock changes.
-pub(super) struct SkillsPage {
+/// The Behaviors page: each role's Behaviors and additions at a scope, and each skill's rules
+/// or rewrite, its history, merges and stock changes.
+pub(super) struct BehaviorsPage {
     bridge: Bridge,
     shared: Shared,
     skill_view: SkillView,
+    behaviors: behaviors::Behaviors,
     /// The open skill's rules or rewrite as the human is editing them.
     skill_text: Entity<TextareaState>,
     stock_unfolded: bool,
@@ -851,8 +856,8 @@ pub(super) struct SkillsPage {
     /// The running host's core instructions with their texts, read when the core page opens.
     core: Vec<CoreText>,
 }
-impl EventEmitter<Intent> for SkillsPage {}
-impl SkillsPage {
+impl EventEmitter<Intent> for BehaviorsPage {}
+impl BehaviorsPage {
     pub(super) fn new(
         bridge: Bridge,
         verifiers: Entity<verifiers::VerifierEditor>,
@@ -875,6 +880,7 @@ impl SkillsPage {
             bridge,
             shared: Shared::default(),
             skill_view: SkillView::List,
+            behaviors: behaviors::Behaviors::new(window, cx),
             skill_text,
             stock_unfolded: false,
             confirming: None,
@@ -888,14 +894,24 @@ impl SkillsPage {
             core: vec![],
         }
     }
-    /// An editor without unsaved edits follows the saved rules or rewrite in each snapshot.
+    /// An editor without unsaved edits follows the saved rules or rewrite in each snapshot, and
+    /// the Behaviors list on screen reads its layers again when a Space changes, as a sync or a
+    /// teammate's save changes it.
     pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
         let (_, moved) = shared.moved_from(&self.shared);
         let redraw = redraws(&self.shared, &shared);
         if moved && let Some(snapshot) = shared.snapshot() {
             self.follow_saved_rules(snapshot, window, cx);
         }
+        fn spaces(shared: &Shared) -> Option<&Vec<Space>> {
+            shared.snapshot().map(|s| &s.spaces)
+        }
+        let spaces_changed = moved && spaces(&shared) != spaces(&self.shared);
         self.shared = shared;
+        let listed = self.shared.page == Page::Behaviors && self.skill_view == SkillView::List;
+        if spaces_changed && listed {
+            self.read_behaviors(window, cx);
+        }
         if redraw {
             cx.notify();
         }
@@ -938,6 +954,9 @@ impl SkillsPage {
         }
         if matches!(view, SkillView::Core(_)) {
             self.read_core(window, cx);
+        }
+        if view == SkillView::List {
+            self.read_behaviors(window, cx);
         }
         self.skill_view = view;
         cx.notify();
@@ -1113,11 +1132,11 @@ impl SkillsPage {
             SkillView::Core(part) => self.core_page(part, p, cx),
             SkillView::Skill(skill) => match self.skill_state(skill) {
                 Some(state) => self.skill_page(state, p, cx),
-                None => self.skills_list(p, cx),
+                None => self.behaviors_list(p, cx),
             },
             SkillView::History(skill) => self.history_page(skill, p, cx),
             SkillView::Review(skill) => self.review_page(skill, p, cx),
-            SkillView::List => self.skills_list(p, cx),
+            SkillView::List => self.behaviors_list(p, cx),
         };
         let shown = match self.skill_view {
             SkillView::Skill(skill) | SkillView::History(skill) | SkillView::Review(skill) => {
@@ -1132,16 +1151,13 @@ impl SkillsPage {
         over_dimmed(page, Self::confirm_dialog(state, confirm, unsaved, p, cx))
     }
 
+    /// Advanced's list: each skill's state, opening its page, and the fixed core.
     fn skills_list(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let skills = self.shared.snapshot().into_iter().flat_map(|s| &s.skills);
         div()
             .flex()
             .flex_col()
             .gap_2()
-            .child(hint(
-                "How your agents work · changes apply from each agent's next turn",
-                p,
-            ))
             .child(eyebrow("SKILLS YOU CAN CHANGE", p).pt_2())
             .children(skills.map(|state| {
                 let skill = state.skill;
@@ -1201,8 +1217,8 @@ impl SkillsPage {
             .child(hint(who, p).text_size(px(font::CAPTION)))
     }
 
-    /// "Skills · <name>", where Skills goes back to the list, or "Skills · <skill> · History",
-    /// where the skill goes back to its page.
+    /// "Behaviors · <name>", where Behaviors goes back to the list, or "Behaviors · <skill> ·
+    /// History", where the skill goes back to its page.
     fn skills_crumb(&self, name: &'static str, p: Palette, cx: &mut Context<Self>) -> Div {
         let link = |id: &'static str, view: SkillView, label: &'static str| {
             div()
@@ -1217,7 +1233,7 @@ impl SkillsPage {
             .gap_1()
             .text_size(px(font::CAPTION))
             .text_color(p.subtle)
-            .child(link("skills-crumb", SkillView::List, "Skills"));
+            .child(link("skills-crumb", SkillView::List, "Behaviors"));
         let (skill, below) = match self.skill_view {
             SkillView::History(skill) => (skill, "· History"),
             SkillView::Review(skill) => (skill, "· Review changes"),
@@ -2236,7 +2252,7 @@ impl SkillsPage {
     }
 }
 
-impl Requests for SkillsPage {
+impl Requests for BehaviorsPage {
     fn bridge(&self) -> &Bridge {
         &self.bridge
     }
@@ -2277,12 +2293,12 @@ impl Requests for SkillsPage {
         }
     }
 }
-impl Render for SkillsPage {
+impl Render for BehaviorsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        render_counts::count("Skills");
+        render_counts::count("Behaviors");
         let p = palette(is_dark(cx));
         ui::page(
-            "Skills",
+            "Behaviors",
             "How your agents work",
             self.skills_page(p, cx),
             None,

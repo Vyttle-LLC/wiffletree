@@ -1779,7 +1779,7 @@ pub(super) fn space_color(spaces: &[Space], id: &SpaceId, p: Palette) -> Hsla {
 }
 
 /// Stored on GitHub, so other people can read it.
-fn is_shared(space: &Space) -> bool {
+pub(super) fn is_shared(space: &Space) -> bool {
     matches!(space.storage.repository, StorageRepository::GitHub { .. })
 }
 

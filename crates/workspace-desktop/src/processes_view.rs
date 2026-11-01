@@ -507,7 +507,7 @@ mod tests {
         // A workspace page hides the inspector, panel and all.
         for page in [
             Page::Models,
-            Page::Skills,
+            Page::Behaviors,
             Page::Usage,
             Page::Repositories,
             Page::Spaces,

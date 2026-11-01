@@ -20,7 +20,7 @@ The host SHALL build each agent's instructions from a fixed core and at most one
 - **THEN** the sorting run's instructions are unchanged and contain none of the rewrite
 
 #### Scenario: No pull request skill
-- **WHEN** the Skills page lists the skills
+- **WHEN** the Behaviors page's Advanced lists the skills
 - **THEN** there are five, and none is about opening a pull request
 
 #### Scenario: A thread in a Space
@@ -38,6 +38,37 @@ The host SHALL build each agent's instructions from a fixed core and at most one
 #### Scenario: A coordinator in a Space with additions
 - **WHEN** a project in Sage starts its coordinator and Sage has additions
 - **THEN** the coordinator's instructions end with Sage's additions under their heading
+
+### Requirement: The Skills page
+The sidebar's Workspace section SHALL have a Behaviors row after Models, opening the Behaviors page, which was the Skills page; a link to a skill SHALL open that skill's page there. The page SHALL have a scope bar of Workspace, a Space and one of that Space's repositories, the repository choice off until a Space is chosen, and SHALL open at a scope it is given. At the scope it SHALL list each role's Behaviors, each with its name, what agents are told for its value, a switch or a pick, a chip naming the layer its value came from (Stock, Workspace, the Space, the repository, or "Set here" for the scope's own) and, for a value the scope sets, Reset to what the scope inherits. A Behavior the scope's layer may not set SHALL show its value read-only, and at a Space or repository a safety Behavior SHALL offer only the choices at least as strict as it inherits, with a line saying so. At the Workspace each role's additions SHALL be its skill's rules, edited on the skill's page; a Space and a repository SHALL each have one additions editor, and a shared Space's scope SHALL say it is shared with the Space's members. The page SHALL read and save each layer only through `layer_values` and `set_layer_values`, show a refusal beside what it refused, and write nothing without the human's action. At the Workspace only, an Advanced disclosure SHALL list the five skills, each with what it is for, the roles that use it and its state ("Stock", "Stock and N of your rules", "Rewritten", "Rewritten · updated", "Rewritten · out of date", "Rewritten · needs you"), and the fixed core, marked read-only. A skill's page SHALL show its stock text, its mode and editor, Save and Discard, Reset to stock, its history, and what the app's own operations enforce whatever the text says. It SHALL NOT claim the app enforces more: it SHALL say that an agent's shell is not sandboxed and can still push with the human's credentials. The fixed core's page SHALL show its text and why it cannot be edited. The Reviewing page SHALL show each review level's "Use it" line read-only, with a link to the Models page, and the Coordinating page SHALL link to the model guide.
+
+#### Scenario: Opening the page
+- **WHEN** the human chooses Behaviors in the sidebar
+- **THEN** the page shows the Workspace's Behaviors by role, each with its chip, and Advanced lists Coordinating, Implementing, Reviewing, Keeping a PR and Assisting with their states, and the fixed core marked read-only
+
+#### Scenario: A value set at a Space
+- **WHEN** the human sets Status table for Sage, which inherits it from the Workspace
+- **THEN** the row's chip reads "Set here", and Reset to Workspace puts back the Workspace's value
+
+#### Scenario: A safety Behavior at a Space
+- **WHEN** the Workspace sets Publishing to "Always ask first" and the human opens Sage
+- **THEN** Publishing offers only "Always ask first", and the page says a Space or repository may only make it stricter
+
+#### Scenario: A layer the Behavior does not allow
+- **WHEN** the human opens sagechat-sms in Sage
+- **THEN** Status table shows its value read-only
+
+#### Scenario: Advanced at the Workspace only
+- **WHEN** the human opens a Space or a repository
+- **THEN** there is no Advanced, and the scope's additions editor is shown instead
+
+#### Scenario: The fixed core
+- **WHEN** the human opens the fixed core
+- **THEN** its text is shown with no editor and no Reset
+
+#### Scenario: Updated and needs you
+- **WHEN** Coordinating was merged into v2 and its note is not dismissed, and Reviewing has a question waiting
+- **THEN** Advanced shows Coordinating as "Rewritten · updated" and Reviewing as "Rewritten · needs you", and the sidebar's Behaviors row and Advanced show the out-of-date mark for Reviewing
 
 ## ADDED Requirements
 

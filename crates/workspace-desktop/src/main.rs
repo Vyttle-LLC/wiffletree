@@ -218,7 +218,9 @@ enum Page {
     Conversation,
     Usage,
     Models,
-    Skills,
+    /// Was Skills: each role's Behaviors and additions at a scope, and the skills behind
+    /// Advanced.
+    Behaviors,
     Issues,
     Repositories,
     Spaces,
@@ -246,7 +248,7 @@ struct Workspace {
     /// The human chose to let a refusing host's agents finish before it restarts.
     waiting_for_host: bool,
     models: Entity<models_view::ModelsPage>,
-    skills: Entity<skills_view::SkillsPage>,
+    behaviors: Entity<skills_view::BehaviorsPage>,
     conversation: Entity<conversation::Conversation>,
     creation: Option<Entity<CreationForm>>,
     repositories: Entity<repositories_view::RepositoriesPage>,
@@ -275,9 +277,10 @@ impl Workspace {
         Self::adopt(&models, window, cx);
         // The start screen draws what the Models page detected.
         cx.observe(&models, |_, _, cx| cx.notify()).detach();
-        let skills = cx
-            .new(|cx| skills_view::SkillsPage::new(bridge.clone(), verifiers.clone(), window, cx));
-        Self::adopt(&skills, window, cx);
+        let behaviors = cx.new(|cx| {
+            skills_view::BehaviorsPage::new(bridge.clone(), verifiers.clone(), window, cx)
+        });
+        Self::adopt(&behaviors, window, cx);
         let inbox = cx.new(|cx| inbox::Inbox::new(bridge.clone(), window, cx));
         let contexts = cx.new(|_| context_view::Contexts::new(bridge.clone()));
         let conversation = cx.new(|cx| {
@@ -295,7 +298,7 @@ impl Workspace {
                 bridge.clone(),
                 inbox.clone(),
                 contexts.clone(),
-                skills.clone(),
+                behaviors.clone(),
                 window,
                 cx,
             )
@@ -339,7 +342,7 @@ impl Workspace {
             refused: false,
             waiting_for_host: false,
             models,
-            skills,
+            behaviors,
             conversation,
             creation: None,
             repositories,
@@ -479,9 +482,15 @@ impl Workspace {
                 self.archived(*archived, affected, window, cx)
             }
             Intent::OpenSkill(skill) => {
-                self.open_page(Page::Skills, window, cx);
-                self.skills.update(cx, |skills, cx| {
-                    skills.open_skill(skills_view::SkillView::Skill(*skill), window, cx)
+                self.open_page(Page::Behaviors, window, cx);
+                self.behaviors.update(cx, |behaviors, cx| {
+                    behaviors.open_skill(skills_view::SkillView::Skill(*skill), window, cx)
+                });
+            }
+            Intent::OpenBehaviors(scope) => {
+                self.open_page(Page::Behaviors, window, cx);
+                self.behaviors.update(cx, |behaviors, cx| {
+                    behaviors.open_scope(scope.clone(), window, cx)
                 });
             }
             Intent::OpenSpace(space) => {
@@ -571,8 +580,9 @@ impl Workspace {
         });
         self.models
             .update(cx, |models, cx| models.share(shared.clone(), window, cx));
-        self.skills
-            .update(cx, |skills, cx| skills.share(shared.clone(), window, cx));
+        self.behaviors.update(cx, |behaviors, cx| {
+            behaviors.share(shared.clone(), window, cx)
+        });
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.share(shared.clone(), window, cx));
         self.inbox
@@ -1044,8 +1054,8 @@ impl Workspace {
         match page {
             Page::Usage => self.read_quotas(window, cx),
             Page::Repositories => self.refresh_repositories(true, window, cx),
-            Page::Skills => self.skills.update(cx, |skills, cx| {
-                skills.open_skill(skills_view::SkillView::List, window, cx)
+            Page::Behaviors => self.behaviors.update(cx, |behaviors, cx| {
+                behaviors.open_skill(skills_view::SkillView::List, window, cx)
             }),
             Page::Assistant => self
                 .assistant

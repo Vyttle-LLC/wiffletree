@@ -921,7 +921,7 @@ impl Render for Workspace {
         let main = match self.shared.page {
             Page::Usage => self.usage.clone().cached(full()).into_any_element(),
             Page::Models => self.models.clone().cached(full()).into_any_element(),
-            Page::Skills => self.skills.clone().cached(full()).into_any_element(),
+            Page::Behaviors => self.behaviors.clone().cached(full()).into_any_element(),
             Page::Repositories => self.repositories.clone().cached(full()).into_any_element(),
             Page::Spaces => self.spaces.clone().cached(full()).into_any_element(),
             Page::Brains => self.brains.clone().cached(full()).into_any_element(),
