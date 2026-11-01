@@ -3,6 +3,7 @@
 use super::*;
 use file_links::Linked;
 use gpui_component::button::ButtonVariants;
+use gpui_component::input::InputState;
 use std::collections::HashMap;
 use ui::{card, hint, mono, pill};
 
@@ -19,6 +20,9 @@ pub(super) struct Inbox {
     compared: workspace_notes::Compared,
     /// Each open item's prompt with its file references linked, by item id.
     prompts: HashMap<String, Linked>,
+    /// The brain conflict whose Keep both line is open, by its card's key, and that line.
+    keeping_both: Option<String>,
+    scope: Entity<InputState>,
 }
 impl Inbox {
     pub(super) fn new(bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -33,7 +37,48 @@ impl Inbox {
             answering: None,
             compared: None,
             prompts: HashMap::new(),
+            keeping_both: None,
+            scope: cx
+                .new(|cx| InputState::new(window, cx).placeholder("One line that scopes both")),
         }
+    }
+    /// A brain conflict's card; `evidence` opens the brain browser's Conflicts view.
+    pub(super) fn conflict_card(
+        &self,
+        card: &ConflictCard,
+        evidence: OpenIssue,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let view = cx.entity().downgrade();
+        let (repository, conflict) = (card.repository.clone(), card.conflict.id.clone());
+        let key = conflict_card::key(card);
+        let open = self.keeping_both.as_deref() == Some(key.as_str());
+        let on: conflict_card::OnConflict = Rc::new(move |action, window, cx| match action {
+            conflict_card::ConflictAction::Evidence => evidence(window, cx),
+            conflict_card::ConflictAction::KeepBoth(open) => {
+                let key = key.clone();
+                let _ = view.update(cx, |view, cx| {
+                    view.keeping_both = open.then_some(key);
+                    if open {
+                        view.scope.update(cx, |input, cx| {
+                            input.set_value("", window, cx);
+                            input.focus(window, cx);
+                        });
+                    }
+                    cx.notify();
+                });
+            }
+            conflict_card::ConflictAction::Rule(ruling) => {
+                let command = Command::RuleConflict {
+                    repository: repository.clone(),
+                    conflict_id: conflict.clone(),
+                    ruling,
+                };
+                let _ = view.update(cx, |view, cx| view.request(command, window, cx));
+            }
+        });
+        conflict_card::conflict_card(card, open, &self.scope, on, p)
     }
     /// An open comparison is read again when the synced settings or the notes change.
     pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
@@ -498,6 +543,7 @@ impl Requests for Inbox {
                 }
             }
             Command::SettlePausedFile { .. } => self.compared = None,
+            Command::RuleConflict { .. } => self.keeping_both = None,
             _ => {}
         }
     }

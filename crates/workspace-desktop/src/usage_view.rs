@@ -340,7 +340,13 @@ impl UsagePage {
                     .flex_col()
                     .gap_1()
                     .cursor_pointer()
-                    .on_click(cx.listener(move |_, _, _, c| c.emit(Intent::Select(id.clone()))))
+                    // A brain's compile line has no session to select: its runs are on Brains.
+                    .on_click(cx.listener(move |_, _, _, c| {
+                        match id.starts_with(workspace_core::COMPILE_LINE) {
+                            true => c.emit(Intent::OpenPage(Page::Brains)),
+                            false => c.emit(Intent::Select(id.clone())),
+                        }
+                    }))
                     .child(
                         div()
                             .flex()

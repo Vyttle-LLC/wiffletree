@@ -325,11 +325,17 @@ pub const GATE_RULES: [&str; 10] = [
 
 /// What the Brains command answers: every registered brain and its batches that are not merged,
 /// or merged in the last day.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct BrainsPage {
     pub brains: Vec<Brain>,
     pub batches: Vec<BrainBatch>,
     /// This host as a compiler, which the page offers as the one to compile on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub this_host: Option<BrainCompiler>,
+    /// The compile of each brain this host compiles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compiles: Vec<crate::BrainCompileState>,
+    /// Open conflicts no project's Inbox shows, as no project includes their claim's repository.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<crate::ConflictCard>,
 }

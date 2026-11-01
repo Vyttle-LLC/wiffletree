@@ -13,7 +13,7 @@ const RETIRED: [&str; 3] = [
 /// The roles that get the agents' communication contract; assistant threads and job runs get
 /// its thread version.
 fn agent_roles() -> impl Iterator<Item = Role> {
-    Role::ALL.into_iter().filter(|role| !role.is_thread())
+    (Role::ALL.into_iter()).filter(|role| !role.is_thread() && *role != Role::Compiler)
 }
 
 /// A role's instructions with its skill rewritten to an empty text: the fixed core alone, which
@@ -701,13 +701,26 @@ fn a_job_run_is_told_it_only_reads_and_saves_and_offers_no_card() {
     ] {
         assert!(!run.contains(absent), "{absent}");
     }
-    assert_eq!(Skill::for_role(Role::JobRun), Skill::Assisting);
+    assert_eq!(Skill::for_role(Role::JobRun), Some(Skill::Assisting));
+}
+
+#[test]
+fn a_brain_compile_runs_under_its_bundled_procedure_with_no_skill() {
+    assert_eq!(Skill::for_role(Role::Compiler), None);
+    let procedure = provider::skill(Role::Compiler);
+    assert!(procedure.starts_with("# Brain compile procedure — v1"));
+    for tool in ["`queue_conflict`", "`finish_compile`"] {
+        assert!(procedure.contains(tool), "{tool}");
+    }
+    for absent in ["create_ticket", "`log_work`", "`report`", "`send_message`"] {
+        assert!(!procedure.contains(absent), "{absent}");
+    }
 }
 
 #[test]
 fn there_are_five_versioned_stock_skills_and_none_opens_a_pull_request() {
     assert_eq!(Skill::ALL.len(), 5);
-    assert_eq!(Skill::for_role(Role::Assistant), Skill::Assisting);
+    assert_eq!(Skill::for_role(Role::Assistant), Some(Skill::Assisting));
     for skill in Skill::ALL {
         assert!(
             skills::stock(skill).starts_with(&format!("# {} — v", skill.name())),

@@ -1,7 +1,10 @@
 //! Ref verification (`brain-compile`, decision 2): what an entry's `ref` names, and whether this
 //! machine's clone of its repository holds it on the repository's default branch on GitHub.
-//! Deterministic and local: it never fetches and never asks GitHub, so a PR's state is not read
-//! here. Results are cached by each clone's default-branch head, so a repeat costs one ref read.
+//! `verify` is deterministic and local: it never fetches and never asks GitHub. Results are
+//! cached by each clone's default-branch head, so a repeat costs one ref read. `verify_with` also
+//! reads named PRs' states with `gh`; the brain index stores what it finds during the brain's
+//! pass, for the browser, and a compile's `for_compile` fetches each clone first, once, then
+//! uses it and records the release tag containing a verified commit.
 use crate::*;
 use std::collections::{HashMap, HashSet};
 use workspace_core::{RefAnchors, RefState, RefVerification};
@@ -42,6 +45,8 @@ pub(crate) fn anchors(reference: &str) -> RefAnchors {
 pub(crate) struct RepoClone {
     pub(crate) path: PathBuf,
     pub(crate) defaults: Vec<String>,
+    /// `owner/name` on GitHub, which a compile asks about a named PR.
+    pub(crate) github: Option<String>,
 }
 
 /// This machine's clones of the workspace repositories, by log folder in lower case.
@@ -66,6 +71,8 @@ impl Clones {
                 .push(RepoClone {
                     path: PathBuf::from(&repository.path),
                     defaults,
+                    github: (repository.github.as_ref())
+                        .map(|github| format!("{}/{}", github.owner, github.name)),
                 });
         }
         Self(clones)
@@ -196,6 +203,133 @@ pub(crate) fn verify(
         .collect()
 }
 
+/// One `ref` as a compile run checked it, with the release tag that holds its commit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Checked {
+    pub(crate) verification: RefVerification,
+    pub(crate) tag: Option<String>,
+}
+
+/// How a verification's reason ends for a PR closed without merging, which is final: it is not
+/// asked about again.
+pub(crate) const CLOSED_UNMERGED: &str = "was closed without merging";
+
+/// A named PR's state on GitHub.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PullState {
+    Merged,
+    Open,
+    Closed,
+}
+
+fn pull_state(
+    gh: &publish::Tool<runtime::GhAnswer>,
+    clone: &RepoClone,
+    number: u64,
+) -> Option<PullState> {
+    let github = clone.github.as_deref()?;
+    let endpoint = format!("repos/{github}/pulls/{number}");
+    let answer = gh(&clone.path, &["api", "--hostname", "github.com", &endpoint]).ok()?;
+    if !answer.status.success() {
+        return None;
+    }
+    let pull: Value = serde_json::from_str(&answer.output).ok()?;
+    Some(match (pull["merged"].as_bool(), pull["state"].as_str()) {
+        (Some(true), _) => PullState::Merged,
+        (_, Some("open")) => PullState::Open,
+        _ => PullState::Closed,
+    })
+}
+
+/// The oldest tag holding `sha` in the clone, as evidence of a release.
+fn tag_containing(clone: &Path, sha: &str) -> Option<String> {
+    let answer =
+        runtime::git_answer(clone, &["tag", "--contains", sha, "--sort=creatordate"]).ok()?;
+    answer.status.success().then_some(())?;
+    answer.output.lines().next().map(str::to_owned)
+}
+
+/// `verify`, then with `gh` each named PR's state: one that merged verifies its entry and an
+/// open one claims it. The brain index and compile runs both verify this way, so an entry reads
+/// the same wherever it is shown; each PR is asked about once per call.
+pub(crate) fn verify_with(
+    clones: &Clones,
+    refs: &[(&str, &str)],
+    cache: &mut Cache,
+    gh: Option<&publish::Tool<runtime::GhAnswer>>,
+) -> Vec<RefVerification> {
+    let mut pulls: HashMap<(PathBuf, u64), Option<PullState>> = HashMap::new();
+    (refs.iter())
+        .zip(verify(clones, refs, cache))
+        .map(|((folder, reference), verification)| {
+            let (Some(gh), Some(number)) = (gh, anchors(reference).pull_request) else {
+                return verification;
+            };
+            let here = clones.0.get(&folder.to_ascii_lowercase());
+            if verification.state == RefState::Verified || here.is_none() {
+                return verification;
+            }
+            let state = (here.into_iter().flatten()).find_map(|clone| {
+                *(pulls.entry((clone.path.clone(), number)))
+                    .or_insert_with(|| pull_state(gh, clone, number))
+            });
+            match state {
+                Some(PullState::Merged) => RefVerification {
+                    state: RefState::Verified,
+                    reason: None,
+                },
+                Some(PullState::Open) => RefVerification {
+                    state: RefState::Claimed,
+                    reason: Some(format!("PR #{number} is open")),
+                },
+                Some(PullState::Closed) => RefVerification {
+                    reason: Some(format!("PR #{number} {CLOSED_UNMERGED}")),
+                    ..verification
+                },
+                None => verification,
+            }
+        })
+        .collect()
+}
+
+/// A compile run's check of each `(folder, ref)`: each clone the refs name is fetched once, then
+/// `verify_with` runs, and a verified commit's release tag is recorded.
+pub(crate) fn for_compile(
+    clones: &Clones,
+    refs: &[(&str, &str)],
+    tools: &publish::Tools,
+) -> Vec<Checked> {
+    let mut fetched: HashSet<&Path> = HashSet::new();
+    for (folder, _) in refs {
+        for clone in clones
+            .0
+            .get(&folder.to_ascii_lowercase())
+            .into_iter()
+            .flatten()
+        {
+            if fetched.insert(&clone.path) {
+                // An offline fetch leaves the clone as it was, which verify reads as it is.
+                let _ = (tools.git)(&clone.path, &["fetch", "--quiet", "origin"]);
+            }
+        }
+    }
+    let verified = verify_with(clones, refs, &mut Cache::default(), Some(&tools.gh));
+    refs.iter()
+        .zip(verified)
+        .map(|((folder, reference), verification)| {
+            let anchors = anchors(reference);
+            let here = clones.0.get(&folder.to_ascii_lowercase());
+            let tag = match verification.state {
+                RefState::Verified => (here.into_iter().flatten()).find_map(|clone| {
+                    (anchors.commits.iter()).find_map(|sha| tag_containing(&clone.path, sha))
+                }),
+                _ => None,
+            };
+            Checked { verification, tag }
+        })
+        .collect()
+}
+
 /// What the clone holds of the named commits, and whether the default branch at `head`
 /// contains each: one question per commit for a few, or one listing of the branch for many.
 fn look_up(clone: &Path, head: &str, commits: &[&str]) -> Vec<(String, Option<Found>)> {
@@ -254,6 +388,7 @@ fn look_up(clone: &Path, head: &str, commits: &[&str]) -> Vec<(String, Option<Fo
 mod tests {
     use super::*;
     use crate::test_support::git;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn a_ref_names_its_branch_commits_and_pull_request() {
@@ -315,6 +450,7 @@ mod tests {
             vec![RepoClone {
                 path: clone.clone(),
                 defaults: vec!["refs/remotes/origin/HEAD".into()],
+                github: Some("Sage-Social/relay".into()),
             }],
         )]));
         Relay {
@@ -448,5 +584,87 @@ mod tests {
             "forgotten between calls only"
         );
         assert_eq!(cache.size, 1);
+    }
+
+    /// Tools whose `gh` says PR #81 merged and #92 is open, counting each `git fetch`.
+    fn compile_tools(fetches: Arc<Mutex<Vec<PathBuf>>>) -> publish::Tools {
+        let gh = |_: &Path, args: &[&str]| -> Result<runtime::GhAnswer> {
+            let pull = match args.last().copied() {
+                Some("repos/Sage-Social/relay/pulls/81") => {
+                    json!({"state": "closed", "merged": true})
+                }
+                Some("repos/Sage-Social/relay/pulls/92") => {
+                    json!({"state": "open", "merged": false})
+                }
+                other => panic!("unexpected gh call {other:?}"),
+            };
+            Ok(runtime::GhAnswer {
+                status: publish::tests::exit(0),
+                output: pull.to_string(),
+                error: String::new(),
+            })
+        };
+        let git = move |path: &Path, args: &[&str]| -> Result<runtime::GitAnswer> {
+            assert_eq!(args, ["fetch", "--quiet", "origin"]);
+            fetches.lock().unwrap().push(path.to_owned());
+            Ok(runtime::GitAnswer {
+                status: publish::tests::exit(0),
+                output: String::new(),
+                error: String::new(),
+            })
+        };
+        publish::Tools {
+            gh: Arc::new(gh),
+            git: Arc::new(git),
+        }
+    }
+
+    #[test]
+    fn a_compile_fetches_once_reads_named_prs_and_records_the_release_tag() {
+        let relay = relay();
+        let clone = relay.clones.0["relay"][0].path.clone();
+        git(&clone, &["tag", "v1.8.0", &relay.merged]);
+        let fetches = Arc::new(Mutex::new(vec![]));
+        let tools = compile_tools(fetches.clone());
+        let (merged, merged_pr, open_pr) = (
+            format!("main @ {}", relay.merged),
+            format!("side @ {} · PR #81", relay.side),
+            format!("wiffletree/retry-telnyx-timeout @ {} · PR #92", relay.side),
+        );
+        let refs = [
+            ("relay", merged.as_str()),
+            ("relay", merged_pr.as_str()),
+            ("relay", open_pr.as_str()),
+            ("relay", "—"),
+            ("watch", merged.as_str()),
+        ];
+        let checked = for_compile(&relay.clones, &refs, &tools);
+        let states: Vec<RefState> = checked.iter().map(|c| c.verification.state).collect();
+        assert_eq!(
+            states,
+            [
+                RefState::Verified,
+                RefState::Verified,
+                RefState::Claimed,
+                RefState::Unverified,
+                RefState::Unverified,
+            ]
+        );
+        assert_eq!(checked[0].tag.as_deref(), Some("v1.8.0"));
+        assert_eq!(checked[1].tag, None);
+        assert_eq!(
+            checked[2].verification.reason.as_deref(),
+            Some("PR #92 is open")
+        );
+        assert_eq!(
+            checked[4].verification.reason.as_deref(),
+            Some("not on this machine")
+        );
+        assert_eq!(*fetches.lock().unwrap(), [clone]);
+        // The brain index verifies the same refs alike, PRs included, without fetching.
+        let indexed = verify_with(&relay.clones, &refs, &mut Cache::default(), Some(&tools.gh));
+        let compiled: Vec<RefVerification> = checked.into_iter().map(|c| c.verification).collect();
+        assert_eq!(indexed, compiled);
+        assert_eq!(fetches.lock().unwrap().len(), 1);
     }
 }

@@ -19,6 +19,9 @@ fn main() -> Result<()> {
     if args.first().map(String::as_str) == Some("issue-thread-mcp") {
         return workspace_host::mcp::serve_stdio(workspace_host::mcp::issue_thread_tools());
     }
+    if args.first().map(String::as_str) == Some("compile-mcp") {
+        return workspace_host::mcp::serve_stdio(workspace_host::mcp::compile_tools());
+    }
     // Claude's hook before a job run's shell command. Exit 2 is the only refusal Claude
     // honours; any other failure would let the command run. So input that cannot be read is
     // refused as unreadable, the reason is written without a panic, and the only exit 0 is an

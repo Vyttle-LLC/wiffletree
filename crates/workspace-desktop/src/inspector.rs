@@ -1,5 +1,6 @@
 //! The right-edge rail and the inspector panel it opens for the selected session.
 use super::*;
+use brain_browser_view::{BrainOpening, BrainTarget, BrainView};
 use gpui_component::{
     Disableable,
     button::ButtonVariants,
@@ -1001,7 +1002,10 @@ impl Inspector {
 
     fn attention_panel(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let items = self.shared.project_attention();
-        let notes = self.shared.workspace_notes();
+        let project = self.shared.project_id().unwrap_or_default();
+        let notes: Vec<&WorkspaceNote> = (self.shared.workspace_notes().iter())
+            .filter(|note| note.is_for(&project))
+            .collect();
         if items.is_empty() && notes.is_empty() {
             return empty_state(
                 "check",
@@ -1018,7 +1022,7 @@ impl Inspector {
         });
         // Issue notes first, under their own label, as every project's Inbox shows them.
         let (issues, others): (Vec<&WorkspaceNote>, Vec<&WorkspaceNote>) =
-            (notes.iter()).partition(|note| matches!(note, WorkspaceNote::Issue(_)));
+            (notes.into_iter()).partition(|note| matches!(note, WorkspaceNote::Issue(_)));
         let mut body = div()
             .flex()
             .flex_col()
@@ -1051,6 +1055,20 @@ impl Inspector {
                 });
                 self.inbox
                     .update(cx, |inbox, cx| inbox.issue_card(note, open, p, cx))
+            }
+            WorkspaceNote::Conflict(card) => {
+                let inspector = cx.entity().downgrade();
+                let opening = BrainOpening {
+                    repository: card.repository.clone(),
+                    project: self.shared.project_id(),
+                    target: BrainTarget::View(BrainView::Conflicts),
+                };
+                let evidence: inbox::OpenIssue = Rc::new(move |_, cx| {
+                    let opening = opening.clone();
+                    let _ = inspector.update(cx, |_, cx| cx.emit(Intent::OpenBrain(opening)));
+                });
+                self.inbox
+                    .update(cx, |inbox, cx| inbox.conflict_card(card, evidence, p, cx))
             }
         }
     }
@@ -1159,7 +1177,11 @@ impl Render for Inspector {
 impl Workspace {
     pub(super) fn inspector_rail(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let role = self.shared.selected_role();
-        let attention = self.shared.workspace_notes().len() + self.shared.project_attention().len();
+        let project = self.shared.project_id().unwrap_or_default();
+        let notes = (self.shared.workspace_notes().iter())
+            .filter(|note| note.is_for(&project) && note.needs_you())
+            .count();
+        let attention = notes + self.shared.project_attention().len();
         let mut rail = div()
             .w(px(64.))
             .h_full()

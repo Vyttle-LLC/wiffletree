@@ -6,6 +6,7 @@ pub mod board;
 mod brain;
 mod brain_browser;
 mod client;
+mod compile;
 mod context;
 pub mod data_dir;
 #[cfg(target_os = "macos")]
@@ -40,6 +41,7 @@ use anyhow::{Context, Result, bail, ensure};
 pub use brain::*;
 pub use brain_browser::*;
 pub use client::*;
+pub use compile::*;
 pub use context::*;
 pub use files::*;
 pub use host::*;
@@ -92,9 +94,12 @@ pub enum Role {
     /// One run of a scheduled job: a read-only thread in the job's Space that only the
     /// scheduler starts.
     JobRun,
+    /// One brain compile run: owned by the brain it compiles, outside every project and Space,
+    /// writing only that brain's wiki in a worktree. Only the compile job starts one.
+    Compiler,
 }
 impl Role {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::ProjectOrchestrator,
         Self::TaskOrchestrator,
         Self::Implementer,
@@ -104,6 +109,7 @@ impl Role {
         Self::Keeper,
         Self::Assistant,
         Self::JobRun,
+        Self::Compiler,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -116,12 +122,17 @@ impl Role {
             Self::Keeper => "PR keeper",
             Self::Assistant => "Assistant",
             Self::JobRun => "Job run",
+            Self::Compiler => "Brain compiler",
         }
     }
     pub fn is_worker(self) -> bool {
         !matches!(
             self,
-            Self::ProjectOrchestrator | Self::TaskOrchestrator | Self::Assistant | Self::JobRun
+            Self::ProjectOrchestrator
+                | Self::TaskOrchestrator
+                | Self::Assistant
+                | Self::JobRun
+                | Self::Compiler
         )
     }
     /// A thread of the assistant or a job's run: owned by a Space, read-only but for its
@@ -157,16 +168,17 @@ impl Skill {
         Self::Assisting,
     ];
     /// The skill a role's instructions end with. The PR keeper's comment sorting is not a role's
-    /// turn and gets none.
-    pub fn for_role(role: Role) -> Self {
-        match role {
+    /// turn and gets none, and a brain compile runs under its bundled procedure alone.
+    pub fn for_role(role: Role) -> Option<Self> {
+        Some(match role {
             // Retired repository coordinators never run again; their archived sessions remain.
             Role::ProjectOrchestrator | Role::TaskOrchestrator => Self::Coordinating,
             Role::Implementer | Role::Maintenance => Self::Implementing,
             Role::Tester | Role::Reviewer => Self::Reviewing,
             Role::Keeper => Self::KeepingAPr,
             Role::Assistant | Role::JobRun => Self::Assisting,
-        }
+            Role::Compiler => return None,
+        })
     }
     pub fn name(self) -> &'static str {
         match self {
@@ -1109,7 +1121,9 @@ impl Snapshot {
         self.workspace_notes.iter().filter_map(|note| match note {
             WorkspaceNote::Paused(setting) => Some(setting),
             WorkspaceNote::Issue(note) => note.paused.as_ref(),
-            WorkspaceNote::SkillQuestion(_) | WorkspaceNote::Held(_) => None,
+            WorkspaceNote::SkillQuestion(_)
+            | WorkspaceNote::Held(_)
+            | WorkspaceNote::Conflict(_) => None,
         })
     }
 
@@ -1303,6 +1317,26 @@ pub enum WorkspaceNote {
     Held(HeldFile),
     /// An issue the human should look at, listed under Issues at the top of every Inbox.
     Issue(IssueNote),
+    /// A brain conflict, listed only in the Inbox of each project the card names.
+    Conflict(Box<ConflictCard>),
+}
+impl WorkspaceNote {
+    /// Whether `project`'s Inbox lists it: a conflict only in its projects', the rest in every
+    /// one.
+    pub fn is_for(&self, project: &str) -> bool {
+        match self {
+            Self::Conflict(card) => card.projects.iter().any(|p| p == project),
+            _ => true,
+        }
+    }
+    /// Whether it counts among what needs the human: not a conflict already ruled, nor one in
+    /// no project's Inbox, which only the Brains page shows.
+    pub fn needs_you(&self) -> bool {
+        match self {
+            Self::Conflict(card) => card.state == ConflictState::Open && !card.projects.is_empty(),
+            _ => true,
+        }
+    }
 }
 /// A file of a storage repository that is not pushed until a scan passes it. Names the check and
 /// its rule, never what matched.
@@ -3736,6 +3770,26 @@ pub enum Command {
     ImportLegacyLogs {
         repository: String,
     },
+    /// Run now: starts a compile run of the brain `owner/name` on this compiler host, or says
+    /// why it waits; answered with the `CompileRun`.
+    RunBrainCompile {
+        repository: String,
+    },
+    /// A page of the brain's compile runs, newest first; answered with `CompileRunPage`.
+    BrainCompileRuns {
+        repository: String,
+        #[serde(default)]
+        offset: usize,
+        limit: usize,
+    },
+    /// The human's ruling on a conflict of the brain: a decision entry in a batch opened at once,
+    /// or for Defer nothing but hiding the card until the next compile; answered with the
+    /// `ConflictCard` or, for Defer, `null`.
+    RuleConflict {
+        repository: String,
+        conflict_id: String,
+        ruling: Ruling,
+    },
     /// Replaces a held entry's text with the human's fix, which must then fit the entry
     /// contract and the cap; answered with the `WorkLog`.
     FixHeldLog {
@@ -4116,6 +4170,7 @@ impl Command {
             | Self::BrainNote { .. }
             | Self::BrainConflicts { .. }
             | Self::BrainStatus { .. }
+            | Self::BrainCompileRuns { .. }
             | Self::SearchBrain { .. }
             | Self::SuggestSpaceBrain { .. }
             | Self::OriginBranches { .. }
@@ -4200,6 +4255,8 @@ impl Command {
             | Self::AmendBrainBatch { .. }
             | Self::SendLogsNow { .. }
             | Self::ImportLegacyLogs { .. }
+            | Self::RunBrainCompile { .. }
+            | Self::RuleConflict { .. }
             | Self::FixHeldLog { .. }
             | Self::ReleaseHeldLog { .. }
             | Self::SyncIssues { .. }
@@ -4259,8 +4316,9 @@ impl Command {
     /// the host may merge into, and a settings repository the host pushes to.
     /// Spaces are the human's: creating, editing or removing one, setting its brain, moving a
     /// project into one and choosing which repositories it lists, and reading where its storage
-    /// is on this Mac. So are a project's added repositories. So are brains: the push grant, forgetting one, Set up, the compiler,
-    /// amending a batch, Send now and the legacy import, and fixing or releasing a held entry.
+    /// is on this Mac. So are a project's added repositories. So are brains: the push grant,
+    /// forgetting one, Set up, the compiler, amending a batch, Send now and the legacy import, a
+    /// compile's Run now, ruling on a conflict, and fixing or releasing a held entry.
     /// Every write to a tracker is the human's, settling a paused issue file, following an issue
     /// and every step of a Linear import too; reading issues is not. Remote access is the human's
     /// too: its state carries the pairing code. The assistant is the human's: its threads, their
@@ -4342,6 +4400,8 @@ impl Command {
                 | Self::AmendBrainBatch { .. }
                 | Self::SendLogsNow { .. }
                 | Self::ImportLegacyLogs { .. }
+                | Self::RunBrainCompile { .. }
+                | Self::RuleConflict { .. }
                 | Self::FixHeldLog { .. }
                 | Self::ReleaseHeldLog { .. }
                 | Self::RemoteAccess

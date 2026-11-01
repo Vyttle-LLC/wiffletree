@@ -81,7 +81,7 @@ pub(crate) fn migrate(host: &mut Host) -> Result<()> {
 }
 
 /// The host's local date of `at`, `YYYY-MM-DD`.
-fn local_date(at: i64) -> String {
+pub(crate) fn local_date(at: i64) -> String {
     let at = Local.timestamp_millis_opt(at).single().unwrap_or_default();
     format!("{:04}-{:02}-{:02}", at.year(), at.month(), at.day())
 }
@@ -109,6 +109,12 @@ fn folded(mut input: LogInput) -> Result<LogInput> {
         *value = one_line(value);
         ensure!(!value.is_empty(), "Give {name} some text");
     }
+    // Only the human's ruling, which `rule_conflict` writes, may say it is one.
+    ensure!(
+        !(input.state.to_lowercase()).starts_with(&brain_index::RULING_PREFIX.to_lowercase()),
+        "state may not begin \"{}\": only the human rules on a conflict, in Wiffletree's Inbox",
+        brain_index::RULING_PREFIX.trim_end()
+    );
     let title = input.title.chars().count();
     ensure!(
         title <= MAX_TITLE_CHARS,
@@ -185,7 +191,7 @@ fn ticket_ref(branch: &str, commits: &[&str], pull_request: Option<u64>) -> Stri
     format!("{branch} @ {shas}{pull_request}")
 }
 
-fn entry_path(folder: &str, repository: &str, date: &str, id: &str) -> String {
+pub(crate) fn entry_path(folder: &str, repository: &str, date: &str, id: &str) -> String {
     let (year, month) = (&date[..4], &date[5..7]);
     format!("{folder}/logs/{repository}/{year}/{month}/{date}-{id}.md")
 }

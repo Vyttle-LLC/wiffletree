@@ -52,8 +52,9 @@ CREATE TABLE IF NOT EXISTS sources (
 );
 CREATE INDEX IF NOT EXISTS sources_by_file ON sources(file_id);
 
--- `key` is `schema`, `commit` (the brain folder and commit indexed) and `last_compile` (the
--- time of the last commit that changed the wiki).
+-- `key` is `schema`, `commit` (the brain folder and commit indexed), `last_compile` (the
+-- time of the last commit that changed the wiki), `last_compile_commit` (that commit) and
+-- `pr_recheck_after` (the last unsettled entry whose PR a pass asked about).
 CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 -- Full text over titles and bodies. `_`, `-` and `/` separate tokens, so identifiers and paths

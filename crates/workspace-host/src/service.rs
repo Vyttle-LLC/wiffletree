@@ -279,7 +279,7 @@ const MOVED: &str = "Stopped: you moved its message to another thread.";
 /// one this way.
 fn stopped_notice(session: &Session, reason: &str) -> String {
     match session.role {
-        Role::Assistant | Role::JobRun => reason.into(),
+        Role::Assistant | Role::JobRun | Role::Compiler => reason.into(),
         _ => stopped_by_parent_notice(reason),
     }
 }
@@ -639,6 +639,8 @@ enum Event {
         router::RouterRun,
         std::result::Result<workspace_core::assistant::router::RouterAnswer, String>,
     ),
+    /// A compile run's pending entries were read and verified on their own thread.
+    CompilePrepared(Box<crate::compile::Prepared>),
     /// A job run's sources were checked on their own thread.
     SourcesChecked(
         String,
@@ -1727,6 +1729,7 @@ impl Actor {
         self.start_skill_merges();
         self.start_router_runs();
         self.start_source_checks();
+        self.start_compile_preparations();
         self.signal(dirty || syncing);
         if !self.checkout_deferred.is_empty()
             && self
@@ -1827,6 +1830,24 @@ impl Actor {
                     }]
                 },
                 |(run, checks), checked| Event::SourcesChecked(run, Box::new(checks), checked),
+            );
+        }
+    }
+
+    /// Reads and verifies each new compile run's pending entries off the host thread: Git and
+    /// GitHub can take minutes.
+    fn start_compile_preparations(&mut self) {
+        for prepare in self.host.take_compile_preparations() {
+            let tools = self.publish_tools.clone();
+            spawn_job(
+                self.sender.clone(),
+                prepare,
+                move |prepare| prepare.run(&tools),
+                |prepare| crate::compile::Prepared {
+                    run_id: prepare.run_id.clone(),
+                    gathered: Err("The compile's preparation stopped unexpectedly".into()),
+                },
+                |_, prepared| Event::CompilePrepared(Box::new(prepared)),
             );
         }
     }
@@ -2381,6 +2402,13 @@ impl Actor {
                 self.host.finish_merge_run(run, answered);
                 true
             }
+            Event::CompilePrepared(prepared) => {
+                let run = prepared.run_id.clone();
+                if let Err(e) = self.host.compile_prepared(*prepared) {
+                    eprintln!("Starting compile run {run}: {e:#}");
+                }
+                true
+            }
             Event::SourcesChecked(run, checked, checks) => {
                 if let Err(e) = self.host.sources_checked(&run, &checked, checks) {
                     eprintln!("Starting job run {run}: {e:#}");
@@ -2758,8 +2786,14 @@ impl Actor {
                     .map(|(id, _)| id.clone());
                 let result = (|| -> Result<Option<Value>> {
                     let id = identity.context("Expired or invalid session credential")?;
-                    // A thread is offered its own tools, and only those.
+                    // A thread is offered its own tools, and only those; so is a compile.
                     let session = self.host.session(&id)?;
+                    if session.role == Role::Compiler {
+                        let git = self.publish_tools.git.clone();
+                        return (self.host)
+                            .compile_tool(&session, &name, &args, &git)
+                            .map(Some);
+                    }
                     if session.role.is_thread() {
                         if name == "propose_job" {
                             let (recipe, pending) = self.host.propose_job(&session, &args)?;
@@ -3306,6 +3340,7 @@ impl Actor {
                             && !active.sort
                             && session.role != Role::Keeper
                             && session.role != Role::JobRun
+                            && session.role != Role::Compiler
                             && session.status != Status::Paused
                     })
                     .and_then(|error| limit_signal(active.limit_reached, error));
@@ -3361,6 +3396,12 @@ impl Actor {
                         (None, None) => crate::jobs::RunEnd::Finished,
                     };
                     self.host.job_run_ended(id, end)?;
+                }
+                // A compile is one turn too: one that did not finish its run ends it.
+                if session.role == Role::Compiler {
+                    let stopped = stop_reason.as_deref();
+                    self.host
+                        .compile_turn_ended(id, stopped, error.as_deref())?;
                 }
                 self.settle_check_ins(&session)?;
                 if let Some(error) = &error {
@@ -4197,6 +4238,18 @@ impl Actor {
     }
     fn check_in(&mut self, id: &str, now: i64) -> Result<()> {
         let session = self.host.session(id)?;
+        // A compile's turn is stopped at its time limit, which times its run out.
+        if session.role == Role::Compiler {
+            let active = self
+                .active
+                .get_mut(id)
+                .context("The compile is not in a turn")?;
+            if (now - active.started_at) / 60_000 >= crate::compile::TIMEOUT_MINUTES {
+                active.stopped_by_parent = Some(crate::compile::TIMED_OUT.into());
+                active.cancel.store(true, Ordering::Relaxed);
+            }
+            return Ok(());
+        }
         let active = &self.active[id];
         // A job's run has no time limit: its note on the assistant's row says how long it has
         // run, with Stop.
@@ -4527,6 +4580,15 @@ impl Actor {
         if session.role == Role::Keeper {
             self.try_ended(session, Some(&format!("{error:#}")));
         }
+        if session.role == Role::Compiler {
+            let failed = format!("Could not start: {error:#}");
+            self.host
+                .compile_turn_ended(&session.id, None, Some(&failed))?;
+            self.host.db.execute(
+                "UPDATE messages SET receipt='completed' WHERE recipient=?1 AND receipt='queued'",
+                [&session.id],
+            )?;
+        }
         if session.role == Role::JobRun {
             let failed = crate::jobs::RunEnd::Failed(format!("Could not start: {error:#}"));
             self.host.job_run_ended(&session.id, failed)?;
@@ -4720,13 +4782,19 @@ impl Actor {
         let token = format!("{}{}", new_id(), new_id());
         let (prompt, sorted) = match sort {
             Some((prompt, sorted)) => (prompt, Some(sorted)),
-            None if session.role.is_thread() => (thread_prompt(&input), None),
+            None if session.role.is_thread() || session.role == Role::Compiler => {
+                (thread_prompt(&input), None)
+            }
             None => (self.prompt(&session, &input)?, None),
         };
         let (instructions, thread) = match session.role {
             Role::Assistant | Role::JobRun => (
                 self.host.thread_instructions(&session)?,
                 Some(self.host.thread_launch(&session)?),
+            ),
+            Role::Compiler => (
+                self.host.instructions(Role::Compiler),
+                Some(self.host.compile_launch(&session)?),
             ),
             role => (self.host.instructions(role), None),
         };

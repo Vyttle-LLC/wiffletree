@@ -10,6 +10,7 @@ use brains_view::{Tone, compiler_line, next_compile, stage_label};
 use gpui_component::{
     Disableable,
     button::ButtonVariants,
+    input::InputState,
     menu::{DropdownMenu, PopupMenuItem},
     text::TextView,
 };
@@ -21,8 +22,8 @@ const FRESH_MS: i64 = 10_000;
 const NO_COMPILE: &str = "No compile yet";
 const OUTSIDE: &str =
     "Logged outside this install: no Wiffletree ticket or conversation on this Mac";
-const RULINGS: [&str; 4] = ["Uphold existing", "Keep new", "Keep both", "Defer"];
-const RULINGS_LATER: &str = "Rulings come with brain compile, which writes the decision entry";
+/// For a conflict the workspace has no card for yet, as before the brain's next sync.
+const RULE_ON_SYNC: &str = "Its rulings show once the brain syncs.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum BrainView {
@@ -115,11 +116,17 @@ pub(super) struct BrainBrowser {
     seen_repositories: BTreeSet<String>,
     seen_authors: BTreeSet<String>,
     conflicts: Reading<Vec<BrainConflict>>,
+    /// The conflict whose Keep both line is open, by its card's key, and that line.
+    keeping_both: Option<String>,
+    keep_both_scope: Entity<InputState>,
 }
 impl EventEmitter<Intent> for BrainBrowser {}
 impl BrainBrowser {
-    pub(super) fn new(bridge: Bridge) -> Self {
+    pub(super) fn new(bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
+            keeping_both: None,
+            keep_both_scope: cx
+                .new(|cx| InputState::new(window, cx).placeholder("One line that scopes both")),
             bridge,
             shared: Shared::default(),
             repository: None,
@@ -643,7 +650,7 @@ impl BrainBrowser {
         let config = self.brain().map(|b| &b.config);
         let here = self.listing().and_then(|l| l.this_host.as_ref());
         let fact = |label: &'static str, value: String| ui::property(label, value, p);
-        let compile = card(p)
+        let mut compile = card(p)
             .child(eyebrow("COMPILE", p))
             .child(fact(
                 "Last",
@@ -655,6 +662,38 @@ impl BrainBrowser {
                 config.map_or("—".into(), |c| compiler_line(c, here)),
             ))
             .child(fact("Pending entries", status.pending_entries.to_string()));
+        // Run now, on the Mac that compiles this brain, or why it waits.
+        let compiled_here = (self.listing().into_iter())
+            .flat_map(|l| l.compiles.iter())
+            .find(|c| Some(c.repository.as_str()) == self.repository.as_deref());
+        if let Some(compiled) = compiled_here {
+            let repository = compiled.repository.clone();
+            compile = compile.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        ui::gated(
+                            button("status-run-compile")
+                                .outline()
+                                .xsmall()
+                                .icon(icon("play"))
+                                .label("Run now")
+                                .disabled(compiled.run_now_waits.is_some()),
+                            &self.shared.host,
+                        )
+                        .on_click(cx.listener(
+                            move |view, _, window, cx| {
+                                let repository = repository.clone();
+                                view.request(Command::RunBrainCompile { repository }, window, cx)
+                            },
+                        )),
+                    )
+                    .children(compiled.run_now_waits.clone().map(|why| hint(why, p))),
+            );
+        }
         let mut prs = card(p).child(eyebrow("OPEN PRS", p));
         let repository = self.repository.as_deref().unwrap_or_default();
         let open: Vec<&BrainBatch> = (self.listing().into_iter())
@@ -1243,9 +1282,61 @@ impl BrainBrowser {
             return list.child(hint("No conflicts in this scope.", p));
         }
         for conflict in conflicts {
-            list = list.child(self.conflict_card(conflict, p, cx));
+            // The workspace's card for it carries both sides and its rulings.
+            let card = (self.shared.workspace_notes().iter()).find_map(|note| match note {
+                WorkspaceNote::Conflict(card)
+                    if Some(&card.repository) == self.repository.as_ref()
+                        && card.conflict.id == conflict.id =>
+                {
+                    Some(card)
+                }
+                _ => None,
+            });
+            list = list.child(match card {
+                Some(card) => self.ruling_card(card, p, cx),
+                None => self.conflict_card(conflict, p, cx),
+            });
         }
         list
+    }
+
+    /// A conflict with its rulings, or who ruled once someone did.
+    fn ruling_card(&self, card: &ConflictCard, p: Palette, cx: &mut Context<Self>) -> Div {
+        let view = cx.entity().downgrade();
+        let (repository, conflict) = (card.repository.clone(), card.conflict.id.clone());
+        let entry = card.conflict.entry_id.clone();
+        let key = conflict_card::key(card);
+        let open = self.keeping_both.as_deref() == Some(key.as_str());
+        let on: conflict_card::OnConflict = Rc::new(move |action, window, cx| {
+            let _ = view.update(cx, |view, cx| match action {
+                conflict_card::ConflictAction::Evidence => {
+                    if let Some(id) = entry.clone() {
+                        let target = BrainTarget::Entry { id, pending: false };
+                        view.go(target, window, cx)
+                    }
+                }
+                conflict_card::ConflictAction::KeepBoth(open) => {
+                    view.keeping_both = open.then(|| key.clone());
+                    if open {
+                        view.keep_both_scope.update(cx, |input, cx| {
+                            input.set_value("", window, cx);
+                            input.focus(window, cx);
+                        });
+                    }
+                    cx.notify();
+                }
+                conflict_card::ConflictAction::Rule(ruling) => {
+                    view.keeping_both = None;
+                    let command = Command::RuleConflict {
+                        repository: repository.clone(),
+                        conflict_id: conflict.clone(),
+                        ruling,
+                    };
+                    view.request(command, window, cx)
+                }
+            });
+        });
+        conflict_card::conflict_card(card, open, &self.keep_both_scope, on, p)
     }
 
     fn conflict_card(&self, conflict: &BrainConflict, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -1302,17 +1393,6 @@ impl BrainBrowser {
                 })),
             );
         }
-        let mut rulings = div().flex().flex_wrap().gap_2();
-        for ruling in RULINGS {
-            rulings = rulings.child(
-                button(SharedString::from(format!("rule-{}-{ruling}", conflict.id)))
-                    .outline()
-                    .xsmall()
-                    .label(ruling)
-                    .disabled(true)
-                    .tooltip(RULINGS_LATER),
-            );
-        }
         card(p)
             .child(head)
             .child(
@@ -1329,7 +1409,7 @@ impl BrainBrowser {
                     .child(conflict.evidence.clone()),
             )
             .child(hint(format!("Recommended: {}", conflict.recommend), p))
-            .child(rulings)
+            .child(hint(RULE_ON_SYNC, p))
     }
 }
 

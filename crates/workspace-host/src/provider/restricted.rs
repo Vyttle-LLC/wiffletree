@@ -1,5 +1,6 @@
-//! The launch of an assistant thread, the one turn kind besides comment sorting that does not
-//! run in YOLO mode. The provider holds the thread to reading, the web and its scratch folder.
+//! The launch of an assistant thread or a brain compile, the turn kinds besides comment sorting
+//! that do not run in YOLO mode. The provider holds a thread to reading, the web and its scratch
+//! folder, and a compile to reading and its worktree, where Claude writes only the wiki.
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 use workspace_core::Source;
@@ -56,6 +57,8 @@ pub fn shell_text_refused(input: &[u8]) -> Option<String> {
 }
 /// A job run's tools: it saves its output and reads its Space's brain, and offers no card.
 pub(crate) const JOB_RUN_TOOLS: [&str; 2] = ["save_output", "query_brain"];
+/// A brain compile's tools: it queues conflicts and says it is done, and has no other write.
+pub(crate) const COMPILE_TOOLS: [&str; 2] = ["queue_conflict", "finish_compile"];
 /// The built-in Claude tools every thread has; `Bash` joins them only for a CLI source.
 const CLAUDE_TOOLS: [&str; 7] = [
     "Read",
@@ -93,6 +96,9 @@ pub struct ThreadLaunch {
     pub job_run: bool,
     /// An issue thread, which has `ISSUE_THREAD_TOOLS`, no source and no web.
     pub issue_thread: bool,
+    /// A brain compile, which has `COMPILE_TOOLS`, no source and no web, and in its worktree,
+    /// `scratch`, writes only this brain folder's `notes/` and `STATUS.md`.
+    pub compile: Option<PathBuf>,
 }
 impl ThreadLaunch {
     /// Whether Codex may run it: not a job's run with a CLI source, since Codex's command rules
@@ -115,23 +121,35 @@ impl ThreadLaunch {
     }
     /// The workspace tools the run is offered.
     fn workspace_tools(&self) -> &'static [&'static str] {
-        match (self.job_run, self.issue_thread) {
-            (true, _) => &JOB_RUN_TOOLS,
-            (false, true) => &ISSUE_THREAD_TOOLS,
-            (false, false) => &THREAD_TOOLS,
+        match (self.compile.is_some(), self.job_run, self.issue_thread) {
+            (true, _, _) => &COMPILE_TOOLS,
+            (false, true, _) => &JOB_RUN_TOOLS,
+            (false, false, true) => &ISSUE_THREAD_TOOLS,
+            (false, false, false) => &THREAD_TOOLS,
         }
     }
     /// The helper's argument that serves those tools.
     fn helper_arg(&self) -> &'static str {
-        match (self.job_run, self.issue_thread) {
-            (true, _) => "job-mcp",
-            (false, true) => "issue-thread-mcp",
-            (false, false) => "thread-mcp",
+        match (self.compile.is_some(), self.job_run, self.issue_thread) {
+            (true, _, _) => "compile-mcp",
+            (false, true, _) => "job-mcp",
+            (false, false, true) => "issue-thread-mcp",
+            (false, false, false) => "thread-mcp",
         }
     }
     /// Whether the run may search and fetch the web.
     fn web(&self) -> bool {
-        !self.issue_thread
+        !self.issue_thread && self.compile.is_none()
+    }
+    /// The files Claude may write: a compile's wiki, or else all of scratch.
+    fn writable(&self) -> Vec<String> {
+        match &self.compile {
+            Some(brain) => vec![
+                format!("/{}/notes/**", brain.display()),
+                format!("/{}/STATUS.md", brain.display()),
+            ],
+            None => vec![format!("/{}/**", self.scratch.display())],
+        }
     }
     fn mcp_sources(&self) -> impl Iterator<Item = (&str, &[String])> {
         self.sources.iter().filter_map(|source| match source {
@@ -167,7 +185,6 @@ impl ThreadLaunch {
     }
     /// What Claude may do without asking; everything else is denied.
     pub(crate) fn claude_allowed(&self) -> Vec<String> {
-        let scratch = self.scratch.display();
         let mut allowed: Vec<String> = ["Read", "Glob", "Grep", "WebSearch", "WebFetch"]
             .into_iter()
             .filter(|tool| self.web() || !WEB_TOOLS.contains(tool))
@@ -175,7 +192,7 @@ impl ThreadLaunch {
             .collect();
         // `//` makes a rule's path absolute; Edit rules cover every tool that writes files.
         for tool in ["Write", "Edit", "MultiEdit"] {
-            allowed.push(format!("{tool}(/{scratch}/**)"));
+            allowed.extend(self.writable().iter().map(|path| format!("{tool}({path})")));
         }
         allowed.extend(
             (self.workspace_tools().iter()).map(|tool| format!("mcp__agent_workspace__{tool}")),
@@ -435,7 +452,42 @@ mod tests {
             servers,
             job_run: false,
             issue_thread: false,
+            compile: None,
         }
+    }
+
+    #[test]
+    fn a_compile_writes_only_its_wiki_with_its_two_tools_and_no_web() {
+        let compile = ThreadLaunch {
+            scratch: "/data/compile-worktrees/r1".into(),
+            compile: Some("/data/compile-worktrees/r1/second-brain".into()),
+            ..launch(vec![])
+        };
+        let allowed = compile.claude_allowed();
+        for tool in ["Write", "Edit", "MultiEdit"] {
+            assert!(allowed.contains(&format!(
+                "{tool}(//data/compile-worktrees/r1/second-brain/notes/**)"
+            )));
+            assert!(allowed.contains(&format!(
+                "{tool}(//data/compile-worktrees/r1/second-brain/STATUS.md)"
+            )));
+        }
+        assert!(!allowed.iter().any(|rule| rule.ends_with("/r1/**)")));
+        let workspace: Vec<&String> = (allowed.iter())
+            .filter(|rule| rule.starts_with("mcp__agent_workspace__"))
+            .collect();
+        assert_eq!(
+            workspace,
+            [
+                "mcp__agent_workspace__queue_conflict",
+                "mcp__agent_workspace__finish_compile"
+            ]
+        );
+        for tool in WEB_TOOLS {
+            assert!(!compile.claude_tools().contains(&tool));
+            assert!(claude_denied(&compile).contains(&tool.to_owned()));
+        }
+        assert_eq!(compile.helper_arg(), "compile-mcp");
     }
     fn linear() -> Source {
         Source::Mcp {

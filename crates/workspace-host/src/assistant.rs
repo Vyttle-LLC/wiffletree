@@ -729,6 +729,7 @@ impl Host {
             servers,
             job_run: thread.job.is_some(),
             issue_thread: thread.attached.is_some(),
+            compile: None,
         })
     }
     /// A thread's workspace tool. No other tool is offered to a thread, and none of these

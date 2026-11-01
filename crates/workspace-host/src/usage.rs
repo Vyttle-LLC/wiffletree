@@ -125,11 +125,15 @@ impl Host {
         };
         let session = self.session(&session_id)?;
         let profile: Value = serde_json::from_str(&detail).unwrap_or(Value::Null);
-        // A thread has no coordinator and counts as its own.
+        // A thread or a compile has no coordinator and counts as its own.
         let counted = |role| {
             matches!(
                 role,
-                Role::TaskOrchestrator | Role::ProjectOrchestrator | Role::Assistant | Role::JobRun
+                Role::TaskOrchestrator
+                    | Role::ProjectOrchestrator
+                    | Role::Assistant
+                    | Role::JobRun
+                    | Role::Compiler
             )
         };
         let mut owner = session.clone();
@@ -543,6 +547,8 @@ impl Host {
         let mut models: BTreeMap<(Provider, String), ModelUsage> = BTreeMap::new();
         let mut daily_models: BTreeMap<(String, Provider, String), ModelUsage> = BTreeMap::new();
         let mut coordinators: BTreeMap<String, CoordinatorUsage> = BTreeMap::new();
+        // Each owning session's line in `coordinators`.
+        let mut lines: BTreeMap<String, String> = BTreeMap::new();
         for group in groups {
             let provider: Provider = serde_json::from_value(Value::String(group.provider))?;
             let counts = &group.counts;
@@ -581,11 +587,19 @@ impl Host {
                 .entry((group.date.clone(), provider, group.model.clone()))
                 .or_insert_with(usage)
                 .add(counts, price);
-            if !coordinators.contains_key(&group.coordinator) {
+            if !lines.contains_key(&group.coordinator) {
                 let session = self.session(&group.coordinator)?;
-                coordinators.insert(
-                    group.coordinator.clone(),
-                    CoordinatorUsage {
+                // A brain's compile runs are one line, "Brain compile · <brain>".
+                let line = match (session.role, &session.owner) {
+                    (Role::Compiler, Some(SessionOwner::Brain(brain))) => CoordinatorUsage {
+                        id: format!("{COMPILE_LINE}{brain}"),
+                        name: "Brain compile".into(),
+                        project: brain.clone(),
+                        own: TokenTotals::default(),
+                        workers: TokenTotals::default(),
+                        cost: None,
+                    },
+                    _ => CoordinatorUsage {
                         id: group.coordinator.clone(),
                         name: session.name,
                         project: self.project(&session.project_id)?.name,
@@ -593,9 +607,11 @@ impl Host {
                         workers: TokenTotals::default(),
                         cost: None,
                     },
-                );
+                };
+                lines.insert(group.coordinator.clone(), line.id.clone());
+                coordinators.entry(line.id.clone()).or_insert(line);
             }
-            let entry = coordinators.get_mut(&group.coordinator).unwrap();
+            let entry = coordinators.get_mut(&lines[&group.coordinator]).unwrap();
             if group.own {
                 entry.own.add(counts);
             } else {

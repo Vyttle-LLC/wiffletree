@@ -19,6 +19,22 @@ const INDEX: &str = "notes/INDEX.md";
 const QUEUE: &str = "reconcile-queue.md";
 const CONFLICT_MARKER: &str = "<!-- conflict:";
 
+/// How many unsettled entries naming a PR a pass asks GitHub about, in turn from where the last
+/// pass stopped, so a pass stays bounded and none is left out.
+const RECHECKED_PRS: usize = 50;
+/// How a ruling entry's `state` begins, followed by the conflict's id and a colon.
+pub(crate) const RULING_PREFIX: &str = "Ruling on conflict ";
+
+/// A ruling entry on `main`: who ruled on which conflict, and whether a compile has yet to
+/// fold it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RulingEntry {
+    pub(crate) entry_id: String,
+    pub(crate) conflict_id: String,
+    pub(crate) author: String,
+    pub(crate) pending: bool,
+}
+
 /// Where the index of the brain `owner/name` lives: `brain-index/github.com/<owner>/<name>.sqlite`.
 pub(crate) fn index_file(home: &Path, repository: &str) -> PathBuf {
     let (owner, name) = repository.split_once('/').unwrap_or((repository, ""));
@@ -165,7 +181,7 @@ fn is_ulid(text: &str) -> bool {
 
 /// The frontmatter's `key: value` lines, with a YAML list's `- item` lines joined to its key,
 /// and the text after it.
-fn frontmatter(text: &str) -> (HashMap<String, String>, &str) {
+pub(crate) fn frontmatter(text: &str) -> (HashMap<String, String>, &str) {
     let mut keys = HashMap::new();
     let Some(rest) = text.strip_prefix("---\n") else {
         return (keys, text);
@@ -204,7 +220,7 @@ fn frontmatter(text: &str) -> (HashMap<String, String>, &str) {
 }
 
 /// The items of a frontmatter list, `[a, b]` or joined `- a` lines.
-fn list(value: &str) -> Vec<String> {
+pub(crate) fn list(value: &str) -> Vec<String> {
     let value = value.trim().trim_start_matches('[').trim_end_matches(']');
     (value.split(','))
         .map(|item| item.trim().trim_matches(['"', '\'']).to_owned())
@@ -213,7 +229,7 @@ fn list(value: &str) -> Vec<String> {
 }
 
 /// The targets of every `[[wikilink]]`, before any `|alias` or `#heading`.
-fn wikilinks(text: &str) -> Vec<String> {
+pub(crate) fn wikilinks(text: &str) -> Vec<String> {
     let mut links = vec![];
     let mut rest = text;
     while let Some(start) = rest.find("[[") {
@@ -233,7 +249,7 @@ fn wikilinks(text: &str) -> Vec<String> {
 }
 
 /// The key a wikilink matches a note by: its file name or title, in lower case, without `.md`.
-fn link_key(target: &str) -> String {
+pub(crate) fn link_key(target: &str) -> String {
     let target = target.rsplit('/').next().unwrap_or(target);
     target.trim_end_matches(".md").trim().to_lowercase()
 }
@@ -280,7 +296,7 @@ struct Indexed {
 }
 
 /// An entry's five fields, each `- key: value`, a value continuing onto indented lines.
-fn entry_fields(body: &str) -> HashMap<&'static str, String> {
+pub(crate) fn entry_fields(body: &str) -> HashMap<&'static str, String> {
     const KEYS: [&str; 5] = ["type", "ref", "changed", "why", "state"];
     let mut fields: HashMap<&'static str, String> = HashMap::new();
     let mut current: Option<&'static str> = None;
@@ -431,24 +447,42 @@ fn store(
     Ok(())
 }
 
-/// Marks the entries a commit after the last compile added as pending, by the commit graph, not
-/// by commit times, which a batch and a compile can share to the second. With no compile yet,
-/// every entry is pending.
+/// Marks pending the entries a compile would take, by the cursor in `notes/INDEX.md` at
+/// `commit` (see `compile.rs`): those added after its `compiled-through` commit, by the commit
+/// graph, less its `compiled-after` ids. With no cursor every entry is pending but those the
+/// legacy import recorded as `compiled`.
 fn mark_pending(
     db: &Connection,
     checkout: &Path,
-    (last_compile, commit): (Option<&str>, &str),
+    commit: &str,
     prefix: &str,
+    compiled: &HashSet<String>,
 ) -> Result<()> {
-    let Some(last_compile) = last_compile else {
-        db.execute("UPDATE files SET pending=(class='entry')", [])?;
-        return Ok(());
+    let index = compile::file_at(checkout, commit, &format!("{prefix}{INDEX}"));
+    let cursor = compile::read_cursor(&index);
+    let through = (cursor.through.as_deref()).filter(|t| publish::is_ancestor(checkout, t, commit));
+    match through {
+        Some(through) => {
+            let since = added_entries(checkout, &format!("{through}..{commit}"), prefix)?;
+            db.execute("UPDATE files SET pending=0 WHERE pending=1", [])?;
+            let mut mark =
+                db.prepare("UPDATE files SET pending=1 WHERE class='entry' AND path=?1")?;
+            for path in since.keys() {
+                mark.execute([path])?;
+            }
+        }
+        None => {
+            db.execute("UPDATE files SET pending=(class='entry')", [])?;
+        }
+    }
+    let done = match through {
+        Some(_) => cursor.after.iter().collect::<Vec<_>>(),
+        None => cursor.after.iter().chain(compiled).collect(),
     };
-    let since = added_entries(checkout, &format!("{last_compile}..{commit}"), prefix)?;
-    db.execute("UPDATE files SET pending=0 WHERE pending=1", [])?;
-    let mut mark = db.prepare("UPDATE files SET pending=1 WHERE class='entry' AND path=?1")?;
-    for path in since.keys() {
-        mark.execute([path])?;
+    let mut unmark =
+        db.prepare("UPDATE files SET pending=0 WHERE class='entry' AND entry_id=?1")?;
+    for id in done {
+        unmark.execute([id])?;
     }
     Ok(())
 }
@@ -465,18 +499,22 @@ fn resolve_sources(db: &Connection) -> Result<()> {
 }
 
 /// What a refresh reads: the brain's checkout, the commit of `main` to index and the brain
-/// folder there, with this machine's clones to verify entries' refs against.
+/// folder there, with this machine's clones to verify entries' refs against, `gh` to read the
+/// PRs they name, and the entries the legacy import recorded as compiled.
 pub(crate) struct Refresh<'a> {
     pub(crate) index: &'a Path,
     pub(crate) checkout: &'a Path,
     pub(crate) commit: &'a str,
     pub(crate) brain_dir: &'a str,
     pub(crate) clones: &'a Clones,
+    pub(crate) gh: Option<&'a publish::Tool<runtime::GhAnswer>>,
+    pub(crate) compiled: &'a HashSet<String>,
 }
 
 /// Brings the index to `commit`: reads and stores only the files whose blob changed, removes
 /// the deleted ones, and checks every entry's ref not yet verified. A commit already indexed,
-/// with the same brain folder, does nothing. Answers how many files it read.
+/// with the same brain folder, reads nothing, and with `gh` asks again about the PRs claimed
+/// entries name. Answers how many files it read.
 pub(crate) fn refresh(refresh: Refresh) -> Result<usize> {
     let Refresh {
         index,
@@ -484,10 +522,19 @@ pub(crate) fn refresh(refresh: Refresh) -> Result<usize> {
         commit,
         brain_dir,
         clones,
+        gh,
+        compiled,
     } = refresh;
     let mut db = open(index)?;
     let at = format!("{brain_dir}\0{commit}");
     if state(&db, "commit")?.as_deref() == Some(at.as_str()) {
+        // A PR merged since does not change the brain, so its claimed entries are asked about
+        // again, as a compile asks.
+        if gh.is_some() {
+            let transaction = db.transaction()?;
+            verify_entries(&transaction, clones, gh, true)?;
+            transaction.commit()?;
+        }
         return Ok(0);
     }
     let previous = state(&db, "commit")?
@@ -585,16 +632,21 @@ pub(crate) fn refresh(refresh: Refresh) -> Result<usize> {
         store(&transaction, path, blob, *class, &text, pull_request)?;
     }
     resolve_sources(&transaction)?;
-    mark_pending(&transaction, checkout, (compile_commit, commit), &prefix)?;
-    verify_entries(&transaction, clones)?;
+    mark_pending(&transaction, checkout, commit, &prefix, compiled)?;
+    verify_entries(&transaction, clones, gh, false)?;
+    // GitHub is asked about the next named PRs only, as on a pass with no new commit.
+    if gh.is_some() {
+        verify_entries(&transaction, clones, gh, true)?;
+    }
     set_state(&transaction, "last_compile", compile_time)?;
+    set_state(&transaction, "last_compile_commit", compile_commit)?;
     set_state(&transaction, "commit", Some(&at))?;
     transaction.commit()?;
     Ok(changed.len())
 }
 
 /// The contents `git cat-file --batch` sent, in the order asked.
-fn blobs(batch: &[u8]) -> Result<Vec<Vec<u8>>> {
+pub(crate) fn blobs(batch: &[u8]) -> Result<Vec<Vec<u8>>> {
     let mut rest = batch;
     let mut contents = vec![];
     while !rest.is_empty() {
@@ -662,19 +714,61 @@ fn squash_pull_request(subject: &str) -> Option<u64> {
         .ok()
 }
 
-/// Checks the ref of every entry not yet verified against this machine's clones.
-fn verify_entries(db: &Connection, clones: &Clones) -> Result<()> {
+/// Checks the ref of every entry not yet verified against this machine's clones, or with
+/// `only_named_prs` asks `gh` about the next unsettled entries' PRs, in turn. A PR closed without
+/// merging is final, and its entry is checked no more.
+fn verify_entries(
+    db: &Connection,
+    clones: &Clones,
+    gh: Option<&publish::Tool<runtime::GhAnswer>>,
+    only_named_prs: bool,
+) -> Result<()> {
     type Unverified = (i64, String, String, Option<String>, Option<String>);
-    let unverified: Vec<Unverified> = db
-        .prepare(
-            "SELECT id,coalesce(repository,''),coalesce(reference,''),verification,verification_reason FROM files WHERE class='entry' AND coalesce(verification,'')<>'verified'",
-        )?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
-        .collect::<rusqlite::Result<_>>()?;
+    let select = |which: &str, after: i64| -> Result<Vec<Unverified>> {
+        Ok(db
+            .prepare(&format!(
+                "SELECT id,coalesce(repository,''),coalesce(reference,''),verification,verification_reason FROM files WHERE class='entry' AND id>?1 AND {which}"
+            ))?
+            .query_map([after], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    };
+    // A PR closed without merging is final: its entry is not checked again.
+    let open = format!(
+        "coalesce(verification_reason,'') NOT LIKE '%{}'",
+        verify_refs::CLOSED_UNMERGED
+    );
+    let (unverified, gh) = match only_named_prs {
+        // Every entry not yet verified, against the clones only.
+        false => (
+            select(
+                &format!("coalesce(verification,'')<>'verified' AND {open}"),
+                0,
+            )?,
+            None,
+        ),
+        // The next claimed or unverified entries naming a PR, whose repository is on this
+        // machine, after the last one asked about, from the first
+        // again past the end, so every one is asked about in turn.
+        true => {
+            let which = format!(
+                "verification IN ('claimed','unverified') AND coalesce(verification_reason,'')<>'not on this machine' AND reference LIKE '% · PR #%' AND {open} ORDER BY id LIMIT {RECHECKED_PRS}"
+            );
+            let from: i64 = (state(db, "pr_recheck_after")?)
+                .and_then(|id| id.parse().ok())
+                .unwrap_or(0);
+            let mut next = select(&which, from)?;
+            if next.is_empty() && from > 0 {
+                next = select(&which, 0)?;
+            }
+            let last = next.last().map(|(id, ..)| id.to_string());
+            set_state(db, "pr_recheck_after", last.as_deref())?;
+            (next, gh)
+        }
+    };
     let refs: Vec<(&str, &str)> = (unverified.iter())
         .map(|(_, folder, reference, _, _)| (folder.as_str(), reference.as_str()))
         .collect();
-    let checked = verify_refs::verify(clones, &refs, &mut verify_refs::Cache::default());
+    let checked = verify_refs::verify_with(clones, &refs, &mut verify_refs::Cache::default(), gh);
     let mut update =
         db.prepare("UPDATE files SET verification=?2,verification_reason=?3 WHERE id=?1")?;
     for ((id, _, _, state, reason), verification) in unverified.iter().zip(checked) {
@@ -935,6 +1029,27 @@ fn note_tree(db: &Connection, scope: Option<&Scope>) -> Result<BrainNoteTree> {
     })
 }
 
+/// A note's first paragraph as plain text: no heading, footnote marks or definitions, and at
+/// most 400 characters.
+fn first_paragraph(body: &str) -> String {
+    let paragraph = (body.split("\n\n"))
+        .map(str::trim)
+        .find(|p| !p.is_empty() && !p.starts_with('#') && !p.starts_with("[^"))
+        .unwrap_or_default();
+    let mut text = String::new();
+    let mut rest = paragraph;
+    while let Some(at) = rest.find("[^") {
+        text.push_str(&rest[..at]);
+        rest = rest[at..].split_once(']').map_or("", |(_, after)| after);
+    }
+    text.push_str(rest);
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match text.chars().count() > 400 {
+        true => format!("{}…", text.chars().take(399).collect::<String>()),
+        false => text,
+    }
+}
+
 /// The note a wikilink names, by its file name or title.
 fn resolve_link(db: &Connection, target: &str) -> Result<Option<String>> {
     Ok(db
@@ -959,7 +1074,7 @@ fn links_of(db: &Connection, body: &str) -> Result<Vec<BrainLink>> {
 
 /// The targets a footnote cites: its Markdown links and wikilinks, or else the entry ids and
 /// `logs/` paths in its text.
-fn footnote_targets(text: &str) -> Vec<String> {
+pub(crate) fn footnote_targets(text: &str) -> Vec<String> {
     let mut targets: Vec<String> = vec![];
     for target in index_links(text) {
         if source_target(&target) != (None, None) && !targets.contains(&target) {
@@ -991,7 +1106,7 @@ fn source_entry(db: &Connection, target: &str) -> Result<Option<BrainEntry>> {
 }
 
 /// One footnote's definition per claim: `[^label]: text`, with its indented continuation.
-fn footnotes(body: &str) -> Vec<(String, String)> {
+pub(crate) fn footnotes(body: &str) -> Vec<(String, String)> {
     let mut notes: Vec<(String, String)> = vec![];
     let mut open = false;
     for line in body.lines() {
@@ -1721,6 +1836,108 @@ impl Host {
         status(&db)
     }
 
+    /// What each side of a conflict says, as the index holds it: the note or entry it conflicts
+    /// with, then the claim's entry. A side the index does not hold is `None`.
+    pub(crate) fn conflict_sides(
+        &self,
+        repository: &str,
+        conflict: &BrainConflict,
+    ) -> Result<(Option<ConflictSide>, Option<ConflictSide>)> {
+        let (_, db) = self.brain_reader(repository)?;
+        let entry_side = |entry: BrainEntry, label: String| ConflictSide {
+            label: format!("{label} · {}", entry.date),
+            text: match entry.changed.is_empty() {
+                true => entry.title.clone(),
+                false => entry.changed.clone(),
+            },
+            detail: format!(
+                "{} · {} · {}",
+                entry.repository,
+                entry.author,
+                entry.verification.state.name()
+            ),
+        };
+        let claim = match &conflict.entry_id {
+            Some(id) => source_entry(&db, id)?.map(|e| entry_side(e, "The new entry says".into())),
+            None => None,
+        };
+        let with = &conflict.conflicts_with;
+        let note = match wikilinks(with).first() {
+            Some(target) => resolve_link(&db, target)?,
+            None => (with.find("notes/"))
+                .map(|at| with[at..].trim().trim_end_matches(')').to_owned())
+                .filter(|path| path.ends_with(".md")),
+        };
+        let existing = match note {
+            Some(path) => {
+                let row: Option<(Option<String>, Option<String>, String)> = db
+                    .query_row(
+                        "SELECT kind,date,body FROM files WHERE class='note' AND path=?1",
+                        [&path],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                    .optional()?;
+                row.map(|(kind, updated, body)| {
+                    let kind = kind.unwrap_or_else(|| "observation".into());
+                    ConflictSide {
+                        label: format!("The {kind} note says"),
+                        text: first_paragraph(&body),
+                        detail: format!(
+                            "{path} · kind: {kind} · updated {}",
+                            updated.unwrap_or_default()
+                        ),
+                    }
+                })
+            }
+            None => match (footnote_targets(with).first()).or(Some(with)) {
+                Some(target) => source_entry(&db, target)?.map(|e| {
+                    let author = e.author.clone();
+                    entry_side(e, format!("{author}'s entry says"))
+                }),
+                None => None,
+            },
+        };
+        Ok((existing, claim))
+    }
+
+    /// The last commit on the brain's `main` that changed the wiki, as the index last read it.
+    pub(crate) fn last_compile_commit(&self, repository: &str) -> Result<Option<String>> {
+        let brain = self.brain(repository)?;
+        match open_read(&index_file(&self.home, &brain.repository))? {
+            Some(db) => state(&db, "last_compile_commit"),
+            None => Ok(None),
+        }
+    }
+
+    /// Every ruling entry on the brain's `main`: those whose `state` begins `Ruling on conflict
+    /// <id>:`. Empty before the brain's first index build.
+    pub(crate) fn brain_rulings(&self, repository: &str) -> Result<Vec<RulingEntry>> {
+        let brain = self.brain(repository)?;
+        let Some(db) = open_read(&index_file(&self.home, &brain.repository))? else {
+            return Ok(vec![]);
+        };
+        let rows: Vec<(String, String, String, bool)> = db
+            .prepare(
+                "SELECT coalesce(entry_id,''),coalesce(author,''),body,pending FROM files WHERE class='entry' AND body LIKE '%Ruling on conflict %'",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok((rows.into_iter())
+            .filter_map(|(entry_id, author, body, pending)| {
+                let mut fields = entry_fields(&body);
+                (fields.get("type").map(String::as_str) == Some("decision")).then_some(())?;
+                let state = fields.remove("state")?;
+                let conflict = state.strip_prefix(RULING_PREFIX)?.split_once(':')?.0;
+                Some(RulingEntry {
+                    entry_id,
+                    conflict_id: conflict.trim().to_owned(),
+                    author,
+                    pending,
+                })
+            })
+            .collect())
+    }
+
     pub fn search_brain(
         &self,
         repository: &str,
@@ -1957,6 +2174,8 @@ pub(crate) mod tests {
                 commit,
                 brain_dir: "second-brain",
                 clones: &self.clones,
+                gh: None,
+                compiled: &HashSet::new(),
             })
             .unwrap()
         }
@@ -2227,7 +2446,18 @@ pub(crate) mod tests {
             (before.body, before.last_compile, before.pending_entries),
             (None, None, 2)
         );
-        let compiled = brain.commit(&sample()[4..], "Compile (#81)");
+        // The compile writes its cursor, through the log batch.
+        let cursor = compile::Cursor {
+            through: Some(logs),
+            after: vec![],
+        };
+        let files: Vec<(String, String)> = (sample()[4..].iter())
+            .map(|(path, text)| match path.as_str() {
+                INDEX => (path.clone(), compile::write_cursor(text, &cursor)),
+                _ => (path.clone(), text.clone()),
+            })
+            .collect();
+        let compiled = brain.commit(&files, "Compile (#81)");
         brain.refresh(&compiled);
         let after = status(&brain.db()).unwrap();
         assert!(after.body.unwrap().contains("retries Telnyx"));
@@ -2244,8 +2474,19 @@ pub(crate) mod tests {
     fn a_batch_merged_in_the_same_second_as_a_compile_is_still_pending() {
         let brain = Checkout::new();
         let second = "@1790000000 +0000";
-        brain.commit_at(&sample()[..1], "Log batch (#80)", second);
-        brain.commit_at(&sample()[4..], "Compile (#81)", second);
+        let first = brain.commit_at(&sample()[..1], "Log batch (#80)", second);
+        // The compile's cursor is through the first batch.
+        let cursor = compile::Cursor {
+            through: Some(first),
+            after: vec![],
+        };
+        let compiled: Vec<(String, String)> = (sample()[4..].iter())
+            .map(|(path, text)| match path.as_str() {
+                INDEX => (path.clone(), compile::write_cursor(text, &cursor)),
+                _ => (path.clone(), text.clone()),
+            })
+            .collect();
+        brain.commit_at(&compiled, "Compile (#81)", second);
         let head = brain.commit_at(&sample()[1..2], "Log batch (#82)", second);
         brain.refresh(&head);
         let status = status(&brain.db()).unwrap();
@@ -2254,6 +2495,272 @@ pub(crate) mod tests {
             status.pending_entries, 1,
             "only the batch after the compile"
         );
+    }
+
+    /// A clone of `relay` with a commit only on its `retry` branch, and that commit's SHA.
+    fn relay_clone() -> (tempfile::TempDir, Clones, String) {
+        let code = tempfile::tempdir().unwrap();
+        let clone = code.path().join("relay");
+        git(
+            code.path(),
+            &["init", "-q", "-b", "main", clone.to_str().unwrap()],
+        );
+        git(&clone, &["commit", "-q", "--allow-empty", "-m", "main"]);
+        git(&clone, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&clone, &["checkout", "-q", "-b", "retry"]);
+        git(&clone, &["commit", "-q", "--allow-empty", "-m", "retry"]);
+        let sha = git(&clone, &["rev-parse", "HEAD"]);
+        let clones = Clones(HashMap::from([(
+            "relay".to_owned(),
+            vec![verify_refs::RepoClone {
+                path: clone,
+                defaults: vec!["refs/remotes/origin/main".into()],
+                github: Some("Sage-Social/relay".into()),
+            }],
+        )]));
+        (code, clones, sha)
+    }
+
+    #[test]
+    fn a_merged_pr_whose_commit_this_clone_lacks_verifies_its_entry() {
+        use std::sync::Arc;
+        let (_code, clones, _) = relay_clone();
+        let gh: publish::Tool<runtime::GhAnswer> = Arc::new(|_, args| {
+            assert_eq!(
+                args.last().copied(),
+                Some("repos/Sage-Social/relay/pulls/95")
+            );
+            Ok(runtime::GhAnswer {
+                status: publish::tests::exit(0),
+                output: json!({"state": "closed", "merged": true}).to_string(),
+                error: String::new(),
+            })
+        });
+        // A teammate's branch, deleted after its squash merge, never reached this clone.
+        let brain = Checkout::new();
+        let head = brain.commit(
+            &[entry(
+                "relay",
+                &id(9),
+                ("tomas", "decision", "Squashed"),
+                "gone @ deadbee · PR #95",
+            )],
+            "Log batch (#80)",
+        );
+        refresh(Refresh {
+            index: &brain.index(),
+            checkout: &brain.path(),
+            commit: &head,
+            brain_dir: "second-brain",
+            clones: &clones,
+            gh: Some(&gh),
+            compiled: &HashSet::new(),
+        })
+        .unwrap();
+        let stored: String = brain
+            .db()
+            .query_row(
+                "SELECT verification FROM files WHERE entry_id=?1",
+                [id(9)],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "verified");
+    }
+
+    #[test]
+    fn a_pr_closed_without_merging_is_final_and_asked_about_once() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (_code, clones, sha) = relay_clone();
+        let asked = Arc::new(AtomicUsize::new(0));
+        let count = asked.clone();
+        let gh: publish::Tool<runtime::GhAnswer> = Arc::new(move |_, args| {
+            assert_eq!(
+                args.last().copied(),
+                Some("repos/Sage-Social/relay/pulls/94")
+            );
+            count.fetch_add(1, Ordering::SeqCst);
+            Ok(runtime::GhAnswer {
+                status: publish::tests::exit(0),
+                output: json!({"state": "closed", "merged": false}).to_string(),
+                error: String::new(),
+            })
+        });
+        let brain = Checkout::new();
+        let reference = format!("retry @ {} · PR #94", &sha[..7]);
+        let first = brain.commit(
+            &[entry(
+                "relay",
+                &id(8),
+                ("mhohlios", "decision", "Dropped"),
+                &reference,
+            )],
+            "Log batch (#80)",
+        );
+        let refresh_at = |commit: &str| {
+            refresh(Refresh {
+                index: &brain.index(),
+                checkout: &brain.path(),
+                commit,
+                brain_dir: "second-brain",
+                clones: &clones,
+                gh: Some(&gh),
+                compiled: &HashSet::new(),
+            })
+            .unwrap();
+        };
+        let stored = || -> (String, String) {
+            brain
+                .db()
+                .query_row(
+                    "SELECT verification,verification_reason FROM files WHERE entry_id=?1",
+                    [id(8)],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        refresh_at(&first);
+        let closed = (
+            "claimed".to_owned(),
+            "PR #94 was closed without merging".to_owned(),
+        );
+        assert_eq!(stored(), closed);
+        // Neither a pass with no new commit nor one with a new commit asks again.
+        refresh_at(&first);
+        let next = brain.commit(&sample()[3..4], "Log batch (#81)");
+        refresh_at(&next);
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        assert_eq!(stored(), closed);
+    }
+
+    #[test]
+    fn a_pr_merged_after_indexing_verifies_its_entry_in_the_browser_as_in_a_compile() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        // A clone of `relay` whose PR #92 commit is only on its branch.
+        let (_code, clones, sha) = relay_clone();
+        let merged = Arc::new(AtomicBool::new(false));
+        let state = merged.clone();
+        let asked = Arc::new(AtomicUsize::new(0));
+        let count = asked.clone();
+        // PR #92 merges during the test; #93 stays open.
+        let gh: publish::Tool<runtime::GhAnswer> = Arc::new(move |_, args| {
+            count.fetch_add(1, Ordering::SeqCst);
+            let merged = match args.last().copied() {
+                Some("repos/Sage-Social/relay/pulls/92") => state.load(Ordering::SeqCst),
+                Some(other) if other.starts_with("repos/Sage-Social/relay/pulls/") => false,
+                other => panic!("unexpected gh call {other:?}"),
+            };
+            Ok(runtime::GhAnswer {
+                status: publish::tests::exit(0),
+                output: json!({"state": if merged { "closed" } else { "open" }, "merged": merged})
+                    .to_string(),
+                error: String::new(),
+            })
+        });
+        let reference = format!("retry @ {} · PR #92", &sha[..7]);
+        let brain = Checkout::new();
+        // Its entry is older than more claimed entries, each for a PR still open, than a pass
+        // asks about at once.
+        let mut entries = vec![entry(
+            "relay",
+            &id(7),
+            ("mhohlios", "decision", "Retry once"),
+            &reference,
+        )];
+        entries.extend((100..100 + RECHECKED_PRS as u128).map(|n| {
+            let open = format!("retry @ {} · PR #{n}", &sha[..7]);
+            entry(
+                "relay",
+                &id(n),
+                ("mhohlios", "observation", "Backoff"),
+                &open,
+            )
+        }));
+        let head = brain.commit(&entries, "Log batch (#80)");
+        let refresh_now = || {
+            refresh(Refresh {
+                index: &brain.index(),
+                checkout: &brain.path(),
+                commit: &head,
+                brain_dir: "second-brain",
+                clones: &clones,
+                gh: Some(&gh),
+                compiled: &HashSet::new(),
+            })
+            .unwrap()
+        };
+        let stored = || -> String {
+            brain
+                .db()
+                .query_row(
+                    "SELECT verification FROM files WHERE entry_id=?1",
+                    [id(7)],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let compiled = || {
+            let refs = [("relay", reference.as_str())];
+            verify_refs::verify_with(
+                &clones,
+                &refs,
+                &mut verify_refs::Cache::default(),
+                Some(&gh),
+            )
+            .remove(0)
+            .state
+        };
+        refresh_now();
+        // A pass with a new commit asks about at most RECHECKED_PRS of the 51 named PRs.
+        assert_eq!(asked.load(Ordering::SeqCst), RECHECKED_PRS);
+        assert_eq!(
+            (stored(), compiled()),
+            ("claimed".to_owned(), RefState::Claimed)
+        );
+        // The PR is squash-merged; the brain does not change.
+        merged.store(true, Ordering::SeqCst);
+        // Passes take the claimed entries in turn, so within two every one is asked about.
+        assert_eq!(refresh_now(), 0, "nothing is read again");
+        assert_eq!(refresh_now(), 0);
+        assert_eq!(
+            (stored(), compiled()),
+            ("verified".to_owned(), RefState::Verified)
+        );
+    }
+
+    #[test]
+    fn pending_entries_follow_the_cursor_its_compiled_ids_and_the_legacy_import() {
+        let brain = Checkout::new();
+        brain.commit(&sample()[..2], "Two entries (#80)");
+        // A bounded compile took the first entry only.
+        let cursor = compile::Cursor {
+            through: None,
+            after: vec![id(1)],
+        };
+        let index = (
+            INDEX.to_owned(),
+            compile::write_cursor("[[Alpha]]\n", &cursor),
+        );
+        let head = brain.commit(&[index], "Compile (#81)");
+        brain.refresh(&head);
+        assert_eq!(status(&brain.db()).unwrap().pending_entries, 1);
+        // With no cursor, what the legacy import recorded as compiled is not pending.
+        let fresh = Checkout::new();
+        fresh.commit(&sample()[..2], "Two entries (#80)");
+        let head = fresh.commit(&sample()[2..3], "One more (#82)");
+        refresh(Refresh {
+            index: &fresh.index(),
+            checkout: &fresh.path(),
+            commit: &head,
+            brain_dir: "second-brain",
+            clones: &Clones::default(),
+            gh: None,
+            compiled: &HashSet::from([id(1), id(2)]),
+        })
+        .unwrap();
+        assert_eq!(status(&fresh.db()).unwrap().pending_entries, 1);
     }
 
     #[test]
@@ -2804,7 +3311,8 @@ pub(crate) mod tests {
             assert_eq!(answer["brain"], REPO);
             assert_eq!(answer["scope"], "brain");
             assert!(answer["last_compile"].as_str().unwrap().contains('T'));
-            assert_eq!(answer["pending_entries"], 0);
+            // The sample's INDEX has no compile cursor, so every entry waits for a compile.
+            assert_eq!(answer["pending_entries"], 5);
             assert!(answer.get("answer").is_none());
             let steps = steps(&answer);
             let first = |step: &str| steps.iter().position(|s| s == step).unwrap();
@@ -2974,6 +3482,8 @@ pub(crate) mod tests {
                 commit: &head,
                 brain_dir: "second-brain",
                 clones: &Clones::default(),
+                gh: None,
+                compiled: &HashSet::new(),
             })
             .unwrap();
             (b.f.host)

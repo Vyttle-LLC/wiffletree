@@ -60,6 +60,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::BrainNote { .. }
         | Command::BrainConflicts { .. }
         | Command::BrainStatus { .. }
+        | Command::BrainCompileRuns { .. }
         | Command::SearchBrain { .. }
         | Command::SuggestSpaceBrain { .. }
         | Command::OriginBranches { .. }
@@ -148,6 +149,8 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::AmendBrainBatch { .. }
         | Command::SendLogsNow { .. }
         | Command::ImportLegacyLogs { .. }
+        | Command::RunBrainCompile { .. }
+        | Command::RuleConflict { .. }
         | Command::FixHeldLog { .. }
         | Command::ReleaseHeldLog { .. }
         | Command::SyncIssues { .. }
