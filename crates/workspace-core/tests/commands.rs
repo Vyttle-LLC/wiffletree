@@ -27,6 +27,7 @@ fn space() -> Space {
         },
         repositories: vec![],
         models: SpaceModels::default(),
+        reviews: Default::default(),
         sources: vec![],
         extra: Extra::new(),
     }

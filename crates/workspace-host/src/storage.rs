@@ -13,7 +13,7 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use tempfile::TempDir;
 use tracker::ISSUES;
-use workspace_core::cascade::{Choices, RepositorySettings};
+use workspace_core::cascade::{Choices, RepositorySettings, ReviewOverrides};
 
 /// The tracker's config at a storage repository's root.
 pub(crate) const TRACKER: &str = "wiffletree-issues.yaml";
@@ -51,6 +51,8 @@ struct SpaceFile {
     repositories: Vec<String>,
     #[serde(default)]
     models: SpaceModels,
+    #[serde(default, skip_serializing_if = "ReviewOverrides::is_empty")]
+    reviews: ReviewOverrides,
     #[serde(default)]
     sources: Vec<Source>,
     #[serde(flatten)]
@@ -71,6 +73,7 @@ fn space_yaml(space: &Space) -> Result<Vec<u8>> {
         brain: space.brain.clone(),
         repositories: space.repositories.clone(),
         models: space.models.clone(),
+        reviews: space.reviews.clone(),
         sources: space.sources.clone(),
         extra: space.extra.clone(),
     };
@@ -100,6 +103,7 @@ fn read_space(content: &[u8], storage: SpaceStorage) -> Result<Space> {
         storage,
         repositories: file.repositories,
         models: file.models,
+        reviews: file.reviews,
         sources: file.sources,
         extra: file.extra,
     };
@@ -1284,6 +1288,7 @@ impl Host {
             },
             repositories: vec![],
             models: SpaceModels::default(),
+            reviews: Default::default(),
             sources: vec![],
             extra: Extra::new(),
         };
@@ -1888,6 +1893,7 @@ pub(crate) mod tests {
             },
             repositories: vec!["Sage-Social/api".into()],
             models: SpaceModels::default(),
+            reviews: Default::default(),
             sources: vec![],
             extra: Extra::new(),
         };

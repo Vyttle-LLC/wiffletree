@@ -2339,6 +2339,7 @@ mod tests {
             },
             repositories: repositories.iter().map(|r| (*r).to_owned()).collect(),
             models: SpaceModels::default(),
+            reviews: Default::default(),
             sources: vec![],
             extra: Extra::new(),
         }

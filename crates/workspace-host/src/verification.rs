@@ -449,14 +449,37 @@ impl Host {
             ticket.state
         );
         let settings = self.settings().verification;
-        if settings.level(level)?.0.kind == LevelKind::Recheck
-            && self.wants_full_reviews(&ticket)?
-        {
+        let named = settings.level(level)?.0;
+        let reviews = self.ticket_reviews(&ticket)?;
+        if !reviews.allows(&named.name) {
+            let space = self.space(&self.ticket_space(&ticket)?)?.space.name;
+            let allowed: Vec<&str> = reviews.levels.value.iter().map(String::as_str).collect();
+            bail!(
+                "{space} does not let its coordinators use the review level {}. Verify at {}.",
+                named.name,
+                or_list(&allowed)
+            );
+        }
+        if named.kind == LevelKind::Recheck && self.wants_full_reviews(&ticket)? {
             bail!(
                 "{level} is a re-check, and this ticket's Review depth Behavior is “Full review for every ticket”. Verify it at a full review level."
             );
         }
         self.start_cycle(ticket, level, Starter::Coordinator { small })
+    }
+    /// The review settings `ticket`'s reviews run under: the Workspace's, with what its
+    /// project's Space overrides.
+    pub(crate) fn ticket_reviews(&self, ticket: &Ticket) -> Result<ResolvedReviews> {
+        self.space_reviews(&self.ticket_space(ticket)?)
+    }
+    /// The review settings of the Space `space`'s tickets.
+    pub(crate) fn space_reviews(&self, space: &SpaceId) -> Result<ResolvedReviews> {
+        let overrides =
+            (self.find_space(space)?).map_or_else(Default::default, |r| r.space.reviews);
+        Ok(cascade::resolve_reviews(
+            &self.settings().verification,
+            &overrides,
+        ))
     }
     /// Starts the PR keeper's review of the commit it moved onto the ticket's branch, at the
     /// keeper's re-check level, with one round and the models those verifiers' rows resolve to.
@@ -499,6 +522,7 @@ impl Host {
         verifiers: &[&VerifierConfig],
         small: bool,
     ) -> Result<Vec<Pick>> {
+        let space = self.ticket_space(ticket)?;
         let picks: Vec<Pick> = (verifiers.iter())
             .map(|verifier| {
                 let job = Job::Verifier {
@@ -506,7 +530,7 @@ impl Host {
                 };
                 let open = (ticket.ledger.iter())
                     .any(|e| e.status == EntryStatus::Open && e.focus == verifier.focus);
-                self.resolve_job(&job, small, !open)
+                self.resolve_job(Some(&space), &job, small, !open)
             })
             .collect::<Result<_>>()?;
         if picks.iter().all(|pick| pick.skip.is_some()) {
@@ -526,7 +550,7 @@ impl Host {
     fn start_cycle(&mut self, mut ticket: Ticket, level: &str, by: Starter) -> Result<Ticket> {
         self.prepare_ticket_worktree(&ticket.id)?;
         ensure!(self.checkout_clean(&ticket)?, "{UNCOMMITTED}");
-        let settings = self.settings().verification;
+        let settings = (self.ticket_reviews(&ticket)?).capped(&self.settings().verification);
         let (level, level_verifiers) = settings.level(level)?;
         level_may_start(&ticket, &settings, level)?;
         let cycle = ticket.next_cycle();
@@ -723,13 +747,14 @@ impl Host {
         let verification = ticket.verification.as_ref().context("No verification")?;
         let (cycle, small) = (verification.cycle, verification.small);
         let mut runs = verification.rounds[0].verifiers.clone();
+        let space = self.ticket_space(ticket)?;
         let mut replaced = vec![];
         for run in &mut runs {
             let job = Job::Verifier {
                 focus: run.focus.clone(),
             };
             // Skips were decided when the cycle was created; a verifier left in it waits.
-            let pick = self.resolve_job(&job, small, false)?;
+            let pick = self.resolve_job(Some(&space), &job, small, false)?;
             let mut agent = self.session(&run.session_id)?;
             if agent.provider != pick.profile.provider {
                 replaced.extend(self.archive_in_change(&agent.id, Some("verifier_replaced"))?);
@@ -1233,7 +1258,7 @@ impl Host {
             self.send(&id, None, &implementer, &body)?;
             return Ok(());
         }
-        let max_cycles = self.settings().verification.max_cycles;
+        let max_cycles = self.ticket_reviews(&ticket)?.max_cycles.value;
         let level = match &verification.level {
             Some(level) if level.kind == LevelKind::Recheck => format!("a {} re-check", level.name),
             level => format!(

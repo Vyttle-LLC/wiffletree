@@ -1097,7 +1097,6 @@ impl AssistantPage {
             .as_ref();
         spaces_view::thread_model(
             default,
-            snapshot.space_locals.get(id),
             &self.shared.detection,
             snapshot.model_selection.row(&Job::Assistant),
         )

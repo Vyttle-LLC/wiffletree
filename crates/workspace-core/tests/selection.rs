@@ -803,3 +803,73 @@ fn the_router_never_moves_on_to_codex() {
             .is_err()
     );
 }
+
+#[test]
+fn a_space_row_overrides_this_macs_unless_none_of_its_choices_is_signed_in() {
+    let mac = table();
+    let space_row = JobRow {
+        job: Job::Coordinator,
+        main: Line {
+            first: sol(),
+            then: Then::Wait,
+        },
+        small: None,
+    };
+    let signed_in = BTreeSet::new();
+    let sage = mac.for_space(Some("Sage"), std::slice::from_ref(&space_row), &signed_in);
+    let from = |table: &SpaceTable, job: &Job| {
+        let row = table.rows.iter().find(|row| row.job.is(job)).unwrap();
+        (row.resolved.from, row.resolved.value.main.first.clone())
+    };
+    assert_eq!(
+        from(&sage, &Job::Coordinator),
+        (cascade::Layer::Space, sol())
+    );
+    assert_eq!(
+        from(&sage, &Job::Implementer),
+        (cascade::Layer::ThisMac, opus())
+    );
+    let pick = (sage.resolve(
+        &Job::Coordinator,
+        false,
+        false,
+        &limits(&[], &signed_in),
+        &when,
+    ))
+    .unwrap();
+    assert_eq!(
+        (pick.profile, pick.reason.as_str()),
+        (sol(), "Sage's Coordinator row: First choice")
+    );
+
+    let codex_out = BTreeSet::from([Provider::Codex]);
+    let sage = mac.for_space(Some("Sage"), &[space_row], &codex_out);
+    assert_eq!(
+        from(&sage, &Job::Coordinator),
+        (cascade::Layer::ThisMac, opus())
+    );
+    let pick = (sage.resolve(
+        &Job::Coordinator,
+        false,
+        false,
+        &limits(&[], &codex_out),
+        &when,
+    ))
+    .unwrap();
+    assert_eq!(pick.profile, opus());
+    assert_eq!(
+        pick.reason,
+        "Sage's Coordinator row falls back to this Mac's: Codex is not signed in on this Mac. \
+         First choice"
+    );
+
+    // Without overrides, the Space resolves exactly as this Mac does.
+    let plain = mac.for_space(Some("Sage"), &[], &signed_in);
+    assert_eq!(plain.selection.jobs, mac.jobs);
+    assert!(
+        plain
+            .rows
+            .iter()
+            .all(|row| row.resolved.from == cascade::Layer::ThisMac)
+    );
+}

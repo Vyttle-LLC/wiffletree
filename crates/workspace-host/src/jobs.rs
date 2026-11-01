@@ -574,43 +574,40 @@ impl Host {
             )
             .optional()?)
     }
-    /// The model a run of `recipe` starts on: the recipe's, else its Space's default for jobs
-    /// when this Mac may use it, else Who runs what's Job row, or the Assistant row without
-    /// one. A recipe with a CLI source runs only on Claude, which can hold the CLI to its
-    /// listed commands; Codex cannot yet (design, decision 9).
+    /// The model a run of `recipe` starts on: the recipe's when this Mac may use it, else Who
+    /// runs what's Job row, or the Assistant row without one, as the recipe's Space resolves
+    /// them. A recipe with a CLI source runs only on Claude, which can hold the CLI to its
+    /// listed commands; Codex cannot yet (design, decision 9), so a Space row of Codex choices
+    /// falls back to this Mac's.
     pub(crate) fn job_model(&self, recipe: &Recipe) -> Result<(ModelProfile, String, bool)> {
-        let record = self.space(&recipe.space_id)?;
+        let space = Some(&recipe.space_id);
         let cli = (recipe.sources.iter()).find_map(|source| match source {
             Source::Cli { command, .. } => Some(command.clone()),
             Source::Mcp { .. } => None,
         });
-        let holds = |profile: &ModelProfile| cli.is_none() || profile.provider == Provider::Claude;
         let codex_note = |cli: &str| format!("Codex cannot yet hold {cli} to read commands");
         let mut notes = vec![];
-        let space_default = (record.space.models.jobs.as_ref()).map(|m| m.profile());
-        let candidates = [
-            (recipe.model.clone(), "Chosen in the recipe".to_owned()),
-            (
-                space_default,
-                format!("{}'s default for jobs", record.space.name),
-            ),
-        ];
-        for (profile, reason) in candidates {
-            let Some(profile) = profile else { continue };
-            match (self.may_use(&record.local, &profile), holds(&profile)) {
-                (true, true) => return Ok((profile, reason, false)),
+        if let Some(profile) = recipe.model.clone() {
+            let reason = "Chosen in the recipe";
+            match (self.may_use(&profile), &cli) {
                 (false, _) => notes.push(format!(
                     "{reason}, {}, is not available on this Mac.",
                     profile.short()
                 )),
-                (true, false) => notes.push(format!(
+                (true, Some(cli)) if profile.provider != Provider::Claude => notes.push(format!(
                     "{reason}, {}, is on Codex, and {}.",
                     profile.short(),
-                    codex_note(cli.as_deref().unwrap_or_default())
+                    codex_note(cli)
                 )),
+                (true, _) => return Ok((profile, reason.into(), false)),
             }
         }
-        let selection = self.model_selection()?;
+        let (quotas, mut unusable, switch_at) = self.limits()?;
+        if cli.is_some() {
+            unusable.insert(Provider::Codex);
+        }
+        let table = self.space_table(space, &unusable)?;
+        let selection = &table.selection;
         let row = (selection.row(&Job::Job)).or_else(|| selection.row(&Job::Assistant));
         let row_name = match selection.row(&Job::Job) {
             Some(_) => "Job row",
@@ -623,10 +620,13 @@ impl Host {
                 codex_note(cli)
             );
         }
-        let pick = match &cli {
-            Some(_) => self.resolve_job_without(&Job::Job, Provider::Codex)?,
-            None => self.resolve_job(&Job::Job, false, false)?,
+        let limits = Limits {
+            quotas: &quotas,
+            unusable: &unusable,
+            switch_at,
+            now: now(),
         };
+        let pick = table.resolve(&Job::Job, false, false, &limits, &policies::reset_time)?;
         notes.push(format!("{row_name}: {}", pick.reason));
         Ok((pick.profile, notes.join(" "), pick.waits))
     }
@@ -2146,6 +2146,55 @@ mod tests {
             "Codex cannot yet hold gh to read commands, and the Job row has no Claude choice."
         );
         assert_eq!(s.host.job_states().unwrap()[0].profile, None);
+    }
+
+    #[test]
+    fn a_run_starts_on_its_recipes_model_then_its_spaces_job_row_then_this_macs() {
+        let mut s = jobs();
+        let profile = |provider, model: &str| ModelProfile {
+            provider,
+            model: model.into(),
+            effort: "high".into(),
+        };
+        let (space, sol) = (
+            s.personal.id.clone(),
+            profile(Provider::Codex, "gpt-6.1-sol"),
+        );
+        let row = JobRow {
+            job: Job::Job,
+            main: Line {
+                first: sol.clone(),
+                then: Then::Wait,
+            },
+            small: None,
+        };
+        let settings = SpaceModelSettings {
+            rows: vec![row],
+            reviews: Default::default(),
+        };
+        s.host.set_space_model_settings(&space, settings).unwrap();
+        let mut brief = recipe(&s.personal, "PR queue", "0 7 * * 1-5");
+        let (model, reason, _) = s.host.job_model(&brief).unwrap();
+        assert_eq!(model, sol);
+        assert_eq!(reason, "Job row: Personal's Job row: First choice");
+
+        let opus = profile(Provider::Claude, "opus");
+        brief.model = Some(opus.clone());
+        assert_eq!(s.host.job_model(&brief).unwrap().0, opus);
+
+        brief.model = None;
+        let signed_out = ProviderStatus {
+            installed: true,
+            signed_in: false,
+            plan: None,
+        };
+        s.host.record_detection(Provider::Codex, &signed_out);
+        let (model, reason, _) = s.host.job_model(&brief).unwrap();
+        assert_eq!(model.provider, Provider::Claude);
+        assert!(
+            reason.contains("Personal's Job row falls back to this Mac's: Codex is not signed in"),
+            "{reason}"
+        );
     }
 
     #[test]

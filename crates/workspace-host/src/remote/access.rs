@@ -46,6 +46,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::SkillMergeReview { .. }
         | Command::BehaviorCatalog
         | Command::LayerValues { .. }
+        | Command::SpaceModels { .. }
         | Command::EffectiveSettings { .. }
         | Command::SkillStockChanges { .. }
         | Command::LeftoverWorktrees
@@ -178,6 +179,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::SetOwnerAllowed { .. }
         | Command::SetKeeper { .. }
         | Command::SetLayerValues { .. }
+        | Command::SetSpaceModels { .. }
         | Command::SaveSkillRules { .. }
         | Command::ResetSkill { .. }
         | Command::RestoreSkill { .. }

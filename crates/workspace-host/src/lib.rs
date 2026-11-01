@@ -80,6 +80,7 @@ use std::{
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
+use workspace_core::cascade::{self, Layer, ResolvedReviews, SpaceModelSettings};
 use workspace_core::*;
 
 /// The activity kind that marks a session the human's own words have reached.
@@ -446,6 +447,8 @@ impl Host {
         host.move_into_shared_folder()?;
         // After the move, so the shared review settings and guide are where it reads them.
         host.migrate_who_runs_what(detect)?;
+        // After the table's migration, which saves the row this note joins.
+        host.note_retired_space_model_lists()?;
         host.refresh_starter_guide()?;
         sync::remove_staging(&host.home)?;
         host.backfill_usage()?;
@@ -763,7 +766,7 @@ impl Host {
         };
         let selection = self.model_selection()?;
         ensure!(selection.is_saved(), policies::NO_SETUP);
-        let pick = self.resolve_job(&Job::Coordinator, false, false)?;
+        let pick = self.resolve_job(Some(space), &Job::Coordinator, false, false)?;
         let session = Session {
             id: new_id(),
             project_id: project.id.clone(),
@@ -2290,6 +2293,12 @@ impl Host {
             Command::SkillHistory { skill } => serde_json::to_value(self.skills().listing(skill))?,
             Command::BehaviorCatalog => serde_json::to_value(behaviors::catalog())?,
             Command::LayerValues { scope } => serde_json::to_value(self.layer_values(&scope)?)?,
+            Command::SpaceModels { space_id } => {
+                serde_json::to_value(self.space_model_settings(&space_id)?)?
+            }
+            Command::SetSpaceModels { space_id, settings } => {
+                serde_json::to_value(self.set_space_model_settings(&space_id, settings)?)?
+            }
             Command::SetLayerValues { scope, values } => {
                 serde_json::to_value(self.set_layer_values(&scope, values)?)?
             }

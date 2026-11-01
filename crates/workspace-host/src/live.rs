@@ -460,7 +460,7 @@ impl Host {
         ticket: &Ticket,
         waived: Option<&'a str>,
     ) -> Option<&'a str> {
-        let cap = self.settings().verification.max_cycles as usize;
+        let cap = self.ticket_reviews(ticket).ok()?.max_cycles.value as usize;
         waived.filter(|_| verification::full_reviews(ticket) >= cap)
     }
     fn finish_ticket(
@@ -562,7 +562,7 @@ impl Host {
             "memory":self.logs(&session.project_id,None,10)?,
             "open_questions":self.open_questions(&session)?});
         if session.role == Role::ProjectOrchestrator {
-            context["model_selection"] = self.model_context()?;
+            context["model_selection"] = self.model_context(&session.project_id)?;
             context["behaviors"] = self.behaviors_context(&session.project_id)?;
             let created = self.created_projects(id)?;
             if !created.is_empty() {
@@ -730,12 +730,17 @@ impl Host {
             })
             .collect())
     }
-    /// The Who runs what table as the coordinator reads it: each row's lines and what each
-    /// would start on now and why, the threshold, the review settings and the guide as notes.
-    fn model_context(&self) -> Result<Value> {
-        let selection = self.model_selection()?;
-        let verification = self.settings().verification;
+    /// The Who runs what table as the coordinator of `project_id` reads it, resolved for its
+    /// Space: each row's lines, which Space overrode it, and what each would start on now and
+    /// why; the threshold; the review settings with the Space's caps and the levels it allows;
+    /// and the guide as notes.
+    fn model_context(&self, project_id: &str) -> Result<Value> {
+        let space = self.project_space(project_id)?;
         let (quotas, unusable, switch_at) = self.limits()?;
+        let table = self.space_table(Some(&space), &unusable)?;
+        let selection = &table.selection;
+        let verification = self.settings().verification;
+        let reviews = self.space_reviews(&space)?;
         let limits = Limits {
             quotas: &quotas,
             unusable: &unusable,
@@ -750,18 +755,26 @@ impl Host {
             &limits,
             &policies::reset_time,
         ) {
-            Ok(pick) if pick.skip.is_some() => json!({"skips": true, "reason": pick.reason}),
-            Ok(pick) => {
-                json!({"profile": pick.profile, "waits": pick.waits, "reason": pick.reason})
-            }
+            Ok(pick) if pick.skip.is_some() => json!({"skips": true,
+                "reason": table.explain(&row.job, pick.reason)}),
+            Ok(pick) => json!({"profile": pick.profile, "waits": pick.waits,
+                "reason": table.explain(&row.job, pick.reason)}),
             Err(error) => json!({"cannot_start": format!("{error:#}")}),
         };
+        let space_name = self.find_space(&space)?.map(|r| r.space.name);
         // Only the human starts the assistant's threads, and only their messages run the router.
-        let jobs: Vec<Value> = (selection.jobs.iter())
+        let jobs: Vec<Value> = (table.rows.iter())
             .filter(|row| !matches!(row.job, Job::Assistant | Job::Router))
-            .map(|row| {
+            .map(|resolved| {
+                let row = &resolved.resolved.value;
                 let mut entry = json!({"job": row.job, "name": row.job.name(),
                     "main": line(&row.main), "right_now": right_now(row, false)});
+                if resolved.resolved.from == Layer::Space {
+                    entry["from"] = json!(space_name);
+                }
+                if !resolved.resolved.notes.is_empty() {
+                    entry["notes"] = json!(resolved.resolved.notes);
+                }
                 if let Some(small) = &row.small {
                     entry["small"] = line(small);
                     entry["right_now_small"] = right_now(row, true);
@@ -769,12 +782,33 @@ impl Host {
                 entry
             })
             .collect();
-        Ok(
-            json!({"revision": selection.revision, "switch_at": switch_at, "jobs": jobs,
-            "verifiers": verification.verifiers, "review_levels": verification.levels,
-            "max_rounds": verification.max_rounds, "max_cycles": verification.max_cycles,
-            "notes": selection.guide}),
-        )
+        let allowed: Vec<&ReviewLevel> = (verification.levels.iter())
+            .filter(|level| reviews.allows(&level.name))
+            .collect();
+        let from_space: Vec<&str> = [
+            ("review_levels", &reviews.levels.from),
+            ("max_rounds", &reviews.max_rounds.from),
+            ("max_cycles", &reviews.max_cycles.from),
+        ]
+        .into_iter()
+        .filter(|(_, from)| **from == Layer::Space)
+        .map(|(key, _)| key)
+        .collect();
+        let review_notes: Vec<&String> = (reviews.levels.notes.iter())
+            .chain(&reviews.max_rounds.notes)
+            .chain(&reviews.max_cycles.notes)
+            .collect();
+        let mut context = json!({"revision": selection.revision, "switch_at": switch_at,
+            "space": space_name, "jobs": jobs, "verifiers": verification.verifiers,
+            "review_levels": allowed, "max_rounds": reviews.max_rounds.value,
+            "max_cycles": reviews.max_cycles.value, "notes": selection.guide});
+        if !from_space.is_empty() {
+            context["reviews_from_space"] = json!(from_space);
+        }
+        if !review_notes.is_empty() {
+            context["review_notes"] = json!(review_notes);
+        }
+        Ok(context)
     }
     /// The job an assignment resolves: the role's row, a configured verifier's when the focus
     /// names one, and for an ad-hoc reviewer the row of the verifier `like` names, else the
@@ -931,7 +965,8 @@ impl Host {
                     return self.assignment_result(&existing);
                 }
                 let job = self.assignment_job(role, focus, args["like"].as_str())?;
-                let pick = self.resolve_job(&job, small, false)?;
+                let space = self.project_space(&session.project_id)?;
+                let pick = self.resolve_job(Some(&space), &job, small, false)?;
                 let instruction = string("instruction")?;
                 // The agent, its instruction and the ticket update exist only with the agent's
                 // model and reason, or not at all.

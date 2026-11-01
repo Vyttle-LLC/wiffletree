@@ -72,3 +72,33 @@ A coordinator's `workspace_context` SHALL list every Behavior as its project's S
 #### Scenario: Sage requires full reviews for one repository
 - **WHEN** Sage sets Review depth to full review for `sagechat-sms` only
 - **THEN** the coordinator's context shows Review depth from Stock for the Space, and from Repository under `Sage-Social/sagechat-sms`
+
+### Requirement: A Space overrides rows of Who runs what
+The Who runs what table SHALL stay per Mac and be the base layer, This Mac. A Space MAY override any of its rows in `space.yaml` `models.rows`, in the table's row shape and kept to the table's rules, at most one row a job. For any agent in a project, thread or job in a Space, the model SHALL resolve recipe model (jobs only) → the Space's row → this Mac's row, through the cascade's resolver, so each row carries whether it came from This Mac or the Space. A Space row none of whose choices is signed in on this Mac SHALL fall back to this Mac's row, and the agent's model reason SHALL say so. The winning row SHALL keep the table's rules for spent providers, waiting and skipping. `models.threads` and `models.jobs`, which earlier releases read, SHALL read as the first choices of the Assistant and Job rows; nothing SHALL be rewritten until a save, and a save SHALL write them to match those rows so an older host keeps using them. A Space's list of the models this Mac may use in it SHALL no longer limit anything. Only the human's client SHALL set a Space's rows.
+
+#### Scenario: Sage overrides the Implementer row
+- **WHEN** Sage's `space.yaml` sets the Implementer row to GPT 6.1 Sol · high, and this Mac's row is Opus · medium
+- **THEN** Sage's implementers start on GPT 6.1 Sol · high, with a reason naming Sage's row, and the coordinator's context marks the row as Sage's
+
+#### Scenario: The Space's provider is signed out here
+- **WHEN** Sage's Assistant row names only Codex and Codex is signed out on this Mac
+- **THEN** a Sage thread starts on this Mac's Assistant row, and its reason says Sage's row fell back because Codex is not signed in on this Mac
+
+#### Scenario: A recipe's model
+- **WHEN** a Sage job's recipe names Opus · high and Sage's Job row names GPT 6.1 Sol · high
+- **THEN** the run starts on Opus · high
+
+#### Scenario: A Space an older host saved
+- **WHEN** Sage's `space.yaml` holds only `models.threads: GPT 6.1 Sol · high`
+- **THEN** Sage's Assistant row is GPT 6.1 Sol · high, and a save of Sage's rows here writes `threads` again with the rows
+
+### Requirement: A Space sets its tickets' reviews
+A Space MAY set, under `reviews` in `space.yaml`, the round cap, the full-review cap and the review levels, by name, its coordinators may use; each unset key SHALL inherit the Workspace's review settings. `verify_ticket` SHALL refuse a level the ticket's Space does not allow, naming the Space and the levels it allows, and each cycle SHALL run under the Space's caps. Saving SHALL refuse a level this Mac does not configure, levels without a full review and a cap out of range; a level read from a file that this Mac does not configure SHALL be left out with a note. A level SHALL still never leave out a verifier with an open finding (see ticket-verification). The coordinator's `model_selection` SHALL show the levels and caps its Space resolves, naming those the Space set.
+
+#### Scenario: Sage allows only its quick level
+- **WHEN** Sage allows only the level "Quick" and its coordinator calls `verify_ticket` at "Full"
+- **THEN** the call is refused, saying Sage does not let its coordinators use Full and to verify at Quick, and no verifier starts
+
+#### Scenario: Sage caps rounds at one
+- **WHEN** the Workspace's round cap is 3 and Sage's is 1, and a Sage ticket's first round fails
+- **THEN** the ticket is blocked at the round cap of 1

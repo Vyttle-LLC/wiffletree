@@ -684,7 +684,10 @@ impl Host {
                 reason: "The PR keeper's Claude choice: sorting runs with every tool turned off"
                     .into(),
             },
-            KeeperSession::Try => self.resolve_job(&workspace_core::Job::Keeper, false, false)?,
+            KeeperSession::Try => {
+                let space = self.ticket_space(ticket)?;
+                self.resolve_job(Some(&space), &workspace_core::Job::Keeper, false, false)?
+            }
         };
         let mut replaced = vec![];
         let agent = self.atomically(|host| {
@@ -4354,7 +4357,7 @@ pub(crate) mod tests {
         };
         let profile = f
             .host
-            .resolve_job(&correctness, false, false)
+            .resolve_job(None, &correctness, false, false)
             .unwrap()
             .profile;
         let provider = profile.provider;
@@ -4590,7 +4593,10 @@ pub(crate) mod tests {
         let correctness = workspace_core::Job::Verifier {
             focus: "Correctness".into(),
         };
-        let runs_on = f.host.resolve_job(&correctness, false, false).unwrap();
+        let runs_on = f
+            .host
+            .resolve_job(None, &correctness, false, false)
+            .unwrap();
         let other = match runs_on.profile.provider {
             Provider::Claude => Provider::Codex,
             Provider::Codex => Provider::Claude,

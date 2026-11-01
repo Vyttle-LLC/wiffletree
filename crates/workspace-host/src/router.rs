@@ -91,7 +91,7 @@ impl Host {
     }
     /// The Router row's pick, or why the router does not run: it never waits.
     fn router_profile(&self) -> Result<ModelProfile, String> {
-        match self.resolve_job(&Job::Router, false, false) {
+        match self.resolve_job(None, &Job::Router, false, false) {
             Ok(pick) if !pick.waits => Ok(pick.profile),
             Ok(_) => Err("The router did not run: every choice on its row is spent.".into()),
             Err(error) => Err(format!("The router did not run: {error:#}")),
@@ -448,7 +448,7 @@ mod tests {
         assert_eq!(
             run.profile,
             s.host
-                .resolve_job(&Job::Router, false, false)
+                .resolve_job(None, &Job::Router, false, false)
                 .unwrap()
                 .profile
         );

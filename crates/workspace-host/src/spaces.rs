@@ -174,6 +174,7 @@ fn new_space(name: &str, prefixes: &mut Vec<String>) -> (Space, TrackerConfig) {
         },
         repositories: vec![],
         models: SpaceModels::default(),
+        reviews: Default::default(),
         sources: vec![],
         extra: Extra::new(),
     };
