@@ -19,7 +19,7 @@ const INDEX: &str = "notes/INDEX.md";
 const QUEUE: &str = "reconcile-queue.md";
 const CONFLICT_MARKER: &str = "<!-- conflict:";
 
-/// How many claimed entries naming a PR a pass asks GitHub about, in turn from where the last
+/// How many unsettled entries naming a PR a pass asks GitHub about, in turn from where the last
 /// pass stopped, so a pass stays bounded and none is left out.
 const RECHECKED_PRS: usize = 50;
 /// How a ruling entry's `state` begins, followed by the conflict's id and a colon.
@@ -715,7 +715,7 @@ fn squash_pull_request(subject: &str) -> Option<u64> {
 }
 
 /// Checks the ref of every entry not yet verified against this machine's clones, or with
-/// `only_named_prs` asks `gh` about the next claimed entries' PRs, in turn. A PR closed without
+/// `only_named_prs` asks `gh` about the next unsettled entries' PRs, in turn. A PR closed without
 /// merging is final, and its entry is checked no more.
 fn verify_entries(
     db: &Connection,
@@ -746,11 +746,12 @@ fn verify_entries(
             )?,
             None,
         ),
-        // The next claimed entries naming a PR after the last one asked about, from the first
+        // The next claimed or unverified entries naming a PR, whose repository is on this
+        // machine, after the last one asked about, from the first
         // again past the end, so every one is asked about in turn.
         true => {
             let which = format!(
-                "verification='claimed' AND reference LIKE '% · PR #%' AND {open} ORDER BY id LIMIT {RECHECKED_PRS}"
+                "verification IN ('claimed','unverified') AND coalesce(verification_reason,'')<>'not on this machine' AND reference LIKE '% · PR #%' AND {open} ORDER BY id LIMIT {RECHECKED_PRS}"
             );
             let from: i64 = (state(db, "pr_recheck_after")?)
                 .and_then(|id| id.parse().ok())
@@ -2518,6 +2519,53 @@ pub(crate) mod tests {
             }],
         )]));
         (code, clones, sha)
+    }
+
+    #[test]
+    fn a_merged_pr_whose_commit_this_clone_lacks_verifies_its_entry() {
+        use std::sync::Arc;
+        let (_code, clones, _) = relay_clone();
+        let gh: publish::Tool<runtime::GhAnswer> = Arc::new(|_, args| {
+            assert_eq!(
+                args.last().copied(),
+                Some("repos/Sage-Social/relay/pulls/95")
+            );
+            Ok(runtime::GhAnswer {
+                status: publish::tests::exit(0),
+                output: json!({"state": "closed", "merged": true}).to_string(),
+                error: String::new(),
+            })
+        });
+        // A teammate's branch, deleted after its squash merge, never reached this clone.
+        let brain = Checkout::new();
+        let head = brain.commit(
+            &[entry(
+                "relay",
+                &id(9),
+                ("tomas", "decision", "Squashed"),
+                "gone @ deadbee · PR #95",
+            )],
+            "Log batch (#80)",
+        );
+        refresh(Refresh {
+            index: &brain.index(),
+            checkout: &brain.path(),
+            commit: &head,
+            brain_dir: "second-brain",
+            clones: &clones,
+            gh: Some(&gh),
+            compiled: &HashSet::new(),
+        })
+        .unwrap();
+        let stored: String = brain
+            .db()
+            .query_row(
+                "SELECT verification FROM files WHERE entry_id=?1",
+                [id(9)],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "verified");
     }
 
     #[test]

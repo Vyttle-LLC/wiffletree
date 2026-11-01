@@ -1581,15 +1581,22 @@ impl Host {
         Ok(cards)
     }
 
+    /// The ruling made here on a conflict, unless its batch was discarded before it reached
+    /// `main`, which leaves the conflict open to rule on again.
     fn local_ruling(&self, repository: &str, conflict: &str) -> Result<Option<LocalRuling>> {
-        Ok(self
+        let local: Option<LocalRuling> = self
             .db
             .query_row(
                 "SELECT data FROM conflict_rulings WHERE repository=?1 AND conflict_id=?2",
                 params![repository, conflict],
                 |r| decode(r, 0),
             )
-            .optional()?)
+            .optional()?;
+        let discarded = |batch: &str| {
+            self.brain_batch(batch)
+                .is_ok_and(|b| b.stage == BrainStage::Discarded)
+        };
+        Ok(local.filter(|l| !l.batch_id.as_deref().is_some_and(discarded)))
     }
 
     /// The human's ruling on a conflict. Uphold existing, Keep new and Keep both write one
@@ -2430,6 +2437,34 @@ mod tests {
         assert!(
             (b.f.host.workspace_notes(&[]).unwrap().iter())
                 .all(|note| !matches!(note, WorkspaceNote::Conflict(_)) || !note.needs_you())
+        );
+    }
+
+    #[test]
+    fn a_ruling_whose_batch_is_discarded_leaves_the_conflict_open_to_rule_again() {
+        let mut b = brained();
+        let conflict = with_conflict(&mut b);
+        let project = b.f.coordinator.project_id.clone();
+        let git = b.tools.git.clone();
+        (b.f.host
+            .rule_conflict(REPO, &conflict, Ruling::KeepNew, &git))
+        .unwrap();
+        let batch = (b.f.host.brain_batches(Some(REPO)).unwrap().into_iter())
+            .find(|batch| batch.title == format!("Ruling on conflict {conflict}"))
+            .unwrap();
+        (b.f.host
+            .amend_brain_batch(&batch.id, &workspace_core::BrainAmendment::Discard, &git))
+        .unwrap();
+        let cards = conflict_notes(&b, &project);
+        assert_eq!(cards[0].state, ConflictState::Open);
+        assert!(WorkspaceNote::Conflict(Box::new(cards[0].clone())).needs_you());
+        let card =
+            (b.f.host
+                .rule_conflict(REPO, &conflict, Ruling::UpholdExisting, &git))
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(&card.state, ConflictState::Ruled { ruling, .. } if ruling == "Uphold existing")
         );
     }
 
