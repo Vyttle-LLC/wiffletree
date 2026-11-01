@@ -1,34 +1,35 @@
-# Pull requests run only the lint job, which compiles every target on macOS. The merge queue runs the validation suite once per
-# landing, and every push to main runs it again; the release workflow reuses it before publishing.
+# A pull request outside a stack and the top level of a stack run the validation suite, as does every push to main; the release
+# workflow reuses it before publishing. A stack's lower levels run only the lint job, which compiles every target on macOS.
 # The core and host tests are built once on Linux and run in four shards. macOS jobs lint, run the desktop tests, the tests that
 # only build on macOS (the `mac` nextest profile) and the communication tests. On main and in a release, the whole suite also runs
 # on macOS. The `check` job, which branch protection requires, passes only when every job that ran did. `github.event_name` is
 # `push` in a release too, because a reusable workflow sees its caller's event.
 # Only runs on main save the Rust build caches. Any other run can restore caches saved on its own ref or on main, so saving from
-# main starts every new pull request and queue run warm; those and releases restore and never save, which keeps their caches from
+# main starts every new pull request warm; pull requests and releases restore and never save, which keeps their caches from
 # pushing main's out of the repository's cache limit.
 name: CI
 
 on:
   pull_request:
-  merge_group:
   push:
     branches: [main]
   workflow_call:
 
-# Only a newer push to a pull request replaces a run. Every other run has a group of its own, because a group holds one waiting
-# run, so even without cancelling in progress a third push to main would cancel the second.
+# Only a newer push to the same pull request replaces a run, so a stack's levels never cancel each other. Every other run has a
+# group of its own, because a group holds one waiting run, so even without cancelling in progress a third push to main would
+# cancel the second.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # A retry that passes still shows as FLAKY in nextest's summary. A flaky test should not eject a stack from the queue.
-  NEXTEST_RETRIES: ${{ github.event_name == 'merge_group' && 1 || 0 }}
+  # A retry that passes still shows as FLAKY in nextest's summary. A flaky test should not fail a pull request.
+  NEXTEST_RETRIES: ${{ github.event_name == 'pull_request' && 1 || 0 }}
 
 jobs:
   linux-build:
-    if: github.event_name != 'pull_request'
+    # `stack` is set only on a pull request in a stack, and position equals size on its top level.
+    if: &runs-tests "!github.event.pull_request.stack || github.event.pull_request.stack.position == github.event.pull_request.stack.size"
     runs-on: ubuntu-latest
     env:
       # Full debug info would make the archive each shard downloads about a gigabyte; line tables keep backtraces readable.
@@ -100,7 +101,7 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   mac-tests:
-    if: github.event_name != 'pull_request'
+    if: *runs-tests
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
@@ -137,7 +138,7 @@ jobs:
           python3 scripts/test_communications.py
 
   mac-full-suite:
-    if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
+    if: github.event_name != 'pull_request'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
@@ -163,14 +164,14 @@ jobs:
         run: exit 1
 
       - uses: actions/download-artifact@v8
-        if: github.event_name != 'pull_request'
+        if: needs.mac-tests.result == 'success'
         with:
           pattern: '*-test-list*'
           merge-multiple: true
 
       # A core or host test macOS builds but Linux does not runs only if the `mac` profile selects it.
-      - name: Every core and host test runs in the merge queue
-        if: github.event_name != 'pull_request'
+      - name: Every core and host test runs in CI
+        if: needs.mac-tests.result == 'success'
         run: |
           sort -u linux-tests.txt mac-only-tests.txt > covered.txt
           sort mac-tests.txt | comm -23 - covered.txt > uncovered.txt
