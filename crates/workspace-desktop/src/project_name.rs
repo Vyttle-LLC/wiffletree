@@ -62,8 +62,8 @@ impl sidebar::Sidebar {
         });
     }
 
-    /// Creates the project New project chose, in its Space with its repositories; the first
-    /// message goes to its coordinator once the project arrives.
+    /// Creates the project New project chose, in its Space with what the human added; the
+    /// first message goes to its coordinator once the project arrives.
     fn create_project(&mut self, project: NewProject, window: &mut Window, cx: &mut Context<Self>) {
         let NewProject {
             name,
@@ -78,9 +78,9 @@ impl sidebar::Sidebar {
             cx,
             move |view, project, window, cx| match project {
                 Ok(project) => {
-                    let command = Command::SetProjectRepositories {
+                    let command = Command::SetAddedRepositories {
                         project_id: project.id.clone(),
-                        repository_ids: Some(repository_ids),
+                        repository_ids,
                     };
                     view.request(command, window, cx);
                     view.pending_first_message = first_message;

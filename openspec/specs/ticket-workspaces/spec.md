@@ -30,8 +30,8 @@ A ticket SHALL belong to one project coordinator and one repository that the pro
 - **AND** the implementer's and every verifier's runtime `workdir` equals the ticket's `worktree`
 
 #### Scenario: Repository outside the project
-- **WHEN** the project coordinator calls `create_ticket` with a `repository_id` the project does not use
-- **THEN** the host rejects it, naming the repository, and creates no worktree or branch
+- **WHEN** the coordinator of project Billing, in the Vyttle Space, calls `create_ticket` with `wiffletree`, which the project does not use
+- **THEN** the host rejects it with "Project Billing does not use repository wiffletree: Vyttle does not list it and it was not added to this project. Ask the human to add it to Vyttle on the Repositories page, or to this project from its Overview.", and creates no worktree or branch
 
 #### Scenario: Repeated creation is idempotent
 - **WHEN** `create_ticket` is called twice with the same title, brief and repository
@@ -40,6 +40,10 @@ A ticket SHALL belong to one project coordinator and one repository that the pro
 #### Scenario: Several tickets share a repository
 - **WHEN** the project coordinator creates two tickets in the same repository
 - **THEN** each ticket has its own worktree and branch
+
+#### Scenario: A reviewer on a ticket whose repository left the project's Space
+- **WHEN** a repository leaves the Space, or the project moves, while an open ticket works there, and a verifier starts on that ticket
+- **THEN** it starts in the ticket's worktree
 
 ### Requirement: Agents report directly to the project coordinator
 Every agent assigned to a ticket SHALL have the ticket's project coordinator as its parent. Reports and messages SHALL travel between an agent and the project coordinator without any intermediate coordinator session, and a blocked report SHALL wake the project coordinator, not the human; only the project coordinator SHALL place questions in the human's inbox.

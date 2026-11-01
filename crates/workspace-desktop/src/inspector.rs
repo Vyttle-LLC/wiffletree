@@ -6,13 +6,12 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
     tooltip::Tooltip,
 };
+use project_repositories::{MovePreview, RepositoryGroups, groups, move_preview, names_label};
 use ui::{
     card, empty_state, eyebrow, hint, icon, mono, page_header, pill, property, section,
     session_icon,
 };
 use wording::{from_now, local_time};
-
-const MOVE_TO_SPACE: &str = "Its later entries go to that Space’s brain; earlier ones stay where they are. Its repositories don’t change.";
 
 fn scope(role: Role) -> &'static str {
     match role {
@@ -453,12 +452,16 @@ impl Inspector {
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
-        let space = snapshot.spaces.iter().find(|s| s.id == project.space);
-        let others: Vec<(SpaceId, String)> = (snapshot.spaces.iter())
+        let space = snapshot.space_of(project);
+        let others: Vec<(SpaceId, String, MovePreview)> = (snapshot.spaces.iter())
             .filter(|s| s.id != project.space)
-            .map(|s| (s.id.clone(), s.name.clone()))
+            .map(|s| {
+                let preview = move_preview(snapshot, project, s);
+                (s.id.clone(), s.name.clone(), preview)
+            })
             .collect();
         let (project_id, project_name) = (project.id.clone(), project.name.clone());
+        let from = space.map_or_else(|| "this Space".to_owned(), |s| s.name.clone());
         let weak = cx.weak_entity();
         let mut section = div().flex().flex_col().gap_1().child(
             section("SPACE", p).child(
@@ -471,9 +474,10 @@ impl Inspector {
                     &self.shared.host,
                 )
                 .dropdown_menu(move |mut menu, _, _| {
-                    for (id, name) in &others {
+                    for (id, name, preview) in &others {
                         let (weak, id, name) = (weak.clone(), id.clone(), name.clone());
                         let (project_id, project_name) = (project_id.clone(), project_name.clone());
+                        let (preview, from) = (preview.clone(), from.clone());
                         menu = menu.item(PopupMenuItem::new(name.clone()).on_click(
                             move |_, window, cx| {
                                 let move_to = Command::MoveProjectToSpace {
@@ -482,13 +486,16 @@ impl Inspector {
                                 };
                                 let weak = weak.clone();
                                 let title = format!("Move {project_name} to {name}?");
+                                let (preview, from, to) =
+                                    (preview.clone(), from.clone(), name.clone());
+                                let p = palette(is_dark(cx));
                                 window.open_alert_dialog(cx, move |dialog, _, _| {
                                     let (weak, move_to) = (weak.clone(), move_to.clone());
                                     dialog
                                         .title(title.clone())
                                         .confirm()
                                         .ok_text("Move")
-                                        .child(MOVE_TO_SPACE)
+                                        .child(Self::move_summary(&preview, &from, &to, p))
                                         .on_ok(move |_, window, cx| {
                                             let move_to = move_to.clone();
                                             let _ = weak.update(cx, |view, cx| {
@@ -524,6 +531,150 @@ impl Inspector {
             format!("Logs to {}.", spaces_view::brain_label(space, local)),
             p,
         ))
+    }
+
+    /// The Move dialog: where entries go, then what the project gains, loses and keeps.
+    fn move_summary(preview: &MovePreview, from: &str, to: &str, p: Palette) -> Div {
+        let heading = |text: String| div().mt_2().font_weight(FontWeight::SEMIBOLD).child(text);
+        let mut summary = div().flex().flex_col().gap_1().child(hint(
+            format!("Its later entries go to {to}’s brain; earlier ones stay where they are."),
+            p,
+        ));
+        if !preview.gains.is_empty() {
+            let count = preview.gains.len();
+            summary = summary
+                .child(heading(format!("Gains {count} from {to}")))
+                .child(hint(names_label(&preview.gains), p));
+        }
+        if !preview.loses.is_empty() {
+            let count = preview.loses.len();
+            summary = summary
+                .child(heading(format!("Loses {count} from {from}")))
+                .child(hint(names_label(&preview.loses), p));
+        }
+        if !preview.keeps.is_empty() {
+            summary = summary.child(heading("Keeps".to_owned()));
+            for (name, why) in &preview.keeps {
+                summary = summary.child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .gap_3()
+                        .child(name.clone())
+                        .child(hint(why.clone(), p)),
+                );
+            }
+        }
+        summary
+    }
+
+    /// Overview's repositories, each under where it comes from; `space` is the project's.
+    fn repository_groups(
+        &self,
+        project: &Project,
+        space: Option<&Space>,
+        groups: RepositoryGroups,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let heading = |text: String| {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .mt_3()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(text)
+        };
+        let mut list = div().flex().flex_col();
+        let from_space = groups.from_space.len() + groups.not_cloned.len();
+        if let Some(space) = space.filter(|_| from_space > 0) {
+            let edit = button("edit-on-repositories")
+                .ghost()
+                .xsmall()
+                .label("Edit on Repositories ›")
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(Intent::OpenPage(Page::Repositories))));
+            list = list.child(
+                heading(format!("From {} · {from_space}", space.name))
+                    .justify_between()
+                    .child(edit),
+            );
+        }
+        for repository in groups.from_space {
+            list = list.child(Self::repository_row(repository, p));
+        }
+        for identity in groups.not_cloned {
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .py_2()
+                    .child(identity.to_owned())
+                    .child(hint("not cloned here", p).text_color(p.yellow)),
+            );
+        }
+        if !groups.added.is_empty() {
+            let count = groups.added.len();
+            list = list.child(heading(format!("Added to this project · {count}")));
+        }
+        for repository in groups.added {
+            let kept: Vec<String> = (project.added_repositories.iter())
+                .filter(|id| **id != repository.id)
+                .cloned()
+                .collect();
+            let project_id = project.id.clone();
+            let remove = ui::gated(
+                button(SharedString::from(format!("remove-{}", repository.id)))
+                    .ghost()
+                    .xsmall()
+                    .label("Remove"),
+                &self.shared.host,
+            )
+            .on_click(cx.listener(move |view, _, window, cx| {
+                let command = Command::SetAddedRepositories {
+                    project_id: project_id.clone(),
+                    repository_ids: kept.clone(),
+                };
+                view.request(command, window, cx);
+            }));
+            list = list.child(Self::repository_row(repository, p).child(remove));
+        }
+        if !groups.open_tickets.is_empty() {
+            let count = groups.open_tickets.len();
+            list = list.child(heading(format!("An open ticket works here · {count}")));
+        }
+        for (repository, titles) in groups.open_tickets {
+            let why = format!(
+                "{} · until it closes",
+                project_repositories::tickets_label(&titles)
+            );
+            list = list.child(Self::open_ticket_row(repository, why, p));
+        }
+        list
+    }
+
+    /// The repository's name and the ticket that holds it, which takes the row's other space.
+    fn open_ticket_row(repository: &Repository, why: String, p: Palette) -> Stateful<Div> {
+        let path = repository.path.clone();
+        div()
+            .id(SharedString::from(format!("held-{}", repository.id)))
+            .flex()
+            .items_center()
+            .gap_3()
+            .py_2()
+            .border_b_1()
+            .border_color(p.edge.opacity(edge::HAIRLINE))
+            .tooltip(move |w, c| Tooltip::new(path.clone()).build(w, c))
+            .child(icon("folder").text_color(p.subtle))
+            .child(
+                div()
+                    .flex_none()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(repository.name.clone()),
+            )
+            .child(hint(why, p).flex_1().min_w_0().text_right().text_ellipsis())
     }
 
     fn repository_row(repository: &Repository, p: Palette) -> Stateful<Div> {
@@ -706,7 +857,7 @@ impl Inspector {
                         .dropdown_menu(move |menu, _, _| {
                             let mut menu = menu;
                             for (label, kind) in [
-                                ("Choose repositories…", Creation::ProjectRepositories),
+                                ("Add to this project…", Creation::ProjectRepositories),
                                 ("Add repositories…", Creation::Import),
                                 ("Attach one with a custom base…", Creation::Repository),
                             ] {
@@ -723,28 +874,26 @@ impl Inspector {
                         }),
                 ),
             );
-            let used = snapshot.project_repositories(&session.project_id);
-            let uses_all = snapshot
-                .projects
-                .iter()
-                .find(|project| project.id == session.project_id)
-                .is_some_and(|project| project.repositories.is_none());
-            repositories = repositories.child(hint(
-                if snapshot.repositories.is_empty() {
-                    "No repositories in the workspace yet. Add them one at a time or from parent folders such as ~/dev/*; each gets its own team.".to_owned()
-                } else if uses_all {
-                    "Uses every workspace repository, including ones added later.".to_owned()
-                } else {
-                    format!(
-                        "Uses {} of {} workspace repositories.",
-                        used.len(),
-                        snapshot.repositories.len()
-                    )
-                },
-                p,
-            ));
-            for repository in used {
-                repositories = repositories.child(Self::repository_row(repository, p));
+            if snapshot.repositories.is_empty() {
+                repositories = repositories.child(hint(
+                    "No repositories in the workspace yet. Add them one at a time or from parent folders such as ~/dev/*; each gets its own team.",
+                    p,
+                ));
+            }
+            if let Some(project) = index.project(&session.project_id) {
+                let space = snapshot.space_of(project);
+                let groups = groups(snapshot, project);
+                if groups.uses_nothing() && !snapshot.repositories.is_empty() {
+                    let name = space.map_or("Its Space", |s| s.name.as_str());
+                    repositories = repositories.child(hint(
+                        format!(
+                            "{name} lists no repository on this Mac, so this project uses none yet. Add one to {name} on the Repositories page, or to this project with Add."
+                        ),
+                        p,
+                    ));
+                }
+                repositories =
+                    repositories.child(self.repository_groups(project, space, groups, p, cx));
             }
             body = body.child(repositories);
             let schedules: Vec<_> = snapshot

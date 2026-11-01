@@ -520,7 +520,8 @@ impl Host {
         })
     }
     /// Moves a project to another Space: its later entries go to that Space's brain, its earlier
-    /// ones stay where they are, and its repositories do not change.
+    /// ones stay where they are, and it uses that Space's repositories in place of this one's. What
+    /// was added to it stays, and its open tickets finish where they are.
     pub fn move_project_to_space(&mut self, project: &str, space: &SpaceId) -> Result<Project> {
         let mut project = self.project(project)?;
         let target = self.space(space)?.space;
@@ -605,10 +606,8 @@ impl Host {
     pub fn space_repositories(&self, space: &SpaceId) -> Result<SpaceRepositories> {
         let space = self.space(space)?.space;
         let here = self.repositories()?;
-        let listed =
-            |repository: &Repository| space.repositories.iter().any(|i| repository.is_github(i));
         Ok(SpaceRepositories {
-            repository_ids: (here.iter().filter(|r| listed(r)))
+            repository_ids: (here.iter().filter(|r| space.lists(r)))
                 .map(|r| r.id.clone())
                 .collect(),
             not_cloned: (space.repositories.iter())
@@ -767,8 +766,7 @@ impl Host {
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?)
     }
-    /// Each project's Space with each repository it uses: the ones its selection names, or,
-    /// for a project that may use every repository, the ones its tickets were in.
+    /// Each project's Space with each repository it uses or its tickets were in.
     fn repository_uses(&self) -> Result<Vec<(SpaceId, String)>> {
         let ticketed: Vec<(String, String)> = (self.db.prepare(
             "SELECT DISTINCT s.project_id,json_extract(t.data,'$.repository_id') FROM tickets t JOIN sessions s ON s.id=t.coordinator_id",
@@ -777,13 +775,14 @@ impl Host {
         .collect::<rusqlite::Result<_>>()?;
         let mut uses = vec![];
         for project in self.projects()? {
-            let used: Vec<String> = match project.repositories {
-                Some(ids) => ids,
-                None => (ticketed.iter())
-                    .filter(|(id, _)| id == &project.id)
-                    .map(|(_, repository)| repository.clone())
-                    .collect(),
-            };
+            let mut used: Vec<String> = (self.project_repositories(&project.id)?.into_iter())
+                .map(|r| r.id)
+                .collect();
+            for (id, repository) in &ticketed {
+                if id == &project.id && !used.contains(repository) {
+                    used.push(repository.clone());
+                }
+            }
             uses.extend(used.into_iter().map(|r| (project.space.clone(), r)));
         }
         Ok(uses)
@@ -885,15 +884,12 @@ mod tests {
         .map(|identity| on_github(&host, identity));
         for name in ["Calls", "Billing", "Watch"] {
             let project = host.create_project_in(name, &sage).unwrap();
-            host.set_project_repositories(
-                &project.id,
-                Some(vec![mobile.id.clone(), api.id.clone()]),
-            )
-            .unwrap();
+            host.set_added_repositories(&project.id, vec![mobile.id.clone(), api.id.clone()])
+                .unwrap();
         }
         // One Personal project uses a Sage-Social repository, fewer than Sage's three.
         let notes = host.create_project_in("Notes", &personal).unwrap();
-        host.set_project_repositories(&notes.id, Some(vec![api.id.clone()]))
+        host.set_added_repositories(&notes.id, vec![api.id.clone()])
             .unwrap();
         // The upgrade found these repositories.
         host.db

@@ -1264,7 +1264,7 @@ mod tests {
         let other_coordinator = f.host.coordinator_of(&other.id).unwrap().unwrap();
         let repository = f.ticket().repository_id;
         f.host
-            .set_project_repositories(&other.id, Some(vec![repository.clone()]))
+            .set_added_repositories(&other.id, vec![repository.clone()])
             .unwrap();
         let foreign = (f.host)
             .create_ticket(&other_coordinator, &repository, "Foreign", "Do")

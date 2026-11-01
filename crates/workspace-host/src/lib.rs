@@ -332,7 +332,7 @@ impl Host {
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
         )?;
         let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        ensure!(version <= 9, "Store schema is newer than this application");
+        ensure!(version <= 10, "Store schema is newer than this application");
         if version == 0 {
             db.execute_batch(&format!(
                 "BEGIN IMMEDIATE; {} COMMIT;",
@@ -365,6 +365,7 @@ impl Host {
         remote::uploads::migrate(&db)?;
         remote::devices::migrate(&db)?;
         spaces::migrate(&db)?;
+        repositories::migrate_to_added(&db)?;
         let mut host = Self {
             db,
             _lock: lock,
@@ -589,7 +590,7 @@ impl Host {
                 record.space
             })
             .collect();
-        Ok(Snapshot { projects: self.projects()?, spaces, space_locals, issue_trackers: self.issue_trackers()?, last_filed_space: self.last_filed_space()?, linear_import: self.linear.status.clone(), repositories: self.repositories()?, sessions: self.live_sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} OR id IN (SELECT json_extract(data,'$.ticket_id') FROM runtimes WHERE session_id IN ({in_turn})) ORDER BY rowid", tickets_listed(true)), [&turning])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id IN (SELECT id FROM sessions WHERE {}) OR session_id IN ({in_turn}) ORDER BY rowid", sessions_where(true)), [&turning])?, archive_stamp: self.archive_stamp()?, message_revisions: self.message_revisions()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, core_instructions: provider::core_instructions(), still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held(), assistant_name: self.assistant_name(), threads: self.thread_tabs(now())?, held: self.held_messages()?, jobs: self.job_states()? })
+        Ok(Snapshot { projects: self.projects()?, spaces, space_locals, issue_trackers: self.issue_trackers()?, last_filed_space: self.last_filed_space()?, linear_import: self.linear.status.clone(), repositories: self.repositories()?, open_ticket_repositories: repositories::open_ticket_repositories(&self.db)?, sessions: self.live_sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} OR id IN (SELECT json_extract(data,'$.ticket_id') FROM runtimes WHERE session_id IN ({in_turn})) ORDER BY rowid", tickets_listed(true)), [&turning])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id IN (SELECT id FROM sessions WHERE {}) OR session_id IN ({in_turn}) ORDER BY rowid", sessions_where(true)), [&turning])?, archive_stamp: self.archive_stamp()?, message_revisions: self.message_revisions()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, core_instructions: provider::core_instructions(), still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held(), assistant_name: self.assistant_name(), threads: self.thread_tabs(now())?, held: self.held_messages()?, jobs: self.job_states()? })
     }
     /// The snapshot's sessions: the live ones, then archived ones still in a turn, which show as
     /// working until it ends.
@@ -655,10 +656,9 @@ impl Host {
     pub fn create_project_in(&mut self, name: &str, space: &SpaceId) -> Result<Project> {
         Ok(self.insert_project(name, space, None)?.0)
     }
-    /// A coordinator's `create_project`: the new project joins the creator's Space, takes
-    /// `repositories` as its selection, or else that Space's repositories on this Mac, and starts
-    /// at once on `brief`, which its coordinator receives as the creating coordinator's words.
-    /// All of it happens, or none of it.
+    /// A coordinator's `create_project`: the new project joins the creator's Space, has those of
+    /// `repositories` that Space does not list added, and starts at once on `brief`, which its
+    /// coordinator receives as the creating coordinator's words. All of it happens, or none of it.
     pub fn create_project_from(
         &mut self,
         creator: &str,
@@ -697,14 +697,9 @@ impl Host {
                     session_id: creator.id.clone(),
                 }),
             )?;
-            let (repositories, not_on_this_mac) = match repositories {
-                Some(ids) => (ids, vec![]),
-                None => {
-                    let space = host.space_repositories(&from.space)?;
-                    (space.repository_ids, space.not_cloned)
-                }
-            };
-            let project = host.set_project_repositories(&project.id, Some(repositories))?;
+            let project =
+                host.set_added_repositories(&project.id, repositories.unwrap_or_default())?;
+            let not_on_this_mac = host.space_repositories(&from.space)?.not_cloned;
             host.send(
                 &format!("{PROJECT_BRIEF_PREFIX}{}", project.id),
                 None,
@@ -747,7 +742,7 @@ impl Host {
             id: new_id(),
             name: name.trim().into(),
             space: space.clone(),
-            repositories: None,
+            added_repositories: vec![],
             home: Some(self.new_project_home(name)?),
             slug: None,
             created_by,
@@ -877,11 +872,7 @@ impl Host {
             ),
         }
         if let Some(repository) = repository {
-            self.repository(repository)?;
-            ensure!(
-                self.project(project)?.uses(repository),
-                "This project does not use that repository"
-            );
+            self.ensure_uses(&self.project(project)?, &self.repository(repository)?)?;
         }
         let repository_id = repository.map(str::to_owned);
         let session = Session {
@@ -1844,10 +1835,10 @@ impl Host {
                 self.remove_repository_root(&path)?;
                 Value::Null
             }
-            Command::SetProjectRepositories {
+            Command::SetAddedRepositories {
                 project_id,
                 repository_ids,
-            } => serde_json::to_value(self.set_project_repositories(&project_id, repository_ids)?)?,
+            } => serde_json::to_value(self.set_added_repositories(&project_id, repository_ids)?)?,
             Command::RemoveRepository { repository_id } => {
                 self.remove_repository(&repository_id)?;
                 Value::Null

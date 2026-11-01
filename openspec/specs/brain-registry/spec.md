@@ -62,7 +62,7 @@ A project SHALL store no brain of its own. A project's brain SHALL be its Space'
 - **THEN** its only brain is the Sage Space's brain, `sagehaven-docs`
 
 #### Scenario: A project created by a coordinator
-- **WHEN** a coordinator in the Vyttle Space creates a project with `create_project` covering every repository
+- **WHEN** a coordinator in the Vyttle Space creates a project with `create_project` that adds a repository outside Vyttle
 - **THEN** the new project is in the Vyttle Space and logs only to `vyttle-docs`
 
 #### Scenario: No brain

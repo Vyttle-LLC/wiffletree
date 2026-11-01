@@ -78,7 +78,7 @@ pub(crate) fn row(command: &Command) -> Row {
         Command::ImportRepositories { .. }
         | Command::RefreshRepositories
         | Command::RemoveRepositoryRoot { .. }
-        | Command::SetProjectRepositories { .. }
+        | Command::SetAddedRepositories { .. }
         | Command::RemoveRepository { .. }
         | Command::SetLive { .. }
         | Command::ConfigureSession { .. }

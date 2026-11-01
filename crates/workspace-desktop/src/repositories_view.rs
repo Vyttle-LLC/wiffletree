@@ -1,4 +1,4 @@
-//! The workspace's repositories. Projects use all of them unless they choose their own set.
+//! The workspace's repositories, grouped by the Spaces that list them.
 use super::*;
 use gpui_component::{
     Disableable, Sizable,
@@ -551,7 +551,7 @@ impl RepositoriesPage {
             return body.child(self.repository_roots(snapshot, p, cx));
         }
         body = body.child(hint(
-            "Every project uses all of these unless it chooses its own set in its Overview.",
+            "A project uses its Space’s repositories, plus any added to it from its Overview.",
             p,
         ));
         if let Some(card) = self.suggestions_card(snapshot, p, cx) {
@@ -609,7 +609,7 @@ impl RepositoriesPage {
         let projects = snapshot
             .projects
             .iter()
-            .filter(|project| project.uses(&repository.id))
+            .filter(|project| snapshot.repository_use(project, repository).is_some())
             .count();
         let id = repository.id.clone();
         let missing = snapshot.missing_repositories.contains(&repository.id);
@@ -1532,7 +1532,7 @@ fn grouped<'a>(
     spaces: &'a [Space],
     repositories: &'a [Repository],
 ) -> Vec<(Option<&'a Space>, Vec<&'a Repository>)> {
-    let listed = |space: &Space, r: &Repository| space.repositories.iter().any(|i| r.is_github(i));
+    let listed = Space::lists;
     let mut sections: Vec<(Option<&Space>, Vec<&Repository>)> = (spaces.iter())
         .map(|space| {
             (
@@ -1943,7 +1943,7 @@ impl Render for RepositoriesPage {
         let p = palette(is_dark(cx));
         ui::page(
             "Repositories",
-            "Repositories every project can use",
+            "Repositories on this Mac",
             self.body(p, cx),
             None,
             &self.shared.host,

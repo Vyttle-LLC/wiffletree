@@ -45,6 +45,7 @@ mod preferences;
 mod processes_view;
 mod progress;
 mod project_name;
+mod project_repositories;
 mod quotas;
 mod render_counts;
 mod repositories_view;
@@ -1118,7 +1119,7 @@ impl Workspace {
                 | Command::AssignTicket { .. }
                 | Command::AttachRepository { .. }
                 | Command::ImportRepositories { .. }
-                | Command::SetProjectRepositories { .. }
+                | Command::SetAddedRepositories { .. }
                 | Command::StartProjectFromIssue { .. }
         ) && let Some(form) = &self.creation
         {

@@ -1,6 +1,6 @@
-//! New project (screen 3 of the `spaces` mockup): the project starts in a Space, the one last
-//! used, with that Space's repositories ticked. Changing the Space replaces the ticks with the
-//! new Space's; other workspace repositories are added only by hand.
+//! New project (screen 3 of the `inherit-space-repositories` mockup): the project starts in a
+//! Space, the one last used, and comes with that Space's repositories, shown as plain rows.
+//! Changing the Space swaps them; other workspace repositories are added by hand and stay.
 use super::*;
 use gpui_component::{
     Sizable,
@@ -16,7 +16,7 @@ use ui::hint;
 pub(super) struct NewProject {
     pub(super) name: String,
     pub(super) space_id: SpaceId,
-    /// In workspace order.
+    /// The repositories added to it, in workspace order.
     pub(super) repository_ids: Vec<String>,
     pub(super) first_message: Option<String>,
 }
@@ -28,7 +28,8 @@ pub(super) struct NewProjectForm {
     repositories: Vec<Repository>,
     /// The Space chosen and its repositories here, once the host has answered.
     defaults: Option<SpaceRepositories>,
-    ticked: BTreeSet<String>,
+    /// Repositories added by hand, which outlast a change of Space.
+    added: BTreeSet<String>,
     /// "Add another repository…" lists the workspace's other repositories.
     others_shown: bool,
     name: Entity<InputState>,
@@ -49,7 +50,7 @@ impl NewProjectForm {
             locals: snapshot.space_locals.clone(),
             repositories: snapshot.repositories.clone(),
             defaults: None,
-            ticked: BTreeSet::new(),
+            added: BTreeSet::new(),
             others_shown: false,
             name: cx.new(|cx| {
                 InputState::new(window, cx)
@@ -71,8 +72,8 @@ impl NewProjectForm {
         self.name.update(cx, |input, cx| input.focus(window, cx));
     }
 
-    /// Asks for `space`'s repositories here, or the default Space's, and ticks them in place of
-    /// the earlier Space's.
+    /// Asks for `space`'s repositories here, or the default Space's, in place of the earlier
+    /// Space's.
     fn choose_space(
         &mut self,
         space: Option<SpaceId>,
@@ -86,7 +87,6 @@ impl NewProjectForm {
             |form, defaults, _, cx| {
                 match defaults {
                     Ok(defaults) => {
-                        form.ticked = defaults.repository_ids.iter().cloned().collect();
                         form.defaults = Some(defaults);
                         form.error.clear();
                     }
@@ -116,7 +116,7 @@ impl NewProjectForm {
             name,
             space_id: defaults.space_id.clone(),
             repository_ids: (self.repositories.iter())
-                .filter(|r| self.ticked.contains(&r.id))
+                .filter(|r| self.added.contains(&r.id))
                 .map(|r| r.id.clone())
                 .collect(),
             first_message: (!message.is_empty()).then_some(message),
@@ -158,33 +158,38 @@ impl NewProjectForm {
         };
         let space = self.spaces.iter().find(|s| s.id == defaults.space_id);
         let mut list = div().flex().flex_col().gap_1();
-        for row in repository_rows(
-            defaults,
-            &self.repositories,
-            &self.ticked,
-            self.others_shown,
-        ) {
+        let label = |repository: &Repository| {
+            (repository.github_identity()).unwrap_or_else(|| repository.name.clone())
+        };
+        for row in repository_rows(defaults, &self.repositories, &self.added, self.others_shown) {
             list = list.child(match row {
-                RepositoryRow::Here(repository) => {
+                RepositoryRow::FromSpace(repository) => {
+                    div().child(label(repository)).into_any_element()
+                }
+                RepositoryRow::Other(repository) => {
                     let id = repository.id.clone();
-                    Checkbox::new(SharedString::from(format!("new-project-{id}")))
-                        .label(
-                            repository
-                                .github_identity()
-                                .unwrap_or_else(|| repository.name.clone()),
+                    let added = self.added.contains(&id);
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            Checkbox::new(SharedString::from(format!("new-project-{id}")))
+                                .label(label(repository))
+                                .checked(added)
+                                .on_click(cx.listener(move |form, checked: &bool, _, cx| {
+                                    match checked {
+                                        true => form.added.insert(id.clone()),
+                                        false => form.added.remove(&id),
+                                    };
+                                    cx.notify();
+                                })),
                         )
-                        .checked(self.ticked.contains(&id))
-                        .on_click(cx.listener(move |form, checked: &bool, _, cx| {
-                            match checked {
-                                true => form.ticked.insert(id.clone()),
-                                false => form.ticked.remove(&id),
-                            };
-                            cx.notify();
-                        }))
+                        .when(added, |d| d.child(hint("added to this project", p)))
                         .into_any_element()
                 }
                 RepositoryRow::NotCloned(identity) => div()
                     .flex()
+                    .items_center()
                     .gap_2()
                     .child(
                         div()
@@ -196,7 +201,9 @@ impl NewProjectForm {
                     .into_any_element(),
             });
         }
-        let note = space.map_or_else(String::new, |s| format!("{}’s repositories.", s.name));
+        let note = space.map_or_else(String::new, |s| {
+            format!("{}’s repositories, kept current.", s.name)
+        });
         list.child(
             div()
                 .flex()
@@ -233,22 +240,25 @@ fn first_message_fits(message: &str) -> Result<(), String> {
 
 /// A line of New project's repositories.
 enum RepositoryRow<'a> {
-    Here(&'a Repository),
+    /// It comes with the Space, so there is nothing to tick.
+    FromSpace(&'a Repository),
     NotCloned(&'a str),
+    /// One the human may add.
+    Other(&'a Repository),
 }
 
 /// New project's repositories: the Space's here, the ones it lists that are not cloned here,
-/// then the workspace's others that are ticked, or all of them once `others` asks for them.
+/// then the workspace's others that are added, or all of them once `others` asks for them.
 fn repository_rows<'a>(
     defaults: &'a SpaceRepositories,
     repositories: &'a [Repository],
-    ticked: &BTreeSet<String>,
+    added: &BTreeSet<String>,
     others: bool,
 ) -> Vec<RepositoryRow<'a>> {
     let in_space = |r: &Repository| defaults.repository_ids.contains(&r.id);
     let mut rows: Vec<RepositoryRow> = (repositories.iter())
         .filter(|r| in_space(r))
-        .map(RepositoryRow::Here)
+        .map(RepositoryRow::FromSpace)
         .collect();
     rows.extend(
         defaults
@@ -258,8 +268,8 @@ fn repository_rows<'a>(
     );
     rows.extend(
         (repositories.iter())
-            .filter(|r| !in_space(r) && (others || ticked.contains(&r.id)))
-            .map(RepositoryRow::Here),
+            .filter(|r| !in_space(r) && (others || added.contains(&r.id)))
+            .map(RepositoryRow::Other),
     );
     rows
 }
@@ -364,8 +374,9 @@ mod tests {
     fn shown(rows: &[RepositoryRow]) -> Vec<String> {
         rows.iter()
             .map(|row| match row {
-                RepositoryRow::Here(r) => r.github_identity().unwrap(),
+                RepositoryRow::FromSpace(r) => r.github_identity().unwrap(),
                 RepositoryRow::NotCloned(identity) => format!("{identity} · not cloned here"),
+                RepositoryRow::Other(r) => format!("{} · tickable", r.github_identity().unwrap()),
             })
             .collect()
     }
@@ -382,9 +393,9 @@ mod tests {
             repository_ids: vec!["m".into(), "w".into()],
             not_cloned: vec!["Sage-Social/api".into()],
         };
-        let ticked: BTreeSet<String> = sage.repository_ids.iter().cloned().collect();
+        let added = BTreeSet::new();
         assert_eq!(
-            shown(&repository_rows(&sage, &repositories, &ticked, false)),
+            shown(&repository_rows(&sage, &repositories, &added, false)),
             [
                 "Sage-Social/mobile-app",
                 "Sage-Social/watch-app",
@@ -392,14 +403,25 @@ mod tests {
             ],
             "no personal repository is listed"
         );
-        let all = repository_rows(&sage, &repositories, &ticked, true);
-        assert_eq!(shown(&all).last().unwrap(), "MHohlios/dotfiles");
-        let mut by_hand = ticked.clone();
-        by_hand.insert("d".into());
+        let all = repository_rows(&sage, &repositories, &added, true);
+        assert_eq!(shown(&all).last().unwrap(), "MHohlios/dotfiles · tickable");
+        let by_hand = BTreeSet::from(["d".to_owned()]);
         assert_eq!(
-            shown(&repository_rows(&sage, &repositories, &by_hand, false)).len(),
-            4,
-            "a repository ticked by hand stays listed"
+            shown(&repository_rows(&sage, &repositories, &by_hand, false))
+                .last()
+                .unwrap(),
+            "MHohlios/dotfiles · tickable",
+            "a repository added by hand stays listed"
+        );
+        // Another Space swaps the Space's rows and keeps what was added.
+        let personal = SpaceRepositories {
+            space_id: SpaceId("personal".into()),
+            repository_ids: vec!["w".into()],
+            not_cloned: vec![],
+        };
+        assert_eq!(
+            shown(&repository_rows(&personal, &repositories, &by_hand, false)),
+            ["Sage-Social/watch-app", "MHohlios/dotfiles · tickable"]
         );
     }
 
