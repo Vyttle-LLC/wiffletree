@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Brain gate update study</title>
+<!--
+  Static study for brain-gate task 4.2. No script, no network.
+  APPROVED by Michael on 2026-10-31.
+  The theme switch at the top is a CSS-only checkbox. Names, times, PR numbers and versions are drawn by hand.
+  1. The Brains page: a brain whose gate is current, and one with a newer release, offering Update gate.
+  2. After Update gate: the gate update PR on the card and in the PR gate, waiting for the code owner.
+  3. A contract mismatch: the warning, held log batches and the sidebar count.
+  4. A pin that names no known release.
+-->
+<style>
+.light,:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}}
+body:has(#force-light:checked){--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+body:has(#force-dark:checked),.dark{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+h2{font-size:15px;font-weight:600;margin:0 0 2px}
+h3{font-size:13px;font-weight:600;margin:0}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.intro{max-width:880px;margin-bottom:22px}
+.intro p{color:var(--subtle);font-size:12px;margin-top:4px}
+.pending{display:inline-block;margin:6px 0 4px;padding:3px 10px;border-radius:9px;font-size:11.5px;font-weight:600;color:var(--yellow);background:color-mix(in srgb,var(--yellow) 16%,transparent)}
+.switch{display:flex;gap:6px;margin:10px 0 0;font-size:12px;color:var(--subtle)}
+.switch input{display:none}
+.switch label{padding:3px 10px;border:1px solid var(--edge);border-radius:7px;cursor:pointer}
+.switch input:checked+label{background:var(--overlay);color:var(--text)}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:26px;align-items:start}
+.wide{grid-column:1/-1}
+.study>.eyebrow{margin-bottom:6px}
+.caption{margin:10px 2px 0;font-size:11.5px;color:var(--subtle)}
+.caption b{color:var(--text);font-weight:600}
+.frame{background:var(--surface);border:1px solid var(--edge);border-radius:12px;overflow:hidden;color:var(--text)}
+.window{display:grid;grid-template-columns:190px 1fr;min-height:420px}
+.side{background:var(--base);border-right:1px solid var(--edge);display:flex;flex-direction:column;padding:12px 10px;gap:3px}
+.logo{font-weight:600;font-size:16px;letter-spacing:-.03em;margin:0 4px 10px}
+.logo span{color:var(--focus)}
+.label{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--subtle);margin:8px 6px 2px}
+.row{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:7px;font-size:13px}
+.row.sel{background:var(--overlay)}
+.row .r{margin-left:auto;font-size:11px;color:var(--subtle)}
+.row .ico{width:16px;text-align:center;color:var(--subtle)}
+.count{font-size:10.5px;padding:0 6px;border-radius:9px;background:color-mix(in srgb,var(--yellow) 18%,transparent);color:var(--yellow);font-weight:600}
+.page{padding:16px 18px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.pagehead{display:flex;flex-direction:column;gap:2px}
+.pagehead .t{font:400 21px/1.2 Georgia,"Times New Roman",serif;letter-spacing:-.02em}
+.hint{font-size:11.5px;color:var(--subtle)}
+.section{display:flex;align-items:center;gap:8px;font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle);margin-top:4px}
+.section .r{margin-left:auto}
+.card{border:1px solid var(--edge);border-radius:10px;background:var(--base);padding:12px 14px;display:flex;flex-direction:column;gap:9px}
+.cardhead{display:flex;align-items:center;gap:8px}
+.cardhead b{font-weight:600}
+.cardhead .r{margin-left:auto;display:flex;gap:6px;align-items:center}
+.kv{display:grid;grid-template-columns:110px 1fr;gap:4px 12px;font-size:12px}
+.kv dt{color:var(--subtle)}
+.kv dd{margin:0}
+code,.mono{font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace}
+code{background:var(--overlay);padding:0 4px;border-radius:4px}
+.mono{color:var(--subtle)}
+.ok{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--yellow)}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--edge);border-radius:7px;padding:4px 11px;font-size:12px;background:var(--surface);color:var(--text);white-space:nowrap}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.btn.ghost{border-color:transparent;color:var(--subtle)}
+.btn.link{border-color:transparent;color:var(--accent);padding:0 2px;background:none}
+.btn.off{opacity:.45}
+.btn.small{padding:1px 8px;font-size:11.5px}
+.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.pill{font-size:10.5px;padding:0 7px;border-radius:9px;background:var(--overlay);color:var(--subtle);white-space:nowrap}
+.pill.ok{background:color-mix(in srgb,var(--green) 14%,transparent);color:var(--green)}
+.pill.bad{background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red)}
+.pill.warn{background:color-mix(in srgb,var(--yellow) 16%,transparent);color:var(--yellow)}
+.pill.live{background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent)}
+.pill.focus{background:color-mix(in srgb,var(--focus) 14%,transparent);color:var(--focus)}
+.banner{border:1px solid color-mix(in srgb,var(--yellow) 45%,var(--edge));background:color-mix(in srgb,var(--yellow) 9%,transparent);border-radius:9px;padding:8px 11px;font-size:12px;display:flex;gap:8px;align-items:center}
+.banner .grow{flex:1}
+/* 2. Runs */
+.runs{display:flex;flex-direction:column;gap:6px}
+.run{border:1px solid var(--edge);border-radius:9px;background:var(--surface);padding:7px 11px;display:grid;grid-template-columns:118px 92px minmax(0,1fr) auto;gap:2px 10px;font-size:12px;align-items:center}
+.run .why{grid-column:3/5;color:var(--subtle);font-size:11.5px}
+.run.failed{border-color:color-mix(in srgb,var(--red) 40%,var(--edge))}
+.pager{display:flex;gap:8px;align-items:center;justify-content:flex-end;font-size:11.5px;color:var(--subtle)}
+.gate{border:1px solid var(--edge);border-radius:9px;background:var(--surface);padding:8px 11px;display:flex;flex-direction:column;gap:6px;font-size:12px}
+.steps{display:flex;gap:4px;align-items:center;font-size:11px}
+.steps span{padding:1px 8px;border-radius:9px;border:1px solid var(--edge);color:var(--muted)}
+.steps span.done{border-color:transparent;background:color-mix(in srgb,var(--green) 14%,transparent);color:var(--green)}
+.steps span.now{border-color:transparent;background:color-mix(in srgb,var(--yellow) 16%,transparent);color:var(--yellow);font-weight:600}
+.steps i{color:var(--muted);font-style:normal}
+ul.legend{margin:6px 0 0;padding-left:18px;color:var(--subtle);font-size:12px;max-width:900px}
+ul.legend li{margin:3px 0}
+@media(max-width:1100px){.grid{grid-template-columns:1fr}.vs{grid-template-columns:1fr}.window{grid-template-columns:1fr}.side{display:none}}
+</style>
+</head>
+<body>
+<div class="intro">
+  <div class="eyebrow">Wiffletree · design study</div>
+  <h1>Brain gate updates</h1>
+  <span class="pending">Approved by Michael, October 31, 2026</span>
+  <p>A static study for <code>openspec/changes/brain-gate</code> task 4.2: Update gate, the pinned and latest gate versions on the Brains page, and what happens when this Wiffletree writes log entries the brain's gate would reject. Nothing here runs. <code>sagehaven-docs</code> and <code>vyttle-docs</code> are sample brains; <code>brain-gate-v1.1.0</code> and <code>v2.0.0</code> are made-up releases.</p>
+  <div class="switch">
+    <span>Appearance:</span>
+    <input type="radio" name="theme" id="force-system" checked><label for="force-system">System</label>
+    <input type="radio" name="theme" id="force-light"><label for="force-light">Light</label>
+    <input type="radio" name="theme" id="force-dark"><label for="force-dark">Dark</label>
+  </div>
+</div>
+
+<div class="grid">
+
+<!-- 1. Brains page: current and behind -->
+<section class="study wide">
+  <div class="eyebrow">1 · Brains · one brain's gate is current, the other's has a newer release</div>
+  <div class="frame">
+    <div class="window">
+      <aside class="side">
+        <div class="logo">wiffle<span>tree</span></div>
+        <div class="row"><span class="ico">✦</span>Assistant</div>
+        <div class="row"><span class="ico">▦</span>Boards</div>
+        <div class="label">Workspace</div>
+        <div class="row"><span class="ico">◇</span>Spaces</div>
+        <div class="row sel"><span class="ico">◎</span>Brains</div>
+        <div class="row"><span class="ico">⚙</span>Models</div>
+        <div class="row"><span class="ico">≡</span>Skills</div>
+        <div class="row"><span class="ico">$</span>Usage</div>
+      </aside>
+      <div class="page">
+        <div class="pagehead">
+          <div class="t">Brains</div>
+          <div class="hint">Git-backed Markdown memory shared with your team · every change reaches main through a pull request</div>
+        </div>
+        <div class="section">Brains · 2<span class="r btn ghost small">↻ Sync now</span></div>
+
+        <div class="card">
+          <div class="cardhead"><span class="mono">◎</span><b>Sage-Social/sagehaven-docs</b><span class="r"><span class="pill ok">Synced 4 min ago</span></span></div>
+          <dl class="kv">
+            <dt>Spaces</dt><dd><span class="btn link">Sage</span> <span class="btn link">Sage Watch</span></dd>
+            <dt>Remote</dt><dd class="mono">github.com/Sage-Social/sagehaven-docs</dd>
+            <dt>Checks</dt><dd>main requires all 7 gate checks</dd>
+            <dt>Gate</dt><dd><b>brain-gate-v1.0.0</b> <span class="mono">· 083ab25</span> · <span class="warn">v1.1.0 is available</span></dd>
+          </dl>
+          <div class="actions">
+            <span class="btn primary">Update gate to v1.1.0</span>
+            <span class="hint">Opens a PR that changes only the caller's pins and the config's version. Your code owner reviews it.</span>
+            <span style="margin-left:auto" class="btn link">What changed ↗</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="cardhead"><span class="mono">◎</span><b>vyttle/vyttle-docs</b><span class="r"><span class="pill ok">Synced 1 min ago</span></span></div>
+          <dl class="kv">
+            <dt>Spaces</dt><dd><span class="btn link">Vyttle</span></dd>
+            <dt>Remote</dt><dd class="mono">github.com/vyttle/vyttle-docs</dd>
+            <dt>Checks</dt><dd>main requires all 7 gate checks</dd>
+            <dt>Gate</dt><dd><b>brain-gate-v1.1.0</b> <span class="mono">· 5d1e07c</span> · <span class="ok">latest</span></dd>
+          </dl>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>Each brain's card gains a Gate line:</b> the release its caller pins, the short commit, and whether it is the latest. <b>“Latest” means the newest release this copy of Wiffletree ships</b>, so a Wiffletree upgrade is what makes Update gate appear; nothing is fetched from GitHub to find releases. Update gate appears only when a newer release exists. <b>What changed</b> opens the gate README's release notes on GitHub. A current brain shows no button.</p>
+</section>
+
+<!-- 2. After Update gate -->
+<section class="study wide">
+  <div class="eyebrow">2 · After Update gate · the PR waits for the code owner</div>
+  <div class="frame"><div class="page">
+    <div class="card">
+      <div class="cardhead"><span class="mono">◎</span><b>Sage-Social/sagehaven-docs</b><span class="r"><span class="pill ok">Synced just now</span></span></div>
+      <dl class="kv">
+        <dt>Gate</dt><dd><b>brain-gate-v1.0.0</b> <span class="mono">· 083ab25</span> · updating to v1.1.0 in <span class="btn link">PR #221</span></dd>
+      </dl>
+      <div class="actions">
+        <span class="btn off">Update gate to v1.1.0</span>
+        <span class="hint">PR #221 is open. It merges when your code owner approves it; it does not auto-merge.</span>
+      </div>
+    </div>
+
+    <div class="section">PR gate</div>
+    <div class="hint">Log batches, compile runs and config changes on their way to main · select one for its checks</div>
+    <div class="gate">
+      <div class="cardhead"><b>Gate update</b><span class="mono">sagehaven-docs · wiffletree/brain/gate/v1.1.0</span><span class="r hint">.github/workflows/brain-gate.yml · wiffletree-brain.json</span></div>
+      <div class="steps"><span class="done">Queued</span><i>›</i><span class="done">PR #221</span><i>›</i><span class="done">Checks</span><i>›</i><span class="now">Waiting for code owner</span><i>›</i><span>Merged</span></div>
+    </div>
+    <div class="gate">
+      <div class="cardhead"><b>Log batch</b><span class="mono">sagehaven-docs · wiffletree/brain/mhohlios/…</span><span class="r hint">6 entries</span></div>
+      <div class="steps"><span class="done">Queued</span><i>›</i><span class="done">PR #222</span><i>›</i><span class="done">Checks</span><i>›</i><span class="now">Auto-merging</span></div>
+    </div>
+  </div></div>
+  <p class="caption"><b>Update gate is a batch like any other.</b> It changes the seven <code>uses:</code> pins in the caller and <code>gate.version</code> in <code>wiffletree-brain.json</code>, nothing else, and its checks run on the new pin. Because <code>CODEOWNERS</code> covers both files, its last step is the code owner's review instead of auto-merge. Log batches keep flowing meanwhile. The card's Gate line moves to v1.1.0 once <code>main</code> holds the merge.</p>
+</section>
+
+<!-- 3. Contract mismatch -->
+<section class="study wide">
+  <div class="eyebrow">3 · Contract mismatch · this Wiffletree writes entries the brain's gate would reject</div>
+  <div class="frame">
+    <div class="window">
+      <aside class="side">
+        <div class="logo">wiffle<span>tree</span></div>
+        <div class="row"><span class="ico">✦</span>Assistant</div>
+        <div class="row"><span class="ico">▦</span>Boards</div>
+        <div class="label">Workspace</div>
+        <div class="row"><span class="ico">◇</span>Spaces</div>
+        <div class="row sel"><span class="ico">◎</span>Brains<span class="r"><span class="count">1</span></span></div>
+        <div class="row"><span class="ico">⚙</span>Models</div>
+        <div class="row"><span class="ico">≡</span>Skills</div>
+        <div class="row"><span class="ico">$</span>Usage</div>
+      </aside>
+      <div class="page">
+        <div class="pagehead"><div class="t">Brains</div></div>
+        <div class="card">
+          <div class="cardhead"><span class="mono">◎</span><b>Sage-Social/sagehaven-docs</b><span class="r"><span class="pill warn">Logs held</span></span></div>
+          <dl class="kv">
+            <dt>Gate</dt><dd><b>brain-gate-v1.1.0</b> <span class="mono">· 5d1e07c</span> · <span class="warn">v2.0.0 is available</span></dd>
+            <dt>Pending</dt><dd>14 log entries held on this Mac</dd>
+          </dl>
+          <div class="banner"><span class="grow"><b>Log batches are held.</b> This Wiffletree writes log entries in gate contract v2, and this brain's gate (v1.1.0) would reject them. Update the gate; held entries go in once the update merges.</span><span class="btn primary">Update gate to v2.0.0</span></div>
+        </div>
+
+        <div class="section">PR gate</div>
+        <div class="gate">
+          <div class="cardhead"><b>Log batch</b><span class="mono">sagehaven-docs · not yet a branch</span><span class="r hint">14 entries</span></div>
+          <div class="steps"><span class="now">Held · waiting for gate v2</span><i>›</i><span>PR</span><i>›</i><span>Checks</span><i>›</i><span>Auto-merged</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>A mismatch holds only that brain's log batches</b>, before any PR opens, so nothing fails on GitHub. Entries are kept on this Mac, not dropped. Compile runs and config PRs, Update gate included, still go through. <b>Contract versions follow the gate's major version:</b> a v1.x gate accepts contract v1. The Brains row in the sidebar counts brains with held logs. Once the update PR merges, the held batch opens on the next pass.</p>
+</section>
+
+<!-- 4. Unknown pin -->
+<section class="study">
+  <div class="eyebrow">4 · A pin that names no known release</div>
+  <div class="frame"><div class="page">
+    <div class="card">
+      <div class="cardhead"><span class="mono">◎</span><b>vyttle/vyttle-docs</b><span class="r"><span class="pill ok">Synced 1 min ago</span></span></div>
+      <dl class="kv">
+        <dt>Gate</dt><dd><span class="warn">Pinned to 9f2c4aa, which is not a gate release this Wiffletree knows</span></dd>
+      </dl>
+      <div class="actions"><span class="btn">Pin to v1.1.0</span><span class="hint">Opens the same review PR as Update gate.</span></div>
+    </div>
+  </div></div>
+  <p class="caption"><b>Someone edited the caller by hand,</b> or pinned a commit from a newer Wiffletree. The card says so and offers to pin the latest known release. Logs are not held: the host can't tell which contract that commit accepts, and the gate on GitHub stays the judge.</p>
+</section>
+
+<section class="study">
+  <div class="eyebrow">Choices Michael approved</div>
+  <div class="frame"><div class="page">
+    <ul class="legend" style="margin:0">
+      <li><b>Latest:</b> the newest release this Wiffletree ships (shown here), or the newest on Wiffletree's <code>main</code> fetched from GitHub? Shipping it keeps the writer and the pinned gate in step.</li>
+      <li><b>Unknown pin:</b> leave logs flowing (shown), or hold them like a mismatch?</li>
+      <li><b>Sidebar count:</b> count brains with held logs only (shown), or also brains with an update available?</li>
+    </ul>
+  </div></div>
+</section>
+
+</div>
+
+<div style="margin-top:26px">
+  <h2>How it behaves</h2>
+  <ul class="legend">
+    <li>The Gate line reads the caller's pin from <code>main</code> and names it by release. <code>gate.version</code> in <code>wiffletree-brain.json</code> is shown only when it disagrees with the pin.</li>
+    <li>Update gate opens one PR through the brain's batch flow, changing only the seven pins and <code>gate.version</code>. It waits for the code owner and never auto-merges.</li>
+    <li>When this Wiffletree's entry contract is newer than the brain's pinned gate accepts, that brain's log batches are held on this Mac until the update merges.</li>
+    <li>This study is static and was approved by Michael on October 31, 2026. It is not the GPUI implementation.</li>
+  </ul>
+</div>
+</body>
+</html>

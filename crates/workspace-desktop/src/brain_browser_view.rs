@@ -509,7 +509,8 @@ impl BrainBrowser {
                 }
                 menu
             });
-        let synced = self.brain().map(brains_view::sync_state);
+        let batches = self.listing().map_or(&[][..], |l| &l.batches);
+        let synced = self.brain().map(|b| brains_view::sync_state(b, batches));
         let mut top = div()
             .flex()
             .items_center()

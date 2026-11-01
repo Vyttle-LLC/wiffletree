@@ -968,6 +968,10 @@ pub struct Snapshot {
     /// no Space and not listed.
     #[serde(default)]
     pub jobs: Vec<job::JobState>,
+    /// The brains whose log batches are held because their pinned gate does not accept the
+    /// entry contract this Wiffletree writes, which the sidebar's Brains row counts.
+    #[serde(default)]
+    pub brains_logs_held: Vec<String>,
 }
 fn assistant_name() -> String {
     assistant::DEFAULT_NAME.into()
@@ -3748,6 +3752,11 @@ pub enum Command {
     SetUpBrain {
         repository: String,
     },
+    /// Queues the batch that moves the caller's gate pins and `gate.version` to the newest
+    /// release this Wiffletree ships; answered with the `BrainBatch`.
+    UpdateBrainGate {
+        repository: String,
+    },
     /// Queues a batch that changes only the compiler in `wiffletree-brain.json`, keeping the
     /// keys this host does not know; answered with the `BrainBatch`.
     SetBrainCompiler {
@@ -4251,6 +4260,7 @@ impl Command {
             | Self::ConfirmBrain { .. }
             | Self::ForgetBrain { .. }
             | Self::SetUpBrain { .. }
+            | Self::UpdateBrainGate { .. }
             | Self::SetBrainCompiler { .. }
             | Self::AmendBrainBatch { .. }
             | Self::SendLogsNow { .. }
@@ -4396,6 +4406,7 @@ impl Command {
                 | Self::ConfirmBrain { .. }
                 | Self::ForgetBrain { .. }
                 | Self::SetUpBrain { .. }
+                | Self::UpdateBrainGate { .. }
                 | Self::SetBrainCompiler { .. }
                 | Self::AmendBrainBatch { .. }
                 | Self::SendLogsNow { .. }

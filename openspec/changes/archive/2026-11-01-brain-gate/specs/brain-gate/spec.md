@@ -107,12 +107,20 @@ A gate release SHALL be a commit on `main`, named `brain-gate-vMAJOR.MINOR.PATCH
 - **THEN** it is released as a new major version, and brains pinned to the old one are unaffected until they update
 
 ### Requirement: Set up installs and updates the gate through a PR
-Set up for a brain SHALL open one PR adding the caller pinned to the current gate release, the `gate` config, an empty allow-list and the `CODEOWNERS` lines, with the owner the human chooses. When a newer release than a brain's pin exists, the Brains page SHALL show both versions and offer Update gate. Update gate SHALL open a PR changing only the caller's pins and the config's `version`. Both PRs SHALL go through the brain's batch flow and SHALL wait for the code owner's review. When this Wiffletree writes an entry contract the brain's pinned gate does not accept, the Brains page SHALL warn and hold that brain's log batches until the gate is updated.
+Set up for a brain SHALL open one PR adding the caller pinned to the current gate release, the `gate` config, an empty allow-list and the `CODEOWNERS` lines, with the owner the human chooses. The latest release SHALL be the newest one this Wiffletree ships; nothing SHALL be fetched from GitHub to find releases. When a newer release than a brain's pin exists, the Brains page SHALL show both versions and offer Update gate. Update gate SHALL open a PR changing only the caller's pins and the config's `version`. Both PRs SHALL go through the brain's batch flow and SHALL wait for the code owner's review. A gate SHALL accept the entry contract of its major version. When this Wiffletree writes an entry contract the brain's pinned gate does not accept, the Brains page SHALL warn and hold that brain's log batches on the Mac, before any PR opens, until the gate is updated; compile, config and gate update PRs SHALL still go through. A pin that names no release this Wiffletree knows SHALL be shown as such, with Update gate offered to pin the latest, and SHALL hold nothing.
 
 #### Scenario: Setting up vyttle-docs
 - **WHEN** the human sets up `vyttle-docs`, which has no gate
 - **THEN** one PR adds the caller, the `gate` config, an empty allow-list and `CODEOWNERS` lines, and it waits for the owner's review
 
 #### Scenario: An update is available
-- **WHEN** `sagehaven-docs` pins `brain-gate-v1.0.0` and `brain-gate-v1.1.0` is released
+- **WHEN** `sagehaven-docs` pins `brain-gate-v1.0.0` and this Wiffletree ships `brain-gate-v1.1.0`
 - **THEN** the Brains page shows both, and Update gate opens a PR changing only the pins and the config's version
+
+#### Scenario: A contract mismatch
+- **WHEN** this Wiffletree writes entry contract v2 and `sagehaven-docs` pins `brain-gate-v1.1.0`
+- **THEN** its log batches stay on this Mac with no PR, the Brains page says why and offers Update gate, and the held batches open on the first pass after the update merges
+
+#### Scenario: A pin edited by hand
+- **WHEN** the caller pins a commit that is no release this Wiffletree knows
+- **THEN** the Brains page says so and offers to pin the latest release, and log batches still open their PRs

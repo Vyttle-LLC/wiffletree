@@ -1,4 +1,4 @@
-Remaining work: task 4.2 (Update gate); every other task is done or not needed.
+Every task is done or not needed. The `sagehaven-docs` switch is its own follow-up ticket, outside this change (5.1).
 
 No dependency on the other brain changes, or on `spaces`, for steps 1–3, which may start now. `spaces` task 4.4 runs `sensitive-info` and `secret-scan` from `gate/` on this Mac, so it needs steps 1–2. Step 4 needs `brain-registry-sync`.
 
@@ -22,9 +22,9 @@ No dependency on the other brain changes, or on `spaces`, for steps 1–3, which
 ## 4. Set up and update
 
 - [x] 4.1 `brain-registry-sync` Set up: add the caller, the `gate` config, the allow-list and the `CODEOWNERS` lines in one PR.
-- [ ] 4.2 Update gate opens a PR with only the pins and version. Show the pinned and latest versions on the Brains page, warn on a contract mismatch and hold batches.
+- [x] 4.2 Update gate opens a PR with only the pins and version. Show the pinned and latest versions on the Brains page, warn on a contract mismatch and hold batches. Built to `ui/mockups.html`, which Michael approved on 2026-10-31: "latest" is the newest release this Wiffletree ships (`GATE_RELEASES`), an unknown pin holds no logs, and the sidebar counts only brains with held logs.
 
 ## 5. Release and adopt
 
-- [x] 5.1 Not needed: brains pin the gate by commit SHA (`GATE_RELEASE`), and Michael chose not to push release tags. ~~Tag `brain-gate-v1.0.0` once the tests pass.~~ Hand the `sagehaven-docs` switch to its follow-up ticket: caller, config values from `gate_config.py`, the allow-list renamed, and the Sage summary job kept in the caller.
+- [x] 5.1 ~~Tag `brain-gate-v1.0.0` once the tests pass.~~ Not needed: brains pin the gate by commit SHA (`GATE_RELEASES`), and Michael chose not to push release tags. Still to do, in its own follow-up ticket outside this change: switch `sagehaven-docs` to the caller, with the config values from `gate_config.py`, the allow-list renamed, and the Sage summary job kept in the caller.
 - [x] 5.2 Run `openspec validate --strict` and the gate fixture tests before ready_for_testing.

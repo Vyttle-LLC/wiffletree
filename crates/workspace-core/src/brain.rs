@@ -50,6 +50,60 @@ pub struct Brain {
     /// offers Import legacy logs.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub legacy_import: bool,
+    /// The gate the caller on `main` pins, as the last pass read it; `None` without a caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<BrainGate>,
+}
+
+/// The brain gate the caller on `main` pins, beside the newest release this Wiffletree ships.
+/// Nothing is fetched from GitHub to find releases.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrainGate {
+    pub pin: BrainGatePin,
+    /// `gate.version` in `wiffletree-brain.json`, only when it names another release than the pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_version: Option<String>,
+    /// The newest release this Wiffletree ships, which Update gate pins.
+    pub latest: BrainGateRelease,
+    /// The log entry contract this Wiffletree writes. A gate accepts the contract of its major
+    /// version.
+    pub contract: u64,
+    /// The pinned release does not accept `contract`, so the brain's log batches are held on
+    /// this Mac before any PR opens.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub logs_held: bool,
+}
+impl BrainGate {
+    /// The release Update gate would pin, while the caller pins something else.
+    pub fn update(&self) -> Option<&BrainGateRelease> {
+        match &self.pin {
+            BrainGatePin::Release { release } if release.commit == self.latest.commit => None,
+            _ => Some(&self.latest),
+        }
+    }
+}
+
+/// How the caller's `uses:` lines pin the gate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BrainGatePin {
+    /// Every job pins this release's commit.
+    Release { release: BrainGateRelease },
+    /// A commit that is not a release this Wiffletree knows, or jobs pinning different commits.
+    Unknown { commit: String },
+}
+
+/// A gate release: its name, such as `brain-gate-v1.0.0`, and the commit callers pin.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrainGateRelease {
+    pub name: String,
+    pub commit: String,
+}
+impl BrainGateRelease {
+    /// The name without its `brain-gate-` prefix, such as `v1.0.0`.
+    pub fn version(&self) -> &str {
+        self.name.strip_prefix("brain-gate-").unwrap_or(&self.name)
+    }
 }
 
 /// What Import legacy logs did.
@@ -205,6 +259,15 @@ pub enum BrainBatchKind {
     Config,
     /// Adds `wiffletree-brain.json` with the gate's caller, config and `CODEOWNERS` lines.
     SetUp,
+    /// Moves the caller's gate pins and `gate.version` to another release, and nothing else.
+    GateUpdate,
+}
+impl BrainBatchKind {
+    /// `CODEOWNERS` covers its files, so its PR waits for the code owner's review and never
+    /// auto-merges.
+    pub fn awaits_review(self) -> bool {
+        matches!(self, Self::SetUp | Self::GateUpdate)
+    }
 }
 
 /// Who wrote a batch: the project whose Inbox gets its item, or no project, whose problem shows
@@ -214,7 +277,7 @@ pub enum BrainBatchKind {
 pub enum BrainSource {
     Project(String),
     Space(SpaceId),
-    /// The Brains page: Set up, a compiler change or an import.
+    /// The Brains page: Set up, Update gate, a compiler change or an import.
     BrainsPage,
 }
 
@@ -254,8 +317,9 @@ pub enum BrainProblem {
     AutoMergeRefused,
     /// `main` does not require these gate checks, so the host does not turn on auto-merge.
     GateNotRequired { missing: Vec<String> },
-    /// A Set up pull request: `CODEOWNERS` covers its files, so it waits for the code owner's
-    /// review instead of auto-merging. Set up comes from the Brains page, which alone shows it.
+    /// A Set up or gate update pull request: `CODEOWNERS` covers its files, so it waits for the
+    /// code owner's review instead of auto-merging. Both come from the Brains page, which alone
+    /// shows it.
     AwaitingReview,
     /// Something other than the host changed the batch's worktree, so it is not pushed.
     ChangedOutside,

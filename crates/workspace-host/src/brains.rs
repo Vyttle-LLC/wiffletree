@@ -1,7 +1,7 @@
 //! Brains (OpenSpec change `brain-registry-sync`): the registry of the brains this Mac's Spaces
 //! name, each brain's `wiffletree-brain.json`, the host's own checkout, and the batches that reach
-//! `main` only through a pull request set to auto-merge, or, for Set up, merged by the code owner
-//! after their review. A pass runs off the host thread. Its only writes to GitHub are pushes of
+//! `main` only through a pull request set to auto-merge, or, for Set up and Update gate, merged by
+//! the code owner after their review. A pass runs off the host thread. Its only writes to GitHub are pushes of
 //! `wiffletree/brain/` branches, never forced, and `gh pr create`, `gh pr merge --auto --squash`
 //! and `gh pr close`; everything it watches it reads with GETs.
 //! Nothing here stores or logs a brain file's content or a check's output text.
@@ -44,18 +44,60 @@ const GATE_CHECKS: [&str; 7] = [
 /// Batches merged within this long stay on the Brains page.
 const SHOWN_AFTER_MERGE_MS: i64 = 86_400_000;
 
-/// A gate release that Set up pins the caller to: its tag and commit.
-#[derive(Clone, Copy)]
-struct GateRelease {
-    tag: &'static str,
-    commit: &'static str,
+/// A gate release that Set up and Update gate pin the caller to: its name, kept as a label, and
+/// the commit brains pin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GateRelease {
+    pub(crate) tag: &'static str,
+    pub(crate) commit: &'static str,
 }
-/// The release Set up pins: `brain-gate-v1.0.0` is its name, kept as a label, and brains pin this
-/// commit, the merge of #175 that moved the gate into Wiffletree.
-const GATE_RELEASE: GateRelease = GateRelease {
+impl GateRelease {
+    /// The major version of `brain-gate-vMAJOR.MINOR.PATCH`, which names the entry contract the
+    /// release accepts.
+    fn major(self) -> Option<u64> {
+        let version = self.tag.strip_prefix("brain-gate-v")?;
+        version.split('.').next()?.parse().ok()
+    }
+    fn named(self) -> BrainGateRelease {
+        BrainGateRelease {
+            name: self.tag.into(),
+            commit: self.commit.into(),
+        }
+    }
+}
+/// The gate releases this Wiffletree ships, oldest first. `brain-gate-v1.0.0` is the merge of
+/// #175 that moved the gate into Wiffletree.
+const GATE_RELEASES: [GateRelease; 1] = [GateRelease {
     tag: "brain-gate-v1.0.0",
     commit: "083ab25267aa260569ab61106ff8fdff5bb2ba0e",
+}];
+/// The log entry contract this Wiffletree writes (`gate/README.md`, "Log entry contract").
+const ENTRY_CONTRACT: u64 = 1;
+/// The action every gate step of the caller uses, before the commit it pins.
+const GATE_ACTION: &str = "Vyttle-LLC/wiffletree/gate@";
+
+/// What this Wiffletree ships of the gate: its releases, oldest first, and the entry contract it
+/// writes. Which release is latest comes from here; nothing is fetched from GitHub.
+#[derive(Clone, Copy)]
+pub(crate) struct Shipped {
+    pub(crate) releases: &'static [GateRelease],
+    pub(crate) contract: u64,
+}
+pub(crate) const SHIPPED: Shipped = Shipped {
+    releases: &GATE_RELEASES,
+    contract: ENTRY_CONTRACT,
 };
+impl Shipped {
+    fn latest(self) -> GateRelease {
+        *self
+            .releases
+            .last()
+            .expect("Wiffletree ships a gate release")
+    }
+    fn release(self, commit: &str) -> Option<GateRelease> {
+        self.releases.iter().copied().find(|r| r.commit == commit)
+    }
+}
 
 /// Creates the brain tables once and, in the same change, turns each Space's local brain folder
 /// the `spaces` upgrade left whose `origin` is on GitHub into that repository as its brain, which
@@ -234,6 +276,97 @@ fn parse_config(bytes: &[u8]) -> BrainConfigReading {
     }
 }
 
+/// The gate the caller at `commit` pins, or `None` when `main` has no caller.
+fn read_gate(
+    checkout: &Path,
+    commit: &str,
+    config: &BrainConfigReading,
+    shipped: Shipped,
+) -> Result<Option<BrainGate>> {
+    let listed = runtime::git_output(checkout, &["ls-tree", "--name-only", commit, "--", CALLER])?;
+    if listed.trim().is_empty() {
+        return Ok(None);
+    }
+    let object = format!("{commit}:{CALLER}");
+    let bytes = runtime::git_bytes(checkout, &["cat-file", "blob", &object], b"")?;
+    Ok(gate_reading(
+        &String::from_utf8_lossy(&bytes),
+        config,
+        shipped,
+    ))
+}
+
+/// The caller's pin named by release, with `gate.version` only when it disagrees, and whether
+/// the pinned release rejects the entries this Wiffletree writes. An unknown pin holds nothing:
+/// which contract it accepts cannot be told, and the gate on GitHub stays the judge.
+fn gate_reading(caller: &str, config: &BrainConfigReading, shipped: Shipped) -> Option<BrainGate> {
+    let pins: Vec<&str> = caller
+        .lines()
+        .filter_map(gate_pin)
+        .map(|(_, c, _)| c)
+        .collect();
+    let first = *pins.first()?;
+    let release = (shipped.release(first)).filter(|_| pins.iter().all(|p| *p == first));
+    let pin = match release {
+        Some(release) => BrainGatePin::Release {
+            release: release.named(),
+        },
+        None => BrainGatePin::Unknown {
+            commit: (pins.iter())
+                .find(|p| shipped.release(p).is_none() || **p != first)
+                .unwrap_or(&first)
+                .to_string(),
+        },
+    };
+    let config_version = (config.config())
+        .and_then(|c| c.gate.as_ref()?["version"].as_str())
+        .filter(|version| release.is_some_and(|r| r.tag != *version))
+        .map(str::to_owned);
+    Some(BrainGate {
+        pin,
+        config_version,
+        latest: shipped.latest().named(),
+        contract: shipped.contract,
+        logs_held: release.is_some_and(|r| r.major() != Some(shipped.contract)),
+    })
+}
+
+/// A caller line's gate step `uses: Vyttle-LLC/wiffletree/gate@<commit>`, bare or quoted:
+/// where the action starts in the line, the commit it pins, and its quote.
+fn gate_pin(line: &str) -> Option<(usize, &str, &str)> {
+    let step = line.trim_start();
+    let step = step.strip_prefix('-').unwrap_or(step).trim_start();
+    let uses = step.strip_prefix("uses:")?.trim_start();
+    let quote = ["\"", "'"]
+        .into_iter()
+        .find(|q| uses.starts_with(q))
+        .unwrap_or("");
+    let action = &uses[quote.len()..];
+    let pinned = action.strip_prefix(GATE_ACTION)?;
+    let commit = match quote {
+        "" => pinned.split_whitespace().next()?,
+        quote => pinned.split_once(quote)?.0,
+    };
+    Some((line.len() - action.len(), commit, quote))
+}
+
+/// The caller with each gate step pinned to `release`, every other byte as it was.
+fn repin(caller: &str, release: GateRelease) -> String {
+    let GateRelease { tag, commit } = release;
+    (caller.split_inclusive('\n'))
+        .map(|line| match gate_pin(line) {
+            Some((at, _, quote)) => {
+                let ending = &line[line.trim_end_matches(['\r', '\n']).len()..];
+                format!(
+                    "{}{GATE_ACTION}{commit}{quote} # {tag}{ending}",
+                    &line[..at]
+                )
+            }
+            None => line.to_owned(),
+        })
+        .collect()
+}
+
 /// The files in the checkout that differ from its `main`, which only something other than the
 /// host can have changed, as the host writes only in batch worktrees.
 fn changed_files(checkout: &Path) -> Result<Vec<String>> {
@@ -270,6 +403,8 @@ pub(crate) struct Pass {
     space_folder: String,
     /// The entries the legacy import recorded as compiled, never pending before a first compile.
     legacy_compiled: std::collections::HashSet<String>,
+    /// The gate releases and entry contract this Wiffletree ships.
+    shipped: Shipped,
 }
 
 /// A batch the pass may push, open, watch or discard.
@@ -297,6 +432,8 @@ pub(crate) struct Passed {
     /// `None` when the pass did not get as far as checking.
     held: Option<Option<BrainHold>>,
     config: Option<BrainConfigReading>,
+    /// The gate the caller on `main` pins, when the pass read it.
+    gate: Option<Option<BrainGate>>,
     /// The gate checks `main` does not require, when the pass could write and read them.
     missing_checks: Option<Vec<String>>,
     /// The checks `main` requires, read alongside them.
@@ -318,6 +455,7 @@ pub(crate) fn pass(mut pass: Pass, tools: &Tools) -> Passed {
         head: None,
         held: None,
         config: None,
+        gate: None,
         missing_checks: None,
         required_checks: None,
         problem: None,
@@ -420,7 +558,11 @@ fn run_pass(pass: &mut Pass, passed: &mut Passed, tools: &Tools) -> Result<()> {
     }
     passed.held = Some(held);
     passed.head = Some(fetched.clone());
-    passed.config = Some(read_config(checkout, &fetched)?);
+    let config = read_config(checkout, &fetched)?;
+    let gate = read_gate(checkout, &fetched, &config, pass.shipped)?;
+    let logs_held = gate.as_ref().is_some_and(|g| g.logs_held);
+    passed.config = Some(config);
+    passed.gate = Some(gate);
     let required = required_checks(tools, &pass.home, &pass.repository)?;
     let missing: Vec<String> = (GATE_CHECKS.iter())
         .filter(|check| !required.iter().any(|r| r == *check))
@@ -434,7 +576,13 @@ fn run_pass(pass: &mut Pass, passed: &mut Passed, tools: &Tools) -> Result<()> {
     };
     let place: Place = (&pass.home, &pass.checkout, &pass.repository, &url);
     for work in &mut pass.work {
-        match work_on(place, work, tools, (&mut passed.login, gate), writing) {
+        match work_on(
+            place,
+            work,
+            tools,
+            (&mut passed.login, gate),
+            (writing, logs_held),
+        ) {
             Ok(()) => {}
             // Out of reach: the whole pass waits and backs off.
             Err(error) if offline(&format!("{error:#}")) => return Err(error),
@@ -459,13 +607,14 @@ struct Gate<'a> {
 /// The home folder, checkout, repository and URL a batch's work runs with.
 type Place<'a> = (&'a Path, &'a Path, &'a str, &'a str);
 
-/// Watches one batch, and when the host may write, discards or publishes it.
+/// Watches one batch, and when the host may write, discards or publishes it. While `logs_held`,
+/// a log batch with no PR yet stays on this Mac.
 fn work_on(
     (home, checkout, repository, url): Place,
     work: &mut Work,
     tools: &Tools,
     (login, gate): (&mut Option<String>, Gate),
-    writing: bool,
+    (writing, logs_held): (bool, bool),
 ) -> Result<()> {
     if work.batch.pull_request.is_some() && !work.batch.is_finished() {
         watch(tools, home, repository, &mut work.batch, gate)?;
@@ -478,6 +627,9 @@ fn work_on(
         return discard(tools, (home, checkout), url, repository, work);
     }
     if work.batch.is_finished() {
+        return Ok(());
+    }
+    if logs_held && work.batch.kind == BrainBatchKind::Log && work.batch.pull_request.is_none() {
         return Ok(());
     }
     if publish_batch((home, repository, url), work, tools, (login, gate.missing))? {
@@ -514,8 +666,8 @@ fn clone(home: &Path, checkout: &Path, url: &str, repository: &str, git: &GitToo
 /// Pushes the batch's commits, opens its PR and turns on auto-merge, each when not done yet.
 /// `false` when the batch's worktree changed outside Wiffletree or GitHub refused the push, so
 /// the batch failed and has nothing new to watch. Auto-merge waits while `missing` names a gate
-/// check `main` does not require, and is never turned on for Set up, which waits for the code
-/// owner's review.
+/// check `main` does not require, and is never turned on for Set up or a gate update, which wait
+/// for the code owner's review.
 fn publish_batch(
     (home, repository, url): (&Path, &str, &str),
     work: &mut Work,
@@ -568,7 +720,7 @@ fn publish_batch(
         }
     };
     let waiting = batch.pull_request.as_ref().is_some_and(|pr| !pr.auto_merge);
-    if batch.kind == BrainBatchKind::SetUp {
+    if batch.kind.awaits_review() {
         batch.problem = Some(BrainProblem::AwaitingReview);
     } else if waiting && !missing.is_empty() {
         batch.problem = Some(BrainProblem::GateNotRequired {
@@ -636,9 +788,9 @@ fn open_pull_request(
     let files: String = (batch.files.iter())
         .map(|file| format!("- `{file}`\n"))
         .collect();
-    let merges = match batch.kind {
-        BrainBatchKind::SetUp => "It waits for the code owner's review; it does not auto-merge.",
-        _ => "It merges by itself once the brain gate's required checks pass.",
+    let merges = match batch.kind.awaits_review() {
+        true => "It waits for the code owner's review; it does not auto-merge.",
+        false => "It merges by itself once the brain gate's required checks pass.",
     };
     let body = format!(
         "Opened by Wiffletree for a {} batch ({}).\n\nFiles:\n{files}\n{merges}\n",
@@ -676,6 +828,7 @@ fn kind_name(kind: BrainBatchKind) -> &'static str {
         BrainBatchKind::Compile => "compile",
         BrainBatchKind::Config => "config",
         BrainBatchKind::SetUp => "set-up",
+        BrainBatchKind::GateUpdate => "gate update",
     }
 }
 
@@ -792,7 +945,7 @@ fn watch(
         )
     } else if pr["mergeable_state"] == "dirty" {
         (BrainStage::Failed, Some(BrainProblem::Conflict))
-    } else if batch.kind == BrainBatchKind::SetUp {
+    } else if batch.kind.awaits_review() {
         (BrainStage::PrOpen, Some(BrainProblem::AwaitingReview))
     } else if !gate.missing.is_empty() {
         // Even with auto-merge on, a gate check main does not require keeps the item open.
@@ -886,7 +1039,7 @@ fn item_prompt(batch: &BrainBatch, problem: &BrainProblem) -> String {
             missing.join(", "),
             if missing.len() == 1 { "" } else { "s" }
         ),
-        // Unreached: Set up batches come from the Brains page, which shows the wait itself.
+        // Unreached: Set up and gate updates come from the Brains page, which shows the wait.
         BrainProblem::AwaitingReview => format!(
             "{about} waits for your review: CODEOWNERS covers the brain gate's files, so it does not auto-merge. Review and merge it on GitHub; the host sees the merge at its next pass."
         ),
@@ -1008,6 +1161,33 @@ fn pretty(value: &Value) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// `wiffletree-brain.json` on the brain's `main` with every key, for a batch that changes one,
+/// refused unless the host read it there.
+fn config_on_main(brain: &Brain) -> Result<Value> {
+    let repository = &brain.repository;
+    match &brain.config {
+        BrainConfigReading::Read { .. } => {}
+        BrainConfigReading::Missing => {
+            bail!("{repository} has no {}; Set up first", BrainConfig::FILE)
+        }
+        BrainConfigReading::Newer { .. } => {
+            bail!(
+                "A newer Wiffletree wrote {}; update to change it",
+                BrainConfig::FILE
+            )
+        }
+        BrainConfigReading::Invalid { reason } => bail!("{reason}"),
+        BrainConfigReading::Unread => {
+            bail!("{repository} has not been fetched yet; Sync now, then try again")
+        }
+    }
+    let head = brain.head.as_deref().context("The brain has no main yet")?;
+    let object = format!("{head}:{}", BrainConfig::FILE);
+    let checkout = Path::new(&brain.checkout);
+    let bytes = runtime::git_bytes(checkout, &["cat-file", "blob", &object], b"")?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
 impl Host {
     fn upgrade_local_brains(&mut self) -> Result<()> {
         for SpaceRecord {
@@ -1104,6 +1284,7 @@ impl Host {
                 legacy_pointer: false,
                 last_pull_request: None,
                 legacy_import: false,
+                gate: None,
             };
             self.db.execute(
                 "INSERT INTO brains(repository,data) VALUES (?1,?2)",
@@ -1495,7 +1676,7 @@ impl Host {
     /// pinned caller, its config and allow-list, and the `CODEOWNERS` lines that make the PR wait
     /// for the code owner's review. Files already on `main` are kept.
     pub fn set_up_brain(&mut self, repository: &str, git: &GitTool) -> Result<BrainBatch> {
-        let release = GATE_RELEASE;
+        let release = self.gate.latest();
         let brain = self.brain(repository)?;
         match &brain.config {
             BrainConfigReading::Missing => {}
@@ -1544,6 +1725,66 @@ impl Host {
         )
     }
 
+    /// Update gate: one batch that moves the caller's gate pins and `gate.version` to the newest
+    /// release this Wiffletree ships, changing nothing else in either file. `CODEOWNERS` covers
+    /// both, so like Set up its PR waits for the code owner's review. It also pins a caller whose
+    /// commit is no release this Wiffletree knows.
+    pub fn update_brain_gate(&mut self, repository: &str, git: &GitTool) -> Result<BrainBatch> {
+        let release = self.gate.latest();
+        let brain = self.brain(repository)?;
+        let gate = (brain.gate.as_ref()).with_context(|| {
+            format!("{repository} has no brain gate caller on main; Set up first")
+        })?;
+        ensure!(
+            !matches!(&gate.pin, BrainGatePin::Release { release: r } if r.commit == release.commit),
+            "{repository}'s gate already pins {}",
+            release.tag
+        );
+        let updating = (self.brain_batches(Some(&brain.repository))?.iter())
+            .any(|b| b.kind == BrainBatchKind::GateUpdate && !b.is_finished());
+        ensure!(!updating, "{repository}'s gate update PR is already open");
+        let mut config = config_on_main(&brain)?;
+        ensure!(
+            matches!(
+                config.get("gate"),
+                None | Some(Value::Null | Value::Object(_))
+            ),
+            "{repository}'s wiffletree-brain.json has a gate that is not an object; fix it on main first"
+        );
+        config["gate"]["version"] = Value::from(release.tag);
+        let head = brain.head.as_deref().context("The brain has no main yet")?;
+        let object = format!("{head}:{CALLER}");
+        let checkout = Path::new(&brain.checkout);
+        let caller = runtime::git_bytes(checkout, &["cat-file", "blob", &object], b"")?;
+        let caller = String::from_utf8(caller).context("The gate's caller is not UTF-8")?;
+        self.queue_brain_batch(
+            &brain.repository,
+            BrainBatchKind::GateUpdate,
+            BrainSource::BrainsPage,
+            &format!("Update the brain gate to {}", release.tag),
+            &[
+                (CALLER.into(), repin(&caller, release).into_bytes()),
+                (BrainConfig::FILE.into(), pretty(&config)?),
+            ],
+            git,
+        )
+    }
+
+    /// The brains with a log batch held: their last pass found the pinned gate rejects this
+    /// Wiffletree's entry contract, and an unfinished log batch has no PR yet.
+    pub(crate) fn brains_logs_held(&self) -> Result<Vec<String>> {
+        Ok((self.db.prepare(
+            "SELECT repository FROM brains b WHERE json_extract(b.data,'$.gate.logs_held')
+             AND EXISTS (SELECT 1 FROM brain_batches x WHERE x.repository=b.repository
+               AND json_extract(x.data,'$.kind')='log'
+               AND json_extract(x.data,'$.pull_request') IS NULL
+               AND json_extract(x.data,'$.stage') NOT IN ('merged','discarded'))
+             ORDER BY b.rowid",
+        )?)
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
+    }
+
     /// A batch that changes only the compiler in `wiffletree-brain.json` on `main`, keeping every
     /// key this host does not know. The compiler stays the merged one until it merges.
     pub fn set_brain_compiler(
@@ -1555,30 +1796,7 @@ impl Host {
         text(&compiler.host_id, 128)?;
         text(&compiler.name, 128)?;
         let brain = self.brain(repository)?;
-        match &brain.config {
-            BrainConfigReading::Read { .. } => {}
-            BrainConfigReading::Missing => {
-                bail!("{repository} has no {}; Set up first", BrainConfig::FILE)
-            }
-            BrainConfigReading::Newer { .. } => {
-                bail!(
-                    "A newer Wiffletree wrote {}; update to change it",
-                    BrainConfig::FILE
-                )
-            }
-            BrainConfigReading::Invalid { reason } => bail!("{reason}"),
-            BrainConfigReading::Unread => {
-                bail!("{repository} has not been fetched yet; Sync now, then try again")
-            }
-        }
-        let head = brain.head.clone().context("The brain has no main yet")?;
-        let object = format!("{head}:{}", BrainConfig::FILE);
-        let bytes = runtime::git_bytes(
-            Path::new(&brain.checkout),
-            &["cat-file", "blob", &object],
-            b"",
-        )?;
-        let mut config: Value = serde_json::from_slice(&bytes)?;
+        let mut config = config_on_main(&brain)?;
         config["compiler"] = serde_json::to_value(compiler)?;
         self.queue_brain_batch(
             &brain.repository,
@@ -1760,6 +1978,7 @@ impl Host {
             index: brain_index::index_file(&self.home, &brain.repository),
             clones: verify_refs::Clones::of(&self.repositories()?),
             legacy_compiled: self.legacy_compiled(&brain.repository)?,
+            shipped: self.gate,
             space_folder: (self.owner_brain(&SessionOwner::Brain(brain.repository.clone()))?)
                 .map_or_else(|| "second-brain".into(), |b| b.folder),
             repository: brain.repository,
@@ -1793,6 +2012,9 @@ impl Host {
         }
         if let Some(config) = passed.config {
             brain.config = config;
+        }
+        if let Some(gate) = passed.gate {
+            brain.gate = gate;
         }
         if let Some(missing) = passed.missing_checks {
             brain.missing_checks = missing;
@@ -1921,7 +2143,7 @@ pub(crate) mod tests {
     const URL: &str = "https://github.com/Sage-Social/sagehaven-docs.git";
     /// A value the sensitive scan would match, planted in check output that must never be kept.
     const PLANTED: &str = "555-867-5309";
-    const RELEASE: GateRelease = GATE_RELEASE;
+    const RELEASE: GateRelease = GATE_RELEASES[0];
 
     struct FakePr {
         number: u64,
@@ -3585,5 +3807,334 @@ pub(crate) mod tests {
             "- changed: [removed: phone]"
         );
         assert_eq!(redact_line("  more 555", "phone"), "  [removed: phone]");
+    }
+
+    /// Made-up later releases, as a newer Wiffletree would ship them.
+    const NEWER: GateRelease = GateRelease {
+        tag: "brain-gate-v1.1.0",
+        commit: "5d1e07c0000000000000000000000000000000aa",
+    };
+    const NEXT_MAJOR: GateRelease = GateRelease {
+        tag: "brain-gate-v2.0.0",
+        commit: "77aa21b0000000000000000000000000000000bb",
+    };
+    const WITH_NEWER: Shipped = Shipped {
+        releases: &[RELEASE, NEWER],
+        contract: 1,
+    };
+    /// A Wiffletree that writes contract v2, which a v1 gate rejects.
+    const WRITES_V2: Shipped = Shipped {
+        releases: &[RELEASE, NEXT_MAJOR],
+        contract: 2,
+    };
+
+    /// A teammate's commit to `main` of the caller pinned to `commit` (labelled brain-gate-v1.0.0)
+    /// and a config naming `version`, with a key this host does not know.
+    fn gate_on_main(github: &GitHub, commit: &'static str, version: &str) {
+        let caller = caller(GateRelease {
+            tag: "brain-gate-v1.0.0",
+            commit,
+        });
+        let config = json!({"version": 1, "brain_dir": "second-brain",
+            "gate": {"version": version, "allowlist": ALLOWLIST}, "future": {"kept": true}});
+        let config = String::from_utf8(pretty(&config).unwrap()).unwrap();
+        github.commit_files_on_main(
+            &[(CALLER, &caller), (BrainConfig::FILE, &config)],
+            "The gate",
+        );
+    }
+
+    fn read(caller_text: &str, version: &str, shipped: Shipped) -> BrainGate {
+        let config = parse_config(
+            json!({"version": 1, "gate": {"version": version}})
+                .to_string()
+                .as_bytes(),
+        );
+        gate_reading(caller_text, &config, shipped).unwrap()
+    }
+
+    #[test]
+    fn the_pin_is_named_by_release_beside_the_latest_and_an_unknown_pin_holds_nothing() {
+        let current = read(&caller(RELEASE), RELEASE.tag, SHIPPED);
+        assert_eq!(
+            current.pin,
+            BrainGatePin::Release {
+                release: RELEASE.named()
+            }
+        );
+        assert_eq!(
+            (current.update(), current.config_version.as_deref()),
+            (None, None)
+        );
+        assert!(!current.logs_held);
+
+        let behind = read(&caller(RELEASE), "brain-gate-v0.9.0", WITH_NEWER);
+        assert_eq!(behind.update(), Some(&NEWER.named()));
+        assert_eq!(behind.latest.version(), "v1.1.0");
+        assert_eq!(
+            behind.config_version.as_deref(),
+            Some("brain-gate-v0.9.0"),
+            "gate.version shows only when it disagrees with the pin"
+        );
+        assert!(!behind.logs_held, "a v1.x gate accepts contract v1");
+
+        let edited = caller(RELEASE).replacen(RELEASE.commit, "9f2c4aa", 1);
+        let unknown = read(&edited, RELEASE.tag, WRITES_V2);
+        assert_eq!(
+            unknown.pin,
+            BrainGatePin::Unknown {
+                commit: "9f2c4aa".into()
+            },
+            "one job pinned by hand makes the whole pin unknown"
+        );
+        assert_eq!(unknown.update(), Some(&NEXT_MAJOR.named()));
+        assert!(!unknown.logs_held, "the gate on GitHub stays the judge");
+        assert_eq!(unknown.config_version, None);
+
+        assert!(read(&caller(RELEASE), RELEASE.tag, WRITES_V2).logs_held);
+        let config = BrainConfigReading::Missing;
+        assert_eq!(gate_reading("name: Other\n", &config, SHIPPED), None);
+    }
+
+    #[test]
+    fn a_quoted_pin_is_read_and_repinned_with_its_quotes() {
+        for quote in ["\"", "'"] {
+            let quoted = caller(RELEASE).replace(
+                &format!("{GATE_ACTION}{} # {}", RELEASE.commit, RELEASE.tag),
+                &format!(
+                    "{quote}{GATE_ACTION}{}{quote} # {}",
+                    RELEASE.commit, RELEASE.tag
+                ),
+            );
+            assert_ne!(quoted, caller(RELEASE));
+            let gate = read(&quoted, RELEASE.tag, WITH_NEWER);
+            assert_eq!(gate.update(), Some(&NEWER.named()));
+            let quoted_newer = caller(NEWER).replace(
+                &format!("{GATE_ACTION}{} # {}", NEWER.commit, NEWER.tag),
+                &format!(
+                    "{quote}{GATE_ACTION}{}{quote} # {}",
+                    NEWER.commit, NEWER.tag
+                ),
+            );
+            assert_eq!(repin(&quoted, NEWER), quoted_newer);
+        }
+    }
+
+    #[test]
+    fn the_brain_card_reads_the_pin_from_the_caller_on_main() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = GitHub::new(folder.path());
+        let tools = github.tools();
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, _) = host_with_brain(home.path());
+        run(&mut host, &tools);
+        assert_eq!(host.brain(REPO).unwrap().gate, None, "no caller yet");
+        gate_on_main(
+            &github,
+            "9f2c4aa0000000000000000000000000000000cc",
+            RELEASE.tag,
+        );
+        run(&mut host, &tools);
+        let gate = host.brain(REPO).unwrap().gate.unwrap();
+        assert!(matches!(gate.pin, BrainGatePin::Unknown { .. }));
+        assert_eq!(gate.latest, RELEASE.named());
+    }
+
+    #[test]
+    fn update_gate_refuses_a_config_whose_gate_is_not_an_object() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = GitHub::new(folder.path());
+        let tools = github.tools();
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, _) = host_with_brain(home.path());
+        host.gate = WITH_NEWER;
+        let config = json!({"version": 1, "brain_dir": "second-brain", "gate": "invalid"});
+        let config = String::from_utf8(pretty(&config).unwrap()).unwrap();
+        github.commit_files_on_main(
+            &[(CALLER, &caller(RELEASE)), (BrainConfig::FILE, &config)],
+            "A hand-edited gate",
+        );
+        run(&mut host, &tools);
+        host.confirm_brain(REPO).unwrap();
+        let refused = host.update_brain_gate(REPO, &tools.git).unwrap_err();
+        assert!(format!("{refused:#}").contains("gate that is not an object"));
+    }
+
+    #[test]
+    fn update_gate_changes_only_the_pins_and_the_version_and_waits_for_the_code_owner() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = GitHub::new(folder.path());
+        let tools = github.tools();
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, _) = host_with_brain(home.path());
+        host.gate = WITH_NEWER;
+        gate_on_main(&github, RELEASE.commit, RELEASE.tag);
+        run(&mut host, &tools);
+        host.confirm_brain(REPO).unwrap();
+        let gate = host.brain(REPO).unwrap().gate.unwrap();
+        assert_eq!(gate.update(), Some(&NEWER.named()));
+
+        let batch = host.update_brain_gate(REPO, &tools.git).unwrap();
+        assert_eq!(batch.kind, BrainBatchKind::GateUpdate);
+        assert_eq!(batch.files, [CALLER, BrainConfig::FILE]);
+        let worktree = home.path().join(BATCHES).join(&batch.id);
+        let changed = git(&worktree, &["diff", "--numstat", "HEAD~", "HEAD"]);
+        assert_eq!(
+            changed,
+            format!("7\t7\t{CALLER}\n1\t1\t{}", BrainConfig::FILE),
+            "the seven pins and gate.version, nothing else"
+        );
+        let caller_now = fs::read_to_string(worktree.join(CALLER)).unwrap();
+        assert_eq!(caller_now, caller(NEWER));
+        let config: Value =
+            serde_json::from_slice(&fs::read(worktree.join(BrainConfig::FILE)).unwrap()).unwrap();
+        assert_eq!(config["gate"]["version"], NEWER.tag);
+        assert_eq!(config["future"]["kept"], true);
+        let again = host.update_brain_gate(REPO, &tools.git).unwrap_err();
+        assert!(format!("{again:#}").contains("already open"));
+
+        run(&mut host, &tools);
+        passing_checks(&github);
+        run(&mut host, &tools);
+        let open = host.brain_batch(&batch.id).unwrap();
+        assert_eq!(open.stage, BrainStage::PrOpen);
+        assert_eq!(open.problem, Some(BrainProblem::AwaitingReview));
+        assert!(
+            github.gh_calls("pr").iter().all(|c| c[1] != "merge"),
+            "it never auto-merges"
+        );
+        let body = (github.gh_calls("pr").into_iter())
+            .find(|c| c[1] == "create")
+            .unwrap()
+            .join(" ");
+        assert!(body.contains("waits for the code owner's review"));
+
+        github.merge(open.pull_request.unwrap().number);
+        run(&mut host, &tools);
+        run(&mut host, &tools);
+        let gate = host.brain(REPO).unwrap().gate.unwrap();
+        assert_eq!(
+            gate.pin,
+            BrainGatePin::Release {
+                release: NEWER.named()
+            }
+        );
+        assert_eq!(
+            (gate.update(), gate.config_version.as_deref()),
+            (None, None)
+        );
+        let current = host.update_brain_gate(REPO, &tools.git).unwrap_err();
+        assert!(format!("{current:#}").contains("already pins brain-gate-v1.1.0"));
+    }
+
+    #[test]
+    fn the_sidebar_lists_a_held_brain_and_not_one_beside_it_whose_gate_accepts_its_logs() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = GitHub::new(folder.path());
+        let tools = github.tools();
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, _) = host_with_brain(home.path());
+        host.gate = WRITES_V2;
+        gate_on_main(&github, RELEASE.commit, RELEASE.tag);
+        run(&mut host, &tools);
+        host.confirm_brain(REPO).unwrap();
+        queue_log(&mut host, &tools, BrainSource::BrainsPage);
+        // A second brain with the same queued log batch, whose gate accepts the contract.
+        let other = "Vyttle-LLC/other-brain";
+        (host.db.execute(
+            "INSERT INTO brains(repository,data) SELECT ?2, json_set(data,'$.repository',?2,
+               '$.gate.logs_held',json('false')) FROM brains WHERE repository=?1",
+            [REPO, other],
+        ))
+        .unwrap();
+        (host.db.execute(
+            "INSERT INTO brain_batches(id,repository,data) SELECT id||'-other', ?2,
+               json_set(data,'$.repository',?2) FROM brain_batches WHERE repository=?1",
+            [REPO, other],
+        ))
+        .unwrap();
+        assert_eq!(host.brain_batches(Some(other)).unwrap().len(), 1);
+        assert_eq!(host.snapshot().unwrap().brains_logs_held, [REPO]);
+    }
+
+    #[test]
+    fn a_contract_mismatch_holds_log_batches_here_until_the_gate_update_merges() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = GitHub::new(folder.path());
+        let tools = github.tools();
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, _) = host_with_brain(home.path());
+        host.gate = WRITES_V2;
+        gate_on_main(&github, RELEASE.commit, RELEASE.tag);
+        run(&mut host, &tools);
+        host.confirm_brain(REPO).unwrap();
+        assert!(host.brain(REPO).unwrap().gate.unwrap().logs_held);
+        let counted = host.snapshot().unwrap().brains_logs_held;
+        assert!(counted.is_empty(), "no log batch waits, so nothing is held");
+
+        let log = queue_log(&mut host, &tools, BrainSource::BrainsPage);
+        assert_eq!(host.snapshot().unwrap().brains_logs_held, [REPO]);
+        let compiler = BrainCompiler {
+            host_id: host.host_id().unwrap(),
+            name: "This Mac".into(),
+            extra: Extra::new(),
+        };
+        let config = host
+            .set_brain_compiler(REPO, &compiler, &tools.git)
+            .unwrap();
+        run(&mut host, &tools);
+        let held = host.brain_batch(&log.id).unwrap();
+        assert_eq!((held.stage, held.branch), (BrainStage::Queued, None));
+        assert!(home.path().join(BATCHES).join(&log.id).exists(), "kept");
+        assert!(
+            host.brain_batch(&config.id).unwrap().pull_request.is_some(),
+            "config PRs still go through"
+        );
+
+        let update = host.update_brain_gate(REPO, &tools.git).unwrap();
+        run(&mut host, &tools);
+        let number = host
+            .brain_batch(&update.id)
+            .unwrap()
+            .pull_request
+            .unwrap()
+            .number;
+        assert_eq!(host.brain_batch(&log.id).unwrap().pull_request, None);
+        github.merge(number);
+        run(&mut host, &tools);
+        run(&mut host, &tools);
+        assert!(!host.brain(REPO).unwrap().gate.unwrap().logs_held);
+        assert!(host.snapshot().unwrap().brains_logs_held.is_empty());
+        let released = host.brain_batch(&log.id).unwrap();
+        assert!(
+            released.pull_request.is_some(),
+            "it opens once the update merged"
+        );
+        assert_eq!(github.assert_pushes_are_batch_branches_only(), 3);
+    }
+
+    #[test]
+    fn an_unknown_pin_lets_logs_through_and_pin_to_latest_repins_it() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = GitHub::new(folder.path());
+        let tools = github.tools();
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, _) = host_with_brain(home.path());
+        host.gate = WRITES_V2;
+        gate_on_main(
+            &github,
+            "9f2c4aa0000000000000000000000000000000cc",
+            RELEASE.tag,
+        );
+        run(&mut host, &tools);
+        host.confirm_brain(REPO).unwrap();
+        let log = queue_log(&mut host, &tools, BrainSource::BrainsPage);
+        run(&mut host, &tools);
+        assert!(host.brain_batch(&log.id).unwrap().pull_request.is_some());
+        assert!(host.snapshot().unwrap().brains_logs_held.is_empty());
+        let pin = host.update_brain_gate(REPO, &tools.git).unwrap();
+        let worktree = home.path().join(BATCHES).join(&pin.id);
+        let caller_now = fs::read_to_string(worktree.join(CALLER)).unwrap();
+        assert_eq!(caller_now.matches(NEXT_MAJOR.commit).count(), 7);
     }
 }

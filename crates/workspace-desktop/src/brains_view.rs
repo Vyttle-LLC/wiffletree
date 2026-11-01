@@ -23,6 +23,9 @@ const IN_SPACES: &str =
     "A Space names its brain in its settings. Brains are added and removed there.";
 const GATE_HINT: &str =
     "Log batches, compile runs and config changes on their way to main · select one for its checks";
+/// The gate README's release notes, which What changed opens.
+const GATE_RELEASE_NOTES: &str =
+    "https://github.com/Vyttle-LLC/wiffletree/blob/main/gate/README.md#releases";
 /// How long a reading stands before a change to the workspace asks again.
 const FRESH_MS: i64 = 10_000;
 /// After Sync now, how long the passes get before the page reads again.
@@ -262,10 +265,11 @@ impl BrainsPage {
             return body.child(hint("No batch is on its way to main.", p));
         }
         for batch in &listing.batches {
-            let required = (listing.brains.iter())
-                .find(|b| b.repository.eq_ignore_ascii_case(&batch.repository))
-                .map_or(&[][..], |b| &b.required_checks);
-            body = body.child(self.gate_row(batch, required, p, cx));
+            let brain = (listing.brains.iter())
+                .find(|b| b.repository.eq_ignore_ascii_case(&batch.repository));
+            let required = brain.map_or(&[][..], |b| &b.required_checks);
+            let held = brain.and_then(|b| held_for(b, batch));
+            body = body.child(self.gate_row(batch, required, held, p, cx));
         }
         body
     }
@@ -278,10 +282,10 @@ impl BrainsPage {
         cx: &mut Context<Self>,
     ) -> Div {
         let repository = brain.repository.clone();
-        let (sync, tone) = sync_state(brain);
         let batches: Vec<&BrainBatch> = (listing.batches.iter())
             .filter(|b| b.repository.eq_ignore_ascii_case(&brain.repository))
             .collect();
+        let (sync, tone) = sync_state(brain, &listing.batches);
         let fact = |label: &'static str, value: AnyElement| {
             div()
                 .flex()
@@ -339,6 +343,21 @@ impl BrainsPage {
                 "Checkout",
                 mono(brain.checkout.clone(), p).into_any_element(),
             ))
+            .children(brain.gate.as_ref().map(|gate| {
+                let line = gate_line(gate, updating(&batches));
+                let mut value = div().flex().flex_wrap().items_baseline().gap_1();
+                if let Some((name, commit)) = line.release {
+                    value = value
+                        .child(div().font_weight(FontWeight::MEDIUM).child(name))
+                        .child(mono(format!("· {commit} ·"), p));
+                }
+                fact(
+                    "Gate",
+                    value
+                        .child(div().text_color(line.tone.color(p)).child(line.status))
+                        .into_any_element(),
+                )
+            }))
             .child(fact("Last PR", text(last_pr(brain, &batches))))
             .child(fact(
                 "Compiles on",
@@ -352,19 +371,42 @@ impl BrainsPage {
                     "Last compile",
                     text(last_compile(compile.last_run.as_ref())),
                 ))
-                .child(fact("Next compile", text(next_run(compile, &brain.config))))
-                .child(fact(
-                    "Pending",
-                    text(format!(
-                        "{} {} since the last compile",
-                        compile.pending,
-                        plural(compile.pending, "entry", "entries")
-                    )),
-                )),
+                .child(fact("Next compile", text(next_run(compile, &brain.config)))),
             None => card.child(fact("Next compile", text(next_compile(&brain.config)))),
         };
+        let pending = pending_line(compile.map(|c| c.pending), held_entries(brain, &batches));
+        card = card.children(pending.map(|line| fact("Pending", text(line))));
+        let held_gate = brain.gate.as_ref().filter(|g| g.logs_held);
+        if let Some(gate) = held_gate {
+            card = card.child(
+                banner(p.yellow)
+                    .child(div().flex_1().child(logs_held_line(gate)))
+                    .children(self.update_gate_button(brain, &batches, cx)),
+            );
+        }
         for (warning, tone) in warnings(brain, &batches) {
             card = card.child(banner(tone.color(p)).child(div().flex_1().min_w_0().child(warning)));
+        }
+        if held_gate.is_none()
+            && let Some(gate) = &brain.gate
+            && let Some((_, hint_text)) = gate_action(gate, updating(&batches))
+        {
+            card = card.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .children(self.update_gate_button(brain, &batches, cx))
+                    .child(div().flex_1().child(hint(hint_text, p)))
+                    .child(
+                        button(SharedString::from(format!("gate-notes-{repository}")))
+                            .link()
+                            .xsmall()
+                            .label("What changed ↗")
+                            .on_click(|_, _, c| c.open_url(GATE_RELEASE_NOTES)),
+                    ),
+            );
         }
         if let Some(compile) = compile.filter(|c| c.needs_model) {
             card = card.child(
@@ -732,11 +774,16 @@ impl BrainsPage {
         &self,
         batch: &BrainBatch,
         required: &[String],
+        held_for: Option<u64>,
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
         let id = batch.id.clone();
         let open = self.open_batch.as_ref() == Some(&batch.id);
+        let note = match held_for {
+            Some(_) => "Held on this Mac until the gate is updated".into(),
+            None => batch_note(batch, required),
+        };
         let failed = batch.stage == BrainStage::Failed;
         let mut detail = vec![batch.repository.clone()];
         detail.extend(self.source_name(&batch.source));
@@ -764,7 +811,7 @@ impl BrainsPage {
                         )
                         .child(hint(detail.join(" · "), p)),
                 )
-                .child(stepper(batch, p))
+                .child(stepper(batch, held_for, p))
                 .child(
                     div()
                         .w(px(220.))
@@ -772,7 +819,7 @@ impl BrainsPage {
                         .text_right()
                         .text_size(px(font::SMALL))
                         .text_color(if failed { p.red } else { p.subtle })
-                        .child(batch_note(batch, required)),
+                        .child(note),
                 ),
         );
         if let (true, BrainSource::Project(project)) = (failed, &batch.source)
@@ -1040,6 +1087,31 @@ impl BrainsPage {
         )
     }
 
+    /// Update gate, or Pin to for a pin no release names; off while its PR is open.
+    fn update_gate_button(
+        &self,
+        brain: &Brain,
+        batches: &[&BrainBatch],
+        cx: &mut Context<Self>,
+    ) -> Option<Button> {
+        let gate = brain.gate.as_ref()?;
+        let (label, _) = gate_action(gate, updating(batches))?;
+        let repository = brain.repository.clone();
+        let button = button(SharedString::from(format!("update-gate-{repository}")))
+            .label(label)
+            .disabled(updating(batches).is_some());
+        let button = match gate.pin {
+            BrainGatePin::Release { .. } => button.primary(),
+            BrainGatePin::Unknown { .. } => button.outline(),
+        };
+        Some(
+            ui::gated(button, &self.shared.host).on_click(cx.listener(move |v, _, w, c| {
+                let repository = repository.clone();
+                v.request(Command::UpdateBrainGate { repository }, w, c)
+            })),
+        )
+    }
+
     fn amend(
         &mut self,
         batch_id: String,
@@ -1139,12 +1211,18 @@ fn same_line(a: &Editing, b: &Editing) -> bool {
     }
 }
 
-/// The brain's sync pill: held, failing, waiting for the grant, or when it last synced.
-pub(super) fn sync_state(brain: &Brain) -> (String, Tone) {
+/// The brain's sync pill: held, failing, a log batch among `batches` held for the gate,
+/// waiting for the grant, or when it last synced.
+pub(super) fn sync_state(brain: &Brain, batches: &[BrainBatch]) -> (String, Tone) {
+    let holds_logs = (batches.iter())
+        .filter(|b| b.repository.eq_ignore_ascii_case(&brain.repository))
+        .any(|b| held_for(brain, b).is_some());
     if brain.held.is_some() {
         ("Writing held".into(), Tone::Bad)
     } else if brain.problem.is_some() {
         ("Sync failed".into(), Tone::Bad)
+    } else if holds_logs {
+        ("Logs held".into(), Tone::Warn)
     } else if !brain.granted {
         ("Waits for your grant".into(), Tone::Warn)
     } else {
@@ -1401,12 +1479,141 @@ fn warnings(brain: &Brain, batches: &[&BrainBatch]) -> Vec<(String, Tone)> {
     warnings
 }
 
+/// The Gate line: the release the caller pins with its short commit, then whether it is the
+/// latest this Wiffletree ships, a newer one is available, or a gate update PR is open.
+#[derive(Debug, PartialEq, Eq)]
+struct GateLine {
+    /// The pinned release's name and short commit; `None` for a pin no release names.
+    release: Option<(String, String)>,
+    status: String,
+    tone: Tone,
+}
+
+fn short(commit: &str) -> &str {
+    &commit[..commit.len().min(7)]
+}
+
+/// `updating` is the open gate update batch's PR, `Some(None)` before it opens.
+fn gate_line(gate: &BrainGate, updating: Option<Option<u64>>) -> GateLine {
+    let latest = gate.latest.version();
+    let in_pr = |verb: &str| match updating {
+        Some(Some(number)) => format!("{verb} to {latest} in PR #{number}"),
+        _ => format!("{verb} to {latest} · its PR opens on the next sync"),
+    };
+    match &gate.pin {
+        BrainGatePin::Release { release } => {
+            let (mut status, tone) = match (gate.update(), updating) {
+                (None, _) => ("latest".to_owned(), Tone::Good),
+                (Some(_), Some(_)) => (in_pr("updating"), Tone::Quiet),
+                (Some(_), None) => (format!("{latest} is available"), Tone::Warn),
+            };
+            if let Some(version) = &gate.config_version {
+                status.push_str(&format!(" · the config says {version}"));
+            }
+            GateLine {
+                release: Some((release.name.clone(), short(&release.commit).to_owned())),
+                status,
+                tone,
+            }
+        }
+        BrainGatePin::Unknown { commit } => {
+            let mut status = format!(
+                "Pinned to {}, which is not a gate release this Wiffletree knows",
+                short(commit)
+            );
+            if updating.is_some() {
+                status.push_str(&format!(" · {}", in_pr("pinning")));
+            }
+            GateLine {
+                release: None,
+                status,
+                tone: Tone::Warn,
+            }
+        }
+    }
+}
+
+/// Update gate's button label and the hint beside it, or `None` for a gate that is current.
+fn gate_action(gate: &BrainGate, updating: Option<Option<u64>>) -> Option<(String, String)> {
+    let target = gate.update()?.version();
+    let label = match gate.pin {
+        BrainGatePin::Release { .. } => format!("Update gate to {target}"),
+        BrainGatePin::Unknown { .. } => format!("Pin to {target}"),
+    };
+    let hint = match (updating, &gate.pin) {
+        (Some(Some(number)), _) => format!(
+            "PR #{number} is open. It merges when your code owner approves it; it does not auto-merge."
+        ),
+        (Some(None), _) => "Its PR opens on the next sync and waits for your code owner.".into(),
+        (None, BrainGatePin::Release { .. }) => "Opens a PR that changes only the caller's pins and the config's version. Your code owner reviews it.".into(),
+        (None, BrainGatePin::Unknown { .. }) => "Opens the same review PR as Update gate.".into(),
+    };
+    Some((label, hint))
+}
+
+/// The held-logs banner: why the brain's log batches wait on this Mac.
+fn logs_held_line(gate: &BrainGate) -> String {
+    let pinned = match &gate.pin {
+        BrainGatePin::Release { release } => release.version().to_owned(),
+        BrainGatePin::Unknown { commit } => short(commit).to_owned(),
+    };
+    format!(
+        "Log batches are held. This Wiffletree writes log entries in gate contract v{}, and this brain's gate ({pinned}) would reject them. Update the gate; held entries go in once the update merges.",
+        gate.contract
+    )
+}
+
+/// The contract a batch waits for while the brain's pinned gate rejects it: an unfinished log
+/// batch with no PR yet, which the host keeps on this Mac.
+pub(super) fn held_for(brain: &Brain, batch: &BrainBatch) -> Option<u64> {
+    let gate = brain.gate.as_ref().filter(|g| g.logs_held)?;
+    let waiting = batch.pull_request.is_none() && !batch.is_finished();
+    (batch.kind == BrainBatchKind::Log && waiting).then_some(gate.contract)
+}
+
+/// How many log entries the brain's held batches keep on this Mac.
+fn held_entries(brain: &Brain, batches: &[&BrainBatch]) -> usize {
+    (batches.iter())
+        .filter(|b| held_for(brain, b).is_some())
+        .map(|b| b.files.len())
+        .sum()
+}
+
+/// The card's Pending line: entries since the last compile, for a brain this Mac compiles, and
+/// log entries held here.
+fn pending_line(since_compile: Option<usize>, held: usize) -> Option<String> {
+    let compiled = since_compile.map(|n| {
+        format!(
+            "{n} {} since the last compile",
+            plural(n, "entry", "entries")
+        )
+    });
+    let held = (held > 0).then(|| {
+        format!(
+            "{held} log {} held on this Mac",
+            plural(held, "entry", "entries")
+        )
+    });
+    match (compiled, held) {
+        (Some(compiled), Some(held)) => Some(format!("{compiled} · {held}")),
+        (compiled, held) => compiled.or(held),
+    }
+}
+
+/// The open gate update batch's PR, `Some(None)` before it opens.
+fn updating(batches: &[&BrainBatch]) -> Option<Option<u64>> {
+    (batches.iter())
+        .find(|b| b.kind == BrainBatchKind::GateUpdate && !b.is_finished())
+        .map(|b| b.pull_request.as_ref().map(|pr| pr.number))
+}
+
 fn kind_label(kind: BrainBatchKind) -> &'static str {
     match kind {
         BrainBatchKind::Log => "Log batch",
         BrainBatchKind::Compile => "Compile run",
         BrainBatchKind::Config => "Config change",
         BrainBatchKind::SetUp => "Set up",
+        BrainBatchKind::GateUpdate => "Gate update",
     }
 }
 
@@ -1422,13 +1629,33 @@ fn author(batch: &BrainBatch) -> Option<&str> {
 
 /// The stepper's four steps, as the mockup draws them.
 const STEPS: [&str; 4] = ["Queued", "PR open", "Checks", "Auto-merged"];
+/// A batch that waits for the code owner, Set up or a gate update, ends with their review.
+const REVIEWED_STEPS: [&str; 5] = [
+    "Queued",
+    "PR open",
+    "Checks",
+    "Waiting for code owner",
+    "Merged",
+];
 
-/// How far the batch is, from 0 for queued to 3 for auto-merging or merged.
+/// How far the batch is, from 0 for queued to the last step for auto-merging or merged.
 fn step_of(batch: &BrainBatch) -> usize {
+    let reviewed = batch.kind.awaits_review();
     match batch.stage {
         BrainStage::Queued => 0,
+        // The host keeps a reviewed batch open for the review while its checks run and after.
+        BrainStage::PrOpen if reviewed && batch.problem == Some(BrainProblem::AwaitingReview) => {
+            let running =
+                (batch.checks.iter()).any(|c| c.conclusion == BrainCheckConclusion::Pending);
+            if batch.checks.is_empty() || running {
+                2
+            } else {
+                3
+            }
+        }
         BrainStage::PrOpen => 1,
         BrainStage::Checks => 2,
+        BrainStage::Merged if reviewed => 4,
         BrainStage::AutoMerging | BrainStage::Merged => 3,
         // A failed batch stops where it failed: at its checks once its PR is open.
         BrainStage::Failed if batch.pull_request.is_some() => 2,
@@ -1437,16 +1664,24 @@ fn step_of(batch: &BrainBatch) -> usize {
     }
 }
 
-/// Each step's label and tone: done, the current one, or not reached.
-fn steps(batch: &BrainBatch) -> Vec<(String, Option<Tone>)> {
+/// Each step's label and tone: done, the current one, or not reached. `held_for` is the entry
+/// contract a held log batch waits for the gate to accept.
+fn steps(batch: &BrainBatch, held_for: Option<u64>) -> Vec<(String, Option<Tone>)> {
     let at = step_of(batch);
-    (STEPS.iter().enumerate())
+    let names: &[&str] = match batch.kind.awaits_review() {
+        true => &REVIEWED_STEPS,
+        false => &STEPS,
+    };
+    (names.iter().enumerate())
         .map(|(i, step)| {
             let mut label = step.to_string();
             if i == 1
                 && let Some(pr) = &batch.pull_request
             {
                 label = format!("PR #{}", pr.number);
+            }
+            if let (0, Some(contract)) = (i, held_for) {
+                label = format!("Held · waiting for gate v{contract}");
             }
             let tone = match (i.cmp(&at), batch.stage) {
                 (std::cmp::Ordering::Less, _) => Some(Tone::Good),
@@ -1469,9 +1704,9 @@ fn steps(batch: &BrainBatch) -> Vec<(String, Option<Tone>)> {
         .collect()
 }
 
-pub(super) fn stepper(batch: &BrainBatch, p: Palette) -> Div {
+pub(super) fn stepper(batch: &BrainBatch, held_for: Option<u64>, p: Palette) -> Div {
     let mut row = div().flex_none().flex().items_center().gap_2();
-    for (i, (label, tone)) in steps(batch).into_iter().enumerate() {
+    for (i, (label, tone)) in steps(batch, held_for).into_iter().enumerate() {
         if i > 0 {
             row = row.child(div().w(px(10.)).h(px(1.)).bg(p.edge));
         }
@@ -1581,12 +1816,170 @@ fn import_line(import: &LegacyImport) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Tone, author, batch_note, compiler_line, grant_lines, import_line, last_compile, last_pr,
+        GateLine, Tone, author, batch_note, compiler_line, gate_action, gate_line, grant_lines,
+        held_entries, held_for, import_line, last_compile, last_pr, logs_held_line, pending_line,
         required_checks, steps, sync_state, warnings, without_origin, without_origin_line,
     };
     use crate::ui;
     use std::collections::BTreeMap;
     use workspace_core::*;
+
+    fn release(name: &str, commit: &str) -> BrainGateRelease {
+        BrainGateRelease {
+            name: name.into(),
+            commit: commit.into(),
+        }
+    }
+    /// A gate pinned to v1.0.0 while this Wiffletree ships `latest`.
+    fn gate(latest: &str) -> BrainGate {
+        BrainGate {
+            pin: BrainGatePin::Release {
+                release: release("brain-gate-v1.0.0", "083ab25267aa"),
+            },
+            config_version: None,
+            latest: release(latest, "5d1e07c00000"),
+            contract: 1,
+            logs_held: false,
+        }
+    }
+
+    #[test]
+    fn the_gate_line_names_the_pin_and_offers_update_gate_only_when_a_newer_release_ships() {
+        let mut current = gate("brain-gate-v1.0.0");
+        current.latest = release("brain-gate-v1.0.0", "083ab25267aa");
+        assert_eq!(
+            gate_line(&current, None),
+            GateLine {
+                release: Some(("brain-gate-v1.0.0".into(), "083ab25".into())),
+                status: "latest".into(),
+                tone: Tone::Good,
+            }
+        );
+        assert_eq!(
+            gate_action(&current, None),
+            None,
+            "a current brain shows no button"
+        );
+
+        let behind = gate("brain-gate-v1.1.0");
+        assert_eq!(gate_line(&behind, None).status, "v1.1.0 is available");
+        let (label, hint) = gate_action(&behind, None).unwrap();
+        assert_eq!(label, "Update gate to v1.1.0");
+        assert!(hint.contains("changes only the caller's pins and the config's version"));
+        let updating = gate_line(&behind, Some(Some(221)));
+        assert_eq!(updating.status, "updating to v1.1.0 in PR #221");
+        let (_, waiting) = gate_action(&behind, Some(Some(221))).unwrap();
+        assert!(waiting.contains("PR #221 is open") && waiting.contains("does not auto-merge"));
+
+        let mut disagreeing = gate("brain-gate-v1.1.0");
+        disagreeing.config_version = Some("brain-gate-v0.9.0".into());
+        assert!(
+            (gate_line(&disagreeing, None).status).ends_with("· the config says brain-gate-v0.9.0")
+        );
+
+        let mut unknown = gate("brain-gate-v1.1.0");
+        unknown.pin = BrainGatePin::Unknown {
+            commit: "9f2c4aa1234".into(),
+        };
+        let line = gate_line(&unknown, None);
+        assert_eq!(line.release, None);
+        assert_eq!(
+            line.status,
+            "Pinned to 9f2c4aa, which is not a gate release this Wiffletree knows"
+        );
+        assert_eq!(gate_action(&unknown, None).unwrap().0, "Pin to v1.1.0");
+    }
+
+    #[test]
+    fn a_contract_mismatch_holds_only_log_batches_without_a_pr_and_says_so() {
+        let mut held = brain();
+        let mut mismatch = gate("brain-gate-v2.0.0");
+        mismatch.pin = BrainGatePin::Release {
+            release: release("brain-gate-v1.1.0", "5d1e07c00000"),
+        };
+        mismatch.contract = 2;
+        mismatch.logs_held = true;
+        held.gate = Some(mismatch.clone());
+        held.synced_at = Some(ui::now());
+        assert!(logs_held_line(&mismatch).contains(
+            "writes log entries in gate contract v2, and this brain's gate (v1.1.0) would reject them"
+        ));
+
+        let mut queued = batch(BrainStage::Queued, None);
+        queued.files = vec!["a.md".into(); 14];
+        let open = batch(BrainStage::Checks, None);
+        let held_pill = sync_state(&held, &[queued.clone(), open.clone()]);
+        assert_eq!(held_pill, ("Logs held".into(), Tone::Warn));
+        assert_eq!(
+            sync_state(&held, std::slice::from_ref(&open)).0,
+            "Synced just now",
+            "a mismatch with no log batch waiting holds nothing"
+        );
+        let mut config = batch(BrainStage::Queued, None);
+        config.kind = BrainBatchKind::Config;
+        assert_eq!(held_for(&held, &queued), Some(2));
+        assert_eq!(held_for(&held, &open), None, "a PR already open goes on");
+        assert_eq!(
+            held_for(&held, &config),
+            None,
+            "config PRs still go through"
+        );
+        let mut discarded = batch(BrainStage::Discarded, None);
+        discarded.pull_request = None;
+        assert_eq!(
+            held_for(&held, &discarded),
+            None,
+            "a discarded batch waits for nothing"
+        );
+        assert_eq!(
+            held_entries(&held, &[&queued, &open, &config, &discarded]),
+            14
+        );
+        assert_eq!(
+            steps(&queued, Some(2))[0],
+            ("Held · waiting for gate v2".into(), Some(Tone::Warn))
+        );
+        assert_eq!(
+            pending_line(None, 14).as_deref(),
+            Some("14 log entries held on this Mac")
+        );
+        assert_eq!(
+            pending_line(Some(3), 1).as_deref(),
+            Some("3 entries since the last compile · 1 log entry held on this Mac")
+        );
+        assert_eq!(pending_line(None, 0), None);
+        assert_eq!(held_for(&brain(), &queued), None);
+    }
+
+    #[test]
+    fn a_gate_update_ends_with_the_code_owners_review_not_auto_merge() {
+        let check = |conclusion| BrainCheck {
+            name: "secret-scan".into(),
+            conclusion,
+            annotations: vec![],
+        };
+        let mut update = batch(BrainStage::PrOpen, Some(BrainProblem::AwaitingReview));
+        update.kind = BrainBatchKind::GateUpdate;
+        update.checks = vec![check(BrainCheckConclusion::Pending)];
+        let running: Vec<String> = steps(&update, None).into_iter().map(|s| s.0).collect();
+        assert_eq!(
+            running,
+            [
+                "Queued",
+                "PR #214",
+                "Checks",
+                "Waiting for code owner",
+                "Merged"
+            ]
+        );
+        assert_eq!(steps(&update, None)[2].1, Some(Tone::Warn));
+        update.checks = vec![check(BrainCheckConclusion::Success)];
+        let waiting = steps(&update, None);
+        assert_eq!(waiting[2].1, Some(Tone::Good));
+        assert_eq!(waiting[3].1, Some(Tone::Warn));
+        update.stage = BrainStage::Merged;
+        assert_eq!(steps(&update, None)[4].1, Some(Tone::Good));
+    }
 
     fn brain() -> Brain {
         Brain {
@@ -1605,6 +1998,7 @@ mod tests {
             legacy_pointer: false,
             last_pull_request: None,
             legacy_import: false,
+            gate: None,
         }
     }
     fn batch(stage: BrainStage, problem: Option<BrainProblem>) -> BrainBatch {
@@ -1658,16 +2052,19 @@ mod tests {
         let mut waiting = brain();
         waiting.granted = false;
         assert_eq!(
-            sync_state(&waiting),
+            sync_state(&waiting, &[]),
             ("Waits for your grant".into(), Tone::Warn)
         );
         let mut held = brain();
         held.held = Some(BrainHold::NotFastForward);
         held.synced_at = Some(ui::now());
-        assert_eq!(sync_state(&held).1, Tone::Bad);
+        assert_eq!(sync_state(&held, &[]).1, Tone::Bad);
         let mut synced = brain();
         synced.synced_at = Some(ui::now());
-        assert_eq!(sync_state(&synced), ("Synced just now".into(), Tone::Good));
+        assert_eq!(
+            sync_state(&synced, &[]),
+            ("Synced just now".into(), Tone::Good)
+        );
     }
 
     #[test]
@@ -1727,13 +2124,13 @@ mod tests {
                 checks: vec!["sensitive-info".into()],
             }),
         );
-        let labels: Vec<(String, Option<Tone>)> = steps(&failed);
+        let labels: Vec<(String, Option<Tone>)> = steps(&failed, None);
         assert_eq!(labels[1], ("PR #214".into(), Some(Tone::Good)));
         assert_eq!(labels[2], ("Checks failed".into(), Some(Tone::Bad)));
         assert_eq!(labels[3].1, None);
-        let merging = steps(&batch(BrainStage::AutoMerging, None));
+        let merging = steps(&batch(BrainStage::AutoMerging, None), None);
         assert_eq!(merging[3], ("Auto-merging".into(), Some(Tone::Warn)));
-        let queued = steps(&batch(BrainStage::Queued, None));
+        let queued = steps(&batch(BrainStage::Queued, None), None);
         assert_eq!(queued[0], ("Queued".into(), Some(Tone::Warn)));
         assert_eq!(queued[1], ("PR open".into(), None));
     }

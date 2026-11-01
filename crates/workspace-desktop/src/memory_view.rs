@@ -251,7 +251,8 @@ impl Inspector {
                     .font_weight(FontWeight::MEDIUM)
                     .child(repository.to_owned()),
             );
-        if let Some((sync, tone)) = brain.map(brains_view::sync_state) {
+        let batches = listing.map_or(&[][..], |l| &l.batches);
+        if let Some((sync, tone)) = brain.map(|b| brains_view::sync_state(b, batches)) {
             title = title.child(pill(sync, tone.color(p)));
         }
         let space = self.project_space().map_or("", |s| s.name.as_str());
@@ -300,6 +301,11 @@ impl Inspector {
         if batches.is_empty() {
             return None;
         }
+        let held_for = |batch: &BrainBatch| {
+            (listing.brains.iter())
+                .find(|b| b.repository.eq_ignore_ascii_case(&batch.repository))
+                .and_then(|brain| brains_view::held_for(brain, batch))
+        };
         let mut list = div()
             .flex()
             .flex_col()
@@ -328,7 +334,7 @@ impl Inspector {
                             )
                             .child(pill(stage, tone.color(p))),
                     )
-                    .child(brains_view::stepper(batch, p)),
+                    .child(brains_view::stepper(batch, held_for(batch), p)),
             );
         }
         Some(list)

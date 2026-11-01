@@ -390,3 +390,12 @@ under `gate/`. Release only a commit on `main` where that workflow passed.
 Callers pin the release's commit SHA, and Wiffletree's Update gate moves the
 pin through a reviewed PR. Pinned commits stay reachable, including if the gate
 moves to its own repository.
+
+A Wiffletree release ships the gate releases it knows, newest last
+(`GATE_RELEASES` in `crates/workspace-host/src/brains.rs`), and the entry
+contract it writes (`ENTRY_CONTRACT`). A gate accepts the contract of its major
+version. The Brains page offers Update gate when a brain pins an older release
+than the newest shipped, and holds a brain's log batches on the Mac, before any
+PR opens, while its pinned release would reject the entries this Wiffletree
+writes. When a new major version changes the contract, the Wiffletree release
+that ships it also raises `ENTRY_CONTRACT`.

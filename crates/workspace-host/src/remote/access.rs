@@ -145,6 +145,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::ConfirmBrain { .. }
         | Command::ForgetBrain { .. }
         | Command::SetUpBrain { .. }
+        | Command::UpdateBrainGate { .. }
         | Command::SetBrainCompiler { .. }
         | Command::AmendBrainBatch { .. }
         | Command::SendLogsNow { .. }
