@@ -142,7 +142,7 @@ This requirement covers cycles started with `verify_ticket`; how a review the ho
 - **THEN** round 4 starts with that verifier
 
 #### Scenario: Verifier cannot verify
-- **WHEN** a verifier reports `blocked`
+- **WHEN** a verifier reports `blocked` and its result is recorded as blocked
 - **THEN** after its round ends the ticket is `blocked` and the project coordinator wakes with that report, without another round, and the message does not offer a waiver
 
 #### Scenario: Every verifier of the level passes

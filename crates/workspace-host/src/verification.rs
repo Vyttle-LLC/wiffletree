@@ -216,9 +216,8 @@ fn is_failing(ledger: &[LedgerEntry], reported: &ReportedFinding) -> bool {
 
 /// Applies a check to the ledger: when it `completed`, the focus's open entries it did not report
 /// again are fixed; a blocked check leaves them open. An open entry it reports again stays open
-/// with the new report, a noted one becomes open
-/// when reported again as an evidenced blocking finding, and new findings are added. A settled
-/// entry reported again is left alone. A keeper review, which may be withdrawn with exactly the
+/// with the new report, a noted one becomes open when reported again as an evidenced blocking
+/// finding, and new findings are added. A settled entry reported again is left alone. A keeper review, which may be withdrawn with exactly the
 /// entries it recorded, leaves a noted entry alone too, recording an evidenced blocking re-report
 /// of it as a new entry.
 fn record_findings(
@@ -1098,9 +1097,9 @@ impl Host {
     }
     /// Records a verifier's result on its round: failed when it changed the worktree or reported
     /// an evidenced blocking finding, else passed, unless it could not verify and found no such
-    /// finding. While the cycle runs, a report from an unchanged worktree updates the ledger. A pass is final, since a later round re-runs
-    /// only failed verifiers, so a verifier that passed is archived at once. Ends the round once
-    /// nobody is pending, unless the cycle already ended.
+    /// finding. While the cycle runs, a report from an unchanged worktree updates the ledger. A
+    /// pass is final, since a later round re-runs only failed verifiers, so a verifier that passed
+    /// is archived at once. Ends the round once nobody is pending, unless the cycle already ended.
     fn record_verdict(
         &mut self,
         mut ticket: Ticket,
@@ -1116,7 +1115,12 @@ impl Host {
             .context("No round")?
             .commit
             .clone();
-        let untouched = head(&ticket)? == commit && is_clean(&ticket)?;
+        let unchanged = || -> Result<bool> { Ok(head(&ticket)? == commit && is_clean(&ticket)?) };
+        // A verifier may report that it cannot verify because git can no longer read the worktree.
+        let untouched = match unchanged() {
+            Err(_) if kind == "blocked" => false,
+            result => result?,
+        };
         let verification = ticket.verification.as_mut().context("No verification")?;
         let round = verification.rounds.last_mut().context("No round")?;
         let run = round

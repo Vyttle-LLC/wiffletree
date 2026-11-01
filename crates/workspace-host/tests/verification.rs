@@ -1659,6 +1659,20 @@ fn a_blocked_verdict_records_its_findings_and_leaves_open_entries_open() {
 }
 
 #[test]
+fn a_blocked_verdict_from_an_unreadable_worktree_blocks_without_recording_findings() {
+    let mut f = one_tester(2);
+    let codex = f.verifier("Codex");
+    std::fs::remove_dir_all(f.worktree()).unwrap();
+
+    f.report_findings(&codex, "gone", "blocked", json!([blocking("Busy line")]))
+        .unwrap();
+
+    assert_eq!(f.run("Codex").result, VerifierResult::Blocked);
+    assert!(f.ledger().is_empty());
+    assert_eq!(f.current().state, TicketState::Blocked);
+}
+
+#[test]
 fn a_re_check_from_a_changed_worktree_fails_and_leaves_the_entry_open() {
     let mut f = one_tester(3);
     let codex = f.verifier("Codex");
