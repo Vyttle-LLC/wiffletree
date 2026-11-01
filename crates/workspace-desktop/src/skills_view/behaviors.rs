@@ -309,7 +309,7 @@ fn compared(line: &str) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Offer {
     behavior: String,
-    /// The line as written.
+    /// The line, trimmed, in its own case.
     line: String,
     /// The role whose Workspace additions hold it; `None` at a Space or repository.
     skill: Option<Skill>,

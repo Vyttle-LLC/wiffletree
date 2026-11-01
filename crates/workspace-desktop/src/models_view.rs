@@ -1287,7 +1287,6 @@ impl ModelsPage {
         )
     }
 
-    /// Falls back here: each of the Space's rows this Mac cannot run.
     /// The rows `rows` holds that no Space may set, with Remove them, which edits the draft.
     fn ignored_banner(
         &self,
@@ -1328,6 +1327,7 @@ impl ModelsPage {
         )
     }
 
+    /// Falls back here: each of the Space's rows this Mac cannot run.
     fn fallback_banner(&self, table: &SpaceTable, space: &str, p: Palette) -> Option<Div> {
         let lines = models::fallback_lines(table, space);
         (!lines.is_empty()).then(|| {
