@@ -59,14 +59,14 @@ Wiffletree is a public repository (`Vyttle-LLC/wiffletree`). Brain repositories 
    - Missing values take the gate's defaults: 2,000 characters, the legacy flag false, no allowed email domains and no allow-list.
    - The action reads gitleaks rules from its own default config, extended by a `.gitleaks.toml` in the brain repository when one exists. `.gitleaksignore` and `gitleaks:allow` work as in PR #1.
    - markdownlint uses the gate's `markdownlint-cli2.jsonc`, tuned to the brain format, so a brain cannot lint differently.
-5. **`gate-tests` keeps its name and changes its subject.** In PR #1 it ran the fixture tests that lived in the brain. Now Wiffletree's own CI runs them on every change to `gate/`, and a release is tagged only from a commit where they pass. In a brain, `gate-tests` runs the pinned action's self-test: the bundled fixtures against the installed tools, on that runner. This proves the pinned gate works there, and keeps seven required checks.
+5. **`gate-tests` keeps its name and changes its subject.** In PR #1 it ran the fixture tests that lived in the brain. Now Wiffletree's own CI runs them on every change to `gate/`, and a release is a commit where they pass. In a brain, `gate-tests` runs the pinned action's self-test: the bundled fixtures against the installed tools, on that runner. This proves the pinned gate works there, and keeps seven required checks.
 6. **Versions:**
-   - Releases are tagged `brain-gate-vMAJOR.MINOR.PATCH`, with a moving `brain-gate-vMAJOR` tag.
+   - A release is a commit named `brain-gate-vMAJOR.MINOR.PATCH` as a label. Michael chose not to push Git tags; brains pin the commit SHA.
    - A change that can fail a PR the previous version passed is a new major version. That covers a stricter rule, a new required field in the entry contract, or a new check.
    - Fixes that only stop false failures, and new optional config, are minor or patch versions.
-   - The caller pins a commit SHA with the tag in a comment, and Update gate moves the pin. The `version` in the brain's config records which release the caller pins.
+   - The caller pins a commit SHA with the release name in a comment, and Update gate moves the pin. The `version` in the brain's config records which release the caller pins.
 7. **One fixture set.** `gate/tests/fixtures/` holds the good and bad entries, notes, PR shapes and sensitive samples. Wiffletree's renderer tests in `brain-log-capture` read the same files, so a contract change fails Wiffletree's own tests in the same PR. The fixtures contain only fake values. `sensitive-info` and `secret-scan` exempt `gate/tests/` only when the gate scans its own repository; in a brain, `gate/tests/` is scanned like any other path.
-8. **Moving later:** the action's only coupling to this repository is its path. Moving it means publishing the same tags in the new repository and changing each caller's `uses:`, through Update gate. Old tags stay in this repository, so pinned callers keep working.
+8. **Moving later:** the action's only coupling to this repository is its path. Moving it means keeping the pinned commits reachable in the new repository and changing each caller's `uses:`, through Update gate. Old commits stay in this repository, so pinned callers keep working.
 9. **Set up writes, in one PR from `brain-registry-sync`:**
    - the caller;
    - the `gate` object;
@@ -91,7 +91,7 @@ Wiffletree is a public repository (`Vyttle-LLC/wiffletree`). Brain repositories 
 ## Migration Plan
 
 1. Copy `scripts/gate/`, the default configs and the fixture tests from `sagehaven-docs` PR #1 into `gate/`. Replace `gate_config.py` with reading `wiffletree-brain.json`, and replace the `sage-run-command` wrapper with plain steps that write annotations. Prove the fixture tests pass unchanged in behaviour.
-2. Tag `brain-gate-v1.0.0`.
+2. Name the release `brain-gate-v1.0.0` as a label for the commit brains pin; no Git tag is pushed.
 3. In `sagehaven-docs` (follow-up ticket): replace the scripts and workflow with the caller pinned to v1.0.0, move the `gate_config.py` values into `wiffletree-brain.json`, rename the allow-list, and keep the Sage summary job in the caller. The check names are unchanged, so branch protection stays as applied.
 4. `vyttle-docs` gets the gate through Set up.
 
@@ -108,7 +108,7 @@ These are merged on `main`:
 | --- | --- | --- | --- |
 | Checks on writes to a shared repository | #162's tracker, now the Space's storage repository (`spaces`), accepts direct pushes and commits from teammates outside Wiffletree, with no CI | **Share** the checks, run locally: before pushing `issues/` or `spaces/`, the host runs this gate's `sensitive-info` and `secret-scan` from `gate/`, at the version the release bundles, and holds a failing file (`spaces`, "Files are scanned before they are pushed"). Tasks 1–2 here must land before `spaces` task 4.4. | None. Recommended in `spaces` and confirmed by Michael, 2026-10-29, instead of a caller on pushes to `main`, which would run only after the text is already public to readers. |
 | PR-gated writes | `brain-registry-sync` batches; `ticket-publishing` opens ticket PRs | **Share** the PR watcher. Brain PRs read the gate's seven check names. | None. |
-| CI shipped from Wiffletree | This is the first GitHub Action Wiffletree publishes for other repositories; the app also bundles two of its checks for `spaces`' local scans | **Align** future reusable pieces under one versioning scheme (`<name>-vX.Y.Z` tags). | Move to a separate `Vyttle-LLC/wiffletree-actions` repository when a second action exists? |
+| CI shipped from Wiffletree | This is the first GitHub Action Wiffletree publishes for other repositories; the app also bundles two of its checks for `spaces`' local scans | **Align** future reusable pieces under one versioning scheme (`<name>-vX.Y.Z` release names). | Move to a separate `Vyttle-LLC/wiffletree-actions` repository when a second action exists? |
 | Repository config in a shared repository | `wiffletree-brain.json` here; `wiffletree-issues.yaml` and `spaces/<space>/space.yaml` in storage repositories (`spaces`, `shared-issues`) | **Align** on one config file per shared repository, at its root, with unknown keys kept. | None. Trackers use YAML to match `space.yaml` in the same repository; `wiffletree-brain.json` and `wiffletree.json` stay JSON (recommended in `spaces`; confirmed by Michael, 2026-10-29). |
 | `CODEOWNERS` and auto-merge | Brains need review for gate and config changes; trackers push directly | No overlap today. | None. |
 | The entry contract | `brain-log-capture`'s renderer | **Share**: one fixture set in `gate/tests/fixtures/`. | None. |

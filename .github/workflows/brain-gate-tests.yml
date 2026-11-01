@@ -1,6 +1,6 @@
 # Runs the brain gate's fixture tests, through the action's own gate-tests mode,
-# on every change under gate/. A gate release is tagged only from a commit where
-# they pass; see gate/README.md.
+# on every change under gate/. A gate release is a commit where they pass; see
+# gate/README.md.
 name: Brain gate tests
 
 on:

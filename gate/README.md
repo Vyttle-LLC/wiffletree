@@ -181,7 +181,8 @@ brain lints alike.
 ## The caller
 
 A brain repository runs the gate from `.github/workflows/brain-gate.yml`. Pin
-the action to a release's commit SHA, with the tag in a comment, in every job:
+the action to a release's commit SHA, with the release name in a comment, in
+every job:
 
 ```yaml
 # The brain gate (Vyttle-LLC/wiffletree/gate). Each job is its own required check.
@@ -374,8 +375,8 @@ EOF
 
 ## Releases
 
-Releases are tagged `brain-gate-vMAJOR.MINOR.PATCH`, with a moving
-`brain-gate-vMAJOR` tag.
+A release is a commit on `main`, named `brain-gate-vMAJOR.MINOR.PATCH` as a
+label. Brains pin the commit SHA, so no Git tag is pushed.
 
 - A change that can fail a PR the previous release passed is a new major
   version: a stricter rule, a new required field in the entry contract, or a
@@ -384,17 +385,8 @@ Releases are tagged `brain-gate-vMAJOR.MINOR.PATCH`, with a moving
   patch version.
 
 `.github/workflows/brain-gate-tests.yml` runs the fixture tests on every change
-under `gate/`. Tag a release only from a commit on `main` where that workflow
-passed:
-
-```sh
-git fetch origin
-git tag -a brain-gate-v1.2.3 -m "Brain gate v1.2.3" <commit>
-git tag -f -a brain-gate-v1 -m "Brain gate v1" <commit>
-git push origin brain-gate-v1.2.3
-git push -f origin brain-gate-v1
-```
+under `gate/`. Release only a commit on `main` where that workflow passed.
 
 Callers pin the release's commit SHA, and Wiffletree's Update gate moves the
-pin through a reviewed PR. Old tags stay published, including if the gate
+pin through a reviewed PR. Pinned commits stay reachable, including if the gate
 moves to its own repository.

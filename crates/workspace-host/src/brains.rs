@@ -50,8 +50,8 @@ struct GateRelease {
     tag: &'static str,
     commit: &'static str,
 }
-/// The release Set up pins: the tag `brain-gate-v1.0.0` points at this commit, the merge of #175
-/// that moved the gate into Wiffletree (`brain-gate` task 5.1).
+/// The release Set up pins: `brain-gate-v1.0.0` is its name, kept as a label, and brains pin this
+/// commit, the merge of #175 that moved the gate into Wiffletree.
 const GATE_RELEASE: GateRelease = GateRelease {
     tag: "brain-gate-v1.0.0",
     commit: "083ab25267aa260569ab61106ff8fdff5bb2ba0e",
