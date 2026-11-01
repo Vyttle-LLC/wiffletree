@@ -1585,58 +1585,33 @@ pub(crate) mod tests {
         }
     }
 
-    /// What this process writes to its standard error, its own and its children's, while `run`
-    /// runs. Nextest runs each test in a process of its own, so no other test writes here.
-    fn logged(run: impl FnOnce()) -> String {
-        use std::io::{Read, Seek};
-        use std::os::fd::AsRawFd;
-        let mut file = tempfile::tempfile().unwrap();
-        // SAFETY: duplicates and restores this process's own standard error descriptor.
-        let saved = unsafe { libc::dup(2) };
-        assert!(saved >= 0 && unsafe { libc::dup2(file.as_raw_fd(), 2) } >= 0);
-        run();
-        // SAFETY: as above.
-        unsafe {
-            libc::dup2(saved, 2);
-            libc::close(saved);
-        }
-        let mut log = String::new();
-        file.rewind().unwrap();
-        file.read_to_string(&mut log).unwrap();
+    /// What the ignored test `test` writes to standard error, its own and its children's, run
+    /// again in a process of its own. `cargo test` runs tests as threads of one process, where
+    /// any other test could write to the same standard error.
+    fn logged(test: &str) -> String {
+        let ran = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                test,
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&ran.stdout);
+        let log = String::from_utf8_lossy(&ran.stderr).into_owned();
+        assert!(
+            ran.status.success() && out.contains("1 passed"),
+            "{out}{log}"
+        );
         log
     }
 
     #[test]
     fn neither_the_key_nor_any_issue_or_comment_text_is_logged() {
-        let folder = tempfile::tempdir().unwrap();
-        let github = shared_storage(folder.path(), Some("CEL"));
-        let (_home, mut host, sage) = cel_tracker(&github);
-        let mut told = plain(1);
-        told["title"] = json!("Title only Linear knows");
-        told["description"] = json!("Call the parent at (415) 555-0134 tonight.");
-        told["comments"]["nodes"] = json!([{
-            "body": "Comment only Linear knows",
-            "createdAt": "2026-09-02T09:00:00.000Z",
-            "user": {"id": "user-sam", "name": "Sam Ortiz", "email": "sam@example.com"},
-        }]);
-        recorded(&mut host, listed(vec![told.clone(), plain(2)]));
-        host.linear.tools.keys = Arc::new(Stuck(Kept::default()));
-        let log = logged(|| {
-            // A scan holds CEL-1, and the key cannot be removed.
-            import(&mut host, &sage, &[], &github.tools());
-            // Linear refuses, then a push fails.
-            begin(&mut host, &sage).unwrap();
-            recorded(&mut host, Box::new(|_, _| fixture("unauthorized.json")));
-            host.linear.tools.keys = Arc::new(Stuck(Kept::default()));
-            assert!(preview(&mut host, &sage).is_err());
-            recorded(&mut host, listed(vec![told, plain(2), plain(3)]));
-            host.linear.tools.keys = Arc::new(Stuck(Kept::default()));
-            github
-                .offline
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            let status = import(&mut host, &sage, &[], &github.tools());
-            assert!(status.error.is_some(), "{status:?}");
-        });
+        let log =
+            logged("linear_import::tests::an_import_that_logs_with_the_key_and_issue_text_at_hand");
         assert!(
             log.contains("the key was not removed"),
             "logs are read: {log}"
@@ -1652,6 +1627,37 @@ pub(crate) mod tests {
         for secret in secrets {
             assert!(!log.contains(secret), "{secret} was logged: {log}");
         }
+    }
+    #[test]
+    #[ignore = "run by neither_the_key_nor_any_issue_or_comment_text_is_logged, which reads its log"]
+    fn an_import_that_logs_with_the_key_and_issue_text_at_hand() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("CEL"));
+        let (_home, mut host, sage) = cel_tracker(&github);
+        let mut told = plain(1);
+        told["title"] = json!("Title only Linear knows");
+        told["description"] = json!("Call the parent at (415) 555-0134 tonight.");
+        told["comments"]["nodes"] = json!([{
+            "body": "Comment only Linear knows",
+            "createdAt": "2026-09-02T09:00:00.000Z",
+            "user": {"id": "user-sam", "name": "Sam Ortiz", "email": "sam@example.com"},
+        }]);
+        recorded(&mut host, listed(vec![told.clone(), plain(2)]));
+        host.linear.tools.keys = Arc::new(Stuck(Kept::default()));
+        // A scan holds CEL-1, and the key cannot be removed.
+        import(&mut host, &sage, &[], &github.tools());
+        // Linear refuses, then a push fails.
+        begin(&mut host, &sage).unwrap();
+        recorded(&mut host, Box::new(|_, _| fixture("unauthorized.json")));
+        host.linear.tools.keys = Arc::new(Stuck(Kept::default()));
+        assert!(preview(&mut host, &sage).is_err());
+        recorded(&mut host, listed(vec![told, plain(2), plain(3)]));
+        host.linear.tools.keys = Arc::new(Stuck(Kept::default()));
+        github
+            .offline
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let status = import(&mut host, &sage, &[], &github.tools());
+        assert!(status.error.is_some(), "{status:?}");
     }
 
     #[test]

@@ -13,6 +13,8 @@ pub(super) type OutputEvent = std::result::Result<Value, String>;
 /// Events the reader may queue ahead of the turn while the provider runs, so a slow turn
 /// holds back a fast provider.
 const BUFFER: usize = 128;
+/// The most one read of the pipe takes.
+const CHUNK: usize = 64 * 1024;
 const MAX_LINE: usize = 2 * 1024 * 1024;
 /// How often a waiting reader looks at the stop flag and its deadlines.
 const POLL: Duration = Duration::from_millis(20);
@@ -97,7 +99,7 @@ impl Output {
         }
     }
     fn read(&self, mut stdout: ChildStdout) {
-        let mut chunk = vec![0; 64 * 1024];
+        let mut chunk = vec![0; CHUNK];
         let mut line = Vec::new();
         // Since the provider exited: bytes read, and when the pipe last went quiet.
         let mut read_after_exit = 0;
@@ -238,8 +240,12 @@ mod tests {
         let _ = writer.kill();
         let _ = writer.wait();
         assert!(cut_short <= 1);
-        // Each line is counted with its newline, which the flushed last line may lack.
-        assert!(accepted <= MAX_BYTES_AFTER_EXIT + 1, "{accepted} bytes");
+        // Each line is counted with its newline, which the flushed last line may lack. The
+        // reader may have begun one read before it saw the exit, which the cap does not count.
+        assert!(
+            accepted <= MAX_BYTES_AFTER_EXIT + CHUNK + 1,
+            "{accepted} bytes"
+        );
         assert!(
             accepted > MAX_BYTES_AFTER_EXIT - 2 * (line.len() + 1),
             "{accepted} bytes"

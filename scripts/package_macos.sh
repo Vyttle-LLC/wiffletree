@@ -22,15 +22,18 @@ cd "$repo_root"
 version="${WIFFLETREE_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)}"
 identity="${CODESIGN_IDENTITY:--}"
 cargo build --locked --release -p workspace-desktop -p workspace-host
-app_bundle="$repo_root/target/$name.app"
+# Cargo reads a relative CARGO_TARGET_DIR against the working directory, the repository root.
+target_dir="${CARGO_TARGET_DIR:-target}"
+case "$target_dir" in /*) ;; *) target_dir="$repo_root/$target_dir" ;; esac
+app_bundle="$target_dir/$name.app"
 # Start clean so files from an earlier build, such as a stapled ticket, never get re-signed.
 rm -rf "$app_bundle"
 mkdir -p "$app_bundle/Contents/MacOS" "$app_bundle/Contents/Resources"
-cp target/release/wiffletree-host "$app_bundle/Contents/MacOS/wiffletree-host"
-cp target/release/workspace-desktop "$app_bundle/Contents/MacOS/wiffletree"
+cp "$target_dir/release/wiffletree-host" "$app_bundle/Contents/MacOS/wiffletree-host"
+cp "$target_dir/release/workspace-desktop" "$app_bundle/Contents/MacOS/wiffletree"
 
 # Build every standard and Retina representation from the canonical brand exports.
-iconset="$repo_root/target/Wiffletree.iconset"
+iconset="$target_dir/Wiffletree.iconset"
 mkdir -p "$iconset"
 for size in 16 32 128 256 512; do
     for scale in 1 2; do
