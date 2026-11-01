@@ -258,9 +258,19 @@ pub(crate) struct Layers {
     pub(crate) repository: Option<String>,
 }
 impl Layers {
+    /// What the Space sets for the repository, when it lists it.
     fn repository_settings(&self) -> Option<&RepositorySettings> {
         let repository = self.repository.as_deref()?;
-        self.space.as_ref()?.repository_settings(repository)
+        let space = self.space.as_ref()?;
+        space.lists_named(repository).then_some(())?;
+        space.repository_settings(repository)
+    }
+    /// The Space's entry for the repository when it no longer lists it, which does not apply.
+    fn unlisted_settings(&self) -> Option<&RepositorySettings> {
+        let repository = self.repository.as_deref()?;
+        let space = self.space.as_ref()?;
+        (!space.lists_named(repository)).then_some(())?;
+        space.repository_settings(repository)
     }
     fn set(&self, id: &str) -> Vec<(Layer, String)> {
         let space = self.space.as_ref().map(|space| &space.behaviors);
@@ -276,11 +286,26 @@ impl Layers {
     }
     /// Every Behavior in catalog order, resolved with where it came from.
     pub(crate) fn resolve(&self) -> Vec<ResolvedBehavior> {
+        let unlisted = self.unlisted_settings().map(|settings| {
+            let space = self.space.as_ref().map_or("", |space| &space.name);
+            let repository = self.repository.as_deref().unwrap_or_default();
+            let note =
+                format!("The Repository value is ignored: {space} does not list {repository}");
+            (&settings.behaviors, note)
+        });
         catalog()
             .into_iter()
-            .map(|behavior| ResolvedBehavior {
-                resolved: cascade::resolve(&behavior, &self.set(&behavior.id)),
-                id: behavior.id,
+            .map(|behavior| {
+                let mut resolved = cascade::resolve(&behavior, &self.set(&behavior.id));
+                if let Some((choices, note)) = &unlisted
+                    && choices.contains_key(&behavior.id)
+                {
+                    resolved.notes.push(note.clone());
+                }
+                ResolvedBehavior {
+                    resolved,
+                    id: behavior.id,
+                }
             })
             .collect()
     }
@@ -476,7 +501,7 @@ impl Host {
         let mut space = self.space(space_id)?.space;
         if let Some(repository) = &repository {
             ensure!(
-                (space.repositories.iter()).any(|listed| listed.eq_ignore_ascii_case(repository)),
+                space.lists_named(repository),
                 "{} does not list {repository}; add it to the Space first",
                 space.name
             );
@@ -535,10 +560,15 @@ impl Host {
             repository: None,
         };
         for (repository, settings) in &space.repository_settings {
-            let saved = current
-                .repository_settings(repository)
-                .map(|r| &r.behaviors);
-            let saved = saved.cloned().unwrap_or_default();
+            let saved = current.repository_settings(repository);
+            // An entry kept for a repository taken off the list is ignored at read; only a new
+            // or changed one is refused, so taking a repository off the list still saves.
+            ensure!(
+                space.lists_named(repository) || saved == Some(settings),
+                "{} does not list {repository}; add it to the Space first",
+                space.name
+            );
+            let saved = saved.map(|r| r.behaviors.clone()).unwrap_or_default();
             check(
                 Layer::Repository,
                 &below_repository,
@@ -620,8 +650,12 @@ impl Host {
                 repository: Some(identity.clone()),
                 ..layers.clone()
             };
-            let differ: Vec<ResolvedBehavior> = (within.resolve().into_iter())
-                .filter(|r| r.resolved.from == Layer::Repository || !r.resolved.notes.is_empty())
+            // Notes the Space's resolution already has come from the Space or Workspace.
+            let differ: Vec<ResolvedBehavior> = (within.resolve().into_iter().zip(&resolved))
+                .filter(|(r, space)| {
+                    r.resolved.from == Layer::Repository || r.resolved.notes != space.resolved.notes
+                })
+                .map(|(r, _)| r)
                 .collect();
             if !differ.is_empty() {
                 repositories.insert(identity, serde_json::to_value(differ)?);
@@ -877,6 +911,45 @@ mod tests {
     }
 
     #[test]
+    fn an_entry_for_a_repository_the_space_no_longer_lists_is_ignored_with_a_note() {
+        let mut f = fixture();
+        let sage = in_space(&mut f, "Sage");
+        set(&mut f, app(&sage), &[(PUBLISHING, ALWAYS_ASK)], "").unwrap();
+        // Taking the repository off the list still saves; its entry stays but does not apply.
+        let mut space = f.host.space(&sage).unwrap().space;
+        space.repositories.clear();
+        f.host.update_space(space).unwrap();
+        let publishing = resolved(&f, PUBLISHING).resolved;
+        assert_eq!(publishing.from, Layer::Stock);
+        assert_eq!(
+            publishing.notes,
+            [format!(
+                "The Repository value is ignored: Sage does not list {APP}"
+            )]
+        );
+        assert!(!f.host.always_asks_before_publishing(&f.ticket()).unwrap());
+    }
+
+    #[test]
+    fn a_space_save_refuses_a_new_entry_for_a_repository_it_does_not_list() {
+        let mut f = fixture();
+        let sage = in_space(&mut f, "Sage");
+        let mut space = f.host.space(&sage).unwrap().space;
+        let settings = RepositorySettings {
+            behaviors: [(PUBLISHING.into(), ALWAYS_ASK.into())].into(),
+            ..RepositorySettings::default()
+        };
+        (space.repository_settings).insert("allowed-org/other".into(), settings);
+        let refused = f.host.update_space(space).unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("Sage does not list allowed-org/other; add it to the Space first"),
+            "{refused:#}"
+        );
+    }
+
+    #[test]
     fn always_ask_first_makes_an_allowed_owners_publish_wait_for_the_human() {
         let mut f = fixture();
         f.allow("allowed-org");
@@ -949,23 +1022,38 @@ mod tests {
     fn the_coordinators_context_names_where_each_behavior_came_from() {
         let mut f = fixture();
         let sage = in_space(&mut f, "Sage");
-        set(&mut f, app(&sage), &[(REVIEW_DEPTH, FULL_REVIEW)], "").unwrap();
+        // A teammate's looser Space value, ignored with a note at the Space.
+        set(&mut f, Scope::Workspace, &[(REVIEW_DEPTH, FULL_REVIEW)], "").unwrap();
+        let mut written = f.host.space(&sage).unwrap().space;
+        (written.behaviors).insert(REVIEW_DEPTH.into(), "proportional".into());
+        f.host
+            .db
+            .execute(
+                "UPDATE spaces SET data=?2 WHERE id=?1",
+                params![sage.as_str(), encode(&written).unwrap()],
+            )
+            .unwrap();
+        let find = |list: &Value, id: &str| {
+            let list = list.as_array().unwrap();
+            list.iter().find(|b| b["id"] == id).cloned()
+        };
         let context = f.host.agent_context(&f.coordinator.id).unwrap();
         let behaviors = &context["behaviors"];
-        let depth = |list: &Value| {
-            let list = list.as_array().unwrap();
-            list.iter()
-                .find(|b| b["id"] == REVIEW_DEPTH)
-                .cloned()
-                .unwrap()
-        };
-        assert_eq!(depth(&behaviors["space"])["from"], "stock");
-        let app = depth(&behaviors["repositories"][APP]);
+        let depth = find(&behaviors["space"], REVIEW_DEPTH).unwrap();
+        assert_eq!(depth["from"], "workspace");
+        assert_eq!(depth["notes"].as_array().unwrap().len(), 1);
+        // The Space's note does not list the repository.
+        assert_eq!(behaviors["repositories"], json!({}));
+        set(&mut f, app(&sage), &[(PUBLISHING, ALWAYS_ASK)], "").unwrap();
+        let context = f.host.agent_context(&f.coordinator.id).unwrap();
+        let listed = &context["behaviors"]["repositories"][APP];
+        assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+        let publishing = find(listed, PUBLISHING).unwrap();
         assert_eq!(
-            (&app["value"], &app["from"]),
-            (&json!(FULL_REVIEW), &json!("repository"))
+            (&publishing["value"], &publishing["from"]),
+            (&json!(ALWAYS_ASK), &json!("repository"))
         );
-        assert_eq!(app["overrode"], json!(["stock"]));
+        assert_eq!(publishing["overrode"], json!(["stock"]));
     }
 
     #[test]

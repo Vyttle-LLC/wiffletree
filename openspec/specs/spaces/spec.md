@@ -6,11 +6,15 @@ Spaces are configured containers, such as Sage, Vyttle or Personal, that answer 
 ## Requirements
 
 ### Requirement: A Space
-A Space SHALL have a name; a description of what belongs in it; instructions added to every thread and job run in it (see `assistant`, `scheduled-jobs`); a brain, being a Git repository, on GitHub as `owner/name` or a local folder, and a folder in it, or none; a storage repository, which is also its tracker; the code repositories it covers, by identity (`owner/name`), never by path; default models for threads and for jobs, each optional; and a list of sources its threads may use. Two Spaces MAY name the same brain, and two Spaces MAY share one storage repository. A Space SHALL NOT be called a project anywhere in the interface.
+A Space SHALL have a name; a description of what belongs in it; additions to every role's instructions in it, stored in `space.yaml` as `instructions:`, the key every release reads, and the Behaviors it sets (see `settings-cascade`); for each code repository it lists, optional Behaviors and additions for that repository's tickets; a brain, being a Git repository, on GitHub as `owner/name` or a local folder, and a folder in it, or none; a storage repository, which is also its tracker; the code repositories it covers, by identity (`owner/name`), never by path; the rows of Who runs what it overrides and what it sets about its tickets' reviews (see `settings-cascade`); and a list of sources its threads may use. Two Spaces MAY name the same brain, and two Spaces MAY share one storage repository. A Space SHALL NOT be called a project anywhere in the interface.
 
 #### Scenario: Two Spaces, one brain
 - **WHEN** the Sage and Sage Watch Spaces both name `Sage-Social/sagehaven-docs` folder `second-brain/`
 - **THEN** projects in both log to that one brain
+
+#### Scenario: Instructions from an older store
+- **WHEN** this host reads a `space.yaml` an older host wrote, with `instructions:`
+- **THEN** the Space's additions are those instructions, and a save here writes them back under `instructions:` with no `additions:` key, so the older host keeps reading them
 
 ### Requirement: Only the user creates or edits a Space
 Spaces SHALL be created, edited and removed only on the Spaces page of Settings, by the user, apart from the Spaces the host creates at upgrade and the default "Personal" Space. No agent, thread, job run, router or workspace tool SHALL create, change or remove a Space or read its machine-local facts. Removing a Space SHALL ask first, SHALL be refused while a non-archived project belongs to it or when it is the last Space, SHALL move its archived projects to the "Personal" Space, creating it if it was removed, and SHALL leave its storage and brain repositories unchanged. Removing "Personal" itself SHALL be refused while archived projects belong to it, because they would have nowhere to go.
@@ -142,14 +146,14 @@ Workspace repositories SHALL stay a separate record kept on this Mac, with their
 - **THEN** no tool adds a repository to a Space or removes one
 
 ### Requirement: Shared Spaces live in their storage repository
-A Space whose storage repository is on GitHub SHALL keep its definition in that repository's `space.yaml`, so that every Mac that adds it reads the same name, description, instructions, brain, repositories, default models and sources. Everything SHALL run on each user's own Mac; there SHALL be no cloud or headless host. A Space whose storage other people can read SHALL be shown as shared.
+A Space whose storage repository is on GitHub SHALL keep its definition in that repository's `space.yaml`, so that every Mac that adds it reads the same name, description, instructions, brain, repositories, model rows, review settings and sources. Everything SHALL run on each user's own Mac; there SHALL be no cloud or headless host. A Space whose storage other people can read SHALL be shown as shared.
 
 #### Scenario: Sage's storage
 - **WHEN** the Sage Space's storage is `Sage-Social/wiffletree-storage`, which every member of Sage-Social can read
 - **THEN** `spaces/sage/space.yaml` in that repository holds the Space's definition, and the Spaces page marks Sage as shared
 
 ### Requirement: Joining a shared Space
-"Add Space → From a repository" SHALL take a GitHub repository, check it as for a storage repository, list the Spaces it holds and add the ones the user ticks. For each, the user SHALL say where the brain and each code repository are cloned on this Mac, or leave them missing. A model the definition names that this Mac lacks or may not use SHALL fall back to this Mac's Who runs what choice, with a note on the Space's page naming both. Joining SHALL be refused when the repository's prefix is used by another storage repository on this Mac, naming it; when that one is a local tracker, the refusal SHALL tell the human to rename its prefix and offer to open its Space's page.
+"Add Space → From a repository" SHALL take a GitHub repository, check it as for a storage repository, list the Spaces it holds and add the ones the user ticks. For each, the user SHALL say where the brain and each code repository are cloned on this Mac, or leave them missing. A row of the definition none of whose choices is signed in on this Mac SHALL fall back to this Mac's row, with a note naming both. Joining SHALL be refused when the repository's prefix is used by another storage repository on this Mac, naming it; when that one is a local tracker, the refusal SHALL tell the human to rename its prefix and offer to open its Space's page.
 
 #### Scenario: A teammate joins
 - **WHEN** a teammate adds `Sage-Social/wiffletree-storage` and ticks Sage
@@ -161,14 +165,18 @@ A Space whose storage repository is on GitHub SHALL keep its definition in that 
 
 #### Scenario: A model this Mac lacks
 - **WHEN** the Sage definition names Opus · high for jobs and the teammate has only Codex signed in
-- **THEN** the Space page notes "Opus · high is not available here; using GPT 6.1 Sol · medium"
+- **THEN** the Space page and the Models page at Sage note "Sage asks for Opus · high for the Job row, but Claude is not signed in on this Mac, so it uses this Mac's row until then"
 
 ### Requirement: What stays on this machine
-Where each repository and brain is cloned, which models this person may use, whether the Space is on here, and this Mac's credentials and keys SHALL stay on this Mac and SHALL NOT be written to the storage repository.
+Where each repository and brain is cloned, whether the Space is on here, and this Mac's credentials and keys SHALL stay on this Mac and SHALL NOT be written to the storage repository.
 
 #### Scenario: Clone paths
 - **WHEN** two teammates clone `mobile-app` in different folders
 - **THEN** `space.yaml` names `Sage-Social/mobile-app` and no path
+
+#### Scenario: A list of models from an earlier release
+- **WHEN** this Mac kept a list of the models it may use in Sage
+- **THEN** the list no longer limits any model, a model being usable when its provider is signed in here, it stays stored, and the Models page notes once that Sage had one
 
 ### Requirement: Edits to a shared Space follow the settings repository's rules
 Files under `spaces/` of a GitHub storage repository SHALL sync with the settings repository's rules (see `shared-repositories`): choosing the repository allows the push; a file changed on two machines, or outside Wiffletree on this machine, pauses with a workspace note offering Compare and the same choices; and a file this machine cannot read is held. Space sync SHALL commit only the files of Spaces this Mac added.

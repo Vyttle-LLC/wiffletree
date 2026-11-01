@@ -29,4 +29,4 @@ Four stacked tickets in the wiffletree repository, each with a full review. Pull
 - [x] 4.2 The Space page: models and instructions leave it; links to "Behaviors for ‹Space›" and "Models for ‹Space›"; the brain's compile time and gate shown read-only; the composer's model label and the page's fallback note resolve the Space's Assistant row.
 - [x] 4.3 The Settings window's groups, "Shared with your Macs", "Spaces" and "This Mac".
 - [x] 4.4 Effective settings from a project's header, from `effective_settings`.
-- [ ] 4.5 Run `openspec validate --strict`, sync the specs and archive this change: a follow-up once stages 3 and 4 have both merged, so neither pull request edits an archived change.
+- [x] 4.5 Run `openspec validate --strict`, sync the specs and archive this change: a follow-up once stages 3 and 4 have both merged, so neither pull request edits an archived change.
