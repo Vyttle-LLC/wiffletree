@@ -1,6 +1,6 @@
-//! The Agents panel: every counted ticket of a project with its stage and, under each open
-//! ticket, the agents working on it, as the progress board lists them. Every other agent the
-//! project has had folds into "Previous agents" at the bottom.
+//! The Agents panel: each open ticket of a project with its stage and the agents working on it,
+//! as the progress board lists them. Accepted and closed tickets fold into "Finished tickets",
+//! and every other agent the project has had folds into "Previous agents" at the bottom.
 use super::*;
 use progress::ProgressBoard;
 use std::{collections::HashSet, time::Duration};
@@ -37,13 +37,23 @@ pub(crate) fn stuck(session: &Session, runtime: Option<&SessionRuntime>) -> Opti
     }
 }
 
-/// Everyone the panel lists for a project: each counted ticket with its unarchived agents,
-/// then the project's previous agents. Those are the rest of the coordinator's agents: archived
-/// agents, finished verifiers among them, agents of accepted or closed
-/// tickets, workers from before tickets existed and retired repository coordinators. An
-/// archived project has no board entry, so all of its agents are previous.
+/// A ticket the panel draws as a card, with its unarchived agents.
+pub(crate) struct TicketCard<'a> {
+    pub(crate) ticket_id: &'a str,
+    /// `None` for a closed ticket, which the board leaves out.
+    pub(crate) progress: Option<&'a TicketProgress>,
+    pub(crate) agents: Vec<&'a AgentProgress>,
+}
+
+/// Everyone the panel lists for a project: a card for each open ticket, then for each finished
+/// ticket an unarchived agent still works on, such as one restored from the archive; the other
+/// finished tickets, accepted or closed, whichever half of the snapshot holds them; then the
+/// project's previous agents. Those are the rest of the coordinator's agents: archived agents,
+/// finished verifiers among them, workers from before tickets existed and retired repository
+/// coordinators. An archived project has no board entry, so all of its agents are previous.
 pub(crate) struct Roster<'a> {
-    pub(crate) tickets: Vec<(&'a TicketProgress, Vec<&'a AgentProgress>)>,
+    pub(crate) tickets: Vec<TicketCard<'a>>,
+    pub(crate) finished: Vec<&'a Ticket>,
     pub(crate) previous: Vec<&'a Session>,
 }
 impl<'a> Roster<'a> {
@@ -55,14 +65,32 @@ impl<'a> Roster<'a> {
     ) -> Self {
         let counted = board.project(project_id).map(|p| board.tickets_of(p));
         let live = |id: &&String| index.session(id).is_some_and(|s| !s.archived);
-        let tickets: Vec<(_, Vec<_>)> = (counted.unwrap_or_default().into_iter())
+        let mut tickets: Vec<_> = (counted.unwrap_or_default().into_iter())
+            .filter(|ticket| ticket.stage != Stage::Accepted)
             .map(|ticket| {
                 let agents = ticket.agents.iter().filter(live);
-                (ticket, agents.filter_map(|id| board.agent(id)).collect())
+                TicketCard {
+                    ticket_id: &ticket.ticket_id,
+                    progress: Some(ticket),
+                    agents: agents.filter_map(|id| board.agent(id)).collect(),
+                }
             })
             .collect();
+        let mut finished = vec![];
+        for ticket in index.tickets_owned_by(coordinator).filter(|t| !t.is_open()) {
+            let agents = index.agents(&ticket.id).filter(|s| !s.archived);
+            let agents: Vec<_> = agents.filter_map(|s| board.agent(&s.id)).collect();
+            match agents.is_empty() {
+                true => finished.push(ticket),
+                false => tickets.push(TicketCard {
+                    ticket_id: &ticket.id,
+                    progress: board.ticket(&ticket.id),
+                    agents,
+                }),
+            }
+        }
         let listed: HashSet<&str> = (tickets.iter())
-            .flat_map(|(_, agents)| agents.iter().map(|a| a.session_id.as_str()))
+            .flat_map(|card| card.agents.iter().map(|a| a.session_id.as_str()))
             .collect();
         let ticket_agents = (index.tickets_owned_by(coordinator)).flat_map(|t| index.agents(&t.id));
         let without_ticket = index.children(coordinator).filter(|s| {
@@ -74,11 +102,15 @@ impl<'a> Roster<'a> {
         let previous = (ticket_agents.chain(without_ticket))
             .filter(|s| !listed.contains(s.id.as_str()))
             .collect();
-        Self { tickets, previous }
+        Self {
+            tickets,
+            finished,
+            previous,
+        }
     }
     /// Each ticket's agents in turn.
     pub(crate) fn ticket_agents(&self) -> Vec<&'a AgentProgress> {
-        let agents = self.tickets.iter().flat_map(|(_, agents)| agents);
+        let agents = self.tickets.iter().flat_map(|card| &card.agents);
         agents.copied().collect()
     }
     pub(crate) fn working(&self) -> usize {
@@ -87,11 +119,8 @@ impl<'a> Roster<'a> {
         on_tickets.count() + previous.count()
     }
     pub(crate) fn busy_tickets(&self) -> usize {
-        let busy = |agents: &Vec<&AgentProgress>| agents.iter().any(|a| a.working);
-        self.tickets
-            .iter()
-            .filter(|(_, agents)| busy(agents))
-            .count()
+        let busy = |card: &&TicketCard| card.agents.iter().any(|a| a.working);
+        self.tickets.iter().filter(busy).count()
     }
     pub(crate) fn stuck(&self, index: &WorkspaceIndex) -> usize {
         let on_tickets = self.ticket_agents().into_iter();
@@ -145,17 +174,34 @@ fn pr_line(
         if i > 0 {
             line = line.child(div().text_color(p.subtle.opacity(0.6)).child("·"));
         }
-        let color = match part.tone {
-            wording::Tone::Muted => p.subtle,
-            wording::Tone::Good => p.green,
-            wording::Tone::Bad => p.red,
-            wording::Tone::Merged => p.focus,
-            wording::Tone::Warn => p.yellow,
-            wording::Tone::Busy => p.focus,
-        };
-        line = line.child(div().text_color(color).child(part.text));
+        line = line.child(div().text_color(tone_color(part.tone, p)).child(part.text));
     }
     line
+}
+
+fn tone_color(tone: wording::Tone, p: Palette) -> Hsla {
+    match tone {
+        wording::Tone::Muted => p.subtle,
+        wording::Tone::Good => p.green,
+        wording::Tone::Bad => p.red,
+        wording::Tone::Merged => p.focus,
+        wording::Tone::Warn => p.yellow,
+        wording::Tone::Busy => p.focus,
+    }
+}
+
+/// What the agent's one quiet line says: an agent idle with nothing running, and not stuck,
+/// waits for something its ticket names. `None` keeps its full row.
+fn waiting_line(
+    ticket: &Ticket,
+    session: &Session,
+    runtime: Option<&SessionRuntime>,
+) -> Option<String> {
+    let idle = matches!(session.status, Status::Ready | Status::Done)
+        && stuck(session, runtime).is_none()
+        && !context_view::compacting(runtime);
+    idle.then(|| wording::waiting_for(ticket, &session.id))
+        .flatten()
 }
 
 /// The elapsed-time timer runs only while the Agents panel is open and an agent it lists under
@@ -165,12 +211,33 @@ fn clock_runs(panel: Option<Panel>, agents: &[&AgentProgress]) -> bool {
     panel == Some(Panel::Agents) && agents.iter().any(|agent| agent.working)
 }
 
+/// A fold's one subtle line, with its chevron.
+fn fold_toggle(id: &'static str, open: bool, label: String, p: Palette) -> Stateful<Div> {
+    let chevron = if open {
+        "chevron-down"
+    } else {
+        "chevron-right"
+    };
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_1()
+        .cursor_pointer()
+        .text_size(px(font::SMALL))
+        .text_color(p.subtle)
+        .hover(|d| d.text_color(p.text))
+        .child(icon(chevron).size(px(12.)))
+        .child(label)
+}
+
 impl Inspector {
     pub(super) fn agents_panel(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let (Some(roster), Some(index)) = (self.shared.roster(), self.shared.index.as_ref()) else {
             return div();
         };
-        if roster.tickets.is_empty() && roster.previous.is_empty() {
+        if roster.tickets.is_empty() && roster.finished.is_empty() && roster.previous.is_empty() {
             return empty_state(
                 "team",
                 "No tickets yet",
@@ -179,77 +246,120 @@ impl Inspector {
             );
         }
         let mut body = div().flex().flex_col().gap_3();
-        for (progress, agents) in &roster.tickets {
-            let Some(ticket) = index.ticket(&progress.ticket_id) else {
+        for ticket_card in &roster.tickets {
+            let Some(ticket) = index.ticket(ticket_card.ticket_id) else {
                 continue;
             };
-            let stuck = (agents.iter())
-                .filter_map(|a| index.session(&a.session_id))
-                .any(|s| stuck(s, index.runtime(&s.id)).is_some());
-            let mut ticket_card = card(p)
-                .when(stuck, |d| d.border_color(p.yellow))
-                .child(
-                    div()
-                        .flex()
-                        .items_baseline()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_ellipsis()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(wording::ticket_label(index.snapshot(), ticket)),
-                        )
-                        .child(hint(wording::stage_figure(progress), p).flex_none()),
-                )
-                .child(progress_bar(Some(progress.position), progress.state, 3., p))
-                .children(ticket.pull_request.as_ref().map(|pr| {
-                    let keeper = (self.shared.snapshot())
-                        .and_then(|s| s.keeper_parts.get(&ticket.id))
-                        .copied();
-                    let keeper = ticket.try_part().or(keeper);
-                    let repository = (index.snapshot().repositories.iter())
-                        .find(|r| r.id == ticket.repository_id);
-                    pr_line(
-                        pr,
-                        ticket.unreviewed(),
-                        keeper,
-                        ticket.waiting_comments(),
-                        wording::merge_part(ticket, repository),
-                        p,
-                    )
-                }))
-                // A waived acceptance and a publish step waiting for the human both need them.
-                .children(
-                    [
-                        wording::waiver_note(ticket),
-                        wording::publish_waiting(ticket),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .map(|note| hint(note, p).text_color(p.yellow).text_ellipsis()),
-                );
-            for agent in agents {
-                ticket_card = ticket_card.children(self.agent_row(index, agent, p, cx));
-            }
-            body = body.child(ticket_card);
+            body = body.child(self.ticket_card(index, ticket, ticket_card, p, cx));
         }
-        body.children(self.previous_agents(index, &roster.previous, p, cx))
+        body.children(self.finished_tickets(&roster.finished, p, cx))
+            .children(self.previous_agents(index, &roster.previous, p, cx))
+    }
+
+    /// The tickets drawn, for the panel's heading: "9 open · 32 finished".
+    pub(super) fn agents_counts(&self, p: Palette) -> Option<Div> {
+        let roster = self.shared.roster()?;
+        let (open, finished) = (roster.tickets.len(), roster.finished.len());
+        (open + finished > 0).then(|| hint(wording::ticket_counts(open, finished), p).flex_none())
+    }
+
+    /// One ticket with its agents. A closed ticket has no stage or bar on the board, and a
+    /// finished ticket's PR says only how it ended.
+    fn ticket_card(
+        &self,
+        index: &WorkspaceIndex,
+        ticket: &Ticket,
+        ticket_card: &TicketCard,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let (progress, agents) = (ticket_card.progress, &ticket_card.agents);
+        let stuck = (agents.iter())
+            .filter_map(|a| index.session(&a.session_id))
+            .any(|s| stuck(s, index.runtime(&s.id)).is_some());
+        let figure = progress.map_or("Closed".into(), wording::stage_figure);
+        let mut drawn = card(p)
+            .when(stuck, |d| d.border_color(p.yellow))
+            .child(
+                div()
+                    .flex()
+                    .items_baseline()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_ellipsis()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(wording::ticket_label(index.snapshot(), ticket)),
+                    )
+                    .child(hint(figure, p).flex_none()),
+            )
+            .children(
+                progress
+                    .map(|progress| progress_bar(Some(progress.position), progress.state, 3., p)),
+            )
+            .children(ticket.pull_request.as_ref().map(|pr| {
+                if !ticket.is_open() {
+                    let outcome = wording::finished_outcome(ticket);
+                    return hint(outcome.text, p).text_color(tone_color(outcome.tone, p));
+                }
+                let keeper = (self.shared.snapshot())
+                    .and_then(|s| s.keeper_parts.get(&ticket.id))
+                    .copied();
+                let keeper = ticket.try_part().or(keeper);
+                let repository =
+                    (index.snapshot().repositories.iter()).find(|r| r.id == ticket.repository_id);
+                pr_line(
+                    pr,
+                    ticket.unreviewed(),
+                    keeper,
+                    ticket.waiting_comments(),
+                    wording::merge_part(ticket, repository),
+                    p,
+                )
+            }))
+            // A waived acceptance and a publish step waiting for the human both need them.
+            .children(
+                [
+                    wording::waiver_note(ticket),
+                    wording::publish_waiting(ticket),
+                ]
+                .into_iter()
+                .flatten()
+                .map(|note| hint(note, p).text_color(p.yellow).text_ellipsis()),
+            );
+        for agent in agents {
+            drawn = drawn.children(self.agent_row(index, ticket, agent, p, cx));
+        }
+        drawn
     }
 
     /// One agent of a ticket: role and focus, figure, elapsed time, current step, model and
     /// bar, and why it is stuck. Selecting it opens its conversation, leaving the panel open
-    /// with the row marked; an archived verifier's conversation is read-only, as elsewhere.
+    /// with the row marked; an archived verifier's conversation is read-only, as elsewhere. An
+    /// agent that is only waiting gets one quiet line instead.
     fn agent_row(
         &self,
         index: &WorkspaceIndex,
+        ticket: &Ticket,
         agent: &AgentProgress,
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
         let session = index.session(&agent.session_id)?;
         let runtime = index.runtime(&session.id);
+        if let Some(waiting) = waiting_line(ticket, session, runtime) {
+            return Some(
+                self.agent_link(session, p, cx)
+                    .text_size(px(font::SMALL))
+                    .text_color(p.subtle)
+                    .child(
+                        self.row_head(session, index.agent_label(session), false, p)
+                            .child(div().flex_none().child(waiting)),
+                    ),
+            );
+        }
         let model = runtime
             .and_then(|r| r.profile.as_ref())
             .map(|profile| models::profile_label(&self.shared.catalog, profile));
@@ -291,6 +401,63 @@ impl Inspector {
         )
     }
 
+    /// The folded "Finished tickets (N)" section: each ticket's title and how it ended, on one
+    /// line, with no bar, checks or conflict, and under it any waiver it was accepted with.
+    fn finished_tickets(
+        &self,
+        finished: &[&Ticket],
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        if finished.is_empty() {
+            return None;
+        }
+        let open = self.finished_open;
+        let toggle = fold_toggle(
+            "finished-tickets",
+            open,
+            format!("Finished tickets ({})", finished.len()),
+            p,
+        )
+        .on_click(cx.listener(|view, _, _, cx| {
+            view.finished_open = !view.finished_open;
+            cx.notify();
+        }));
+        let rows = finished.iter().filter(|_| open).map(|ticket| {
+            let outcome = wording::finished_outcome(ticket);
+            let line = div()
+                .flex()
+                .items_baseline()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .child(ticket.title.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(tone_color(outcome.tone, p))
+                        .child(outcome.text),
+                );
+            div()
+                .px_1()
+                .py(px(2.))
+                .rounded_md()
+                .text_size(px(font::SMALL))
+                .hover(|d| d.bg(p.overlay.opacity(0.7)))
+                .child(line)
+                // Too long to share the line, and a waived ticket never reads only as accepted.
+                .children(
+                    wording::waiver_note(ticket)
+                        .map(|note| hint(note, p).text_color(p.yellow).text_ellipsis()),
+                )
+        });
+        Some(div().flex().flex_col().gap_1().child(toggle).children(rows))
+    }
+
     /// The folded "Previous agents (N)" section: each agent's name, the ticket it worked on,
     /// and its figure or why it is stuck.
     fn previous_agents(
@@ -304,29 +471,16 @@ impl Inspector {
             return None;
         }
         let open = self.previous_open;
-        let toggle = div()
-            .id("previous-agents")
-            .flex()
-            .items_center()
-            .gap_1()
-            .px_1()
-            .cursor_pointer()
-            .text_size(px(font::SMALL))
-            .text_color(p.subtle)
-            .hover(|d| d.text_color(p.text))
-            .on_click(cx.listener(|view, _, _, cx| {
-                view.previous_open = !view.previous_open;
-                cx.notify();
-            }))
-            .child(
-                icon(if open {
-                    "chevron-down"
-                } else {
-                    "chevron-right"
-                })
-                .size(px(12.)),
-            )
-            .child(format!("Previous agents ({})", previous.len()));
+        let toggle = fold_toggle(
+            "previous-agents",
+            open,
+            format!("Previous agents ({})", previous.len()),
+            p,
+        )
+        .on_click(cx.listener(|view, _, _, cx| {
+            view.previous_open = !view.previous_open;
+            cx.notify();
+        }));
         let rows = previous.iter().filter(|_| open).map(|&session| {
             let (label, ticket) = previous_label(index, session);
             let stuck = stuck(session, index.runtime(&session.id));
@@ -429,7 +583,7 @@ impl Inspector {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{Panel, Roster, Stuck, clock_runs, previous_label, stuck};
+    use super::{Panel, Roster, Stuck, clock_runs, previous_label, stuck, waiting_line};
     use crate::progress::ProgressBoard;
     use crate::test_support::ticket_store;
     use std::rc::Rc;
@@ -633,6 +787,103 @@ mod tests {
         );
         let retired = index.session(&retired.id).unwrap();
         assert_eq!(previous_label(&index, retired).0, "sagechat-sms (retired)");
+    }
+
+    #[test]
+    fn open_tickets_are_cards_and_finished_ones_fold_unless_an_agent_still_works_on_them() {
+        let (_directory, mut host, root, open) = ticket_store();
+        let repository = host.repositories().unwrap().remove(0);
+        let mut ticket = |title: &str| {
+            let created = host
+                .create_ticket(&root.id, &repository.id, title, "Brief")
+                .unwrap();
+            let agent = host
+                .assign_ticket(&created.id, Role::Implementer, Provider::Codex, "Fix", None)
+                .unwrap();
+            (created, agent)
+        };
+        let (accepted, accepted_agent) = ticket("Accepted");
+        let (closed, _) = ticket("Closed");
+        let (restored, agent) = ticket("Restored");
+        host.set_archived(&accepted_agent.id, true).unwrap();
+        host.close_ticket(&closed.id).unwrap();
+        host.close_ticket(&restored.id).unwrap();
+        host.set_archived(&agent.id, false).unwrap();
+        // Accepting needs a passed review, so the records are moved by hand.
+        let mut page = host.progress(0).unwrap();
+        let entry = page.tickets.iter_mut();
+        let entry = entry.into_iter().find(|t| t.ticket_id == accepted.id);
+        entry.unwrap().stage = Stage::Accepted;
+        let mut snapshot = host.snapshot().unwrap();
+        let held = snapshot.tickets.iter_mut();
+        let held = held.into_iter().find(|t| t.id == accepted.id).unwrap();
+        held.state = TicketState::Accepted;
+        let mut board = ProgressBoard::default();
+        board.merge(page);
+        let index = WorkspaceIndex::new(snapshot, Rc::new(host.archive().unwrap()));
+
+        let roster = Roster::new(&board, &index, &root.project_id, &root.id);
+
+        let cards: Vec<&str> = roster.tickets.iter().map(|c| c.ticket_id).collect();
+        assert_eq!(cards, [open.id.as_str(), restored.id.as_str()]);
+        assert!(
+            roster.tickets[1].progress.is_none(),
+            "the board has no entry"
+        );
+        let on_card = &roster.tickets[1].agents;
+        assert_eq!(on_card[0].session_id, agent.id);
+        let finished: Vec<&str> = roster.finished.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(finished, ["Accepted", "Closed"]);
+        assert!(roster.previous.iter().all(|s| s.id != agent.id));
+    }
+
+    #[test]
+    fn a_project_whose_tickets_all_finished_still_has_something_to_list() {
+        let (_directory, mut host, root, ticket) = ticket_store();
+        host.close_ticket(&ticket.id).unwrap();
+        let mut board = ProgressBoard::default();
+        board.merge(host.progress(0).unwrap());
+        let index = WorkspaceIndex::new(host.snapshot().unwrap(), Rc::new(host.archive().unwrap()));
+
+        let roster = Roster::new(&board, &index, &root.project_id, &root.id);
+
+        assert!(roster.tickets.is_empty() && roster.previous.is_empty());
+        assert_eq!(roster.finished.len(), 1);
+    }
+
+    #[test]
+    fn only_an_idle_agent_with_nothing_wrong_gets_the_quiet_line() {
+        let (_directory, _host, _root, mut ticket) = ticket_store();
+        ticket.state = TicketState::Assigned;
+        let clean = SessionRuntime::default();
+        for idle in [Status::Ready, Status::Done] {
+            assert_eq!(
+                waiting_line(&ticket, &session(idle), Some(&clean)).as_deref(),
+                Some("Waiting on coordinator"),
+                "{idle:?}"
+            );
+        }
+        for full_row in [
+            Status::Working,
+            Status::Blocked,
+            Status::Paused,
+            Status::Disconnected,
+        ] {
+            assert_eq!(
+                waiting_line(&ticket, &session(full_row), Some(&clean)),
+                None,
+                "{full_row:?}"
+            );
+        }
+        let failed = SessionRuntime {
+            last_error: Some("The provider exited".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            waiting_line(&ticket, &session(Status::Ready), Some(&failed)),
+            None,
+            "a stuck agent is never quieted"
+        );
     }
 
     #[test]

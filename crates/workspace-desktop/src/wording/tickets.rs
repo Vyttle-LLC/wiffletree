@@ -70,7 +70,8 @@ pub(crate) fn publish_waiting(ticket: &Ticket) -> Option<String> {
         .map(|_| format!("{} waits for your approval", request.step.label()))
 }
 
-/// A ticket accepted with a waiver: its Agents panel card says this under its bar.
+/// A ticket accepted with a waiver: the Agents panel says this under its card's bar, or under
+/// its line among the finished tickets.
 pub(crate) fn waiver_note(ticket: &Ticket) -> Option<String> {
     ticket
         .waiver
@@ -584,6 +585,54 @@ pub(crate) fn badge_label(status: &str, questions: u32) -> String {
     }
 }
 
+/// How a finished ticket ended, for its one line: its PR's real outcome, such as "#1 merged", or
+/// "Closed, no PR". A PR still open reads as quietly as a closed one.
+pub(crate) fn finished_outcome(ticket: &Ticket) -> PrPart {
+    let (text, tone) = match &ticket.pull_request {
+        Some(pr) if pr.state == PrState::Merged => (format!("#{} merged", pr.number), Tone::Merged),
+        Some(pr) if pr.state == PrState::Closed => (format!("#{} closed", pr.number), Tone::Muted),
+        Some(pr) => (format!("#{} open", pr.number), Tone::Muted),
+        None if ticket.state == TicketState::Accepted => ("Accepted, no PR".into(), Tone::Muted),
+        None => ("Closed, no PR".into(), Tone::Muted),
+    };
+    PrPart { text, tone }
+}
+
+/// What an idle agent of an open ticket waits for: its ticket's next step. A verifier that has
+/// not reported owes its review, whether or not its turn has run. A verifier with a result has
+/// nothing to wait for here, and a finished ticket's agent is not waiting on the ticket.
+pub(crate) fn waiting_for(ticket: &Ticket, session_id: &str) -> Option<String> {
+    if !ticket.is_open() {
+        return None;
+    }
+    let cycle = ticket.verification.as_ref();
+    let result = cycle.and_then(|cycle| {
+        let results = cycle.latest_results();
+        let run = results.iter().find(|run| run.session_id == session_id)?;
+        Some(run.result)
+    });
+    Some(match result {
+        Some(VerifierResult::Pending) => "Review pending".into(),
+        Some(_) => return None,
+        None if matches!(
+            ticket.state,
+            TicketState::ReadyForTesting | TicketState::Verifying
+        ) =>
+        {
+            "Waiting for review".into()
+        }
+        None => match ticket.open_pull_request() {
+            Some(pr) => format!("Waiting on PR #{}", pr.number),
+            None => "Waiting on coordinator".into(),
+        },
+    })
+}
+
+/// The Agents panel's heading figure, such as "9 open · 32 finished".
+pub(crate) fn ticket_counts(open: usize, finished: usize) -> String {
+    format!("{open} open · {finished} finished")
+}
+
 /// A ticket's short figure: "blocked", or its percentage. A striped ticket has none.
 pub(crate) fn ticket_figure(ticket: &TicketProgress) -> Option<String> {
     match ticket.state {
@@ -915,6 +964,88 @@ mod tests {
         );
         assert_eq!(strip_figure(Some(&working), None), "50%");
         assert_eq!(strip_figure(None, None), "");
+    }
+
+    #[test]
+    fn a_finished_ticket_says_how_it_ended_and_never_in_the_error_color() {
+        use {CheckState as C, MergeState as M, PrState as S};
+        let (_directory, _host, _root, mut ticket) = store();
+        let mut outcome = |state, pull_request| {
+            (ticket.state, ticket.pull_request) = (state, pull_request);
+            let part = finished_outcome(&ticket);
+            (part.text, part.tone)
+        };
+        let accepted = TicketState::Accepted;
+        assert_eq!(
+            outcome(accepted, Some(pr(S::Merged, C::Success, M::Unknown))),
+            ("#142 merged".into(), Tone::Merged)
+        );
+        assert_eq!(
+            outcome(accepted, Some(pr(S::Closed, C::Failure, M::Dirty))),
+            ("#142 closed".into(), Tone::Muted)
+        );
+        assert_eq!(
+            outcome(accepted, Some(pr(S::Open, C::Failure, M::Dirty))),
+            ("#142 open".into(), Tone::Muted)
+        );
+        assert_eq!(
+            outcome(accepted, None),
+            ("Accepted, no PR".into(), Tone::Muted)
+        );
+        assert_eq!(
+            outcome(TicketState::Closed, None),
+            ("Closed, no PR".into(), Tone::Muted)
+        );
+    }
+
+    #[test]
+    fn an_idle_agent_says_what_its_ticket_waits_for() {
+        use {CheckState as C, MergeState as M, PrState as S};
+        let (_directory, _host, _root, mut ticket) = store();
+        ticket.pull_request = Some(PullRequest {
+            number: 21,
+            ..pr(S::Open, C::Success, M::Clean)
+        });
+        for state in [TicketState::ReadyForTesting, TicketState::Verifying] {
+            ticket.state = state;
+            assert_eq!(
+                waiting_for(&ticket, "agent").as_deref(),
+                Some("Waiting for review")
+            );
+        }
+        ticket.state = TicketState::Passed;
+        assert_eq!(
+            waiting_for(&ticket, "agent").as_deref(),
+            Some("Waiting on PR #21")
+        );
+        ticket.pull_request = Some(pr(S::Merged, C::Success, M::Unknown));
+        assert_eq!(
+            waiting_for(&ticket, "agent").as_deref(),
+            Some("Waiting on coordinator")
+        );
+        ticket.state = TicketState::Accepted;
+        assert_eq!(waiting_for(&ticket, "agent"), None);
+
+        ticket.state = TicketState::Verifying;
+        let mut cycle = verification(1, VerificationOutcome::Running, 1);
+        let run = |result| VerifierRun {
+            session_id: "tester".into(),
+            role: Role::Tester,
+            focus: "Tests".into(),
+            message_id: "verify".into(),
+            result,
+            report_id: None,
+            reason: None,
+        };
+        cycle.rounds[0].verifiers = vec![run(VerifierResult::Pending)];
+        ticket.verification = Some(cycle.clone());
+        assert_eq!(
+            waiting_for(&ticket, "tester").as_deref(),
+            Some("Review pending")
+        );
+        cycle.rounds[0].verifiers = vec![run(VerifierResult::Failed)];
+        ticket.verification = Some(cycle);
+        assert_eq!(waiting_for(&ticket, "tester"), None);
     }
 
     #[test]

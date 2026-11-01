@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Quiet Agents panel study</title>
+<!--
+  Static study for keeping finished work out of the Agents panel.
+  No script, no network. The folded sections open with <details>, so they can be clicked.
+  (a) Today: a finished ticket keeps a full card, a closed PR still reads as a conflict, and
+      every idle agent keeps a full row.
+  (b) Proposed: open tickets only, waiting agents on one quiet line, finished agents archived,
+      finished tickets folded.
+  (c) Proposed: the same panel with the folded sections opened.
+  Tickets, numbers and agents are sample data modelled on the MUDling project.
+-->
+<style>
+:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A}}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+h2{font-size:13px;font-weight:600;margin:0 0 2px}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.intro{max-width:780px;margin-bottom:24px}
+.intro p{color:var(--subtle);font-size:12px}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px;align-items:start}
+.caption{margin:0 2px 10px;font-size:11px;color:var(--subtle)}
+/* The Agents panel, mirroring agents_panel.rs: cards of a stage, a bar, a PR line and agents. */
+.panel{background:var(--base);border:1px solid var(--edge);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:12px}
+.panel-head{display:flex;justify-content:space-between;align-items:baseline;font-size:11px;color:var(--subtle);padding:0 2px}
+.panel-head b{color:var(--text);font-weight:600;font-size:12px}
+.card{background:var(--surface);border:1px solid var(--edge);border-radius:9px;padding:10px;display:flex;flex-direction:column;gap:7px}
+.card.stuck{border-color:var(--yellow)}
+.top{display:flex;align-items:baseline;gap:8px}
+.title{flex:1;min-width:0;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.figure{flex:none;font-size:11px;color:var(--subtle)}
+.bar{height:3px;border-radius:2px;background:var(--overlay);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--focus)}
+.bar.done i{background:var(--green);width:100%}
+.bar.blocked i{background:var(--red)}
+.pr{display:flex;align-items:center;gap:5px;white-space:nowrap;overflow:hidden;font-size:11px;color:var(--subtle)}
+.sep{opacity:.6}
+.good{color:var(--green)}
+.bad{color:var(--red)}
+.merged{color:var(--focus)}
+.warn{color:var(--yellow)}
+.agent{display:flex;flex-direction:column;gap:3px;padding-top:3px}
+.agent-top{display:flex;align-items:center;gap:6px}
+.glyph{flex:none;width:16px;text-align:center;color:var(--subtle)}
+.name{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.step{padding-left:22px;font-size:11px;color:var(--subtle);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* A fold: one subtle line, like "Previous agents" today. */
+details>summary{list-style:none;display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11.5px;color:var(--subtle);white-space:nowrap}
+details>summary::-webkit-details-marker{display:none}
+details>summary:hover{color:var(--text)}
+.chev::before{content:"▸";display:inline-block;width:10px}
+details[open]>summary .chev::before{content:"▾"}
+.fold{padding:0 4px}
+.rows{margin-top:6px;display:flex;flex-direction:column;gap:2px}
+/* One finished ticket: a single line, never a bar or a colored warning. */
+.row{display:flex;align-items:baseline;gap:8px;padding:2px 4px;border-radius:5px;font-size:11.5px}
+.row:hover{background:var(--overlay)}
+.row .label{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .state{flex:none;color:var(--subtle)}
+.row .state.merged{color:var(--focus)}
+/* An active agent with nothing running: one line, no bar, no model. */
+.waiting{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--subtle)}
+.new{outline:2px dashed color-mix(in srgb,var(--accent) 55%,transparent);outline-offset:3px;border-radius:6px}
+.notes{max-width:780px;margin-top:26px;font-size:12px;color:var(--subtle)}
+.notes h2{color:var(--text);margin-top:14px}
+.notes li{margin:4px 0}
+@media(max-width:1100px){.grid{grid-template-columns:minmax(0,1fr)}body{padding:16px}}
+</style>
+</head>
+<body>
+<header class="intro">
+  <div class="eyebrow">Design study · quiet Agents panel</div>
+  <h1>Only what still needs you stays in view</h1>
+  <p>The Agents panel shows every accepted ticket at full size, so 32 finished tickets bury the 9 open ones. It also keeps a full row for every agent, busy or not. This study folds finished tickets, archives finished agents, quiets agents that are waiting, and leaves open work on top. Dashed outlines mark what is new. Tickets and agents are sample data modelled on MUDling.</p>
+</header>
+
+<div class="grid">
+  <section>
+    <h2>Today</h2>
+    <p class="caption">Finished tickets sit among open ones. A PR closed by hand still reads as a red conflict. Idle agents look the same as busy ones.</p>
+    <div class="panel">
+      <div class="panel-head"><b>Agents</b><span>41 tickets</span></div>
+      <div class="card">
+        <div class="top"><span class="title">mudling · Phase 0: Rust workspace</span><span class="figure">Accepted · 100%</span></div>
+        <div class="bar done"><i></i></div>
+        <div class="pr">#1 <span class="sep">·</span> <span class="merged">merged</span></div>
+      </div>
+      <div class="card">
+        <div class="top"><span class="title">mudling · Core: connection</span><span class="figure">Accepted · 100%</span></div>
+        <div class="bar done"><i></i></div>
+        <div class="pr">#2 <span class="sep">·</span> <span class="good">checks ✓</span> <span class="sep">·</span> <span class="bad">conflict</span></div>
+      </div>
+      <div class="card">
+        <div class="top"><span class="title">mudling · Core: SQLite store</span><span class="figure">Accepted · 100%</span></div>
+        <div class="bar done"><i></i></div>
+        <div class="pr">#6 <span class="sep">·</span> <span class="good">checks ✓</span> <span class="sep">·</span> <span class="bad">conflict</span></div>
+      </div>
+      <div class="card">
+        <div class="top"><span class="title">mudling · Desktop shell</span><span class="figure">Verifying · 62%</span></div>
+        <div class="bar"><i style="width:62%"></i></div>
+        <div class="pr">#22 <span class="sep">·</span> <span class="good">checks ✓</span></div>
+        <div class="agent"><div class="agent-top"><span class="glyph">✓</span><span class="name">Implementer</span><span class="figure">Done · 6 of 6</span></div><div class="step">Claude Opus 5.5</div><div class="bar done"><i></i></div></div>
+        <div class="agent"><div class="agent-top"><span class="glyph">◉</span><span class="name">Reviewer · Claude</span><span class="figure">2 of 4 · 6m</span></div><div class="step">Tracing the input path · Claude Opus 5.5</div><div class="bar"><i style="width:50%"></i></div></div>
+        <div class="agent"><div class="agent-top"><span class="glyph">✓</span><span class="name">Tester · Tests</span><span class="figure">Done · 3 of 3</span></div><div class="step">Claude Sonnet 5.5</div><div class="bar done"><i></i></div></div>
+        <div class="agent"><div class="agent-top"><span class="glyph">✓</span><span class="name">Reviewer · Style</span><span class="figure">Done · 2 of 2</span></div><div class="step">Claude Opus 5.5</div><div class="bar done"><i></i></div></div>
+      </div>
+      <div class="card">
+        <div class="top"><span class="title">mudling · Phase 3 integration</span><span class="figure">Passed · 90%</span></div>
+        <div class="bar"><i style="width:90%"></i></div>
+        <div class="pr">#21 <span class="sep">·</span> <span class="good">checks ✓</span></div>
+        <div class="agent"><div class="agent-top"><span class="glyph">○</span><span class="name">Implementer</span><span class="figure">Ready · 4 of 4</span></div><div class="step">Claude Opus 5.5</div><div class="bar done"><i></i></div></div>
+      </div>
+      <div class="fold"><details><summary><span class="chev"></span>Previous agents (118)</summary></details></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Proposed</h2>
+    <p class="caption">Open tickets only. An agent still waiting on a review or a PR stays on one quiet line. Finished agents are archived, and finished tickets fold below, closed by default.</p>
+    <div class="panel">
+      <div class="panel-head"><b>Agents</b><span>9 open · 32 finished</span></div>
+      <div class="card">
+        <div class="top"><span class="title">mudling · Desktop shell</span><span class="figure">Verifying · 62%</span></div>
+        <div class="bar"><i style="width:62%"></i></div>
+        <div class="pr">#22 <span class="sep">·</span> <span class="good">checks ✓</span></div>
+        <div class="agent"><div class="agent-top"><span class="glyph">◉</span><span class="name">Reviewer · Claude</span><span class="figure">2 of 4 · 6m</span></div><div class="step">Tracing the input path · Claude Opus 5.5</div><div class="bar"><i style="width:50%"></i></div></div>
+        <div class="waiting new"><span class="glyph">○</span><span class="name">Implementer</span><span class="figure">Waiting for review</span></div>
+      </div>
+      <div class="card">
+        <div class="top"><span class="title">mudling · Phase 3 integration</span><span class="figure">Passed · 90%</span></div>
+        <div class="bar"><i style="width:90%"></i></div>
+        <div class="pr">#21 <span class="sep">·</span> <span class="good">checks ✓</span></div>
+        <div class="waiting new"><span class="glyph">○</span><span class="name">Implementer</span><span class="figure">Waiting on PR #21</span></div>
+      </div>
+      <div class="card stuck">
+        <div class="top"><span class="title">mudling · Evening-of-play bundle</span><span class="figure">Assigned · 30%</span></div>
+        <div class="bar"><i style="width:30%"></i></div>
+        <div class="agent"><div class="agent-top"><span class="glyph">◇</span><span class="name">Implementer</span><span class="figure warn">Last turn failed</span></div><div class="step">Claude Opus 5.5</div><div class="bar blocked"><i style="width:30%"></i></div></div>
+      </div>
+      <div class="fold new"><details><summary><span class="chev"></span>Finished tickets (32)</summary></details></div>
+      <div class="fold"><details><summary><span class="chev"></span>Previous agents (118)</summary></details></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Proposed, opened</h2>
+    <p class="caption">The folds open where they sit. A finished ticket is one line with its real PR outcome, and it never shows a check, a conflict or a bar.</p>
+    <div class="panel">
+      <div class="panel-head"><b>Agents</b><span>9 open · 32 finished</span></div>
+      <div class="card">
+        <div class="top"><span class="title">mudling · Desktop shell</span><span class="figure">Verifying · 62%</span></div>
+        <div class="bar"><i style="width:62%"></i></div>
+        <div class="pr">#22 <span class="sep">·</span> <span class="good">checks ✓</span></div>
+        <div class="agent"><div class="agent-top"><span class="glyph">◉</span><span class="name">Reviewer · Claude</span><span class="figure">2 of 4 · 6m</span></div><div class="step">Tracing the input path · Claude Opus 5.5</div><div class="bar"><i style="width:50%"></i></div></div>
+        <div class="waiting new"><span class="glyph">○</span><span class="name">Implementer</span><span class="figure">Waiting for review</span></div>
+      </div>
+      <div class="fold new"><details open><summary><span class="chev"></span>Finished tickets (32)</summary>
+        <div class="rows">
+          <div class="row"><span class="label">Phase 0: Rust workspace</span><span class="state merged">#1 merged</span></div>
+          <div class="row"><span class="label">Core: connection</span><span class="state">#2 closed</span></div>
+          <div class="row"><span class="label">Core: line pipeline</span><span class="state merged">#3 merged</span></div>
+          <div class="row"><span class="label">Core: SQLite store</span><span class="state">#6 closed</span></div>
+          <div class="row"><span class="label">Core: version gate</span><span class="state">#4 closed</span></div>
+          <div class="row"><span class="label">Core: completions</span><span class="state">#5 closed</span></div>
+          <div class="row"><span class="label">Core: plugin host</span><span class="state merged">#7 merged</span></div>
+          <div class="row"><span class="label">Spike: renderer choice</span><span class="state">Closed, no PR</span></div>
+          <div class="row"><span class="label" style="color:var(--subtle)">… 24 more</span></div>
+        </div>
+      </details></div>
+      <div class="fold"><details><summary><span class="chev"></span>Previous agents (118)</summary></details></div>
+    </div>
+  </section>
+</div>
+
+<div class="notes">
+  <h2>How it behaves</h2>
+  <ul>
+    <li><b>Finished tickets</b> means accepted and closed tickets together. The section is closed by default and sits above Previous agents.</li>
+    <li>A finished ticket's PR keeps being read until GitHub says it merged or closed, so its line is always true. This fix also corrects the five stale MUDling PRs on the first pass after the update, with nobody touching them.</li>
+    <li>An agent working, blocked, paused, disconnected or after a failed turn keeps its full row. Anything that needs a look is never quieted.</li>
+    <li>An agent waiting on something is active. The implementer stays on its ticket until the ticket is accepted or closed, on one quiet line that says what it waits for, and it goes back to a full row the moment it starts a turn.</li>
+    <li>An agent that is finished is archived. A verifier is archived as soon as it passes, and its row moves to Previous agents. A ticket's implementer is archived when the ticket is accepted or closed, as it is today.</li>
+    <li>The project's progress bar and percentage do not change.</li>
+  </ul>
+</div>
+</body>
+</html>
