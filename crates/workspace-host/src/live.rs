@@ -774,9 +774,18 @@ impl Host {
                 if !resolved.resolved.notes.is_empty() {
                     entry["notes"] = json!(resolved.resolved.notes);
                 }
-                if let Some(small) = &row.small {
-                    entry["small"] = line(small);
-                    entry["right_now_small"] = right_now(row, true);
+                // Small work resolves on its own and may come from another layer.
+                let small = (table.small_rows.iter()).find(|small| small.job.is(&row.job));
+                if let Some(small) = small.filter(|small| {
+                    small.resolved.value.small.is_some()
+                        || small.resolved.from != resolved.resolved.from
+                }) {
+                    let small_row = &small.resolved.value;
+                    entry["small"] = line(small_row.line(true));
+                    entry["right_now_small"] = right_now(small_row, true);
+                    if small.resolved.from == Layer::Space {
+                        entry["small_from"] = json!(space_name);
+                    }
                 }
                 entry
             })

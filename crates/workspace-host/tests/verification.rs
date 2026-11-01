@@ -3328,3 +3328,54 @@ fn the_coordinator_reads_the_table_and_reviews_its_space_resolves() {
     assert_eq!(selection["max_rounds"], json!(2));
     assert_eq!(selection["reviews_from_space"], json!(["max_cycles"]));
 }
+
+#[test]
+fn the_coordinator_reads_small_work_from_the_layer_it_resolves_to() {
+    let mut f = Fixture::ready(three_verifiers(), 2);
+    let mut selection = f.host.model_selection().unwrap();
+    let opus = profile(Provider::Claude, "opus", "high");
+    let sonnet = profile(Provider::Claude, "sonnet", "medium");
+    let haiku = profile(Provider::Claude, "haiku", "low");
+    let implementer = selection.row_mut(&Job::Implementer).unwrap();
+    implementer.main = Line {
+        first: opus,
+        then: Then::Wait,
+    };
+    implementer.small = Some(Line {
+        first: sonnet,
+        then: Then::Wait,
+    });
+    f.host.set_model_selection(&selection).unwrap();
+    let row = JobRow {
+        job: Job::Implementer,
+        main: Line {
+            first: lens(Provider::Codex),
+            then: Then::Wait,
+        },
+        small: Some(Line {
+            first: haiku.clone(),
+            then: Then::Wait,
+        }),
+    };
+    set_space(&mut f, vec![row], cascade::ReviewOverrides::default());
+    let signed_out = ProviderStatus {
+        installed: true,
+        signed_in: false,
+        plan: None,
+    };
+    f.host.record_detection(Provider::Codex, &signed_out);
+    take_input(&mut f.host, &f.coordinator.id.clone());
+    let context = f
+        .host
+        .agent_tool(&f.coordinator.id.clone(), "workspace_context", json!({}))
+        .unwrap();
+    let space = f.host.project(&f.coordinator.project_id).unwrap().space;
+    let name = f.host.space(&space).unwrap().space.name;
+    let jobs = context["model_selection"]["jobs"].as_array().unwrap();
+    let implementer = jobs.iter().find(|j| j["name"] == "Implementer").unwrap();
+    assert!(implementer.get("from").is_none(), "{implementer}");
+    assert_eq!(implementer["main"]["first"]["model"], "opus");
+    assert_eq!(implementer["small"]["first"]["model"], "haiku");
+    assert_eq!(implementer["small_from"], json!(name));
+    assert_eq!(implementer["right_now_small"]["profile"], json!(haiku));
+}

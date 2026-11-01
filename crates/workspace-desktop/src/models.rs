@@ -291,10 +291,7 @@ pub(crate) fn now_of(
     if !all_checked(detection) {
         return Now::Checking;
     }
-    let line = match (&row.small, small) {
-        (Some(line), true) => line,
-        _ => &row.main,
-    };
+    let line = row.line(small);
     match pick {
         Ok(pick) if pick.waits && row.job == Job::Router => Now::AsksYou,
         Err(_) if row.job == Job::Router => Now::AsksYou,

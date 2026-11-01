@@ -69,6 +69,10 @@ impl Space {
     pub fn lists(&self, repository: &crate::Repository) -> bool {
         self.repositories.iter().any(|i| repository.is_github(i))
     }
+    /// Whether this Space lists the repository named `owner/name`, ignoring case as GitHub does.
+    pub fn lists_named(&self, identity: &str) -> bool {
+        (self.repositories.iter()).any(|listed| listed.eq_ignore_ascii_case(identity))
+    }
     /// What the Space sets for the repository named `owner/name`, ignoring case as GitHub does.
     pub fn repository_settings(&self, identity: &str) -> Option<&RepositorySettings> {
         (self.repository_settings.iter())

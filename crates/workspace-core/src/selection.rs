@@ -211,6 +211,14 @@ pub struct JobRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub small: Option<Line>,
 }
+impl JobRow {
+    /// The line `small` work runs: the small-work line when there is one, else the main line.
+    pub fn line(&self, small: bool) -> &Line {
+        (self.small.as_ref())
+            .filter(|_| small)
+            .unwrap_or(&self.main)
+    }
+}
 
 /// This machine's "Who runs what" table, with the shared switch threshold and guide.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -317,10 +325,7 @@ impl ModelSelection {
         if self.row(&Job::Assistant).is_none()
             && let Some(implementer) = self.row(&Job::Implementer)
         {
-            let main = implementer
-                .small
-                .clone()
-                .unwrap_or(implementer.main.clone());
+            let main = implementer.line(true).clone();
             self.jobs.push(JobRow {
                 job: Job::Assistant,
                 main,
@@ -741,7 +746,7 @@ fn not_runnable(
     unusable: &BTreeSet<Provider>,
     held: &BTreeMap<Provider, String>,
 ) -> Option<String> {
-    let line = (row.small.as_ref()).filter(|_| small).unwrap_or(&row.main);
+    let line = row.line(small);
     let runs = |p: &ModelProfile| {
         !unusable.contains(&p.provider)
             && !(row.job == Job::Router && p.provider == Provider::Codex)
@@ -874,10 +879,8 @@ pub fn resolve(
     limits: &Limits,
     when: &dyn Fn(i64) -> String,
 ) -> Result<Pick> {
-    let (line, small) = match (&row.small, small) {
-        (Some(line), true) => (line, true),
-        _ => (&row.main, false),
-    };
+    let line = row.line(small);
+    let small = small && row.small.is_some();
     // The router runs with every tool off, which Codex cannot be started with.
     let router_unusable;
     let router_limits;

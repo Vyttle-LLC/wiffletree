@@ -77,7 +77,7 @@ fn sections(effective: &Effective, space: &str) -> Vec<(&'static str, Vec<Row>)>
         let small = (settings.small_models.iter()).find(|small| small.job.is(job));
         if let Some(small) = small {
             let row_used = &small.resolved.value;
-            let line = row_used.small.as_ref().unwrap_or(&row_used.main);
+            let line = row_used.line(true);
             let differs = *line != resolved.resolved.value.main
                 || small.resolved.from != resolved.resolved.from;
             if differs {

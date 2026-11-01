@@ -1087,9 +1087,9 @@ impl AssistantPage {
     }
 
     /// The model a new thread in `space` starts on, as the host picks it with nothing chosen.
-    fn new_thread_model(&self, space: Option<&SpaceId>) -> Option<ModelProfile> {
+    fn new_thread_model(&self, space: &SpaceId) -> Option<ModelProfile> {
         let snapshot = self.shared.snapshot()?;
-        let space = (snapshot.spaces.iter()).find(|s| Some(&s.id) == space);
+        let space = (snapshot.spaces.iter()).find(|s| s.id == *space);
         models::thread_model(&snapshot.model_selection, space, &self.shared.detection)
     }
     fn composer_box(&self, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -1113,10 +1113,13 @@ impl AssistantPage {
             Some(_) => chip_name,
             None => format!("{chip_name} · auto"),
         };
-        // A thread shows its own model; a new tab what its thread would start on.
+        // A thread shows its own model; a new tab what its thread would start on in the Space
+        // picked by hand. On auto the router may pick a Space that overrides this Mac's row.
         let model = match tab {
             Some(tab) => tab.profile.clone(),
-            None => self.new_thread_model(space.as_ref()),
+            None => (self.chosen_space.as_ref())
+                .and(space.as_ref())
+                .and_then(|space| self.new_thread_model(space)),
         };
         let model = div()
             .px_2()
