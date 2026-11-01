@@ -301,6 +301,16 @@ impl Layers {
             .collect::<Vec<_>>()
             .join("\n")
     }
+    /// Whether the Space, or the repository within it, adds anything to the agent's
+    /// instructions.
+    fn has_additions(&self) -> bool {
+        let space = self.space.as_ref().map(|space| space.additions.trim());
+        let repository = self.repository_settings().map(|r| r.additions.trim());
+        [space, repository]
+            .into_iter()
+            .flatten()
+            .any(|text| !text.is_empty())
+    }
     /// The Space's additions, and then the repository's, each with its own heading. Neither
     /// widens the agent's authority.
     fn additions(&self, changed_by: Option<String>) -> String {
@@ -386,7 +396,10 @@ impl Host {
         if session.role.is_thread() {
             text.push_str(&self.attached_section(session)?);
         }
-        let changed_by = (layers.space.as_ref()).and_then(|space| self.space_changed_by(space));
+        // Who changed them comes from Git, asked only when there are additions to name.
+        let changed_by = (layers.space.as_ref())
+            .filter(|_| layers.has_additions())
+            .and_then(|space| self.space_changed_by(space));
         text.push_str(&layers.additions(changed_by));
         Ok(text)
     }
@@ -822,6 +835,40 @@ mod tests {
             "",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn a_looser_repository_value_a_teammate_wrote_is_ignored_with_a_note() {
+        let mut f = fixture();
+        let sage = in_space(&mut f, "Sage");
+        set(&mut f, space(&sage), &[(PUBLISHING, ALWAYS_ASK)], "").unwrap();
+        let mut written = f.host.space(&sage).unwrap().space;
+        let looser = RepositorySettings {
+            behaviors: [(PUBLISHING.into(), "allowed_owners".into())].into(),
+            ..RepositorySettings::default()
+        };
+        written.repository_settings.insert(APP.into(), looser);
+        f.host
+            .db
+            .execute(
+                "UPDATE spaces SET data=?2 WHERE id=?1",
+                params![sage.as_str(), encode(&written).unwrap()],
+            )
+            .unwrap();
+        let publishing = resolved(&f, PUBLISHING).resolved;
+        assert_eq!(
+            (publishing.value.as_str(), publishing.from),
+            (ALWAYS_ASK, Layer::Space)
+        );
+        assert_eq!(publishing.notes.len(), 1);
+        assert!(
+            publishing.notes[0].starts_with(
+                "The Repository value is ignored: a Repository may only make Publishing stricter"
+            ),
+            "{:?}",
+            publishing.notes
+        );
+        assert!(f.host.always_asks_before_publishing(&f.ticket()).unwrap());
     }
 
     #[test]

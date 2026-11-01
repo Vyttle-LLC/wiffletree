@@ -1420,8 +1420,6 @@ mod tests {
         host.shared_folder().join("skills/coordinating").join(file)
     }
 
-    /// Bases Coordinating's rewrite on a stand-in for an earlier stock text, as if it had been
-    /// written before a release that changed it.
     /// The coordinator's instructions up to the sentences of its stock Behaviors, which follow
     /// its skill's text.
     fn before_behaviors(host: &Host) -> String {
@@ -1431,6 +1429,8 @@ mod tests {
             .expect("the stock Behaviors last")
             .to_owned()
     }
+    /// Bases Coordinating's rewrite on a stand-in for an earlier stock text, as if it had been
+    /// written before a release that changed it.
     fn based_on_an_earlier_release(host: &Host, base: &str) {
         fs::write(coordinating(host, "base.md"), base).unwrap();
     }

@@ -277,6 +277,12 @@ pub(crate) fn validate(space: &Space) -> Result<()> {
         space.additions.len() <= MAX_TEXT_BYTES,
         "A Space's additions are at most {MAX_TEXT_BYTES} bytes"
     );
+    for (repository, settings) in &space.repository_settings {
+        ensure!(
+            settings.additions.len() <= MAX_TEXT_BYTES,
+            "{repository}'s additions are at most {MAX_TEXT_BYTES} bytes"
+        );
+    }
     for (at, identity) in space.repositories.iter().enumerate() {
         validate_repository_identity(identity)?;
         ensure!(

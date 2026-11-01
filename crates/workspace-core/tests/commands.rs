@@ -32,6 +32,16 @@ fn space() -> Space {
     }
 }
 
+fn set_layer_values() -> Command {
+    Command::SetLayerValues {
+        scope: cascade::Scope::Repository {
+            space_id: space().id,
+            repository: "Sage-Social/api".into(),
+        },
+        values: cascade::LayerValues::default(),
+    }
+}
+
 #[test]
 fn reads_are_exactly_the_commands_that_change_nothing() {
     let reads = [
@@ -100,6 +110,14 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
         },
         Command::SkillHistory {
             skill: Skill::Coordinating,
+        },
+        Command::BehaviorCatalog,
+        Command::LayerValues {
+            scope: cascade::Scope::Workspace,
+        },
+        Command::EffectiveSettings {
+            project_id: text(),
+            ticket_id: Some(text()),
         },
         Command::SkillMergeReview {
             skill: Skill::Coordinating,
@@ -272,6 +290,7 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
         Command::SetKeeper {
             keeper: KeeperSettings::default(),
         },
+        set_layer_values(),
         Command::SaveSkillRules {
             skill: Skill::Coordinating,
             rules: text(),
@@ -412,6 +431,7 @@ fn space_commands_are_the_humans() {
             space_id: space().id,
             path: text(),
         },
+        set_layer_values(),
     ];
     for command in human {
         assert!(command.is_human_only() && !command.is_read(), "{command:?}");
@@ -424,6 +444,13 @@ fn space_commands_are_the_humans() {
         "it reads where the storage is on this Mac"
     );
     assert!(!Command::Snapshot.is_human_only());
+    // Reading a layer, the catalog or what agents get is not the human's alone.
+    let layer = Command::LayerValues {
+        scope: cascade::Scope::Space {
+            space_id: space().id,
+        },
+    };
+    assert!(!layer.is_human_only() && !Command::BehaviorCatalog.is_human_only());
 }
 
 #[test]
