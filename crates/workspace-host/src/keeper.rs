@@ -742,7 +742,9 @@ impl Host {
         let settings = self.settings().keeper;
         let coordinator = self.session(&ticket.coordinator_id)?;
         ensure!(
-            settings.works_on_branches() && self.kept(ticket, repository, &coordinator)?,
+            settings.works_on_branches()
+                && self.kept(ticket, repository, &coordinator)?
+                && (!waiting || ticket.running_try().is_some() || rebase_stands(&settings, ticket)),
             "the keeper may no longer change the branch"
         );
         if waiting && ticket.keeper.as_ref().is_some_and(|k| k.waiting_changed) {
@@ -1751,7 +1753,9 @@ impl Host {
         let repository = self.ticket_repository(&ticket)?;
         let changed = record.waiting_changed;
         let settings = self.settings().keeper;
-        let may = settings.works_on_branches() && self.keeps_branch(&ticket, &repository)?;
+        let may = settings.works_on_branches()
+            && (problem.is_some() || rebase_stands(&settings, &ticket))
+            && self.keeps_branch(&ticket, &repository)?;
         // A changed patch is reviewed while the conflicts trigger is on.
         let trigger = problem.unwrap_or(KeeperProblem::Conflict);
         let moved = match may {
@@ -1872,7 +1876,9 @@ impl Host {
         let coordinator = self.session(&ticket.coordinator_id)?;
         let repository = self.ticket_repository(&ticket)?;
         let trigger = review.problem.unwrap_or(KeeperProblem::Conflict);
-        let on = settings.tries(trigger) && self.kept(&ticket, &repository, &coordinator)?;
+        let on = settings.tries(trigger)
+            && (review.problem.is_some() || rebase_stands(&settings, &ticket))
+            && self.kept(&ticket, &repository, &coordinator)?;
         let reviews = ticket.keeper.as_mut().map(|k| &mut k.reviews);
         let Some(started) = reviews.and_then(|r| r.last_mut()).filter(|_| passed) else {
             return Ok(None);
@@ -2370,6 +2376,17 @@ fn shows(problem: KeeperProblem, pr: &PullRequest) -> bool {
         KeeperProblem::Conflict => pr.merge_state == MergeState::Dirty,
         KeeperProblem::Checks => pr.checks == CheckState::Failure,
     }
+}
+/// Whether a finished rebase that is no try's result may still move or be pushed: the rebase
+/// trigger is on, or the PR still shows a problem whose trigger is on. It asks less than
+/// `Host::wants_rebase`, as the rebase's own review or the watcher's released wake end `would_try`.
+fn rebase_stands(keeper: &KeeperSettings, ticket: &Ticket) -> bool {
+    keeper.rebase
+        || ticket.open_pull_request().is_some_and(|pr| {
+            [KeeperProblem::Conflict, KeeperProblem::Checks]
+                .into_iter()
+                .any(|problem| keeper.tries(problem) && shows(problem, pr))
+        })
 }
 /// How keeper messages name a ticket's PR, as the watcher's do.
 fn named(ticket: &Ticket) -> String {
@@ -6479,6 +6496,53 @@ pub(crate) mod tests {
         );
         fixes_only(&mut f);
         assert!(f.host.keeper_parts().is_empty());
+    }
+
+    #[test]
+    fn unticking_the_rebase_trigger_drops_a_clean_prs_waiting_rebase() {
+        let (mut f, r) = reviewing("true");
+        let base = move_base(&f, &r, "other.txt", "1\n");
+        let job = due(&mut f, &base);
+        let (head, pushed) = (f.head(), r.branch(BRANCH));
+        assert!(f.host.keeper_rebased(rebase(&job, fetch(&r))).unwrap());
+        fixes_only(&mut f);
+        let ticket = f.ticket();
+        let repository = f.host.ticket_repository(&ticket).unwrap();
+        let refused = f.host.keeper_checkout_allowed(&ticket, &repository, true);
+        assert!(refused.is_err());
+        assert!(f.host.keeper_move(&f.ticket.clone()).unwrap().is_none());
+        assert_eq!((f.head(), r.branch(BRANCH)), (head, pushed));
+        assert_eq!(f.ticket().keeper.unwrap().waiting, None);
+    }
+
+    #[test]
+    fn unticking_the_rebase_trigger_pushes_no_review_of_a_clean_prs_changed_rebase() {
+        let (mut f, r) = reviewing("true");
+        let (before, after) = under_review(&mut f, &r);
+        fixes_only(&mut f);
+        verdict(&mut f, "Correctness", "passed", json!([]));
+        let step = f.host.keeper_review_done(&f.ticket.clone()).unwrap();
+        assert!(step.is_none());
+        assert_eq!(r.branch(BRANCH), Some(before));
+        assert_eq!(f.head(), after);
+        assert!(notices(&f.host)[0].2.contains("was turned off for it"));
+    }
+
+    #[test]
+    fn with_only_the_fixes_on_a_rebase_is_dropped_once_its_problem_clears() {
+        let (mut f, r, _) = checking(FIXED);
+        fixes_only(&mut f);
+        let base = move_base(&f, &r, "other.txt", "1\n");
+        checks_failed(&mut f, &base, 0);
+        let mut due = checks_failed(&mut f, &base, 2 * MINUTE);
+        let job = due.rebases.remove(0);
+        let (head, pushed) = (f.head(), r.branch(BRANCH));
+        assert!(f.host.keeper_rebased(rebase(&job, fetch(&r))).unwrap());
+        let mut pr = f.ticket().pull_request.unwrap();
+        pr.checks = CheckState::Success;
+        observed(&mut f, &base, pr, 3 * MINUTE);
+        assert!(f.host.keeper_move(&f.ticket.clone()).unwrap().is_none());
+        assert_eq!((f.head(), r.branch(BRANCH)), (head, pushed));
     }
 
     #[test]
