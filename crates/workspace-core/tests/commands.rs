@@ -348,6 +348,31 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
 }
 
 #[test]
+fn create_space_sends_its_additions_as_a_previous_host_reads_them() {
+    let create = Command::CreateSpace {
+        name: text(),
+        description: text(),
+        additions: "Never log child PII.".into(),
+        prefix: None,
+        storage: None,
+    };
+    let sent = serde_json::to_value(&create).unwrap();
+    assert_eq!(sent["instructions"], "Never log child PII.");
+    assert_eq!(sent.get("additions"), None);
+    let mut renamed = sent.clone();
+    let additions = renamed
+        .as_object_mut()
+        .unwrap()
+        .remove("instructions")
+        .unwrap();
+    renamed["additions"] = additions;
+    let read: Command = serde_json::from_value(renamed).unwrap();
+    assert!(
+        matches!(read, Command::CreateSpace { additions, .. } if additions == "Never log child PII.")
+    );
+}
+
+#[test]
 fn space_commands_are_the_humans() {
     let human = [
         Command::CreateSpace {

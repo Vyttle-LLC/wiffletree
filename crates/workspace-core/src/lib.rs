@@ -3548,7 +3548,8 @@ pub enum Command {
         name: String,
         #[serde(default)]
         description: String,
-        #[serde(default, alias = "instructions")]
+        /// Sent as `instructions`, the name a host of the previous release reads.
+        #[serde(default, rename = "instructions", alias = "additions")]
         additions: String,
         #[serde(default)]
         prefix: Option<String>,

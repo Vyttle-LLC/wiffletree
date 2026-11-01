@@ -436,6 +436,7 @@ impl Host {
             "A Space's storage cannot be changed here"
         );
         validate(&space)?;
+        self.check_space_behaviors(&current.space, &space)?;
         self.ensure_unused_name(&space.name, Some(&space.id))?;
         if let Some(SpaceBrain {
             repository: BrainRepository::GitHub { owner, name, .. },

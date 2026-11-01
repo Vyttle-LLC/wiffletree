@@ -442,7 +442,6 @@ impl Host {
             additions,
         } = values;
         let behaviors = keep_unknown(&self.layer_values(scope)?.behaviors, behaviors);
-        let layer = scope.layer();
         let (space_id, repository) = match scope {
             Scope::Workspace => {
                 ensure!(
@@ -469,19 +468,6 @@ impl Host {
                 space.name
             );
         }
-        // What this layer inherits: the layers below it, as this Mac reads them.
-        let inherited = Layers {
-            workspace: self.workspace_behaviors(),
-            space: (layer == Layer::Repository).then(|| space.clone()),
-            repository: None,
-        };
-        for behavior in catalog() {
-            if let Some(value) = behaviors.get(&behavior.id) {
-                let from = inherited.value(&behavior.id);
-                cascade::check(&behavior, layer, &from, value)
-                    .with_context(|| format!("{} can't be saved", behavior.name))?;
-            }
-        }
         match repository {
             None => {
                 space.behaviors = behaviors;
@@ -502,6 +488,52 @@ impl Host {
         }
         self.update_space(space)?;
         self.layer_values(scope)
+    }
+    /// Refuses the Behavior choices a save of `space` changes from `current` as the resolver
+    /// would ignore them: a layer the Behavior does not allow, or the Space or a repository
+    /// loosening a safety Behavior it inherits on this Mac. A choice it leaves as it was, such
+    /// as a looser one a teammate saved, stays readable and is ignored on read.
+    pub(crate) fn check_space_behaviors(&self, current: &Space, space: &Space) -> Result<()> {
+        let workspace = self.workspace_behaviors();
+        let check = |layer, inherited: &Layers, saved: &Choices, choices: &Choices| {
+            for behavior in catalog() {
+                let value = choices.get(&behavior.id);
+                if let Some(value) = value.filter(|v| saved.get(&behavior.id) != Some(*v)) {
+                    let from = inherited.value(&behavior.id);
+                    cascade::check(&behavior, layer, &from, value)
+                        .with_context(|| format!("{} can't be saved", behavior.name))?;
+                }
+            }
+            anyhow::Ok(())
+        };
+        let below_space = Layers {
+            workspace: workspace.clone(),
+            ..Layers::default()
+        };
+        check(
+            Layer::Space,
+            &below_space,
+            &current.behaviors,
+            &space.behaviors,
+        )?;
+        let below_repository = Layers {
+            workspace,
+            space: Some(space.clone()),
+            repository: None,
+        };
+        for (repository, settings) in &space.repository_settings {
+            let saved = current
+                .repository_settings(repository)
+                .map(|r| &r.behaviors);
+            let saved = saved.cloned().unwrap_or_default();
+            check(
+                Layer::Repository,
+                &below_repository,
+                &saved,
+                &settings.behaviors,
+            )?;
+        }
+        Ok(())
     }
     /// What a project's agents get, or with `ticket_id` that ticket's agents, and where each
     /// value came from. A project stops at its Space; a ticket resolves its repository in it.
@@ -755,12 +787,23 @@ mod tests {
         set(&mut f, space(&sage), &[(PUBLISHING, ALWAYS_ASK)], "").unwrap();
         let refused = set(&mut f, app(&sage), &[(PUBLISHING, "allowed_owners")], "");
         assert!(format!("{:#}", refused.unwrap_err()).contains("a Repository may only make"));
-        // A teammate's Mac wrote the looser value; this Mac's stricter Workspace stands.
-        let mut written = f.host.space(&sage).unwrap().space;
-        written
-            .behaviors
-            .insert(REVIEW_DEPTH.into(), "proportional".into());
-        f.host.update_space(written).unwrap();
+        // Nor through the Space page's save.
+        let mut edited = f.host.space(&sage).unwrap().space;
+        let looser = (REVIEW_DEPTH.to_owned(), "proportional".to_owned());
+        edited.behaviors.extend([looser]);
+        let refused = f.host.update_space(edited.clone()).unwrap_err();
+        assert!(format!("{refused:#}").contains("a Space may only make Review depth stricter"));
+        // A teammate's Mac wrote the looser value; this Mac's stricter Workspace stands, and an
+        // edit that leaves it as it was still saves.
+        f.host
+            .db
+            .execute(
+                "UPDATE spaces SET data=?2 WHERE id=?1",
+                params![sage.as_str(), encode(&edited).unwrap()],
+            )
+            .unwrap();
+        edited.description = "Sage Haven work".into();
+        f.host.update_space(edited).unwrap();
         let depth = resolved(&f, REVIEW_DEPTH).resolved;
         assert_eq!(
             (depth.value.as_str(), depth.from),
