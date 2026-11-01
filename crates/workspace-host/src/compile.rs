@@ -126,6 +126,23 @@ pub(crate) fn write_cursor(index: &str, cursor: &Cursor) -> String {
     format!("---\n{}\n---\n{body}", kept.join("\n"))
 }
 
+/// Whether `main`'s cursor has compiled everything `run`'s did: the same `compiled-through`
+/// with at least its `compiled-after` ids, or a later one, as another compiler may have moved
+/// it on since.
+fn at_or_past(checkout: &Path, main: &Cursor, run: &Cursor) -> bool {
+    match (&run.through, &main.through) {
+        (Some(run_through), Some(main_through)) if run_through == main_through => {
+            run.after.iter().all(|id| main.after.contains(id))
+        }
+        (Some(run_through), Some(main_through)) => {
+            publish::is_ancestor(checkout, run_through, main_through)
+        }
+        (Some(_), None) => false,
+        (None, Some(_)) => true,
+        (None, None) => run.after.iter().all(|id| main.after.contains(id)),
+    }
+}
+
 /// A pending entry as a run reads it on `main`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PendingEntry {
@@ -886,9 +903,12 @@ impl Host {
             return Ok(None);
         }
         let index = format!("{}/{INDEX}", work.brain_dir);
-        let on_main = (brain.head.as_deref())
-            .map(|head| read_cursor(&file_at(Path::new(&brain.checkout), head, &index)));
-        Ok((on_main.as_ref() != Some(&work.cursor)).then(|| {
+        let checkout = Path::new(&brain.checkout);
+        let fetched = (brain.head.as_deref()).is_some_and(|head| {
+            let on_main = read_cursor(&file_at(checkout, head, &index));
+            at_or_past(checkout, &on_main, &work.cursor)
+        });
+        Ok((!fetched).then(|| {
             let number = batch
                 .pull_request
                 .map_or(String::new(), |pr| format!(" #{}", pr.number));
@@ -2639,6 +2659,15 @@ mod tests {
         );
         assert!(run(&mut b.f.host, &b.tools));
         assert_eq!(b.cursor_on_main(), work.cursor);
+        // The compiler moves to another host, which compiles past this host's cursor, and
+        // back: this host's last cursor is behind main's, which it never waits for.
+        let later = b.merge(&[relay(2)]);
+        let moved_on = Cursor {
+            through: Some(later),
+            after: vec![],
+        };
+        b.merge(&[("notes/INDEX.md".into(), write_cursor("", &moved_on))]);
+        assert_ne!(b.cursor_on_main(), work.cursor);
         b.f.host.run_brain_compile(REPO).unwrap();
         b.prepare();
         assert_eq!(

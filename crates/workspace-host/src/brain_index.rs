@@ -19,6 +19,9 @@ const INDEX: &str = "notes/INDEX.md";
 const QUEUE: &str = "reconcile-queue.md";
 const CONFLICT_MARKER: &str = "<!-- conflict:";
 
+/// The claimed entries naming a PR that a pass with no new commit asks GitHub about again,
+/// newest first, so a pass stays bounded.
+const RECHECKED_PRS: usize = 50;
 /// How a ruling entry's `state` begins, followed by the conflict's id and a colon.
 pub(crate) const RULING_PREFIX: &str = "Ruling on conflict ";
 
@@ -510,7 +513,8 @@ pub(crate) struct Refresh<'a> {
 
 /// Brings the index to `commit`: reads and stores only the files whose blob changed, removes
 /// the deleted ones, and checks every entry's ref not yet verified. A commit already indexed,
-/// with the same brain folder, does nothing. Answers how many files it read.
+/// with the same brain folder, reads nothing, and with `gh` asks again about the PRs claimed
+/// entries name. Answers how many files it read.
 pub(crate) fn refresh(refresh: Refresh) -> Result<usize> {
     let Refresh {
         index,
@@ -524,6 +528,13 @@ pub(crate) fn refresh(refresh: Refresh) -> Result<usize> {
     let mut db = open(index)?;
     let at = format!("{brain_dir}\0{commit}");
     if state(&db, "commit")?.as_deref() == Some(at.as_str()) {
+        // A PR merged since does not change the brain, so its claimed entries are asked about
+        // again, as a compile asks.
+        if gh.is_some() {
+            let transaction = db.transaction()?;
+            verify_entries(&transaction, clones, gh, true)?;
+            transaction.commit()?;
+        }
         return Ok(0);
     }
     let previous = state(&db, "commit")?
@@ -622,7 +633,7 @@ pub(crate) fn refresh(refresh: Refresh) -> Result<usize> {
     }
     resolve_sources(&transaction)?;
     mark_pending(&transaction, checkout, commit, &prefix, compiled)?;
-    verify_entries(&transaction, clones, gh)?;
+    verify_entries(&transaction, clones, gh, false)?;
     set_state(&transaction, "last_compile", compile_time)?;
     set_state(&transaction, "last_compile_commit", compile_commit)?;
     set_state(&transaction, "commit", Some(&at))?;
@@ -704,12 +715,19 @@ fn verify_entries(
     db: &Connection,
     clones: &Clones,
     gh: Option<&publish::Tool<runtime::GhAnswer>>,
+    only_named_prs: bool,
 ) -> Result<()> {
     type Unverified = (i64, String, String, Option<String>, Option<String>);
+    let which = match only_named_prs {
+        true => format!(
+            "verification='claimed' AND reference LIKE '% · PR #%' ORDER BY id DESC LIMIT {RECHECKED_PRS}"
+        ),
+        false => "coalesce(verification,'')<>'verified'".into(),
+    };
     let unverified: Vec<Unverified> = db
-        .prepare(
-            "SELECT id,coalesce(repository,''),coalesce(reference,''),verification,verification_reason FROM files WHERE class='entry' AND coalesce(verification,'')<>'verified'",
-        )?
+        .prepare(&format!(
+            "SELECT id,coalesce(repository,''),coalesce(reference,''),verification,verification_reason FROM files WHERE class='entry' AND {which}"
+        ))?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
         .collect::<rusqlite::Result<_>>()?;
     let refs: Vec<(&str, &str)> = (unverified.iter())
@@ -2441,6 +2459,103 @@ pub(crate) mod tests {
         assert_eq!(
             status.pending_entries, 1,
             "only the batch after the compile"
+        );
+    }
+
+    #[test]
+    fn a_pr_merged_after_indexing_verifies_its_entry_in_the_browser_as_in_a_compile() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // A clone of `relay` whose PR #92 commit is only on its branch.
+        let code = tempfile::tempdir().unwrap();
+        let clone = code.path().join("relay");
+        git(
+            code.path(),
+            &["init", "-q", "-b", "main", clone.to_str().unwrap()],
+        );
+        git(&clone, &["commit", "-q", "--allow-empty", "-m", "main"]);
+        git(&clone, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&clone, &["checkout", "-q", "-b", "retry"]);
+        git(&clone, &["commit", "-q", "--allow-empty", "-m", "retry"]);
+        let sha = git(&clone, &["rev-parse", "HEAD"]);
+        let clones = Clones(HashMap::from([(
+            "relay".to_owned(),
+            vec![verify_refs::RepoClone {
+                path: clone,
+                defaults: vec!["refs/remotes/origin/main".into()],
+                github: Some("Sage-Social/relay".into()),
+            }],
+        )]));
+        let merged = Arc::new(AtomicBool::new(false));
+        let state = merged.clone();
+        let gh: publish::Tool<runtime::GhAnswer> = Arc::new(move |_, args| {
+            assert_eq!(
+                args.last().copied(),
+                Some("repos/Sage-Social/relay/pulls/92")
+            );
+            let merged = state.load(Ordering::SeqCst);
+            Ok(runtime::GhAnswer {
+                status: publish::tests::exit(0),
+                output: json!({"state": if merged { "closed" } else { "open" }, "merged": merged})
+                    .to_string(),
+                error: String::new(),
+            })
+        });
+        let reference = format!("retry @ {} · PR #92", &sha[..7]);
+        let brain = Checkout::new();
+        let head = brain.commit(
+            &[entry(
+                "relay",
+                &id(7),
+                ("mhohlios", "decision", "Retry once"),
+                &reference,
+            )],
+            "Log batch (#80)",
+        );
+        let refresh_now = || {
+            refresh(Refresh {
+                index: &brain.index(),
+                checkout: &brain.path(),
+                commit: &head,
+                brain_dir: "second-brain",
+                clones: &clones,
+                gh: Some(&gh),
+                compiled: &HashSet::new(),
+            })
+            .unwrap()
+        };
+        let stored = || -> String {
+            brain
+                .db()
+                .query_row(
+                    "SELECT verification FROM files WHERE entry_id=?1",
+                    [id(7)],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let compiled = || {
+            let refs = [("relay", reference.as_str())];
+            verify_refs::verify_with(
+                &clones,
+                &refs,
+                &mut verify_refs::Cache::default(),
+                Some(&gh),
+            )
+            .remove(0)
+            .state
+        };
+        refresh_now();
+        assert_eq!(
+            (stored(), compiled()),
+            ("claimed".to_owned(), RefState::Claimed)
+        );
+        // The PR is squash-merged; the brain does not change.
+        merged.store(true, Ordering::SeqCst);
+        assert_eq!(refresh_now(), 0, "nothing is read again");
+        assert_eq!(
+            (stored(), compiled()),
+            ("verified".to_owned(), RefState::Verified)
         );
     }
 
