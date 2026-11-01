@@ -303,7 +303,7 @@ impl Store {
         stamp
     }
     /// What the index keeps of the issue, read from its files.
-    pub(crate) fn indexed(&self, id: &IssueId, tracker: &str) -> Result<Indexed> {
+    fn indexed(&self, id: &IssueId, tracker: &str) -> Result<Indexed> {
         // Taken first, so a write while the files are read is found by the next look.
         let stamp = self.stamp(id);
         let mut digest = Sha256::new();
@@ -382,7 +382,7 @@ impl Store {
 }
 
 /// One issue as the index keeps it, `issues.sql`'s `issue_index`.
-pub(crate) struct Indexed {
+struct Indexed {
     listing: IssueListing,
     stamp: String,
     version: String,
@@ -425,7 +425,7 @@ fn listing(record: &IssueRecord) -> IssueListing {
 
 /// The highest number with `prefix` that any `issues/<ID>/` path has had in the history up to
 /// `commit`, so an issue deleted by an ordinary commit never gives its number away; 0 for none.
-pub(crate) fn highest_number(folder: &Path, commit: &str, prefix: &str) -> Result<u64> {
+fn highest_number(folder: &Path, commit: &str, prefix: &str) -> Result<u64> {
     Ok(used_numbers(folder, commit, prefix)?
         .last()
         .copied()

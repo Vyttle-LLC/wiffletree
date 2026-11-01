@@ -663,6 +663,11 @@ enum Event {
     StorageSynced(String, Result<storage::Passed>),
     /// A brain's pass finished on its own thread; `None` when it panicked.
     BrainPassed(String, Option<brains::Passed>),
+    /// Import legacy logs read the brain's legacy logs and their authors off the host thread.
+    LegacyLogsRead {
+        found: Result<legacy_logs::LegacyFound>,
+        reply: Reply,
+    },
     /// A storage repository was checked and cloned off the host thread, for a new Space or the
     /// Spaces to join.
     StorageStaged {
@@ -977,8 +982,8 @@ struct Actor {
     gh_account_seen: Option<std::time::SystemTime>,
     /// `gh` as every GitHub read runs it, and Git as publish steps run it.
     publish_tools: publish::Tools,
-    /// The settings repository's pace, with the cadence of every rule set it holds: settings,
-    /// and the Spaces and tracker of a storage repository it also is.
+    /// The settings repository's pace, at `settings_cadence`: every minute while it is also a
+    /// Space's tracker, else the settings cadence.
     sync_pace: repos::Pace,
     /// By `repos::key`, the pace of each GitHub storage repository that is not the settings
     /// repository, whose pass runs with the settings rule set.
@@ -1573,6 +1578,23 @@ impl Actor {
                     let _ =
                         sender.send_blocking(Event::SettingsRepositoryPrepared { prepared, reply });
                 });
+            }
+            // The read makes one `gh api` call per commit, so it runs off the host thread; the
+            // reply answers once its batches are queued, or with why it failed.
+            Command::ImportLegacyLogs { repository } => {
+                let read = self.host.begin_legacy_import(repository)?;
+                let tools = self.publish_tools.clone();
+                spawn_job(
+                    self.sender.clone(),
+                    (read, reply.clone()),
+                    move |(read, _)| read.run(&tools),
+                    |_| {
+                        Err(anyhow::anyhow!(
+                            "The legacy log import stopped unexpectedly"
+                        ))
+                    },
+                    |(_, reply), found| Event::LegacyLogsRead { found, reply },
+                );
             }
             Command::SyncNow => {
                 self.sync_pace.sync_now();
@@ -2321,6 +2343,15 @@ impl Actor {
                     }
                 }
                 true
+            }
+            Event::LegacyLogsRead { found, reply } => {
+                let git = &self.publish_tools.git;
+                let result = (found.and_then(|found| self.host.finish_legacy_import(found, git)))
+                    .and_then(|import| Ok(serde_json::to_value(import)?))
+                    .map_err(|e| format!("{e:#}"));
+                let imported = result.is_ok();
+                let _ = reply.try_send(result);
+                imported
             }
             Event::StorageSynced(key, passed) => {
                 if let Some(pace) = self.storage_paces.get_mut(&key) {
@@ -9438,6 +9469,51 @@ mod tests {
     }
 
     #[test]
+    fn import_legacy_logs_reads_off_the_host_thread_and_replies_once_its_batch_is_queued() {
+        use crate::brains::tests::{GitHub, REPO, name_brain, run};
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        host.legacy_pointer = home.path().join("no-pointer");
+        let sage = host.create_space("Sage", "", "", None).unwrap().space;
+        name_brain(&mut host, &sage.id, REPO);
+        host.record_gh_login(Some("mhohlios".into()));
+        let folder = tempfile::tempdir().unwrap();
+        let github = GitHub::new(folder.path());
+        let tools = github.tools();
+        github.commit_file_on_main(
+            "second-brain/logs/calls.md",
+            "## 2026-09-02 — Retry once\n- type: decision\n- changed: retry\n",
+        );
+        assert!(run(&mut host, &tools));
+        let (mut actor, _, _) = idle_actor(host);
+        actor.publish_tools = tools;
+        let (sender, events) = async_channel::bounded(8);
+        actor.sender = sender;
+        let command = Command::ImportLegacyLogs {
+            repository: REPO.into(),
+        };
+        let (reply, replies) = async_channel::bounded(1);
+
+        assert!(actor.scan_in_background(&command, &reply).unwrap());
+        let read = events.recv_blocking().unwrap();
+        assert!(matches!(read, Event::LegacyLogsRead { .. }));
+        assert!(replies.try_recv().is_err(), "answered once queued");
+        assert!(actor.host.brain_batches(Some(REPO)).unwrap().is_empty());
+
+        assert!(actor.handle(read), "the Brains page reads its batch");
+        let import: LegacyImport =
+            serde_json::from_value(replies.recv_blocking().unwrap().unwrap()).unwrap();
+        assert_eq!((import.added, import.batches, import.done), (1, 1, false));
+        assert_eq!(actor.host.brain_batches(Some(REPO)).unwrap().len(), 1);
+
+        // A brain that cannot import is refused at once, with nothing left running.
+        actor.host.record_gh_login(None);
+        let error = actor.scan_in_background(&command, &reply).unwrap_err();
+        assert!(format!("{error:#}").contains("GitHub login"), "{error:#}");
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
     fn a_running_step_is_stored_again_when_its_files_arrive() {
         let (_home, mut actor, session, run) = actor_with_turn();
         // Claude announces a tool call before its input, and so before its path.
@@ -11149,6 +11225,57 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        assert_eq!(actor.scheduling.wake_at, None);
+    }
+
+    #[test]
+    fn a_compiles_turn_is_stopped_at_thirty_minutes_without_a_check_in() {
+        let home = tempfile::tempdir().unwrap();
+        let host = Host::open_set_up(home.path()).unwrap();
+        let compile = Session {
+            id: "compile".into(),
+            project_id: String::new(),
+            parent_id: None,
+            repository_id: None,
+            name: "Brain compile · acme/brain".into(),
+            role: Role::Compiler,
+            provider: Provider::Claude,
+            status: Status::Working,
+            archived: false,
+            owner: Some(SessionOwner::Brain("acme/brain".into())),
+        };
+        (host.db)
+            .execute(
+                "INSERT INTO sessions VALUES (?1,NULL,NULL,?2,?3)",
+                params![
+                    compile.id,
+                    tag(&compile.role).unwrap(),
+                    encode(&compile).unwrap()
+                ],
+            )
+            .unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+        let started = now();
+        let mut turn = active_turn("compiling", vec![]);
+        turn.started_at = started;
+        turn.next_check_in = started + CHECK_IN_MS;
+        actor.active.insert(compile.id.clone(), turn);
+        let minutes = |m: i64| started + m * 60_000;
+
+        actor.check_in_long_turns(minutes(29));
+        assert!(!actor.active[&compile.id].cancel.load(Ordering::Relaxed));
+
+        actor.check_in_long_turns(minutes(30));
+        let turn = &actor.active[&compile.id];
+        assert!(turn.cancel.load(Ordering::Relaxed));
+        assert_eq!(
+            turn.stopped_by_parent.as_deref(),
+            Some(crate::compile::TIMED_OUT)
+        );
+        assert!(actor.host.attention_count().unwrap() == 0);
+        // A stopped turn winding down arms no further check-in.
+        actor.scheduling.wake_at = None;
+        actor.check_in_long_turns(minutes(61));
         assert_eq!(actor.scheduling.wake_at, None);
     }
 
