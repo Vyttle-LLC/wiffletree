@@ -13,120 +13,186 @@
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-86C1BC"></a>
 </p>
 
-![The Tide alerts coordinator reporting an accepted ticket, under a progress strip that reads 1 of 3 tickets accepted](docs/images/coordinator.png)
+![The Tide alerts coordinator reporting that a ticket passed its Full review and was accepted, under a progress strip that reads 1 of 3 tickets accepted](docs/images/coordinator.png)
 
-<table>
-  <tr>
-    <td width="50%"><img src="docs/images/tickets.png" alt="The Agents panel beside the coordinator's chat, listing three tickets by stage with their agents, models and progress"></td>
-    <td width="50%"><img src="docs/images/models.png" alt="The Models page: when a subscription runs low, and the Who runs what table, with a first choice, a next choice and a Right now column for each job"></td>
-  </tr>
-  <tr>
-    <td align="center"><sub>Every ticket gets its own branch, implementer and independent reviewers.</sub></td>
-    <td align="center"><sub>You decide who runs each job, and what happens when a subscription runs low.</sub></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="docs/images/usage.png" alt="The Usage page with Claude and Codex 5-hour and weekly account limits above a week of daily Claude and Codex tokens"></td>
-    <td width="50%"><img src="docs/images/context.png" alt="An implementer's Context card showing how full its context window is, by category, with a Compact button"></td>
-  </tr>
-  <tr>
-    <td align="center"><sub>Account limits from the providers, above the tokens your agents used each day.</sub></td>
-    <td align="center"><sub>See what fills an agent's context, and compact it when you choose.</sub></td>
-  </tr>
-</table>
+## What it is
+
+- **One goal, one coordinator.** You describe an outcome, and a coordinator plans it, staffs it and reports back.
+- **A team of agents.** Claude and Codex play any role, and you choose who runs what.
+- **Tested branches.** Someone other than the author checks every ticket before it is accepted.
+- **Memory that lasts.** A Space can keep a second brain, a Git repository of what your team decided and learned.
+- **Why we built it.** The hard part moved from writing code to keeping several agents on one goal, and that work cuts across repositories.
+
+The full explanation of everything below is in **[docs/FEATURES.md](docs/FEATURES.md)**.
 
 ## Install
 
-Wiffletree runs on Apple Silicon Macs with macOS 13 or later. Install the latest release with one command:
+- You need an Apple Silicon Mac with macOS 13 or later. Install the latest signed release with one command:
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/Vyttle-LLC/wiffletree/main/scripts/install.sh | bash
-```
+  ```sh
+  curl -fsSL https://raw.githubusercontent.com/Vyttle-LLC/wiffletree/main/scripts/install.sh | bash
+  ```
 
-The script downloads the signed and notarized app from [Releases](https://github.com/Vyttle-LLC/wiffletree/releases/latest), checks it with Gatekeeper, moves it to `/Applications` and opens it. Run it again any time to reinstall. To install somewhere else, set `WIFFLETREE_INSTALL_DIR=~/Applications`. If you prefer to do it by hand, download `Wiffletree-<version>-macos-arm64.zip`, unzip it and drag `Wiffletree.app` to Applications.
+- Run it again to reinstall, or set `WIFFLETREE_INSTALL_DIR=~/Applications` to install elsewhere. [Releases](https://github.com/Vyttle-LLC/wiffletree/releases/latest) has the zip.
+- Install [Claude Code](https://code.claude.com), [Codex](https://github.com/openai/codex) or both, and sign in:
 
-Wiffletree drives the agent CLIs you already use, so install [Claude Code](https://code.claude.com), [Codex](https://github.com/openai/codex) or both, and sign in:
+  ```sh
+  claude auth login
+  codex login
+  ```
 
-```sh
-claude auth login
-codex login
-```
+- On first run, review the suggested setup on the Models page and press **Save**. No agent starts until a setup is saved.
+- Press **⌘N**, add a repository, and tell the coordinator what you want. See [your first project](docs/DEVELOPMENT.md#first-project).
+- Updates are automatic: a sidebar card offers **Restart to update**.
 
-The first time you open Wiffletree, a welcome screen lists the CLIs it found signed in and offers a model setup suggested from them. Review it on the Models page and press **Save**; no agent starts until a setup is saved. Then press **⌘N**, add a repository, and tell the coordinator what you want built. [Your first project](docs/DEVELOPMENT.md#first-project) walks through it step by step.
+## Features
 
-**Updates are automatic.** The app checks hourly, downloads new versions in the background and shows a card in the sidebar with what changed. Click **Restart to update**, or quit Wiffletree from its menu bar icon. To check right away, click the version number at the bottom of the sidebar.
+<table>
+  <tr>
+    <td><img src="docs/images/agents.png" alt="The Agents panel beside the coordinator's chat, listing two open tickets by stage with their agents, models and progress"></td>
+    <td><img src="docs/images/review.png" alt="The Tickets panel showing a ticket in round 2 of its Full review, with round 1's results and a blocking finding in its decision ledger"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Every ticket shows its agents and progress.</sub></td>
+    <td align="center"><sub>Reviews keep each round and finding.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/spaces.png" alt="The Spaces page for the Tidepool Space, with its description, brain, compile time, brain gate, code repositories and sources"></td>
+    <td><img src="docs/images/brain.png" alt="The brain browser's Status view for a demo brain, with its status note, compile times and five pending entries"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>A Space holds a brain, repositories and rules.</sub></td>
+    <td align="center"><sub>The brain browser reads a second brain.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/issues.png" alt="The Issues page as a board, with demo issues in Triage, Backlog, Todo and In progress columns"></td>
+    <td><img src="docs/images/assistant.png" alt="An Assistant thread in the Tidepool Space answering a status question, then saving two outputs to Boards"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Issues are plain files in your repository.</sub></td>
+    <td align="center"><sub>The Assistant answers in read-only threads.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/models.png" alt="The Models page's Who runs what table, with a first choice, a next choice, a small-work line and a Right now column for each job"></td>
+    <td><img src="docs/images/usage.png" alt="The Usage page with Claude and Codex 5-hour and weekly limits above seven days of token totals and a table by model"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>You decide who runs each job.</sub></td>
+    <td align="center"><sub>Limits sit above what your agents used.</sub></td>
+  </tr>
+</table>
+
+### Projects and the coordinator
+
+- A project is an outcome, such as a feature or a bug, not a repository.
+- Each project has one coordinator, which plans, asks what matters and reports the result.
+- Workers report blockers to the coordinator. Only it escalates to you, through one Inbox.
+
+[More on projects](docs/FEATURES.md#projects-and-the-coordinator)
+
+### Tickets
+
+- Each ticket has one repository, its own branch and its own worktree.
+- An implementer builds it and separate agents check it. "The turn ended" never counts as "it works."
+- Agents talk through a durable message queue, and each resumes its exact session after a restart.
+
+[More on tickets](docs/FEATURES.md#tickets)
+
+### Reviews
+
+- A review level is a named set of testers and reviewers, called verifiers.
+- A full review can be a ticket's only review. A re-check, such as "Light", runs only after a review that passed.
+- All verifiers run at once on one commit, and only those that failed check again.
+- Findings need a location, a trigger and evidence, and they stay in the ticket's decision ledger.
+- You cap the rounds in a review and the full reviews per ticket.
+
+[More on reviews](docs/FEATURES.md#reviews)
+
+### Spaces
+
+- A Space answers "where does this go?" for projects, threads, jobs and issues.
+- It holds a brain, code repositories, instructions for every role and its own model rows.
+- A new Space is local and never pushed. To share one, store it in a private GitHub repository.
+- Only you create and edit Spaces. No agent tool can.
+
+[More on Spaces](docs/FEATURES.md#spaces)
+
+### Second brain
+
+- **Logging:** agents record decisions as they work, and entries reach the brain in batched pull requests.
+- **Reading:** agents ask with `query_brain`, and you use the brain browser's Status, Wiki, Logs and Conflicts views or ⌘K.
+- **Compile:** one Mac folds entries into notes on a schedule, and conflicts come to you as Inbox cards.
+- **The brain gate:** seven deterministic checks guard `main`, including secret and personal-data scans.
+
+[More on the second brain](docs/FEATURES.md#second-brain)
+
+### Issues
+
+- The Issues page shows every Space's issues as a list or a board.
+- Each issue is plain files in its Space's storage repository, and it stays in Git history for good.
+- Start a project from an issue, import from Linear, or let the assistant suggest changes for you to apply.
+
+[More on issues](docs/FEATURES.md#issues)
+
+### Assistant, recurring jobs and Boards
+
+- The assistant takes quick questions in threads, and a router picks each message's thread and Space.
+- A thread is read-only plus a scratch folder, and it stays on your Mac.
+- Recurring work is a job only you can save, and Boards keeps what threads and jobs produce.
+
+[More on the assistant](docs/FEATURES.md#assistant-recurring-jobs-and-boards)
+
+### Models and usage
+
+- Any model can play any role, and the Who runs what table sets each job's choices.
+- A job moves on when a limit passes your threshold, 95% by default. Wiffletree never buys more.
+- Limits come only from the providers' own telemetry, and the Usage page charts tokens by day.
+- Each agent's Context card shows what fills its context, with **Compact…** beside it.
+
+[More on models and usage](docs/FEATURES.md#models-and-usage)
+
+### Behaviors and skills
+
+- The Behaviors page changes how agents work at the Workspace, a Space or a repository.
+- Five skills hold each role's instructions. You can add rules or rewrite them and still get updates.
+- Every agent also has a fixed core you can read but not edit.
+
+[More on Behaviors](docs/FEATURES.md#behaviors-and-skills)
+
+### Pull requests
+
+- **Publishing:** Wiffletree pushes a reviewed ticket and opens its pull request.
+- **Protected branches:** each repository lists them, and Wiffletree refuses to merge into one.
+- **Merging:** it merges into other branches only at the reviewed commit, when the coordinator asks.
+- **The PR keeper:** an opt-in helper rebases pull requests and tries once to fix a conflict or failed checks.
+
+[More on pull requests](docs/FEATURES.md#pull-requests)
+
+### Also included
+
+- **[Settings sync](docs/FEATURES.md#settings-sync):** a private GitHub repository keeps your skills and review settings on every Mac.
+- **[Remote access](docs/FEATURES.md#remote-access):** pair another Mac to drive this one. It is off by default.
+- **[Processes panel](docs/FEATURES.md#processes-panel):** see and stop the dev servers agents leave running.
 
 > [!WARNING]
-> Agents run with their provider's permission prompts bypassed so they can work unattended. Add only repositories you are comfortable letting them change. Wiffletree itself pushes a ticket's branch and opens its pull request only through its own checked operation: without asking in repositories whose GitHub owner you allow, and after your approval everywhere else. It merges a ticket's pull request only through its own checked merge, which the coordinator asks for, only in those repositories and only into a branch that is not protected. It never merges into a protected branch and never approves, closes or comments on a ticket's pull request. For a brain you name in a Space, it also pushes its own `wiffletree/brain/` branches, opens their pull requests and turns on auto-merge, so GitHub merges each once the brain gate's required checks pass, except Set up's and Update gate's, which wait for the code owner's review; it closes one only when you choose Discard. If you turn on the PR keeper, Wiffletree also rebases a ticket's open pull request and replaces the branch on GitHub, which changes every commit id on the pull request: whenever its base moves with "Keep it rebased" ticked, or, with only "Keep it free of conflicts and failed checks" ticked, only when the pull request conflicts or its checks fail. Agents can still run any command on your Mac, including a push or a merge with your credentials, which Wiffletree does not prevent. That includes the PR keeper's model, which gets one try at a conflict or at failed checks when "Keep it free of conflicts and failed checks" is ticked: Wiffletree checks only what the try leaves behind, which files changed and whether your checks command passes, and has that reviewed before pushing it. Your checks command runs as you wrote it.
-
-## Why we built this
-
-Coding agents got good enough that the bottleneck moved. The hard part is no longer getting one agent to write code. It is keeping five of them pointed at the same goal across three repositories, and still knowing what is going on.
-
-The tools we had were terminal managers organized around repositories. They show you a lot, but the work we care about is a feature, a bug or an outcome, and those cut across repositories. Coordination meant pasting text into terminals, so nobody could say for sure whether a message had arrived, been read or been acted on. When something crashed, the plan lived only in our heads.
-
-We wanted to hand off a goal the way you would to a strong team lead, then check in when it mattered. So we built a workspace around that idea instead of around terminals.
-
-## How work gets done
-
-Wiffletree has opinions about how agent work should be organized.
-
-**Projects are outcomes, not repositories.** A project is a feature, a bug or any goal you want reached. Repositories are attached to it, and one repository can serve many projects at once.
-
-**Every project belongs to a Space.** A Space, such as Sage, Vyttle or Personal, answers "where does this go?". It has a description, instructions, a brain the project's coordinator logs to, the code repositories it covers and default models. New project starts in the Space you used last, with that Space's repositories ticked, and says which brain the project will log to; a repository the Space lists that is not cloned on this Mac is shown as not cloned here. The Repositories page groups repositories by Space, with one chip per Space on each row, and a repository may be in several Spaces or none. Adding a repository suggests a Space from its GitHub owner, which only suggests. You create, edit and remove Spaces on the Spaces page in the sidebar, which is Settings › Spaces, and only you change which repositories a Space lists: no agent tool can.
-
-**A Space's storage repository is also its tracker.** Each Space keeps its definition in a Git repository, in `spaces/<space>/space.yaml`, and that repository's `issues/` folder and `wiffletree-issues.yaml` are the Space's issues, with one prefix such as SAGE. A new Space gets a local repository in the data folder with no remote, which is a private tracker that is never pushed. A team shares a Space by storing it in a private GitHub repository; a teammate adds it with Add Space → From a repository and says where its brain and each code repository are cloned on their Mac, or leaves them missing. Spaces stored in one repository share its issues and prefix. Everyone who can read that repository can read the Space and its issues, and the Space's page says who that is. Anyone who can push to it can change the Space's instructions for everyone in it and can read and edit its issues, so the page says that too. Edits to a shared Space are commits that sync like settings, and an edit made on two Macs, or outside Wiffletree, pauses until you choose. Before pushing `spaces/` or `issues/`, Wiffletree runs the brain gate's personal-data and secret scans on your Mac. A file that fails, or that a check cannot scan, for example because gitleaks is missing, stays on your Mac with a note naming the file, the check and the rule, never the text it matched.
-
-**Issues are your team's shared backlog.** The Issues page, in the sidebar before Repositories, lists the issues of every Space as a list grouped by state or as a board, with filters for Space, open, assignee, priority, label and repository, and a search over titles, descriptions and comments. Drag a card to move it; open an issue to read its description and timeline, comment, and change its state, priority or assignee. An issue changed since you last opened it carries a dot, and the sidebar counts them. Unread marks and filters stay on your Mac. Each issue is a folder of plain files in its Space's storage repository: a private GitHub repository your team chooses, or a local one that stays on your Mac. Choosing the GitHub repository is what lets Wiffletree push issues to it. A new issue there has a temporary ID until it is pushed and numbered. Issue text is scanned for personal data and secrets before it is pushed, but know the limits: issues stay in Git history for good, even after you delete or edit them; everyone who can read the repository can read them, including, for an organization's repository, its members; anyone who can push can edit any issue; and an agent's shell can still push to the repository with your credentials, though sync does not spread an edit it did not make. Teammates without Wiffletree can add and edit issues through GitHub, and an issue file Wiffletree cannot read is shown as written. Tickets, agents, projects and conversations are never written to a tracker: an issue is not a ticket.
-
-**Quick questions go to the assistant, not a project.** The assistant, pinned above Projects in the sidebar under the name you give it in Settings, holds many threads in tabs. Each thread is its own small Claude or Codex session in one Space, which never changes. Before each message a router, a small Claude model on the Router row with every tool off (Codex cannot yet run with every tool off, so a Router row on Codex always asks), answers which thread and which Space it belongs to: it continues the thread, switches to another open one or opens a new tab, and a message that went elsewhere leaves a line saying where, with Change. When it is less sure than the threshold in Settings (0.8 at first), when it fails or when its row is spent, it asks with one-click choices and holds your message, unsent, until you answer, even across a restart; picking a Space with the chip in the composer skips it. A thread starts on the model the Assistant row in Who runs what picks, unless the Space names a default for threads that this Mac can run. A thread is read-only plus its own scratch folder in the data folder, and the provider enforces it: Claude runs in a permission mode that denies, without asking, everything but reading, web search and fetch, writes under the scratch folder, the thread's own tools and its Space's sources, with none of your Claude settings files; Codex runs in its workspace-write sandbox rooted at the scratch folder, with no temporary folders, no shell network and approvals never asked. A run that starts with a tool or MCP server it was not given is stopped, and says so. A thread has no coordination tool and cannot edit a repository, commit, push, change a Space or a setting, or start agents. It can save a scratch file to Boards, kept only on this Mac; suggest a new Space, which you create yourself; and offer Make this a project, which, once you confirm its brief, starts a project in the thread's Space and leaves the thread read-only. Threads stay on this Mac, never sync, leave the tab strip a day after their last message and stay searchable. A thread reads its Space's whole brain with `query_brain`, and when you ask it to remember something it logs one entry there with `log_work`, under the brain's `logs/assistant/` folder, sent in a batch pull request like an agent's; deleting the thread closes its batch and keeps its entries. ⌘K in a thread searches its Space's brain.
-
-**Ask the assistant about issues; you apply what it suggests.** Ask the assistant on an issue opens that issue's thread beside it, and on the Issues page a thread with the tracker's list attached, in the Space the page is filtered to, or the one you last used for a new project. A tracker two Spaces share has a separate thread in each, and a thread never changes its Space. An issue thread reads only its Space's tracker, and its Space's repositories on this Mac at their base branch, read-only and bounded. Because issue text is written by others, it has no web search or fetch and none of its Space's sources, so it has no way to send what it read off your Mac, and a notice names who wrote what it reads. It cannot link an issue to work, create a ticket or log to the brain. Every change it suggests is a card: an edit as a diff, a comment, a split, a duplicate link or a new issue, which any thread may propose in its own Space. Nothing reaches the tracker until you choose Apply, which writes as you; Edit changes the proposal's text first, and Discard writes nothing. A card whose issue changed since says who changed it and shows the change against the current version. A comment you apply reads "Assistant for ‹you›" on every Mac, and an issue you file from a card says the assistant filed it for you.
-
-**Recurring work is a job only you can save.** Ask the assistant for something recurring, such as a brief every weekday at 7, and its thread shows a recipe card: the prompt, the schedule in words with its next three runs, the model, and every source a run may read, each checked now, such as `gh pr list` and `gh pr view` or a Linear MCP server's read tools. A command-line source can be only gh, linctl, sentry-cli or aws, and only their read commands on Wiffletree's short list; a write such as `gh pr comment` is refused. Before a run, each MCP server is started and must answer and list its tools. Nothing is scheduled until you press Save job; no thread, run, note or file can save, change or enable a job, and the assistant's Jobs list and each job's page are where you pause, resume, run, edit or delete one. Each run is a fresh read-only thread in the job's Space, offered only its recipe's sources, and saves its result as a file kept at the same place each time, as a new version. Before a run, Wiffletree checks each source is installed and signed in, and a run with one missing does not start and says how to fix it. A job with a command-line source runs only on Claude, which can hold the CLI to its listed commands; Codex cannot yet. Jobs run only while Wiffletree runs and never wake your Mac: missed runs come back as one catch-up run, and the Jobs list offers Start Wiffletree at login. A run that has gone 30 minutes shows on the assistant's row and on its job's page with Stop, and one that failed or did not start counts there until you open its job.
-
-**Boards keeps what threads and jobs save.** Boards, pinned under the assistant, lists every output with its Space, the job that wrote it or "From a thread", when it last changed, a preview and where it is kept: "Shared in ‹Space›", or "Only on this Mac". A job's output says Stale when two of its scheduled runs passed without a new version, and a shared job's names the Mac that runs it. Filter by Space and job, or search titles; its Jobs button opens the assistant's Jobs list. Markdown opens in Wiffletree; HTML opens in an embedded web view that runs its scripts but cannot reach the network, other files, or navigate away, and a link offers Open in browser instead; images and PDFs open in Quick Look; anything else opens in its default app. The picker lists the latest first, then the history, a Git commit for each push and, for a shared job's output, the saves replaced before a push, marked as only on this Mac; picking an earlier one shows it without changing the latest. An output only on this Mac offers Share to Space…, which copies it into that Space's storage after saying who can read it. No thread or job moves an output.
-
-**A shared job runs on one Mac, or on everyone's.** In a Space stored on GitHub, a job is "One runner, shared result" unless you choose "Everyone runs their own". A one-runner job, such as a release dashboard, runs only on its runner's Mac: the Mac that saved it, until a member chooses Take over running, which commits their Mac as the runner. Every other member's Boards shows the runner's latest output with "Runs on ‹name›'s Mac", and Stale once two of its scheduled runs pass without a new version. Nothing a job writes is pushed until its runner approves it: its first output, and its first after anyone changes its prompt or sources, waits on the runner's Boards as "Waiting for your approval", with Share and Keep private, which leaves it only on that Mac. The approval is kept on the runner's Mac and never in the repository, and a member who takes over approves their own first output. An "Everyone runs their own" job is a template each member's Mac runs with that member's own sign-ins, and its results stay on that Mac.
-
-**Who can change a shared job's instructions.** Anyone who can push to a Space's storage repository can change its jobs' prompts and sources and the Space's instructions, for every member. The runner's approval of each changed prompt or source list is what keeps a changed job from pushing what it read, and an edit made outside Wiffletree pauses until you choose. No thread, job run, note or file can save, enable, take over or approve a job: only the Wiffletree app sends those commands, and a run's shell is held to its listed read commands. A project agent's shell is not sandboxed, though. It runs as you, so it can still write the storage clone in the data folder and push to the repository with your credentials, as it can for the settings repository. Sync does not spread an edit it did not make: such an edit waits for you on that Mac.
-
-**You talk to one coordinator.** Each project has a coordinator that owns the goal and the conversation with you. It plans, asks you the questions that matter and reports the result. You do not have to manage the agents underneath it.
-
-**Each ticket is its own workspace.** The coordinator breaks the work into tickets, one repository each, with its own branch and worktree. It assigns an implementer, then verifies with one call that runs every tester and reviewer in the chosen review level at once on the same commit, and accepts the result.
-
-**Tickets are small, isolated and tested by someone else.** Every ticket gets its own Git worktree and branch. An implementer builds it, and a separate tester checks it against the acceptance criteria. "The turn ended" never counts as "it works."
-
-**You decide how thorough a review is.** A review level is a named set of testers and reviewers, with a line telling the coordinator when to use it. A full review can be a ticket's only review. A re-check, such as the suggested "Light", runs only on a ticket whose last review passed, for example after a rebase or a small fix. You also cap the rounds in one review and the full reviews per ticket.
-
-**Blocked is not the same as needs-you.** Workers report blockers to the coordinator, which resolves most of them. Only the coordinator escalates to you, and it gathers its questions in one Inbox so you answer them once.
-
-**Any model can play any role, and you decide who runs what.** Claude can coordinate Codex implementers, and Codex can coordinate Claude. On the Models page, one table says who runs each job (the coordinator, implementers, testers, each reviewer and the PR keeper): a first choice, a choice for when that subscription runs low, and optionally a lighter line for small work. Wiffletree moves a job to its next choice when the first choice's subscription passes a threshold you set, 95% by default, and when every choice is past it, waits for the earliest reset; it never buys more. A reviewer's row can say skip instead, and then a review goes ahead without that reviewer and says so. By default the Claude and Codex reviewers wait rather than switch, so a second opinion stays a second opinion. The coordinator never picks models: it asks for a job, and for small work when it fits, and each agent shows why it runs where it does, just above the message box, such as "Started on Codex: Claude's weekly limit was at 96%". A running agent never switches provider. You can still change the model of any single agent yourself.
-
-**You can change how agents work, not what they may do.** The Behaviors page, after Models in the sidebar, is the one place for it. A scope bar picks the Workspace, which is you on every Mac, a Space, or one of that Space's repositories. For each role it lists the Behaviors, named choices such as Review depth or Publishing, each with its switch or pick, a chip naming where its value comes from (Stock, Workspace, the Space or the repository, or "Set here") and Reset to what the scope inherits. A Behavior a scope can't set shows its value read-only, and a Space or repository is offered only stricter Review depth and Publishing. A Space and a repository each have their own additions, free text after the Behaviors for every role in the Space, or for that repository's tickets in that Space. At the Workspace, a role's additions are its skill's own rules, and Advanced holds the five skills: Coordinating, Implementing, Reviewing, Keeping a PR and Assisting, for the assistant's threads. Each is a stock text bundled with Wiffletree, and you can add your own rules after it. Agents are told that your rules win where the two disagree. A saved change applies from each agent's next turn. A Codex agent gets it from its next new session, because a resumed Codex session keeps the instructions it started with. You can also rewrite the stock text itself, after a confirmation: your rewrite is sent in place of it. When a release brings a new version of a skill you rewrote, Wiffletree merges the update into your rewrite on its own, paragraph by paragraph, and leaves a note on the skill's page with Review changes, which shows each change before and after, and Undo, which puts back exactly what you had. Where you also changed a passage the update changes, the PR keeper's Claude model merges just that passage; with no such model, you choose the update's wording or yours on the skill's page. You are asked only when the model finds that the two wordings want different things: the question waits at the top of every project's Inbox and on the skill's page, and answering it on one Mac settles it on all of them. With a settings repository, one Mac merges for all of them. Until a merge applies, your rewrite keeps running as written, and the skill is marked out of date, with a dot on the Behaviors row and on Advanced, and what changed line by line; you can merge it in, mark it up to date or reset it. Reset to stock removes your rules or rewrite after asking, and a skill's History lists every change, newest first, with View and Restore, so nothing you wrote is lost. Every agent also gets a fixed core that you can read there but not edit: its workspace tools, how it reports, and the rules the app enforces whatever a skill says. Each skill's page lists what the app enforces and what the text decides. Authority is not in the text. An agent's shell is not sandboxed, so it can still run `git push` with your credentials, and it can write the skills folder in the data folder, as it can write the settings file.
-
-**Your settings can follow you to every Mac.** In Settings, name a private GitHub repository that you created, empty or already used by your other Mac. Wiffletree then keeps the skills with your rules, rewrites and their history, the review settings, the model notes, the switch threshold, the check-in thresholds and the PR keeper's triggers the same on every Mac that names it. It pulls at launch and every 5 minutes and pushes a few seconds after you change something, with no model. What belongs to one Mac stays there: who runs each job, the PR keeper's model included, the workspace folder, the owners allowed to get pull requests, the repositories and their checks, and the appearance. Passwords, tokens, the database, conversations, projects and tickets are never shared. Choosing the repository on a Mac is what lets Wiffletree push to it, only to its default branch, only its own files and never by force; the owners you allow for pull requests neither grant nor need that. Skills are part of every agent's instructions, so whoever can push to the repository can change how your agents work on every Mac, and an organization's members may be able to read a private repository it owns: Settings says who can before you choose. When two Macs change the same setting, or something other than Wiffletree changes one, that setting pauses until you choose, with a note at the top of every project's Inbox and a comparison of both versions. An agent's shell can still write the shared folder and push to the repository with your credentials. Sync does not prevent that, but it does not spread an edit it did not make: such an edit waits for you on that Mac.
-
-**Messages are durable.** Agents talk through the app's message queue, not by typing into each other's terminals. Every message is saved before it is acknowledged, and an idle recipient wakes the moment one arrives. After a restart, each agent resumes its exact provider session, and the app never silently retries work that might have had side effects.
-
-**Software does the routine work; models do the thinking.** Git state, status, polling and usage tracking are ordinary deterministic code. Models are woken only for decisions that need reasoning, so coordinators sleep between events instead of polling.
-
-**You can see how far along the work is.** The app derives the progress bars from each agent's checklist, each ticket's stage and its review results. The coordinator's strip shows the project's phase, one segment per ticket and how many tickets are accepted. The Agents panel, opened from any of the project's conversations, lists every ticket with its agents, their models and their progress, and marks an agent that is stuck.
-
-**You can see what fills an agent's context.** Each agent's Overview has a Context card that shows how full its context window is and with what, measured after every turn without a model call. Claude reports its own categories; for Codex they are estimates. **Compact…** on the same card replaces a Claude or Codex agent's conversation with a summary when you choose, and for Claude you can say what to keep.
-
-**You can stop what agents leave running.** A dev server or watcher an agent starts keeps running between its turns. The Processes panel lists what each agent has running, or every agent's from the coordinator, with how long it has run and its CPU, and stops one or all of them. Wiffletree also stops them when an agent is stopped or archived and when the app quits.
-
-**Usage and limits stay in view.** The sidebar shows each provider's 5-hour and weekly limits, and the Usage page puts both accounts side by side. Those percentages come only from the providers' own telemetry: the Codex app server, and the rate-limit events Claude sends during live turns, so a Claude window reads **Unavailable** when Claude reports no percentage. Wiffletree never scrapes account pages or spends tokens to check. Below the limits, it charts the tokens its agents used by day and ranks them by coordinator, with project and provider filters.
-
-**Humans own integration.** Agents deliver tested branches. Once a ticket's review has ended, Wiffletree pushes its branch and opens its pull request itself: without asking for the GitHub owners you allow on the Repositories page, and only after you approve each step everywhere else. Each repository on the Repositories page has a list of protected branches: its default branch on GitHub and its base are always on it, you add names and patterns such as `release/*`, and branches GitHub protects count too. When the coordinator asks, Wiffletree merges a ticket's pull request into any other branch, such as a feature branch, in a repository whose owner you allow, but only at the reviewed commit, with passing checks or none and no conflict, and the merge accepts the ticket. After a review that ended blocked it asks you first, on an Inbox card. You merge into protected branches, including a feature branch into `main`: Wiffletree refuses whoever asks. It never approves, closes or comments on a ticket's pull request. A brain's batch pull requests auto-merge once the brain gate's required checks pass, except Set up's and Update gate's, which wait for the code owner's review, and Wiffletree closes one only when you choose Discard.
-
-**The PR keeper keeps pull requests current, if you ask it to.** It is off until you tick it on the Repositories page, and it acts only in repositories that open pull requests without asking. Two rows are independent, and either can be on alone: "Keep it free of conflicts and failed checks" rebases a pull request only when it conflicts or its checks fail, then tries once to fix it, and "Keep it rebased" also rebases every time the base moves. Once a pull request's base has been quiet for a couple of minutes, Wiffletree rebases the branch itself, with no model and no review, and replaces the branch on GitHub with a lease, only when the rebased change is the same as the reviewed one. Every commit id on the pull request changes. A rebase whose patch changed, because the base moved lines the change touches, is pushed only with "Keep it free of conflicts and failed checks" ticked, a re-check level chosen for it and a checks command on the repository's row: the command, such as `cargo test`, runs on the rebased commit, stopped after its limit (20 minutes unless you set 1–120), then the commit is reviewed at that level before it is pushed. If either fails, nothing is pushed, the branch is left as it was before the rebase and the coordinator is told. A rebase that conflicts gets one try by the PR keeper's model at each pull request head, with the same settings and a PR keeper model in Models → Who runs what. The model works in the keeper's own checkout, never the ticket's worktree, and its result is thrown away unless it changes only the files Git could not merge, passes the checks and passes the review; only then is it pushed. A try that is thrown away leaves the branch and the ticket's review as they were, and the coordinator is told why. The pull request's line reads "keeper resolving" while the try runs and "with the coordinator" after one was thrown away. The same setting covers failed checks: a pull request whose checks failed on GitHub gets one try the same way, once no rebase is due for it: Wiffletree first runs your checks command on its head, and if it passes here, no model runs and the coordinator is told the failure could not be reproduced. Otherwise the model's fix must add commits on top of the head, change only files the pull request already changes and pass the same checks and review; the line reads "keeper fixing" meanwhile. Without all of these, a changed patch, a conflict or failed checks are left to the coordinator. With "Sort new comments" ticked and a Claude model in the PR keeper's row, it also sorts new comments from people who can push to the repository into needs a change, a question or no action, with a model run that has every tool and hook turned off, and sends the coordinator links to those that need something, never their text. It never replies, resolves or reacts on GitHub. It works only while Wiffletree is running.
-
-**It should feel instant.** Wiffletree is a native Rust app built on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), not a web view, and it stays light when idle.
+> Read this before you add a repository. The [full text](docs/FEATURES.md#safety) gives every condition.
+>
+> - **Permission prompts are bypassed,** so add only repositories you are comfortable letting agents change.
+> - **Agents can run any command on your Mac with your credentials,** including a push or a merge. Wiffletree does not prevent that.
+> - **Wiffletree pushes and opens pull requests itself:** without asking for owners you allow, and after your approval elsewhere.
+> - **It merges through its checked merge,** when the coordinator asks, for allowed owners, and never into a protected branch.
+> - **Brain branches auto-merge.** It pushes `wiffletree/brain/` branches, and GitHub merges each once the gate passes, except Set up's and Update gate's.
+> - **The PR keeper, if you turn it on, rewrites branches,** which changes every commit id on a pull request.
+> - **The PR keeper's model gets one try** at a conflict or failed checks, and only what it leaves behind is checked.
+> - **Your checks command runs as you wrote it.**
 
 ## Status
 
-Wiffletree is early software, and it changes quickly. Live Claude and Codex runs, exact session resume and mixed-provider handoffs work today. Everything runs on your Mac. Agents keep working after you quit the app, and a menu bar icon shows how many are; they stop when the Mac restarts or you log out, until you open Wiffletree again. See [current limits](docs/DEVELOPMENT.md#current-limits) and the [product requirements](docs/PRD.md) for what comes next, including a headless host you can drive from another machine.
+- Wiffletree is early software, and it changes quickly.
+- Live Claude and Codex runs, exact session resume and mixed-provider handoffs work today.
+- Everything runs on your Mac, and another Mac can drive it with [remote access](docs/FEATURES.md#remote-access).
+- Agents keep working after you quit the app. They stop when the Mac restarts or you log out, until you open Wiffletree again.
+- See [current limits](docs/DEVELOPMENT.md#current-limits) and the [product requirements](docs/PRD.md) for what comes next, including an iPhone client.
 
 ## Build from source
 
@@ -137,29 +203,23 @@ bash scripts/package_macos.sh
 open target/Wiffletree.app
 ```
 
-Use `--beta` to build a separate **Wiffletree Beta** that runs beside the installed app with its own store. To try it against a scratch store without packaging:
+- Use `--beta` to build a separate **Wiffletree Beta** with its own store.
+- To try a scratch store without packaging, then save the suggested setup and relaunch to get the demo project:
 
-```sh
-cargo build --locked --release -p workspace-host -p workspace-desktop
-./target/release/workspace-desktop \
-  --data-dir /tmp/wiffletree-preview --demo-repository "$PWD"
-```
+  ```sh
+  cargo build --locked --release -p workspace-host -p workspace-desktop
+  ./target/release/workspace-desktop \
+    --data-dir /tmp/wiffletree-preview --demo-repository "$PWD"
+  ```
 
-On a fresh store, save the suggested setup on the Models page and relaunch to get the demo project.
-
-[Development notes](docs/DEVELOPMENT.md) cover model configuration, headless commands, validation and releases. [Measured host timings](docs/performance/host-baseline.md) are kept separate from the desktop and provider performance targets, which are not yet verified.
+- [Development notes](docs/DEVELOPMENT.md) cover configuration, headless commands, validation and releases.
+- [Measured host timings](docs/performance/host-baseline.md) are separate from the performance targets, which are not yet verified.
 
 ## Contributing
 
-Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and the checks every pull request must pass. For anything larger than a small fix, open an issue first so we can agree on the approach.
-
-Useful places to start reading:
-
-- [Product requirements](docs/PRD.md): the source of truth for scope, architecture and performance budgets.
-- [Design guide](design/README.md): the current interactive mockup, earlier studies and their limits.
-- [Brand kit](design/brand/README.md) and [colors](design/brand.md): the Interlock mark and the Tidal palette.
-
-To report a vulnerability, follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
+- Start with [CONTRIBUTING.md](CONTRIBUTING.md). For anything larger than a small fix, open an issue first.
+- To report a vulnerability, follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
+- Useful reading: [features](docs/FEATURES.md), [product requirements](docs/PRD.md), the [design guide](design/README.md), the [brand kit](design/brand/README.md) and [colors](design/brand.md).
 
 ## License
 
