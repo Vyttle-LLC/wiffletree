@@ -11272,7 +11272,7 @@ mod tests {
             turn.stopped_by_parent.as_deref(),
             Some(crate::compile::TIMED_OUT)
         );
-        assert!(actor.host.attention_count().unwrap() == 0);
+        assert_eq!(actor.host.attention_count().unwrap(), 0);
         // A stopped turn winding down arms no further check-in.
         actor.scheduling.wake_at = None;
         actor.check_in_long_turns(minutes(61));
