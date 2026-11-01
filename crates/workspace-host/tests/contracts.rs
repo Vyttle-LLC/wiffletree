@@ -234,8 +234,9 @@ fn every_roles_instructions_state_the_publishing_rules_in_wiffletrees_own_words(
 }
 
 #[test]
-fn the_readme_says_what_wiffletree_publishes_and_what_it_cannot_prevent() {
+fn the_features_page_says_what_wiffletree_publishes_and_what_it_cannot_prevent() {
     let readme = include_str!("../../../README.md");
+    let features = include_str!("../../../docs/FEATURES.md");
     for gone in [
         "never pushes",
         "does not push, open pull requests",
@@ -244,6 +245,7 @@ fn the_readme_says_what_wiffletree_publishes_and_what_it_cannot_prevent() {
         "merging stays yours",
     ] {
         assert!(!readme.contains(gone), "{gone}");
+        assert!(!features.contains(gone), "{gone}");
     }
     for stated in [
         "pushes a ticket's branch and opens its pull request only through its own checked operation",
@@ -254,7 +256,7 @@ fn the_readme_says_what_wiffletree_publishes_and_what_it_cannot_prevent() {
         "**Humans own integration.**",
         "You merge into protected branches",
     ] {
-        assert!(readme.contains(stated), "{stated}");
+        assert!(features.contains(stated), "{stated}");
     }
     let notes = include_str!("../../../docs/DEVELOPMENT.md");
     assert!(
@@ -262,15 +264,15 @@ fn the_readme_says_what_wiffletree_publishes_and_what_it_cannot_prevent() {
             .contains("an agent's shell can still run `git push`, `gh pr create` or `gh pr merge`")
     );
     assert!(notes.contains("merges a ticket's pull request only through `merge_ticket`"));
-    for text in [readme, notes] {
+    for text in [readme, features, notes] {
         let lower = text.to_lowercase();
         assert!(!lower.contains("approved owner") && !lower.contains("automatic pr"));
     }
 }
 
 #[test]
-fn the_readme_says_what_the_settings_repository_shares_and_who_it_lets_change_agents() {
-    let readme = include_str!("../../../README.md");
+fn the_features_page_says_what_the_settings_repository_shares_and_who_it_lets_change_agents() {
+    let features = include_str!("../../../docs/FEATURES.md");
     for stated in [
         "the skills with your rules, rewrites and their history, the review settings, the model notes, the switch threshold, the check-in thresholds and the PR keeper's triggers",
         "What belongs to one Mac stays there",
@@ -280,7 +282,7 @@ fn the_readme_says_what_the_settings_repository_shares_and_who_it_lets_change_ag
         "An agent's shell can still write the shared folder and push to the repository with your credentials",
         "it does not spread an edit it did not make",
     ] {
-        assert!(readme.contains(stated), "{stated}");
+        assert!(features.contains(stated), "{stated}");
     }
 }
 
