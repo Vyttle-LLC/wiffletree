@@ -1970,6 +1970,18 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_removal_from_a_finished_tickets_pr_is_recorded_and_tells_nobody() {
+        let (_home, mut host, ticket) = accepted_with_open_pr();
+        let before = notices(&host);
+        let pr = dequeued("RFMQE_1", Some("merge_conflict"));
+        let pass = found_finished(&ticket, pr.clone());
+        host.record_pull_requests(&ticket.repository_id, &pass, 0, 0)
+            .unwrap();
+        assert_eq!(notices(&host), before);
+        assert_eq!(host.ticket(&ticket.id).unwrap().pull_request, Some(pr));
+    }
+
+    #[test]
     fn a_removal_counts_against_no_wake_budget_and_a_closed_pr_says_why_too() {
         let (_home, mut host, ticket) = host_with_ticket();
         for head in ["a1", "a2", "a3"] {
