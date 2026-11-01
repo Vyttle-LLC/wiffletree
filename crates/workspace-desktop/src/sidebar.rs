@@ -718,7 +718,7 @@ impl Sidebar {
             (Page::Brains, "Brains", "brain"),
             (Page::Usage, "Usage and limits", "activity"),
             (Page::Models, "Models", "settings"),
-            (Page::Skills, "Skills", "book"),
+            (Page::Behaviors, "Behaviors", "book"),
         ] {
             // The brain browser is a page of Brains.
             let selected = self.shared.page == page
@@ -738,9 +738,10 @@ impl Sidebar {
                         page == Page::Models && !self.shared.offers_new_project(),
                         |d| d.child(div().size(px(6.)).rounded_full().bg(p.accent)),
                     )
-                    // A rewrite out of date waits on the Skills page.
+                    // A rewrite out of date waits under the Behaviors page's Advanced.
                     .when(
-                        page == Page::Skills && skills_view::a_rewrite_is_out_of_date(&self.shared),
+                        page == Page::Behaviors
+                            && skills_view::a_rewrite_is_out_of_date(&self.shared),
                         |d| d.child(div().size(px(6.)).rounded_full().bg(p.accent)),
                     )
                     // Brains whose log batches wait on this Mac for a gate update.

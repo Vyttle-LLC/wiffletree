@@ -112,6 +112,18 @@ pub fn skill_merge_review(skill: Skill, entry: String) -> Ask<skills::MergeRevie
 pub fn skill_stock_changes(skill: Skill) -> Ask<Vec<Line>> {
     Ask::new(Command::SkillStockChanges { skill })
 }
+pub fn behavior_catalog() -> Ask<Vec<cascade::Behavior>> {
+    Ask::new(Command::BehaviorCatalog)
+}
+pub fn layer_values(scope: cascade::Scope) -> Ask<cascade::LayerValues> {
+    Ask::new(Command::LayerValues { scope })
+}
+pub fn set_layer_values(
+    scope: cascade::Scope,
+    values: cascade::LayerValues,
+) -> Ask<cascade::LayerValues> {
+    Ask::new(Command::SetLayerValues { scope, values })
+}
 pub fn files(session_id: String, whole_tree: bool) -> Ask<Vec<TicketFiles>> {
     Ask::new(Command::Files {
         session_id,

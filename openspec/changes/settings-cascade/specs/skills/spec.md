@@ -20,7 +20,7 @@ The host SHALL build each agent's instructions from a fixed core and at most one
 - **THEN** the sorting run's instructions are unchanged and contain none of the rewrite
 
 #### Scenario: No pull request skill
-- **WHEN** the Skills page lists the skills
+- **WHEN** the Behaviors page's Advanced lists the skills
 - **THEN** there are five, and none is about opening a pull request
 
 #### Scenario: A thread in a Space

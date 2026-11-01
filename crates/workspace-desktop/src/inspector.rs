@@ -110,8 +110,8 @@ pub(super) struct Inspector {
     pub(super) shared: Shared,
     pub(super) inbox: Entity<inbox::Inbox>,
     pub(super) contexts: Entity<context_view::Contexts>,
-    /// The Inbox lists the Skills page's questions.
-    pub(super) skills: Entity<skills_view::SkillsPage>,
+    /// The Inbox lists the Behaviors page's questions about rewrites.
+    pub(super) skills: Entity<skills_view::BehaviorsPage>,
     pub(super) panel_data: PanelData,
     pub(super) memory_title: Entity<InputState>,
     pub(super) memory_body: Entity<TextareaState>,
@@ -142,7 +142,7 @@ impl Inspector {
         bridge: Bridge,
         inbox: Entity<inbox::Inbox>,
         contexts: Entity<context_view::Contexts>,
-        skills: Entity<skills_view::SkillsPage>,
+        skills: Entity<skills_view::BehaviorsPage>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
