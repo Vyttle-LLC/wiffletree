@@ -31,6 +31,9 @@ pub(crate) struct Preferences {
     /// Look for Wiffletree on other Macs on this network; off, macOS never asks about it.
     #[serde(default)]
     pub find_on_network: bool,
+    /// The Space page's one-time note on what moved to Behaviors and Models was dismissed.
+    #[serde(default)]
+    pub cascade_moves_seen: bool,
     #[serde(skip)]
     path: PathBuf,
 }
@@ -44,6 +47,7 @@ impl Default for Preferences {
             group_projects: true,
             paired_hosts: vec![],
             find_on_network: false,
+            cascade_moves_seen: false,
             path: PathBuf::new(),
         }
     }

@@ -87,6 +87,7 @@ impl Panel {
             Self::Files => "folder",
             Self::Processes => "terminal",
             Self::Agents => "team",
+            Self::Settings => "settings",
         }
     }
     fn title(self) -> &'static str {
@@ -100,6 +101,7 @@ impl Panel {
             Self::Files => "Files",
             Self::Processes => "Processes",
             Self::Agents => "Agents",
+            Self::Settings => "Effective settings",
         }
     }
 }
@@ -277,8 +279,55 @@ impl Inspector {
             }
             Some(Panel::Files) => self.fetch_files(window, cx),
             Some(Panel::Processes) => self.sync_process_readings(window, cx),
+            Some(Panel::Settings) => self.load_effective_settings(project_id, window, cx),
             _ => {}
         }
+    }
+    /// The Behaviors' names, then what the selected ticket's agents get, or the project's.
+    fn load_effective_settings(
+        &mut self,
+        project_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = self.shared.selected.clone();
+        let ticket_id = (selected.as_deref())
+            .and_then(|id| self.shared.ticket_of(id))
+            .map(|ticket| ticket.id.clone());
+        let ask = ask::behavior_catalog();
+        self.ask(ask, window, cx, move |view, catalog, window, cx| {
+            let catalog = match catalog {
+                Ok(catalog) => catalog,
+                Err(error) => return toast_error(error, window, cx),
+            };
+            let ask = ask::effective_settings(project_id, ticket_id);
+            view.ask(ask, window, cx, move |view, settings, window, cx| {
+                let shown =
+                    view.shared.panel == Some(Panel::Settings) && view.shared.selected == selected;
+                if shown {
+                    let data = settings.map(|settings| {
+                        PanelData::Settings(Box::new(effective_view::Effective {
+                            settings,
+                            catalog,
+                        }))
+                    });
+                    view.accept_panel_data(data, window, cx);
+                }
+            });
+        });
+    }
+    fn settings_panel(&self, p: Palette) -> Div {
+        let PanelData::Settings(effective) = &self.panel_data else {
+            return hint("Loading…", p);
+        };
+        let space = (self.shared.snapshot())
+            .and_then(|s| {
+                s.spaces
+                    .iter()
+                    .find(|s| s.id == effective.settings.space_id)
+            })
+            .map_or("Its Space".into(), |s| s.name.clone());
+        effective_view::panel(effective, &space, p)
     }
     pub(super) fn capture_memory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session_id) = self.shared.selected.clone() else {
@@ -376,6 +425,7 @@ impl Inspector {
             Panel::Files => self.files_message(p),
             Panel::Processes => self.processes_panel(p, cx),
             Panel::Agents => self.agents_panel(p, cx),
+            Panel::Settings => self.settings_panel(p),
         };
         // The Files panel lists its tree a screenful at a time, so the tree scrolls itself.
         let tree = (panel == Panel::Files)

@@ -626,6 +626,17 @@ impl SpaceTable {
         self.held.insert(provider, why);
         self
     }
+    /// The table small work resolves when `small`, else the main one.
+    pub fn table(&self, small: bool) -> &ModelSelection {
+        if small { &self.small } else { &self.selection }
+    }
+    /// Each of the Space's rows whose main line this Mac cannot run, so this Mac's row is used
+    /// instead, with why, such as "Claude is not signed in on this Mac".
+    pub fn fallbacks(&self) -> Vec<(&JobRow, String)> {
+        (self.overrides.iter())
+            .filter_map(|row| Some((row, refused(row, false, &self.unusable, &self.held)?)))
+            .collect()
+    }
     /// What `job` would start on now, as [`ModelSelection::resolve`] says, with the reason
     /// naming the Space when its row was used or fell back.
     pub fn resolve(

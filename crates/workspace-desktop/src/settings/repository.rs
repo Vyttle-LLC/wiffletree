@@ -10,9 +10,6 @@ pub(crate) use join::Joined;
 pub(crate) use synced::{Mark, SyncByHost, SyncShown, share_sync};
 use ui::{confirm_card, pill};
 
-/// The section's place among the scrolled body's children: three sections and their rules.
-pub(super) const SECTION: usize = 6;
-
 /// What asks first; Cancel sends nothing.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Confirm {

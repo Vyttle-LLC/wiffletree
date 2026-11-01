@@ -193,6 +193,24 @@ pub fn join_spaces(repository: String, spaces: Vec<JoinSpace>) -> Ask<Vec<SpaceR
 pub fn space_storage(space_id: SpaceId) -> Ask<StorageStatus> {
     Ask::new(Command::SpaceStorage { space_id })
 }
+pub fn set_space_models(
+    space_id: SpaceId,
+    settings: cascade::SpaceModelSettings,
+) -> Ask<cascade::SpaceModelSettings> {
+    Ask::new(Command::SetSpaceModels { space_id, settings })
+}
+pub fn behavior_catalog() -> Ask<Vec<cascade::Behavior>> {
+    Ask::new(Command::BehaviorCatalog)
+}
+pub fn effective_settings(
+    project_id: String,
+    ticket_id: Option<String>,
+) -> Ask<cascade::EffectiveSettings> {
+    Ask::new(Command::EffectiveSettings {
+        project_id,
+        ticket_id,
+    })
+}
 pub fn brains() -> Ask<BrainsPage> {
     Ask::new(Command::Brains)
 }

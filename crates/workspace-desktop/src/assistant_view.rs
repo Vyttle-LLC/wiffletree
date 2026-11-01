@@ -1089,17 +1089,8 @@ impl AssistantPage {
     /// The model a new thread in `space` starts on, as the host picks it with nothing chosen.
     fn new_thread_model(&self, space: Option<&SpaceId>) -> Option<ModelProfile> {
         let snapshot = self.shared.snapshot()?;
-        let id = space?;
-        let default = (snapshot.spaces.iter())
-            .find(|s| &s.id == id)?
-            .models
-            .threads
-            .as_ref();
-        spaces_view::thread_model(
-            default,
-            &self.shared.detection,
-            snapshot.model_selection.row(&Job::Assistant),
-        )
+        let space = (snapshot.spaces.iter()).find(|s| Some(&s.id) == space);
+        models::thread_model(&snapshot.model_selection, space, &self.shared.detection)
     }
     fn composer_box(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let tab = self.open_tab();

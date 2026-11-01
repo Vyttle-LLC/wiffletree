@@ -20,6 +20,7 @@ mod context_view;
 mod conversation;
 mod conversation_header;
 mod creation;
+mod effective_view;
 mod events_view;
 mod file_links;
 mod files_view;
@@ -112,14 +113,19 @@ enum Panel {
     /// rail. It lists the whole project, so it stays open whichever of the project's agents is
     /// selected.
     Agents,
+    /// Effective settings, opened from the conversation header: what the selected ticket's
+    /// agents get, or the project's from its coordinator.
+    Settings,
 }
 
-/// What the open Memory, Events or Git panel loaded, decoded once when its reply arrives.
+/// What the open Memory, Events, Git or Effective settings panel loaded, decoded once when its
+/// reply arrives.
 enum PanelData {
     Loading,
     Memory(Vec<WorkLog>),
     Events(Vec<Activity>),
     Git(Vec<Commit>),
+    Settings(Box<effective_view::Effective>),
 }
 
 /// A request sent again once, rather than once per ask, when asked for while it is answered.
@@ -213,7 +219,7 @@ fn keep_quotas(held: &mut Rc<Vec<QuotaReading>>, read: Vec<QuotaReading>) {
 }
 
 /// What fills the main area: one session's conversation, or a page about the whole workspace.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page {
     Conversation,
     Usage,
@@ -498,6 +504,10 @@ impl Workspace {
                 self.spaces.update(cx, |spaces, cx| {
                     spaces.open_space(space.clone(), window, cx)
                 });
+            }
+            Intent::OpenModels(space) => {
+                self.open_page(Page::Models, window, cx);
+                (self.models).update(cx, |models, cx| models.show_scope(space.clone(), cx));
             }
             Intent::OpenBrain(opening) => {
                 self.open_page(Page::BrainBrowser, window, cx);

@@ -2,8 +2,8 @@
 use std::collections::BTreeSet;
 use workspace_core::{
     Chooser, Detection, Job, JobRow, Limits, Line, ModelOption, ModelProfile, ModelSelection,
-    PROVIDERS, Pick, Provider, ProviderStatus, QuotaReading, Role, Selection, Setup, Then,
-    VerificationSettings, WorkspaceIndex, resolve, suggest, usual_efforts,
+    PROVIDERS, Pick, Provider, ProviderStatus, QuotaReading, Role, Selection, Setup, Space,
+    SpaceTable, Then, VerificationSettings, WorkspaceIndex, resolve, suggest, usual_efforts,
 };
 
 pub(crate) fn choices(
@@ -238,6 +238,25 @@ pub(crate) fn right_now(
     };
     resolve(row, small, true, &limits, &reset_time).map_err(|e| e.to_string())
 }
+/// What `job`'s line would start on now as a Space's `table` resolves it, its reason naming the
+/// Space's part.
+pub(crate) fn space_right_now(
+    table: &SpaceTable,
+    job: &Job,
+    small: bool,
+    quotas: &[QuotaReading],
+    detection: &Detection,
+    now: i64,
+) -> Result<Pick, String> {
+    let unusable = unusable(detection);
+    let limits = Limits {
+        quotas,
+        unusable: &unusable,
+        switch_at: table.selection.switch_at,
+        now,
+    };
+    (table.resolve(job, small, true, &limits, &reset_time)).map_err(|e| e.to_string())
+}
 /// A reset time as reasons write it, "Mon 09:00", in this Mac's time zone.
 pub(crate) fn reset_time(at: i64) -> String {
     use chrono::TimeZone;
@@ -455,6 +474,98 @@ pub(crate) fn picker_groups(
         });
     }
     groups
+}
+
+/// This Mac's table as `space` resolves it here with the Space's row overrides `rows`, which
+/// may be the page's unsaved draft.
+pub(crate) fn space_table(
+    selection: &ModelSelection,
+    space: Option<&Space>,
+    rows: &[JobRow],
+    detection: &Detection,
+) -> SpaceTable {
+    let name = space.map(|space| space.name.as_str());
+    selection.for_space(name, rows, &unusable(detection))
+}
+
+/// The rows the Models page shows at a Space: this Mac's, each replaced by the Space's own where
+/// it sets one, then the Space's rows for jobs this Mac has none for, each with whether the
+/// Space sets it. A Space's row for a verifier this Mac does not configure is left out, as the
+/// host leaves it out.
+pub(crate) fn space_rows(selection: &ModelSelection, overrides: &[JobRow]) -> Vec<(JobRow, bool)> {
+    let over = |job: &Job| overrides.iter().find(|row| row.job.is(job));
+    let mut rows: Vec<(JobRow, bool)> = (selection.jobs.iter())
+        .map(|row| match over(&row.job) {
+            Some(space) => (space.clone(), true),
+            None => (row.clone(), false),
+        })
+        .collect();
+    rows.extend(
+        (overrides.iter())
+            .filter(|row| !matches!(row.job, Job::Verifier { .. }))
+            .filter(|row| selection.row(&row.job).is_none())
+            .map(|row| (row.clone(), true)),
+    );
+    rows
+}
+
+/// Sets one cell of `job`'s row at a Space: the Space's row, started as a copy of this Mac's
+/// when it has none yet, as [`set_cell`] sets this Mac's.
+pub(crate) fn set_space_cell(
+    overrides: &mut Vec<JobRow>,
+    selection: &ModelSelection,
+    job: &Job,
+    which: Cell,
+    profile: Option<ModelProfile>,
+) {
+    let mut table = ModelSelection {
+        jobs: std::mem::take(overrides),
+        ..ModelSelection::default()
+    };
+    if table.row(job).is_none()
+        && let Some(row) = selection.row(job)
+    {
+        table.jobs.push(row.clone());
+    }
+    set_cell(&mut table, job, which, profile);
+    *overrides = table.jobs;
+}
+
+/// Drops the Space's row for `job`, so this Mac's row applies again.
+pub(crate) fn reset_space_row(overrides: &mut Vec<JobRow>, job: &Job) {
+    overrides.retain(|row| !row.job.is(job));
+}
+
+/// What each of a Space's rows this Mac cannot run falls back to, as the Models and Space pages
+/// say it.
+pub(crate) fn fallback_lines(table: &SpaceTable, space: &str) -> Vec<String> {
+    (table.fallbacks().into_iter())
+        .map(|(row, why)| {
+            format!(
+                "{space} asks for {} for the {} row, but {why}, so it uses this Mac's row until then.",
+                row.main.first.short(),
+                row.job.name()
+            )
+        })
+        .collect()
+}
+
+/// The model a new thread in `space` starts on when the user picks none: the first choice of
+/// the Assistant row as the Space resolves it that this Mac can run. A provider not checked yet
+/// counts as not usable, as the host counts it.
+pub(crate) fn thread_model(
+    selection: &ModelSelection,
+    space: Option<&Space>,
+    detection: &Detection,
+) -> Option<ModelProfile> {
+    let overrides = space.map_or(vec![], |space| space.models.overrides());
+    let table = space_table(selection, space, &overrides, detection);
+    let unusable = unusable(detection);
+    let row = table.selection.row(&Job::Assistant)?;
+    row.main
+        .choices()
+        .find(|profile| !unusable.contains(&profile.provider))
+        .cloned()
 }
 
 /// How an agent's model was chosen, as its chat shows it.
@@ -779,6 +890,150 @@ mod tests {
                 &codex_only
             ),
             Now::Cannot
+        );
+    }
+    fn job_row(job: Job, first: &ModelProfile, then: Then) -> JobRow {
+        JobRow {
+            job,
+            main: Line {
+                first: first.clone(),
+                then,
+            },
+            small: None,
+        }
+    }
+    /// This Mac's table: the Implementer on Opus and the Assistant on Sonnet, each then Codex.
+    fn this_macs() -> ModelSelection {
+        let sol = Then::Model(profile(Provider::Codex, "gpt-6.1-sol", "medium"));
+        ModelSelection {
+            jobs: vec![
+                job_row(
+                    Job::Implementer,
+                    &profile(Provider::Claude, "opus", "high"),
+                    sol.clone(),
+                ),
+                job_row(
+                    Job::Assistant,
+                    &profile(Provider::Claude, "sonnet", "medium"),
+                    sol,
+                ),
+            ],
+            ..ModelSelection::default()
+        }
+    }
+    fn sage(rows: Vec<JobRow>) -> Space {
+        let mut space: Space = serde_json::from_value(serde_json::json!({
+            "id": "sage", "name": "Sage",
+            "storage": {"repository": {"kind": "local", "id": "s"}, "folder": "sage"}
+        }))
+        .unwrap();
+        space.models.set_overrides(rows);
+        space
+    }
+    #[test]
+    fn at_a_space_an_edited_row_is_the_spaces_until_reset_restores_this_macs() {
+        let table = this_macs();
+        let (opus, sonnet) = (
+            profile(Provider::Claude, "opus", "high"),
+            profile(Provider::Claude, "sonnet", "medium"),
+        );
+        let first = Cell {
+            small: false,
+            then: false,
+        };
+        // At This Mac's scope, or a Space that sets nothing, every row is this Mac's.
+        let mac_rows: Vec<(JobRow, bool)> =
+            (table.jobs.iter()).map(|r| (r.clone(), false)).collect();
+        assert_eq!(space_rows(&table, &[]), mac_rows);
+
+        // An edit at a Space starts the Space's row as a copy of this Mac's and leaves the
+        // table alone.
+        let mut overrides = vec![];
+        set_space_cell(
+            &mut overrides,
+            &table,
+            &Job::Assistant,
+            first,
+            Some(opus.clone()),
+        );
+        let assistant = Line {
+            first: opus.clone(),
+            ..table.row(&Job::Assistant).unwrap().main.clone()
+        };
+        assert_eq!(overrides[0].main, assistant);
+        assert_eq!(table.row(&Job::Assistant).unwrap().main.first, sonnet);
+        let shown = space_rows(&table, &overrides);
+        assert_eq!(shown[0], mac_rows[0]);
+        assert_eq!(shown[1], (overrides[0].clone(), true));
+        // Skip is for reviews only, so its then choice cannot be set to skip; a wait is kept.
+        set_space_cell(
+            &mut overrides,
+            &table,
+            &Job::Assistant,
+            Cell {
+                then: true,
+                ..first
+            },
+            None,
+        );
+        assert_eq!(overrides[0].main.then, Then::Wait);
+
+        reset_space_row(&mut overrides, &Job::Assistant);
+        assert_eq!(space_rows(&table, &overrides), mac_rows);
+
+        // A Space may add a row this Mac has none of, such as the Job row.
+        set_space_cell(
+            &mut overrides,
+            &table,
+            &Job::Job,
+            first,
+            Some(sonnet.clone()),
+        );
+        let job = job_row(Job::Job, &sonnet, Then::Wait);
+        assert_eq!(space_rows(&table, &overrides).last(), Some(&(job, true)));
+    }
+    #[test]
+    fn a_space_row_whose_provider_is_signed_out_falls_back_to_this_macs_row() {
+        let table = this_macs();
+        let opus = profile(Provider::Claude, "opus", "high");
+        let sol = profile(Provider::Codex, "gpt-6.1-sol", "medium");
+        let space = sage(vec![job_row(Job::Assistant, &opus, Then::Wait)]);
+        let at = |detection: &Detection| {
+            space_table(&table, Some(&space), &space.models.overrides(), detection)
+        };
+        let both = detected(&PROVIDERS);
+        assert!(fallback_lines(&at(&both), "Sage").is_empty());
+        assert_eq!(
+            thread_model(&table, Some(&space), &both),
+            Some(opus.clone())
+        );
+        // Outside a Space a thread starts on this Mac's row.
+        assert_eq!(
+            thread_model(&table, None, &both),
+            Some(profile(Provider::Claude, "sonnet", "medium"))
+        );
+
+        let codex = detected(&[Provider::Codex]);
+        assert_eq!(
+            fallback_lines(&at(&codex), "Sage"),
+            [
+                "Sage asks for Opus · high for the Assistant row, but Claude is not signed in on this Mac, so it uses this Mac's row until then."
+            ]
+        );
+        // The composer's label follows: this Mac's row, on the choice it can run.
+        assert_eq!(
+            thread_model(&table, Some(&space), &codex),
+            Some(sol.clone())
+        );
+
+        // A provider not checked yet counts as unavailable, as the host counts it.
+        let claude_unchecked: Detection = (codex.into_iter())
+            .filter(|(provider, _)| *provider == Provider::Codex)
+            .collect();
+        assert_eq!(fallback_lines(&at(&claude_unchecked), "Sage").len(), 1);
+        assert_eq!(
+            thread_model(&table, Some(&space), &claude_unchecked),
+            Some(sol)
         );
     }
     #[test]

@@ -31,7 +31,7 @@ A Space whose storage repository is on GitHub SHALL keep its definition in that 
 
 #### Scenario: A model this Mac lacks
 - **WHEN** the Sage definition names Opus · high for jobs and the teammate has only Codex signed in
-- **THEN** the Space page notes "Opus · high is not available here; using GPT 6.1 Sol · medium"
+- **THEN** the Space page and the Models page at Sage note "Sage asks for Opus · high for the Job row, but Claude is not signed in on this Mac, so it uses this Mac's row until then"
 
 ### Requirement: What stays on this machine
 Where each repository and brain is cloned, whether the Space is on here, and this Mac's credentials and keys SHALL stay on this Mac and SHALL NOT be written to the storage repository.

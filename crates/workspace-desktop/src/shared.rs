@@ -235,6 +235,8 @@ pub(super) enum Intent {
     OpenBehaviors(skills_view::Scope),
     /// Opens the Spaces page on one Space.
     OpenSpace(SpaceId),
+    /// Opens the Models page at a Space's scope, or at this Mac's with `None`.
+    OpenModels(Option<SpaceId>),
     /// Opens the brain browser on a brain, a scope and a view, note or entry.
     OpenBrain(brain_browser_view::BrainOpening),
     /// Opens the Brains page with one batch's checks shown.

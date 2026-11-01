@@ -59,10 +59,9 @@ pub(super) struct SpacesPage {
     prefix_input: Entity<InputState>,
     /// The folder in the brain that entries are written to.
     brain_folder: Entity<InputState>,
-    /// The form's brain, code repositories and default models, saved with Save.
+    /// The form's brain and code repositories, saved with Save.
     brain: Option<SpaceBrain>,
     repositories: Vec<String>,
-    models: SpaceModels,
     /// New stores the Space in a GitHub repository rather than on this Mac.
     on_github: bool,
     /// The prefix field is open, to rename a tracker's prefix or set up issues.
@@ -70,6 +69,8 @@ pub(super) struct SpacesPage {
     storage: Option<(SpaceId, Result<StorageStatus, String>)>,
     /// The Space whose storage was last asked about, and when.
     storage_asked: Option<(SpaceId, i64)>,
+    /// The brains as the host last read them, for the shown Space's brain compile and gate.
+    brains: Option<BrainsPage>,
     joining: Option<Joining>,
     /// The repository New was asked to store the Space in, as named, and who can read it,
     /// shown before anything is written.
@@ -111,11 +112,11 @@ impl SpacesPage {
             brain_folder: cx.new(|cx| InputState::new(window, cx).placeholder("second-brain")),
             brain: None,
             repositories: vec![],
-            models: SpaceModels::default(),
             on_github: false,
             editing_prefix: false,
             storage: None,
             storage_asked: None,
+            brains: None,
             joining: None,
             checked: None,
             busy: false,
@@ -238,7 +239,6 @@ impl SpacesPage {
     fn load(&mut self, space: &Space, window: &mut Window, cx: &mut Context<Self>) {
         self.brain = space.brain.clone();
         self.repositories = space.repositories.clone();
-        self.models = space.models.clone();
         self.editing_prefix = false;
         self.error = None;
         self.refused_by = None;
@@ -251,7 +251,6 @@ impl SpacesPage {
             .update(cx, |input, cx| input.set_value(folder, window, cx));
         for (state, value) in [
             (&self.description, space.description.clone()),
-            (&self.instructions, space.additions.clone()),
             (&self.sources, sources),
         ] {
             state.update(cx, |input, cx| input.set_value(value, window, cx));
@@ -307,7 +306,8 @@ impl SpacesPage {
         cx.notify();
     }
 
-    /// Asks the host what the shown Space's storage holds, for its Storage and issues box.
+    /// Asks the host what the shown Space's storage holds, for its Storage and issues box, and
+    /// what its brain's `wiffletree-brain.json` says, for the brain's compile and gate.
     fn read_storage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.shown_space().map(|s| s.id.clone()) else {
             return;
@@ -323,6 +323,11 @@ impl SpacesPage {
                 cx.notify();
             },
         );
+        self.ask(ask::brains(), window, cx, |view, brains, _, cx| {
+            // Without them the page shows no compile or gate, as for a local brain.
+            view.brains = brains.ok();
+            cx.notify();
+        });
     }
     fn storage_of(&self, id: &SpaceId) -> Option<&Result<StorageStatus, String>> {
         (self.storage.as_ref())
@@ -345,9 +350,7 @@ impl SpacesPage {
             name,
             brain,
             description: self.description.read(cx).value().trim().to_owned(),
-            additions: self.instructions.read(cx).value().trim().to_owned(),
             repositories: self.repositories.clone(),
-            models: self.models.clone(),
             sources,
             ..space.clone()
         })
@@ -828,23 +831,12 @@ impl SpacesPage {
                 Some(ROUTER.into()),
                 p,
             ))
-            .child(row(
-                "Instructions",
-                Textarea::new(&self.instructions).w_full(),
-                Some(format!("Added to every thread and job in {}.", space.name)),
-                p,
-            ))
             .child(row("Brain", self.brain_field(space, local, p, cx), None, p))
+            .children(self.brain_facts(space, p))
             .child(row(
                 "Code repositories",
                 self.repositories_field(space, p, cx),
                 Some(format!("Every project in {} uses these.", space.name)),
-                p,
-            ))
-            .child(row(
-                "Default models",
-                self.models_field(local, p, cx),
-                None,
                 p,
             ))
             .child(row(
@@ -856,6 +848,8 @@ impl SpacesPage {
                 )),
                 p,
             ))
+            .child(self.cascade_links(space, local, p, cx))
+            .children(self.moved_banner(space, p, cx))
             .child(self.storage_box(space, status, p, cx));
         if let Some(error) = &self.error {
             page = page.child(self.error_line(error, p, cx));
@@ -1032,21 +1026,79 @@ impl SpacesPage {
         )
     }
 
-    fn models_field(&self, local: Option<&SpaceLocal>, p: Palette, cx: &mut Context<Self>) -> Div {
-        let selection = self.shared.snapshot().map(|s| &s.model_selection);
-        // Jobs follow the Assistant row until a Job row exists.
-        let row = selection.and_then(|s| s.row(&Job::Assistant));
-        let fallbacks = [
-            ("threads", &self.models.threads),
-            ("jobs", &self.models.jobs),
-        ]
-        .into_iter()
-        .filter_map(|(which, model)| {
-            fallback_note(which, model.as_ref(), &self.shared.detection, row)
+    /// The brain's compile time and gate, read-only: its `wiffletree-brain.json` says them, and
+    /// the Brains page changes them.
+    fn brain_facts(&self, space: &Space, p: Palette) -> Option<Div> {
+        let BrainRepository::GitHub { owner, name, .. } = &space.brain.as_ref()?.repository else {
+            return None;
+        };
+        let page = self.brains.as_ref()?;
+        let identity = format!("{owner}/{name}");
+        let brain = (page.brains.iter()).find(|b| b.repository.eq_ignore_ascii_case(&identity))?;
+        let (compile, gate) = brain_lines(brain, page.this_host.as_ref());
+        let set_in_brain = |line: String| {
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_1()
+                .child(line)
+                .child(hint("· set in the brain", p))
+        };
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(row("Brain compile", set_in_brain(compile), None, p))
+                .child(row("Brain gate", set_in_brain(gate), None, p)),
+        )
+    }
+
+    /// Behaviors for ‹Space› → and Models for ‹Space› →, each with what the Space changes, then
+    /// what this Mac falls back from.
+    fn cascade_links(
+        &self,
+        space: &Space,
+        local: Option<&SpaceLocal>,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let id = space.id.clone();
+        let link = |button: Button, changes: String| {
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(button)
+                .child(hint(changes, p))
+        };
+        // Behaviors opens on the Workspace scope until the Behaviors page can preselect a Space.
+        let behaviors = link(
+            button("space-behaviors")
+                .small()
+                .label(format!("Behaviors for {} →", space.name))
+                .on_click(cx.listener(|_, _, _, c| c.emit(Intent::OpenPage(Page::Skills)))),
+            counted(behaviors_changed(space), "change"),
+        );
+        let models = link(
+            button("space-models")
+                .small()
+                .label(format!("Models for {} →", space.name))
+                .on_click(
+                    cx.listener(move |_, _, _, c| c.emit(Intent::OpenModels(Some(id.clone())))),
+                ),
+            models_changed(space),
+        );
+        let fallbacks = self.shared.snapshot().map_or(vec![], |snapshot| {
+            let table = models::space_table(
+                &snapshot.model_selection,
+                Some(space),
+                &space.models.overrides(),
+                &self.shared.detection,
+            );
+            models::fallback_lines(&table, &space.name)
         });
-        let notes: Vec<String> = (local.map_or(&[][..], |l| &l.notes).iter().cloned())
-            .chain(fallbacks)
-            .collect();
+        let notes = (local.map_or(&[][..], |l| &l.notes).iter().cloned()).chain(fallbacks);
         div()
             .flex()
             .flex_col()
@@ -1055,74 +1107,50 @@ impl SpacesPage {
                 div()
                     .flex()
                     .flex_wrap()
-                    .items_center()
-                    .gap_2()
-                    .child("Threads:")
-                    .child(self.model_picker(ModelFor::Threads, cx))
-                    .child("Jobs:")
-                    .child(self.model_picker(ModelFor::Jobs, cx)),
+                    .gap_3()
+                    .child(behaviors)
+                    .child(models),
             )
-            .children(
-                notes
-                    .iter()
-                    .map(|note| hint(note.clone(), p).text_color(p.yellow)),
-            )
+            .children(notes.map(|note| hint(note, p).text_color(p.yellow)))
     }
 
-    fn model_picker(&self, which: ModelFor, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let current = match which {
-            ModelFor::Threads => self.models.threads.clone(),
-            ModelFor::Jobs => self.models.jobs.clone(),
-        };
-        let label = current
-            .as_ref()
-            .map_or("Who runs what".into(), |model| model.profile().short());
-        let options: Vec<ModelProfile> = (self.shared.catalog.iter())
-            .flat_map(|option| {
-                option.efforts.iter().map(|effort| ModelProfile {
-                    provider: option.provider,
-                    model: option.model.clone(),
-                    effort: effort.clone(),
-                })
-            })
-            .collect();
-        let weak = cx.weak_entity();
-        let id = match which {
-            ModelFor::Threads => "space-threads-model",
-            ModelFor::Jobs => "space-jobs-model",
-        };
-        button(id)
-            .xsmall()
-            .label(label)
-            .dropdown_caret(true)
-            .dropdown_menu(move |mut menu, _, _| {
-                let set = |model: Option<SpaceModel>, weak: WeakEntity<SpacesPage>| {
-                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                        let _ = weak.update(cx, |view, cx| {
-                            match which {
-                                ModelFor::Threads => view.models.threads = model.clone(),
-                                ModelFor::Jobs => view.models.jobs = model.clone(),
+    /// Once, until dismissed: what left the Space page for Behaviors and Models.
+    fn moved_banner(&self, space: &Space, p: Palette, cx: &mut Context<Self>) -> Option<Div> {
+        if cx.global::<Preferences>().cascade_moves_seen {
+            return None;
+        }
+        let name = &space.name;
+        Some(
+            banner(p.yellow)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(p.yellow)
+                                .child("Moved"),
+                        )
+                        .child(format!(
+                            "{name}'s instructions are now “{name} additions” on Behaviors, and reach every role in {name}. Its thread and job models are now {name}'s Assistant and Job rows on Models."
+                        )),
+                )
+                .child(
+                    button("dismiss-moved")
+                        .ghost()
+                        .xsmall()
+                        .label("Got it")
+                        .on_click(|_, _, cx| {
+                            let preferences = cx.global_mut::<Preferences>();
+                            preferences.cascade_moves_seen = true;
+                            if let Err(error) = preferences.save() {
+                                eprintln!("Saving preferences: {error}");
                             }
-                            cx.notify();
-                        });
-                    }
-                };
-                menu = menu.item(
-                    PopupMenuItem::new("Who runs what")
-                        .checked(current.is_none())
-                        .on_click(set(None, weak.clone())),
-                );
-                for profile in &options {
-                    let checked = current.as_ref().is_some_and(|c| &c.profile() == profile);
-                    let model = Some(SpaceModel::from(profile.clone()));
-                    menu = menu.item(
-                        PopupMenuItem::new(profile.short())
-                            .checked(checked)
-                            .on_click(set(model, weak.clone())),
-                    );
-                }
-                menu
-            })
+                            cx.refresh_windows();
+                        }),
+                ),
+        )
     }
 
     fn storage_box(
@@ -1564,12 +1592,6 @@ impl SpacesPage {
     }
 }
 
-#[derive(Clone, Copy)]
-enum ModelFor {
-    Threads,
-    Jobs,
-}
-
 const REMOVE_SPACE: &str = "Its storage and brain repositories stay as they are. Its archived projects move to Personal. A Space with an open project, or the last Space, can’t be removed.";
 const PREFIX_RULE: &str = "2 to 5 capitals, used by no other storage repository on this Mac.";
 
@@ -1650,9 +1672,7 @@ fn merged(read: &Space, form: &Space, latest: &Space) -> Space {
     Space {
         name: pick(&read.name, &form.name, &latest.name),
         description: pick(&read.description, &form.description, &latest.description),
-        additions: pick(&read.additions, &form.additions, &latest.additions),
         repositories: pick(&read.repositories, &form.repositories, &latest.repositories),
-        models: pick(&read.models, &form.models, &latest.models),
         brain: pick(&read.brain, &form.brain, &latest.brain),
         sources: pick(&read.sources, &form.sources, &latest.sources),
         ..latest.clone()
@@ -1714,57 +1734,41 @@ fn place(named: String, at: String, choose: Button, p: Palette) -> Div {
         .child(choose)
 }
 
-/// What a Space's default model for `which`, threads or jobs, falls back to on this Mac when its
-/// provider is signed out here. Then they start on the Assistant row's first choice this Mac
-/// can run.
-fn fallback_note(
-    which: &str,
-    model: Option<&SpaceModel>,
-    detection: &Detection,
-    row: Option<&JobRow>,
-) -> Option<String> {
-    let model = model?.profile();
-    if may_run(&model, detection) {
-        return None;
+/// The brain's compile, "Daily at 06:00 America/Chicago on Mike's MacBook", and its gate, the
+/// checks `main` requires, as the Space page shows them.
+fn brain_lines(brain: &Brain, this_host: Option<&BrainCompiler>) -> (String, String) {
+    let compiler = brains_view::compiler_line(&brain.config, this_host);
+    let compile = match brain.config.config() {
+        Some(_) => format!("{} on {compiler}", brains_view::next_compile(&brain.config)),
+        // Why there is no compiler says it all.
+        None => compiler,
+    };
+    let mut gate = match brain.required_checks.as_slice() {
+        [] => "main requires no gate checks".to_owned(),
+        checks => format!("main requires {}", checks.join(", ")),
+    };
+    if !brain.missing_checks.is_empty() {
+        gate.push_str(&format!(
+            "; not yet {}, so batches wait",
+            brain.missing_checks.join(", ")
+        ));
     }
-    let fallback = row_choice(row, detection);
-    Some(match fallback {
-        Some(fallback) => format!(
-            "{} is not available here; {which} use {}.",
-            model.short(),
-            fallback.short()
-        ),
-        None => format!(
-            "{} is not available here, and neither is the Assistant row in Who runs what.",
-            model.short()
-        ),
-    })
+    (compile, gate)
 }
 
-/// Whether this Mac may run a Space's default model: its provider is not found signed out here.
-/// A provider not detected yet counts as signed in, as the host counts it.
-fn may_run(model: &ModelProfile, detection: &Detection) -> bool {
-    detection
-        .get(&model.provider)
-        .is_none_or(ProviderStatus::usable)
+/// How many Behavior choices the Space makes, for itself and for its repositories.
+fn behaviors_changed(space: &Space) -> usize {
+    let repositories = space.repository_settings.values();
+    space.behaviors.len() + repositories.map(|r| r.behaviors.len()).sum::<usize>()
 }
-/// The Assistant row's first choice this Mac can run.
-fn row_choice<'a>(row: Option<&'a JobRow>, detection: &Detection) -> Option<&'a ModelProfile> {
-    row?.main.choices().find(|p| {
-        detection
-            .get(&p.provider)
-            .is_none_or(ProviderStatus::usable)
-    })
-}
-/// The model a new thread in a Space starts on when the user picks none: the Space's default
-/// for threads when this Mac may run it, else the Assistant row's first choice it can run.
-pub(super) fn thread_model(
-    model: Option<&SpaceModel>,
-    detection: &Detection,
-    row: Option<&JobRow>,
-) -> Option<ModelProfile> {
-    let default = model.map(SpaceModel::profile);
-    (default.filter(|d| may_run(d, detection))).or_else(|| row_choice(row, detection).cloned())
+
+/// What the Space sets on Models: its rows, and its reviews when it sets any.
+fn models_changed(space: &Space) -> String {
+    let rows = counted(space.models.overrides().len(), "row");
+    match space.reviews.is_empty() {
+        true => rows,
+        false => format!("{rows} · reviews"),
+    }
 }
 
 pub(super) fn space_mark(color: Hsla) -> Div {
@@ -1814,7 +1818,7 @@ fn storage_banner(space: &Space, readers: Option<Readers>) -> (&'static str, Str
     (
         "Shared.",
         format!(
-            "{read} Anyone who can push to {repository} can change these instructions for everyone in this Space, and can read and edit its issues. Edits to the Space are commits and follow the settings repository’s sync, pause and compare rules."
+            "{read} Anyone who can push to {repository} can change this Space’s Behaviors, additions and models for everyone in it, and can read and edit its issues. Edits to the Space are commits and follow the settings repository’s sync, pause and compare rules."
         ),
     )
 }
@@ -2087,12 +2091,13 @@ impl Render for SpacesPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        Joining, STORAGE_FRESH_MS, brain_after_choosing, brain_label, fallback_note, follows_brain,
-        format_sources, holds_draft, issues_line, join_choices, join_refused_by, merged,
-        new_storage_line, parse_sources, pass_finished, prefix_question, readers_line,
-        reads_storage_again, replaces_github_brain, repository_line, shared_with, storage_banner,
-        sync_line, thread_model,
+        Joining, STORAGE_FRESH_MS, behaviors_changed, brain_after_choosing, brain_label,
+        brain_lines, follows_brain, format_sources, holds_draft, issues_line, join_choices,
+        join_refused_by, merged, models_changed, new_storage_line, parse_sources, pass_finished,
+        prefix_question, readers_line, reads_storage_again, replaces_github_brain,
+        repository_line, shared_with, storage_banner, sync_line,
     };
+    use crate::wording::counted;
     use workspace_core::*;
 
     fn space(name: &str, storage: StorageRepository) -> Space {
@@ -2138,58 +2143,78 @@ mod tests {
     }
 
     #[test]
-    fn a_default_model_this_mac_cannot_run_says_what_threads_and_jobs_use_instead() {
-        let profile = |provider, model: &str, effort: &str| ModelProfile {
-            provider,
-            model: model.into(),
-            effort: effort.into(),
+    fn the_space_page_links_to_what_the_space_changes_and_saving_it_keeps_models_and_additions() {
+        let mut sage = sage();
+        assert_eq!(counted(behaviors_changed(&sage), "change"), "0 changes");
+        assert_eq!(models_changed(&sage), "0 rows");
+        sage.behaviors.insert("review_depth".into(), "full".into());
+        let repository = cascade::RepositorySettings {
+            behaviors: [("publishing".to_owned(), "always_ask".to_owned())].into(),
+            ..Default::default()
         };
-        let opus = SpaceModel::from(profile(Provider::Claude, "opus", "high"));
-        let row = JobRow {
-            job: Job::Assistant,
-            main: Line {
-                first: profile(Provider::Claude, "sonnet", "medium"),
-                then: Then::Model(profile(Provider::Codex, "gpt-6.1-sol", "medium")),
-            },
-            small: None,
+        (sage.repository_settings).insert("Sage-Social/sagechat-sms".into(), repository);
+        sage.models.threads = Some(SpaceModel::from(ModelProfile {
+            provider: Provider::Claude,
+            model: "opus".into(),
+            effort: "high".into(),
+        }));
+        assert_eq!(counted(behaviors_changed(&sage), "change"), "2 changes");
+        assert_eq!(models_changed(&sage), "1 row");
+        sage.reviews.max_cycles = Some(3);
+        assert_eq!(models_changed(&sage), "1 row · reviews");
+
+        // The form has no models or additions, so a save keeps what Models and Behaviors set
+        // meanwhile, here or on another Mac.
+        let read = sage.clone();
+        let form = Space {
+            description: "Sage Haven work".into(),
+            ..read.clone()
         };
-        let status = |signed_in| ProviderStatus {
-            installed: true,
-            signed_in,
-            plan: None,
+        let latest = Space {
+            additions: "Never log child PII.".into(),
+            models: SpaceModels::default(),
+            ..read.clone()
         };
-        let both: Detection = [
-            (Provider::Claude, status(true)),
-            (Provider::Codex, status(true)),
-        ]
-        .into();
-        assert_eq!(fallback_note("jobs", Some(&opus), &both, Some(&row)), None);
-        assert_eq!(fallback_note("jobs", None, &both, Some(&row)), None);
-        let no_claude: Detection = [
-            (Provider::Claude, status(false)),
-            (Provider::Codex, status(true)),
-        ]
-        .into();
+        let saved = merged(&read, &form, &latest);
+        assert_eq!(saved.description, "Sage Haven work");
+        assert_eq!(saved.additions, "Never log child PII.");
+        assert_eq!(saved.models, SpaceModels::default());
+    }
+
+    #[test]
+    fn the_brains_compile_and_gate_read_as_its_config_says() {
+        let brain = |config: serde_json::Value, missing: &[&str]| -> Brain {
+            serde_json::from_value(serde_json::json!({
+                "repository": "Sage-Social/sage-brain", "spaces": ["sage"], "granted": true,
+                "checkout": "/data/brains/sage-brain", "config": config,
+                "required_checks": ["sensitive-info", "secret-scan"],
+                "missing_checks": missing,
+            }))
+            .unwrap()
+        };
+        let read = serde_json::json!({"kind": "read", "config": {"version": 1,
+            "compiler": {"host_id": "mike", "name": "Mike's MacBook"},
+            "compile": {"at": "06:00", "timezone": "America/Chicago"}}});
         assert_eq!(
-            fallback_note("jobs", Some(&opus), &no_claude, Some(&row)).unwrap(),
-            "Opus · high is not available here; jobs use GPT 6.1 Sol · medium."
+            brain_lines(&brain(read.clone(), &[]), None),
+            (
+                "Daily at 06:00 America/Chicago on Mike's MacBook".into(),
+                "main requires sensitive-info, secret-scan".into()
+            )
         );
-        // A new tab's model chip says the same: the default where it runs, else the row.
-        let sonnet = profile(Provider::Claude, "sonnet", "medium");
-        let started = |model, detection: &Detection| thread_model(model, detection, Some(&row));
-        assert_eq!(started(Some(&opus), &both), Some(opus.profile()));
-        assert_eq!(started(None, &both), Some(sonnet.clone()));
+        let this_mac = BrainCompiler {
+            host_id: "mike".into(),
+            name: "Mike's MacBook".into(),
+            extra: Extra::new(),
+        };
+        let (compile, gate) = brain_lines(&brain(read, &["secret-scan"]), Some(&this_mac));
         assert_eq!(
-            started(Some(&opus), &no_claude),
-            Some(profile(Provider::Codex, "gpt-6.1-sol", "medium"))
+            compile,
+            "Daily at 06:00 America/Chicago on Mike's MacBook (this Mac)"
         );
-        // Not detected yet counts as signed in, as the host counts it.
-        let undetected = Detection::new();
-        assert_eq!(
-            fallback_note("jobs", Some(&opus), &undetected, Some(&row)),
-            None
-        );
-        assert_eq!(started(Some(&opus), &undetected), Some(opus.profile()));
+        assert!(gate.ends_with("; not yet secret-scan, so batches wait"));
+        let unread = brain(serde_json::json!({"kind": "unread"}), &[]);
+        assert_eq!(brain_lines(&unread, None).0, "Not read yet");
     }
 
     #[test]
@@ -2201,7 +2226,7 @@ mod tests {
             text.contains("Every member of Sage-Social can read Sage-Social/wiffletree-storage.")
         );
         assert!(text.contains(
-            "Anyone who can push to Sage-Social/wiffletree-storage can change these instructions for everyone in this Space"
+            "Anyone who can push to Sage-Social/wiffletree-storage can change this Space’s Behaviors, additions and models for everyone in it"
         ));
         let status = status(Some("SAGE"), 148, Some(Readers::EveryMember));
         assert_eq!(
@@ -2382,7 +2407,7 @@ mod tests {
         latest.repositories = vec!["Sage-Social/api".into()];
         latest.description = "Pulled from a teammate".into();
         let mut form = read.clone();
-        form.additions = "Treat production as read-only.".into();
+        form.name = "Sage Haven".into();
         let saved = merged(&read, &form, &latest);
         assert_eq!(
             saved.repositories,
@@ -2390,7 +2415,7 @@ mod tests {
             "the chip's edit stays"
         );
         assert_eq!(saved.description, "Pulled from a teammate");
-        assert_eq!(saved.additions, "Treat production as read-only.");
+        assert_eq!(saved.name, "Sage Haven");
         form.repositories = vec![];
         latest.repositories = vec!["Sage-Social/api".into(), "Sage-Social/web".into()];
         let mut read = read;
