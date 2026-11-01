@@ -52,8 +52,6 @@ pub(crate) struct FromIssue {
     pub id: IssueId,
     pub title: String,
     pub defaults: IssueProjectDefaults,
-    /// The repositories the project would use in the offered Space, by name.
-    pub repositories: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -326,14 +324,9 @@ impl CreationForm {
     }
 
     fn take_issue_defaults(&mut self, defaults: IssueProjectDefaults) {
-        let Some(issue) = &mut self.from_issue else {
-            return;
-        };
-        issue.repositories = (defaults.repositories.repository_ids.iter())
-            .filter_map(|id| self.workspace_repositories.iter().find(|r| &r.id == id))
-            .map(|r| r.name.clone())
-            .collect();
-        issue.defaults = defaults;
+        if let Some(issue) = &mut self.from_issue {
+            issue.defaults = defaults;
+        }
     }
 
     /// The installed CLIs' models, offered by the model picker beside the table's, and what
@@ -782,9 +775,13 @@ impl CreationForm {
         let offered = (self.options.iter())
             .find(|choice| choice.id == offered)
             .map_or("", |choice| choice.label.as_str());
-        let uses = match issue.repositories.is_empty() {
+        let names: Vec<&str> = (issue.defaults.repositories.repository_ids.iter())
+            .filter_map(|id| self.workspace_repositories.iter().find(|r| &r.id == id))
+            .map(|r| r.name.as_str())
+            .collect();
+        let uses = match names.is_empty() {
             true => format!("In {offered}, it starts with no repository."),
-            false => format!("In {offered}, it uses {}.", issue.repositories.join(", ")),
+            false => format!("In {offered}, it uses {}.", names.join(", ")),
         };
         div()
             .flex()

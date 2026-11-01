@@ -1,7 +1,8 @@
 //! Boards (OpenSpec change `assistant-spaces-jobs-boards`, screens 4 and 5 of its mockup): every
 //! output a thread or job saved, filtered by Space and job and searched by title, with a Jobs
-//! button that opens the assistant's Jobs list; and one output open by its type, with its versions. Markdown renders natively, HTML in
-//! the board web view, images and PDFs in Quick Look, and anything else in its default app.
+//! button that opens the assistant's Jobs list; and one output open by its type, with its
+//! versions. Markdown renders natively, HTML in the board web view, images and PDFs in Quick
+//! Look, and anything else in its default app.
 use super::*;
 use board_web_view::{Board, BoardEvent, BoardFolder, with_rules};
 use gpui::{Bounds, Image, Pixels, canvas, img};
@@ -96,6 +97,13 @@ struct Viewer {
     version: Option<String>,
     folder: PathBuf,
     body: Body,
+}
+impl Viewer {
+    /// Lists the output's versions, keeping one picked before they arrived.
+    fn take_versions(&mut self, versions: Vec<BoardVersion>) {
+        self.version.get_or_insert_with(|| LATEST.to_owned());
+        self.versions = versions;
+    }
 }
 
 pub(super) struct BoardsPage {
@@ -294,10 +302,7 @@ impl BoardsPage {
                     return;
                 };
                 match versions {
-                    Ok(versions) => {
-                        viewer.version = Some(LATEST.to_owned());
-                        viewer.versions = versions;
-                    }
+                    Ok(versions) => viewer.take_versions(versions),
                     Err(error) => toast_error(error, window, cx),
                 }
                 cx.notify();
@@ -1552,8 +1557,8 @@ impl Render for BoardsPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        JobFilter, Shows, TooltipWatch, contained, filtered, keeping_label, source_label,
-        under_overlay, version_label,
+        Body, JobFilter, LATEST, Shows, TooltipWatch, Viewer, contained, filtered, keeping_label,
+        source_label, under_overlay, version_label,
     };
     use gpui::{Image, ImageFormat};
     use std::sync::Arc;
@@ -1620,6 +1625,31 @@ mod tests {
         assert_eq!(watch.frame(), (true, false));
         watch.tooltip_released();
         assert_eq!(watch.frame(), (false, false));
+    }
+
+    #[test]
+    fn the_versions_reply_keeps_a_version_picked_before_it() {
+        let version = |commit: &str| BoardVersion {
+            commit: commit.into(),
+            saved_at: 0,
+            run_id: None,
+            catch_up: 0,
+            shared: false,
+            local_only: false,
+            file: "brief.md".into(),
+        };
+        let mut viewer = Viewer {
+            output: output("Brief", "sage", None),
+            versions: vec![],
+            version: None,
+            folder: "/tmp".into(),
+            body: Body::Loading,
+        };
+        viewer.take_versions(vec![version(LATEST), version("c1")]);
+        assert_eq!(viewer.version.as_deref(), Some(LATEST));
+        viewer.version = Some("c1".into());
+        viewer.take_versions(vec![version(LATEST), version("c1")]);
+        assert_eq!(viewer.version.as_deref(), Some("c1"));
     }
 
     #[test]

@@ -888,15 +888,10 @@ impl Workspace {
         let Some(index) = self.shared.index.clone() else {
             return;
         };
-        let repositories = (defaults.repositories.repository_ids.iter())
-            .filter_map(|id| index.snapshot().repositories.iter().find(|r| &r.id == id))
-            .map(|r| r.name.clone())
-            .collect();
         let issue = FromIssue {
             id,
             title,
             defaults,
-            repositories,
         };
         let bridge = self.bridge.clone();
         let form = cx.new(|cx| CreationForm::from_issue(&index, issue, bridge, window, cx));

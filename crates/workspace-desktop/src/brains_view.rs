@@ -364,7 +364,7 @@ impl BrainsPage {
             None => card.child(fact("Next compile", text(next_compile(&brain.config)))),
         };
         for (warning, tone) in warnings(brain, &batches) {
-            card = card.child(banner(tone.color(p)).child(warning));
+            card = card.child(banner(tone.color(p)).child(div().flex_1().min_w_0().child(warning)));
         }
         if let Some(compile) = compile.filter(|c| c.needs_model) {
             card = card.child(

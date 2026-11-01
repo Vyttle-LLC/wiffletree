@@ -144,6 +144,32 @@ fn checked_note(run: &JobRun, now: i64) -> (String, bool) {
     }
 }
 
+/// The job page's paused banner, for a paused job, and the line under its schedule.
+fn schedule_note(job: &JobState) -> (Option<&'static str>, String) {
+    if !job.recipe.enabled {
+        return (Some(PAUSED), "No next run while paused".into());
+    }
+    let next = match job.next_runs.is_empty() {
+        true => "No next run".into(),
+        false => format!("Next: {}", job.next_runs.join(" · ")),
+    };
+    (None, next)
+}
+
+/// How a run offers Stop: only while it runs, and prominently once it is past 30 minutes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stop {
+    Quiet,
+    Prominent,
+}
+fn stops(run: &JobRun) -> Option<Stop> {
+    match (run.outcome == RunOutcome::Running, run.long_minutes) {
+        (false, _) => None,
+        (true, None) => Some(Stop::Quiet),
+        (true, Some(_)) => Some(Stop::Prominent),
+    }
+}
+
 /// The pills by a job's name: Active, on its page only, or Paused; a running run and the last
 /// 30-minute mark it passed, since that is when `long_minutes` moves; and the Mac that runs it
 /// in this Mac's place.
@@ -651,11 +677,7 @@ impl AssistantPage {
                     .disabled(running || job.not_here.is_some())
                     .on_click(cx.listener(move |v, _, w, c| v.run_now(key.clone(), w, c))),
             );
-        let next = match (paused, job.next_runs.is_empty()) {
-            (true, _) => "No next run while paused".to_owned(),
-            (false, true) => "No next run".into(),
-            (false, false) => format!("Next: {}", job.next_runs.join(" · ")),
-        };
+        let (banner, next) = schedule_note(job);
         let checked = job.runs.iter().find(|r| !r.sources.is_empty());
         let (when_checked, fresh) = match (checked, &job.not_here) {
             (Some(run), _) => checked_note(run, ui::now()),
@@ -711,7 +733,8 @@ impl AssistantPage {
                 RunOutcome::Stopped => p.subtle,
                 RunOutcome::Failed | RunOutcome::NotStarted => p.red,
             };
-            let long = run.outcome == RunOutcome::Running && run.long_minutes.is_some();
+            let stop_button = stops(run);
+            let long = stop_button == Some(Stop::Prominent);
             runs = runs.child(
                 card(p)
                     .gap_1()
@@ -731,7 +754,7 @@ impl AssistantPage {
                                     .text_size(px(font::SMALL))
                                     .child(run_line(run)),
                             )
-                            .when(run.outcome == RunOutcome::Running, |d| {
+                            .when(stop_button.is_some(), |d| {
                                 d.child(
                                     button(SharedString::from(format!("stop-run-{}", run.id)))
                                         .when(!long, |b| b.ghost())
@@ -817,7 +840,7 @@ impl AssistantPage {
                     )
                     .children(job_pills(job, true, p)),
             )
-            .when(paused, |d| {
+            .when_some(banner, |d, banner| {
                 d.child(
                     ui::banner(p.yellow).text_size(px(font::SMALL)).child(
                         div()
@@ -831,7 +854,7 @@ impl AssistantPage {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child("Paused."),
                             )
-                            .child(PAUSED),
+                            .child(banner),
                     ),
                 )
             })
@@ -931,8 +954,8 @@ impl AssistantPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHECK_FRESH_MS, attention, checked_note, file_type_label, last_run_line, long_run_text,
-        long_runs, run_line, run_model, stale_source_line,
+        CHECK_FRESH_MS, PAUSED, Stop, attention, checked_note, file_type_label, last_run_line,
+        long_run_text, long_runs, run_line, run_model, schedule_note, stale_source_line, stops,
     };
     use workspace_core::job::{
         JobKey, JobRun, JobState, Recipe, RunOutcome, Schedule, SourceCheck,
@@ -1004,6 +1027,41 @@ mod tests {
             Some(JobKey::recipe(&SpaceId("sage".into()), "dashboard"))
         );
         assert_eq!(attention(&[job(vec![])]), (0, None));
+    }
+
+    #[test]
+    fn a_paused_job_shows_its_banner_and_no_next_run() {
+        let mut brief = job(vec![]);
+        brief.next_runs = vec!["Mon 07:00".into(), "Tue 07:00".into()];
+        assert_eq!(
+            schedule_note(&brief),
+            (None, "Next: Mon 07:00 · Tue 07:00".into())
+        );
+        brief.recipe.enabled = false;
+        assert_eq!(
+            schedule_note(&brief),
+            (Some(PAUSED), "No next run while paused".into())
+        );
+        brief.recipe.enabled = true;
+        brief.next_runs.clear();
+        assert_eq!(schedule_note(&brief), (None, "No next run".into()));
+    }
+
+    #[test]
+    fn only_a_running_run_offers_stop_and_a_long_one_prominently() {
+        let mut running = run("r1", RunOutcome::Running, 1);
+        assert_eq!(stops(&running), Some(Stop::Quiet));
+        running.long_minutes = Some(30);
+        assert_eq!(stops(&running), Some(Stop::Prominent));
+        for outcome in [
+            RunOutcome::Finished,
+            RunOutcome::Stopped,
+            RunOutcome::Failed,
+        ] {
+            let mut ended = run("r2", outcome, 1);
+            ended.long_minutes = Some(30);
+            assert_eq!(stops(&ended), None);
+        }
     }
 
     #[test]

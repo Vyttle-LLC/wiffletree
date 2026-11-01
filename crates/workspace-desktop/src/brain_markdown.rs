@@ -148,7 +148,6 @@ pub(super) fn link_key(target: &str) -> String {
     target.trim_end_matches(".md").trim().to_lowercase()
 }
 
-/// What a clicked link opens.
 pub(super) fn link_target(url: &str) -> LinkTarget {
     if let Some(path) = url.strip_prefix(NOTE) {
         return LinkTarget::Note(decode(path));

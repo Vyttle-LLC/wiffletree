@@ -171,11 +171,7 @@ impl Inspector {
         );
         self.ask(logs, window, cx, move |view, read, _, _| {
             if shown(view, &project) {
-                view.memory_summary.recent = Some(read.map(|page| {
-                    (page.pending.into_iter().chain(page.entries))
-                        .take(RECENT)
-                        .collect()
-                }));
+                view.memory_summary.recent = Some(read.map(newest_entries));
             }
         });
     }
@@ -497,8 +493,15 @@ impl Inspector {
     }
 }
 
-/// The recent entries the summary lists.
 const RECENT: usize = 5;
+
+/// The page's newest entries, this Mac's pending ones among those on main by id.
+fn newest_entries(page: BrainLogPage) -> Vec<BrainEntry> {
+    let mut entries: Vec<BrainEntry> = page.pending.into_iter().chain(page.entries).collect();
+    entries.sort_by(|a, b| b.id.cmp(&a.id));
+    entries.truncate(RECENT);
+    entries
+}
 /// How long the summary's reading stands before a change to the workspace asks again.
 const FRESH_MS: i64 = 10_000;
 
@@ -574,8 +577,44 @@ fn brain_name(brain: &SpaceBrain, local: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{brain_name, log_status, no_brain_line};
+    use super::{RECENT, brain_name, log_status, newest_entries, no_brain_line};
     use workspace_core::*;
+
+    #[test]
+    fn recent_entries_are_the_newest_pending_or_on_main() {
+        let entry = |id: &str, pending: bool| BrainEntry {
+            id: id.into(),
+            path: format!("logs/{id}.md"),
+            repository: "app".into(),
+            author: "mhohlios".into(),
+            source: "wiffletree".into(),
+            date: "2026-10-31".into(),
+            title: id.into(),
+            kind: BrainKind::Decision,
+            reference: String::new(),
+            changed: String::new(),
+            why: String::new(),
+            state: String::new(),
+            anchors: RefAnchors::default(),
+            verification: RefVerification {
+                state: RefState::Unverified,
+                reason: None,
+            },
+            pull_request: EntryPullRequest::None,
+            origin: None,
+            pending,
+        };
+        let page = BrainLogPage {
+            entries: ["09", "07", "06", "05", "04", "03"]
+                .map(|id| entry(id, false))
+                .into(),
+            pending: ["08", "01"].map(|id| entry(id, true)).into(),
+            ..BrainLogPage::default()
+        };
+        let ids: Vec<String> = newest_entries(page).into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, ["09", "08", "07", "06", "05"]);
+        assert_eq!(ids.len(), RECENT);
+    }
 
     #[test]
     fn an_entry_says_when_it_is_held_released_or_waiting_for_a_brain() {
