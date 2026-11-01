@@ -206,11 +206,10 @@ impl SpacesPage {
         self.load(&space, window, cx);
     }
     fn follow_brain(&mut self, space: &Space, window: &mut Window, cx: &mut Context<Self>) {
-        let unedited = self
-            .loaded
-            .as_ref()
-            .is_some_and(|(from, read)| from.id == space.id && self.form_brain(cx) == read.brain);
-        if unedited {
+        let follows = self.loaded.as_ref().is_some_and(|(from, read)| {
+            from.id == space.id && follows_brain(&self.form_brain(cx), &read.brain, &space.brain)
+        });
+        if follows {
             self.adopt_brain(space.brain.clone(), window, cx);
         }
     }
@@ -1588,8 +1587,6 @@ fn new_storage_line(check: &StorageCheck) -> String {
     )
 }
 
-/// Whether a change to the workspace asks again what `shown`'s storage holds: when the last
-/// question was about another Space, or about this one and has gone stale.
 fn reads_storage_again(
     asked: Option<&(SpaceId, i64)>,
     shown: &SpaceId,
@@ -1613,10 +1610,19 @@ fn pass_finished(before: &[IssueTracker], now: &[IssueTracker], shown: &SpaceId)
     pass(before) != pass(now)
 }
 
-/// Whether a folder chosen while the form says No brain replaces the Space's GitHub brain.
 fn replaces_github_brain(form: &Option<SpaceBrain>, space: &Option<SpaceBrain>) -> bool {
     let github = |b: &SpaceBrain| matches!(b.repository, BrainRepository::GitHub { .. });
     form.is_none() && space.as_ref().is_some_and(github)
+}
+
+/// Whether the form takes the Space's brain: it changed since the form was filled, and the form
+/// left its own brain as filled.
+fn follows_brain(
+    form: &Option<SpaceBrain>,
+    read: &Option<SpaceBrain>,
+    space: &Option<SpaceBrain>,
+) -> bool {
+    form == read && space != read
 }
 
 /// The form's brain once a brain was chosen, which changes only where it is on this Mac or,
@@ -2091,7 +2097,7 @@ impl Render for SpacesPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        Joining, STORAGE_FRESH_MS, brain_after_choosing, brain_label, fallback_note,
+        Joining, STORAGE_FRESH_MS, brain_after_choosing, brain_label, fallback_note, follows_brain,
         format_sources, holds_draft, issues_line, join_choices, join_refused_by, merged,
         new_storage_line, parse_sources, pass_finished, prefix_question, readers_line,
         reads_storage_again, replaces_github_brain, repository_line, shared_with, storage_banner,
@@ -2554,6 +2560,27 @@ mod tests {
         assert!(!replaces_github_brain(&Some(github.clone()), &Some(github)));
         assert!(!replaces_github_brain(&None, &Some(local)));
         assert!(!replaces_github_brain(&None, &None));
+    }
+
+    #[test]
+    fn an_edited_form_takes_only_a_changed_brain_it_left_alone() {
+        let local = Some(SpaceBrain {
+            repository: BrainRepository::local(),
+            folder: "second-brain".into(),
+            extra: Extra::new(),
+        });
+        assert!(
+            follows_brain(&None, &None, &local),
+            "a brain chosen meanwhile"
+        );
+        assert!(
+            !follows_brain(&local, &local, &local),
+            "an unrelated snapshot leaves the folder input alone"
+        );
+        assert!(
+            !follows_brain(&None, &local, &local),
+            "No brain is the form's edit"
+        );
     }
 
     #[test]
