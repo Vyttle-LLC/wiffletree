@@ -21,7 +21,8 @@ const KEEP: &str =
     "Only in repositories whose owner is allowed below · all off until you allow one.";
 const WATCH: &str =
     "Always on. Tells the coordinator when it merges, closes, fails checks or conflicts.";
-const REBASE_AFTER: &str = "After the base has been quiet for";
+const REBASE_AFTER: &str = "Also rebases every time the base moves, after it has been quiet for";
+const FIX_FIRST: &str = "Rebases only when the PR conflicts or its checks fail, then tries once to fix it. Then runs the";
 const REBASE_PUSH: &str = "minutes. Pushes only when the change is the same as the reviewed one.";
 const SORT: &str = "Tells the coordinator which need a change or an answer.";
 /// The name of the one trigger for tries at conflicts and failed checks.
@@ -1009,9 +1010,9 @@ impl RepositoriesPage {
     }
 
     /// The PR keeper's triggers, for the whole workspace, in one card: the watch that is always
-    /// on, the rebase trigger and its quiet period, the one trigger for tries at conflicts and
-    /// failed checks and its review level, and comment sorting, with a line for each trigger on
-    /// from another machine that this one cannot run.
+    /// on, the one trigger for tries at conflicts and failed checks and its review level, the
+    /// rebase trigger and its quiet period, and comment sorting, with a line for each trigger
+    /// on from another machine that this one cannot run.
     fn keeper_block(
         &self,
         keeper: &KeeperSettings,
@@ -1085,7 +1086,7 @@ impl RepositoriesPage {
             .child(step("more", "+", minutes + 1).on_click(save(quiet(minutes + 1))))
             .child(REBASE_PUSH);
         let level = inline()
-            .child("Then runs the")
+            .child(FIX_FIRST)
             .child(self.review_level_picker(keeper, cx))
             .child("review before pushing.");
         let mut fix_details = vec![level.into_any_element()];
@@ -1113,20 +1114,20 @@ impl RepositoriesPage {
                 vec![hint(WATCH, p).into_any_element()],
             ))
             .child(trigger(
-                Checkbox::new("keeper-rebase")
-                    .disabled(refused)
-                    .checked(keeper.rebase)
-                    .on_click(rebase),
-                KEEPER_REBASE,
-                vec![period.into_any_element()],
-            ))
-            .child(trigger(
                 Checkbox::new("keeper-fixes")
                     .disabled(refused)
                     .checked(fixes_are_on(keeper))
                     .on_click(fixes),
                 KEEPER_TRIES,
                 fix_details,
+            ))
+            .child(trigger(
+                Checkbox::new("keeper-rebase")
+                    .disabled(refused)
+                    .checked(keeper.rebase)
+                    .on_click(rebase),
+                KEEPER_REBASE,
+                vec![period.into_any_element()],
             ))
             .child(trigger(
                 Checkbox::new("keeper-comments")

@@ -742,7 +742,7 @@ impl Host {
         let settings = self.settings().keeper;
         let coordinator = self.session(&ticket.coordinator_id)?;
         ensure!(
-            settings.rebase && self.kept(ticket, repository, &coordinator)?,
+            settings.works_on_branches() && self.kept(ticket, repository, &coordinator)?,
             "the keeper may no longer change the branch"
         );
         if waiting && ticket.keeper.as_ref().is_some_and(|k| k.waiting_changed) {
@@ -1062,21 +1062,25 @@ impl Host {
         }
         Ok(())
     }
-    /// The keeper's part of each kept ticket's PR line, while the rebase trigger is on. A part
-    /// shows only while the keeper still keeps the ticket and may change its branch, so an
-    /// owner unticked or a project paused since the last pass hides it at once.
+    /// The keeper's part of each kept ticket's PR line, while it may work on branches. A part
+    /// shows only while the keeper still keeps the ticket, may change its branch and wants a
+    /// rebase of it, so an owner unticked or a project paused since the last pass hides it at
+    /// once.
     pub(crate) fn keeper_parts(&self) -> BTreeMap<String, KeeperPart> {
-        if !self.settings().keeper.rebase {
+        if !self.settings().keeper.works_on_branches() {
             return BTreeMap::new();
         }
-        let keeps = |id: &str| {
+        let current = |id: &str| {
             let ticket = self.ticket(id)?;
-            self.keeps_branch(&ticket, &self.ticket_repository(&ticket)?)
+            let repository = self.ticket_repository(&ticket)?;
+            anyhow::Ok(
+                self.keeps_branch(&ticket, &repository)? && self.wants_rebase(&ticket, &repository),
+            )
         };
         self.keeper
             .parts
             .iter()
-            .filter(|(id, _)| keeps(id).unwrap_or(false))
+            .filter(|(id, _)| current(id).unwrap_or(false))
             .map(|(id, part)| (id.clone(), *part))
             .collect()
     }
@@ -1099,7 +1103,7 @@ impl Host {
     ) -> Result<()> {
         let Some(pr) = ticket
             .open_pull_request()
-            .filter(|_| settings.keeper.rebase)
+            .filter(|_| settings.keeper.works_on_branches())
         else {
             return Ok(());
         };
@@ -1143,10 +1147,10 @@ impl Host {
         });
         Ok(())
     }
-    /// Makes the ticket's rebase due when its base has been quiet for the period, its head does
-    /// not contain the base yet, that pair was not rebased before, and the keeper may change the
-    /// branch; or, with no rebase due, the reproduction of its failed checks. Returns the
-    /// ticket's part of its PR line, in that order of precedence.
+    /// Makes the ticket's rebase due when the keeper wants one, its base has been quiet for the
+    /// period, its head does not contain the base yet, that pair was not rebased before, and the
+    /// keeper may change the branch; or, with no rebase due, the reproduction of its failed
+    /// checks. Returns the ticket's part of its PR line, in that order of precedence.
     fn ticket_due(
         &mut self,
         ticket: &Ticket,
@@ -1158,7 +1162,7 @@ impl Host {
     ) -> Result<Option<KeeperPart>> {
         let Some(pr) = ticket
             .open_pull_request()
-            .filter(|_| settings.keeper.rebase)
+            .filter(|_| settings.keeper.works_on_branches())
         else {
             return Ok(None);
         };
@@ -1197,6 +1201,9 @@ impl Host {
                 head: pr.head.clone(),
                 checks: repository.checks.clone().context("No checks command")?,
             });
+        }
+        if !self.wants_rebase(ticket, repository) {
+            return Ok(None);
         }
         if up_to_date {
             let rebased = record
@@ -1240,6 +1247,19 @@ impl Host {
         });
         Ok(None)
     }
+    /// Whether the keeper wants the PR rebased: the rebase trigger is on, or the PR shows a
+    /// problem the keeper would try.
+    fn wants_rebase(&self, ticket: &Ticket, repository: &Repository) -> bool {
+        let problem_to_try = |problem| {
+            ticket
+                .open_pull_request()
+                .is_some_and(|pr| shows(problem, pr))
+                && self.would_try(ticket, repository, problem)
+        };
+        self.settings().keeper.rebase
+            || problem_to_try(KeeperProblem::Conflict)
+            || problem_to_try(KeeperProblem::Checks)
+    }
     /// Whether the keeper has no rebase to do for the PR's head, which comes before a try at
     /// failed checks: the head contains the base the keeper last saw, or that head and base
     /// were rebased already.
@@ -1274,7 +1294,6 @@ impl Host {
         let settings = self.settings().keeper;
         let head = ticket.open_pull_request().map(|pr| pr.head.as_str());
         !ticket.in_merge_queue()
-            && settings.rebase
             && settings.tries(problem)
             && repository.checks.is_some()
             && head.is_some_and(|head| !ticket.tried(problem, head))
@@ -1732,7 +1751,7 @@ impl Host {
         let repository = self.ticket_repository(&ticket)?;
         let changed = record.waiting_changed;
         let settings = self.settings().keeper;
-        let may = settings.rebase && self.keeps_branch(&ticket, &repository)?;
+        let may = settings.works_on_branches() && self.keeps_branch(&ticket, &repository)?;
         // A changed patch is reviewed while the conflicts trigger is on.
         let trigger = problem.unwrap_or(KeeperProblem::Conflict);
         let moved = match may {
@@ -1853,9 +1872,7 @@ impl Host {
         let coordinator = self.session(&ticket.coordinator_id)?;
         let repository = self.ticket_repository(&ticket)?;
         let trigger = review.problem.unwrap_or(KeeperProblem::Conflict);
-        let on = settings.rebase
-            && settings.tries(trigger)
-            && self.kept(&ticket, &repository, &coordinator)?;
+        let on = settings.tries(trigger) && self.kept(&ticket, &repository, &coordinator)?;
         let reviews = ticket.keeper.as_mut().map(|k| &mut k.reviews);
         let Some(started) = reviews.and_then(|r| r.last_mut()).filter(|_| passed) else {
             return Ok(None);
@@ -2057,7 +2074,8 @@ impl Host {
         git: &publish::GitTool,
     ) -> Result<()> {
         let coordinator = self.session(&ticket.coordinator_id)?;
-        let kept = self.settings().keeper.rebase && self.kept(ticket, repository, &coordinator)?;
+        let kept = self.settings().keeper.works_on_branches()
+            && self.kept(ticket, repository, &coordinator)?;
         let movable = match kept {
             true => self.movable(ticket, from),
             false => Err(anyhow::anyhow!("the keeper no longer keeps the ticket")),
@@ -6419,5 +6437,147 @@ pub(crate) mod tests {
         assert!(f.host.keeper_reviews_ended().is_empty());
         set_queued(&mut f, false);
         assert_eq!(f.host.keeper_reviews_ended(), [f.ticket.clone()]);
+    }
+
+    /// Turns the rebase trigger off and leaves both triggers for tries on.
+    fn fixes_only(f: &mut Fixture) {
+        let fixes = KeeperSettings {
+            rebase: false,
+            conflicts: true,
+            checks: true,
+            ..f.host.settings().keeper
+        };
+        f.host.set_keeper(fixes).unwrap();
+    }
+    fn assert_no_branch_work(due: &Due) {
+        assert!(due.rebases.is_empty() && due.reproductions.is_empty() && due.fetches.is_empty());
+    }
+
+    #[test]
+    fn with_only_the_fixes_on_a_clean_pr_behind_its_base_is_left_alone() {
+        let (mut f, r) = reviewing("true");
+        fixes_only(&mut f);
+        let (head, pushed) = (f.head(), r.branch(BRANCH));
+        let base = move_base(&f, &r, "other.txt", "1\n");
+        for at in [0, 60 * MINUTE] {
+            assert_no_branch_work(&watched(&mut f, &base, &head, false, at));
+        }
+        assert!(f.host.keeper_parts().is_empty());
+        assert_eq!((f.head(), r.branch(BRANCH)), (head, pushed));
+        assert!(try_agent(&f).is_none() && wakes(&f).is_empty());
+    }
+
+    #[test]
+    fn turning_the_rebase_trigger_off_hides_a_clean_prs_rebase_timing_at_once() {
+        let (mut f, r) = reviewing("true");
+        let head = f.head();
+        let base = move_base(&f, &r, "other.txt", "1\n");
+        watched(&mut f, &base, &head, false, 0);
+        assert_eq!(
+            f.host.keeper_parts()[&f.ticket],
+            KeeperPart::RebaseAt(2 * MINUTE)
+        );
+        fixes_only(&mut f);
+        assert!(f.host.keeper_parts().is_empty());
+    }
+
+    #[test]
+    fn with_only_the_fixes_on_a_conflict_is_rebased_after_the_quiet_period_and_tried_once() {
+        let (mut f, r, base) = conflicting();
+        fixes_only(&mut f);
+        let head = f.head();
+        assert!(watched(&mut f, &base, &head, true, 0).rebases.is_empty());
+        assert_eq!(
+            f.host.keeper_parts()[&f.ticket],
+            KeeperPart::RebaseAt(2 * MINUTE)
+        );
+        assert!(held(&f).is_some() && wakes(&f).is_empty());
+        let mut jobs = watched(&mut f, &base, &head, true, 2 * MINUTE).rebases;
+        let job = jobs.remove(0);
+        assert!(jobs.is_empty() && job.tries);
+        f.host.keeper_rebased(rebase(&job, fetch(&r))).unwrap();
+        let agent = try_agent(&f).expect("a try agent");
+        resolve(&job.checkout, &[]);
+        assert!(gated(&mut f, &agent));
+        assert!(f.host.keeper_move(&f.ticket.clone()).unwrap().is_none());
+        let after = f.head();
+        verdict(&mut f, "Correctness", "passed", json!([]));
+        let step = f.host.keeper_review_done(&f.ticket.clone()).unwrap();
+        drive(&mut f, &r, step);
+        assert_eq!(r.branch(BRANCH), Some(after));
+        assert_eq!(last_try(&f).ended, Some(TryEnd::Pushed));
+    }
+
+    #[test]
+    fn with_only_the_fixes_on_failed_checks_are_rebased_then_reproduced_and_tried_once() {
+        let (mut f, r, _) = checking(FIXED);
+        fixes_only(&mut f);
+        let base = move_base(&f, &r, "other.txt", "1\n");
+        let waits = checks_failed(&mut f, &base, 0);
+        assert!(waits.rebases.is_empty() && waits.reproductions.is_empty());
+        let mut due = checks_failed(&mut f, &base, 2 * MINUTE);
+        assert!(due.reproductions.is_empty());
+        let job = due.rebases.remove(0);
+        assert!(due.rebases.is_empty());
+        keep(&mut f, &r, job);
+        assert_eq!(r.branch(BRANCH), Some(f.head()));
+        let due = checks_failed(&mut f, &base, 3 * MINUTE);
+        assert!(due.rebases.is_empty());
+        reproduce_due(&mut f, due);
+        assert!(try_agent(&f).is_some());
+        let again = checks_failed(&mut f, &base, 4 * MINUTE);
+        assert!(again.rebases.is_empty() && again.reproductions.is_empty());
+    }
+
+    #[test]
+    fn with_only_the_fixes_on_and_no_checks_command_the_watcher_wakes_and_nothing_is_rebased() {
+        let (mut f, _r, base) = conflicting();
+        fixes_only(&mut f);
+        let repository = f.ticket().repository_id;
+        f.host.set_repository_checks(&repository, None).unwrap();
+        let head = f.head();
+        assert_no_branch_work(&watched(&mut f, &base, &head, true, 60 * MINUTE));
+        assert!(held(&f).is_none());
+        assert_eq!(wakes(&f).len(), 1);
+        assert_no_branch_work(&checks_failed(&mut f, &base, 61 * MINUTE));
+        assert!(held_for(&f, KeeperProblem::Checks).is_none());
+        assert_eq!(wakes(&f).len(), 2);
+        assert!(f.host.keeper_parts().is_empty());
+    }
+
+    #[test]
+    fn with_only_the_fixes_on_a_used_try_rebases_nothing_more() {
+        let (mut f, _r, base) = conflicting();
+        fixes_only(&mut f);
+        let head = f.head();
+        let mut ticket = f.ticket();
+        ticket.keeper.get_or_insert_default().tries.push(KeeperTry {
+            problem: KeeperProblem::Conflict,
+            head: head.clone(),
+            base: base.clone(),
+            files: vec![],
+            started: 0,
+            ended: Some(TryEnd::ThrownAway("no".into())),
+        });
+        f.host.save_ticket(&ticket).unwrap();
+        assert_no_branch_work(&watched(&mut f, &base, &head, true, 60 * MINUTE));
+    }
+
+    #[test]
+    fn with_only_the_fixes_on_commits_pushed_elsewhere_are_still_taken_in() {
+        let (mut f, r) = reviewing("true");
+        fixes_only(&mut f);
+        pushed_elsewhere(&mut f, &r, "c.txt", "three\n");
+        assert_eq!(fetches(&mut f).len(), 1);
+    }
+
+    #[test]
+    fn with_every_branch_trigger_off_the_keeper_does_no_branch_work() {
+        let (mut f, _r, base) = conflicting();
+        f.host.set_keeper(KeeperSettings::default()).unwrap();
+        let head = f.head();
+        assert_no_branch_work(&watched(&mut f, &base, &head, true, 60 * MINUTE));
+        assert_no_branch_work(&checks_failed(&mut f, &base, 61 * MINUTE));
+        assert!(f.host.keeper_parts().is_empty());
     }
 }
