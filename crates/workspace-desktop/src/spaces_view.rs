@@ -1072,12 +1072,16 @@ impl SpacesPage {
                 .child(button)
                 .child(hint(changes, p))
         };
-        // Behaviors opens on the Workspace scope until the Behaviors page can preselect a Space.
+        let scope = cascade::Scope::Space {
+            space_id: space.id.clone(),
+        };
         let behaviors = link(
             button("space-behaviors")
                 .small()
                 .label(format!("Behaviors for {} →", space.name))
-                .on_click(cx.listener(|_, _, _, c| c.emit(Intent::OpenPage(Page::Skills)))),
+                .on_click(
+                    cx.listener(move |_, _, _, c| c.emit(Intent::OpenBehaviors(scope.clone()))),
+                ),
             counted(behaviors_changed(space), "change"),
         );
         let models = link(
@@ -1133,7 +1137,7 @@ impl SpacesPage {
                                 .child("Moved"),
                         )
                         .child(format!(
-                            "{name}'s instructions are now “{name} additions” on Behaviors, and reach every role in {name}. Its thread and job models are now {name}'s Assistant and Job rows on Models."
+                            "{name}'s instructions are now “{name} additions” on Behaviors for {name}, and reach every role in {name}. Its thread and job models are now {name}'s Assistant and Job rows on Models for {name}."
                         )),
                 )
                 .child(

@@ -855,7 +855,7 @@ fn sidebar_groups(spaces: &[(SpaceId, String)]) -> Vec<(&'static str, Vec<(Strin
         (
             "Shared with your Macs",
             vec![
-                entry("Behaviors", Go::Page(Page::Skills)),
+                entry("Behaviors", Go::Page(Page::Behaviors)),
                 entry("Reviews", Go::Models),
                 entry("PR keeper", Go::Page(Page::Repositories)),
                 entry("Check-ins", Go::Section(Block::CheckIns)),
@@ -1025,7 +1025,7 @@ mod tests {
                 .collect()
         };
         assert_eq!(labels(0)[0], "Behaviors");
-        assert_eq!(groups[0].1[0].1, Go::Page(Page::Skills));
+        assert_eq!(groups[0].1[0].1, Go::Page(Page::Behaviors));
         assert_eq!(labels(1), ["Sage", "Vyttle"]);
         assert_eq!(groups[1].1[0].1, Go::Space(SpaceId("sage".into())));
         // Repository facts and the allowed owners are permissions of this Mac, not shared.

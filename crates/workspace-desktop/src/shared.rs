@@ -228,10 +228,6 @@ pub(super) enum Intent {
     /// Opens the Behaviors page on one skill.
     OpenSkill(Skill),
     /// Opens the Behaviors page at a scope, such as a Space's page does for its own.
-    #[expect(
-        dead_code,
-        reason = "the Space page's link arrives in settings-cascade stage 4"
-    )]
     OpenBehaviors(skills_view::Scope),
     /// Opens the Spaces page on one Space.
     OpenSpace(SpaceId),

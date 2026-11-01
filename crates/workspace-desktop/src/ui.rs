@@ -333,6 +333,7 @@ pub(super) fn from_chip(layer: cascade::Layer, label: impl Into<SharedString>, p
         .py(px(1.))
         .rounded(px(7.))
         .text_size(px(font::META))
+        .whitespace_nowrap()
         .child(label.into());
     let tint = match layer {
         Layer::Stock | Layer::ThisMac => None,

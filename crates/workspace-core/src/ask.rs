@@ -199,9 +199,6 @@ pub fn set_space_models(
 ) -> Ask<cascade::SpaceModelSettings> {
     Ask::new(Command::SetSpaceModels { space_id, settings })
 }
-pub fn behavior_catalog() -> Ask<Vec<cascade::Behavior>> {
-    Ask::new(Command::BehaviorCatalog)
-}
 pub fn effective_settings(
     project_id: String,
     ticket_id: Option<String>,
