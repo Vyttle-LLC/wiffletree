@@ -3572,8 +3572,8 @@ pub enum Command {
         space_id: Option<SpaceId>,
     },
     /// Creates a project and its coordinator in `space_id`, one of the Spaces sharing the
-    /// issue's tracker, with the issue's repositories on this Mac, or the Space's when it lists
-    /// none; links it to the issue, sends the coordinator the issue as untrusted context, and
+    /// issue's tracker, with the issue's repositories on this Mac that the Space does not list
+    /// added to it; links it to the issue, sends the coordinator the issue as untrusted context, and
     /// records in the tracker that the human started work. Answered with `CreatedProject`.
     StartProjectFromIssue {
         id: IssueId,

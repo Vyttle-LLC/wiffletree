@@ -603,8 +603,6 @@ impl Host {
         );
         let project = self.atomically(|host| {
             let (project, coordinator) = host.insert_project(name, &thread.space_id, None)?;
-            let repositories = host.space_repositories(&thread.space_id)?.repository_ids;
-            let project = host.set_project_repositories(&project.id, Some(repositories))?;
             host.send_with_files(&new_id(), None, &coordinator.id, &body, &files)?;
             host.set_live(&project.id, true)?;
             thread.project_id = Some(project.id.clone());
@@ -1269,6 +1267,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(project.space, sage);
+        assert!(
+            project.added_repositories.is_empty(),
+            "it inherits its Space's"
+        );
         assert!(host.live_projects().unwrap().contains(&project.id));
         let coordinator = (host.sessions().unwrap().into_iter())
             .find(|s| s.project_id == project.id)
