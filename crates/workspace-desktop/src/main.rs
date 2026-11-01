@@ -51,6 +51,8 @@ mod project_repositories;
 mod quotas;
 mod render_counts;
 mod repositories_view;
+mod repository_chooser;
+mod repository_tree;
 mod settings;
 mod shared;
 mod sidebar;
@@ -713,6 +715,13 @@ impl Workspace {
                         let names: Vec<_> = refresh.added.iter().map(|r| r.name.as_str()).collect();
                         let found = format!("Found new repositories: {}", names.join(", "));
                         toast(found, window, cx);
+                        for joined in refresh.joined {
+                            toast(joined, window, cx);
+                        }
+                        // A Space that could not take a repository is worth interrupting for.
+                        for failed in refresh.not_joined {
+                            toast_error(failed, window, cx);
+                        }
                     }
                     Ok(_) => {}
                     Err(error) => eprintln!("Repository refresh: {error}"),

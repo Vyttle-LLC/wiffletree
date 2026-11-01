@@ -689,7 +689,7 @@ enum Event {
     },
     /// A root scan finished on its own thread; adding what it found is quick.
     Discovered {
-        found: Vec<RepositoryCandidate>,
+        found: Vec<repositories::ScannedRepository>,
         warnings: Vec<String>,
         reply: Reply,
     },

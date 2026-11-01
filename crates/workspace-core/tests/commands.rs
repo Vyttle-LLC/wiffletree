@@ -432,6 +432,10 @@ fn space_commands_are_the_humans() {
             space_id: space().id,
             path: text(),
         },
+        Command::SetFollowedRoots {
+            space_id: space().id,
+            roots: vec![text()],
+        },
         set_layer_values(),
     ];
     for command in human {
