@@ -202,6 +202,12 @@ impl SpaceModels {
         }
         rows
     }
+    /// The rows the Space holds for jobs no Space may set, which are ignored until removed.
+    pub fn ignored(&self) -> Vec<JobRow> {
+        (self.overrides().into_iter())
+            .filter(|row| !row.job.space_may_set())
+            .collect()
+    }
     /// Saves `rows` as the Space's overrides, with `threads` and `jobs` written to match the
     /// Assistant and Job rows so that older hosts still use them. Each row keeps the keys this
     /// release does not know from the saved row for its job, and a saved row this release

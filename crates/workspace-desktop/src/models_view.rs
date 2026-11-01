@@ -22,6 +22,8 @@ pub(super) fn card_title(title: &'static str, note: impl Into<SharedString>, p: 
 
 /// Where Wiffletree may move on, in percent, as the threshold menu offers it.
 const SWITCH_CHOICES: [u32; 6] = [75, 80, 85, 90, 95, 99];
+/// Why the table at a Space leaves two rows out.
+const ON_THIS_MAC: &str = "Router and Brain compiler are set on This Mac: routing happens before a message has a Space, and a brain can belong to several Spaces.";
 
 fn provider_color(provider: Provider, p: Palette) -> Hsla {
     match provider {
@@ -57,6 +59,7 @@ pub(super) struct ModelsPage {
     catalog_notice: String,
     /// The Space the page shows, with its overrides as drafted; `None` shows this Mac's table.
     scope: Option<SpaceScope>,
+    scroll: ui::PageScroll,
 }
 
 /// What a Space sets about models and reviews: its saved copy, from the snapshot, and the page's
@@ -224,7 +227,13 @@ impl ModelsPage {
             catalog_loaded: false,
             catalog_notice: String::new(),
             scope: None,
+            scroll: ui::PageScroll::new(ModelsCard::COUNT),
         }
+    }
+    /// Shows this Mac's scope at one of its cards.
+    pub(super) fn show_card(&mut self, card: ModelsCard, cx: &mut Context<Self>) {
+        self.scroll.open_at(Some(card as usize));
+        self.show_scope(None, cx);
     }
     /// Shows the table at a Space's scope, or this Mac's with `None`. A draft for another Space
     /// is dropped.
@@ -1047,7 +1056,10 @@ impl ModelsPage {
                     let at = Some((space_table, space.as_str(), *overridden));
                     table = table.child(self.job_row(row, &verifiers, at, p, cx));
                 }
-                (rows, validate_overrides(&scope.draft.rows).err())
+                (
+                    rows,
+                    validate_space_rows(&scope.draft.rows, &scope.saved.rows).err(),
+                )
             }
             _ => {
                 for row in &self.model_selection.jobs {
@@ -1066,7 +1078,7 @@ impl ModelsPage {
         if missing(&Job::Job) {
             table = table.child(self.job_placeholder(p, cx));
         }
-        if missing(&Job::Compiler) {
+        if self.scope.is_none() && missing(&Job::Compiler) {
             table = table.child(self.optional_placeholder(
                 &Job::Compiler,
                 "No Brain compiler model: brains are not compiled.",
@@ -1097,6 +1109,7 @@ impl ModelsPage {
                     .filter(|_| !self.model_selection.jobs.is_empty())
                     .map(|error| hint(error.to_string(), p).text_color(p.red)),
             )
+            .when(space.is_some(), |d| d.child(hint(ON_THIS_MAC, p)))
             .child(hint(
                 "The coordinator never picks exact models: it asks for a job and, optionally, small work, and Wiffletree picks the line from this table. Sorting comments and merging skill updates use only the PR keeper's Claude choice. You can still change any one agent from its chat.",
                 p,
@@ -1227,7 +1240,7 @@ impl ModelsPage {
             Some(name) => format!(
                 "A row {name} sets applies to every agent in {name}, after a job recipe's own model; the other rows are this Mac's. Shared with {name}'s members."
             ),
-            None => "This Mac's table. A Space may override any row for the work in it.".into(),
+            None => "This Mac's table. A Space may override a row for the work in it, but not Router or Brain compiler.".into(),
         };
         Some(
             div()
@@ -1271,6 +1284,46 @@ impl ModelsPage {
                         ),
                 )
                 .child(hint(note, p).flex_1().min_w_0()),
+        )
+    }
+
+    /// The rows `rows` holds that no Space may set, with Remove them, which edits the draft.
+    fn ignored_banner(
+        &self,
+        rows: &[JobRow],
+        space: &str,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let line = models::ignored_line(rows, space)?;
+        Some(
+            ui::banner(p.yellow)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_wrap()
+                        .gap_1()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(p.yellow)
+                                .child("Ignored:"),
+                        )
+                        .child(line),
+                )
+                .child(
+                    button("remove-ignored-rows")
+                        .small()
+                        .label("Remove them")
+                        .on_click(cx.listener(|v, _, _, c| {
+                            if let Some(scope) = &mut v.scope {
+                                scope.draft.rows.retain(|row| row.job.space_may_set());
+                            }
+                            c.notify();
+                        })),
+                ),
         )
     }
 
@@ -1452,7 +1505,7 @@ impl ModelsPage {
     /// Why the Space's draft cannot be saved, if it cannot.
     fn space_draft_error(&self, scope: &SpaceScope, cx: &App) -> Option<String> {
         let reviews = cascade::check_reviews(&self.verification(cx), &scope.draft.reviews);
-        (validate_overrides(&scope.draft.rows).err())
+        (validate_space_rows(&scope.draft.rows, &scope.saved.rows).err())
             .or(reviews.err())
             .map(|error| error.to_string())
     }
@@ -1507,6 +1560,7 @@ impl ModelsPage {
                 .flex_col()
                 .gap_3()
                 .children(scope_bar)
+                .children(self.ignored_banner(&scope.draft.rows, &name, p, cx))
                 .children(self.fallback_banner(&table, &name, p))
                 .child(self.table_card(p, cx))
                 .child(self.space_reviews_card(scope, &name, p, cx));
@@ -1528,10 +1582,19 @@ impl ModelsPage {
                 "Who runs each job, and what happens when a subscription runs low. The table is saved for this Mac; the threshold, the reviews and the notes are shared with your other Macs. Your own choices are never limited.",
                 p,
             ))
-            .child(self.subscriptions_card(p))
+            .child(self.scroll.mark(
+                self.subscriptions_card(p),
+                ModelsCard::Subscriptions as usize,
+            ))
             .child(self.threshold_card(p, cx))
-            .child(self.table_card(p, cx))
-            .child(self.review_card(p))
+            .child(self.scroll.mark(
+                self.table_card(p, cx),
+                ModelsCard::WhoRunsWhat as usize,
+            ))
+            .child(
+                self.scroll
+                    .mark(self.review_card(p), ModelsCard::Reviews as usize),
+            )
             .child(self.guide_card(p))
     }
 
@@ -1708,8 +1771,9 @@ impl Requests for ModelsPage {
     }
 }
 impl Render for ModelsPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         render_counts::count("Models");
+        self.scroll.follow(window, cx);
         let p = palette(is_dark(cx));
         let footer = match self
             .scope
@@ -1719,11 +1783,12 @@ impl Render for ModelsPage {
             Some(scope) => self.space_footer(scope, p, cx),
             None => self.models_footer(p, cx),
         };
-        ui::page(
+        ui::page_with_cards(
             "Models",
             "Models on this machine",
             self.models_panel(p, cx),
             Some(footer),
+            &self.scroll,
             &self.shared.host,
             p,
             cx,

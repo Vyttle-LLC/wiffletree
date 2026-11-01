@@ -1120,6 +1120,117 @@ mod tests {
         assert_eq!(host.space(&sage).unwrap().space.reviews.max_rounds, None);
     }
 
+    /// A Claude row for `job`, on a line that breaks the table's rules when `broken`.
+    fn space_row(job: Job, broken: bool) -> JobRow {
+        let opus = ModelProfile {
+            provider: Provider::Claude,
+            model: "opus".into(),
+            effort: "high".into(),
+        };
+        JobRow {
+            job,
+            main: Line {
+                first: opus.clone(),
+                then: if broken {
+                    Then::Model(opus)
+                } else {
+                    Then::Wait
+                },
+            },
+            small: None,
+        }
+    }
+
+    #[test]
+    fn a_space_cannot_gain_a_router_or_compiler_row_through_either_save() {
+        let (_home, mut host, sage) = store();
+        for job in [Job::Router, Job::Compiler] {
+            let name = job.name();
+            let row = space_row(job, false);
+            let mut space = host.space(&sage).unwrap().space;
+            space.models.set_overrides(vec![row.clone()]);
+            let error = host.update_space(space).unwrap_err().to_string();
+            assert!(
+                error.contains(&format!("The {name} row belongs")),
+                "{error}"
+            );
+
+            let settings = cascade::SpaceModelSettings {
+                rows: vec![row],
+                ..Default::default()
+            };
+            let error = host.set_space_model_settings(&sage, settings).unwrap_err();
+            assert!(error.to_string().contains("belongs to this Mac"), "{error}");
+            assert!(
+                host.space(&sage)
+                    .unwrap()
+                    .space
+                    .models
+                    .overrides()
+                    .is_empty()
+            );
+        }
+    }
+
+    /// Writes `rows` straight into the Space, as a teammate's older host saved them.
+    fn saved_by_an_older_host(host: &mut Host, sage: &SpaceId, rows: Vec<JobRow>) {
+        let mut space = host.space(sage).unwrap().space;
+        space.models.set_overrides(rows);
+        host.db
+            .execute(
+                "UPDATE spaces SET data=?2 WHERE id=?1",
+                params![sage.as_str(), encode(&space).unwrap()],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn an_old_compiler_row_changes_nothing_and_blocks_no_other_save() {
+        let (_home, mut host, sage) = store();
+        // It also breaks the table's rules, which must not count against it.
+        let old = vec![
+            space_row(Job::Compiler, true),
+            space_row(Job::Router, false),
+        ];
+        saved_by_an_older_host(&mut host, &sage, old.clone());
+
+        let this_mac = host.resolve_job(None, &Job::Router, false, false).unwrap();
+        let in_sage = host
+            .resolve_job(Some(&sage), &Job::Router, false, false)
+            .unwrap();
+        assert_ne!(old[1].main.first, this_mac.profile);
+        assert_eq!(in_sage.profile, this_mac.profile);
+        let table = host.space_table(Some(&sage), &Default::default()).unwrap();
+        assert!(
+            table
+                .rows
+                .iter()
+                .all(|row| row.resolved.from != Layer::Space)
+        );
+        assert!(table.fallbacks(false).is_empty(), "no banner for it");
+
+        // An unrelated save, through each command, keeps it.
+        let mut settings = host.space_model_settings(&sage).unwrap();
+        settings.rows.push(space_row(Job::Implementer, false));
+        let saved = host.set_space_model_settings(&sage, settings).unwrap();
+        assert!(old.iter().all(|row| saved.rows.contains(row)));
+        let mut space = host.space(&sage).unwrap().space;
+        space.description = "Changed".into();
+        let saved = host.update_space(space).unwrap().space;
+        assert_eq!(saved.models.ignored(), old);
+
+        // Changing it is refused, and leaving it out removes it.
+        let mut settings = host.space_model_settings(&sage).unwrap();
+        settings.rows.retain(|row| row.job != Job::Compiler);
+        settings.rows.push(space_row(Job::Compiler, false));
+        assert!(host.set_space_model_settings(&sage, settings).is_err());
+        let mut settings = host.space_model_settings(&sage).unwrap();
+        settings.rows.retain(|row| row.job.space_may_set());
+        let saved = host.set_space_model_settings(&sage, settings).unwrap();
+        assert_eq!(saved.rows.len(), 1);
+        assert!(host.space(&sage).unwrap().space.models.ignored().is_empty());
+    }
+
     #[test]
     fn a_spaces_list_of_this_macs_models_limits_nothing_and_is_noted_once() {
         let (home, mut host, sage) = store();

@@ -202,6 +202,27 @@ impl Shared {
     }
 }
 
+/// A card of the Models page that Settings opens, as its place among the page's anchors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ModelsCard {
+    Subscriptions,
+    WhoRunsWhat,
+    Reviews,
+}
+impl ModelsCard {
+    pub(super) const COUNT: usize = 3;
+}
+
+/// A card of the Repositories page that Settings opens, as its place among the page's anchors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RepositoriesCard {
+    Keeper,
+    AllowedOwners,
+}
+impl RepositoriesCard {
+    pub(super) const COUNT: usize = 2;
+}
+
 /// What a view asks the shell to change in `Shared`, or to do on its behalf.
 #[derive(Clone)]
 pub(super) enum Intent {
@@ -233,6 +254,10 @@ pub(super) enum Intent {
     OpenSpace(SpaceId),
     /// Opens the Models page at a Space's scope, or at this Mac's with `None`.
     OpenModels(Option<SpaceId>),
+    /// Opens the Models page at this Mac's scope, at one of its cards.
+    OpenModelsCard(ModelsCard),
+    /// Opens the Repositories page at one of its cards, or at its top with `None`.
+    OpenRepositories(Option<RepositoriesCard>),
     /// Opens the brain browser on a brain, a scope and a view, note or entry.
     OpenBrain(brain_browser_view::BrainOpening),
     /// Opens the Brains page with one batch's checks shown.

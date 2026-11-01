@@ -1,9 +1,11 @@
 //! The Behaviors page's front (OpenSpec change `settings-cascade`): a scope bar of Workspace,
 //! a Space and one of its repositories; each role's Behaviors at that scope, with the layer each
-//! value came from and a Reset to what the scope inherits; and the scope's additions. Every
-//! value is read and saved through `layer_values` and `set_layer_values`, and resolved here as
-//! the host resolves it, so a choice the host would refuse is not offered.
+//! value came from and a Reset to what the scope inherits; and the scope's additions, with an
+//! offer to delete a line a Behavior now says. Every value is read and saved through
+//! `layer_values` and `set_layer_values`, and resolved here as the host resolves it, so a choice
+//! the host would refuse is not offered.
 use super::*;
+use crate::preferences::KeptAddition;
 use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
     switch::Switch,
@@ -298,6 +300,67 @@ fn workspace_additions(state: &SkillState) -> String {
     }
 }
 
+/// An additions line as it is compared with a Behavior's sentence, and remembered.
+fn compared(line: &str) -> String {
+    line.trim().to_lowercase()
+}
+
+/// An additions line a Behavior now says, offered for deleting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Offer {
+    behavior: String,
+    /// The line, trimmed, in its own case.
+    line: String,
+    /// The role whose Workspace additions hold it; `None` at a Space or repository.
+    skill: Option<Skill>,
+}
+impl Offer {
+    fn kept(&self, scope: &Scope) -> KeptAddition {
+        KeptAddition {
+            scope: scope.clone(),
+            skill: self.skill,
+            line: compared(&self.line),
+        }
+    }
+}
+
+/// Each distinct line of `additions` that equals a sentence of `behaviors`. `skill` is the role
+/// whose additions they are, if they are one role's.
+fn offers<'a>(
+    additions: &str,
+    behaviors: impl Iterator<Item = &'a Behavior> + Clone,
+    skill: Option<Skill>,
+) -> Vec<Offer> {
+    let says = |line: &str| {
+        let sentences = behaviors.clone().flat_map(|behavior| {
+            let named = behavior.name.as_str();
+            (behavior.choices.iter()).map(move |choice| (named, compared(&choice.sentence)))
+        });
+        sentences
+            .filter(|(_, sentence)| !sentence.is_empty())
+            .find_map(|(named, sentence)| (sentence == compared(line)).then_some(named))
+    };
+    let mut found: Vec<Offer> = vec![];
+    for line in additions.lines() {
+        let already = found.iter().any(|o| compared(&o.line) == compared(line));
+        if let Some(behavior) = says(line).filter(|_| !already) {
+            found.push(Offer {
+                behavior: behavior.to_owned(),
+                line: line.trim().to_owned(),
+                skill,
+            });
+        }
+    }
+    found
+}
+
+/// `additions` without any line equal to `line`, every other line as it was.
+fn without_line(additions: &str, line: &str) -> String {
+    (additions.split_inclusive('\n'))
+        .filter(|kept| compared(kept) != compared(line))
+        .collect()
+}
+
 /// Advanced holds the rewrites, which are the Workspace's alone.
 fn shows_advanced(scope: &Scope) -> bool {
     *scope == Scope::Workspace
@@ -436,6 +499,121 @@ impl BehaviorsPage {
         (self.shared.snapshot()?.spaces.iter()).find(|space| &space.id == id)
     }
 
+    /// The saved additions lines at the scope that a Behavior now says and the human has not
+    /// kept. At the Workspace additions are each skill's rules, which only its own Behaviors
+    /// repeat and a rewrite puts out of effect; anywhere else they reach every role.
+    fn additions_offers(&self, cx: &App) -> Vec<Offer> {
+        let scope = &self.behaviors.scope;
+        let catalog = &self.behaviors.catalog;
+        let found = match scope {
+            Scope::Workspace => (Skill::ALL.into_iter())
+                .filter_map(|skill| {
+                    let state = self.skill_state(skill).filter(|s| s.rewrite.is_none())?;
+                    let own = catalog.iter().filter(move |b| b.skill == skill);
+                    Some(offers(&state.rules, own, Some(skill)))
+                })
+                .flatten()
+                .collect(),
+            _ => (self.behaviors.saved(scope)).map_or(vec![], |saved| {
+                offers(&saved.additions, catalog.iter(), None)
+            }),
+        };
+        let kept = &cx.global::<Preferences>().kept_additions;
+        (found.into_iter())
+            .filter(|offer| !kept.contains(&offer.kept(scope)))
+            .collect()
+    }
+
+    /// Delete this line: through the skill's rules at the Workspace, and elsewhere through the
+    /// scope's values, with the editor following so no draft brings the line back.
+    fn delete_addition(&mut self, offer: &Offer, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(skill) = offer.skill {
+            let Some(state) = self.skill_state(skill) else {
+                return;
+            };
+            let rules = without_line(&state.rules, &offer.line);
+            return self.request(Command::SaveSkillRules { skill, rules }, window, cx);
+        }
+        let Some(saved) = self.behaviors.saved(&self.behaviors.scope).cloned() else {
+            return;
+        };
+        let draft = self.behaviors.additions.read(cx).value().to_string();
+        let draft = without_line(&draft, &offer.line);
+        (self.behaviors.additions).update(cx, |input, cx| input.set_value(draft, window, cx));
+        let values = LayerValues {
+            additions: without_line(&saved.additions, &offer.line),
+            ..saved
+        };
+        self.save_layer(values, Refused::Additions, window, cx);
+    }
+
+    /// Keep it: the line stays and is not offered again on this Mac.
+    fn keep_addition(&mut self, offer: &Offer, cx: &mut Context<Self>) {
+        let kept = offer.kept(&self.behaviors.scope);
+        let preferences = cx.global_mut::<Preferences>();
+        preferences.kept_additions.push(kept);
+        if let Err(error) = preferences.save() {
+            eprintln!("Saving preferences: {error}");
+        }
+        cx.notify();
+    }
+
+    /// One offer at a time, counting those waiting, so several lines never stack banners.
+    fn additions_offer_banner(&self, p: Palette, cx: &mut Context<Self>) -> Option<Div> {
+        let offers = self.additions_offers(cx);
+        let offer = offers.first()?.clone();
+        let heading = match offers.len() {
+            1 => "1 line now has a Behavior.".to_owned(),
+            lines => format!("{lines} lines now have a Behavior."),
+        };
+        let keep = offer.clone();
+        let delete = offer.clone();
+        Some(
+            ui::banner(p.yellow).items_start().child(
+                (div().flex_1().min_w_0().flex().flex_col().gap_2())
+                    .child(
+                        (div().flex().flex_wrap().gap_1())
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(p.yellow)
+                                    .child(heading),
+                            )
+                            .child(format!(
+                                "“{}” says the same thing as this addition:",
+                                offer.behavior
+                            )),
+                    )
+                    .child(
+                        div()
+                            .pl_2()
+                            .border_l_2()
+                            .border_color(p.edge)
+                            .font_family(".SystemMonoFont")
+                            .text_size(px(font::SMALL))
+                            .child(offer.line),
+                    )
+                    .child(
+                        (div().flex().gap_2())
+                            .child(
+                                ui::gated(
+                                    button("delete-addition")
+                                        .primary()
+                                        .label("Delete this line"),
+                                    &self.shared.host,
+                                )
+                                .on_click(
+                                    cx.listener(move |v, _, w, c| v.delete_addition(&delete, w, c)),
+                                ),
+                            )
+                            .child(button("keep-addition").label("Keep it").on_click(
+                                cx.listener(move |v, _, _, c| v.keep_addition(&keep, c)),
+                            )),
+                    ),
+            ),
+        )
+    }
+
     /// The list at the scope: the scope bar, each role's Behaviors and additions, and, at the
     /// Workspace, Advanced.
     pub(in crate::skills_view) fn behaviors_list(&self, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -461,6 +639,7 @@ impl BehaviorsPage {
         else {
             return page.child(hint("Loading…", p));
         };
+        let offer = self.additions_offer_banner(p, cx);
         let rows = rows(&self.behaviors.catalog, scope.layer(), &chain);
         let skills = Skill::ALL.into_iter().filter(|skill| {
             shows_advanced(&scope) || rows.iter().any(|row| row.behavior.skill == *skill)
@@ -477,6 +656,7 @@ impl BehaviorsPage {
             }
         });
         let page = page
+            .children(offer)
             .child(ui::locked(
                 div().flex().flex_col().gap_1().children(sections),
                 &self.shared.host,
@@ -838,11 +1018,12 @@ impl BehaviorsPage {
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
     use super::{
-        Layers, Row, chain, chip, read_only_note, reset_label, rows, scope_of, shows_advanced,
-        tightening_note, with_choice,
+        Layers, Offer, Row, chain, chip, offers, read_only_note, reset_label, rows, scope_of,
+        shows_advanced, tightening_note, with_choice, without_line,
     };
+    use crate::preferences::Preferences;
     use workspace_core::{
-        Command, SpaceId,
+        Command, Skill, SpaceId,
         cascade::{Behavior, Layer, LayerValues, Scope},
     };
     use workspace_host::Host;
@@ -1135,6 +1316,77 @@ mod tests {
         let off = |values: &LayerValues| values.behaviors.len();
         assert_eq!(off(&replies[1]), 2, "the last reply is the one kept");
         assert_eq!(read(&mut host, workspace).behaviors, replies[1].behaviors);
+    }
+
+    /// The sentence the Behavior `id` tells agents when on, and the catalog.
+    fn sentence(host: &mut Host, id: &str) -> (String, Vec<Behavior>) {
+        let catalog = catalog(host);
+        let behavior = catalog.iter().find(|b| b.id == id).unwrap();
+        let on = behavior.choices.iter().find(|c| !c.sentence.is_empty());
+        (on.unwrap().sentence.clone(), catalog)
+    }
+
+    #[test]
+    fn an_additions_line_matches_a_behaviors_sentence_ignoring_case_and_surrounding_whitespace() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, _) = sage(&home);
+        let (said, catalog) = sentence(&mut host, "fetch_before_landing_order");
+        let additions = format!(
+            "Never log child PII.\n  {}  \n\n{said}\n{said} Always.",
+            said.to_uppercase()
+        );
+        let found = offers(&additions, catalog.iter(), None);
+        assert_eq!(
+            found,
+            [Offer {
+                behavior: "Fetch before naming a landing order".into(),
+                line: said.to_uppercase(),
+                skill: None,
+            }],
+            "the same line twice is one offer, and a longer line is no match"
+        );
+        // An empty sentence, as a Behavior's off choice has, matches no blank line.
+        assert!(offers("\n  \n", catalog.iter(), None).is_empty());
+    }
+
+    #[test]
+    fn a_workspace_line_matches_only_its_own_roles_behaviors() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, _) = sage(&home);
+        let (said, catalog) = sentence(&mut host, "fetch_before_landing_order");
+        let own = |skill: Skill| catalog.iter().filter(move |b| b.skill == skill);
+        let coordinator = Skill::Coordinating;
+        assert_eq!(offers(&said, own(coordinator), Some(coordinator)).len(), 1);
+        let implementer = Skill::Implementing;
+        assert!(offers(&said, own(implementer), Some(implementer)).is_empty());
+    }
+
+    #[test]
+    fn deleting_a_line_leaves_every_other_line_as_it_was() {
+        let additions = "Keep me.\n  Delete ME. \n\n  Indented.\n";
+        assert_eq!(
+            without_line(additions, "delete me."),
+            "Keep me.\n\n  Indented.\n"
+        );
+        assert_eq!(without_line("Only line", "only line"), "");
+    }
+
+    #[test]
+    fn a_kept_line_is_remembered_for_its_scope_and_survives_a_restart() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut host, sage) = sage(&home);
+        let (said, catalog) = sentence(&mut host, "fetch_before_landing_order");
+        let offer = offers(&said, catalog.iter(), None).remove(0);
+
+        let mut preferences = Preferences::load(home.path());
+        preferences.kept_additions.push(offer.kept(&space(&sage)));
+        preferences.save().unwrap();
+
+        let kept = Preferences::load(home.path()).kept_additions;
+        assert!(kept.contains(&offer.kept(&space(&sage))));
+        let unlike_case = offers(&said.to_uppercase(), catalog.iter(), None).remove(0);
+        assert!(kept.contains(&unlike_case.kept(&space(&sage))));
+        assert!(!kept.contains(&offer.kept(&sms(&sage))), "another scope");
     }
 
     #[test]

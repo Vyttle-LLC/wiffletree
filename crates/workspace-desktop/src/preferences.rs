@@ -2,6 +2,7 @@
 use crate::hosts::PairedHost;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Path, PathBuf};
+use workspace_core::{Skill, cascade::Scope};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -34,10 +35,22 @@ pub(crate) struct Preferences {
     /// The Space page's one-time note on what moved to Behaviors and Models was dismissed.
     #[serde(default)]
     pub cascade_moves_seen: bool,
+    /// The additions lines the human chose to keep over a Behavior that says the same.
+    #[serde(default)]
+    pub kept_additions: Vec<KeptAddition>,
     #[serde(skip)]
     path: PathBuf,
 }
 impl gpui::Global for Preferences {}
+
+/// An additions line kept with Keep it, compared as the Behaviors page compares lines.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct KeptAddition {
+    pub scope: Scope,
+    /// The role whose Workspace additions hold the line; `None` at a Space or repository.
+    pub skill: Option<Skill>,
+    pub line: String,
+}
 impl Default for Preferences {
     fn default() -> Self {
         Self {
@@ -48,6 +61,7 @@ impl Default for Preferences {
             paired_hosts: vec![],
             find_on_network: false,
             cascade_moves_seen: false,
+            kept_additions: vec![],
             path: PathBuf::new(),
         }
     }

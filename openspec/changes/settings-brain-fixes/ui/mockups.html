@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Settings and brains fixes study</title>
+<!--
+  Static study for the settings and brains fixes. No script, no network.
+  Drawn 2026-11-01 from the settings review of origin/main at 9027b61.
+  The theme switch at the top is a CSS-only radio group. Spaces, brains, times and counts are
+  sample data drawn by hand.
+  1. Set up asks for a compile time.
+  2. A brain with no compile time, and changing the time.
+  3. The Space page's Brain compile row.
+  4. Models for a Space, without the Brain compiler and Router rows.
+  5. New Space's wording.
+  6. The Settings sidebar.
+  7. Offering to delete old additions lines a Behavior now says.
+-->
+<style>
+.light,:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}}
+body:has(#force-light:checked){--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+body:has(#force-dark:checked){--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+h2{font-size:15px;font-weight:600;margin:0 0 2px}
+h3{font-size:13px;font-weight:600;margin:14px 0 4px}
+p{margin:0}
+code{font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.intro{max-width:900px;margin-bottom:22px}
+.intro p{color:var(--subtle);font-size:12px;margin-top:4px}
+.intro ul{margin:8px 0 0;padding-left:18px;color:var(--subtle);font-size:12px}
+.intro li b{color:var(--text);font-weight:600}
+.pending{display:inline-block;margin:6px 0 4px;padding:3px 10px;border-radius:9px;font-size:11.5px;font-weight:600;color:var(--yellow);background:color-mix(in srgb,var(--yellow) 16%,transparent)}
+.switch{display:flex;gap:6px;margin:10px 0 0;font-size:12px;color:var(--subtle)}
+.switch label{padding:3px 10px;border:1px solid var(--edge);border-radius:7px;cursor:pointer}
+body:has(#force-system:checked) label[for=force-system],body:has(#force-light:checked) label[for=force-light],body:has(#force-dark:checked) label[for=force-dark]{background:var(--overlay);color:var(--text)}
+.study{margin-bottom:30px;max-width:1160px}
+.study>.eyebrow{margin-bottom:6px}
+.pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;align-items:start}
+.tag{font-size:11px;font-weight:600;margin-bottom:4px}
+.tag.now{color:var(--muted)}
+.tag.new{color:var(--green)}
+.caption{margin:10px 2px 0;font-size:11.5px;color:var(--subtle);max-width:900px}
+.caption b{color:var(--text);font-weight:600}
+.frame{background:var(--surface);border:1px solid var(--edge);border-radius:12px;overflow:hidden}
+.frame+.tag{margin-top:14px}
+.page{padding:14px 16px}
+.head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px}
+.head .r{margin-left:auto}
+.note{font-size:11.5px;color:var(--subtle)}
+.warn{color:var(--yellow)}
+.ok{color:var(--green)}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--edge);border-radius:7px;padding:3px 10px;font-size:12px;background:var(--surface);color:var(--text);white-space:nowrap}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.btn.quiet{border-color:transparent;color:var(--subtle)}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.actions.end{justify-content:flex-end}
+.banner{border-radius:8px;padding:7px 10px;font-size:12px;margin:8px 0;background:color-mix(in srgb,var(--yellow) 12%,transparent);color:var(--text)}
+.banner b{color:var(--yellow)}
+.bar{display:flex;align-items:center;gap:10px}
+.bar>:first-child{flex:1;min-width:0}
+.kv{display:grid;grid-template-columns:130px 1fr;gap:5px 14px;font-size:12.5px;margin-top:6px}
+.kv .k{color:var(--subtle)}
+.field{border:1px solid var(--edge);border-radius:7px;padding:3px 9px;background:var(--base);font-size:12.5px;display:inline-block}
+.field.dd::after{content:" ▾";color:var(--muted)}
+.editor{border:1px solid var(--edge);border-radius:8px;padding:9px 11px;margin-top:10px;background:var(--base)}
+.editor .field{background:var(--surface)}
+.times{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:6px 0}
+.link{color:var(--accent);font-size:12px}
+.textarea{border:1px solid var(--edge);border-radius:8px;padding:7px 9px;background:var(--base);color:var(--muted);font-size:12.5px;min-height:44px}
+.form{display:grid;grid-template-columns:120px 1fr;gap:4px 12px;font-size:12.5px}
+.form .k{padding-top:3px}
+.form .s{grid-column:2;font-size:11.5px;color:var(--subtle);margin-bottom:6px}
+.from{display:inline-flex;align-items:center;border-radius:7px;padding:1px 8px;font-size:11px;white-space:nowrap}
+.from.stock{color:var(--muted);border:1px dashed var(--edge)}
+.from.space{color:var(--focus);background:color-mix(in srgb,var(--focus) 14%,transparent)}
+.reset{font-size:11px;color:var(--accent)}
+table{border-collapse:collapse;width:100%;font-size:12px}
+th{text-align:left;font-weight:500;color:var(--subtle);font-size:11px;padding:4px 6px;border-bottom:1px solid var(--edge)}
+td{padding:5px 6px;border-bottom:1px solid color-mix(in srgb,var(--edge) 50%,transparent);vertical-align:top}
+td .s{display:block;font-size:11px;color:var(--subtle)}
+tr.gone td{color:var(--muted);text-decoration:line-through;background:color-mix(in srgb,var(--red) 7%,transparent)}
+tr.gone td .s{text-decoration:line-through}
+tr.over td{background:color-mix(in srgb,var(--focus) 6%,transparent)}
+.win{display:grid;grid-template-columns:190px 1fr;min-height:330px}
+.side{background:var(--base);border-right:1px solid var(--edge);padding:10px 8px}
+.side .g{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--subtle);margin:10px 6px 3px}
+.side .i{padding:3px 8px;border-radius:7px;font-size:12.5px}
+.side .i.sel{background:var(--overlay)}
+.side .i.fresh{color:var(--green);font-weight:600}
+.side .i .r{float:right;font-size:11px;color:var(--muted);font-weight:400}
+.go{font-size:11.5px;color:var(--subtle);border-bottom:1px solid color-mix(in srgb,var(--edge) 50%,transparent);padding:4px 0;display:grid;grid-template-columns:150px 1fr;gap:8px}
+.go b{color:var(--text);font-weight:500}
+.quote{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;border-left:2px solid var(--edge);padding:2px 0 2px 9px;margin:6px 0}
+@media(max-width:820px){.pair{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<input type="radio" name="theme" id="force-system" checked hidden>
+<input type="radio" name="theme" id="force-light" hidden>
+<input type="radio" name="theme" id="force-dark" hidden>
+
+<div class="intro">
+  <div class="eyebrow">Wiffletree · settings and brains fixes study</div>
+  <h1>Brains fit the settings they sit beside</h1>
+  <p>Seven small screens, each shown as it is today and as proposed. The rule behind the first four: <b>a brain belongs to itself, not to one Space</b>, so its settings stay out of the Space's cascade and are editable where the brain lives.</p>
+  <span class="pending">Approved by Michael on November 1, 2026</span>
+  <div class="switch"><label for="force-system">System</label><label for="force-light">Light</label><label for="force-dark">Dark</label></div>
+  <ul>
+    <li><b>Compile time:</b> 06:00 in this Mac's timezone is filled in at Set up. Changing it opens a config pull request, as changing the compiler does.</li>
+    <li><b>Router and Brain compiler:</b> they stay on this Mac's table only. A row already saved on a Space is ignored with a note.</li>
+    <li><b>Sidebar:</b> Brains joins the Spaces group, which becomes "Spaces &amp; brains". Entries open their own section, and "Publishing" becomes "Allowed owners".</li>
+    <li><b>Old additions (screen 7):</b> this finishes the unticked task from the settings cascade. It is the one item here you did not see in the question, so tell me if you would rather leave it out.</li>
+  </ul>
+</div>
+
+<!-- 1 -->
+<section class="study">
+  <div class="eyebrow">1 · Brains · a brain with no wiffletree-brain.json yet</div>
+  <div class="pair">
+    <div>
+      <div class="tag now">Today</div>
+      <div class="frame"><div class="page">
+        <div class="head"><h2>Sage-Social/sage-brain</h2></div>
+        <div class="kv">
+          <span class="k">Spaces</span><span>Sage</span>
+          <span class="k">Compiles on</span><span>No compiler · Set up adds wiffletree-brain.json</span>
+          <span class="k">Next compile</span><span>Not scheduled</span>
+        </div>
+        <div class="actions"><span class="btn">Set up</span></div>
+      </div></div>
+      <p class="caption">Set up opens its pull request at once. The file has no compile time, so the brain is never scheduled.</p>
+    </div>
+    <div>
+      <div class="tag new">Proposed</div>
+      <div class="frame"><div class="page">
+        <div class="head"><h2>Sage-Social/sage-brain</h2></div>
+        <div class="kv">
+          <span class="k">Spaces</span><span>Sage</span>
+          <span class="k">Compiles on</span><span>No compiler · Set up adds wiffletree-brain.json</span>
+        </div>
+        <div class="editor">
+          <b>Set up this brain</b>
+          <div class="times">Compile daily at <span class="field">06:00</span> <span class="field dd">America/Chicago</span></div>
+          <div class="note">Opens one PR adding wiffletree-brain.json with this Mac as compiler, and the brain gate. It waits for your review.</div>
+          <div class="actions end"><span class="btn quiet">Cancel</span><span class="btn primary">Open the PR</span></div>
+        </div>
+      </div></div>
+      <p class="caption"><b>Set up becomes a short form.</b> Accepting what is filled in is one click, so no brain starts without a schedule.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 2 -->
+<section class="study">
+  <div class="eyebrow">2 · Brains · a brain set up before this change</div>
+  <div class="pair">
+    <div>
+      <div class="tag now">Today</div>
+      <div class="frame"><div class="page">
+        <div class="head"><h2>Sage-Social/sage-brain</h2></div>
+        <div class="kv">
+          <span class="k">Compiles on</span><span>Mike's MacBook (this Mac)</span>
+          <span class="k">Last compile</span><span>None yet</span>
+          <span class="k">Next compile</span><span>Not scheduled</span>
+        </div>
+        <div class="actions"><span class="btn">Run now</span><span class="btn">Change compiler</span></div>
+      </div></div>
+      <p class="caption">Nothing here says why, or how to fix it. The only way today is to edit the JSON by hand.</p>
+    </div>
+    <div>
+      <div class="tag new">Proposed</div>
+      <div class="frame"><div class="page">
+        <div class="head"><h2>Sage-Social/sage-brain</h2></div>
+        <div class="kv">
+          <span class="k">Compiles on</span><span>Mike's MacBook (this Mac)</span>
+          <span class="k">Last compile</span><span>None yet</span>
+          <span class="k">Next compile</span><span class="warn">Not scheduled</span>
+        </div>
+        <div class="banner bar"><span><b>No compile time.</b> This brain compiles only on Run now or a merged ruling.</span><span class="btn">Set compile time…</span></div>
+        <div class="actions"><span class="btn">Run now</span><span class="btn">Change compiler</span></div>
+      </div></div>
+      <div class="tag new">Proposed · changing a time</div>
+      <div class="frame"><div class="page">
+        <div class="kv">
+          <span class="k">Compiles on</span><span>Mike's MacBook (this Mac)</span>
+          <span class="k">Next compile</span><span>Daily at 06:00 America/Chicago</span>
+        </div>
+        <div class="editor">
+          <div class="times">Compile daily at <span class="field">02:00</span> <span class="field dd">America/Chicago</span></div>
+          <div class="note">The new time applies once the config PR merges.</div>
+          <div class="actions end"><span class="btn quiet">Cancel</span><span class="btn primary">Open the PR</span></div>
+        </div>
+        <div class="actions"><span class="btn">Run now</span><span class="btn">Change compile time</span><span class="btn">Change compiler</span></div>
+      </div></div>
+      <p class="caption"><b>Same pattern as Change compiler.</b> The time is shared by everyone who uses the brain, so it goes through the brain's pull request.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 3 -->
+<section class="study">
+  <div class="eyebrow">3 · Settings › Spaces › Sage</div>
+  <div class="pair">
+    <div>
+      <div class="tag now">Today</div>
+      <div class="frame"><div class="page">
+        <div class="kv">
+          <span class="k">Brain</span><span>Sage-Social/sage-brain · <code>second-brain/</code></span>
+          <span class="k">Brain compile</span><span>Not scheduled on Mike's MacBook <span class="note">· set in the brain</span></span>
+          <span class="k">Brain gate</span><span>main requires 7 checks <span class="note">· set in the brain</span></span>
+        </div>
+      </div></div>
+      <p class="caption">"Set in the brain" is a dead end: it names no place to go.</p>
+    </div>
+    <div>
+      <div class="tag new">Proposed</div>
+      <div class="frame"><div class="page">
+        <div class="kv">
+          <span class="k">Brain</span><span>Sage-Social/sage-brain · <code>second-brain/</code></span>
+          <span class="k">Brain compile</span><span><span class="warn">Not scheduled</span> on Mike's MacBook <span class="link">· Change on Brains →</span></span>
+          <span class="k">Brain gate</span><span>main requires 7 checks <span class="link">· Change on Brains →</span></span>
+        </div>
+      </div></div>
+      <p class="caption"><b>Still read-only here.</b> Both rows now link to the page that changes them.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 4 -->
+<section class="study">
+  <div class="eyebrow">4 · Models · Space Sage</div>
+  <div class="pair">
+    <div>
+      <div class="tag now">Today</div>
+      <div class="frame"><div class="page">
+        <div class="head"><h2>Who runs what</h2><span class="note">this Mac's table, with Sage's rows on top</span></div>
+        <table>
+          <tr><th>Job</th><th>First</th><th>From</th><th></th></tr>
+          <tr class="over"><td>Implementer<span class="s">Writes the change</span></td><td>GPT 6.1 Sol · high</td><td><span class="from space">Sage</span></td><td class="reset">Reset</td></tr>
+          <tr><td>Assistant<span class="s">Answers in your threads</span></td><td>Opus · high</td><td><span class="from stock">This Mac</span></td><td></td></tr>
+          <tr class="over"><td>Router<span class="s">Picks each message's thread</span></td><td>Sonnet · high</td><td><span class="from space">Sage</span></td><td class="reset">Reset</td></tr>
+          <tr class="over"><td>Brain compiler<span class="s">Compiles brains this Mac compiles</span></td><td>Opus · high</td><td><span class="from space">Sage</span></td><td class="reset">Reset</td></tr>
+        </table>
+      </div></div>
+      <p class="caption">Both of Sage's last two rows look as if they apply, and neither ever runs.</p>
+    </div>
+    <div>
+      <div class="tag new">Proposed</div>
+      <div class="frame"><div class="page">
+        <div class="head"><h2>Who runs what</h2><span class="note">this Mac's table, with Sage's rows on top</span></div>
+        <div class="banner bar"><span><b>Ignored:</b> Sage also sets Router and Brain compiler rows. Neither belongs to a Space, so this Mac's rows run.</span><span class="btn">Remove them</span></div>
+        <table>
+          <tr><th>Job</th><th>First</th><th>From</th><th></th></tr>
+          <tr class="over"><td>Implementer<span class="s">Writes the change</span></td><td>GPT 6.1 Sol · high</td><td><span class="from space">Sage</span></td><td class="reset">Reset</td></tr>
+          <tr><td>Assistant<span class="s">Answers in your threads</span></td><td>Opus · high</td><td><span class="from stock">This Mac</span></td><td></td></tr>
+        </table>
+        <p class="note" style="margin-top:8px">Router and Brain compiler are set on This Mac: routing happens before a message has a Space, and a brain can belong to several Spaces.</p>
+      </div></div>
+      <p class="caption"><b>Both rows leave the Space view and Effective settings.</b> Saving a new one on a Space is refused. The banner appears only for a Space that already has them.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 5 -->
+<section class="study">
+  <div class="eyebrow">5 · Spaces › New Space</div>
+  <div class="pair">
+    <div>
+      <div class="tag now">Today</div>
+      <div class="frame"><div class="page">
+        <div class="form">
+          <span class="k">Instructions</span><div class="textarea">Rules for every agent in this Space</div>
+          <span class="s">Added to every thread and job in this Space.</span>
+        </div>
+      </div></div>
+      <p class="caption">The placeholder and the line under it disagree, and the line is out of date.</p>
+    </div>
+    <div>
+      <div class="tag new">Proposed</div>
+      <div class="frame"><div class="page">
+        <div class="form">
+          <span class="k">Additions</span><div class="textarea">Rules for every agent in this Space</div>
+          <span class="s">Added for every agent in this Space. Change them later on Behaviors.</span>
+        </div>
+      </div></div>
+      <p class="caption"><b>Same word as Behaviors.</b> The storage hint below it changes too: "Its issues and its Spaces' additions are shared with everyone who can read it."</p>
+    </div>
+  </div>
+</section>
+
+<!-- 6 -->
+<section class="study">
+  <div class="eyebrow">6 · Settings window · sidebar</div>
+  <div class="pair">
+    <div>
+      <div class="tag now">Today</div>
+      <div class="frame"><div class="win">
+        <div class="side">
+          <div class="g">Shared with your Macs</div>
+          <div class="i">Behaviors</div>
+          <div class="i">Reviews</div>
+          <div class="i">PR keeper</div>
+          <div class="i">Check-ins</div>
+          <div class="i">Assistant &amp; router</div>
+          <div class="i">Settings repository</div>
+          <div class="g">Spaces</div>
+          <div class="i">Sage</div>
+          <div class="i">Vyttle</div>
+          <div class="g">This Mac</div>
+          <div class="i">Who runs what</div>
+          <div class="i">Subscriptions</div>
+          <div class="i">Repositories</div>
+          <div class="i">Publishing</div>
+          <div class="i">Workspace folder</div>
+          <div class="i">Builds &amp; remote access</div>
+          <div class="i">Appearance</div>
+        </div>
+        <div class="page">
+          <div class="note">Where each entry lands</div>
+          <div class="go"><b>Reviews</b><span>Top of Models</span></div>
+          <div class="go"><b>Who runs what</b><span>Top of Models</span></div>
+          <div class="go"><b>Subscriptions</b><span>Top of Models</span></div>
+          <div class="go"><b>PR keeper</b><span>Top of Repositories</span></div>
+          <div class="go"><b>Repositories</b><span>Top of Repositories</span></div>
+          <div class="go"><b>Publishing</b><span>Top of Repositories</span></div>
+          <div class="go"><b>Brains</b><span>No entry</span></div>
+        </div>
+      </div></div>
+    </div>
+    <div>
+      <div class="tag new">Proposed</div>
+      <div class="frame"><div class="win">
+        <div class="side">
+          <div class="g">Shared with your Macs</div>
+          <div class="i">Behaviors</div>
+          <div class="i">Reviews</div>
+          <div class="i">PR keeper</div>
+          <div class="i">Check-ins</div>
+          <div class="i">Assistant &amp; router</div>
+          <div class="i">Settings repository</div>
+          <div class="g">Spaces &amp; brains</div>
+          <div class="i">Sage</div>
+          <div class="i">Vyttle</div>
+          <div class="i fresh">Brains</div>
+          <div class="g">This Mac</div>
+          <div class="i">Who runs what</div>
+          <div class="i">Subscriptions</div>
+          <div class="i">Repositories</div>
+          <div class="i fresh">Allowed owners</div>
+          <div class="i">Workspace folder</div>
+          <div class="i">Builds &amp; remote access</div>
+          <div class="i">Appearance</div>
+        </div>
+        <div class="page">
+          <div class="note">Where each entry lands</div>
+          <div class="go"><b>Reviews</b><span>Reviews card on Models</span></div>
+          <div class="go"><b>Who runs what</b><span>Who runs what card on Models</span></div>
+          <div class="go"><b>Subscriptions</b><span>Subscriptions card on Models</span></div>
+          <div class="go"><b>PR keeper</b><span>"When a ticket's PR is open" on Repositories</span></div>
+          <div class="go"><b>Repositories</b><span>Top of Repositories</span></div>
+          <div class="go"><b>Allowed owners</b><span>"Opening PRs without asking" on Repositories</span></div>
+          <div class="go"><b>Brains</b><span>Brains page</span></div>
+        </div>
+      </div></div>
+    </div>
+  </div>
+  <p class="caption"><b>The groups stay as they are.</b> Reviews stays shared and Who runs what stays on this Mac, because that is where each is saved. Each entry now opens its own card, so they stop looking like duplicates.</p>
+</section>
+
+<!-- 7 -->
+<section class="study">
+  <div class="eyebrow">7 · Behaviors · old additions, offered once</div>
+  <div class="pair">
+    <div>
+      <div class="tag now">Today</div>
+      <div class="frame"><div class="page">
+        <div class="head"><h2>Behaviors</h2></div>
+        <h3 style="margin-top:0">Additions for every coordinator</h3>
+        <div class="textarea" style="color:var(--text)">Before recommending a landing order, fetch origin and report how far main has moved.</div>
+      </div></div>
+      <p class="caption">If you wrote this line before Behaviors existed, agents now get it twice, and turning the Behavior off leaves your line in place.</p>
+    </div>
+    <div>
+      <div class="tag new">Proposed</div>
+      <div class="frame"><div class="page">
+        <div class="head"><h2>Behaviors</h2></div>
+        <div class="banner">
+          <b>1 line now has a Behavior.</b> "Fetch before naming a landing order" says the same thing as this addition:
+          <div class="quote">Before recommending a landing order, fetch origin and report how far main has moved.</div>
+          <div class="actions"><span class="btn primary">Delete this line</span><span class="btn">Keep it</span></div>
+        </div>
+        <h3>Additions for every coordinator</h3>
+        <div class="textarea" style="color:var(--text)">Before recommending a landing order, fetch origin and report how far main has moved.</div>
+      </div></div>
+      <p class="caption"><b>Asked once, per line, and never removed unasked.</b> Only a line that matches a Behavior's sentence is offered. Keep it is remembered.</p>
+    </div>
+  </div>
+</section>
+
+</body>
+</html>

@@ -222,17 +222,18 @@ impl Host {
         })
     }
     /// Replaces what a Space sets about models and reviews in its `space.yaml`. Refuses a row the
-    /// table's rules refuse, a review level this Mac does not configure, levels without a full
-    /// review and a cap out of range. Review keys this release does not know stay.
+    /// table's rules refuse, a new or changed row no Space may set, a review level this Mac does
+    /// not configure, levels without a full review and a cap out of range. Review keys this
+    /// release does not know stay.
     pub fn set_space_model_settings(
         &mut self,
         space_id: &SpaceId,
         settings: SpaceModelSettings,
     ) -> Result<SpaceModelSettings> {
         let SpaceModelSettings { rows, mut reviews } = settings;
-        validate_overrides(&rows)?;
-        cascade::check_reviews(&self.settings().verification, &reviews)?;
         let mut space = self.space(space_id)?.space;
+        validate_space_rows(&rows, &space.models.overrides())?;
+        cascade::check_reviews(&self.settings().verification, &reviews)?;
         for (key, value) in std::mem::take(&mut space.reviews.extra) {
             reviews.extra.entry(key).or_insert(value);
         }
@@ -244,9 +245,9 @@ impl Host {
     /// Refuses `space`'s model rows or review overrides, where they differ from `current`'s, as
     /// `set_space_model_settings` would; unchanged ones, as a teammate saved them, stay.
     pub(crate) fn check_space_models(&self, current: &Space, space: &Space) -> Result<()> {
-        let rows = space.models.overrides();
-        if rows != current.models.overrides() {
-            validate_overrides(&rows)?;
+        let (rows, saved) = (space.models.overrides(), current.models.overrides());
+        if rows != saved {
+            validate_space_rows(&rows, &saved)?;
         }
         if space.reviews != current.reviews {
             cascade::check_reviews(&self.settings().verification, &space.reviews)?;

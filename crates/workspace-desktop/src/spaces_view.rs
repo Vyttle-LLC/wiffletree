@@ -832,7 +832,7 @@ impl SpacesPage {
                 p,
             ))
             .child(row("Brain", self.brain_field(space, local, p, cx), None, p))
-            .children(self.brain_facts(space, p))
+            .children(self.brain_facts(space, p, cx))
             .child(row(
                 "Code repositories",
                 self.repositories_field(space, p, cx),
@@ -1026,9 +1026,9 @@ impl SpacesPage {
         )
     }
 
-    /// The brain's compile time and gate, read-only: its `wiffletree-brain.json` says them, and
-    /// the Brains page changes them.
-    fn brain_facts(&self, space: &Space, p: Palette) -> Option<Div> {
+    /// The brain's compile time and gate, read-only here: its `wiffletree-brain.json` says them,
+    /// and each links to the Brains page, which changes them.
+    fn brain_facts(&self, space: &Space, p: Palette, cx: &mut Context<Self>) -> Option<Div> {
         let BrainRepository::GitHub { owner, name, .. } = &space.brain.as_ref()?.repository else {
             return None;
         };
@@ -1036,21 +1036,39 @@ impl SpacesPage {
         let identity = format!("{owner}/{name}");
         let brain = (page.brains.iter()).find(|b| b.repository.eq_ignore_ascii_case(&identity))?;
         let (compile, gate) = brain_lines(brain, page.this_host.as_ref());
-        let set_in_brain = |line: String| {
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_1()
-                .child(line)
-                .child(hint("· set in the brain", p))
+        let change_on_brains = |id: &'static str, line: Div, cx: &mut Context<Self>| {
+            line.child(hint("·", p)).child(
+                button(id)
+                    .link()
+                    .xsmall()
+                    .label("Change on Brains →")
+                    .on_click(cx.listener(|_, _, _, c| c.emit(Intent::OpenPage(Page::Brains)))),
+            )
+        };
+        let line = || div().flex().flex_wrap().items_center().gap_1();
+        let compile = match compile.strip_prefix(brains_view::NOT_SCHEDULED) {
+            Some(rest) => line()
+                .child(div().text_color(p.yellow).child(brains_view::NOT_SCHEDULED))
+                .child(rest.trim_start().to_owned()),
+            None => line().child(compile),
         };
         Some(
             div()
                 .flex()
                 .flex_col()
                 .gap_3()
-                .child(row("Brain compile", set_in_brain(compile), None, p))
-                .child(row("Brain gate", set_in_brain(gate), None, p)),
+                .child(row(
+                    "Brain compile",
+                    change_on_brains("brain-compile-link", compile, cx),
+                    None,
+                    p,
+                ))
+                .child(row(
+                    "Brain gate",
+                    change_on_brains("brain-gate-link", line().child(div().child(gate)), cx),
+                    None,
+                    p,
+                )),
         )
     }
 
@@ -1102,7 +1120,11 @@ impl SpacesPage {
             );
             models::fallback_lines(&table, &space.name)
         });
-        let notes = (local.map_or(&[][..], |l| &l.notes).iter().cloned()).chain(fallbacks);
+        let ignored = models::ignored_line(&space.models.ignored(), &space.name)
+            .map(|line| format!("Ignored: {line}"));
+        let notes = (local.map_or(&[][..], |l| &l.notes).iter().cloned())
+            .chain(fallbacks)
+            .chain(ignored);
         div()
             .flex()
             .flex_col()
@@ -1342,9 +1364,9 @@ impl SpacesPage {
                 p,
             ))
             .child(row(
-                "Instructions",
+                "Additions",
                 Textarea::new(&self.instructions).w_full(),
-                Some("Added to every thread and job in this Space.".into()),
+                Some("Added for every agent in this Space. Change them later on Behaviors.".into()),
                 p,
             ))
             .child(row(
@@ -1396,7 +1418,7 @@ impl SpacesPage {
                     }),
                 Some(
                     if self.on_github {
-                        "A private repository. Its issues and its Spaces’ instructions are shared with everyone who can read it."
+                        "A private repository. Its issues and its Spaces’ additions are shared with everyone who can read it."
                     } else {
                         "A local Git repository with no remote. Nothing in it is pushed anywhere."
                     }
@@ -1766,9 +1788,10 @@ fn behaviors_changed(space: &Space) -> usize {
     space.behaviors.len() + repositories.map(|r| r.behaviors.len()).sum::<usize>()
 }
 
-/// What the Space sets on Models: its rows, and its reviews when it sets any.
+/// What the Space sets on Models: its rows that count, and its reviews when it sets any.
 fn models_changed(space: &Space) -> String {
-    let rows = counted(space.models.overrides().len(), "row");
+    let models = &space.models;
+    let rows = counted(models.overrides().len() - models.ignored().len(), "row");
     match space.reviews.is_empty() {
         true => rows,
         false => format!("{rows} · reviews"),

@@ -85,7 +85,10 @@ use hosts::{HostChoice, HostView, Hosts};
 use palette::{Palette, palette};
 use preferences::{Appearance, Preferences};
 use serde_json::Value;
-use shared::{Amendment, HumanWrote, Intent, Requests, Shared, toast, toast_error};
+use shared::{
+    Amendment, HumanWrote, Intent, ModelsCard, RepositoriesCard, Requests, Shared, toast,
+    toast_error,
+};
 use ui::{button, edge, font};
 // GPUI has an `Inspector` too; ours wins over its glob.
 use inspector::Inspector;
@@ -508,6 +511,14 @@ impl Workspace {
             Intent::OpenModels(space) => {
                 self.open_page(Page::Models, window, cx);
                 (self.models).update(cx, |models, cx| models.show_scope(space.clone(), cx));
+            }
+            Intent::OpenModelsCard(card) => {
+                self.open_page(Page::Models, window, cx);
+                (self.models).update(cx, |models, cx| models.show_card(*card, cx));
+            }
+            Intent::OpenRepositories(card) => {
+                self.open_page(Page::Repositories, window, cx);
+                (self.repositories).update(cx, |page, cx| page.show_card(*card, cx));
             }
             Intent::OpenBrain(opening) => {
                 self.open_page(Page::BrainBrowser, window, cx);

@@ -3743,10 +3743,12 @@ pub enum Command {
     ForgetBrain {
         repository: String,
     },
-    /// Queues the batch that adds `wiffletree-brain.json`, with this host as compiler, and the
-    /// gate's caller, config, allow-list and `CODEOWNERS` lines; answered with the `BrainBatch`.
+    /// Queues the batch that adds `wiffletree-brain.json`, with this host as compiler and
+    /// `compile` as its compile time, and the gate's caller, config, allow-list and `CODEOWNERS`
+    /// lines; answered with the `BrainBatch`.
     SetUpBrain {
         repository: String,
+        compile: BrainCompile,
     },
     /// Queues the batch that moves the caller's gate pins and `gate.version` to the newest
     /// release this Wiffletree ships; answered with the `BrainBatch`.
@@ -3758,6 +3760,12 @@ pub enum Command {
     SetBrainCompiler {
         repository: String,
         compiler: BrainCompiler,
+    },
+    /// Queues a batch that changes only the compile time in `wiffletree-brain.json`, keeping the
+    /// keys this host does not know; answered with the `BrainBatch`.
+    SetBrainCompileTime {
+        repository: String,
+        compile: BrainCompile,
     },
     /// Amends or discards a batch whose pull request is open and unmerged; answered with the
     /// `BrainBatch`.
@@ -4295,6 +4303,7 @@ impl Command {
             | Self::SetUpBrain { .. }
             | Self::UpdateBrainGate { .. }
             | Self::SetBrainCompiler { .. }
+            | Self::SetBrainCompileTime { .. }
             | Self::AmendBrainBatch { .. }
             | Self::SendLogsNow { .. }
             | Self::ImportLegacyLogs { .. }
@@ -4447,6 +4456,7 @@ impl Command {
                 | Self::SetUpBrain { .. }
                 | Self::UpdateBrainGate { .. }
                 | Self::SetBrainCompiler { .. }
+                | Self::SetBrainCompileTime { .. }
                 | Self::AmendBrainBatch { .. }
                 | Self::SendLogsNow { .. }
                 | Self::ImportLegacyLogs { .. }

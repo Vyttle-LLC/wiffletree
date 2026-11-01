@@ -488,7 +488,7 @@ pub(crate) fn space_table(
 /// The rows the Models page shows at a Space: this Mac's, each replaced by the Space's own where
 /// it sets one, then the Space's rows for jobs this Mac has none for, each with whether the
 /// Space sets it. A Space's row for a verifier this Mac does not configure is left out, as the
-/// host leaves it out.
+/// host leaves it out, and so are the jobs no Space may set.
 pub(crate) fn space_rows(selection: &ModelSelection, overrides: &[JobRow]) -> Vec<(JobRow, bool)> {
     let over = |job: &Job| overrides.iter().find(|row| row.job.is(job));
     let mut rows: Vec<(JobRow, bool)> = (selection.jobs.iter())
@@ -503,7 +503,23 @@ pub(crate) fn space_rows(selection: &ModelSelection, overrides: &[JobRow]) -> Ve
             .filter(|row| selection.row(&row.job).is_none())
             .map(|row| (row.clone(), true)),
     );
+    rows.retain(|(row, _)| row.job.space_may_set());
     rows
+}
+
+/// What a Space is told about the rows in `rows` that no Space may set, if it holds any.
+pub(crate) fn ignored_line(rows: &[JobRow], space: &str) -> Option<String> {
+    let holds = |job: Job| rows.iter().any(|row| row.job == job);
+    Some(match (holds(Job::Router), holds(Job::Compiler)) {
+        (false, false) => return None,
+        (true, true) => format!(
+            "{space} also sets Router and Brain compiler rows. Neither belongs to a Space, so this Mac's rows run."
+        ),
+        (router, _) => format!(
+            "{space} also sets a {} row. It doesn't belong to a Space, so this Mac's row runs.",
+            if router { "Router" } else { "Brain compiler" }
+        ),
+    })
 }
 
 /// Sets one cell of `job`'s row at a Space: the Space's row, started as a copy of this Mac's
@@ -994,6 +1010,42 @@ mod tests {
         );
         let job = job_row(Job::Job, &sonnet, Then::Wait);
         assert_eq!(space_rows(&table, &overrides).last(), Some(&(job, true)));
+    }
+    #[test]
+    fn the_table_at_a_space_leaves_out_the_router_and_compiler_and_notes_a_row_held_for_them() {
+        let opus = ModelProfile {
+            provider: Provider::Claude,
+            model: "opus".into(),
+            effort: "high".into(),
+        };
+        let table = ModelSelection {
+            jobs: vec![
+                job_row(Job::Implementer, &opus, Then::Wait),
+                job_row(Job::Router, &opus, Then::Wait),
+                job_row(Job::Compiler, &opus, Then::Wait),
+            ],
+            ..ModelSelection::default()
+        };
+        let router = job_row(Job::Router, &opus, Then::Wait);
+        let compiler = job_row(Job::Compiler, &opus, Then::Wait);
+        let jobs = |shown: Vec<(JobRow, bool)>| -> Vec<Job> {
+            shown.into_iter().map(|(row, _)| row.job).collect()
+        };
+        assert_eq!(jobs(space_rows(&table, &[])), [Job::Implementer]);
+        let held = [router.clone(), compiler.clone()];
+        assert_eq!(jobs(space_rows(&table, &held)), [Job::Implementer]);
+
+        assert_eq!(ignored_line(&[], "Sage"), None);
+        let implementer = job_row(Job::Implementer, &opus, Then::Wait);
+        assert_eq!(ignored_line(&[implementer], "Sage"), None);
+        assert_eq!(
+            ignored_line(&held, "Sage").unwrap(),
+            "Sage also sets Router and Brain compiler rows. Neither belongs to a Space, so this Mac's rows run."
+        );
+        assert_eq!(
+            ignored_line(&[compiler], "Sage").unwrap(),
+            "Sage also sets a Brain compiler row. It doesn't belong to a Space, so this Mac's row runs."
+        );
     }
     #[test]
     fn a_space_row_whose_provider_is_signed_out_falls_back_to_this_macs_row() {

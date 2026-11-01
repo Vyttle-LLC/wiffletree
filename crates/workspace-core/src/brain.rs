@@ -210,6 +210,10 @@ pub struct BrainCompile {
     #[serde(flatten)]
     pub extra: Extra,
 }
+impl BrainCompile {
+    /// The time Set up fills in.
+    pub const DEFAULT_AT: &str = "06:00";
+}
 
 /// One branch, one pull request and one squash merge of changes to a brain.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -396,6 +400,9 @@ pub struct BrainsPage {
     /// This host as a compiler, which the page offers as the one to compile on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub this_host: Option<BrainCompiler>,
+    /// This host's timezone, which a compile time form fills in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub this_timezone: Option<String>,
     /// The compile of each brain this host compiles.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compiles: Vec<crate::BrainCompileState>,
