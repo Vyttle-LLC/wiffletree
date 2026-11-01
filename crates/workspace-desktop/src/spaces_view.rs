@@ -140,11 +140,12 @@ impl SpacesPage {
     }
 
     /// Redraws while shown, loads the shown Space into the form, and reads its storage again
-    /// once the reading is old or is another Space's, as after the shown one is removed.
+    /// once the reading is old or is another Space's, as after the shown one is removed, or once
+    /// a storage pass for it finished.
     pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
         let (_, moved) = shared.moved_from(&self.shared);
         let opened = shared.page == Page::Spaces && self.shared.page != Page::Spaces;
-        self.shared = shared;
+        let before = std::mem::replace(&mut self.shared, shared);
         if self.shared.page != Page::Spaces {
             return;
         }
@@ -154,8 +155,12 @@ impl SpacesPage {
         }
         self.load_shown(window, cx);
         let shown = self.shown_space().map(|s| s.id.clone());
+        fn trackers(shared: &Shared) -> &[IssueTracker] {
+            shared.snapshot().map_or(&[], |s| &s.issue_trackers)
+        }
         let again = shown.is_some_and(|shown| {
             reads_storage_again(self.storage_asked.as_ref(), &shown, moved, ui::now())
+                || pass_finished(trackers(&before), trackers(&self.shared), &shown)
         });
         if opened || again {
             self.read_storage(window, cx);
@@ -1597,6 +1602,17 @@ fn reads_storage_again(
     }
 }
 
+/// Whether a storage pass for `shown` finished between two snapshots: its tracker's last sync
+/// or error changed.
+fn pass_finished(before: &[IssueTracker], now: &[IssueTracker], shown: &SpaceId) -> bool {
+    let pass = |trackers: &[IssueTracker]| {
+        (trackers.iter())
+            .find(|t| &t.space_id == shown)
+            .map(|t| (t.synced_at, t.error.clone()))
+    };
+    pass(before) != pass(now)
+}
+
 /// Whether a folder chosen while the form says No brain replaces the Space's GitHub brain.
 fn replaces_github_brain(form: &Option<SpaceBrain>, space: &Option<SpaceBrain>) -> bool {
     let github = |b: &SpaceBrain| matches!(b.repository, BrainRepository::GitHub { .. });
@@ -2077,9 +2093,9 @@ mod tests {
     use super::{
         Joining, STORAGE_FRESH_MS, brain_after_choosing, brain_label, fallback_note,
         format_sources, holds_draft, issues_line, join_choices, join_refused_by, merged,
-        new_storage_line, parse_sources, prefix_question, readers_line, reads_storage_again,
-        replaces_github_brain, repository_line, shared_with, storage_banner, sync_line,
-        thread_model,
+        new_storage_line, parse_sources, pass_finished, prefix_question, readers_line,
+        reads_storage_again, replaces_github_brain, repository_line, shared_with, storage_banner,
+        sync_line, thread_model,
     };
     use workspace_core::*;
 
@@ -2481,6 +2497,42 @@ mod tests {
         assert!(reads_storage_again(Some(&asked), &removed, true, stale));
         assert!(!reads_storage_again(Some(&asked), &removed, false, stale));
         assert!(reads_storage_again(None, &next, false, 0));
+    }
+
+    #[test]
+    fn a_finished_storage_pass_reads_the_shown_spaces_storage_again() {
+        let tracker = |space: &str, synced_at, error: Option<&str>| IssueTracker {
+            space_id: SpaceId(space.into()),
+            tracker: format!("github:sage-social/{space}"),
+            prefix: Some("SAGE".into()),
+            local: false,
+            login: Some("mhohlios".into()),
+            issues: 0,
+            open: 0,
+            unread: 0,
+            waiting: 0,
+            paused: 0,
+            synced_at,
+            error: error.map(Into::into),
+        };
+        let sage = SpaceId("sage".into());
+        let before = [
+            tracker("sage", Some(1_000), None),
+            tracker("personal", None, None),
+        ];
+        assert!(!pass_finished(&before, &before, &sage));
+        let synced = [
+            tracker("sage", Some(2_000), None),
+            tracker("personal", None, None),
+        ];
+        assert!(pass_finished(&before, &synced, &sage));
+        let failed = [tracker("sage", Some(1_000), Some("gh: not signed in"))];
+        assert!(pass_finished(&before, &failed, &sage));
+        let elsewhere = [
+            tracker("sage", Some(1_000), None),
+            tracker("personal", Some(5), None),
+        ];
+        assert!(!pass_finished(&before, &elsewhere, &sage));
     }
 
     #[test]
