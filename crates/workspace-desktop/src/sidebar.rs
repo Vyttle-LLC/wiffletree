@@ -743,6 +743,14 @@ impl Sidebar {
                         page == Page::Skills && skills_view::a_rewrite_is_out_of_date(&self.shared),
                         |d| d.child(div().size(px(6.)).rounded_full().bg(p.accent)),
                     )
+                    // Brains whose log batches wait on this Mac for a gate update.
+                    .when(page == Page::Brains, |d| {
+                        let held = (self.shared.snapshot()).map_or(0, |s| s.brains_logs_held.len());
+                        d.when(held > 0, |d| {
+                            d.child(div().flex_1())
+                                .child(ui::pill(held.to_string(), p.yellow))
+                        })
+                    })
                     .when(page == Page::Issues, |d| {
                         let unread = (self.shared.snapshot())
                             .map_or(0, |s| issues_view::unread(&s.issue_trackers));

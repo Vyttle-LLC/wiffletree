@@ -304,6 +304,11 @@ impl Inspector {
         if batches.is_empty() {
             return None;
         }
+        let held_for = |batch: &BrainBatch| {
+            (listing.brains.iter())
+                .find(|b| b.repository.eq_ignore_ascii_case(&batch.repository))
+                .and_then(|brain| brains_view::held_for(brain, batch))
+        };
         let mut list = div()
             .flex()
             .flex_col()
@@ -332,7 +337,7 @@ impl Inspector {
                             )
                             .child(pill(stage, tone.color(p))),
                     )
-                    .child(brains_view::stepper(batch, p)),
+                    .child(brains_view::stepper(batch, held_for(batch), p)),
             );
         }
         Some(list)
