@@ -19,8 +19,8 @@ const INDEX: &str = "notes/INDEX.md";
 const QUEUE: &str = "reconcile-queue.md";
 const CONFLICT_MARKER: &str = "<!-- conflict:";
 
-/// How many claimed entries naming a PR a pass with no new commit asks GitHub about again, in
-/// turn from where the last pass stopped, so a pass stays bounded and none is left out.
+/// How many claimed entries naming a PR a pass asks GitHub about, in turn from where the last
+/// pass stopped, so a pass stays bounded and none is left out.
 const RECHECKED_PRS: usize = 50;
 /// How a ruling entry's `state` begins, followed by the conflict's id and a colon.
 pub(crate) const RULING_PREFIX: &str = "Ruling on conflict ";
@@ -634,6 +634,10 @@ pub(crate) fn refresh(refresh: Refresh) -> Result<usize> {
     resolve_sources(&transaction)?;
     mark_pending(&transaction, checkout, commit, &prefix, compiled)?;
     verify_entries(&transaction, clones, gh, false)?;
+    // GitHub is asked about the next named PRs only, as on a pass with no new commit.
+    if gh.is_some() {
+        verify_entries(&transaction, clones, gh, true)?;
+    }
     set_state(&transaction, "last_compile", compile_time)?;
     set_state(&transaction, "last_compile_commit", compile_commit)?;
     set_state(&transaction, "commit", Some(&at))?;
@@ -710,7 +714,9 @@ fn squash_pull_request(subject: &str) -> Option<u64> {
         .ok()
 }
 
-/// Checks the ref of every entry not yet verified against this machine's clones.
+/// Checks the ref of every entry not yet verified against this machine's clones, or with
+/// `only_named_prs` asks `gh` about the next claimed entries' PRs, in turn. A PR closed without
+/// merging is final, and its entry is checked no more.
 fn verify_entries(
     db: &Connection,
     clones: &Clones,
@@ -726,13 +732,25 @@ fn verify_entries(
             .query_map([after], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
             .collect::<rusqlite::Result<_>>()?)
     };
-    let unverified = match only_named_prs {
-        false => select("coalesce(verification,'')<>'verified'", 0)?,
+    // A PR closed without merging is final: its entry is not checked again.
+    let open = format!(
+        "coalesce(verification_reason,'') NOT LIKE '%{}'",
+        verify_refs::CLOSED_UNMERGED
+    );
+    let (unverified, gh) = match only_named_prs {
+        // Every entry not yet verified, against the clones only.
+        false => (
+            select(
+                &format!("coalesce(verification,'')<>'verified' AND {open}"),
+                0,
+            )?,
+            None,
+        ),
         // The next claimed entries naming a PR after the last one asked about, from the first
         // again past the end, so every one is asked about in turn.
         true => {
             let which = format!(
-                "verification='claimed' AND reference LIKE '% · PR #%' ORDER BY id LIMIT {RECHECKED_PRS}"
+                "verification='claimed' AND reference LIKE '% · PR #%' AND {open} ORDER BY id LIMIT {RECHECKED_PRS}"
             );
             let from: i64 = (state(db, "pr_recheck_after")?)
                 .and_then(|id| id.parse().ok())
@@ -743,7 +761,7 @@ fn verify_entries(
             }
             let last = next.last().map(|(id, ..)| id.to_string());
             set_state(db, "pr_recheck_after", last.as_deref())?;
-            next
+            (next, gh)
         }
     };
     let refs: Vec<(&str, &str)> = (unverified.iter())
@@ -2478,11 +2496,8 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn a_pr_merged_after_indexing_verifies_its_entry_in_the_browser_as_in_a_compile() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        // A clone of `relay` whose PR #92 commit is only on its branch.
+    /// A clone of `relay` with a commit only on its `retry` branch, and that commit's SHA.
+    fn relay_clone() -> (tempfile::TempDir, Clones, String) {
         let code = tempfile::tempdir().unwrap();
         let clone = code.path().join("relay");
         git(
@@ -2502,13 +2517,91 @@ pub(crate) mod tests {
                 github: Some("Sage-Social/relay".into()),
             }],
         )]));
+        (code, clones, sha)
+    }
+
+    #[test]
+    fn a_pr_closed_without_merging_is_final_and_asked_about_once() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (_code, clones, sha) = relay_clone();
+        let asked = Arc::new(AtomicUsize::new(0));
+        let count = asked.clone();
+        let gh: publish::Tool<runtime::GhAnswer> = Arc::new(move |_, args| {
+            assert_eq!(
+                args.last().copied(),
+                Some("repos/Sage-Social/relay/pulls/94")
+            );
+            count.fetch_add(1, Ordering::SeqCst);
+            Ok(runtime::GhAnswer {
+                status: publish::tests::exit(0),
+                output: json!({"state": "closed", "merged": false}).to_string(),
+                error: String::new(),
+            })
+        });
+        let brain = Checkout::new();
+        let reference = format!("retry @ {} · PR #94", &sha[..7]);
+        let first = brain.commit(
+            &[entry(
+                "relay",
+                &id(8),
+                ("mhohlios", "decision", "Dropped"),
+                &reference,
+            )],
+            "Log batch (#80)",
+        );
+        let refresh_at = |commit: &str| {
+            refresh(Refresh {
+                index: &brain.index(),
+                checkout: &brain.path(),
+                commit,
+                brain_dir: "second-brain",
+                clones: &clones,
+                gh: Some(&gh),
+                compiled: &HashSet::new(),
+            })
+            .unwrap();
+        };
+        let stored = || -> (String, String) {
+            brain
+                .db()
+                .query_row(
+                    "SELECT verification,verification_reason FROM files WHERE entry_id=?1",
+                    [id(8)],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        refresh_at(&first);
+        let closed = (
+            "claimed".to_owned(),
+            "PR #94 was closed without merging".to_owned(),
+        );
+        assert_eq!(stored(), closed);
+        // Neither a pass with no new commit nor one with a new commit asks again.
+        refresh_at(&first);
+        let next = brain.commit(&sample()[3..4], "Log batch (#81)");
+        refresh_at(&next);
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        assert_eq!(stored(), closed);
+    }
+
+    #[test]
+    fn a_pr_merged_after_indexing_verifies_its_entry_in_the_browser_as_in_a_compile() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        // A clone of `relay` whose PR #92 commit is only on its branch.
+        let (_code, clones, sha) = relay_clone();
         let merged = Arc::new(AtomicBool::new(false));
         let state = merged.clone();
+        let asked = Arc::new(AtomicUsize::new(0));
+        let count = asked.clone();
         // PR #92 merges during the test; #93 stays open.
         let gh: publish::Tool<runtime::GhAnswer> = Arc::new(move |_, args| {
+            count.fetch_add(1, Ordering::SeqCst);
             let merged = match args.last().copied() {
                 Some("repos/Sage-Social/relay/pulls/92") => state.load(Ordering::SeqCst),
-                Some("repos/Sage-Social/relay/pulls/93") => false,
+                Some(other) if other.starts_with("repos/Sage-Social/relay/pulls/") => false,
                 other => panic!("unexpected gh call {other:?}"),
             };
             Ok(runtime::GhAnswer {
@@ -2519,10 +2612,9 @@ pub(crate) mod tests {
             })
         });
         let reference = format!("retry @ {} · PR #92", &sha[..7]);
-        let open = format!("retry @ {} · PR #93", &sha[..7]);
         let brain = Checkout::new();
-        // Its entry is older than more claimed entries, for a PR still open, than a pass asks
-        // about at once.
+        // Its entry is older than more claimed entries, each for a PR still open, than a pass
+        // asks about at once.
         let mut entries = vec![entry(
             "relay",
             &id(7),
@@ -2530,6 +2622,7 @@ pub(crate) mod tests {
             &reference,
         )];
         entries.extend((100..100 + RECHECKED_PRS as u128).map(|n| {
+            let open = format!("retry @ {} · PR #{n}", &sha[..7]);
             entry(
                 "relay",
                 &id(n),
@@ -2572,6 +2665,8 @@ pub(crate) mod tests {
             .state
         };
         refresh_now();
+        // A pass with a new commit asks about at most RECHECKED_PRS of the 51 named PRs.
+        assert_eq!(asked.load(Ordering::SeqCst), RECHECKED_PRS);
         assert_eq!(
             (stored(), compiled()),
             ("claimed".to_owned(), RefState::Claimed)

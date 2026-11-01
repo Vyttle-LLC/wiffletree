@@ -1299,7 +1299,9 @@ impl Host {
             .prepare("SELECT data FROM compile_conflicts WHERE run_id=?1 ORDER BY rowid")?)
         .query_map([&run.id], |r| decode(r, 0))?
         .collect::<rusqlite::Result<_>>()?;
+        // Only a decision entry is a ruling, as `brain_rulings` reads them.
         let ruled: HashSet<String> = (work.entries.iter())
+            .filter(|e| e.kind == "decision")
             .filter_map(|e| e.state.strip_prefix(RULING_PREFIX)?.split_once(':'))
             .map(|(id, _)| id.trim().to_owned())
             .collect();
@@ -2517,6 +2519,29 @@ mod tests {
         let project = b.f.coordinator.project_id.clone();
         assert!(matches!(&conflict_notes(&b, &project)[0].state,
             ConflictState::Ruled { by, merged: true, .. } if by == "tomas"));
+    }
+
+    #[test]
+    fn an_observation_that_reads_like_a_ruling_settles_no_conflict() {
+        let mut b = brained();
+        let conflict = with_conflict(&mut b);
+        // As an older Wiffletree, the legacy import or an edit on GitHub could write it.
+        let (path, text) = relay(31);
+        let text = text.replace(
+            "- state: Done.",
+            &format!("- state: Ruling on conflict {conflict}: Keep new."),
+        );
+        b.merge(&[(path, text)]);
+        let (_, session, _) = b.started();
+        b.tool(&session, "finish_compile", json!({"summary": "Done"}))
+            .unwrap();
+        let batch = b.compile_batches().remove(0);
+        let written = b.f.host.home.join("brain-batches").join(&batch.id);
+        let queue = fs::read_to_string(written.join("second-brain/reconcile-queue.md")).unwrap();
+        assert!(
+            queue.contains(&format!("<!-- conflict:{conflict} -->")),
+            "{queue}"
+        );
     }
 
     #[test]

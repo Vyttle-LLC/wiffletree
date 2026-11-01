@@ -1,9 +1,10 @@
 //! Ref verification (`brain-compile`, decision 2): what an entry's `ref` names, and whether this
 //! machine's clone of its repository holds it on the repository's default branch on GitHub.
-//! `verify` is deterministic and local: it never fetches and never asks GitHub, so the browser
-//! reads no PR state. Results are cached by each clone's default-branch head, so a repeat costs
-//! one ref read. A compile's `for_compile` fetches each clone first, once, and reads named PRs'
-//! states and the release tag containing a verified commit.
+//! `verify` is deterministic and local: it never fetches and never asks GitHub. Results are
+//! cached by each clone's default-branch head, so a repeat costs one ref read. `verify_with` also
+//! reads named PRs' states with `gh`; the brain index stores what it finds during the brain's
+//! pass, for the browser, and a compile's `for_compile` fetches each clone first, once, then
+//! uses it and records the release tag containing a verified commit.
 use crate::*;
 use std::collections::{HashMap, HashSet};
 use workspace_core::{RefAnchors, RefState, RefVerification};
@@ -209,6 +210,10 @@ pub(crate) struct Checked {
     pub(crate) tag: Option<String>,
 }
 
+/// How a verification's reason ends for a PR closed without merging, which is final: it is not
+/// asked about again.
+pub(crate) const CLOSED_UNMERGED: &str = "was closed without merging";
+
 /// A named PR's state on GitHub.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PullState {
@@ -277,7 +282,11 @@ pub(crate) fn verify_with(
                     state: RefState::Claimed,
                     reason: Some(format!("PR #{number} is open")),
                 },
-                Some(PullState::Closed) | None => verification,
+                Some(PullState::Closed) => RefVerification {
+                    reason: Some(format!("PR #{number} {CLOSED_UNMERGED}")),
+                    ..verification
+                },
+                None => verification,
             }
         })
         .collect()
