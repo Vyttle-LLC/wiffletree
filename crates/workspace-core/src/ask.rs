@@ -212,6 +212,27 @@ pub fn brain_conflicts(repository: String, project_id: Option<String>) -> Ask<Ve
         project_id,
     })
 }
+pub fn run_brain_compile(repository: String) -> Ask<CompileRun> {
+    Ask::new(Command::RunBrainCompile { repository })
+}
+pub fn brain_compile_runs(repository: String, offset: usize, limit: usize) -> Ask<CompileRunPage> {
+    Ask::new(Command::BrainCompileRuns {
+        repository,
+        offset,
+        limit,
+    })
+}
+pub fn rule_conflict(
+    repository: String,
+    conflict_id: String,
+    ruling: Ruling,
+) -> Ask<Option<ConflictCard>> {
+    Ask::new(Command::RuleConflict {
+        repository,
+        conflict_id,
+        ruling,
+    })
+}
 pub fn brain_status(repository: String) -> Ask<BrainStatus> {
     Ask::new(Command::BrainStatus { repository })
 }

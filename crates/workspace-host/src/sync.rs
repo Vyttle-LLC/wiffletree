@@ -1327,10 +1327,21 @@ impl Host {
         });
         let questions = (skills.iter()).filter_map(|state| state.question.clone());
         let notes = notes.into_iter().map(WorkspaceNote::Paused);
+        // A brain that cannot be read shows no cards; its problem is on the Brains page. A card
+        // naming no project is in no Inbox, only on the Brains page and in the brain browser.
+        let conflicts = (self.conflict_cards()).unwrap_or_else(|error| {
+            eprintln!("Brain conflicts: {error:#}");
+            vec![]
+        });
         Ok((self.issue_notes()?.into_iter())
             .chain(notes)
             .chain(self.held_notes()?)
             .chain(questions.map(WorkspaceNote::SkillQuestion))
+            .chain(
+                conflicts
+                    .into_iter()
+                    .map(|card| WorkspaceNote::Conflict(Box::new(card))),
+            )
             .collect())
     }
     /// A repository as `owner/name`, by its record key.

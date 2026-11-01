@@ -19,6 +19,19 @@ const INDEX: &str = "notes/INDEX.md";
 const QUEUE: &str = "reconcile-queue.md";
 const CONFLICT_MARKER: &str = "<!-- conflict:";
 
+/// How a ruling entry's `state` begins, followed by the conflict's id and a colon.
+pub(crate) const RULING_PREFIX: &str = "Ruling on conflict ";
+
+/// A ruling entry on `main`: who ruled on which conflict, and whether a compile has yet to
+/// fold it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RulingEntry {
+    pub(crate) entry_id: String,
+    pub(crate) conflict_id: String,
+    pub(crate) author: String,
+    pub(crate) pending: bool,
+}
+
 /// Where the index of the brain `owner/name` lives: `brain-index/github.com/<owner>/<name>.sqlite`.
 pub(crate) fn index_file(home: &Path, repository: &str) -> PathBuf {
     let (owner, name) = repository.split_once('/').unwrap_or((repository, ""));
@@ -165,7 +178,7 @@ fn is_ulid(text: &str) -> bool {
 
 /// The frontmatter's `key: value` lines, with a YAML list's `- item` lines joined to its key,
 /// and the text after it.
-fn frontmatter(text: &str) -> (HashMap<String, String>, &str) {
+pub(crate) fn frontmatter(text: &str) -> (HashMap<String, String>, &str) {
     let mut keys = HashMap::new();
     let Some(rest) = text.strip_prefix("---\n") else {
         return (keys, text);
@@ -204,7 +217,7 @@ fn frontmatter(text: &str) -> (HashMap<String, String>, &str) {
 }
 
 /// The items of a frontmatter list, `[a, b]` or joined `- a` lines.
-fn list(value: &str) -> Vec<String> {
+pub(crate) fn list(value: &str) -> Vec<String> {
     let value = value.trim().trim_start_matches('[').trim_end_matches(']');
     (value.split(','))
         .map(|item| item.trim().trim_matches(['"', '\'']).to_owned())
@@ -213,7 +226,7 @@ fn list(value: &str) -> Vec<String> {
 }
 
 /// The targets of every `[[wikilink]]`, before any `|alias` or `#heading`.
-fn wikilinks(text: &str) -> Vec<String> {
+pub(crate) fn wikilinks(text: &str) -> Vec<String> {
     let mut links = vec![];
     let mut rest = text;
     while let Some(start) = rest.find("[[") {
@@ -233,7 +246,7 @@ fn wikilinks(text: &str) -> Vec<String> {
 }
 
 /// The key a wikilink matches a note by: its file name or title, in lower case, without `.md`.
-fn link_key(target: &str) -> String {
+pub(crate) fn link_key(target: &str) -> String {
     let target = target.rsplit('/').next().unwrap_or(target);
     target.trim_end_matches(".md").trim().to_lowercase()
 }
@@ -280,7 +293,7 @@ struct Indexed {
 }
 
 /// An entry's five fields, each `- key: value`, a value continuing onto indented lines.
-fn entry_fields(body: &str) -> HashMap<&'static str, String> {
+pub(crate) fn entry_fields(body: &str) -> HashMap<&'static str, String> {
     const KEYS: [&str; 5] = ["type", "ref", "changed", "why", "state"];
     let mut fields: HashMap<&'static str, String> = HashMap::new();
     let mut current: Option<&'static str> = None;
@@ -588,13 +601,14 @@ pub(crate) fn refresh(refresh: Refresh) -> Result<usize> {
     mark_pending(&transaction, checkout, (compile_commit, commit), &prefix)?;
     verify_entries(&transaction, clones)?;
     set_state(&transaction, "last_compile", compile_time)?;
+    set_state(&transaction, "last_compile_commit", compile_commit)?;
     set_state(&transaction, "commit", Some(&at))?;
     transaction.commit()?;
     Ok(changed.len())
 }
 
 /// The contents `git cat-file --batch` sent, in the order asked.
-fn blobs(batch: &[u8]) -> Result<Vec<Vec<u8>>> {
+pub(crate) fn blobs(batch: &[u8]) -> Result<Vec<Vec<u8>>> {
     let mut rest = batch;
     let mut contents = vec![];
     while !rest.is_empty() {
@@ -935,6 +949,27 @@ fn note_tree(db: &Connection, scope: Option<&Scope>) -> Result<BrainNoteTree> {
     })
 }
 
+/// A note's first paragraph as plain text: no heading, footnote marks or definitions, and at
+/// most 400 characters.
+fn first_paragraph(body: &str) -> String {
+    let paragraph = (body.split("\n\n"))
+        .map(str::trim)
+        .find(|p| !p.is_empty() && !p.starts_with('#') && !p.starts_with("[^"))
+        .unwrap_or_default();
+    let mut text = String::new();
+    let mut rest = paragraph;
+    while let Some(at) = rest.find("[^") {
+        text.push_str(&rest[..at]);
+        rest = rest[at..].split_once(']').map_or("", |(_, after)| after);
+    }
+    text.push_str(rest);
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match text.chars().count() > 400 {
+        true => format!("{}…", text.chars().take(399).collect::<String>()),
+        false => text,
+    }
+}
+
 /// The note a wikilink names, by its file name or title.
 fn resolve_link(db: &Connection, target: &str) -> Result<Option<String>> {
     Ok(db
@@ -959,7 +994,7 @@ fn links_of(db: &Connection, body: &str) -> Result<Vec<BrainLink>> {
 
 /// The targets a footnote cites: its Markdown links and wikilinks, or else the entry ids and
 /// `logs/` paths in its text.
-fn footnote_targets(text: &str) -> Vec<String> {
+pub(crate) fn footnote_targets(text: &str) -> Vec<String> {
     let mut targets: Vec<String> = vec![];
     for target in index_links(text) {
         if source_target(&target) != (None, None) && !targets.contains(&target) {
@@ -991,7 +1026,7 @@ fn source_entry(db: &Connection, target: &str) -> Result<Option<BrainEntry>> {
 }
 
 /// One footnote's definition per claim: `[^label]: text`, with its indented continuation.
-fn footnotes(body: &str) -> Vec<(String, String)> {
+pub(crate) fn footnotes(body: &str) -> Vec<(String, String)> {
     let mut notes: Vec<(String, String)> = vec![];
     let mut open = false;
     for line in body.lines() {
@@ -1719,6 +1754,106 @@ impl Host {
     pub fn brain_status(&self, repository: &str) -> Result<BrainStatus> {
         let (_, db) = self.brain_reader(repository)?;
         status(&db)
+    }
+
+    /// What each side of a conflict says, as the index holds it: the note or entry it conflicts
+    /// with, then the claim's entry. A side the index does not hold is `None`.
+    pub(crate) fn conflict_sides(
+        &self,
+        repository: &str,
+        conflict: &BrainConflict,
+    ) -> Result<(Option<ConflictSide>, Option<ConflictSide>)> {
+        let (_, db) = self.brain_reader(repository)?;
+        let entry_side = |entry: BrainEntry, label: String| ConflictSide {
+            label: format!("{label} · {}", entry.date),
+            text: match entry.changed.is_empty() {
+                true => entry.title.clone(),
+                false => entry.changed.clone(),
+            },
+            detail: format!(
+                "{} · {} · {}",
+                entry.repository,
+                entry.author,
+                entry.verification.state.name()
+            ),
+        };
+        let claim = match &conflict.entry_id {
+            Some(id) => source_entry(&db, id)?.map(|e| entry_side(e, "The new entry says".into())),
+            None => None,
+        };
+        let with = &conflict.conflicts_with;
+        let note = match wikilinks(with).first() {
+            Some(target) => resolve_link(&db, target)?,
+            None => (with.find("notes/"))
+                .map(|at| with[at..].trim().trim_end_matches(')').to_owned())
+                .filter(|path| path.ends_with(".md")),
+        };
+        let existing = match note {
+            Some(path) => {
+                let row: Option<(Option<String>, Option<String>, String)> = db
+                    .query_row(
+                        "SELECT kind,date,body FROM files WHERE class='note' AND path=?1",
+                        [&path],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                    .optional()?;
+                row.map(|(kind, updated, body)| {
+                    let kind = kind.unwrap_or_else(|| "observation".into());
+                    ConflictSide {
+                        label: format!("The {kind} note says"),
+                        text: first_paragraph(&body),
+                        detail: format!(
+                            "{path} · kind: {kind} · updated {}",
+                            updated.unwrap_or_default()
+                        ),
+                    }
+                })
+            }
+            None => match (footnote_targets(with).first()).or(Some(with)) {
+                Some(target) => source_entry(&db, target)?.map(|e| {
+                    let author = e.author.clone();
+                    entry_side(e, format!("{author}'s entry says"))
+                }),
+                None => None,
+            },
+        };
+        Ok((existing, claim))
+    }
+
+    /// The last commit on the brain's `main` that changed the wiki, as the index last read it.
+    pub(crate) fn last_compile_commit(&self, repository: &str) -> Result<Option<String>> {
+        let brain = self.brain(repository)?;
+        match open_read(&index_file(&self.home, &brain.repository))? {
+            Some(db) => state(&db, "last_compile_commit"),
+            None => Ok(None),
+        }
+    }
+
+    /// Every ruling entry on the brain's `main`: those whose `state` begins `Ruling on conflict
+    /// <id>:`. Empty before the brain's first index build.
+    pub(crate) fn brain_rulings(&self, repository: &str) -> Result<Vec<RulingEntry>> {
+        let brain = self.brain(repository)?;
+        let Some(db) = open_read(&index_file(&self.home, &brain.repository))? else {
+            return Ok(vec![]);
+        };
+        let rows: Vec<(String, String, String, bool)> = db
+            .prepare(
+                "SELECT coalesce(entry_id,''),coalesce(author,''),body,pending FROM files WHERE class='entry' AND body LIKE '%Ruling on conflict %'",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok((rows.into_iter())
+            .filter_map(|(entry_id, author, body, pending)| {
+                let state = entry_fields(&body).remove("state")?;
+                let conflict = state.strip_prefix(RULING_PREFIX)?.split_once(':')?.0;
+                Some(RulingEntry {
+                    entry_id,
+                    conflict_id: conflict.trim().to_owned(),
+                    author,
+                    pending,
+                })
+            })
+            .collect())
     }
 
     pub fn search_brain(

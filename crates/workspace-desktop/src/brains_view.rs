@@ -1,16 +1,19 @@
 //! The Brains page (OpenSpec change `brain-registry-sync`, `design/mockups/current/brains.html`
 //! without its repository mapping): each brain this Mac's Spaces name, with the Spaces that name
-//! it, its grant, sync and compiler, then the PR gate's batches with their checks. Brains are
-//! added and removed in a Space's settings. Every action here is the human's, and nothing on the
-//! page shows a brain file's content or a check's output.
+//! it, its grant, sync and compiler, and for a brain this Mac compiles its last and next compile,
+//! Run now and its runs (`brain-compile`); then the conflicts no project's Inbox shows, then the
+//! PR gate's batches with their checks. Brains are added and removed in a Space's settings. Every
+//! action here is the human's, and nothing on the page shows a check's output. Only a conflict
+//! card quotes brain text, as plain text.
 use super::*;
 use brain_browser_view::{BrainOpening, BrainTarget, BrainView};
 use gpui_component::{
-    Sizable,
+    Disableable, Sizable,
     button::ButtonVariants,
     input::Input,
     menu::{DropdownMenu, PopupMenuItem},
 };
+use std::collections::HashMap;
 use ui::{banner, card, empty_state, hint, icon, mono, pill, section};
 use wording::{age, plural};
 use workspace_core::BrainsPage as Listing;
@@ -55,7 +58,17 @@ pub(super) struct BrainsPage {
     reason: Entity<InputState>,
     /// Why the host refused the last action.
     error: Option<String>,
+    /// Each compiled brain's page of compile runs, and where that page starts.
+    runs: HashMap<String, CompileRunPage>,
+    run_offsets: HashMap<String, usize>,
+    /// The conflict with no project whose Keep both line is open, by its card's key, and that
+    /// line.
+    keeping_both: Option<String>,
+    scope: Entity<InputState>,
 }
+
+/// Compile runs shown per page.
+const RUNS_PAGE: usize = 6;
 impl EventEmitter<Intent> for BrainsPage {}
 impl BrainsPage {
     pub(super) fn new(bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -77,6 +90,10 @@ impl BrainsPage {
                 cx,
             ),
             error: None,
+            runs: HashMap::new(),
+            run_offsets: HashMap::new(),
+            keeping_both: None,
+            scope: input("One line that scopes both", window, cx),
         }
     }
 
@@ -99,10 +116,43 @@ impl BrainsPage {
 
     fn read_brains(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.asked_at = ui::now();
-        self.ask(ask::brains(), window, cx, |view, read, _, cx| {
+        self.ask(ask::brains(), window, cx, |view, read, window, cx| {
+            let compiled: Vec<String> = (read.iter())
+                .flat_map(|listing| listing.compiles.iter().map(|c| c.repository.clone()))
+                .collect();
             view.read = Some(read);
+            view.runs
+                .retain(|repository, _| compiled.contains(repository));
+            for repository in compiled {
+                view.read_runs(repository, window, cx);
+            }
             cx.notify();
         });
+    }
+
+    /// Reads the brain's page of compile runs that starts where the human paged to.
+    fn read_runs(&mut self, repository: String, window: &mut Window, cx: &mut Context<Self>) {
+        let offset = self.run_offsets.get(&repository).copied().unwrap_or(0);
+        let ask = ask::brain_compile_runs(repository.clone(), offset, RUNS_PAGE);
+        self.ask(ask, window, cx, move |view, page, _, cx| {
+            if let Ok(page) = page {
+                view.runs.insert(repository, page);
+                cx.notify();
+            }
+        });
+    }
+
+    /// Pages a brain's compile runs `by` pages, newer for a negative one.
+    fn page_runs(
+        &mut self,
+        repository: String,
+        by: isize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let offset = self.run_offsets.entry(repository.clone()).or_default();
+        *offset = offset.saturating_add_signed(by * RUNS_PAGE as isize);
+        self.read_runs(repository, window, cx);
     }
 
     /// Asks the host to sync every brain now, and reads the page again once the passes had time.
@@ -193,6 +243,20 @@ impl BrainsPage {
         for brain in &listing.brains {
             body = body.child(self.brain_card(brain, listing, p, cx));
         }
+        if !listing.conflicts.is_empty() {
+            body = body
+                .child(section(
+                    format!("CONFLICTS WITH NO PROJECT · {}", listing.conflicts.len()),
+                    p,
+                ))
+                .child(hint(
+                    "No project includes these claims' repositories, so no Inbox shows them.",
+                    p,
+                ));
+            for conflict in &listing.conflicts {
+                body = body.child(self.unplaced_conflict(conflict, p, cx));
+            }
+        }
         body = body.child(section("PR GATE", p)).child(hint(GATE_HINT, p));
         if listing.batches.is_empty() {
             return body.child(hint("No batch is on its way to main.", p));
@@ -279,13 +343,169 @@ impl BrainsPage {
             .child(fact(
                 "Compiles on",
                 text(compiler_line(&brain.config, listing.this_host.as_ref())),
-            ))
-            .child(fact("Next compile", text(next_compile(&brain.config))))
-            .child(fact("Last compile", text(LAST_COMPILE.into())));
+            ));
+        let compile = (listing.compiles.iter())
+            .find(|c| c.repository.eq_ignore_ascii_case(&brain.repository));
+        card = match compile {
+            Some(compile) => card
+                .child(fact(
+                    "Last compile",
+                    text(last_compile(compile.last_run.as_ref())),
+                ))
+                .child(fact("Next compile", text(next_run(compile, &brain.config))))
+                .child(fact(
+                    "Pending",
+                    text(format!(
+                        "{} {} since the last compile",
+                        compile.pending,
+                        plural(compile.pending, "entry", "entries")
+                    )),
+                )),
+            None => card.child(fact("Next compile", text(next_compile(&brain.config)))),
+        };
         for (warning, tone) in warnings(brain, &batches) {
             card = card.child(banner(tone.color(p)).child(warning));
         }
-        card.child(self.brain_actions(brain, listing, &batches, p, cx))
+        if let Some(compile) = compile.filter(|c| c.needs_model) {
+            card = card.child(
+                banner(p.yellow)
+                    .child(div().flex_1().child(format!(
+                        "No Brain compiler model is chosen, so {}'s pending entries are not compiled. Choose one in Models.",
+                        compile.repository
+                    )))
+                    .child(
+                        button(SharedString::from(format!("models-{}", compile.repository)))
+                            .link()
+                            .xsmall()
+                            .label("Open Models")
+                            .on_click(cx.listener(|_, _, _, c| c.emit(Intent::OpenPage(Page::Models)))),
+                    ),
+            );
+        }
+        card = card.child(self.brain_actions(brain, listing, &batches, p, cx));
+        match compile {
+            Some(compile) => card.child(self.compile_runs(compile, p, cx)),
+            None => card,
+        }
+    }
+
+    /// Run now and the brain's compile runs, a page at a time, newest first.
+    fn compile_runs(&self, compile: &BrainCompileState, p: Palette, cx: &mut Context<Self>) -> Div {
+        let repository = compile.repository.clone();
+        let waits = compile.run_now_waits.clone().or_else(|| {
+            compile
+                .needs_model
+                .then(|| "Choose a Brain compiler model first.".to_owned())
+        });
+        let r = repository.clone();
+        let run_now = ui::gated(
+            button(SharedString::from(format!("run-compile-{repository}")))
+                .outline()
+                .icon(icon("play"))
+                .label("Run now")
+                .disabled(waits.is_some()),
+            &self.shared.host,
+        )
+        .on_click(cx.listener(move |v, _, w, c| {
+            let repository = r.clone();
+            v.request(Command::RunBrainCompile { repository }, w, c)
+        }));
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(section("COMPILE RUNS", p))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(run_now)
+                    .children(waits.map(|why| hint(why, p))),
+            );
+        let Some(page) = self.runs.get(&repository) else {
+            return body.child(hint("Reading the runs…", p));
+        };
+        if page.runs.is_empty() {
+            return body.child(hint("No compile run yet.", p));
+        }
+        for run in &page.runs {
+            body = body.child(run_row(run, p));
+        }
+        let offset = self.run_offsets.get(&repository).copied().unwrap_or(0);
+        let shown = format!(
+            "{}–{} of {}",
+            offset + 1,
+            offset + page.runs.len(),
+            page.total
+        );
+        let (newer, older) = (repository.clone(), repository.clone());
+        body.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap_2()
+                .child(hint(shown, p))
+                .child(
+                    button(SharedString::from(format!("runs-newer-{repository}")))
+                        .ghost()
+                        .xsmall()
+                        .label("Newer")
+                        .disabled(offset == 0)
+                        .on_click(
+                            cx.listener(move |v, _, w, c| v.page_runs(newer.clone(), -1, w, c)),
+                        ),
+                )
+                .child(
+                    button(SharedString::from(format!("runs-older-{repository}")))
+                        .ghost()
+                        .xsmall()
+                        .label("Older")
+                        .disabled(offset + page.runs.len() >= page.total)
+                        .on_click(
+                            cx.listener(move |v, _, w, c| v.page_runs(older.clone(), 1, w, c)),
+                        ),
+                ),
+        )
+    }
+
+    /// A conflict no project's Inbox shows, with its rulings.
+    fn unplaced_conflict(&self, card: &ConflictCard, p: Palette, cx: &mut Context<Self>) -> Div {
+        let view = cx.entity().downgrade();
+        let (repository, conflict) = (card.repository.clone(), card.conflict.id.clone());
+        let key = conflict_card::key(card);
+        let open = self.keeping_both.as_deref() == Some(key.as_str());
+        let on: conflict_card::OnConflict = Rc::new(move |action, window, cx| {
+            let _ = view.update(cx, |view, cx| match action {
+                conflict_card::ConflictAction::Evidence => {
+                    cx.emit(Intent::OpenBrain(BrainOpening {
+                        repository: repository.clone(),
+                        project: None,
+                        target: BrainTarget::View(BrainView::Conflicts),
+                    }))
+                }
+                conflict_card::ConflictAction::KeepBoth(open) => {
+                    view.keeping_both = open.then(|| key.clone());
+                    if open {
+                        view.scope.update(cx, |input, cx| {
+                            input.set_value("", window, cx);
+                            input.focus(window, cx);
+                        });
+                    }
+                    cx.notify();
+                }
+                conflict_card::ConflictAction::Rule(ruling) => {
+                    let command = Command::RuleConflict {
+                        repository: repository.clone(),
+                        conflict_id: conflict.clone(),
+                        ruling,
+                    };
+                    view.request(command, window, cx)
+                }
+            });
+        });
+        conflict_card::conflict_card(card, open, &self.scope, on, p)
     }
 
     fn brain_actions(
@@ -995,8 +1215,115 @@ fn without_origin_line(space: &str, folder: &str) -> String {
     )
 }
 
-/// No compile run is recorded until `brain-compile` adds them.
-const LAST_COMPILE: &str = "None yet · this release does not compile brains";
+/// The brain's last compile run in a line: when, what it did and its PR.
+fn last_compile(run: Option<&CompileRun>) -> String {
+    let Some(run) = run else {
+        return "None yet".into();
+    };
+    let mut line = format!(
+        "{} · {}",
+        wording::day_and_time(run.started_at),
+        run.outcome.label()
+    );
+    if !run.reason.is_empty() {
+        line.push_str(&format!(" · {}", run.reason));
+    }
+    if let Some(number) = run.pull_request {
+        let state = if run.merged { "merged" } else { "open" };
+        line.push_str(&format!(" · PR #{number} {state}"));
+    }
+    line
+}
+
+/// The next scheduled run, and that it waits while a compile PR is open.
+fn next_run(compile: &BrainCompileState, config: &BrainConfigReading) -> String {
+    let Some(at) = compile.next_at else {
+        return next_compile(config);
+    };
+    let schedule = config.config().and_then(|c| c.compile.as_ref());
+    let mut line = match schedule {
+        Some(s) => format!("{} {}", wording::day_and_time(at), s.timezone),
+        None => wording::day_and_time(at),
+    };
+    if let Some(why) = compile
+        .run_now_waits
+        .as_deref()
+        .filter(|w| w.starts_with("Waiting for"))
+    {
+        line.push_str(&format!(" · {}", why.to_lowercase()));
+    }
+    line
+}
+
+/// One compile run: when and why it started, its counts and model, how it ended and its PR,
+/// then its reason, usage and procedure.
+fn run_row(run: &CompileRun, p: Palette) -> Div {
+    let tone = match run.outcome {
+        CompileOutcome::Running => Tone::Warn,
+        CompileOutcome::Skipped => Tone::Quiet,
+        CompileOutcome::Waiting => Tone::Warn,
+        CompileOutcome::Failed | CompileOutcome::TimedOut => Tone::Bad,
+        CompileOutcome::PrOpened => Tone::Good,
+    };
+    let outcome = match (run.outcome, run.pull_request) {
+        (CompileOutcome::PrOpened, Some(number)) if run.merged => format!("PR #{number} merged"),
+        (CompileOutcome::PrOpened, Some(number)) => format!("PR #{number} open"),
+        (outcome, _) => outcome.label().to_owned(),
+    };
+    let model = (run.profile.as_ref())
+        .map(|profile| format!(" · {}", profile.short()))
+        .unwrap_or_default();
+    let counts = match run.model_calls {
+        0 if run.outcome == CompileOutcome::Skipped => {
+            "No pending entries · no model call".to_owned()
+        }
+        _ => format!(
+            "{} pending · {} processed{model}",
+            run.pending, run.processed
+        ),
+    };
+    let mut detail = vec![];
+    if !run.reason.is_empty() && run.outcome != CompileOutcome::Skipped {
+        detail.push(run.reason.clone());
+    }
+    if run.tokens > 0 {
+        let cost = run.cost.map(|c| format!(" · ${c:.2}")).unwrap_or_default();
+        detail.push(format!("{} tokens{cost}", run.tokens));
+    }
+    if let Some(version) = run.procedure {
+        detail.push(format!("procedure v{version}"));
+    }
+    div()
+        .p_2()
+        .rounded_md()
+        .border_1()
+        .border_color(match tone {
+            Tone::Bad => p.red.opacity(0.4),
+            _ => p.edge,
+        })
+        .flex()
+        .flex_col()
+        .gap_1()
+        .text_size(px(font::SMALL))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(120.))
+                        .flex_none()
+                        .child(wording::day_and_time(run.started_at)),
+                )
+                .child(pill(run.trigger.label(), p.subtle))
+                .child(div().flex_1().min_w_0().text_ellipsis().child(counts))
+                .child(pill(outcome, tone.color(p))),
+        )
+        .when(!detail.is_empty(), |row| {
+            row.child(hint(detail.join(" · "), p))
+        })
+}
 
 /// The brain's most recent PR, however old, and how many of its batches are still in the gate.
 fn last_pr(brain: &Brain, batches: &[&BrainBatch]) -> String {
@@ -1254,7 +1581,7 @@ fn import_line(import: &LegacyImport) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        LAST_COMPILE, Tone, author, batch_note, compiler_line, grant_lines, import_line, last_pr,
+        Tone, author, batch_note, compiler_line, grant_lines, import_line, last_compile, last_pr,
         required_checks, steps, sync_state, warnings, without_origin, without_origin_line,
     };
     use crate::ui;
@@ -1485,7 +1812,31 @@ mod tests {
             last_pr(&brain(), &[&queued, &queued]),
             "2 batches in the gate"
         );
-        assert!(LAST_COMPILE.starts_with("None yet"));
+        assert_eq!(last_compile(None), "None yet");
+        let run = CompileRun {
+            id: "r".into(),
+            repository: "Sage-Social/sagehaven-docs".into(),
+            trigger: CompileTrigger::Scheduled,
+            started_at: 1_790_000_000_000,
+            ended_at: None,
+            pending: 37,
+            processed: 37,
+            model_calls: 1,
+            profile: None,
+            procedure: Some(1),
+            outcome: CompileOutcome::PrOpened,
+            reason: "37 entries compiled · 2 conflicts queued".into(),
+            conflicts: 2,
+            batch_id: None,
+            pull_request: Some(212),
+            merged: false,
+            tokens: 0,
+            cost: None,
+        };
+        assert!(
+            last_compile(Some(&run))
+                .ends_with("PR opened · 37 entries compiled · 2 conflicts queued · PR #212 open")
+        );
     }
 
     #[test]

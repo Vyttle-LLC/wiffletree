@@ -539,7 +539,7 @@ impl ModelsPage {
             Cell { then: true, .. } if router => Some("Ask me where it goes"),
             Cell { then: true, .. } => Some("Wait for the reset"),
             Cell { small: true, .. } => Some("Same as the first line"),
-            _ if *job == Job::Keeper => Some("No model"),
+            _ if matches!(job, Job::Keeper | Job::Compiler) => Some("No model"),
             _ if *job == Job::Job => Some("Same as the Assistant row"),
             _ => None,
         };
@@ -740,14 +740,17 @@ impl ModelsPage {
                             )
                             .child(line(main, cx)),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(hint("Small work", p).w(px(70.)).flex_none())
-                            .child(small_work),
-                    ),
+                    // A compile is one run, so the Brain compiler has no small-work line.
+                    .when(row.job != Job::Compiler, |lines| {
+                        lines.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(hint("Small work", p).w(px(70.)).flex_none())
+                                .child(small_work),
+                        )
+                    }),
             )
             .child(now.w(px(120.)).flex_none())
     }
@@ -789,6 +792,14 @@ impl ModelsPage {
         }
         if self.model_selection.row(&Job::Job).is_none() {
             table = table.child(self.job_placeholder(p, cx));
+        }
+        if self.model_selection.row(&Job::Compiler).is_none() {
+            table = table.child(self.optional_placeholder(
+                &Job::Compiler,
+                "No Brain compiler model: brains are not compiled.",
+                p,
+                cx,
+            ));
         }
         let error = self.model_selection.validate().err();
         card(p)
@@ -846,11 +857,27 @@ impl ModelsPage {
     }
     /// The Job row while it has none: one menu to choose one, as jobs follow the Assistant row.
     fn job_placeholder(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        self.optional_placeholder(
+            &Job::Job,
+            "No Job row: jobs run on the Assistant row.",
+            p,
+            cx,
+        )
+    }
+    /// An optional row while it has none: one menu to choose its first choice, and `missing`,
+    /// what having none means.
+    fn optional_placeholder(
+        &self,
+        job: &Job,
+        missing: &'static str,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let first = Cell {
             small: false,
             then: false,
         };
-        let (name, about) = job_label(&Job::Job, &[]);
+        let (name, about) = job_label(job, &[]);
         div()
             .py_2()
             .flex()
@@ -868,9 +895,9 @@ impl ModelsPage {
             .child(
                 div()
                     .flex_1()
-                    .child(self.cell_menu(&Job::Job, first, None, false, None, cx)),
+                    .child(self.cell_menu(job, first, None, false, None, cx)),
             )
-            .child(hint("No Job row: jobs run on the Assistant row.", p).flex_1())
+            .child(hint(missing, p).flex_1())
     }
 
     fn review_card(&self, p: Palette) -> Div {
@@ -1029,6 +1056,10 @@ fn job_label(job: &Job, verifiers: &[VerifierConfig]) -> (String, String) {
             "Picks each message's thread; never waits".into(),
         ),
         Job::Job => ("Job".into(), "Runs your scheduled jobs".into()),
+        Job::Compiler => (
+            "Brain compiler".into(),
+            "Compiles brains this Mac compiles".into(),
+        ),
         Job::Verifier { focus } => {
             let verifier = (verifiers.iter()).find(|v| v.focus.eq_ignore_ascii_case(focus));
             let role = verifier.map_or(Role::Reviewer, |v| v.role);

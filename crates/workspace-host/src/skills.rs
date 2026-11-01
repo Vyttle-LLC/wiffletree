@@ -516,9 +516,13 @@ impl SkillStore<'_> {
         }
         Ok(())
     }
-    /// What a role's next turn is sent, with its skill as the store holds it.
+    /// What a role's next turn is sent, with its skill as the store holds it; a brain compile's
+    /// is its bundled procedure, which no skill changes.
     pub fn instructions(&self, role: Role) -> String {
-        provider::role_instructions(role, &self.state(Skill::for_role(role)))
+        match Skill::for_role(role) {
+            Some(skill) => provider::role_instructions(role, &self.state(skill)),
+            None => provider::skill(role),
+        }
     }
     /// Oldest first, the entries that can be read, each with its name, the time it was written.
     pub fn history(&self, skill: Skill) -> Vec<(String, Entry)> {

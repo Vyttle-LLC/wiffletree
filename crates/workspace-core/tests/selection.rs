@@ -507,6 +507,69 @@ fn jobs_follow_the_assistant_row_until_they_have_a_row_of_their_own() {
     assert_eq!(pick(&table), sonnet());
 }
 
+#[test]
+fn the_brain_compiler_row_is_optional_last_with_no_skip_and_no_small_work_line() {
+    let unusable = BTreeSet::new();
+    let mut table = table();
+    // A table saved before the row loads unchanged, with none.
+    let saved = serde_json::to_string(&table).unwrap();
+    let mut loaded: ModelSelection = serde_json::from_str(&saved).unwrap();
+    loaded.fit(&VerificationSettings::default());
+    assert!(loaded.row(&Job::Compiler).is_none());
+    assert!(
+        (loaded.resolve(&Job::Compiler, false, false, &limits(&[], &unusable), &when)).is_err(),
+        "no row resolves no model, never the Job or Assistant row"
+    );
+    table.set_compiler_row(Some(Line {
+        first: sonnet(),
+        then: Then::Model(sol()),
+    }));
+    table.set_job_row(Some(Line {
+        first: opus(),
+        then: Then::Wait,
+    }));
+    table.validate().unwrap();
+    table.fit(&VerificationSettings::default());
+    let names: Vec<String> = table.jobs.iter().map(|row| row.job.name()).collect();
+    assert_eq!(
+        names[names.len() - 4..],
+        ["Assistant", "Router", "Job", "Brain compiler"]
+    );
+    // Claude spent: the run starts on its then choice.
+    let spent = claude_weekly(99.);
+    let pick = (table.resolve(
+        &Job::Compiler,
+        false,
+        false,
+        &limits(&spent, &unusable),
+        &when,
+    ))
+    .unwrap();
+    assert_eq!(pick.profile, sol());
+    let mut twice = table.clone();
+    twice.jobs.push(twice.row(&Job::Compiler).unwrap().clone());
+    assert_eq!(
+        twice.validate().unwrap_err().to_string(),
+        "The Brain compiler has two rows"
+    );
+    let mut skipping = table.clone();
+    skipping.row_mut(&Job::Compiler).unwrap().main.then = Then::Skip;
+    assert!((skipping.validate().unwrap_err().to_string()).contains("only reviews can be skipped"));
+    let mut small = table.clone();
+    small.row_mut(&Job::Compiler).unwrap().small = Some(Line {
+        first: sonnet(),
+        then: Then::Wait,
+    });
+    assert_eq!(
+        small.validate().unwrap_err().to_string(),
+        "The Brain compiler has no small-work line"
+    );
+    assert_eq!(
+        Job::for_role(Role::Compiler, None, &VerificationSettings::default()),
+        Some(Job::Compiler)
+    );
+}
+
 fn skipping_reviewer() -> JobRow {
     JobRow {
         job: Job::Verifier {

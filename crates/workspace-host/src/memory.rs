@@ -81,7 +81,7 @@ pub(crate) fn migrate(host: &mut Host) -> Result<()> {
 }
 
 /// The host's local date of `at`, `YYYY-MM-DD`.
-fn local_date(at: i64) -> String {
+pub(crate) fn local_date(at: i64) -> String {
     let at = Local.timestamp_millis_opt(at).single().unwrap_or_default();
     format!("{:04}-{:02}-{:02}", at.year(), at.month(), at.day())
 }
@@ -185,7 +185,7 @@ fn ticket_ref(branch: &str, commits: &[&str], pull_request: Option<u64>) -> Stri
     format!("{branch} @ {shas}{pull_request}")
 }
 
-fn entry_path(folder: &str, repository: &str, date: &str, id: &str) -> String {
+pub(crate) fn entry_path(folder: &str, repository: &str, date: &str, id: &str) -> String {
     let (year, month) = (&date[..4], &date[5..7]);
     format!("{folder}/logs/{repository}/{year}/{month}/{date}-{id}.md")
 }

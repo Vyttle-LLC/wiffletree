@@ -8,6 +8,7 @@ mod brains;
 pub mod build_gate;
 mod checkout;
 pub mod compaction;
+mod compile;
 pub mod context;
 pub mod detection;
 mod diffs;
@@ -110,15 +111,17 @@ fn sessions_where(live: bool) -> String {
         "id IN (SELECT session_id FROM runtimes WHERE json_extract(data,'$.ticket_id') IN (SELECT id FROM tickets WHERE {}))",
         tickets_where(true)
     );
-    // Threads are listed only as the assistant's, never as a project's sessions.
+    // Threads are listed only as the assistant's, and compile runs only on the Brains page,
+    // never as a project's sessions.
     if live {
         format!("({NOT_THREAD} AND ({ARCHIVED_FLAG}=0 OR {on_open_ticket}))")
     } else {
         format!("({NOT_THREAD} AND {ARCHIVED_FLAG}=1 AND NOT {on_open_ticket})")
     }
 }
-/// SQL condition on `sessions` for a session that is not an assistant thread.
-const NOT_THREAD: &str = "role NOT IN ('assistant','job_run')";
+/// SQL condition on `sessions` for a session that is not an assistant thread or a brain
+/// compile, which belong to no project.
+const NOT_THREAD: &str = "role NOT IN ('assistant','job_run','compiler')";
 pub struct Host {
     pub(crate) db: Connection,
     /// Files remote devices are uploading, kept while the host runs.
@@ -198,6 +201,9 @@ pub struct Host {
     pub(crate) source_env: Option<jobs::SourceEnv>,
     /// Runs whose sources wait to be checked, for the service to check off the host thread.
     source_checks: Vec<(String, jobs::SourceChecks)>,
+    /// Compile runs whose pending entries wait to be read and verified, for the service to do
+    /// off the host thread.
+    pub(crate) compile_preparations: Vec<compile::Prepare>,
 }
 /// A report that set its ticket's state while the reporter's turn ran.
 pub(crate) struct MidTurnReport {
@@ -346,6 +352,7 @@ impl Host {
         assistant::migrate(&db)?;
         router::migrate(&db)?;
         jobs::migrate(&db)?;
+        compile::migrate(&db)?;
         db.execute_batch(include_str!("steps.sql"))?;
         db.execute_batch(include_str!("schedules.sql"))?;
         db.execute_batch(include_str!("selection.sql"))?;
@@ -410,6 +417,7 @@ impl Host {
             built_ins: vec![],
             source_env: None,
             source_checks: vec![],
+            compile_preparations: vec![],
         };
         // Before anything reads or writes a shared setting, so the shared folder is in place:
         // clones an earlier release named `<owner>-<name>` first, then one still in `shared/`.
@@ -511,6 +519,7 @@ impl Host {
         tx.commit()?;
         self.recover_steps()?;
         self.end_interrupted_job_runs()?;
+        self.end_interrupted_compiles()?;
         self.ask_about_interrupted_routes()
     }
     pub(crate) fn event(
@@ -866,6 +875,7 @@ impl Host {
             Role::Assistant | Role::JobRun => {
                 bail!("An assistant thread belongs to a Space, not a project")
             }
+            Role::Compiler => bail!("A brain compile belongs to its brain, not a project"),
             _ => ensure!(
                 owner.role == Role::ProjectOrchestrator,
                 "Agents belong to their project's coordinator"
@@ -2063,6 +2073,24 @@ impl Host {
             Command::ImportLegacyLogs { repository } => serde_json::to_value(
                 self.import_legacy_logs(&repository, &publish::Tools::default())?,
             )?,
+            Command::RunBrainCompile { repository } => {
+                serde_json::to_value(self.run_brain_compile(&repository)?)?
+            }
+            Command::BrainCompileRuns {
+                repository,
+                offset,
+                limit,
+            } => serde_json::to_value(self.brain_compile_runs(&repository, offset, limit)?)?,
+            Command::RuleConflict {
+                repository,
+                conflict_id,
+                ruling,
+            } => serde_json::to_value(self.rule_conflict(
+                &repository,
+                &conflict_id,
+                ruling,
+                &publish::Tools::default().git,
+            )?)?,
             Command::FixHeldLog { log_id, fix } => {
                 serde_json::to_value(self.fix_held_log(&log_id, fix)?)?
             }

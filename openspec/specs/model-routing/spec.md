@@ -147,11 +147,11 @@ While no model selection is saved, New project SHALL NOT be offered: the start s
 - **THEN** the start screen reads "Start with a project.", the sidebar is unmarked, and the host learns which CLIs are signed in
 
 ### Requirement: Who runs what
-The host SHALL persist, per machine, one row per job: Coordinator, Implementer, Tester, one per configured verifier keyed by its focus, optionally PR keeper, Assistant, Router and optionally Job. Each row SHALL have a first choice (provider, model, effort), a then choice that is a model, wait (the default, saved as no then) or skip, and an optional small-work line with its own first and then. Skip SHALL be offered only on verifier rows, on either line. A save SHALL be refused, whole, with the previous table kept, when a row of Coordinator, Implementer, Tester, Assistant or Router is missing or doubled, two rows name one verifier or two PR keeper or Job rows exist, a model or effort is empty or too long, a then choice uses the same provider as its first choice, or a Coordinator, Implementer, Tester, PR keeper, Assistant, Router or Job line's then is skip. A table saved before skip existed SHALL load unchanged. A table saved before the Assistant and Router rows existed SHALL load with an Assistant row copied from the Implementer row's small-work line, or its main line without one, and a Router row on Haiku at low effort when any row uses Claude, else on Codex's smallest model, which always counts as unsure (see assistant-router), both named in the table's `copied` list until a save stores them. Without a Job row, jobs SHALL resolve the Assistant row. The table SHALL NOT be shared through the settings repository. A save that also changes the guide or the switch threshold SHALL change all of them or none, and a save together with the review settings SHALL be checked whole before anything is written.
+The host SHALL persist, per machine, one row per job: Coordinator, Implementer, Tester, one per configured verifier keyed by its focus, optionally PR keeper, Assistant, Router, optionally Job and optionally Brain compiler. Each row SHALL have a first choice (provider, model, effort), a then choice that is a model, wait (the default, saved as no then) or skip, and an optional small-work line with its own first and then. The Brain compiler row SHALL have no small-work line. Skip SHALL be offered only on verifier rows, on either line. A save SHALL be refused, whole, with the previous table kept, when a row of Coordinator, Implementer, Tester, Assistant or Router is missing or doubled, two rows name one verifier or two PR keeper, Job or Brain compiler rows exist, a model or effort is empty or too long, a then choice uses the same provider as its first choice, a Coordinator, Implementer, Tester, PR keeper, Assistant, Router, Job or Brain compiler line's then is skip, or the Brain compiler row has a small-work line. A table saved before skip existed, or before the Brain compiler row existed, SHALL load unchanged. A table saved before the Assistant and Router rows existed SHALL load with an Assistant row copied from the Implementer row's small-work line, or its main line without one, and a Router row on Haiku at low effort when any row uses Claude, else on Codex's smallest model, which always counts as unsure (see assistant-router), both named in the table's `copied` list until a save stores them. Without a Job row, jobs SHALL resolve the Assistant row. The table SHALL NOT be shared through the settings repository. A save that also changes the guide or the switch threshold SHALL change all of them or none, and a save together with the review settings SHALL be checked whole before anything is written.
 
 The table SHALL match the configured verifiers whenever it is read: a row for a verifier that is no longer configured SHALL be left out, and a configured verifier without a row SHALL use a copy of the first reviewer's row, or of the Tester row with no reviewer row, and SHALL be named in the table's `copied` list until a save stores its row.
 
-Assistant threads, issue threads included, SHALL resolve the Assistant row, the router the Router row and job runs the Job row, when each thread, router run or job run starts, by the same rules as an agent start. A Space's default model for threads or jobs, when this Mac may use it, and a model the user chose in a thread's composer or a job's recipe SHALL win over the row. When every Router choice is spent or cannot be chosen, the router SHALL count as unsure instead of waiting (see assistant-router).
+Assistant threads, issue threads included, SHALL resolve the Assistant row, the router the Router row and job runs the Job row, when each thread, router run or job run starts, by the same rules as an agent start. A Space's default model for threads or jobs, when this Mac may use it, and a model the user chose in a thread's composer or a job's recipe SHALL win over the row. When every Router choice is spent or cannot be chosen, the router SHALL count as unsure instead of waiting (see assistant-router). Brain compile runs SHALL resolve the Brain compiler row, never the Job row (see "The Brain compiler's row").
 
 #### Scenario: A then on the same subscription
 - **WHEN** the human saves Implementer with Opus · medium then Sonnet · high
@@ -176,6 +176,14 @@ Assistant threads, issue threads included, SHALL resolve the Assistant row, the 
 #### Scenario: The router never waits
 - **WHEN** Claude is spent and the Router row is Haiku · low then wait
 - **THEN** the router counts as unsure and the user is asked where the message goes
+
+#### Scenario: A table from before the Brain compiler row
+- **WHEN** the host loads a table saved before the Brain compiler row existed
+- **THEN** it loads unchanged, with no Brain compiler row
+
+#### Scenario: The last rows
+- **WHEN** the human opens the Models page with every optional row set
+- **THEN** the table ends with Assistant, Router, Job and Brain compiler, and has no Issue assistant row
 
 ### Requirement: Switch threshold
 The host SHALL keep one switch threshold, a whole percentage from 50 to 100, default 95, in the shared folder's `settings/models.json`, so every machine with the same settings repository uses it. It SHALL be saved with the Models page's Save.
@@ -367,3 +375,14 @@ The session's parent SHALL be told once, by the turn's result message, that the 
 #### Scenario: A restart during the wait
 - **WHEN** the host restarts while a limit failure waits for a reset
 - **THEN** the input is still retried at the reset
+
+### Requirement: The Brain compiler's row
+A brain's compile runs SHALL use the table's Brain compiler row, resolved like any agent start when a run needs a model. With no row, no compile run SHALL start a model, and the Brains page SHALL say to choose a Brain compiler model in Models. A run that finds nothing pending SHALL NOT resolve the row. Only the human's client SHALL change the row. The Models page SHALL show the Brain compiler row with a No model choice, as the PR keeper row does, and its then menu SHALL NOT offer skip.
+
+#### Scenario: Nothing chosen
+- **WHEN** the table has no Brain compiler row and the nightly run of `sagehaven-docs` finds pending entries
+- **THEN** no model starts, the run is recorded as waiting for a Brain compiler model, and the Brains page says to choose one in Models
+
+#### Scenario: A row while Claude is spent
+- **WHEN** the Brain compiler row is Sonnet · medium then GPT 6.1 Sol · medium and Claude is spent
+- **THEN** the run starts on GPT 6.1 Sol · medium

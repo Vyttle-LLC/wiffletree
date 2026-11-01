@@ -6,7 +6,7 @@ use crate::*;
 use std::sync::Arc;
 
 /// A command run in a folder with an argument list, never through a shell.
-type Tool<Answer> = Arc<dyn Fn(&Path, &[&str]) -> Result<Answer> + Send + Sync>;
+pub(crate) type Tool<Answer> = Arc<dyn Fn(&Path, &[&str]) -> Result<Answer> + Send + Sync>;
 pub(crate) type GitTool = Tool<runtime::GitAnswer>;
 /// `gh`, and Git's commands that reach the network, as a step runs them.
 #[derive(Clone)]

@@ -1196,10 +1196,15 @@ impl Host {
             name: sync::machine_name(),
             extra: Extra::new(),
         };
+        let conflicts = (self.conflict_cards()?.into_iter())
+            .filter(|card| card.projects.is_empty())
+            .collect();
         Ok(BrainsPage {
             brains,
             batches,
             this_host: Some(this_host),
+            compiles: self.brain_compile_states()?,
+            conflicts,
         })
     }
 

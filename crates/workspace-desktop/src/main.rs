@@ -14,6 +14,7 @@ mod brains_view;
 mod bridge;
 mod browse;
 mod composer_focus;
+mod conflict_card;
 mod connect_sheet;
 mod context_view;
 mod conversation;
@@ -308,7 +309,8 @@ impl Workspace {
         Self::adopt(&spaces, window, cx);
         let brains = cx.new(|cx| brains_view::BrainsPage::new(bridge.clone(), window, cx));
         Self::adopt(&brains, window, cx);
-        let brain_browser = cx.new(|_| brain_browser_view::BrainBrowser::new(bridge.clone()));
+        let brain_browser =
+            cx.new(|cx| brain_browser_view::BrainBrowser::new(bridge.clone(), window, cx));
         Self::adopt(&brain_browser, window, cx);
         let brain_search = cx.new(|cx| brain_search::BrainSearch::new(bridge.clone(), window, cx));
         Self::adopt(&brain_search, window, cx);

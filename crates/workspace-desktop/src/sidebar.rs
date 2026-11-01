@@ -1796,7 +1796,7 @@ fn needs_you(attention: &[Attention], notes: &[WorkspaceNote], project_id: &str)
         .iter()
         .filter(|a| a.project_id == project_id)
         .count()
-        + notes.len()
+        + notes.iter().filter(|note| note.is_for(project_id)).count()
 }
 
 /// The release the app has downloaded, waiting for it to exit.
@@ -1905,5 +1905,27 @@ mod tests {
         assert_eq!(needs_you(&items, &[], "a"), 1);
         assert_eq!(needs_you(&items, std::slice::from_ref(&note), "a"), 2);
         assert_eq!(needs_you(&[], std::slice::from_ref(&note), "c"), 1);
+        // A brain conflict counts only in the projects its card names.
+        let conflict = WorkspaceNote::Conflict(Box::new(workspace_core::ConflictCard {
+            repository: "Sage-Social/sagehaven-docs".into(),
+            conflict: workspace_core::BrainConflict {
+                id: "c-1".into(),
+                title: "Retry cap".into(),
+                rule: None,
+                claim: String::new(),
+                conflicts_with: String::new(),
+                evidence: String::new(),
+                recommend: String::new(),
+                entry_id: None,
+                repository: None,
+            },
+            existing: None,
+            claim: None,
+            projects: vec!["a".into()],
+            state: workspace_core::ConflictState::Open,
+            recommended: None,
+        }));
+        assert_eq!(needs_you(&[], std::slice::from_ref(&conflict), "a"), 1);
+        assert_eq!(needs_you(&[], std::slice::from_ref(&conflict), "c"), 0);
     }
 }

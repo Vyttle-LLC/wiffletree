@@ -61,19 +61,35 @@ fn approval(recipe: &Recipe) -> String {
 /// and run records from the scheduler, and keeps its own owner, trigger and run. It is no
 /// recipe and in no Space; only the host's code registers one.
 pub(crate) struct BuiltIn {
-    pub(crate) name: &'static str,
+    /// Unique among built-in jobs, such as `brain-compile:<brain>`.
+    pub(crate) name: String,
+    /// What it works on, such as a brain's `owner/name`, which its functions are given.
+    pub(crate) subject: String,
     /// Who it belongs to, such as "the Sage brain".
     pub(crate) owner: String,
-    pub(crate) schedule: Schedule,
+    /// Its due times; with none, only Run now and its trigger start it.
+    pub(crate) schedule: Option<Schedule>,
     /// Its own trigger beside its due times: a run starts when this says so.
-    pub(crate) triggered: fn(&Host) -> bool,
-    /// Runs it by its own rules for sessions and models, and says what it did.
-    pub(crate) run: fn(&mut Host) -> Result<String>,
+    pub(crate) triggered: fn(&Host, &str) -> bool,
+    /// Runs it on its subject by its own rules for sessions and models, and says what it did.
+    pub(crate) run: fn(&mut Host, &str, BuiltInStart) -> Result<String>,
 }
 impl BuiltIn {
     pub(crate) fn key(&self) -> JobKey {
-        JobKey::built_in(self.name)
+        JobKey::built_in(&self.name)
     }
+}
+
+/// Why a built-in job's run started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BuiltInStart {
+    /// At its due time; `catch_up` is how many missed times the run stands for, 0 on time.
+    Due {
+        catch_up: u32,
+    },
+    RunNow,
+    /// Its own trigger.
+    Triggered,
 }
 
 /// What one pass of the scheduler did.
@@ -890,7 +906,10 @@ impl Host {
                 due.push((recipe.key(), recipe.schedule.clone()));
             }
         }
-        due.extend((self.built_ins.iter()).map(|b| (b.key(), b.schedule.clone())));
+        if let Err(error) = self.refresh_compile_jobs() {
+            eprintln!("Brain compile jobs: {error:#}");
+        }
+        due.extend((self.built_ins.iter()).filter_map(|b| Some((b.key(), b.schedule.clone()?))));
         for (key, schedule) in due {
             // One job's failure must never stop the others.
             match self.fire_job(&key, &schedule, now) {
@@ -904,11 +923,11 @@ impl Host {
             }
         }
         let triggered: Vec<JobKey> = (self.built_ins.iter())
-            .filter(|b| (b.triggered)(self))
+            .filter(|b| (b.triggered)(self, &b.subject))
             .map(BuiltIn::key)
             .collect();
         for key in triggered {
-            self.run_job(&key, None, 0, now)?;
+            self.run_job(&key, None, BuiltInStart::Triggered, now)?;
             pass.changed = true;
         }
         Ok(pass)
@@ -948,7 +967,7 @@ impl Host {
         let next = next_after(&cron, zone, now);
         self.set_due(key, next)?;
         if !running {
-            self.run_job(key, Some(due), catch_up, now)?;
+            self.run_job(key, Some(due), BuiltInStart::Due { catch_up }, now)?;
         }
         Ok((next, !running))
     }
@@ -976,17 +995,22 @@ impl Host {
         let running =
             (self.job_runs(key, 1)?.first()).is_some_and(|r| r.outcome == RunOutcome::Running);
         ensure!(!running, "The job is running now");
-        self.run_job(key, None, 0, now())
+        self.run_job(key, None, BuiltInStart::RunNow, now())
     }
     /// Records one run and, for a recipe, queues the check of its sources; `sources_checked`
-    /// starts its thread or records why it did not start. A built-in job runs now.
+    /// starts its thread or records why it did not start. A built-in job runs now, told why
+    /// by `start`, which for a recipe says only how many missed times its run stands for.
     fn run_job(
         &mut self,
         key: &JobKey,
         scheduled: Option<i64>,
-        catch_up: u32,
+        start: BuiltInStart,
         at: i64,
     ) -> Result<JobRun> {
+        let catch_up = match start {
+            BuiltInStart::Due { catch_up } => catch_up,
+            BuiltInStart::RunNow | BuiltInStart::Triggered => 0,
+        };
         let mut run = JobRun {
             id: new_id(),
             job: key.clone(),
@@ -1007,7 +1031,8 @@ impl Host {
         };
         if let Some(built_in) = self.built_in(key) {
             let (run_it, owner) = (built_in.run, built_in.owner.clone());
-            let result = run_it(self);
+            let subject = built_in.subject.clone();
+            let result = run_it(self, &subject, start);
             run.ended_at = Some(now());
             (run.outcome, run.reason) = match result {
                 Ok(note) => (RunOutcome::Finished, format!("For {owner}: {note}")),
@@ -2175,14 +2200,16 @@ mod tests {
     fn a_built_in_job_catches_up_once_and_no_command_reaches_it() {
         let mut s = jobs();
         s.host.built_ins.push(BuiltIn {
-            name: "brain-compile",
+            name: "brain-compile".into(),
+            subject: "Personal".into(),
             owner: "the Personal brain".into(),
-            schedule: Schedule {
+            schedule: Some(Schedule {
                 cron: "0 2 * * *".into(),
                 timezone: "America/New_York".into(),
-            },
-            triggered: |_| false,
-            run: |_| {
+            }),
+            triggered: |_, _| false,
+            run: |_, subject, _| {
+                assert_eq!(subject, "Personal");
                 COMPILES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok("compiled".into())
             },

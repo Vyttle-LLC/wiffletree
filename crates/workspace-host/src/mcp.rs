@@ -356,6 +356,22 @@ pub fn job_run_tools() -> Value {
         "inputSchema": {"type":"object","properties":{"path":string,"title":string},"required":["path","title"],"additionalProperties":false}
     }, query_brain()])
 }
+/// A brain compile's tools: it queues conflicts and ends the run, and writes nothing else.
+pub fn compile_tools() -> Value {
+    let string = json!({"type":"string"});
+    let rules = json!({"type":"string","enum":["decision-contradiction","agent-disagreement","destructive"]});
+    let rulings =
+        json!({"type":"string","enum":["Uphold existing","Keep new","Keep both","Defer"]});
+    json!([{
+        "name": "queue_conflict",
+        "description": "Queue one conflict for the human's ruling, only when a pending entry contradicts a kind: decision note, two authors disagree about the same fact, or the entry is destructive or deprecating. claim is the pending entry's id; conflicts_with is the note's path, such as notes/Call Relay Retries.md, or the other entry's id. evidence has one line per supporting fact, such as verification and PR states and the authors. recommend is your ruling, with reason in one line. Leave the conflicting note as it is.",
+        "inputSchema": {"type":"object","properties":{"rule":rules,"title":string,"claim":string,"conflicts_with":string,"evidence":{"type":"array","items":string},"recommend":rulings,"reason":string},"required":["rule","title","claim","conflicts_with","evidence","recommend","reason"],"additionalProperties":false}
+    }, {
+        "name": "finish_compile",
+        "description": "End the compile, once, after editing the notes and STATUS.md and queueing every conflict. summary is one line of what changed. Wiffletree then checks the changes and opens the compile PR.",
+        "inputSchema": {"type":"object","properties":{"summary":string},"required":["summary"],"additionalProperties":false}
+    }])
+}
 /// Serves a session's MCP `tools`: `tools_for` its role, or a thread's `thread_tools`.
 pub fn serve_stdio(tools: Value) -> Result<()> {
     let socket = std::env::var("WORKSPACE_SOCKET").context("Missing workspace endpoint")?;
