@@ -350,8 +350,7 @@ impl BehaviorsPage {
         }
     }
 
-    /// Keeps what `scope` sets, while the list still resolves through it. The additions editor
-    /// follows the scope's own additions unless it holds unsaved edits.
+    /// The additions editor follows the scope's own additions unless it holds unsaved edits.
     fn store(
         &mut self,
         scope: Scope,
@@ -395,8 +394,7 @@ impl BehaviorsPage {
                 match values {
                     Ok(values) if last => {
                         view.behaviors.refusal = None;
-                        if saving == Refused::Additions {
-                            // The editor takes what was saved.
+                        if saving == Refused::Additions && view.behaviors.scope == saved {
                             let text = values.additions.clone();
                             (view.behaviors.additions)
                                 .update(cx, |input, cx| input.set_value(text, window, cx));
@@ -407,9 +405,8 @@ impl BehaviorsPage {
                     Ok(_) => {}
                     Err(error) => {
                         view.behaviors.refusal = Some((saving, error));
-                        // What was shown before the reply goes back to what the host holds. The
-                        // values from before this save come back first, so refused additions
-                        // stay in the editor as unsaved.
+                        // The values from before this save come back before the read, so
+                        // refused additions stay in the editor as unsaved.
                         if !last {
                             return;
                         }
