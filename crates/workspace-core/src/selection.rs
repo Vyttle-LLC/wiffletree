@@ -8,7 +8,11 @@ use crate::{
 };
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, fmt, ops::RangeInclusive};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    ops::RangeInclusive,
+};
 
 /// The order pickers and messages list providers in.
 pub const PROVIDERS: [Provider; 2] = [Provider::Claude, Provider::Codex];
@@ -530,6 +534,8 @@ pub struct SpaceTable {
     space: Option<String>,
     overrides: Vec<JobRow>,
     unusable: BTreeSet<Provider>,
+    /// Why a provider this Mac has signed in cannot run here, for the reason a Space row gives.
+    held: BTreeMap<Provider, String>,
 }
 impl ModelSelection {
     /// This table as the Space `space` resolves it with its `overrides`, when `unusable` are the
@@ -550,6 +556,7 @@ impl ModelSelection {
             space: space.map(Into::into),
             overrides: overrides.to_vec(),
             unusable: unusable.clone(),
+            held: BTreeMap::new(),
         }
     }
     /// This table with the `overrides` this Mac can run on top, for small work when `small`,
@@ -613,6 +620,12 @@ impl ModelSelection {
     }
 }
 impl SpaceTable {
+    /// This table, saying `why` when a Space row falls back because `provider` cannot run,
+    /// such as for a job whose CLI source Codex cannot yet hold.
+    pub fn because(mut self, provider: Provider, why: String) -> Self {
+        self.held.insert(provider, why);
+        self
+    }
     /// What `job` would start on now, as [`ModelSelection::resolve`] says, with the reason
     /// naming the Space when its row was used or fell back.
     pub fn resolve(
@@ -648,7 +661,7 @@ impl SpaceTable {
         let mut said: Vec<String> = looked_at
             .filter_map(|job| {
                 let row = self.overrides.iter().find(|row| row.job.is(job))?;
-                let why = not_runnable(row, small, &self.unusable)?;
+                let why = refused(row, small, &self.unusable, &self.held)?;
                 Some(format!(
                     "{space}'s {} row falls back to this Mac's: {why}.",
                     job.name()
@@ -685,14 +698,33 @@ impl Setting for RowSetting<'_> {
     fn refusal(&self, layer: Layer, _: &Option<JobRow>, value: &Option<JobRow>) -> Option<String> {
         let row = value.as_ref().filter(|_| layer == Layer::Space)?;
         debug_assert!(row.job.is(self.job));
-        not_runnable(row, self.small, self.unusable)
+        refused(row, self.small, self.unusable, &BTreeMap::new())
+    }
+}
+
+/// Why a Space's `row` gives way to this Mac's: it breaks the table's rules, or this Mac can run
+/// none of the choices on its line in use.
+fn refused(
+    row: &JobRow,
+    small: bool,
+    unusable: &BTreeSet<Provider>,
+    held: &BTreeMap<Provider, String>,
+) -> Option<String> {
+    match validate_rows(std::slice::from_ref(row)) {
+        Err(error) => Some(format!("it breaks the table's rules: {error:#}")),
+        Ok(()) => not_runnable(row, small, unusable, held),
     }
 }
 
 /// Why this Mac can run none of the choices on `row`'s line in use, its small-work line for
 /// `small` work when it has one, else its main line, such as "Claude is not signed in on this
-/// Mac"; the router never runs on Codex.
-fn not_runnable(row: &JobRow, small: bool, unusable: &BTreeSet<Provider>) -> Option<String> {
+/// Mac", or what `held` says of a provider; the router never runs on Codex.
+fn not_runnable(
+    row: &JobRow,
+    small: bool,
+    unusable: &BTreeSet<Provider>,
+    held: &BTreeMap<Provider, String>,
+) -> Option<String> {
     let line = (row.small.as_ref()).filter(|_| small).unwrap_or(&row.main);
     let runs = |p: &ModelProfile| {
         !unusable.contains(&p.provider)
@@ -701,8 +733,12 @@ fn not_runnable(row: &JobRow, small: bool, unusable: &BTreeSet<Provider>) -> Opt
     if line.choices().any(runs) {
         return None;
     }
-    let mut names: Vec<&str> = line.choices().map(|p| p.provider.label()).collect();
-    names.dedup();
+    let mut providers: Vec<Provider> = line.choices().map(|p| p.provider).collect();
+    providers.dedup();
+    if let Some(why) = providers.iter().find_map(|p| held.get(p)) {
+        return Some(why.clone());
+    }
+    let names: Vec<&str> = providers.iter().map(|p| p.label()).collect();
     let are = if names.len() > 1 { "are" } else { "is" };
     Some(format!(
         "{} {are} not signed in on this Mac",

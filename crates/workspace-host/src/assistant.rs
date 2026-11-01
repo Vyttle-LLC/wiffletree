@@ -1092,6 +1092,35 @@ mod tests {
     }
 
     #[test]
+    fn a_space_saved_with_a_row_the_table_refuses_is_refused() {
+        let (_home, mut host, sage) = store();
+        let profile = |model: &str| ModelProfile {
+            provider: Provider::Claude,
+            model: model.into(),
+            effort: "high".into(),
+        };
+        let mut space = host.space(&sage).unwrap().space;
+        let row = JobRow {
+            job: Job::Coordinator,
+            main: Line {
+                first: profile("sonnet"),
+                then: Then::Model(profile("opus")),
+            },
+            small: None,
+        };
+        space.models.set_overrides(vec![row]);
+        let error = host.update_space(space.clone()).unwrap_err().to_string();
+        assert!(
+            error.contains("both choices use the Claude subscription"),
+            "{error}"
+        );
+        space.models.set_overrides(vec![]);
+        space.reviews.max_rounds = Some(99);
+        assert!(host.update_space(space).is_err());
+        assert_eq!(host.space(&sage).unwrap().space.reviews.max_rounds, None);
+    }
+
+    #[test]
     fn a_spaces_list_of_this_macs_models_limits_nothing_and_is_noted_once() {
         let (home, mut host, sage) = store();
         let sol = ModelProfile {

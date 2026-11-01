@@ -603,10 +603,12 @@ impl Host {
             }
         }
         let (quotas, mut unusable, switch_at) = self.limits()?;
-        if cli.is_some() {
-            unusable.insert(Provider::Codex);
+        // Codex signed in here still cannot run a recipe with a CLI source.
+        let held = cli.is_some() && unusable.insert(Provider::Codex);
+        let mut table = self.space_table(space, &unusable)?;
+        if let (true, Some(cli)) = (held, &cli) {
+            table = table.because(Provider::Codex, codex_note(cli));
         }
-        let table = self.space_table(space, &unusable)?;
         let selection = &table.selection;
         let row = (selection.row(&Job::Job)).or_else(|| selection.row(&Job::Assistant));
         let row_name = match selection.row(&Job::Job) {
@@ -2146,6 +2148,47 @@ mod tests {
             "Codex cannot yet hold gh to read commands, and the Job row has no Claude choice."
         );
         assert_eq!(s.host.job_states().unwrap()[0].profile, None);
+    }
+
+    #[test]
+    fn a_cli_source_moves_a_run_off_a_spaces_codex_job_row_saying_why() {
+        let mut s = jobs();
+        s.cli("gh", 0);
+        let signed_in = ProviderStatus {
+            installed: true,
+            signed_in: true,
+            plan: None,
+        };
+        s.host.record_detection(Provider::Codex, &signed_in);
+        s.host.record_detection(Provider::Claude, &signed_in);
+        let row = JobRow {
+            job: Job::Job,
+            main: Line {
+                first: ModelProfile {
+                    provider: Provider::Codex,
+                    model: "gpt-6.1-sol".into(),
+                    effort: "high".into(),
+                },
+                then: Then::Wait,
+            },
+            small: None,
+        };
+        let settings = SpaceModelSettings {
+            rows: vec![row],
+            reviews: Default::default(),
+        };
+        let space = s.personal.id.clone();
+        s.host.set_space_model_settings(&space, settings).unwrap();
+        let mut brief = recipe(&s.personal, "PR queue", "0 7 * * 1-5");
+        brief.sources = vec![gh()];
+        let (model, reason, _) = s.host.job_model(&brief).unwrap();
+        assert_eq!(model.provider, Provider::Claude);
+        assert!(
+            reason.contains(
+                "Personal's Job row falls back to this Mac's: Codex cannot yet hold gh to read commands."
+            ),
+            "{reason}"
+        );
     }
 
     #[test]

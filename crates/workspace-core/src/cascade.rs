@@ -343,12 +343,22 @@ pub fn resolve_reviews(
         unknown = missing.into_iter().cloned().collect();
         set.push((Layer::Space, levels.in_order(known)));
     }
+    let restricted = overrides.levels.is_some();
+    let full = levels.full();
     let mut levels = resolve(&levels, &set);
     if !unknown.is_empty() {
         levels.notes.push(format!(
             "The Space's levels {} are not configured here",
             unknown.join(", ")
         ));
+    }
+    // A restriction that cannot stand still restricts: to the full reviews alone.
+    if restricted && levels.from != Layer::Space {
+        levels.value = full;
+        levels.from = Layer::Space;
+        levels
+            .notes
+            .push("so only this Mac's full-review levels may be used".into());
     }
     ResolvedReviews {
         levels,
@@ -429,6 +439,13 @@ struct AllowedLevels<'a>(&'a VerificationSettings);
 impl AllowedLevels<'_> {
     fn named(&self, name: &str) -> Option<&ReviewLevel> {
         self.0.levels.iter().find(|l| same_name(&l.name, name))
+    }
+    /// The configured full-review levels' names, in configured order.
+    fn full(&self) -> Vec<String> {
+        (self.0.levels.iter())
+            .filter(|l| l.kind == LevelKind::FullReview)
+            .map(|l| l.name.clone())
+            .collect()
     }
     /// The configured names of `names`, in configured order.
     fn in_order(&self, names: Vec<&String>) -> Vec<String> {
@@ -552,5 +569,31 @@ mod tests {
                 .to_string()
                 .contains("no choice \"often\"")
         );
+    }
+
+    #[test]
+    fn a_space_restriction_without_a_full_review_allows_only_the_full_reviews() {
+        let mut settings = VerificationSettings::default();
+        let full = settings.levels[0].clone();
+        settings.levels.push(ReviewLevel {
+            name: "Recheck".into(),
+            kind: LevelKind::Recheck,
+            ..full.clone()
+        });
+        for names in [vec!["Recheck"], vec!["A teammate's level"]] {
+            let overrides = ReviewOverrides {
+                levels: Some(names.iter().map(|n| n.to_string()).collect()),
+                ..Default::default()
+            };
+            let levels = resolve_reviews(&settings, &overrides).levels;
+            assert_eq!(levels.value, std::slice::from_ref(&full.name), "{names:?}");
+            assert_eq!(levels.from, Space);
+            let said = levels.notes.join(" ");
+            assert!(
+                said.contains("only this Mac's full-review levels"),
+                "{said}"
+            );
+            assert!(check_reviews(&settings, &overrides).is_err());
+        }
     }
 }

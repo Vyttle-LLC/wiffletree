@@ -918,3 +918,44 @@ fn small_work_resolves_a_space_row_by_its_small_work_line() {
     );
     assert_eq!(pick(space_row(haiku.clone(), sol()), false).profile, haiku);
 }
+
+#[test]
+fn a_space_row_that_breaks_the_tables_rules_is_left_out_with_a_note() {
+    let mac = table();
+    // Two choices on the one Claude subscription.
+    let row = JobRow {
+        job: Job::Coordinator,
+        main: Line {
+            first: sonnet(),
+            then: Then::Model(opus()),
+        },
+        small: None,
+    };
+    let signed_in = BTreeSet::new();
+    let sage = mac.for_space(Some("Sage"), &[row], &signed_in);
+    let resolved = &sage
+        .rows
+        .iter()
+        .find(|r| r.job == Job::Coordinator)
+        .unwrap()
+        .resolved;
+    assert_eq!(resolved.from, cascade::Layer::ThisMac);
+    assert!(
+        resolved.notes[0].contains("breaks the table's rules"),
+        "{:?}",
+        resolved.notes
+    );
+    let pick = (sage.resolve(
+        &Job::Coordinator,
+        false,
+        false,
+        &limits(&[], &signed_in),
+        &when,
+    ))
+    .unwrap();
+    assert_eq!(pick.profile, opus());
+    assert!(
+        pick.reason
+            .starts_with("Sage's Coordinator row falls back to this Mac's: it breaks")
+    );
+}

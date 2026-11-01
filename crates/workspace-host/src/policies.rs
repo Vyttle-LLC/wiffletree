@@ -241,6 +241,18 @@ impl Host {
         self.update_space(space)?;
         self.space_model_settings(space_id)
     }
+    /// Refuses `space`'s model rows or review overrides, where they differ from `current`'s, as
+    /// `set_space_model_settings` would; unchanged ones, as a teammate saved them, stay.
+    pub(crate) fn check_space_models(&self, current: &Space, space: &Space) -> Result<()> {
+        let rows = space.models.overrides();
+        if rows != current.models.overrides() {
+            validate_overrides(&rows)?;
+        }
+        if space.reviews != current.reviews {
+            cascade::check_reviews(&self.settings().verification, &space.reviews)?;
+        }
+        Ok(())
+    }
     /// The Space of the project `project_id`, whose agents resolve its rows.
     pub(crate) fn project_space(&self, project_id: &str) -> Result<SpaceId> {
         Ok(self.project(project_id)?.space)
