@@ -1796,7 +1796,9 @@ fn needs_you(attention: &[Attention], notes: &[WorkspaceNote], project_id: &str)
         .iter()
         .filter(|a| a.project_id == project_id)
         .count()
-        + notes.iter().filter(|note| note.is_for(project_id)).count()
+        + (notes.iter())
+            .filter(|note| note.is_for(project_id) && note.needs_you())
+            .count()
 }
 
 /// The release the app has downloaded, waiting for it to exit.
@@ -1927,5 +1929,17 @@ mod tests {
         }));
         assert_eq!(needs_you(&[], std::slice::from_ref(&conflict), "a"), 1);
         assert_eq!(needs_you(&[], std::slice::from_ref(&conflict), "c"), 0);
+        // Once ruled it waits for a compile, not for you.
+        let WorkspaceNote::Conflict(mut ruled) = conflict else {
+            unreachable!()
+        };
+        ruled.state = workspace_core::ConflictState::Ruled {
+            ruling: "Keep new".into(),
+            by: "mhohlios".into(),
+            pull_request: None,
+            merged: false,
+        };
+        let ruled = WorkspaceNote::Conflict(ruled);
+        assert_eq!(needs_you(&[], std::slice::from_ref(&ruled), "a"), 0);
     }
 }

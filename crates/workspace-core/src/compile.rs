@@ -137,12 +137,14 @@ pub enum Ruling {
     Defer,
 }
 impl Ruling {
+    /// The four rulings' names, as cards, the compile tools and the conflict queue write them.
+    pub const NAMES: [&str; 4] = ["Uphold existing", "Keep new", "Keep both", "Defer"];
     pub fn label(&self) -> &'static str {
         match self {
-            Self::UpholdExisting => "Uphold existing",
-            Self::KeepNew => "Keep new",
-            Self::KeepBoth { .. } => "Keep both",
-            Self::Defer => "Defer",
+            Self::UpholdExisting => Self::NAMES[0],
+            Self::KeepNew => Self::NAMES[1],
+            Self::KeepBoth { .. } => Self::NAMES[2],
+            Self::Defer => Self::NAMES[3],
         }
     }
 }
@@ -198,7 +200,7 @@ impl ConflictCard {
     /// The recommended ruling's name in `recommend`, such as "Uphold existing" in
     /// "Uphold existing: PR #92 is still open".
     pub fn recommended_in(recommend: &str) -> Option<String> {
-        ["Uphold existing", "Keep new", "Keep both", "Defer"]
+        Ruling::NAMES
             .into_iter()
             .find(|name| {
                 recommend

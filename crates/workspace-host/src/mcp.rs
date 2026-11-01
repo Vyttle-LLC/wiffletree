@@ -360,8 +360,7 @@ pub fn job_run_tools() -> Value {
 pub fn compile_tools() -> Value {
     let string = json!({"type":"string"});
     let rules = json!({"type":"string","enum":["decision-contradiction","agent-disagreement","destructive"]});
-    let rulings =
-        json!({"type":"string","enum":["Uphold existing","Keep new","Keep both","Defer"]});
+    let rulings = json!({"type":"string","enum":workspace_core::Ruling::NAMES});
     json!([{
         "name": "queue_conflict",
         "description": "Queue one conflict for the human's ruling, only when a pending entry contradicts a kind: decision note, two authors disagree about the same fact, or the entry is destructive or deprecating. claim is the pending entry's id; conflicts_with is the note's path, such as notes/Call Relay Retries.md, or the other entry's id. evidence has one line per supporting fact, such as verification and PR states and the authors. recommend is your ruling, with reason in one line. Leave the conflicting note as it is.",

@@ -582,7 +582,8 @@ impl Host {
             [],
             |r| r.get(0),
         )?;
-        Ok(waiting + self.workspace_notes(&self.skill_states()?)?.len())
+        let notes = self.workspace_notes(&self.skill_states()?)?;
+        Ok(waiting + notes.iter().filter(|note| note.needs_you()).count())
     }
     /// The live workspace; `archive` has the rest.
     pub fn snapshot(&self) -> Result<Snapshot> {

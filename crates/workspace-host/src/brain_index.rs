@@ -444,24 +444,42 @@ fn store(
     Ok(())
 }
 
-/// Marks the entries a commit after the last compile added as pending, by the commit graph, not
-/// by commit times, which a batch and a compile can share to the second. With no compile yet,
-/// every entry is pending.
+/// Marks pending the entries a compile would take, by the cursor in `notes/INDEX.md` at
+/// `commit` (see `compile.rs`): those added after its `compiled-through` commit, by the commit
+/// graph, less its `compiled-after` ids. With no cursor every entry is pending but those the
+/// legacy import recorded as `compiled`.
 fn mark_pending(
     db: &Connection,
     checkout: &Path,
-    (last_compile, commit): (Option<&str>, &str),
+    commit: &str,
     prefix: &str,
+    compiled: &HashSet<String>,
 ) -> Result<()> {
-    let Some(last_compile) = last_compile else {
-        db.execute("UPDATE files SET pending=(class='entry')", [])?;
-        return Ok(());
+    let index = compile::file_at(checkout, commit, &format!("{prefix}{INDEX}"));
+    let cursor = compile::read_cursor(&index);
+    let through = (cursor.through.as_deref()).filter(|t| publish::is_ancestor(checkout, t, commit));
+    match through {
+        Some(through) => {
+            let since = added_entries(checkout, &format!("{through}..{commit}"), prefix)?;
+            db.execute("UPDATE files SET pending=0 WHERE pending=1", [])?;
+            let mut mark =
+                db.prepare("UPDATE files SET pending=1 WHERE class='entry' AND path=?1")?;
+            for path in since.keys() {
+                mark.execute([path])?;
+            }
+        }
+        None => {
+            db.execute("UPDATE files SET pending=(class='entry')", [])?;
+        }
+    }
+    let done = match through {
+        Some(_) => cursor.after.iter().collect::<Vec<_>>(),
+        None => cursor.after.iter().chain(compiled).collect(),
     };
-    let since = added_entries(checkout, &format!("{last_compile}..{commit}"), prefix)?;
-    db.execute("UPDATE files SET pending=0 WHERE pending=1", [])?;
-    let mut mark = db.prepare("UPDATE files SET pending=1 WHERE class='entry' AND path=?1")?;
-    for path in since.keys() {
-        mark.execute([path])?;
+    let mut unmark =
+        db.prepare("UPDATE files SET pending=0 WHERE class='entry' AND entry_id=?1")?;
+    for id in done {
+        unmark.execute([id])?;
     }
     Ok(())
 }
@@ -478,13 +496,16 @@ fn resolve_sources(db: &Connection) -> Result<()> {
 }
 
 /// What a refresh reads: the brain's checkout, the commit of `main` to index and the brain
-/// folder there, with this machine's clones to verify entries' refs against.
+/// folder there, with this machine's clones to verify entries' refs against, `gh` to read the
+/// PRs they name, and the entries the legacy import recorded as compiled.
 pub(crate) struct Refresh<'a> {
     pub(crate) index: &'a Path,
     pub(crate) checkout: &'a Path,
     pub(crate) commit: &'a str,
     pub(crate) brain_dir: &'a str,
     pub(crate) clones: &'a Clones,
+    pub(crate) gh: Option<&'a publish::Tool<runtime::GhAnswer>>,
+    pub(crate) compiled: &'a HashSet<String>,
 }
 
 /// Brings the index to `commit`: reads and stores only the files whose blob changed, removes
@@ -497,6 +518,8 @@ pub(crate) fn refresh(refresh: Refresh) -> Result<usize> {
         commit,
         brain_dir,
         clones,
+        gh,
+        compiled,
     } = refresh;
     let mut db = open(index)?;
     let at = format!("{brain_dir}\0{commit}");
@@ -598,8 +621,8 @@ pub(crate) fn refresh(refresh: Refresh) -> Result<usize> {
         store(&transaction, path, blob, *class, &text, pull_request)?;
     }
     resolve_sources(&transaction)?;
-    mark_pending(&transaction, checkout, (compile_commit, commit), &prefix)?;
-    verify_entries(&transaction, clones)?;
+    mark_pending(&transaction, checkout, commit, &prefix, compiled)?;
+    verify_entries(&transaction, clones, gh)?;
     set_state(&transaction, "last_compile", compile_time)?;
     set_state(&transaction, "last_compile_commit", compile_commit)?;
     set_state(&transaction, "commit", Some(&at))?;
@@ -677,7 +700,11 @@ fn squash_pull_request(subject: &str) -> Option<u64> {
 }
 
 /// Checks the ref of every entry not yet verified against this machine's clones.
-fn verify_entries(db: &Connection, clones: &Clones) -> Result<()> {
+fn verify_entries(
+    db: &Connection,
+    clones: &Clones,
+    gh: Option<&publish::Tool<runtime::GhAnswer>>,
+) -> Result<()> {
     type Unverified = (i64, String, String, Option<String>, Option<String>);
     let unverified: Vec<Unverified> = db
         .prepare(
@@ -688,7 +715,7 @@ fn verify_entries(db: &Connection, clones: &Clones) -> Result<()> {
     let refs: Vec<(&str, &str)> = (unverified.iter())
         .map(|(_, folder, reference, _, _)| (folder.as_str(), reference.as_str()))
         .collect();
-    let checked = verify_refs::verify(clones, &refs, &mut verify_refs::Cache::default());
+    let checked = verify_refs::verify_with(clones, &refs, &mut verify_refs::Cache::default(), gh);
     let mut update =
         db.prepare("UPDATE files SET verification=?2,verification_reason=?3 WHERE id=?1")?;
     for ((id, _, _, state, reason), verification) in unverified.iter().zip(checked) {
@@ -1844,7 +1871,9 @@ impl Host {
             .collect::<rusqlite::Result<_>>()?;
         Ok((rows.into_iter())
             .filter_map(|(entry_id, author, body, pending)| {
-                let state = entry_fields(&body).remove("state")?;
+                let mut fields = entry_fields(&body);
+                (fields.get("type").map(String::as_str) == Some("decision")).then_some(())?;
+                let state = fields.remove("state")?;
                 let conflict = state.strip_prefix(RULING_PREFIX)?.split_once(':')?.0;
                 Some(RulingEntry {
                     entry_id,
@@ -2092,6 +2121,8 @@ pub(crate) mod tests {
                 commit,
                 brain_dir: "second-brain",
                 clones: &self.clones,
+                gh: None,
+                compiled: &HashSet::new(),
             })
             .unwrap()
         }
@@ -2362,7 +2393,18 @@ pub(crate) mod tests {
             (before.body, before.last_compile, before.pending_entries),
             (None, None, 2)
         );
-        let compiled = brain.commit(&sample()[4..], "Compile (#81)");
+        // The compile writes its cursor, through the log batch.
+        let cursor = compile::Cursor {
+            through: Some(logs),
+            after: vec![],
+        };
+        let files: Vec<(String, String)> = (sample()[4..].iter())
+            .map(|(path, text)| match path.as_str() {
+                INDEX => (path.clone(), compile::write_cursor(text, &cursor)),
+                _ => (path.clone(), text.clone()),
+            })
+            .collect();
+        let compiled = brain.commit(&files, "Compile (#81)");
         brain.refresh(&compiled);
         let after = status(&brain.db()).unwrap();
         assert!(after.body.unwrap().contains("retries Telnyx"));
@@ -2379,8 +2421,19 @@ pub(crate) mod tests {
     fn a_batch_merged_in_the_same_second_as_a_compile_is_still_pending() {
         let brain = Checkout::new();
         let second = "@1790000000 +0000";
-        brain.commit_at(&sample()[..1], "Log batch (#80)", second);
-        brain.commit_at(&sample()[4..], "Compile (#81)", second);
+        let first = brain.commit_at(&sample()[..1], "Log batch (#80)", second);
+        // The compile's cursor is through the first batch.
+        let cursor = compile::Cursor {
+            through: Some(first),
+            after: vec![],
+        };
+        let compiled: Vec<(String, String)> = (sample()[4..].iter())
+            .map(|(path, text)| match path.as_str() {
+                INDEX => (path.clone(), compile::write_cursor(text, &cursor)),
+                _ => (path.clone(), text.clone()),
+            })
+            .collect();
+        brain.commit_at(&compiled, "Compile (#81)", second);
         let head = brain.commit_at(&sample()[1..2], "Log batch (#82)", second);
         brain.refresh(&head);
         let status = status(&brain.db()).unwrap();
@@ -2389,6 +2442,39 @@ pub(crate) mod tests {
             status.pending_entries, 1,
             "only the batch after the compile"
         );
+    }
+
+    #[test]
+    fn pending_entries_follow_the_cursor_its_compiled_ids_and_the_legacy_import() {
+        let brain = Checkout::new();
+        brain.commit(&sample()[..2], "Two entries (#80)");
+        // A bounded compile took the first entry only.
+        let cursor = compile::Cursor {
+            through: None,
+            after: vec![id(1)],
+        };
+        let index = (
+            INDEX.to_owned(),
+            compile::write_cursor("[[Alpha]]\n", &cursor),
+        );
+        let head = brain.commit(&[index], "Compile (#81)");
+        brain.refresh(&head);
+        assert_eq!(status(&brain.db()).unwrap().pending_entries, 1);
+        // With no cursor, what the legacy import recorded as compiled is not pending.
+        let fresh = Checkout::new();
+        fresh.commit(&sample()[..2], "Two entries (#80)");
+        let head = fresh.commit(&sample()[2..3], "One more (#82)");
+        refresh(Refresh {
+            index: &fresh.index(),
+            checkout: &fresh.path(),
+            commit: &head,
+            brain_dir: "second-brain",
+            clones: &Clones::default(),
+            gh: None,
+            compiled: &HashSet::from([id(1), id(2)]),
+        })
+        .unwrap();
+        assert_eq!(status(&fresh.db()).unwrap().pending_entries, 1);
     }
 
     #[test]
@@ -2939,7 +3025,8 @@ pub(crate) mod tests {
             assert_eq!(answer["brain"], REPO);
             assert_eq!(answer["scope"], "brain");
             assert!(answer["last_compile"].as_str().unwrap().contains('T'));
-            assert_eq!(answer["pending_entries"], 0);
+            // The sample's INDEX has no compile cursor, so every entry waits for a compile.
+            assert_eq!(answer["pending_entries"], 5);
             assert!(answer.get("answer").is_none());
             let steps = steps(&answer);
             let first = |step: &str| steps.iter().position(|s| s == step).unwrap();
@@ -3109,6 +3196,8 @@ pub(crate) mod tests {
                 commit: &head,
                 brain_dir: "second-brain",
                 clones: &Clones::default(),
+                gh: None,
+                compiled: &HashSet::new(),
             })
             .unwrap();
             (b.f.host)

@@ -46,7 +46,6 @@ const RULES: [&str; 3] = [
     "agent-disagreement",
     "destructive",
 ];
-const RULINGS: [&str; 4] = ["Uphold existing", "Keep new", "Keep both", "Defer"];
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS compile_runs (id TEXT PRIMARY KEY, repository TEXT NOT NULL COLLATE NOCASE, started_at INTEGER NOT NULL, session_id TEXT, data TEXT NOT NULL, work TEXT);
@@ -193,7 +192,7 @@ fn read_at(checkout: &Path, commit: &str, prefix: &str, paths: &[String]) -> Res
 }
 
 /// One file at `commit`, or empty when it is not there.
-fn file_at(checkout: &Path, commit: &str, path: &str) -> String {
+pub(crate) fn file_at(checkout: &Path, commit: &str, path: &str) -> String {
     runtime::git_bytes(
         checkout,
         &["cat-file", "blob", &format!("{commit}:{path}")],
@@ -608,11 +607,14 @@ fn check_changes(worktree: &Path, brain_dir: &str) -> Result<Vec<String>> {
                 "{path} links [[{link}]], which is no note"
             );
         }
-        let folder = Path::new(path)
-            .parent()
-            .map(|p| brain.join(p))
-            .unwrap_or(brain.clone());
-        for (label, definition) in footnotes(body) {
+        let defined = footnotes(body);
+        for label in footnote_marks(body) {
+            ensure!(
+                defined.iter().any(|(l, _)| *l == label),
+                "{path}'s footnote [^{label}] has no definition"
+            );
+        }
+        for (label, definition) in defined {
             let targets = footnote_targets(&definition);
             ensure!(
                 !targets.is_empty(),
@@ -621,7 +623,8 @@ fn check_changes(worktree: &Path, brain_dir: &str) -> Result<Vec<String>> {
             for target in targets {
                 let file = target.split('#').next().unwrap_or_default();
                 let exists = match file.ends_with(".md") {
-                    true => folder.join(file).is_file(),
+                    true => resolved(path, file)
+                        .is_some_and(|entry| is_entry_path(&entry) && brain.join(entry).is_file()),
                     false => entries.contains(file),
                 };
                 ensure!(
@@ -632,6 +635,44 @@ fn check_changes(worktree: &Path, brain_dir: &str) -> Result<Vec<String>> {
         }
     }
     Ok(changed)
+}
+
+/// `link`, relative to the brain-folder file `from`, as a path in the brain folder; `None` when
+/// it leaves the folder.
+fn resolved(from: &str, link: &str) -> Option<String> {
+    let mut parts: Vec<&str> = from.split('/').collect();
+    parts.pop();
+    for part in link.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+/// The labels of the footnote marks in `body`'s text, leaving out their definitions.
+fn footnote_marks(body: &str) -> Vec<String> {
+    let mut marks: Vec<String> = vec![];
+    for line in body.lines() {
+        let mut rest = line;
+        if let Some(definition) = rest.strip_prefix("[^") {
+            rest = definition.split_once("]:").map_or(rest, |(_, text)| text);
+        }
+        while let Some(at) = rest.find("[^") {
+            let Some((label, after)) = rest[at + 2..].split_once(']') else {
+                break;
+            };
+            if !marks.iter().any(|m| m == label) {
+                marks.push(label.to_owned());
+            }
+            rest = after;
+        }
+    }
+    marks
 }
 
 /// The id of every entry file under `logs`, from its file name `<date>-<id>.md`.
@@ -665,26 +706,34 @@ fn run_built_in(host: &mut Host, repository: &str, start: jobs::BuiltInStart) ->
         jobs::BuiltInStart::RunNow => CompileTrigger::RunNow,
         jobs::BuiltInStart::Triggered => CompileTrigger::Ruling,
     };
-    // Rulings pending now are this run's to compile, whatever starts it.
-    for ruling in host.new_rulings(repository)? {
-        host.db.execute(
-            "INSERT OR IGNORE INTO ruling_triggers VALUES (?1,?2)",
-            params![repository, ruling],
-        )?;
+    let rulings = host.new_rulings(repository)?;
+    let Some(run) = host.start_compile(repository, trigger)? else {
+        return Ok("a compile run is in progress".into());
+    };
+    // A run that starts compiles every ruling pending now, whatever started it; one that
+    // waits leaves them to trigger the next run that can start.
+    if run.outcome == CompileOutcome::Running {
+        for ruling in rulings {
+            host.db.execute(
+                "INSERT OR IGNORE INTO ruling_triggers VALUES (?1,?2)",
+                params![repository, ruling],
+            )?;
+        }
     }
-    match host.start_compile(repository, trigger)? {
-        Some(run) => Ok(match run.reason.is_empty() {
-            true => format!("compile run {} started", run.id),
-            false => run.reason,
-        }),
-        None => Ok("a compile run is in progress".into()),
-    }
+    Ok(match run.reason.is_empty() {
+        true => format!("compile run {} started", run.id),
+        false => run.reason,
+    })
 }
 
-/// The scheduler's trigger: a fetched `main` added a ruling entry no run has yet started for.
+/// The scheduler's trigger: a fetched `main` added a ruling entry no run has yet started for,
+/// and a run can start now. While one runs or a compile PR is open it waits, unconsumed.
 fn ruling_merged(host: &Host, repository: &str) -> bool {
     host.new_rulings(repository)
         .is_ok_and(|rulings| !rulings.is_empty())
+        && host
+            .compile_waits(repository)
+            .is_ok_and(|waits| waits.is_none())
 }
 
 impl Host {
@@ -797,17 +846,79 @@ impl Host {
             .find(|b| b.kind == BrainBatchKind::Compile && !b.is_finished()))
     }
 
-    /// Why a run cannot start now: one is running, or a compile PR is open.
+    /// The entries the legacy import recorded as compiled in the brain.
+    pub(crate) fn legacy_compiled(&self, repository: &str) -> Result<HashSet<String>> {
+        Ok((self
+            .db
+            .prepare("SELECT entry_id FROM legacy_compiled WHERE brain=?1")?)
+        .query_map([repository], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Why a run cannot start now: one is running, a compile PR is open, or the last compile PR
+    /// merged but `main` here does not hold its cursor yet, so a run would compile its entries
+    /// again.
     fn compile_waits(&self, repository: &str) -> Result<Option<String>> {
         if self.running_compile(repository)?.is_some() {
             return Ok(Some("A compile run is in progress".into()));
         }
-        Ok(self
-            .open_compile_batch(repository)?
-            .map(|batch| match &batch.pull_request {
+        if let Some(batch) = self.open_compile_batch(repository)? {
+            return Ok(Some(match &batch.pull_request {
                 Some(pr) => format!("Waiting for PR #{}", pr.number),
                 None => "Waiting for the compile batch to open its PR".into(),
-            }))
+            }));
+        }
+        let last: Option<(String, Option<String>)> = self
+            .db
+            .query_row(
+                "SELECT json_extract(data,'$.batch_id'),work FROM compile_runs WHERE repository=?1 AND json_extract(data,'$.batch_id') IS NOT NULL ORDER BY started_at DESC LIMIT 1",
+                [repository],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((batch, Some(work))) = last else {
+            return Ok(None);
+        };
+        let batch = self.brain_batch(&batch)?;
+        let work: Work = serde_json::from_str(&work)?;
+        let brain = self.brain(repository)?;
+        if batch.stage != BrainStage::Merged {
+            return Ok(None);
+        }
+        let index = format!("{}/{INDEX}", work.brain_dir);
+        let on_main = (brain.head.as_deref())
+            .map(|head| read_cursor(&file_at(Path::new(&brain.checkout), head, &index)));
+        Ok((on_main.as_ref() != Some(&work.cursor)).then(|| {
+            let number = batch
+                .pull_request
+                .map_or(String::new(), |pr| format!(" #{}", pr.number));
+            format!("Waiting for main to be fetched after compile PR{number} merged")
+        }))
+    }
+
+    /// The wiki files `main` changed since `from` that a run would write, which it may not
+    /// overwrite with what it compiled from `from`.
+    fn changed_meanwhile(
+        &self,
+        repository: &str,
+        from: &str,
+        files: &[String],
+    ) -> Result<Vec<String>> {
+        let brain = self.brain(repository)?;
+        let Some(head) = brain.head.filter(|head| head != from) else {
+            return Ok(vec![]);
+        };
+        let mut args = vec![
+            "diff",
+            "--name-only",
+            "--no-renames",
+            from,
+            head.as_str(),
+            "--",
+        ];
+        args.extend(files.iter().map(String::as_str));
+        let changed = runtime::git_output(Path::new(&brain.checkout), &args)?;
+        Ok(changed.lines().map(str::to_owned).collect())
     }
 
     /// Run now: starts a run through the scheduler, or says why it waits.
@@ -883,11 +994,7 @@ impl Host {
             (None, Some(head)) => {
                 let brain_dir = (brain.config.config().map(|c| c.brain_dir.clone()))
                     .unwrap_or_else(|| SpaceBrain::DEFAULT_FOLDER.into());
-                let legacy_compiled = (self
-                    .db
-                    .prepare("SELECT entry_id FROM legacy_compiled WHERE brain=?1")?)
-                .query_map([&brain.repository], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
+                let legacy_compiled = self.legacy_compiled(&brain.repository)?;
                 self.compile_preparations.push(Prepare {
                     run_id: run.id.clone(),
                     checkout: PathBuf::from(&brain.checkout),
@@ -1103,9 +1210,9 @@ impl Host {
                 );
                 let recommend = string("recommend", 64)?;
                 ensure!(
-                    RULINGS.contains(&recommend.as_str()),
+                    Ruling::NAMES.contains(&recommend.as_str()),
                     "recommend is one of {}",
-                    RULINGS.join(", ")
+                    Ruling::NAMES.join(", ")
                 );
                 let claim = string("claim", 128)?;
                 ensure!(
@@ -1200,6 +1307,14 @@ impl Host {
         if queue != existing {
             files.push((format!("{}/{QUEUE}", work.brain_dir), queue.into_bytes()));
         }
+        // Whole files compiled from the run's head would undo what `main` changed in them since.
+        let paths: Vec<String> = files.iter().map(|(path, _)| path.clone()).collect();
+        let moved = self.changed_meanwhile(&run.repository, &work.head, &paths)?;
+        ensure!(
+            moved.is_empty(),
+            "main changed {} while the run worked, so nothing was pushed; the next run compiles again",
+            moved.join(", ")
+        );
         let title = format!("Compile: {} entries", work.entries.len());
         let batch = self.queue_brain_batch(
             &run.repository,
@@ -1475,6 +1590,15 @@ impl Host {
                     brain.repository
                 )
             })?;
+        // A conflict is ruled once, here or on any install whose ruling reached `main`.
+        let ruled_here = (self.local_ruling(&brain.repository, conflict_id)?)
+            .is_some_and(|l| l.ruling != Ruling::Defer);
+        let ruled_on_main =
+            (self.brain_rulings(&brain.repository)?.iter()).any(|r| r.conflict_id == conflict_id);
+        ensure!(
+            !ruled_here && !ruled_on_main,
+            "{conflict_id} is already ruled on"
+        );
         if ruling == Ruling::Defer {
             let local = LocalRuling {
                 ruling,
@@ -1485,11 +1609,6 @@ impl Host {
             self.save_local_ruling(&brain.repository, conflict_id, &local)?;
             return Ok(None);
         }
-        ensure!(
-            self.local_ruling(&brain.repository, conflict_id)?
-                .is_none_or(|l| l.ruling == Ruling::Defer),
-            "{conflict_id} is already ruled on"
-        );
         let author = (self.gh_login.clone())
             .filter(|login| memory::valid_login(login))
             .context("Wiffletree has not read your GitHub login. Sign gh in, then Sync now on the Brains page.")?;
@@ -2103,7 +2222,21 @@ mod tests {
     #[test]
     fn a_change_outside_the_wiki_or_a_broken_link_fails_the_run_and_leaves_the_cursor() {
         type Change = fn(&Path);
-        let cases: [(&str, Change); 3] = [
+        let cases: [(&str, Change); 5] = [
+            // A footnote out of `logs/` to a Markdown file that is no entry.
+            ("which is no entry file", |brain| {
+                fs::create_dir_all(brain.join("notes")).unwrap();
+                let note = relay_note(&id(1)).replace(
+                    &format!("../logs/app/2026/10/2026-10-20-{}.md", id(1)),
+                    "../logs/../../README.md",
+                );
+                fs::write(brain.join("notes/Call Relay.md"), note).unwrap()
+            }),
+            ("has no definition", |brain| {
+                fs::create_dir_all(brain.join("notes")).unwrap();
+                let note = relay_note(&id(1)).replace("`/healthz`.[^1]", "`/healthz`.[^1][^2]");
+                fs::write(brain.join("notes/Call Relay.md"), note).unwrap()
+            }),
             ("outside the wiki", |brain| {
                 fs::write(brain.join("logs/app/2026/10/extra.md"), "x\n").unwrap()
             }),
@@ -2268,6 +2401,14 @@ mod tests {
                 .is_err()
         );
         assert!(!mcp::tools().to_string().contains("rule_conflict"));
+        // Nor is a ruled conflict deferred.
+        let deferred = b.f.host.rule_conflict(REPO, &conflict, Ruling::Defer, &git);
+        assert!(deferred.unwrap_err().to_string().contains("already ruled"));
+        // A ruled card no longer counts as needing the human.
+        assert!(
+            (b.f.host.workspace_notes(&[]).unwrap().iter())
+                .all(|note| !matches!(note, WorkspaceNote::Conflict(_)) || !note.needs_you())
+        );
     }
 
     #[test]
@@ -2356,6 +2497,155 @@ mod tests {
         let project = b.f.coordinator.project_id.clone();
         assert!(matches!(&conflict_notes(&b, &project)[0].state,
             ConflictState::Ruled { by, merged: true, .. } if by == "tomas"));
+    }
+
+    #[test]
+    fn no_agent_or_capture_form_may_log_a_ruling() {
+        let mut b = brained();
+        let implementer = b.f.implementer.id.clone();
+        let forged = json!({"type": "decision", "title": "Ruled", "changed": "Kept new.",
+            "why": "Because.", "state": "Ruling on conflict c-1: Keep new."});
+        let refused =
+            b.f.host
+                .agent_tool(&implementer, "log_work", forged)
+                .unwrap_err();
+        assert!(
+            refused.to_string().contains("only the human rules"),
+            "{refused:#}"
+        );
+        let coordinator = b.f.coordinator.id.clone();
+        let lowered = json!({"type": "decision", "title": "Ruled", "changed": "Kept new.",
+            "why": "Because.", "state": "ruling on conflict c-1: Keep new."});
+        assert!(
+            b.f.host
+                .agent_tool(&coordinator, "log_work", lowered)
+                .is_err()
+        );
+        // An observation whose state reads like one is no ruling, and starts no compile.
+        let (path, text) = relay(30);
+        let text = text.replace(
+            "- state: Done.",
+            "- state: Ruling on conflict c-1: Keep new.",
+        );
+        b.merge(&[(path, text)]);
+        assert!(b.f.host.brain_rulings(REPO).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_ruling_that_merges_while_a_compile_pr_is_open_starts_a_run_once_it_can() {
+        let mut b = brained();
+        let conflict = with_conflict(&mut b);
+        let files = [("second-brain/STATUS.md".to_owned(), b"# Status\n".to_vec())];
+        let git = b.tools.git.clone();
+        (b.f.host.queue_brain_batch(
+            REPO,
+            BrainBatchKind::Compile,
+            BrainSource::BrainsPage,
+            "Compile: 1 entries",
+            &files,
+            &git,
+        ))
+        .unwrap();
+        passing_checks(&b.github);
+        assert!(run(&mut b.f.host, &b.tools));
+        let ruling = format!(
+            "---\nid: {}\nrepo: app\nauthor: tomas\nsource: wiffletree\n---\n## 2026-10-31 — Ruling\n- type: decision\n- ref: —\n- changed: Kept new.\n- why: Ruled.\n- state: Ruling on conflict {conflict}: Keep new.\n",
+            id(40)
+        );
+        b.merge(&[(format!("logs/app/2026/10/2026-10-31-{}.md", id(40)), ruling)]);
+        for minute in 1..4 {
+            b.f.host
+                .fire_and_check(ny("2026-10-30 09:00") + minute * 60_000)
+                .unwrap();
+        }
+        assert!(
+            b.runs().is_empty(),
+            "the ruling waits for the open PR, unconsumed"
+        );
+        b.github.merge(214);
+        assert!(run(&mut b.f.host, &b.tools));
+        b.f.host.fire_and_check(ny("2026-10-30 09:10")).unwrap();
+        b.f.host.fire_and_check(ny("2026-10-30 09:11")).unwrap();
+        let runs = b.runs();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            (runs[0].trigger, runs[0].outcome),
+            (CompileTrigger::Ruling, CompileOutcome::Running)
+        );
+    }
+
+    #[test]
+    fn a_note_main_changed_while_the_run_worked_is_never_overwritten() {
+        let mut b = brained();
+        b.merge(&[
+            relay(1),
+            note("Call Relay", "observation", &[id(1)], "Health is /status."),
+        ]);
+        let (run, session, work) = b.started();
+        // A teammate's change to the same note merges and is fetched meanwhile.
+        b.merge(&[note(
+            "Call Relay",
+            "observation",
+            &[id(1)],
+            "Health is /live.",
+        )]);
+        let brain = work.worktree.join("second-brain");
+        fs::write(brain.join("notes/Call Relay.md"), relay_note(&id(1))).unwrap();
+        let failed = b
+            .tool(&session, "finish_compile", json!({"summary": "Done"}))
+            .unwrap_err();
+        assert!(
+            failed
+                .to_string()
+                .contains("main changed second-brain/notes/Call Relay.md"),
+            "{failed:#}"
+        );
+        assert_eq!(
+            b.f.host.compile_run(&run.id).unwrap().outcome,
+            CompileOutcome::Failed
+        );
+        assert!(b.compile_batches().is_empty());
+    }
+
+    #[test]
+    fn run_now_waits_until_main_holds_the_merged_compile_prs_cursor() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        let (_, session, work) = b.started();
+        let brain = work.worktree.join("second-brain");
+        fs::create_dir_all(brain.join("notes")).unwrap();
+        fs::write(brain.join("notes/Call Relay.md"), relay_note(&id(1))).unwrap();
+        b.tool(&session, "finish_compile", json!({"summary": "Done"}))
+            .unwrap();
+        passing_checks(&b.github);
+        assert!(run(&mut b.f.host, &b.tools));
+        let number = b.compile_batches()[0].pull_request.as_ref().unwrap().number;
+        let before = b.f.host.brain(REPO).unwrap().head.unwrap();
+        b.github.merge(number);
+        assert!(run(&mut b.f.host, &b.tools));
+        assert_eq!(b.compile_batches()[0].stage, BrainStage::Merged);
+        // As when the pass fetched main just before GitHub merged the PR.
+        (b.f.host.db.execute(
+            "UPDATE brains SET data=json_set(data,'$.head',?2) WHERE repository=?1",
+            params![REPO, before],
+        ))
+        .unwrap();
+        let waits = b.f.host.run_brain_compile(REPO).unwrap_err();
+        assert!(
+            waits
+                .to_string()
+                .starts_with("Waiting for main to be fetched"),
+            "{waits:#}"
+        );
+        assert!(run(&mut b.f.host, &b.tools));
+        assert_eq!(b.cursor_on_main(), work.cursor);
+        b.f.host.run_brain_compile(REPO).unwrap();
+        b.prepare();
+        assert_eq!(
+            b.runs()[0].outcome,
+            CompileOutcome::Skipped,
+            "nothing is compiled twice"
+        );
     }
 
     #[test]

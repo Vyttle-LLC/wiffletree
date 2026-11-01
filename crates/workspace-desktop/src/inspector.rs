@@ -1177,7 +1177,11 @@ impl Render for Inspector {
 impl Workspace {
     pub(super) fn inspector_rail(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let role = self.shared.selected_role();
-        let attention = self.shared.workspace_notes().len() + self.shared.project_attention().len();
+        let project = self.shared.project_id().unwrap_or_default();
+        let notes = (self.shared.workspace_notes().iter())
+            .filter(|note| note.is_for(&project) && note.needs_you())
+            .count();
+        let attention = notes + self.shared.project_attention().len();
         let mut rail = div()
             .w(px(64.))
             .h_full()

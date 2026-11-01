@@ -244,9 +244,47 @@ fn tag_containing(clone: &Path, sha: &str) -> Option<String> {
     answer.output.lines().next().map(str::to_owned)
 }
 
+/// `verify`, then with `gh` each named PR's state: one that merged verifies its entry and an
+/// open one claims it. The brain index and compile runs both verify this way, so an entry reads
+/// the same wherever it is shown; each PR is asked about once per call.
+pub(crate) fn verify_with(
+    clones: &Clones,
+    refs: &[(&str, &str)],
+    cache: &mut Cache,
+    gh: Option<&publish::Tool<runtime::GhAnswer>>,
+) -> Vec<RefVerification> {
+    let mut pulls: HashMap<(PathBuf, u64), Option<PullState>> = HashMap::new();
+    (refs.iter())
+        .zip(verify(clones, refs, cache))
+        .map(|((folder, reference), verification)| {
+            let (Some(gh), Some(number)) = (gh, anchors(reference).pull_request) else {
+                return verification;
+            };
+            let here = clones.0.get(&folder.to_ascii_lowercase());
+            if verification.state == RefState::Verified || here.is_none() {
+                return verification;
+            }
+            let state = (here.into_iter().flatten()).find_map(|clone| {
+                *(pulls.entry((clone.path.clone(), number)))
+                    .or_insert_with(|| pull_state(gh, clone, number))
+            });
+            match state {
+                Some(PullState::Merged) => RefVerification {
+                    state: RefState::Verified,
+                    reason: None,
+                },
+                Some(PullState::Open) => RefVerification {
+                    state: RefState::Claimed,
+                    reason: Some(format!("PR #{number} is open")),
+                },
+                Some(PullState::Closed) | None => verification,
+            }
+        })
+        .collect()
+}
+
 /// A compile run's check of each `(folder, ref)`: each clone the refs name is fetched once, then
-/// `verify` runs, a named PR that merged verifies its entry and an open one claims it, and a
-/// verified commit's release tag is recorded.
+/// `verify_with` runs, and a verified commit's release tag is recorded.
 pub(crate) fn for_compile(
     clones: &Clones,
     refs: &[(&str, &str)],
@@ -266,34 +304,12 @@ pub(crate) fn for_compile(
             }
         }
     }
-    let verified = verify(clones, refs, &mut Cache::default());
+    let verified = verify_with(clones, refs, &mut Cache::default(), Some(&tools.gh));
     refs.iter()
         .zip(verified)
-        .map(|((folder, reference), mut verification)| {
+        .map(|((folder, reference), verification)| {
             let anchors = anchors(reference);
             let here = clones.0.get(&folder.to_ascii_lowercase());
-            if verification.state != RefState::Verified
-                && let (Some(number), Some(here)) = (anchors.pull_request, here)
-            {
-                let state = here
-                    .iter()
-                    .find_map(|clone| pull_state(&tools.gh, clone, number));
-                match state {
-                    Some(PullState::Merged) => {
-                        verification = RefVerification {
-                            state: RefState::Verified,
-                            reason: None,
-                        }
-                    }
-                    Some(PullState::Open) => {
-                        verification = RefVerification {
-                            state: RefState::Claimed,
-                            reason: Some(format!("PR #{number} is open")),
-                        }
-                    }
-                    Some(PullState::Closed) | None => {}
-                }
-            }
             let tag = match verification.state {
                 RefState::Verified => (here.into_iter().flatten()).find_map(|clone| {
                     (anchors.commits.iter()).find_map(|sha| tag_containing(&clone.path, sha))
@@ -636,5 +652,10 @@ mod tests {
             Some("not on this machine")
         );
         assert_eq!(*fetches.lock().unwrap(), [clone]);
+        // The brain index verifies the same refs alike, PRs included, without fetching.
+        let indexed = verify_with(&relay.clones, &refs, &mut Cache::default(), Some(&tools.gh));
+        let compiled: Vec<RefVerification> = checked.into_iter().map(|c| c.verification).collect();
+        assert_eq!(indexed, compiled);
+        assert_eq!(fetches.lock().unwrap().len(), 1);
     }
 }

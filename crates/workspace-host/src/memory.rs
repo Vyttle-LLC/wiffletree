@@ -109,6 +109,12 @@ fn folded(mut input: LogInput) -> Result<LogInput> {
         *value = one_line(value);
         ensure!(!value.is_empty(), "Give {name} some text");
     }
+    // Only the human's ruling, which `rule_conflict` writes, may say it is one.
+    ensure!(
+        !(input.state.to_lowercase()).starts_with(&brain_index::RULING_PREFIX.to_lowercase()),
+        "state may not begin \"{}\": only the human rules on a conflict, in Wiffletree's Inbox",
+        brain_index::RULING_PREFIX.trim_end()
+    );
     let title = input.title.chars().count();
     ensure!(
         title <= MAX_TITLE_CHARS,

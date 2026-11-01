@@ -1329,6 +1329,14 @@ impl WorkspaceNote {
             _ => true,
         }
     }
+    /// Whether it counts among what needs the human: not a conflict already ruled, nor one in
+    /// no project's Inbox, which only the Brains page shows.
+    pub fn needs_you(&self) -> bool {
+        match self {
+            Self::Conflict(card) => card.state == ConflictState::Open && !card.projects.is_empty(),
+            _ => true,
+        }
+    }
 }
 /// A file of a storage repository that is not pushed until a scan passes it. Names the check and
 /// its rule, never what matched.

@@ -268,6 +268,8 @@ pub(crate) struct Pass {
     clones: verify_refs::Clones,
     /// The brain folder a Space naming the brain gives, for a `main` with no config.
     space_folder: String,
+    /// The entries the legacy import recorded as compiled, never pending before a first compile.
+    legacy_compiled: std::collections::HashSet<String>,
 }
 
 /// A batch the pass may push, open, watch or discard.
@@ -322,7 +324,7 @@ pub(crate) fn pass(mut pass: Pass, tools: &Tools) -> Passed {
         work: vec![],
     };
     let result = run_pass(&mut pass, &mut passed, tools);
-    if let Err(error) = refresh_index(&pass, &passed) {
+    if let Err(error) = refresh_index(&pass, &passed, tools) {
         eprintln!("Brain index of {}: {error:#}", pass.repository);
     }
     passed.work = pass.work;
@@ -336,7 +338,7 @@ pub(crate) fn pass(mut pass: Pass, tools: &Tools) -> Passed {
 /// Brings the brain's index to the `main` the pass fetched or, when it fetched nothing and the
 /// index is missing or its build never completed, to the checkout's `main`, so a deleted or
 /// interrupted index is rebuilt offline too.
-fn refresh_index(pass: &Pass, passed: &Passed) -> Result<()> {
+fn refresh_index(pass: &Pass, passed: &Passed, tools: &Tools) -> Result<()> {
     let checkout = &pass.checkout;
     let commit = match &passed.head {
         Some(head) => head.clone(),
@@ -360,6 +362,8 @@ fn refresh_index(pass: &Pass, passed: &Passed) -> Result<()> {
         commit: &commit,
         brain_dir: &brain_dir,
         clones: &pass.clones,
+        gh: Some(&tools.gh),
+        compiled: &pass.legacy_compiled,
     })?;
     Ok(())
 }
@@ -1755,6 +1759,7 @@ impl Host {
             home: self.home.clone(),
             index: brain_index::index_file(&self.home, &brain.repository),
             clones: verify_refs::Clones::of(&self.repositories()?),
+            legacy_compiled: self.legacy_compiled(&brain.repository)?,
             space_folder: (self.owner_brain(&SessionOwner::Brain(brain.repository.clone()))?)
                 .map_or_else(|| "second-brain".into(), |b| b.folder),
             repository: brain.repository,
