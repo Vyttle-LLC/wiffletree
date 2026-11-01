@@ -1041,7 +1041,7 @@ impl Host {
             lines.push(match kept {
                 true => format!("{moved}; the PR keeper will rebase it onto {}.", request.base),
                 false => format!(
-                    "{moved}; it needs a rebase onto {} of only its own commits, which the PR keeper does not do here.",
+                    "{moved}; it needs a rebase onto {} of only its own commits. The PR keeper does that here only if the PR conflicts or its checks fail and its fixes are on.",
                     request.base
                 ),
             });

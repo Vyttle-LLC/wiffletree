@@ -26,7 +26,7 @@ const FIX_FIRST: &str = "Rebases only when the PR conflicts or its checks fail, 
 const REBASE_PUSH: &str = "minutes. Pushes only when the change is the same as the reviewed one.";
 const SORT: &str = "Tells the coordinator which need a change or an answer.";
 /// The name of the one trigger for tries at conflicts and failed checks.
-const NO_CHECKS: &str = "none entered · rebases and comment sorting work; a conflict or a failed check goes to the coordinator";
+const NO_CHECKS: &str = "none entered · “Keep it rebased” and comment sorting work; a conflict or a failed check goes to the coordinator";
 const OWNER_PLACEHOLDER: &str = "An owner, or owner/name for one fork";
 const BASE_HINT: &str = "Changes the base used for tickets and publishing. Existing branches and worktrees are not rebased.";
 const PROTECT_PLACEHOLDER: &str = "branch or pattern, such as hotfix/*";
@@ -2106,7 +2106,7 @@ mod tests {
             checks_summary(None, true),
             (
                 None,
-                "none entered · rebases and comment sorting work; a conflict or a failed check goes to the coordinator".into()
+                "none entered · “Keep it rebased” and comment sorting work; a conflict or a failed check goes to the coordinator".into()
             )
         );
         assert_eq!(checks_summary(None, false), (None, "none entered".into()));
