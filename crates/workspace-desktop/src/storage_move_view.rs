@@ -425,6 +425,7 @@ mod tests {
         Space {
             id: SpaceId("vyttle".into()),
             name: "Vyttle".into(),
+            color: None,
             description: String::new(),
             additions: String::new(),
             behaviors: Default::default(),

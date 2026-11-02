@@ -16,6 +16,7 @@ fn space() -> Space {
     Space {
         id: SpaceId(text()),
         name: text(),
+        color: None,
         description: text(),
         additions: text(),
         behaviors: Default::default(),

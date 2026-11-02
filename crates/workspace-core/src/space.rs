@@ -34,6 +34,9 @@ pub type Extra = std::collections::BTreeMap<String, serde_json::Value>;
 pub struct Space {
     pub id: SpaceId,
     pub name: String,
+    /// The color that marks this Space; without one it takes a default by its place in the list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<SpaceColor>,
     /// What belongs in this Space.
     #[serde(default)]
     pub description: String,
@@ -78,6 +81,57 @@ impl Space {
         (self.repository_settings.iter())
             .find(|(named, _)| named.eq_ignore_ascii_case(identity))
             .map(|(_, settings)| settings)
+    }
+}
+
+/// The colors a Space can be marked with. Their names are stored in `space.yaml`, so they stay
+/// as they are; `ALL` is the order Spaces without one take them in, alternating cool and warm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpaceColor {
+    Teal,
+    Coral,
+    Lilac,
+    Gold,
+    Sky,
+    Sage,
+    Rose,
+}
+impl SpaceColor {
+    pub const ALL: [SpaceColor; 7] = [
+        Self::Teal,
+        Self::Coral,
+        Self::Lilac,
+        Self::Gold,
+        Self::Sky,
+        Self::Sage,
+        Self::Rose,
+    ];
+    /// The color of the Space at `at` in the list, when it has none of its own.
+    pub fn by_place(at: usize) -> Self {
+        Self::ALL[at % Self::ALL.len()]
+    }
+    /// The color the Space at `at` in `spaces` shows.
+    pub fn of(spaces: &[Space], at: usize) -> Self {
+        (spaces.get(at).and_then(|s| s.color)).unwrap_or_else(|| Self::by_place(at))
+    }
+    /// What New Space proposes: the first color no Space shows yet, or the first when all do.
+    pub fn first_unused(spaces: &[Space]) -> Self {
+        let used: Vec<Self> = (0..spaces.len()).map(|at| Self::of(spaces, at)).collect();
+        (Self::ALL.into_iter())
+            .find(|color| !used.contains(color))
+            .unwrap_or(Self::Teal)
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Teal => "Teal",
+            Self::Coral => "Coral",
+            Self::Lilac => "Lilac",
+            Self::Gold => "Gold",
+            Self::Sky => "Sky",
+            Self::Sage => "Sage",
+            Self::Rose => "Rose",
+        }
     }
 }
 
@@ -540,6 +594,8 @@ pub struct SpaceSetup {
     /// A repository whose tracker already sets a time keeps it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compile: Option<crate::BrainCompile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<SpaceColor>,
 }
 
 /// What New Space proposes: the owner of the repository it offers to create, and this Mac's
@@ -822,6 +878,69 @@ mod tests {
         assert_eq!(saved["rows"][1]["job"], json!({"kind": "future_job"}));
         let read: SpaceModels = serde_json::from_value(saved).unwrap();
         assert_eq!(read.overrides(), rows);
+    }
+
+    fn space_file(color: Option<&str>) -> serde_json::Value {
+        let mut file = json!({
+            "id": "sage",
+            "name": "Sage",
+            "description": "",
+            "instructions": "",
+            "storage": {"repository": {"kind": "local", "id": "7k2q"}, "folder": "sage"},
+            "repositories": [],
+            "models": {},
+            "sources": [],
+        });
+        if let Some(color) = color {
+            file["color"] = json!(color);
+        }
+        file
+    }
+
+    #[test]
+    fn a_space_file_reads_and_writes_its_color_and_one_without_stays_without() {
+        let without: Space = serde_json::from_value(space_file(None)).unwrap();
+        assert_eq!(without.color, None);
+        assert_eq!(serde_json::to_value(&without).unwrap(), space_file(None));
+
+        let coral: Space = serde_json::from_value(space_file(Some("coral"))).unwrap();
+        assert_eq!(coral.color, Some(SpaceColor::Coral));
+        assert_eq!(
+            serde_json::to_value(&coral).unwrap(),
+            space_file(Some("coral"))
+        );
+    }
+
+    fn spaces(colors: &[Option<SpaceColor>]) -> Vec<Space> {
+        let read: Space = serde_json::from_value(space_file(None)).unwrap();
+        (colors.iter())
+            .map(|&color| Space {
+                color,
+                ..read.clone()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn spaces_without_a_color_alternate_cool_and_warm_by_place() {
+        use SpaceColor::*;
+        let shown: Vec<_> = (0..8).map(SpaceColor::by_place).collect();
+        assert_eq!(shown, [Teal, Coral, Lilac, Gold, Sky, Sage, Rose, Teal]);
+        let listed = spaces(&[None, Some(Rose), None]);
+        let shown: Vec<_> = (0..3).map(|at| SpaceColor::of(&listed, at)).collect();
+        assert_eq!(shown, [Teal, Rose, Lilac]);
+    }
+
+    #[test]
+    fn new_space_proposes_the_first_color_no_space_shows() {
+        use SpaceColor::*;
+        assert_eq!(SpaceColor::first_unused(&[]), Teal);
+        assert_eq!(SpaceColor::first_unused(&spaces(&[None, None])), Lilac);
+        assert_eq!(
+            SpaceColor::first_unused(&spaces(&[Some(Coral), None])),
+            Teal
+        );
+        assert_eq!(SpaceColor::first_unused(&spaces(&[None; 7])), Teal);
     }
 
     #[test]

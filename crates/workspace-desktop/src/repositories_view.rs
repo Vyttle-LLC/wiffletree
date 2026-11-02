@@ -2346,6 +2346,7 @@ mod tests {
         Space {
             id: SpaceId(name.to_lowercase()),
             name: name.into(),
+            color: None,
             description: String::new(),
             additions: String::new(),
             behaviors: Default::default(),

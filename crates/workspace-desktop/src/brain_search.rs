@@ -559,6 +559,7 @@ mod tests {
         let space = Space {
             id: SpaceId("sage".into()),
             name: "Sage".into(),
+            color: None,
             description: String::new(),
             additions: String::new(),
             behaviors: Default::default(),

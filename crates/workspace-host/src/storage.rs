@@ -41,6 +41,8 @@ struct SpaceFile {
     format: u32,
     id: SpaceId,
     name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    color: Option<SpaceColor>,
     #[serde(default)]
     description: String,
     /// Stored as `instructions`, the name every release reads, so a teammate on an older host
@@ -72,6 +74,7 @@ fn space_yaml(space: &Space) -> Result<Vec<u8>> {
         format: SPACE_FORMAT,
         id: space.id.clone(),
         name: space.name.clone(),
+        color: space.color,
         description: space.description.clone(),
         additions: space.additions.clone(),
         behaviors: space.behaviors.clone(),
@@ -108,6 +111,7 @@ fn read_space(content: &[u8], storage: SpaceStorage) -> Result<Space> {
     let space = Space {
         id: file.id,
         name: file.name,
+        color: file.color,
         description: file.description,
         additions: file.additions,
         behaviors: file.behaviors,
@@ -1803,6 +1807,7 @@ impl Host {
         let space = Space {
             id: SpaceId(new_id()),
             name: name.trim().into(),
+            color: setup.color,
             description: description.into(),
             additions: additions.into(),
             behaviors: Default::default(),
@@ -2477,6 +2482,7 @@ pub(crate) mod tests {
         let space = Space {
             id: SpaceId("sage-id".into()),
             name: "Sage".into(),
+            color: None,
             description: description.into(),
             additions: "Name the ticket.".into(),
             behaviors: Default::default(),
@@ -2501,6 +2507,7 @@ pub(crate) mod tests {
         static NO_SETUP: SpaceSetup = SpaceSetup {
             folder: None,
             create_repository: false,
+            color: None,
             compile: None,
         };
         NewSpace {
@@ -2584,6 +2591,10 @@ pub(crate) mod tests {
         assert_eq!(tracker.prefix, "WOOD");
         let file = fs::read(in_folder.join("spaces/woodworking/space.yaml")).unwrap();
         assert_eq!(read_space(&file, space.storage.clone()).unwrap(), space);
+        assert!(
+            !String::from_utf8(file).unwrap().contains("color"),
+            "none chosen"
+        );
         // Personal, from the store's upgrade, gets its repository at start, once.
         let personal = host.storage_folder(&personal(&host).storage.repository);
         assert_eq!(
@@ -3349,6 +3360,7 @@ repository_settings:
         let setup = SpaceSetup {
             folder: Some("tracking/".into()),
             create_repository: false,
+            color: Some(SpaceColor::Gold),
             compile: Some(at("06:00")),
         };
         let local = host
@@ -3356,6 +3368,10 @@ repository_settings:
             .unwrap()
             .space;
         assert_eq!(local.storage.root, "tracking");
+        let clone = host.storage_folder(&local.storage.repository);
+        let file = fs::read(clone.join("tracking/spaces/woodworking/space.yaml")).unwrap();
+        assert!(String::from_utf8_lossy(&file).contains("color: gold"));
+        assert_eq!(read_space(&file, local.storage.clone()).unwrap(), local);
         assert_eq!(host.tracker(&local).unwrap().compile, Some(at("06:00")));
         let clone = host.storage_folder(&local.storage.repository);
         let first = committed(&clone);
@@ -3425,6 +3441,7 @@ repository_settings:
         let setup = SpaceSetup {
             folder: Some("elsewhere".into()),
             create_repository: false,
+            color: None,
             compile: Some(at("06:00")),
         };
         let added = std::slice::from_ref(&sage.id);

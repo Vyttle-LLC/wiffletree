@@ -8,6 +8,7 @@ use gpui_component::{
     checkbox::Checkbox,
     input::{Input, InputEvent, Textarea, TextareaState},
     menu::{DropdownMenu, PopupMenuItem},
+    tooltip::Tooltip,
 };
 use linear_import_view::LinearImportPanel;
 use repository_box::BringingIn;
@@ -72,6 +73,8 @@ pub(super) struct SpacesPage {
     choice: RepositoryChoice,
     /// New Space compiles the wiki on this Mac.
     compile_here: bool,
+    /// New Space's color.
+    new_color: SpaceColor,
     /// The prefix New proposed from the name, which follows the name until the human types.
     prefix_proposed: Option<String>,
     defaults: Option<SpaceFormDefaults>,
@@ -139,6 +142,7 @@ impl SpacesPage {
             brain_folder_input: input(SpaceBrain::DEFAULT_FOLDER, window, cx),
             choice: RepositoryChoice::Create,
             compile_here: true,
+            new_color: SpaceColor::Teal,
             prefix_proposed: None,
             defaults: None,
             protect_refused: None,
@@ -663,6 +667,12 @@ impl SpacesPage {
             )
             .child(row("Name", Input::new(&self.name).small(), None, p))
             .child(row(
+                "Color",
+                self.color_field(space, p, cx),
+                Some(COLOR_CAPTION.into()),
+                p,
+            ))
+            .child(row(
                 "What belongs here",
                 Textarea::new(&self.description).w_full(),
                 Some(ROUTER.into()),
@@ -715,6 +725,52 @@ impl SpacesPage {
                     .on_click(cx.listener(|view, _, window, cx| view.save(window, cx))),
                 ),
         )
+    }
+
+    fn color_field(&self, space: &Space, p: Palette, cx: &mut Context<Self>) -> Div {
+        let spaces = self.spaces();
+        let at = spaces.iter().position(|s| s.id == space.id).unwrap_or(0);
+        let id = space.id.clone();
+        let weak = cx.weak_entity();
+        swatches(
+            "space-color",
+            SpaceColor::of(spaces, at),
+            p,
+            move |color, window, cx| {
+                let id = id.clone();
+                let _ = weak.update(cx, |view, cx| view.set_color(&id, color, window, cx));
+            },
+        )
+    }
+
+    /// Saves a Space's color at once, over the Space as it is now, as a commit like any edit.
+    fn set_color(
+        &mut self,
+        id: &SpaceId,
+        color: SpaceColor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(latest) = self.spaces().iter().find(|s| &s.id == id).cloned() else {
+            return;
+        };
+        if latest.color == Some(color) {
+            return;
+        }
+        let colored = Space {
+            color: Some(color),
+            ..latest
+        };
+        self.ask(
+            ask::update_space(colored),
+            window,
+            cx,
+            |_, saved, window, cx| {
+                if let Err(error) = saved {
+                    toast_error(error, window, cx);
+                }
+            },
+        );
     }
 
     fn error_line(&self, error: &str, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -1131,12 +1187,53 @@ pub(super) fn space_mark(color: Hsla) -> Div {
     div().size(px(8.)).flex_none().rounded(px(2.)).bg(color)
 }
 
-/// Each Space's color, by its place in the list.
+/// Each Space's color: its own, or else the one its place in the list gives it.
 pub(super) fn space_color(spaces: &[Space], id: &SpaceId, p: Palette) -> Hsla {
-    let colors = [p.focus, p.blue, p.magenta, p.green, p.yellow, p.accent];
     let at = spaces.iter().position(|s| &s.id == id).unwrap_or(0);
-    colors[at % colors.len()]
+    palette_color(SpaceColor::of(spaces, at), p)
 }
+
+fn palette_color(color: SpaceColor, p: Palette) -> Hsla {
+    match color {
+        SpaceColor::Teal => p.focus,
+        SpaceColor::Coral => p.accent,
+        SpaceColor::Lilac => p.magenta,
+        SpaceColor::Gold => p.yellow,
+        SpaceColor::Sky => p.blue,
+        SpaceColor::Sage => p.green,
+        SpaceColor::Rose => p.red,
+    }
+}
+
+/// The seven colors to pick from, `picked` outlined; `pick` runs with the one clicked.
+fn swatches(
+    id: &'static str,
+    picked: SpaceColor,
+    p: Palette,
+    pick: impl Fn(SpaceColor, &mut Window, &mut App) + 'static,
+) -> Div {
+    let pick = std::rc::Rc::new(pick);
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(10.))
+        .children(SpaceColor::ALL.into_iter().map(|color| {
+            let pick = pick.clone();
+            div()
+                .id(SharedString::from(format!("{id}-{}", color.label())))
+                .size(px(22.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .bg(palette_color(color, p))
+                .border_2()
+                .border_color(if color == picked { p.text } else { p.base })
+                .tooltip(move |window, cx| Tooltip::new(color.label()).build(window, cx))
+                .on_click(move |_, window, cx| pick(color, window, cx))
+        }))
+}
+
+const COLOR_CAPTION: &str = "Marks this Space in the sidebar, the Assistant and the project list.";
 
 /// Stored on GitHub, so other people can read it.
 pub(super) fn is_shared(space: &Space) -> bool {
@@ -1422,6 +1519,7 @@ mod tests {
         Space {
             id: SpaceId(name.to_lowercase()),
             name: name.into(),
+            color: None,
             description: String::new(),
             additions: String::new(),
             behaviors: Default::default(),

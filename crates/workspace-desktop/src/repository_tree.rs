@@ -417,6 +417,7 @@ mod tests {
         Space {
             id: SpaceId(id.into()),
             name: id.into(),
+            color: None,
             description: String::new(),
             additions: String::new(),
             behaviors: Default::default(),
