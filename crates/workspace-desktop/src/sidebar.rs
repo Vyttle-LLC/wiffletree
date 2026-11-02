@@ -234,7 +234,7 @@ impl Sidebar {
             self.name_new_project(window, cx);
         }
         if selection {
-            self.reveal_selected_space();
+            self.reveal_selected();
         }
         let host_version = self.bridge.host_version();
         let host_moved = host_version != self.host_version;
@@ -256,12 +256,17 @@ impl Sidebar {
         let index = self.shared.index.as_ref()?;
         Some(tree::section_of(index, index.project(project_id)?))
     }
-    /// Opens the collapsed Space of a project selected from elsewhere, such as the Inbox, so its
-    /// row shows.
-    fn reveal_selected_space(&mut self) {
-        let selected = self.shared.selected_session();
-        let space = selected.and_then(|session| self.section_of(&session.project_id));
-        if let Some(space) = space {
+    /// Opens the collapsed Space and group of a project selected from elsewhere, such as the
+    /// Inbox, so its row shows.
+    fn reveal_selected(&mut self) {
+        let Some(project_id) = self.shared.selected_session().map(|s| s.project_id.clone()) else {
+            return;
+        };
+        let index = self.shared.index.as_ref();
+        let root = index.and_then(|index| index.roots(&project_id).next());
+        let word = root.map(|root| tree::group_key(&root.name));
+        if let (Some(space), Some(word)) = (self.section_of(&project_id), word) {
+            self.collapsed_groups.remove(&(space.clone(), word));
             self.collapsed_spaces.remove(&space);
         }
     }
