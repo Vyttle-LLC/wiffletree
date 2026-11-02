@@ -784,10 +784,11 @@ mod tests {
         Bridge, LinkAction, Linked, candidates, in_time, link_action, local_target, reference,
         resolve, wait_for_links,
     };
-    use crate::bridge::tests::serve;
+    use crate::{bridge::tests::serve, click_slop::ClickSlop};
     use gpui::{
-        ClickEvent, KeyboardClickEvent, MouseButton, MouseClickEvent, MouseUpEvent,
-        TouchClickEvent, point, px,
+        ClickEvent, Context, IntoElement, KeyboardClickEvent, Modifiers, MouseButton,
+        MouseClickEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, Styled as _,
+        TestAppContext, TouchClickEvent, VisualTestContext, Window, div, point, px,
     };
     use std::{
         fs,
@@ -1251,5 +1252,59 @@ mod tests {
         assert_eq!(link_action(file, &long_press), LinkAction::Nothing);
         let back = mouse(MouseButton::Navigate(gpui::NavigationDirection::Back));
         assert_eq!(link_action(file, &back), LinkAction::Nothing);
+    }
+
+    /// A window showing one message under the window's text selection and click slop, as the
+    /// main window does.
+    struct Message(Linked, ClickSlop);
+    impl Render for Message {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(400.))
+                .child(self.1.element())
+                .child(gpui_base::TextSelectionLayer)
+                .child(self.0.view())
+        }
+    }
+
+    /// A window showing a web link at its top left, and a point on the link.
+    fn web_link(cx: &mut TestAppContext) -> (&mut VisualTestContext, Point<Pixels>) {
+        let served = serve(|_| {});
+        cx.update(gpui_component::init);
+        let body = "[open the example page](https://example.com/)";
+        let linked = Linked::new("m", body, Vec::new().into(), &served.bridge);
+        let (_, cx) = cx.add_window_view(|_, _| Message(linked, ClickSlop::default()));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        (cx, point(px(20.), px(8.)))
+    }
+
+    /// Moves the held left press to `to`, and paints the window, as the app does when anything
+    /// changes, such as a live chat or the selection.
+    fn hold_to(to: Point<Pixels>, cx: &mut VisualTestContext) {
+        cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    #[gpui::test]
+    fn a_click_that_wobbles_a_pixel_opens_the_link(cx: &mut TestAppContext) {
+        let (cx, at) = web_link(cx);
+        let wobbled = at + point(px(1.), px(1.));
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+        hold_to(wobbled, cx);
+        cx.simulate_mouse_up(wobbled, MouseButton::Left, Modifiers::default());
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com/"));
+    }
+
+    #[gpui::test]
+    fn a_drag_across_the_link_selects_it_without_opening_it(cx: &mut TestAppContext) {
+        let (cx, at) = web_link(cx);
+        let dragged = at + point(px(60.), px(0.));
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+        hold_to(at + point(px(2.), px(0.)), cx);
+        hold_to(dragged, cx);
+        cx.simulate_mouse_up(dragged, MouseButton::Left, Modifiers::default());
+        assert_eq!(cx.opened_url(), None);
+        let selected = cx.update(gpui_base::TextSelection::selected_text);
+        assert!(selected.contains("the"), "selected {selected:?}");
     }
 }

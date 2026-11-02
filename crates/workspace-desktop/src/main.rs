@@ -13,6 +13,7 @@ mod brain_search;
 mod brains_view;
 mod bridge;
 mod browse;
+mod click_slop;
 mod composer_focus;
 mod conflict_card;
 mod connect_sheet;
@@ -78,6 +79,7 @@ mod welcome;
 mod wording;
 mod workspace_notes;
 use bridge::{Bridge, ChangedSteps};
+use click_slop::ClickSlop;
 use creation::{Creation, CreationForm, FromIssue};
 use gpui::{prelude::*, *};
 use gpui_component::{
@@ -1449,13 +1451,17 @@ struct HostWindow {
     /// Each host's workspace once shown, kept with its view, drafts and sends in flight, so
     /// switching back finds it as it was and only one workspace waits on each host's wakes.
     kept: std::collections::HashMap<HostChoice, Entity<Workspace>>,
+    click_slop: ClickSlop,
 }
 #[derive(Default)]
 struct MainShell(Option<WeakEntity<HostWindow>>);
 impl Global for MainShell {}
 impl Render for HostWindow {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        self.workspace.clone()
+        div()
+            .size_full()
+            .child(self.click_slop.element())
+            .child(self.workspace.clone())
     }
 }
 impl HostWindow {
@@ -1465,6 +1471,7 @@ impl HostWindow {
         Self {
             kept: [(selected, workspace.clone())].into(),
             workspace,
+            click_slop: ClickSlop::default(),
         }
     }
     /// Shows the selected host's workspace, built anew when it was never shown or `fresh`, as
