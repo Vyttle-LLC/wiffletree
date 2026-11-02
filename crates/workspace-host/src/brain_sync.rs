@@ -180,6 +180,9 @@ impl RuleSet for LogRules {
 pub(crate) enum Landed {
     /// Its commit is made; it landed when the push went through.
     Committed,
+    /// `main` already holds the run's own files, as a push whose answer was lost landed them, in
+    /// this commit.
+    AlreadyOnMain(String),
     /// `main` holds a cursor at or past the run's, which that Mac's commit wrote.
     CompiledElsewhere(Option<String>),
     /// Another Mac took the run's claim over.
@@ -192,17 +195,25 @@ pub(crate) enum Landed {
 /// What a landing's next step is on the head `remote`.
 pub(crate) enum Verdict {
     Land(Vec<(String, Vec<u8>)>),
+    /// `main` already holds the run's own files, in this commit.
+    AlreadyOnMain(String),
     /// `main` already holds a cursor at or past the run's, which that Mac's commit wrote.
     CompiledElsewhere(Option<String>),
 }
 
 impl Landing {
-    /// Reads this run against `remote`, the head it would land on: a cursor at or past its own
-    /// lands nothing, a wiki file changed there since the run's commit fails it, as does a path
-    /// through a symbolic link in the clone, and otherwise its exact files land.
+    /// Reads this run against `remote`, the head it would land on: its own files there mean it
+    /// landed, a cursor at or past its own lands nothing, a wiki file changed there since the
+    /// run's commit fails it, as does a path through a symbolic link in the clone, and otherwise
+    /// its exact files land.
     pub(crate) fn verdict(&self, clone: &Path, remote: &str) -> Result<Verdict> {
         let main = read_cursor(&file_at(clone, remote, &self.index));
         if at_or_past(clone, &main, &self.cursor) {
+            if self.holds_its_files(clone, remote) {
+                let last = ["log", "-1", "--format=%H", remote, "--", &self.index];
+                let commit = runtime::git_output(clone, &last)?;
+                return Ok(Verdict::AlreadyOnMain(commit.trim().to_owned()));
+            }
             return Ok(Verdict::CompiledElsewhere(cursor_machine(
                 clone,
                 remote,
@@ -224,6 +235,15 @@ impl Landing {
         Ok(Verdict::Land(
             self.files.iter().map(read).collect::<Result<_>>()?,
         ))
+    }
+    /// Whether `remote` holds every one of the run's files as the run wrote it.
+    fn holds_its_files(&self, clone: &Path, remote: &str) -> bool {
+        self.files.iter().all(|path| {
+            let there = format!("{remote}:{path}");
+            let there = runtime::git_bytes(clone, &["cat-file", "blob", &there], b"");
+            let here = fs::read(self.worktree.join(path));
+            matches!((there, here), (Ok(there), Ok(here)) if there == here)
+        })
     }
     /// The run's files `main` changed since its commit, which it may not overwrite with what it
     /// compiled from there.
@@ -313,6 +333,7 @@ impl RuleSet for WikiRules {
             "The repository moved while the run worked, so nothing landed; the next run compiles again"
         );
         match landing.verdict(clone, remote)? {
+            Verdict::AlreadyOnMain(commit) => self.ended = Some(Landed::AlreadyOnMain(commit)),
             Verdict::CompiledElsewhere(machine) => {
                 self.ended = Some(Landed::CompiledElsewhere(machine));
             }
@@ -605,6 +626,9 @@ impl Host {
                     shared::write_atomically(&clone.join(path), &content)?;
                 }
                 self.end_landing(&landing, CompileOutcome::Landed, None, Some(commit))
+            }
+            Landed::AlreadyOnMain(commit) => {
+                self.end_landing(&landing, CompileOutcome::Landed, None, Some(&commit))
             }
             Landed::CompiledElsewhere(machine) => {
                 let reason = compile::compiled_elsewhere(machine.as_deref());

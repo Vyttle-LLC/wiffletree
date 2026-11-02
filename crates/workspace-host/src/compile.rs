@@ -1852,6 +1852,9 @@ impl Host {
     fn land_locally(&mut self, landing: &Landing, clone: &Path) -> Result<()> {
         let head = runtime::git_output(clone, &["rev-parse", "HEAD"])?;
         match landing.verdict(clone, head.trim())? {
+            brain_sync::Verdict::AlreadyOnMain(commit) => {
+                self.end_landing(landing, CompileOutcome::Landed, None, Some(&commit))
+            }
             brain_sync::Verdict::CompiledElsewhere(machine) => {
                 let reason = compiled_elsewhere(machine.as_deref());
                 let outcome = CompileOutcome::CompiledElsewhere;
@@ -1919,7 +1922,9 @@ impl Host {
         self.end_compile(&mut run, outcome, reason)
     }
 
-    /// Ends the runs a stopped host cut off: their sessions' turns cannot finish any longer.
+    /// Ends the runs a stopped host cut off, as their sessions' turns cannot finish any longer. A
+    /// run that finished keeps its output: a local one lands now, and a GitHub one waits for the
+    /// repository's next pass.
     pub(crate) fn end_interrupted_compiles(&mut self) -> Result<()> {
         let running: Vec<String> = (self.db.prepare(
             "SELECT id FROM compile_runs WHERE json_extract(data,'$.outcome')='running'",
@@ -1928,8 +1933,25 @@ impl Host {
         .collect::<rusqlite::Result<_>>()?;
         for id in running {
             let mut run = self.compile_run(&id)?;
-            let reason = "Wiffletree stopped while the run was in progress".to_owned();
-            self.end_compile(&mut run, CompileOutcome::Failed, reason)?;
+            let landing = (self.compile_work(&id).ok()).and_then(|work| work.landing);
+            let waiting = landing.filter(|landing| landing.worktree.exists());
+            let storage = (self.brain(&run.repository))
+                .and_then(|brain| self.brain_home(&brain))
+                .map(|(storage, _)| storage);
+            match (waiting, storage) {
+                (Some(_), Ok(storage)) if Self::storage_key(&storage).is_some() => {}
+                (Some(landing), Ok(storage)) => {
+                    let clone = self.storage_folder(&storage);
+                    if let Err(error) = self.land_locally(&landing, &clone) {
+                        let reason = format!("{error:#}");
+                        self.end_compile(&mut run, CompileOutcome::Failed, reason)?;
+                    }
+                }
+                _ => {
+                    let reason = "Wiffletree stopped while the run was in progress".to_owned();
+                    self.end_compile(&mut run, CompileOutcome::Failed, reason)?;
+                }
+            }
         }
         Ok(())
     }
@@ -4185,6 +4207,126 @@ mod tests {
             .unwrap();
         b.pull();
         assert_eq!(b.run_named(&run).outcome, CompileOutcome::Landed);
+    }
+
+    #[test]
+    fn a_finished_run_keeps_its_output_through_a_restart_and_lands_at_the_next_pass() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        let (run, _) = b.finished(&relay_note(&id(1)));
+        b.f.host.end_interrupted_compiles().unwrap();
+        assert_eq!(b.run_named(&run).outcome, CompileOutcome::Running);
+        b.pull();
+        let run = b.run_named(&run);
+        assert_eq!(run.outcome, CompileOutcome::Landed);
+        assert_eq!(run.commit.as_deref(), Some(&*b.github.log("%H")[0]));
+        assert_eq!(b.tip().unwrap().state, ClaimState::Landed);
+    }
+
+    #[test]
+    fn a_finished_run_whose_output_is_gone_fails_at_a_restart_and_releases_its_claim() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        let (run, work) = b.finished(&relay_note(&id(1)));
+        fs::remove_dir_all(&work.worktree).unwrap();
+        b.f.host.end_interrupted_compiles().unwrap();
+        b.prepare();
+        assert_eq!(b.run_named(&run).outcome, CompileOutcome::Failed);
+        assert_eq!(b.tip().unwrap().state, ClaimState::Released);
+    }
+
+    #[test]
+    fn a_landing_whose_push_landed_with_its_answer_lost_reads_as_landed_with_its_commit() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        let (run, _) = b.finished(&relay_note(&id(1)));
+        let real = b.tools.git.clone();
+        let answerless = real.clone();
+        b.tools.git = std::sync::Arc::new(move |path: &Path, args: &[&str]| {
+            let answer = answerless(path, args)?;
+            Ok(match publish::subcommand(args) {
+                "push" => runtime::GitAnswer {
+                    status: publish::tests::exit(128),
+                    output: String::new(),
+                    error: "fatal: the remote end hung up unexpectedly".into(),
+                },
+                _ => answer,
+            })
+        });
+        let _ = b.sync_answering();
+        b.tools.git = real;
+        b.prepare();
+        let run = b.run_named(&run);
+        assert_eq!(run.outcome, CompileOutcome::Landed, "{}", run.reason);
+        let index = format!("{BRAIN}/notes/INDEX.md");
+        let last = ["log", "-1", "--format=%H", "main", "--", index.as_str()];
+        let landed = crate::test_support::git(&b.github.bare, &last);
+        assert_eq!(run.commit.as_deref(), Some(landed.trim()));
+    }
+
+    #[test]
+    fn a_local_run_that_finished_lands_at_a_restart() {
+        let mut f = publish::tests::fixture();
+        let home = f.host.create_space("Home", "", "", None).unwrap().space;
+        (f.host
+            .move_project_to_space(&f.coordinator.project_id, &home.id))
+        .unwrap();
+        let repository = home.storage.repository.key();
+        let clone = f.host.storage_folder(&home.storage.repository);
+        let (path, text) = relay(1);
+        let file = clone.join(BRAIN).join(&path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, text).unwrap();
+        storage::commit_local(&clone, &[&format!("{BRAIN}/{path}")], "An entry").unwrap();
+        // A run the host stopped between its finish and its commit: its files are in a worktree.
+        let run = (f
+            .host
+            .start_compile(&repository, CompileTrigger::RunNow, None))
+        .unwrap()
+        .unwrap();
+        f.host.take_compile_preparations();
+        let worktree = tempfile::tempdir().unwrap();
+        let index = format!("{BRAIN}/notes/INDEX.md");
+        fs::create_dir_all(worktree.path().join(BRAIN).join("notes")).unwrap();
+        let cursor = Cursor {
+            through: Some(
+                runtime::git_output(&clone, &["rev-parse", "HEAD"])
+                    .unwrap()
+                    .trim()
+                    .to_owned(),
+            ),
+            after: vec![],
+        };
+        fs::write(worktree.path().join(&index), write_cursor("", &cursor)).unwrap();
+        let landing = Landing {
+            run: run.id.clone(),
+            worktree: worktree.path().to_owned(),
+            head: cursor.through.clone().unwrap(),
+            cursor: cursor.clone(),
+            files: vec![index.clone()],
+            index: index.clone(),
+            entries: 1,
+            claim: None,
+        };
+        let work = Work {
+            head: landing.head.clone(),
+            brain_dir: BRAIN.into(),
+            worktree: worktree.path().to_owned(),
+            entries: vec![],
+            verification: vec![],
+            cursor,
+            landing: Some(landing),
+        };
+        (f.host.db)
+            .execute(
+                "UPDATE compile_runs SET work=?2 WHERE id=?1",
+                params![run.id, serde_json::to_string(&work).unwrap()],
+            )
+            .unwrap();
+        f.host.end_interrupted_compiles().unwrap();
+        let run = f.host.compile_run(&run.id).unwrap();
+        assert_eq!(run.outcome, CompileOutcome::Landed, "{}", run.reason);
+        assert!(clone.join(&index).is_file());
     }
 
     #[test]
