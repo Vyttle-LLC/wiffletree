@@ -105,6 +105,10 @@ The service runs stage, copy and push off the host thread as jobs, each answerin
 
 `CheckStorageMove` answers with `StorageMove`, and is a read for remote access, as `CheckStorageRepository` is. `MoveStorage` is a change, Control only, as `JoinSpaces` is. Both are in `is_human_only`, so an agent on the host's socket is refused them, and no tool names them.
 
+### Beside `one-space-repository`
+
+This change keeps today's rules. `one-space-repository` drops the brain refusal and has Move carry a Space's folder with its logs, wiki and `compilers/` and set `SpaceStorage.root`; that waits for its own code. Both changes modify "The Spaces page", so whichever archives second must keep Move storage… in its wording.
+
 ## Risks
 
 - **A busy Space may need a second Move.** A write during the move fails it; the retry is small because only the difference is pushed.
