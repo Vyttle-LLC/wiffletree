@@ -721,6 +721,39 @@ fn a_brain_compile_runs_under_its_bundled_procedure_with_no_skill() {
 }
 
 #[test]
+fn no_bundled_text_names_a_retired_brain_skill_or_sends_entries_by_pull_request() {
+    let mut texts: Vec<String> = Role::ALL.into_iter().map(provider::skill).collect();
+    texts.extend(Skill::ALL.into_iter().map(|s| skills::stock(s).to_owned()));
+    for tools in [
+        mcp::tools(),
+        mcp::thread_tools(),
+        mcp::issue_thread_tools(),
+        mcp::job_run_tools(),
+        mcp::compile_tools(),
+    ] {
+        let tools = tools.as_array().unwrap().clone();
+        texts.extend(tools.iter().map(|t| t["description"].to_string()));
+    }
+    for text in &texts {
+        for retired in ["brain-log", "brain-query", "brain-compile", "brain-reconcile"] {
+            assert!(!text.contains(retired), "{retired} in {text}");
+        }
+        // A sentence about the brain or its entries says nothing of batches or pull requests.
+        for sentence in text.split(". ") {
+            let lower = sentence.to_lowercase();
+            if lower.contains("brain") || lower.contains("log_work") {
+                for word in ["batch", "pull request", " pr "] {
+                    assert!(!lower.contains(word), "{word}: {sentence}");
+                }
+            }
+        }
+    }
+    for role in [Role::ProjectOrchestrator, Role::Implementer] {
+        assert!(core(role).contains("each entry lands straight in the project's brain"));
+    }
+}
+
+#[test]
 fn there_are_five_versioned_stock_skills_and_none_opens_a_pull_request() {
     assert_eq!(Skill::ALL.len(), 5);
     assert_eq!(Skill::for_role(Role::Assistant), Some(Skill::Assisting));
