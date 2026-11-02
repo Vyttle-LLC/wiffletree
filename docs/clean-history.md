@@ -11,7 +11,7 @@ Cleaning history cannot reach copies that already exist: every Mac's clone, a fo
 
 ## 2. Remove it from the file
 
-Press **Open the file** on the alert, remove the text, and save. Wiffletree pushes the change like any other. At its next pull each Mac scans the file again and closes its own alert once the rule no longer fires there.
+**Open the file** shows it on GitHub at the commit the alert names. Remove the text on `main`: edit an issue in Wiffletree, which pushes the change like any other, or edit the file in GitHub's web editor. At its next pull each Mac scans the file again and closes its own alert once the rule no longer fires there.
 
 ## 3. Rewrite history
 
