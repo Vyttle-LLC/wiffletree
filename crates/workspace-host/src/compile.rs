@@ -454,8 +454,8 @@ pub(crate) enum Stopped {
     CompiledOn(String),
     /// Its Brain compiler row waits, or it has none.
     Waits(String),
-    /// A live claim stands at this tip.
-    Live(Box<Tip>),
+    /// That Mac holds a live claim.
+    Live(String),
     /// Another Mac's claim beat its own.
     Lost,
     /// GitHub turned its claim down.
@@ -560,7 +560,8 @@ impl Prepare {
         }
         if let Some(claimer) = &self.claimer {
             if let Some(tip) = tip.as_ref().filter(|tip| !tip.free(now())) {
-                return Err(Stopped::Live(Box::new(tip.clone())));
+                let holder = tip.claim.as_ref().map(|claim| claim.machine.clone());
+                return Err(Stopped::Live(holder.unwrap_or_default()));
             }
             let claiming = claimer.claim(checkout, &self.run_id, tip.as_ref(), &tools.git);
             match claiming.map_err(|_| Stopped::Unreachable)? {
@@ -803,7 +804,7 @@ fn queue_text(existing: &str, ruled: &HashSet<String>, queued: &[String]) -> Str
 /// Whether `source` has the shape of an entry's id, a ULID. A note from before this procedure
 /// may list file paths, which stay until a page is rewritten.
 fn is_entry_id(source: &str) -> bool {
-    brains::ulid_time(source).is_some()
+    brain_index::is_ulid(source)
 }
 
 /// Why a compile session's changes may not be pushed, checked in its worktree: only the wiki
@@ -1164,7 +1165,6 @@ impl Host {
             if tip.landed(&owed.due).is_some() {
                 return self.clear_owed(&repository);
             }
-            self.compile_tips.insert(repository.clone(), tip.clone());
         }
         if reading.nothing_pending {
             return self.clear_owed(&repository);
@@ -1281,19 +1281,9 @@ impl Host {
         })
     }
 
-    /// Why Run now waits on a wiki: a run in progress here, or a live claim last read for it.
-    fn run_now_waits(&self, repository: &str) -> Result<Option<String>> {
-        if self.running_compile(repository)?.is_some() {
-            return Ok(Some("A compile run is in progress".into()));
-        }
-        let live = (self.compile_tips.get(repository))
-            .filter(|tip| !tip.free(now()))
-            .and_then(|tip| tip.claim.as_ref());
-        Ok(live.map(|claim| format!("The wiki is compiling on {}", claim.machine)))
-    }
-
-    /// Run now: starts a run through the scheduler, or says why it waits. A claim decides between
-    /// Macs that press it at once.
+    /// Run now: starts a run through the scheduler, or says why it waits. Its run reads the tip
+    /// fresh, so a live claim on another Mac ends it with no model call, saying so, and a claim
+    /// decides between Macs that press it at once.
     pub fn run_brain_compile(&mut self, repository: &str) -> Result<CompileRun> {
         let brain = self.brain(repository)?;
         let (storage, _) = self.brain_home(&brain)?;
@@ -1301,9 +1291,10 @@ impl Host {
             self.compiles_here(&storage)?,
             "Compiling is off on this Mac. Turn on Compile on this Mac first."
         );
-        if let Some(waits) = self.run_now_waits(&brain.repository)? {
-            bail!("{waits}");
-        }
+        ensure!(
+            self.running_compile(&brain.repository)?.is_none(),
+            "A compile run is in progress"
+        );
         self.refresh_compile_jobs()?;
         self.run_job_now(&compile_key(&brain.repository))?;
         (self
@@ -1477,11 +1468,14 @@ impl Host {
     /// reading the tip from then on, and when it could not reach GitHub; otherwise it is done.
     fn compile_stopped(&mut self, run: &mut CompileRun, stopped: Stopped) -> Result<()> {
         let repository = run.repository.clone();
+        // A Run now owes nothing, and leaves a due run as it stood.
         let lost = |host: &Self, run: &CompileRun| -> Result<()> {
-            host.db.execute(
-                "UPDATE compile_owed SET lost_run=?2 WHERE repository=?1",
-                params![repository, run.id],
-            )?;
+            if run.trigger != CompileTrigger::RunNow {
+                host.db.execute(
+                    "UPDATE compile_owed SET lost_run=?2 WHERE repository=?1",
+                    params![repository, run.id],
+                )?;
+            }
             Ok(())
         };
         match stopped {
@@ -1489,10 +1483,11 @@ impl Host {
                 let reason = "GitHub could not be reached, so nothing was claimed".to_owned();
                 self.end_compile(run, CompileOutcome::Waiting, reason)
             }
-            Stopped::Live(tip) => {
-                let machine = (tip.claim.as_ref()).map_or("another Mac", |c| c.machine.as_str());
-                let reason = format!("Lost to {machine}");
-                self.compile_tips.insert(repository.clone(), *tip.clone());
+            Stopped::Live(machine) => {
+                let reason = match run.trigger {
+                    CompileTrigger::RunNow => format!("Compiling on {machine}, so no run started"),
+                    _ => format!("Lost to {machine}"),
+                };
                 lost(self, run)?;
                 self.end_compile(run, CompileOutcome::Lost, reason)
             }
@@ -2019,7 +2014,8 @@ impl Host {
             });
             states.push(BrainCompileState {
                 behind: self.falling_behind(&brain, &compilers, pending, waiting_since)?,
-                run_now_waits: self.run_now_waits(&brain.repository)?,
+                run_now_waits: (self.running_compile(&brain.repository)?)
+                    .map(|_| "A compile run is in progress".into()),
                 compiles_here: self.compiles_here(&storage)?,
                 last_run,
                 compilers,
@@ -2066,13 +2062,16 @@ impl Host {
         .map_or("no compile yet".to_owned(), |run| {
             format!("last run {}", memory::local_date(run.started_at))
         });
-        let missed = jobs::times_since(&schedule(&compile)?, waiting_since, now())?;
-        Ok((missed >= MISSED_TIMES_BEHIND).then(|| {
-            format!(
-                "{name}'s wiki is falling behind: {}, {last_run}.",
-                entries_waiting(pending).to_lowercase()
-            )
-        }))
+        // A shared file may hold a time the schedule cannot read, as `refresh_compile_jobs` logs.
+        let missed = schedule(&compile).and_then(|s| jobs::times_since(&s, waiting_since, now()));
+        Ok(
+            (missed.is_ok_and(|missed| missed >= MISSED_TIMES_BEHIND)).then(|| {
+                format!(
+                    "{name}'s wiki is falling behind: {}, {last_run}.",
+                    entries_waiting(pending).to_lowercase()
+                )
+            }),
+        )
     }
 
     /// Every open conflict of this Mac's wikis, as cards for the Inbox of each project in a Space
@@ -3757,19 +3756,24 @@ mod tests {
         assert_eq!(lost.reason, format!("Lost to {THEIR_MAC}"));
         assert!(b.owed().unwrap().lost_run.is_some());
         assert_eq!(b.f.host.sessions().unwrap().len(), sessions);
-        // Run now says the wiki is compiling on that Mac.
-        let waits = b.f.host.run_brain_compile(REPO).unwrap_err();
-        assert_eq!(
-            format!("{waits:#}"),
-            format!("The wiki is compiling on {THEIR_MAC}")
-        );
-        assert_eq!(
-            b.state().run_now_waits,
-            Some(format!("The wiki is compiling on {THEIR_MAC}"))
-        );
         // A pull with the claim still live changes nothing and adds no row.
         b.pull();
-        assert_eq!(b.runs().len(), 2 - 1);
+        assert_eq!(b.runs().len(), 1);
+        // Run now starts no run, and the page says the wiki is compiling on that Mac.
+        b.f.host.run_brain_compile(REPO).unwrap();
+        b.prepare();
+        let refused = b.state().last_run.unwrap();
+        assert_eq!(refused.outcome, CompileOutcome::Lost);
+        assert_eq!(
+            refused.reason,
+            format!("Compiling on {THEIR_MAC}, so no run started")
+        );
+        assert_eq!(b.f.host.sessions().unwrap().len(), sessions);
+        assert_eq!(
+            b.owed().unwrap().lost_run,
+            Some(lost.id.clone()),
+            "the due run stands"
+        );
         b.teammate(ClaimState::Released, now(), DUE);
         b.pull();
         b.prepare();
@@ -3778,6 +3782,25 @@ mod tests {
         assert_eq!(b.tip().unwrap().run, run.id);
         assert_eq!(b.claims(), 3, "as a child of the release");
         assert!(b.owed().is_none());
+    }
+
+    #[test]
+    fn run_now_starts_as_soon_as_a_run_on_another_mac_has_ended() {
+        for ended in [ClaimState::Landed, ClaimState::Released] {
+            let mut b = brained();
+            b.merge(&[relay(1)]);
+            b.with_compiler_row();
+            b.teammate(ClaimState::Claimed, now(), DUE);
+            b.f.host.run_brain_compile(REPO).unwrap();
+            b.prepare();
+            assert_eq!(b.runs()[0].outcome, CompileOutcome::Lost);
+            b.teammate(ended, now(), DUE);
+            b.f.host.run_brain_compile(REPO).unwrap();
+            b.prepare();
+            let run = b.runs().remove(0);
+            assert_eq!(run.outcome, CompileOutcome::Running, "{}", run.reason);
+            assert_eq!(b.tip().unwrap().run, run.id);
+        }
     }
 
     #[test]
@@ -3802,7 +3825,6 @@ mod tests {
             }),
         };
         assert!(expired.free(now()));
-        b.f.host.compile_tips.remove(REPO);
         b.teammate(ClaimState::Claimed, now() - 61 * MINUTE, DUE);
         b.pull();
         b.prepare();
@@ -4120,6 +4142,49 @@ mod tests {
         let failed = b.tool(&session, "finish_compile", json!({"summary": "Done"}));
         assert!(format!("{:#}", failed.unwrap_err()).contains("which is no entry file"));
         assert_eq!(b.run_named(&run).outcome, CompileOutcome::Failed);
+    }
+
+    #[test]
+    fn a_compile_time_the_schedule_cannot_read_stops_only_that_wikis_schedule() {
+        let mut b = brained();
+        let tracker = format!("{FOLDER}/wiffletree-issues.yaml");
+        let edited =
+            "format: 1\nprefix: SAGE\ncompile:\n  at: \"6:00\"\n  timezone: America/Chicago\n";
+        b.github.commit(&tracker, edited);
+        b.merge(&[relay(1)]);
+        assert_eq!(b.state().behind, None);
+        assert_eq!(b.state().pending, 1);
+        b.f.host.brains_page().unwrap();
+        let space = b.sage.id.clone();
+        b.f.host.storage_status(&space).unwrap();
+        b.f.host.refresh_compile_jobs().unwrap();
+        let job = b.f.host.built_in(&compile_key(REPO)).unwrap();
+        assert_eq!(job.schedule, None, "only Run now until the file is fixed");
+    }
+
+    #[test]
+    fn only_a_whole_ulid_is_an_entry_id_and_a_path_shaped_source_is_left_alone() {
+        assert!(is_entry_id(&id(1)));
+        let path = "strategymemo-2026-06-01.md";
+        assert_eq!(path.len(), 26);
+        for source in [path, "notes/pri\u{e9}ces-du-marche.md"] {
+            assert!(!is_entry_id(source), "{source}");
+            assert_eq!(brains::ulid_time(source), None);
+        }
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        let (run, session, work) = b.started();
+        let page = work.worktree.join(BRAIN).join("notes/Old.md");
+        fs::create_dir_all(page.parent().unwrap()).unwrap();
+        fs::write(
+            &page,
+            format!("---\ntitle: Old\nkind: observation\nupdated: 2026-11-01\nsources: [{path}, {}]\n---\nOld.\n", id(1)),
+        )
+        .unwrap();
+        b.tool(&session, "finish_compile", json!({"summary": "Done"}))
+            .unwrap();
+        b.pull();
+        assert_eq!(b.run_named(&run).outcome, CompileOutcome::Landed);
     }
 
     #[test]

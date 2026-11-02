@@ -34,7 +34,7 @@ const ULID_ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 
 /// When the ULID `id` was made; `None` for another kind of id, such as a legacy entry's.
 pub(crate) fn ulid_time(id: &str) -> Option<i64> {
-    (id.len() == 26).then_some(())?;
+    brain_index::is_ulid(id).then_some(())?;
     id[..10].bytes().try_fold(0i64, |time, byte| {
         let digit = ULID_ALPHABET.iter().position(|&c| c == byte)?;
         Some(time << 5 | digit as i64)

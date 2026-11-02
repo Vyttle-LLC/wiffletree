@@ -215,8 +215,6 @@ pub struct Host {
     pub(crate) compile_tip_reads: Vec<compile::TipRead>,
     /// Ended runs' claims to end on GitHub, off the host thread.
     pub(crate) claim_ends: Vec<compile::ClaimEnd>,
-    /// The claim branch's tip as a run last read it, by repository, for what Run now says.
-    pub(crate) compile_tips: std::collections::HashMap<String, repos::Tip>,
 }
 /// A report that set its ticket's state while the reporter's turn ran.
 pub(crate) struct MidTurnReport {
@@ -430,7 +428,6 @@ impl Host {
             compile_preparations: vec![],
             compile_tip_reads: vec![],
             claim_ends: vec![],
-            compile_tips: std::collections::HashMap::new(),
         };
         // Before anything reads or writes a shared setting, so the shared folder is in place:
         // clones an earlier release named `<owner>-<name>` first, then one still in `shared/`.

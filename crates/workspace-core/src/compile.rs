@@ -129,8 +129,7 @@ pub struct BrainCompileState {
     pub last_run: Option<CompileRun>,
     /// Entries on `main` added since the brain's last compile.
     pub pending: usize,
-    /// Why Run now waits, when it does: a run in progress here or on another Mac, or compiling
-    /// being off here.
+    /// Why Run now waits, when it does: a run in progress here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_now_waits: Option<String>,
     /// This Mac compiles the wiki.

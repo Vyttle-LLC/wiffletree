@@ -177,7 +177,7 @@ fn is_digits(text: &str) -> bool {
 }
 
 /// A lowercase ULID, as entry ids are.
-fn is_ulid(text: &str) -> bool {
+pub(crate) fn is_ulid(text: &str) -> bool {
     text.len() == 26
         && text
             .bytes()
