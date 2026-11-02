@@ -572,7 +572,6 @@ impl Inspector {
         let Some(space) = space else {
             return section.child(hint("No Space", p));
         };
-        let local = snapshot.space_locals.get(&space.id);
         section = section.child(
             div()
                 .flex()
@@ -586,7 +585,7 @@ impl Inspector {
                 .child(space.name.clone()),
         );
         section.child(hint(
-            format!("Logs to {}.", spaces_view::brain_label(space, local)),
+            format!("Logs to {}.", spaces_view::brain_label(space)),
             p,
         ))
     }
@@ -1070,13 +1069,17 @@ impl Inspector {
                 .find(|item| !item.is_permission())
                 .map(|item| item.id.clone())
         });
-        // Issue notes first, under their own label, as every project's Inbox shows them.
+        // Alerts at the very top, then issue notes under their own label, as every project's
+        // Inbox shows them.
+        let (alerts, notes): (Vec<&WorkspaceNote>, Vec<&WorkspaceNote>) =
+            (notes.into_iter()).partition(|note| matches!(note, WorkspaceNote::Alert(_)));
         let (issues, others): (Vec<&WorkspaceNote>, Vec<&WorkspaceNote>) =
             (notes.into_iter()).partition(|note| matches!(note, WorkspaceNote::Issue(_)));
         let mut body = div()
             .flex()
             .flex_col()
             .gap_3()
+            .children(alerts.into_iter().map(|note| self.note_card(note, p, cx)))
             .when(!issues.is_empty(), |body| body.child(section("Issues", p)))
             .children(issues.into_iter().map(|note| self.note_card(note, p, cx)))
             .children(others.into_iter().map(|note| self.note_card(note, p, cx)));
@@ -1098,6 +1101,13 @@ impl Inspector {
                 .skills
                 .update(cx, |skills, cx| skills.question_card(question, p, cx)),
             WorkspaceNote::Held(held) => self.inbox.read(cx).held_card(held, p),
+            WorkspaceNote::HeldEntry(entry) => self
+                .inbox
+                .update(cx, |inbox, cx| inbox.held_entry_card(entry, p, cx)),
+            WorkspaceNote::Alert(alert) => self
+                .inbox
+                .update(cx, |inbox, cx| inbox.alert_card(alert, p, cx)),
+            WorkspaceNote::ScanStopped(stopped) => scan_alert::stopped_card(stopped, p),
             WorkspaceNote::Issue(note) => {
                 let (inspector, id) = (cx.entity().downgrade(), note.id.clone());
                 let open: inbox::OpenIssue = Rc::new(move |_, cx| {
@@ -1198,7 +1208,7 @@ impl Requests for Inspector {
             Command::CompactContext { session_id, .. } => self.compact_accepted(&session_id),
             Command::AppendLog { .. } | Command::FixHeldLog { .. } => {
                 let saved = match command {
-                    Command::FixHeldLog { .. } => "Fixed; it goes to the brain with its batch",
+                    Command::FixHeldLog { .. } => "Fixed; it lands in the brain",
                     _ => "Saved to project memory",
                 };
                 self.clear_capture(window, cx);

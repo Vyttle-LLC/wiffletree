@@ -86,19 +86,10 @@ pub(super) fn conflict_card(
                 .font_weight(FontWeight::MEDIUM)
                 .child(conflict.title.clone()),
         );
-    if let ConflictState::Ruled {
-        ruling,
-        by,
-        pull_request,
-        merged,
-    } = &card_data.state
-    {
-        let pr = pull_request.map_or(String::new(), |n| format!(" in PR #{n}"));
-        let status = match merged {
-            true => "The ruling is on main; the compiler compiles it next.".to_owned(),
-            false => format!(
-                "Its decision entry is on its way{pr}. Compile starts when the ruling merges."
-            ),
+    if let ConflictState::Ruled { ruling, by, landed } = &card_data.state {
+        let status = match landed {
+            true => "The ruling is on main; the next compile picks it up.",
+            false => "Its decision entry is on its way; the next compile picks it up.",
         };
         return body
             .child(

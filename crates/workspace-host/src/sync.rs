@@ -57,8 +57,13 @@ fn read_machine_name() -> String {
 /// What GitHub and Git say about the repository, with a clone of its branch in a new folder of
 /// the data folder that is removed when dropped.
 fn read(home: &Path, input: &str, tools: &Tools) -> Result<(SettingsRepositoryCheck, TempDir)> {
-    let (repository, organization, staging) =
-        repos::clone_to_staging(home, input, tools, "Your skills and settings")?;
+    let public = "Choose a private repository. Your skills and settings would be public.";
+    let repos::Staging {
+        repository,
+        organization,
+        clone: staging,
+        ..
+    } = repos::clone_to_staging(home, input, public, tools)?;
     for path in SHARED_PATHS {
         refuse_links(staging.path(), Path::new(path))?;
     }
@@ -439,6 +444,8 @@ pub(crate) struct Passed {
     failed: Option<anyhow::Error>,
     /// What the storage rule sets found, when the repository is also storage.
     storage: Option<storage::Found>,
+    /// The folder GitHub's head moved into, which ended the pass before it compared anything.
+    moved_to: Option<folder::Root>,
     since: u64,
 }
 
@@ -790,6 +797,7 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
             error: None,
             failed: None,
             storage: None,
+            moved_to: None,
             since,
         },
         refused: None,
@@ -798,7 +806,10 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
         return Ok(settings.passed);
     }
     let (input, scanner) = storage.unzip();
-    let mut stored = input.map(|input| storage::RuleSets::new(input, true));
+    let mut stored = input.map(|mut input| {
+        input.read_claim(&clone, &repository.push_url, &tools.git);
+        storage::RuleSets::new(input, true)
+    });
     let outcome = {
         let mut rule_sets: Vec<&mut dyn RuleSet> = vec![&mut settings];
         if let Some(stored) = &mut stored {
@@ -825,7 +836,8 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
         Err(error) => passed.error = Some(error),
     }
     passed.error = passed.error.or(refused);
-    passed.storage = stored.map(|stored| stored.found(outcome.held));
+    passed.storage = stored.map(|stored| stored.found(outcome.held, outcome.refused));
+    passed.moved_to = outcome.moved_to;
     Ok(passed)
 }
 
@@ -891,7 +903,6 @@ impl Host {
         with: Option<JoinWith>,
         tools: &Tools,
     ) -> Result<HostSettings> {
-        self.refuse_second_use_of(input, storage::Use::Settings)?;
         let prepared = prepare(&self.home, input, with, tools)?;
         self.adopt_settings_repository(prepared)
     }
@@ -1068,6 +1079,7 @@ impl Host {
         let storage = match self.storage_input(&key)? {
             Some(input) => {
                 let scanner = scan::Scanner::bundled(&self.home, self.scan_path.clone())?;
+                let scanner = scanner.in_folder(input.root.clone(), self.scan_domains(&key));
                 Some((input, scanner))
             }
             None => None,
@@ -1109,8 +1121,16 @@ impl Host {
             return Ok(false);
         }
         let key = repos::key(&passed.repository.name);
-        if let Some(found) = passed.storage.take() {
-            self.finish_storage(found, passed.pushed.is_some())?;
+        if let Some(root) = passed.moved_to.take() {
+            self.finish_move(&key, &root)?;
+            self.merge_after_pass(&[]);
+            return Ok(true);
+        }
+        let synced_before = self.brain_commit(&key)?;
+        let stored = passed.storage.take();
+        let held_storage = stored.is_some();
+        if let Some(found) = stored {
+            self.finish_storage(found, passed.pushed.as_deref())?;
         }
         if let Some(error) = passed.failed.take() {
             // The other rule sets' commits were pushed; only settings waits.
@@ -1119,6 +1139,9 @@ impl Host {
                 "UPDATE sync_record SET synced=?2 WHERE repository=?1 AND path=''",
                 params![key, commit.as_bytes()],
             )?;
+            if held_storage {
+                self.after_storage(&key, synced_before.as_deref(), &commit)?;
+            }
             self.sync.stopped = error.is::<Stopped>();
             self.sync.failed(at, format!("{error:#}"));
             self.merge_after_pass(&[]);
@@ -1147,7 +1170,7 @@ impl Host {
         let mut synced = passed.alike;
         synced.extend(passed.committed.into_iter().filter(|_| pushed.is_some()));
         let commit = passed.pushed.unwrap_or(passed.remote);
-        synced.push((String::new(), Some(commit.into_bytes())));
+        synced.push((String::new(), Some(commit.clone().into_bytes())));
         let tx = self.db.transaction()?;
         // The host wrote what it pulled; what it pushed or found alike keeps its last write.
         for (rows, written) in [(&pulled, "excluded.written"), (&synced, "written")] {
@@ -1178,6 +1201,9 @@ impl Host {
             )?;
         }
         tx.commit()?;
+        if held_storage {
+            self.after_storage(&key, synced_before.as_deref(), &commit)?;
+        }
         if !sorting && self.settings().keeper.comments {
             self.restart_comments()?;
         }
@@ -1284,8 +1310,17 @@ impl Host {
         let settings = self.settings_key().unwrap_or_default();
         let mut notes = BTreeMap::new();
         // An issue's paused file is an issue note, under Issues.
-        let rows = (rows.into_iter()).filter(|(_, path, _)| !path.starts_with("issues/"));
-        for (key, path, why) in rows {
+        let mut outside_issues = vec![];
+        for row in rows {
+            let root = self.root_of_key(&row.0)?;
+            if !root
+                .strip(&row.1)
+                .is_some_and(|path| path.starts_with("issues/"))
+            {
+                outside_issues.push(row);
+            }
+        }
+        for (key, path, why) in outside_issues {
             let path = unit(&path).to_owned();
             let paused: Paused = serde_json::from_str(&why)?;
             let repository = match key == settings && is_shared(&path) {
@@ -1334,6 +1369,10 @@ impl Host {
         let notes = notes.into_iter().map(WorkspaceNote::Paused);
         // A brain that cannot be read shows no cards; its problem is on the Brains page. A card
         // naming no project is in no Inbox, only on the Brains page and in the brain browser.
+        let held_entries = self
+            .held_entries()?
+            .into_iter()
+            .map(WorkspaceNote::HeldEntry);
         let conflicts = (self.conflict_cards()).unwrap_or_else(|error| {
             eprintln!("Brain conflicts: {error:#}");
             vec![]
@@ -1341,6 +1380,8 @@ impl Host {
         Ok((self.issue_notes()?.into_iter())
             .chain(notes)
             .chain(self.held_notes()?)
+            .chain(self.alert_notes()?)
+            .chain(held_entries)
             .chain(questions.map(WorkspaceNote::SkillQuestion))
             .chain(
                 conflicts
@@ -1365,14 +1406,16 @@ impl Host {
     }
     /// A paused file of a storage repository as the app names it, such as "Sage · Space".
     fn stored_file_name(&self, key: &str, path: &str) -> Result<String> {
-        if path == storage::TRACKER {
+        let root = self.root_of_key(key)?;
+        let in_folder = root.strip(path).unwrap_or(path);
+        if in_folder == storage::TRACKER {
             return Ok("Issue prefix".into());
         }
         for record in self.spaces()? {
             let space = &record.space;
             let folder = format!("spaces/{}/", space.storage.folder);
             if repos::key(&space.storage.repository.key()) == key
-                && let Some(file) = path.strip_prefix(&folder)
+                && let Some(file) = in_folder.strip_prefix(&folder)
             {
                 return Ok(match file {
                     "space.yaml" => format!("{} · Space", space.name),
@@ -1474,7 +1517,10 @@ impl Host {
             for (file, ..) in &rows {
                 if let Some(content) = mine(file) {
                     let checked = match stored {
-                        true => storage::check(file, &content),
+                        true => {
+                            let root = self.root_of_key(&key)?;
+                            storage::check(root.strip(file).unwrap_or(file), &content)
+                        }
                         false => shared::check(file, &content),
                     };
                     checked.with_context(|| format!("{file} can't be synced"))?;
@@ -1572,6 +1618,8 @@ pub(crate) mod tests {
     use std::sync::{Arc, Mutex};
 
     pub(crate) const NAME: &str = "MHohlios/wiffletree-storage";
+    /// What `gh` says when the plan has no rulesets for a private repository.
+    pub(crate) const PLAN_REFUSES: &str = "gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)";
     const URL: &str = "https://github.com/MHohlios/wiffletree-storage.git";
     const README: &str = "# My Wiffletree storage\n";
 
@@ -1596,6 +1644,10 @@ pub(crate) mod tests {
         /// Runs before the next Git command of that name, as another machine's push or a
         /// save made meanwhile would.
         pub(crate) before: Mutex<Option<Hook>>,
+        /// The rules GitHub reports on the default branch, or with `null` its refusal on a plan
+        /// without rulesets for a private repository, and its classic branch protection.
+        pub(crate) rules: Mutex<Value>,
+        pub(crate) protection: Mutex<Option<Value>>,
     }
     impl GitHub {
         pub(crate) fn new(folder: &Path, readme: bool) -> Self {
@@ -1627,6 +1679,8 @@ pub(crate) mod tests {
                 protocol: Mutex::new("https"),
                 unreadable: Mutex::default(),
                 before: Mutex::default(),
+                rules: Mutex::new(json!([])),
+                protection: Mutex::default(),
             }
         }
         pub(crate) fn tools(self: &Arc<Self>) -> Tools {
@@ -1647,13 +1701,28 @@ pub(crate) mod tests {
                 }
                 assert_eq!(args[..3], ["api", "--hostname", "github.com"], "reads only");
                 assert_eq!(args.len(), 4, "a GET with no fields: {args:?}");
-                let answer = match args[3].split_once('/') {
-                    Some(("repos", _)) => Some(&github.repository),
-                    _ => github.organization.as_ref(),
+                let endpoint = args[3];
+                let protection = github.protection.lock().unwrap().clone();
+                let rules = github.rules.lock().unwrap().clone();
+                if endpoint.contains("/rules/branches/") && rules.is_null() {
+                    return Ok(runtime::GhAnswer {
+                        status: exit(1),
+                        output: String::new(),
+                        error: PLAN_REFUSES.into(),
+                    });
+                }
+                let answer = match endpoint.split_once('/') {
+                    _ if endpoint.contains("/rules/branches/") => Some(rules),
+                    _ if endpoint.ends_with("/protection") => protection,
+                    _ if endpoint.contains("/branches/") => {
+                        Some(json!({"protected": protection.is_some()}))
+                    }
+                    Some(("repos", _)) => Some(github.repository.clone()),
+                    _ => github.organization.clone(),
                 };
                 Ok(runtime::GhAnswer {
                     status: exit(if answer.is_some() { 0 } else { 1 }),
-                    output: answer.map(Value::to_string).unwrap_or_default(),
+                    output: answer.as_ref().map(Value::to_string).unwrap_or_default(),
                     error: answer.map_or("HTTP 404: Not Found", |_| "").into(),
                 })
             };
@@ -1735,8 +1804,23 @@ pub(crate) mod tests {
         pub(crate) fn commit(&self, file: &str, content: impl AsRef<[u8]>) {
             commit_on(&self.bare, file, content);
         }
+        /// One commit of `files` on GitHub's `main`, with `message`; its SHA.
+        pub(crate) fn commit_files(&self, files: &[(String, String)], message: &str) -> String {
+            let work = tempfile::tempdir().unwrap();
+            let bare = self.bare.to_str().unwrap();
+            git(work.path(), &["clone", "-q", bare, "."]);
+            for (file, content) in files {
+                let path = work.path().join(file);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, content).unwrap();
+            }
+            git(work.path(), &["add", "--all"]);
+            git(work.path(), &["commit", "-q", "-m", message]);
+            git(work.path(), &["push", "-q", "origin", "HEAD:main"]);
+            git(work.path(), &["rev-parse", "HEAD"])
+        }
         /// Every Git command of that name sent, with the options before it.
-        fn calls(&self, command: &str) -> Vec<Vec<String>> {
+        pub(crate) fn calls(&self, command: &str) -> Vec<Vec<String>> {
             let named = |args: &&Vec<String>| {
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
                 publish::subcommand(&args) == command
@@ -1749,7 +1833,7 @@ pub(crate) mod tests {
                 .cloned()
                 .collect()
         }
-        fn pushes(&self) -> usize {
+        pub(crate) fn pushes(&self) -> usize {
             self.calls("push").len()
         }
     }

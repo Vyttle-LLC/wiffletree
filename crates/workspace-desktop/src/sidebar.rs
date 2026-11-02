@@ -744,9 +744,16 @@ impl Sidebar {
                             && skills_view::a_rewrite_is_out_of_date(&self.shared),
                         |d| d.child(div().size(px(6.)).rounded_full().bg(p.accent)),
                     )
-                    // Brains whose log batches wait on this Mac for a gate update.
+                    // Log entries a scan held on this Mac, and alerts from pull scans.
                     .when(page == Page::Brains, |d| {
-                        let held = (self.shared.snapshot()).map_or(0, |s| s.brains_logs_held.len());
+                        let held = (self.shared.workspace_notes().iter())
+                            .filter(|note| {
+                                matches!(
+                                    note,
+                                    WorkspaceNote::HeldEntry(_) | WorkspaceNote::Alert(_)
+                                )
+                            })
+                            .count();
                         d.when(held > 0, |d| {
                             d.child(div().flex_1())
                                 .child(ui::pill(held.to_string(), p.yellow))
@@ -1946,8 +1953,7 @@ mod tests {
         ruled.state = workspace_core::ConflictState::Ruled {
             ruling: "Keep new".into(),
             by: "mhohlios".into(),
-            pull_request: None,
-            merged: false,
+            landed: false,
         };
         let ruled = WorkspaceNote::Conflict(ruled);
         assert_eq!(needs_you(&[], std::slice::from_ref(&ruled), "a"), 0);

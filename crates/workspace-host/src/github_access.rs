@@ -122,21 +122,21 @@ pub(crate) struct Private {
     pub(crate) default_branch: String,
     pub(crate) organization: bool,
     pub(crate) readers: Readers,
+    /// GitHub lets this Mac's login push to it.
+    pub(crate) push: bool,
 }
 
-/// Asks GitHub who can read `owner/name`, refusing a repository that is not private.
+/// Asks GitHub who can read `owner/name`, refusing a repository that is not private with
+/// `public`, which says why it must be.
 pub(crate) fn private_repository(
     tools: &Tools,
     home: &Path,
     owner: &str,
     name: &str,
-    kept: &str,
+    public: &str,
 ) -> Result<Private> {
     let facts = gh_json(tools, home, &format!("repos/{owner}/{name}"))?;
-    ensure!(
-        facts["private"] == true,
-        "Choose a private repository. {kept} would be public."
-    );
+    ensure!(facts["private"] == true, "{public}");
     let organization = facts["owner"]["type"] == "Organization";
     let readers = match organization {
         _ if facts["visibility"] == "internal" => Readers::EnterpriseMembers,
@@ -162,5 +162,159 @@ pub(crate) fn private_repository(
         name: field("full_name").context("GitHub named no repository")?,
         organization,
         readers,
+        // A login GitHub gives no permissions for is left to the first push to refuse.
+        push: facts["permissions"]["push"] != false,
     })
+}
+
+/// How many people GitHub lists as able to read the repository, when it lets this Mac count
+/// them: an organization's members when every member reads it, or else its collaborators.
+pub(crate) fn reader_count(
+    tools: &Tools,
+    home: &Path,
+    name: &str,
+    readers: Readers,
+) -> Option<usize> {
+    let owner = workspace_core::repository_owner(name);
+    let endpoint = match readers {
+        Readers::EveryMember => format!("orgs/{owner}/members?per_page=100"),
+        Readers::Invited => format!("repos/{name}/collaborators?per_page=100"),
+        Readers::EnterpriseMembers | Readers::MaybeMembers => return None,
+    };
+    Some(gh_json(tools, home, &endpoint).ok()?.as_array()?.len())
+}
+
+/// Reads the rulesets and branch protection on `branch` of the repository `name`, refusing a
+/// branch whose rules require pull requests or status checks, or take no push, as Wiffletree
+/// pushes straight to it. Answers whether they protect its history: block force-pushes and
+/// deleting it.
+pub(crate) fn direct_push(tools: &Tools, home: &Path, name: &str, branch: &str) -> Result<bool> {
+    let cannot = |rule: &str| {
+        anyhow::anyhow!(
+            "{branch} {rule}, so Wiffletree can't write to it. Choose another repository, or turn that rule off on GitHub."
+        )
+    };
+    // A plan without rulesets for a private repository answers 403, and then none can apply.
+    let rules = match gh_json(
+        tools,
+        home,
+        &format!("repos/{name}/rules/branches/{branch}"),
+    ) {
+        Ok(rules) => rules,
+        Err(error)
+            if ["HTTP 403", "HTTP 404"]
+                .iter()
+                .any(|code| format!("{error:#}").contains(code)) =>
+        {
+            Value::Null
+        }
+        Err(error) => return Err(error),
+    };
+    let types: Vec<&str> = (rules.as_array().into_iter().flatten())
+        .filter_map(|rule| rule["type"].as_str())
+        .collect();
+    for (kind, rule) in [
+        ("pull_request", "requires pull requests"),
+        ("required_status_checks", "requires status checks"),
+        ("update", "takes no push"),
+    ] {
+        if types.contains(&kind) {
+            return Err(cannot(rule));
+        }
+    }
+    let mut protected = types.contains(&"non_fast_forward") && types.contains(&"deletion");
+    // A branch that does not exist yet, as in a new repository, has no protection.
+    let Ok(summary) = gh_json(tools, home, &format!("repos/{name}/branches/{branch}")) else {
+        return Ok(protected);
+    };
+    if summary["protected"] != true {
+        return Ok(protected);
+    }
+    // The whole protection needs a repository admin; the summary says enough without it.
+    match gh_json(
+        tools,
+        home,
+        &format!("repos/{name}/branches/{branch}/protection"),
+    ) {
+        Ok(protection) => {
+            if protection["required_pull_request_reviews"].is_object() {
+                return Err(cannot("requires pull requests"));
+            }
+            let checks = &protection["required_status_checks"];
+            let listed = |key: &str| checks[key].as_array().is_some_and(|l| !l.is_empty());
+            if listed("contexts") || listed("checks") {
+                return Err(cannot("requires status checks"));
+            }
+            if protection["lock_branch"]["enabled"] == true {
+                return Err(cannot("takes no push"));
+            }
+            let allowed = |key: &str| protection[key]["enabled"] == true;
+            protected |= !allowed("allow_force_pushes") && !allowed("allow_deletions");
+        }
+        Err(_) => {
+            let checks = &summary["protection"]["required_status_checks"];
+            if checks["enforcement_level"]
+                .as_str()
+                .is_some_and(|l| l != "off")
+            {
+                return Err(cannot("requires status checks"));
+            }
+            // Classic protection blocks force-pushes and deletion unless allowed.
+            protected = true;
+        }
+    }
+    Ok(protected)
+}
+
+/// Creates the repository `owner/name` on GitHub, private and empty.
+pub(crate) fn create_private(tools: &Tools, home: &Path, name: &str) -> Result<()> {
+    let answer = (tools.gh)(home, &["repo", "create", name, "--private"])?;
+    ensure!(
+        answer.status.success(),
+        "GitHub did not create {name}: {}",
+        answer.error.trim()
+    );
+    Ok(())
+}
+
+/// The ruleset Protect history adds: force-pushes and deleting the default branch are blocked,
+/// and nothing else is required.
+pub(crate) fn history_ruleset() -> Value {
+    serde_json::json!({
+        "name": "Protect history",
+        "target": "branch",
+        "enforcement": "active",
+        "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+        "rules": [{"type": "non_fast_forward"}, {"type": "deletion"}],
+    })
+}
+
+/// Protect history: adds `history_ruleset` to the repository `name`. GitHub's refusal, for
+/// want of an admin or of a plan that allows rulesets on a private repository, is the error,
+/// in GitHub's words.
+pub(crate) fn protect_history(tools: &Tools, home: &Path, name: &str) -> Result<()> {
+    let body = tempfile::NamedTempFile::new_in(home)?;
+    fs::write(body.path(), history_ruleset().to_string())?;
+    let input = body
+        .path()
+        .to_str()
+        .context("The data folder's path is not UTF-8")?;
+    let endpoint = format!("repos/{name}/rulesets");
+    let args = [
+        "api",
+        "--hostname",
+        repositories::GITHUB_HOST,
+        "--method",
+        "POST",
+        &endpoint,
+        "--input",
+        input,
+    ];
+    let answer = (tools.gh)(home, &args)?;
+    ensure!(
+        answer.status.success(),
+        "GitHub refused: {}",
+        answer.error.trim()
+    );
+    Ok(())
 }

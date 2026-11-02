@@ -3,8 +3,10 @@
 //! files. Each commit holds one rule set's changes, and a file under no rule set is pulled and
 //! never committed. The settings repository's rule set is `sync`.
 use crate::*;
+use folder::Root;
 use github_access::{remote_head, run, run_at};
 use publish::GitTool;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub(crate) const FOLDER: &str = "repos";
@@ -225,19 +227,29 @@ pub(crate) fn refuse_another(home: &Path, repository: &SettingsRepository) -> Re
     Ok(())
 }
 
+/// A repository `clone_to_staging` checked and cloned.
+pub(crate) struct Staging {
+    /// The repository as this Mac will record it.
+    pub(crate) repository: SettingsRepository,
+    /// Its owner is an organization.
+    pub(crate) organization: bool,
+    /// GitHub lets this Mac's login push to it.
+    pub(crate) push: bool,
+    pub(crate) clone: tempfile::TempDir,
+}
+
 /// Checks a private GitHub repository named as `owner/name` or by its URL, as `gh` reaches it,
-/// and clones its default branch into a `shared-staging-*` folder of the data folder, removed
-/// when dropped or at the next start: the repository as this Mac will record it, whether its
-/// owner is an organization, and the clone. `kept` says what a public repository would expose.
+/// refusing a public one with `public`, and clones its default branch into a `shared-staging-*`
+/// folder of the data folder, removed when dropped or at the next start.
 pub(crate) fn clone_to_staging(
     home: &Path,
     input: &str,
+    public: &str,
     tools: &publish::Tools,
-    kept: &str,
-) -> Result<(SettingsRepository, bool, tempfile::TempDir)> {
+) -> Result<Staging> {
     use github_access::{candidates, first_readable, gh_protocol, private_repository};
     let (owner, name, urls) = candidates(input, &gh_protocol(tools, home))?;
-    let private = private_repository(tools, home, &owner, &name, kept)?;
+    let private = private_repository(tools, home, &owner, &name, public)?;
     let (push_url, head) = first_readable(home, urls, &private.default_branch, &tools.git)?;
     let repository = SettingsRepository {
         name: private.name,
@@ -267,7 +279,12 @@ pub(crate) fn clone_to_staging(
             &["symbolic-ref", "HEAD", &branch],
         )?;
     }
-    Ok((repository, private.organization, staging))
+    Ok(Staging {
+        repository,
+        organization: private.organization,
+        push: private.push,
+        clone: staging,
+    })
 }
 
 /// A file's content, `None` for no file.
@@ -277,6 +294,17 @@ pub(crate) type Content = Option<Vec<u8>>;
 pub(crate) trait RuleSet {
     /// Whether the file at `path`, relative to the clone, is this rule set's.
     fn claims(&self, path: &str) -> bool;
+    /// Whether the engine brings this rule set's files down from GitHub as it does a file no
+    /// rule set claims, as the rule set commits only what it is given and compares nothing.
+    fn pulled_by_git(&self) -> bool {
+        false
+    }
+    /// The folder GitHub's head `remote` moved this rule set's files into, when this Mac still
+    /// has them at the root: the pass stops, before any rule set reads the move as deletions,
+    /// for the host to adopt it.
+    fn moved_to(&self, _clone: &Path, _remote: &str) -> Result<Option<Root>> {
+        Ok(None)
+    }
     /// Compares this machine's files with GitHub's head `remote`, before the clone moves to it.
     fn compare(&mut self, clone: &Path, remote: &str) -> Result<()>;
     /// The files to commit on GitHub's head, as the pass read them, and the commit's message.
@@ -302,8 +330,8 @@ pub(crate) trait RuleSet {
 }
 
 /// How many times a pass fetches and pushes in all when GitHub's branch moves under the push of
-/// a rule set that `pushes_again`. Only the settings pass's runner boards do, which only this
-/// Mac writes, so a few tries are enough. A storage repository's own pass retries whole instead,
+/// a rule set that `pushes_again`. Only the settings pass's runner boards, log entries and wiki
+/// landing do, which no other Mac's commit conflicts with, so a few tries are enough. A storage repository's own pass retries whole instead,
 /// up to `issues_sync::PUSH_TRIES`, which is higher because teammates filing at once each take
 /// the next number.
 const PUSH_TRIES: usize = 3;
@@ -318,10 +346,15 @@ pub(crate) struct Remote<'a> {
 /// pushing failed.
 pub(crate) type Pushed = std::result::Result<Option<String>, String>;
 
-/// What a pass pushed, and the files a scan held back from its commits.
+/// What a pass pushed, the files a scan held back from its commits, and the folder GitHub's
+/// head moved into, which ended the pass before it compared anything. `refused`: why GitHub
+/// rejected its push with the branch where it was, which another pass will not change. Any other
+/// failure, such as a dropped network, waits for the next pass.
 pub(crate) struct Outcome {
     pub(crate) pushed: Pushed,
     pub(crate) held: Vec<scan::Held>,
+    pub(crate) moved_to: Option<Root>,
+    pub(crate) refused: Option<String>,
 }
 
 /// Fetches the branch, lets each rule set compare its files, takes GitHub's version of the files
@@ -360,9 +393,14 @@ pub(crate) fn pass(
         let moved = (once.pushed.as_ref()).is_err_and(|error| error.is::<Moved>());
         let again = (once.committed.iter()).any(|&at| rule_sets[at].pushes_again());
         if !moved || !again || tries == PUSH_TRIES {
+            let pushed = once.pushed.map_err(|error| format!("{error:#}"));
+            let refused = pushed.as_ref().err().filter(|_| !moved);
+            let refused = refused.filter(|error| rejected(error));
             return Ok(Outcome {
-                pushed: once.pushed.map_err(|error| format!("{error:#}")),
+                refused: refused.cloned(),
+                pushed,
                 held,
+                moved_to: once.moved_to,
             });
         }
         tries += 1;
@@ -376,11 +414,18 @@ pub(crate) fn pass(
     }
 }
 
+/// Whether GitHub itself turned a push down, as Git reports a ruleset or a hook, rather than the
+/// push failing on its way there.
+fn rejected(error: &str) -> bool {
+    error.contains("[remote rejected]")
+}
+
 /// One pass's outcome, its push's error kept whole, and the rule sets that committed.
 struct Once {
     pushed: Result<Option<String>>,
     held: Vec<scan::Held>,
     committed: Vec<usize>,
+    moved_to: Option<Root>,
 }
 
 /// One fetch, compare, commit and push of the rule sets `taking_part` marks; the others are
@@ -394,17 +439,17 @@ fn pass_once(
     scanner: Option<&scan::Scanner>,
     git: &GitTool,
 ) -> Result<Once> {
-    let branch = format!("refs/heads/{}", remote.branch);
-    let fetch = ["fetch", "--quiet", "--no-tags", "--recurse-submodules=no"];
-    run_at(
-        git,
-        clone,
-        remote.url,
-        &[&fetch[..], &[remote.url, &branch]].concat(),
-    )?;
-    let head = runtime::git_output(clone, &["rev-parse", "FETCH_HEAD"])?
-        .trim()
-        .to_owned();
+    let head = fetch(clone, remote, git)?;
+    for rule_set in rule_sets.iter() {
+        if let Some(root) = rule_set.moved_to(clone, &head)? {
+            return Ok(Once {
+                pushed: Ok(None),
+                held: vec![],
+                committed: vec![],
+                moved_to: Some(root),
+            });
+        }
+    }
     let mut compared = vec![];
     for (rule_set, &part) in rule_sets.iter_mut().zip(taking_part) {
         if !part {
@@ -417,8 +462,10 @@ fn pass_once(
             rule_set.failed(error);
         }
     }
-    let owner = |path: &str| rule_sets.iter().position(|rule_set| rule_set.claims(path));
-    take_other_files(clone, previous, &head, &|path| owner(path).is_some())?;
+    let its_own = |path: &str| {
+        (rule_sets.iter()).any(|rule_set| rule_set.claims(path) && !rule_set.pulled_by_git())
+    };
+    take_other_files(clone, previous, &head, &its_own)?;
     runtime::git_output(clone, &["reset", "--quiet", &head])?;
     let commits: Vec<_> = (rule_sets.iter_mut().zip(compared).enumerate())
         .filter(|(_, (_, compared))| *compared)
@@ -445,7 +492,57 @@ fn pass_once(
         pushed,
         held,
         committed,
+        moved_to: None,
     })
+}
+
+/// Fetches the remote's branch; GitHub's head.
+fn fetch(clone: &Path, remote: &Remote, git: &GitTool) -> Result<String> {
+    let branch = format!("refs/heads/{}", remote.branch);
+    let fetch = ["fetch", "--quiet", "--no-tags", "--recurse-submodules=no"];
+    run_at(
+        git,
+        clone,
+        remote.url,
+        &[&fetch[..], &[remote.url, &branch]].concat(),
+    )?;
+    let head = runtime::git_output(clone, &["rev-parse", "FETCH_HEAD"])?;
+    Ok(head.trim().to_owned())
+}
+
+/// How many times a move is made and pushed before it gives up, as teammates keep pushing.
+const MOVE_TRIES: usize = 5;
+
+/// Moves the repository at `clone` into the folder `root`: one commit on GitHub's head, with its
+/// stubs, checked by `folder::check_move` and pushed unforced. A refused push fetches: when the
+/// root layout is gone, a teammate's move is done, and otherwise the move is made again on the
+/// new head. The folder the repository is in now, for the host to adopt.
+pub(crate) fn move_into_folder(
+    clone: &Path,
+    remote: &Remote,
+    root: &Root,
+    git: &GitTool,
+) -> Result<Root> {
+    for _ in 0..MOVE_TRIES {
+        let head = fetch(clone, remote, git)?;
+        if let Some(moved) = folder::moved_to(clone, &head)? {
+            return Ok(moved);
+        }
+        runtime::git_output(clone, &["reset", "--quiet", &head])?;
+        folder::stage_move(clone, &head, root)?;
+        let message = format!("Move into {}/ · {}", root.name(), sync::machine_name());
+        commit_staged(clone, &message, git)?;
+        let check = |commits: &str| {
+            ensure!(commits.lines().count() == 1, "A move is one commit");
+            folder::check_move(clone, &head, commits.trim(), root)
+        };
+        match push_checked(clone, remote, &check, git) {
+            Ok(()) => return Ok(root.clone()),
+            Err(error) if error.is::<Moved>() => {}
+            Err(error) => return Err(error),
+        }
+    }
+    bail!("{} kept moving on GitHub; try again", remote.branch)
 }
 
 /// One commit per rule set's changes, then one push of them all; the head pushed, if any.
@@ -589,6 +686,37 @@ pub(crate) fn push(
     owner: &dyn Fn(&str) -> Option<usize>,
     git: &GitTool,
 ) -> Result<()> {
+    let check = |commits: &str| {
+        for commit in commits.lines() {
+            let args = ["diff-tree", "--root", "-r", "-m", "--no-commit-id"];
+            let args = [&args[..], &["--name-only", "--no-renames", "-z", commit]].concat();
+            let changed = runtime::git_output(clone, &args)?;
+            let mut rule_set = None;
+            for path in changed.split('\0').filter(|path| !path.is_empty()) {
+                let Some(claimed) = owner(path) else {
+                    bail!(
+                        "Sync changes only the files its rule sets cover, and a commit changes {path}"
+                    );
+                };
+                ensure!(
+                    *rule_set.get_or_insert(claimed) == claimed,
+                    "A commit changes {path} beside files of another rule set, which sync commits apart"
+                );
+            }
+        }
+        Ok(())
+    };
+    push_checked(clone, remote, &check, git)
+}
+
+/// Pushes the clone's HEAD as `push` does, once `check` passed the commits GitHub lacks, listed
+/// one per line.
+fn push_checked(
+    clone: &Path,
+    remote: &Remote,
+    check: &dyn Fn(&str) -> Result<()>,
+    git: &GitTool,
+) -> Result<()> {
     let head = runtime::git_output(clone, &["rev-parse", "HEAD"])?
         .trim()
         .to_owned();
@@ -603,24 +731,7 @@ pub(crate) fn push(
         }
         None => head.clone(),
     };
-    let commits = runtime::git_output(clone, &["rev-list", &range])?;
-    for commit in commits.lines() {
-        let args = ["diff-tree", "--root", "-r", "-m", "--no-commit-id"];
-        let args = [&args[..], &["--name-only", "--no-renames", "-z", commit]].concat();
-        let changed = runtime::git_output(clone, &args)?;
-        let mut rule_set = None;
-        for path in changed.split('\0').filter(|path| !path.is_empty()) {
-            let Some(claimed) = owner(path) else {
-                bail!(
-                    "Sync changes only the files its rule sets cover, and a commit changes {path}"
-                );
-            };
-            ensure!(
-                *rule_set.get_or_insert(claimed) == claimed,
-                "A commit changes {path} beside files of another rule set, which sync commits apart"
-            );
-        }
-    }
+    check(&runtime::git_output(clone, &["rev-list", &range])?)?;
     let refspec = format!("{head}:refs/heads/{}", remote.branch);
     let args = ["push", "--no-follow-tags", "--recurse-submodules=no"];
     let pushed = run_at(
@@ -746,6 +857,180 @@ impl Record {
         )?;
         Ok(())
     }
+}
+
+/// The branch a repository's compile claims live on. `pass` only ever fetches and pushes the
+/// repository's default branch, so it never sees this one.
+pub(crate) const CLAIM_BRANCH: &str = "wiffletree-compile-claim";
+/// Where a clone keeps the claim branch's tip, outside `refs/heads/`.
+const CLAIM_REF: &str = "refs/wiffletree/compile-claim";
+/// A claim no one has ended is free to take over after this long.
+pub(crate) const CLAIM_EXPIRES_MS: i64 = 3_600_000;
+
+/// How a claim stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ClaimState {
+    Claimed,
+    Landed,
+    Released,
+}
+
+/// A compile claim, the JSON message of a commit with an empty tree on `CLAIM_BRANCH`. It holds
+/// its run's id, so no two Macs ever push the same commit.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Claim {
+    pub(crate) host: String,
+    pub(crate) machine: String,
+    pub(crate) login: String,
+    pub(crate) run: String,
+    /// The scheduled time it is for, or `run-now:<run id>`.
+    pub(crate) due: String,
+    pub(crate) state: ClaimState,
+    pub(crate) at: i64,
+}
+
+/// The claim branch's tip. `claim` is `None` for a commit that holds no claim, which anyone may
+/// build on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Tip {
+    pub(crate) commit: String,
+    pub(crate) claim: Option<Claim>,
+}
+impl Tip {
+    /// Whether a run may claim on top of this tip at `at`.
+    pub(crate) fn free(&self, at: i64) -> bool {
+        self.claim.as_ref().is_none_or(|claim| {
+            claim.state != ClaimState::Claimed || at - claim.at > CLAIM_EXPIRES_MS
+        })
+    }
+    /// The Mac whose run landed the due time `due`.
+    pub(crate) fn landed(&self, due: &str) -> Option<&str> {
+        let claim = self.claim.as_ref()?;
+        (claim.state == ClaimState::Landed && claim.due == due).then_some(claim.machine.as_str())
+    }
+}
+
+/// The claim branch's tip at `url`, or `None` before the first claim: `ls-remote`, then a fetch
+/// of that one branch when the clone lacks the commit, since a claim's state is in its message
+/// and a child needs its parent. An error means this Mac could not reach GitHub.
+pub(crate) fn read_tip(clone: &Path, url: &str, git: &GitTool) -> Result<Option<Tip>> {
+    let Some(commit) = remote_head(clone, url, CLAIM_BRANCH, git)? else {
+        return Ok(None);
+    };
+    let held = format!("{commit}^{{commit}}");
+    let lacks = |clone: &Path| {
+        let args = ["cat-file", "-e", held.as_str()];
+        !runtime::git_answer(clone, &args).is_ok_and(|answer| answer.status.success())
+    };
+    if lacks(clone) {
+        let branch = format!("+refs/heads/{CLAIM_BRANCH}:{CLAIM_REF}");
+        let fetch = ["fetch", "--quiet", "--no-tags", "--recurse-submodules=no"];
+        run_at(git, clone, url, &[&fetch[..], &[url, &branch]].concat())?;
+    }
+    let message = runtime::git_output(clone, &["log", "-1", "--format=%B", &commit])?;
+    Ok(Some(Tip {
+        claim: serde_json::from_str(&message).ok(),
+        commit,
+    }))
+}
+
+/// How a claim's one push ended.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Claiming {
+    /// This commit is the tip, whatever the push answered.
+    Won(String),
+    /// Another Mac's commit is the tip.
+    Lost,
+    /// The push failed with GitHub in reach and the branch where it was, as for a login that can
+    /// read but not push.
+    Refused(String),
+}
+
+/// Writes `claim` as a child of `tip`, or as the first claim, and pushes it once, never forced.
+/// The tip is then read whatever Git answered, so a push that landed with its answer lost is won.
+/// A refused claim ends here, with no fetch, merge or second push. An error means this Mac could
+/// not read the tip, so it could not reach GitHub, and it claimed nothing.
+pub(crate) fn claim(
+    clone: &Path,
+    url: &str,
+    tip: Option<&Tip>,
+    claim: &Claim,
+    git: &GitTool,
+) -> Result<Claiming> {
+    let parent = tip.map(|tip| tip.commit.as_str());
+    let commit = claim_commit(clone, parent, claim, git)?;
+    let pushed = push_claim(clone, url, &commit, git);
+    let now = remote_head(clone, url, CLAIM_BRANCH, git)?;
+    if now.as_deref() == Some(commit.as_str()) {
+        return Ok(Claiming::Won(commit));
+    }
+    match pushed {
+        Err(error) if now.as_deref() == parent => Ok(Claiming::Refused(format!("{error:#}"))),
+        _ => Ok(Claiming::Lost),
+    }
+}
+
+/// When each Mac, by host id, last landed a run, from the claim branch as this clone last
+/// fetched it. Reads nothing from GitHub; a clone that never read the branch knows none.
+pub(crate) fn last_landed(clone: &Path) -> std::collections::HashMap<String, i64> {
+    let mut landed = std::collections::HashMap::new();
+    let args = ["log", "--format=%B%x00", "-n", "200", CLAIM_REF, "--"];
+    let Ok(log) = runtime::git_output(clone, &args) else {
+        return landed;
+    };
+    for message in log.split('\0') {
+        let Ok(claim) = serde_json::from_str::<Claim>(message.trim()) else {
+            continue;
+        };
+        if claim.state == ClaimState::Landed {
+            let at = landed.entry(claim.host).or_insert(claim.at);
+            *at = (*at).max(claim.at);
+        }
+    }
+    landed
+}
+
+/// The Mac whose claim is the tip at `url`, when this Mac can read it: a read, as `read_tip`
+/// is, for naming the Mac a run lost to once its attempt has ended.
+pub(crate) fn claimed_by(clone: &Path, url: &str, git: &GitTool) -> Option<String> {
+    let tip = read_tip(clone, url, git).ok().flatten()?;
+    tip.claim.map(|claim| claim.machine)
+}
+
+/// Pushes this run's `claim` as a child of its own commit `parent`, tried once: a push that fails
+/// needs nothing more, as the hour covers it.
+pub(crate) fn end_claim(
+    clone: &Path,
+    url: &str,
+    parent: &str,
+    claim: &Claim,
+    git: &GitTool,
+) -> Result<()> {
+    let commit = claim_commit(clone, Some(parent), claim, git)?;
+    push_claim(clone, url, &commit, git)
+}
+
+/// The commit of `claim`, with the empty tree, which a clone need not hold until it is written.
+fn claim_commit(
+    clone: &Path,
+    parent: Option<&str>,
+    claim: &Claim,
+    git: &GitTool,
+) -> Result<String> {
+    let tree = runtime::git_bytes(clone, &["hash-object", "-w", "-t", "tree", "--stdin"], b"")?;
+    let tree = String::from_utf8(tree)?;
+    let message = serde_json::to_string(claim)?;
+    let mut args = vec!["commit-tree", tree.trim(), "-m", &message];
+    args.extend(parent.iter().flat_map(|parent| ["-p", parent]));
+    Ok(run(git, clone, &args)?.trim().to_owned())
+}
+
+fn push_claim(clone: &Path, url: &str, commit: &str, git: &GitTool) -> Result<()> {
+    let refspec = format!("{commit}:refs/heads/{CLAIM_BRANCH}");
+    let args = ["push", "--no-follow-tags", "--recurse-submodules=no"];
+    run_at(git, clone, url, &[&args[..], &[url, &refspec]].concat())?;
+    Ok(())
 }
 
 const MAX_BACKOFF_MS: i64 = 1_800_000;
@@ -1117,6 +1402,366 @@ mod tests {
             "{error:#}"
         );
         assert_eq!(github.log("%s"), ["Initial commit"]);
+    }
+
+    fn stamped(host: &str, state: ClaimState, at: i64) -> Claim {
+        Claim {
+            host: host.into(),
+            machine: format!("{host}'s Mac"),
+            login: host.into(),
+            run: format!("run-{host}-{at}"),
+            due: "2026-11-02T06:00 America/Chicago".into(),
+            state,
+            at,
+        }
+    }
+
+    /// A Mac's clone of the repository, which has only ever fetched `main`.
+    fn mac(github: &GitHub, folder: &Path, name: &str) -> PathBuf {
+        let clone = folder.join(name);
+        let (bare, into) = (github.bare.to_str().unwrap(), clone.to_str().unwrap());
+        git(folder, &["clone", "-q", "--single-branch", bare, into]);
+        without_background_maintenance(&clone);
+        clone
+    }
+
+    fn claim_branch_log(github: &GitHub) -> Vec<String> {
+        let log = ["log", "--format=%H", CLAIM_BRANCH];
+        git(&github.bare, &log).lines().map(str::to_owned).collect()
+    }
+
+    /// Each Mac claims on `tip` at once; the commits they won.
+    fn race(github: &Arc<GitHub>, macs: &[(&Path, Claim)], tip: Option<&Tip>) -> Vec<String> {
+        let start = std::sync::Barrier::new(macs.len());
+        let answers: Vec<Claiming> = std::thread::scope(|scope| {
+            let racing: Vec<_> = (macs.iter())
+                .map(|(clone, stamp)| {
+                    let (tools, start) = (github.tools(), &start);
+                    scope.spawn(move || {
+                        start.wait();
+                        claim(clone, URL, tip, stamp, &tools.git).unwrap()
+                    })
+                })
+                .collect();
+            racing.into_iter().map(|r| r.join().unwrap()).collect()
+        });
+        (answers.into_iter())
+            .filter_map(|answer| match answer {
+                Claiming::Won(commit) => Some(commit),
+                Claiming::Lost => None,
+                Claiming::Refused(why) => panic!("refused: {why}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn two_first_claims_at_one_commit_of_main_create_the_branch_once() {
+        for _ in 0..5 {
+            let folder = tempfile::tempdir().unwrap();
+            let github = Arc::new(GitHub::new(folder.path(), true));
+            let (one, two) = (
+                mac(&github, folder.path(), "one"),
+                mac(&github, folder.path(), "two"),
+            );
+            let git_tool = github.tools().git;
+            assert_eq!(read_tip(&one, URL, &git_tool).unwrap(), None);
+            let macs = [
+                (one.as_path(), stamped("one", ClaimState::Claimed, 1)),
+                (two.as_path(), stamped("two", ClaimState::Claimed, 1)),
+            ];
+            let won = race(&github, &macs, None);
+            assert_eq!(won.len(), 1, "exactly one creates the branch");
+            assert_eq!(claim_branch_log(&github), won);
+            assert_eq!(
+                github.pushes(),
+                2,
+                "the loser pushed once and merged nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn two_claims_raced_from_one_tip_have_one_winner_and_the_loser_stays_as_it_was() {
+        for _ in 0..5 {
+            let folder = tempfile::tempdir().unwrap();
+            let github = Arc::new(GitHub::new(folder.path(), true));
+            let (one, two) = (
+                mac(&github, folder.path(), "one"),
+                mac(&github, folder.path(), "two"),
+            );
+            let git_tool = github.tools().git;
+            let first = stamped("first", ClaimState::Released, 1);
+            claim(&one, URL, None, &first, &git_tool).unwrap();
+            // A clone that has only ever fetched `main` reads the tip and claims as its child.
+            let tip = read_tip(&two, URL, &git_tool).unwrap().unwrap();
+            assert_eq!(tip.claim.as_ref(), Some(&first));
+            assert!(tip.free(2));
+            read_tip(&one, URL, &git_tool).unwrap();
+            let macs = [
+                (one.as_path(), stamped("one", ClaimState::Claimed, 2)),
+                (two.as_path(), stamped("two", ClaimState::Claimed, 2)),
+            ];
+            let before = (github.pushes(), github.calls("fetch").len());
+            let won = race(&github, &macs, Some(&tip));
+            assert_eq!(won.len(), 1);
+            assert_eq!(
+                claim_branch_log(&github),
+                [won[0].clone(), tip.commit.clone()]
+            );
+            assert_eq!(github.pushes(), before.0 + 2, "one push each, none forced");
+            assert_eq!(
+                github.calls("fetch").len(),
+                before.1,
+                "a refused claim fetches nothing"
+            );
+            assert!(github.calls("push").iter().all(|call| {
+                !call
+                    .iter()
+                    .any(|a| a.contains("force") || a.starts_with('+'))
+            }));
+        }
+    }
+
+    #[test]
+    fn a_refused_claim_is_not_pushed_again_and_the_engine_never_touches_the_branch() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let (one, two) = (
+            mac(&github, folder.path(), "one"),
+            mac(&github, folder.path(), "two"),
+        );
+        let git_tool = github.tools().git;
+        let won = claim(
+            &one,
+            URL,
+            None,
+            &stamped("one", ClaimState::Claimed, 1),
+            &git_tool,
+        );
+        let Claiming::Won(commit) = won.unwrap() else {
+            panic!("the first claim wins");
+        };
+        let before = github.pushes();
+        let lost = claim(
+            &two,
+            URL,
+            None,
+            &stamped("two", ClaimState::Claimed, 1),
+            &git_tool,
+        );
+        assert_eq!(lost.unwrap(), Claiming::Lost);
+        assert_eq!(
+            claimed_by(&two, URL, &git_tool).as_deref(),
+            Some("one's Mac")
+        );
+        assert_eq!(github.pushes(), before + 1, "one attempt, one push");
+        assert_eq!(claim_branch_log(&github), std::slice::from_ref(&commit));
+        // A pass over the same clone leaves the branch and the tracking ref alone.
+        let previous = git(&one, &["rev-parse", "HEAD"]).trim().to_owned();
+        let remote = Remote {
+            url: URL,
+            branch: "main",
+        };
+        pass(&one, remote, &previous, &mut [], None, &git_tool).unwrap();
+        assert_eq!(claim_branch_log(&github), [commit]);
+        let touched = github
+            .calls("fetch")
+            .iter()
+            .chain(&github.calls("push"))
+            .any(|call| {
+                call.iter().any(|a| a.contains(CLAIM_BRANCH)) && call.iter().any(|a| a == "main")
+            });
+        assert!(!touched);
+    }
+
+    #[test]
+    fn a_claim_whose_push_landed_with_its_answer_lost_reads_as_won() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let one = mac(&github, folder.path(), "one");
+        let real = github.tools().git;
+        let answerless: GitTool = Arc::new(move |path: &Path, args: &[&str]| {
+            let answer = real(path, args)?;
+            Ok(match publish::subcommand(args) {
+                "push" => runtime::GitAnswer {
+                    status: publish::tests::exit(128),
+                    output: String::new(),
+                    error: "fatal: the remote end hung up unexpectedly".into(),
+                },
+                _ => answer,
+            })
+        });
+        let stamp = stamped("one", ClaimState::Claimed, 1);
+        let won = claim(&one, URL, None, &stamp, &answerless).unwrap();
+        assert_eq!(won, Claiming::Won(claim_branch_log(&github).remove(0)));
+    }
+
+    #[test]
+    fn a_claim_github_turns_down_says_why_and_one_that_never_got_there_claims_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let one = mac(&github, folder.path(), "one");
+        let git_tool = github.tools().git;
+        let stamp = stamped("one", ClaimState::Claimed, 1);
+        github
+            .offline
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(claim(&one, URL, None, &stamp, &git_tool).is_err());
+        github
+            .offline
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let hook = github.bare.join("hooks/pre-receive");
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(&hook, "#!/bin/sh\necho no new branches >&2\nexit 1\n").unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let refused = claim(&one, URL, None, &stamp, &git_tool).unwrap();
+        assert!(
+            matches!(&refused, Claiming::Refused(why) if why.contains("no new branches")),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_claim_lives_for_an_hour_and_an_expired_one_is_taken_over_as_its_child_with_no_force() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let (one, two) = (
+            mac(&github, folder.path(), "one"),
+            mac(&github, folder.path(), "two"),
+        );
+        let git_tool = github.tools().git;
+        const MINUTE: i64 = 60_000;
+        let at = 1_000 * MINUTE;
+        claim(
+            &one,
+            URL,
+            None,
+            &stamped("one", ClaimState::Claimed, at),
+            &git_tool,
+        )
+        .unwrap();
+        let tip = read_tip(&two, URL, &git_tool).unwrap().unwrap();
+        assert!(!tip.free(at + 59 * MINUTE), "59 minutes old is live");
+        assert!(tip.free(at + 61 * MINUTE), "61 minutes old is expired");
+        let taken = stamped("two", ClaimState::Claimed, at + 61 * MINUTE);
+        let won = claim(&two, URL, Some(&tip), &taken, &git_tool).unwrap();
+        assert!(matches!(won, Claiming::Won(_)));
+        assert_eq!(claim_branch_log(&github)[1], tip.commit);
+        // A Mac that slept through its claim now reads a tip that is not its own, and ends its
+        // claim with a child of the old one, which Git refuses.
+        let now = read_tip(&one, URL, &git_tool).unwrap().unwrap();
+        assert_ne!(now.commit, tip.commit);
+        let released = stamped("one", ClaimState::Released, at + 62 * MINUTE);
+        assert!(end_claim(&one, URL, &tip.commit, &released, &git_tool).is_err());
+        assert_eq!(claim_branch_log(&github).len(), 2);
+    }
+
+    #[test]
+    fn two_takeovers_of_an_expired_claim_have_one_winner() {
+        for _ in 0..5 {
+            let folder = tempfile::tempdir().unwrap();
+            let github = Arc::new(GitHub::new(folder.path(), true));
+            let (crashed, one, two) = (
+                mac(&github, folder.path(), "crashed"),
+                mac(&github, folder.path(), "one"),
+                mac(&github, folder.path(), "two"),
+            );
+            let git_tool = github.tools().git;
+            const MINUTE: i64 = 60_000;
+            let at = 1_000 * MINUTE;
+            let stale = stamped("crashed", ClaimState::Claimed, at);
+            claim(&crashed, URL, None, &stale, &git_tool).unwrap();
+            let tip = read_tip(&one, URL, &git_tool).unwrap().unwrap();
+            read_tip(&two, URL, &git_tool).unwrap();
+            assert!(tip.free(at + 61 * MINUTE));
+            let macs = [
+                (
+                    one.as_path(),
+                    stamped("one", ClaimState::Claimed, at + 61 * MINUTE),
+                ),
+                (
+                    two.as_path(),
+                    stamped("two", ClaimState::Claimed, at + 61 * MINUTE),
+                ),
+            ];
+            let before = github.pushes();
+            let won = race(&github, &macs, Some(&tip));
+            assert_eq!(won.len(), 1, "exactly one takes it over");
+            assert_eq!(
+                claim_branch_log(&github),
+                [won[0].clone(), tip.commit.clone()]
+            );
+            assert_eq!(github.pushes(), before + 2, "one push each");
+        }
+    }
+
+    #[test]
+    fn a_landed_claim_names_its_mac_for_its_due_time_alone() {
+        let tip = |state| Tip {
+            commit: "c".into(),
+            claim: Some(stamped("one", state, 1)),
+        };
+        let due = "2026-11-02T06:00 America/Chicago";
+        assert_eq!(tip(ClaimState::Landed).landed(due), Some("one's Mac"));
+        assert_eq!(tip(ClaimState::Landed).landed("run-now:r"), None);
+        assert_eq!(tip(ClaimState::Released).landed(due), None);
+        assert!(tip(ClaimState::Landed).free(2) && tip(ClaimState::Released).free(2));
+        let unknown = Tip {
+            commit: "c".into(),
+            claim: None,
+        };
+        assert!(unknown.free(0), "a commit that holds no claim stops no one");
+    }
+
+    #[test]
+    fn a_rejected_push_is_lasting_and_a_network_drop_only_waits() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let clone = cloned(&github, folder.path());
+        let file = "settings/review.json";
+        let committing = |github: &Arc<GitHub>, git: &GitTool| {
+            let previous = runtime::git_output(&clone, &["rev-parse", "HEAD"]).unwrap();
+            fs::create_dir_all(clone.join("settings")).unwrap();
+            fs::write(clone.join(file), format!("{}\n", github.pushes())).unwrap();
+            let mut settings = Under::new("settings/", &["settings/review.json"]);
+            let remote = Remote {
+                url: URL,
+                branch: "main",
+            };
+            let rule_sets: &mut [&mut dyn RuleSet] = &mut [&mut settings];
+            let previous = previous.trim();
+            pass(&clone, remote, previous, rule_sets, None, git).unwrap()
+        };
+        let real = github.tools().git;
+        let dropped: GitTool = {
+            let real = real.clone();
+            Arc::new(
+                move |path: &Path, args: &[&str]| match publish::subcommand(args) {
+                    "push" => Ok(runtime::GitAnswer {
+                        status: publish::tests::exit(128),
+                        output: String::new(),
+                        error: "fatal: unable to access: Connection reset".into(),
+                    }),
+                    _ => real(path, args),
+                },
+            )
+        };
+        let outcome = committing(&github, &dropped);
+        assert!(outcome.pushed.is_err());
+        assert_eq!(outcome.refused, None, "another pass may well get through");
+        let hook = github.bare.join("hooks/pre-receive");
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(
+            &hook,
+            "#!/bin/sh\necho main needs a pull request >&2\nexit 1\n",
+        )
+        .unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let outcome = committing(&github, &real);
+        let refused = outcome.refused.unwrap();
+        assert!(refused.contains("main needs a pull request"), "{refused}");
     }
 
     #[test]

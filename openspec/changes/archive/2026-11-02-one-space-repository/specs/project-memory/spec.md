@@ -35,7 +35,7 @@ For a Space on GitHub the tool SHALL refuse, storing nothing, when gh reports no
 - **WHEN** the implementer of a `sagechat-call-watch-relay` ticket calls `log_work` with a decision, title and the three fields
 - **THEN** the host stores one entry for `sagechat-call-watch-relay` in Sage's folder, sends it to the sync engine at once, and returns its id and file path
 
-#### Scenario: No brain
+#### Scenario: A Space on this Mac alone
 - **WHEN** an implementer in a project of Personal, which named no brain in an earlier release, calls `log_work` with `gh` signed out
 - **THEN** the entry is committed in Personal's local repository, with this Mac's account name as `author`
 

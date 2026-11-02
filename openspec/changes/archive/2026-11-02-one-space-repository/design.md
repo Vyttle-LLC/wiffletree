@@ -64,9 +64,13 @@ Landing is a fourth kind of rule set, **wiki**, over `notes/`, `STATUS.md` and `
 
 **What ends a landing instead:**
 
-- **`main` already holds a cursor at or past the run's** (`at_or_past`, kept). Another Mac compiled these entries after a takeover. The run ends as "already compiled", lands nothing and releases. The bookmark stops double processing, as the approved model says.
+- **`main` already holds a cursor at or past the run's** (`at_or_past`, kept). Another Mac compiled these entries after a takeover. The run ends as "compiled elsewhere", lands nothing and releases. The bookmark stops double processing, as the approved model says.
 - **A wiki file changed on `main` since `H0`** (`changed_meanwhile`, kept), such as a hand edit on GitHub. The run ends failed, lands nothing and releases, and the next run recompiles from the new wiki. Overwriting the edit would lose it, and a merge of prose is what the compile model is for.
 - **A file fails the scan.** A landing is all or nothing: every wiki file is held from this push, the run ends failed naming the file and rule, and the run's output is discarded. The cursor did not move, so the next run sees the same entries.
+
+- **GitHub rejects the push for a reason another pass will not change**, such as a ruleset that requires pull requests: GitHub is in reach and `main` has not moved. The run ends failed with GitHub's reason, lands nothing and releases, so Run now works again. A push that could not reach GitHub, or that `main` moved under, waits for the next pass.
+
+**How a run's scan failure reaches the human.** The run is the only record: no wiki file becomes a held file, and no card or Inbox item is raised, because there is nothing to edit or mark. A compile's output is gone once the run ends. The failed run's record names the file, the line, the check and the rule, never the text, and the Brains page shows it as the wiki's last run and in its run history. The entries stay pending, so the next run compiles them again and the wiki falls behind in plain sight. The usual cause is a value the human marked Not sensitive: the marker sits on the entry's line, so a copy in a note has none and fails the landing. The compile procedure therefore tells the model never to copy text from a line that carries `gate:allow`.
 
 The cursor moves only when the commit that holds it lands, as it did only when a PR merged.
 
@@ -76,7 +80,7 @@ The cursor moves only when the commit that holds it lands, as it did only when a
 
 **One field.** `SpaceStorage.root` holds the folder, `wiffletree` by default and empty for a repository not yet moved. `SpaceStorage.folder` keeps its meaning, the Space's own name under `spaces/`. `space.yaml` never names either, as today it never names its storage. Rule sets take paths through one `Root` type that joins and strips the prefix, so `claims`, `scanned`, `space_file`, `TRACKER`, `ISSUES` and the compile paths stop being bare constants. An empty root gives today's paths exactly, so an unmoved repository behaves as it does now.
 
-The rule sets become Spaces, boards, issues, logs and wiki. Logs are add-only by one Mac, so they push without comparing, like a runner's boards. The wiki compares whole files.
+The rule sets become Spaces, boards, issues, logs and wiki. Logs are add-only by one Mac, so they push without comparing, like a runner's boards. The wiki commits only a run's exact files and compares them at the landing (see 2). Neither keeps a record of its files, because a brain grows without end, so Git brings other Macs' logs and wiki pages down as it does a file no rule set claims.
 
 **A joining Mac reads the tree.** It clones to staging, as today, lists the head's tree, and looks for `<folder>/spaces/<space>/space.yaml` and `<folder>/wiffletree-issues.yaml`, skipping forwarding stubs (see 4). One folder found is the folder. None means an empty repository, which is offered as new. Two means the repository is refused, naming both, because each repository holds one. There is no marker file at the root, because anything outside the folder is left alone. A root-level layout found this way is joined as it stands, with an empty root.
 
@@ -84,9 +88,9 @@ The rule sets become Spaces, boards, issues, logs and wiki. Logs are add-only by
 
 **Moving an existing repository once.** A local repository moves at first start, with no question, because nothing else reads it. A GitHub repository moves when the human presses Move into `wiffletree/` on the Space's page. This is the one write an upgrade would make to a shared repository, `spaces` says an upgrade pushes nothing, and it stops any teammate on an older host, so a person should choose the time. Until then the Space works at the root, with logs and the wiki under `second-brain/` there.
 
-The move is one commit, with its stubs. It renames every path under the rule sets to the folder and changes no content. It is the one commit that spans rule sets, so it has its own check and not `repos::push`'s: every change is a rename at 100% similarity of a claimed path, or a stub. Its push is one attempt inside a loop of its own: when refused, it fetches, and if the root layout is gone the move is done; otherwise it redoes the move on the new head, up to 5 tries.
+The move is one commit, with its stubs. It renames every path under the rule sets to the folder and changes no content. It is the one commit that spans rule sets, so it has its own check and not `repos::push`'s, stated by content and not by Git's rename detection, because a stub stays at each old `space.yaml` and tracker and Git reports those as modified plus added: each path in the folder holds the blob its old path held in the parent commit, and every other path is a stub or unchanged. Its push is one attempt inside a loop of its own: when refused, it fetches, and if the root layout is gone the move is done; otherwise it redoes the move on the new head, up to 5 tries.
 
-Every other Mac on this release adopts the move in its next pass: a recorded empty root and a head with no root layout means reading the tree again, moving this Mac's record paths and any unpushed files under the folder, then comparing as usual. Unpushed changes survive because their paths move with the record. A commit that only renames adds nothing new, so the pulled scan skips its renames.
+Every other Mac on this release adopts the move in its next pass: a recorded empty root and a head with no root layout means reading the tree again, moving this Mac's record paths and any unpushed files under the folder, then comparing as usual. Unpushed changes survive because their paths move with the record. A commit that only moves files adds nothing new, so the pulled scan skips each path that holds the blob its old path held in the parent commit, and the stubs.
 
 ### 4. Upgrade and older hosts
 
@@ -132,7 +136,7 @@ The rest ends with it: the other `gate` keys, the compiler's name and `version`.
 
 **Clearing.** After any pull that changes an alert's file, the file at the head is scanned whole. When the rule no longer fires there, the alert closes by itself on each Mac, and the card has already said the old text stays in history. **Not sensitive** takes a reason and closes the alert on this Mac only, keeping the row so the same path, rule and blob never alert here again. It writes nothing to the repository: an entry is never changed, and a shared allow-list is a way to silence a scan.
 
-**Through the move.** The pulled scan skips a rename, so nothing would raise an alert again at the new path. Moving a repository and adopting a move therefore rewrite the paths in `scan_alerts` with the record, in one transaction. An open alert stays open until the rule stops firing in the moved file.
+**Through the move.** The pulled scan skips a moved file, so nothing would raise an alert again at the new path. Moving a repository and adopting a move therefore rewrite the paths in `scan_alerts` with the record, in one transaction. An open alert stays open until the rule stops firing in the moved file.
 
 **A held entry's Not sensitive.** It is offered only for a `sensitive-info` finding, where the card writes `gate:allow`. A `secret-scan` finding, or a check that could not run, offers Edit it and Discard. Writing `gitleaks:allow` would be a second marker for the card to get right, and one click should not push what looks like a live secret: a false positive can be edited. An alert's Not sensitive is another thing: it writes nothing, so it works for either check.
 

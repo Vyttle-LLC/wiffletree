@@ -114,7 +114,12 @@ fn git_query(path: &Path, args: &[&str], input: Option<Vec<u8>>) -> Result<GitAn
 /// Runs `git push` without prompts. A push runs the repository's pre-push hooks, so it gets
 /// minutes where a query gets seconds.
 pub fn git_push(path: &Path, args: &[&str]) -> Result<GitAnswer> {
-    git_run(git_command(path, args), PUSH_TIMEOUT, None)
+    let (status, output, error) = bounded_output(git_command(path, args), PUSH_TIMEOUT, None)?;
+    Ok(GitAnswer {
+        status,
+        output: String::from_utf8(output)?,
+        error: push_error(&error),
+    })
 }
 
 fn git_command(path: &Path, args: &[&str]) -> Command {
@@ -224,6 +229,26 @@ fn error_line(error: &[u8]) -> String {
         .or_else(|| lines().next_back())
         .unwrap_or_default()
         .to_owned()
+}
+
+/// A failed push's error line, or for one the remote rejected Git's line saying so with the first
+/// few lines the remote said why, as `error_line` would keep only Git's "failed to push".
+fn push_error(error: &[u8]) -> String {
+    const SAID: usize = 5;
+    let text = String::from_utf8_lossy(error);
+    let lines = || text.lines().map(str::trim);
+    let Some(rejected) = lines().find(|l| l.contains("[remote rejected]")) else {
+        return error_line(error);
+    };
+    let said: Vec<&str> = (lines().filter_map(|l| l.strip_prefix("remote:")))
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .take(SAID)
+        .collect();
+    match said.is_empty() {
+        true => rejected.to_owned(),
+        false => format!("{rejected}: {}", said.join(" ")),
+    }
 }
 
 /// Runs GitHub's `gh` in `path` without prompts and returns its output, or its last error line.

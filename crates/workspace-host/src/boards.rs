@@ -22,6 +22,8 @@ const PREVIEW_BYTES: u64 = 16 * 1024;
 /// outputs saved from threads or shared, and in `jobs`, a folder per job holding the same.
 struct Shelf {
     repository: PathBuf,
+    /// The repository's Wiffletree folder, for versions from before it moved there.
+    root: folder::Root,
     space: SpaceId,
     keeping: Keeping,
     loose: String,
@@ -147,9 +149,11 @@ impl Shelves {
     pub(crate) fn versions(&self, id: &str) -> Result<Vec<BoardVersion>> {
         let found = self.find(id)?;
         let latest = self.version_of(LATEST, &found.about, 0, false);
-        let mut history = self.logged(&found.shelf.repository, &found.metadata(), false)?;
+        let metadata = found.metadata();
+        let before = found.shelf.root.moved_from(&metadata);
+        let mut history = self.logged(&found.shelf.repository, &metadata, before, false)?;
         if let Some(folder) = self.unpushed_of(&found) {
-            history.extend(self.logged(&self.store, &format!("{folder}.json"), true)?);
+            history.extend(self.logged(&self.store, &format!("{folder}.json"), None, true)?);
             history.sort_by_key(|version| std::cmp::Reverse(version.saved_at));
         }
         // The latest's metadata is as untrusted as an earlier commit's.
@@ -210,35 +214,47 @@ impl Shelves {
         let folder = assistant::output_folder(&self.store.join(&base), title).ok()?;
         Some(format!("{base}/{folder}"))
     }
-    /// The versions Git holds of the output whose metadata is `metadata` in `repository`.
+    /// The versions Git holds of the output whose metadata is `metadata` in `repository`, or was
+    /// at `before` until the repository moved into its folder. The move's commit rewrites
+    /// nothing, so it and the save before it are one version.
     fn logged(
         &self,
         repository: &Path,
         metadata: &str,
+        before: Option<&str>,
         local_only: bool,
     ) -> Result<Vec<BoardVersion>> {
         if !repository.join(".git").exists() {
             return Ok(vec![]);
         }
         let limit = format!("-n{MAX_VERSIONS}");
-        let log = runtime::git_output(
-            repository,
-            &["log", &limit, "--format=%H %ct", "--", metadata],
-        )?;
-        let mut versions = vec![];
+        let mut args = vec!["log", &limit, "--format=%H %ct", "--", metadata];
+        args.extend(before);
+        let log = runtime::git_output(repository, &args)?;
+        let mut versions: Vec<BoardVersion> = vec![];
         for line in log.lines() {
             let Some((commit, time)) = line.split_once(' ') else {
                 continue;
             };
-            let shown = format!("{commit}:{metadata}");
-            let about: Value = runtime::git_output(repository, &["show", &shown])
-                .ok()
+            let about: Value = [Some(metadata), before]
+                .into_iter()
+                .flatten()
+                .find_map(|path| {
+                    let shown = format!("{commit}:{path}");
+                    runtime::git_output(repository, &["show", &shown]).ok()
+                })
                 .and_then(|text| serde_json::from_str(&text).ok())
                 .unwrap_or_default();
             let committed = time.parse().unwrap_or_default();
             let version = self.version_of(commit, &about, committed, local_only);
+            let same = |newer: &BoardVersion| {
+                BoardVersion {
+                    commit: newer.commit.clone(),
+                    ..version.clone()
+                } == *newer
+            };
             // An earlier commit's metadata is as untrusted as the latest's.
-            if plain_file_name(&version.file) {
+            if plain_file_name(&version.file) && !versions.last().is_some_and(same) {
                 versions.push(version);
             }
         }
@@ -275,11 +291,20 @@ impl Shelves {
         if staged.exists() {
             fs::remove_dir_all(&staged)?;
         }
-        let prefix = format!("{folder}/");
-        let listed = runtime::git_output(
-            &repository,
-            &["ls-tree", "-r", "-z", "--name-only", commit, "--", &prefix],
-        )?;
+        let listing = |prefix: &str| {
+            let args = ["ls-tree", "-r", "-z", "--name-only", commit, "--", prefix];
+            runtime::git_output(&repository, &args)
+        };
+        let mut prefix = format!("{folder}/");
+        let mut listed = listing(&prefix)?;
+        // A version from before the repository moved into its folder.
+        if let Some(before) = (listed.is_empty() && !versions[at].local_only)
+            .then(|| found.shelf.root.moved_from(&folder))
+            .flatten()
+        {
+            prefix = format!("{before}/");
+            listed = listing(&prefix)?;
+        }
         for path in listed.split('\0').filter(|path| !path.is_empty()) {
             let relative = path.strip_prefix(&prefix).context("Unexpected path")?;
             let bytes =
@@ -390,14 +415,18 @@ impl Host {
             let space = record.space;
             shelves.push(Shelf {
                 repository: store.clone(),
+                root: Default::default(),
                 space: space.id.clone(),
                 keeping: Keeping::Private,
                 loose: space.id.to_string(),
                 jobs: format!("{}/{}", space.id, assistant::JOB_OUTPUTS),
             });
             let boards = format!("spaces/{}/boards", space.storage.folder);
+            let root = folder::Root::new(&space.storage.root);
+            let boards = root.join(&boards);
             shelves.push(Shelf {
                 repository: self.storage_folder(&space.storage.repository),
+                root,
                 space: space.id.clone(),
                 keeping: match space.storage.repository {
                     StorageRepository::Local { .. } => Keeping::LocalStorage,
@@ -465,7 +494,7 @@ impl Host {
     /// Writes an output into `space`'s storage under `base`, at the folder of the title `about`
     /// names, as `file` with `about` beside it; a title written before is replaced, its old file
     /// included. Committed at once in local storage, and pushed by the next pass from GitHub.
-    /// Returns the output's folder, relative to the repository.
+    /// Returns the output's folder, relative to the repository's folder.
     pub(crate) fn write_output(
         &self,
         space: &Space,
@@ -475,7 +504,7 @@ impl Host {
         mut about: Value,
         message: &str,
     ) -> Result<String> {
-        let storage = self.storage_folder(&space.storage.repository);
+        let storage = self.root_folder(&space.storage.repository)?;
         let title = about["title"].as_str().context("An output has a title")?;
         let folder = format!(
             "{base}/{}",
@@ -547,10 +576,10 @@ mod tests {
         };
         host.save_job(recipe).unwrap();
         let storage = host.storage_folder(&personal.storage.repository);
-        let base = format!(
+        let base = folder::Root::new(&personal.storage.root).join(&format!(
             "spaces/{}/boards/release-dashboard",
             personal.storage.folder
-        );
+        ));
         let now = now();
         for (body, run, saved_at) in [
             ("<title>Week one</title>", "r1", now - 1000),
@@ -625,6 +654,67 @@ mod tests {
             "<title>Week two</title>"
         );
         assert!(shelves.version_folder(&dashboard.id, "HEAD").is_err());
+    }
+
+    #[test]
+    fn an_outputs_versions_and_their_count_last_through_the_move_into_the_folder() {
+        let (_home, mut host, personal) = host();
+        host.save_job(Recipe {
+            id: "brief".into(),
+            name: "Brief".into(),
+            space_id: personal.id.clone(),
+            prompt: "Write it.".into(),
+            schedule: workspace_core::job::Schedule {
+                cron: "0 8 * * 1".into(),
+                timezone: "America/New_York".into(),
+            },
+            model: None,
+            sources: vec![],
+            output: None,
+            sharing: Sharing::OneRunner,
+            runner: None,
+            enabled: true,
+            extra: Default::default(),
+        })
+        .unwrap();
+        let storage = host.storage_folder(&personal.storage.repository);
+        let base = format!("spaces/{}/boards/brief", personal.storage.folder);
+        let saved = |body: &str, saved_at: i64, base: &str, root: &folder::Root| {
+            let scratch = tempfile::tempdir().unwrap();
+            let file = scratch.path().join("brief.md");
+            fs::write(&file, body).unwrap();
+            let about = json!({"title":"Brief","saved_at":saved_at});
+            assistant::store_output_in(root, &storage, base, "Brief", &file, about)
+                .unwrap()
+                .1
+        };
+        let at_root = folder::Root::default();
+        assert_eq!(saved("One", 1000, &base, &at_root), 1);
+        assert_eq!(saved("Two", 2000, &base, &at_root), 2);
+        let moved = format!("wiffletree/{base}");
+        fs::create_dir_all(storage.join(&moved).parent().unwrap()).unwrap();
+        git(&storage, &["mv", &base, &moved]);
+        git(&storage, &["commit", "-qm", "Move into wiffletree/"]);
+
+        let root = folder::Root::default_folder();
+        let shelves = host.shelves().unwrap();
+        let brief = shelves.list().remove(0);
+        let versions = shelves.versions(&brief.id).unwrap();
+        assert_eq!(versions.len(), 2, "{versions:?}");
+        let earlier = shelves.version_folder(&brief.id, &versions[1].commit);
+        let earlier = fs::read_to_string(earlier.unwrap().join("brief.md"));
+        assert_eq!(earlier.unwrap(), "One");
+
+        assert_eq!(saved("Three", 3000, &moved, &root), 3);
+        let shelves = host.shelves().unwrap();
+        let brief = shelves.list().remove(0);
+        let bodies: Vec<String> = (shelves.versions(&brief.id).unwrap().iter())
+            .map(|version| {
+                let folder = shelves.version_folder(&brief.id, &version.commit).unwrap();
+                fs::read_to_string(folder.join("brief.md")).unwrap()
+            })
+            .collect();
+        assert_eq!(bodies, ["Three", "Two", "One"]);
     }
 
     #[test]
@@ -721,7 +811,7 @@ mod tests {
     #[test]
     fn a_dot_slug_or_a_linked_job_folder_never_widens_a_boards_root() {
         let (_home, host, personal) = host();
-        let storage = host.storage_folder(&personal.storage.repository);
+        let storage = host.root_folder(&personal.storage.repository).unwrap();
         let boards = storage.join(format!("spaces/{}/boards", personal.storage.folder));
         fs::create_dir_all(&boards).unwrap();
         std::os::unix::fs::symlink("../../..", boards.join("escape")).unwrap();

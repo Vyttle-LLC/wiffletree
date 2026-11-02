@@ -10,6 +10,11 @@ const OTHER: &str = "MHohlios/other-storage";
 /// A value the `sensitive-info` check holds.
 const PHONE: &str = "Call the parent at (415) 555-0134 tonight.\n";
 
+/// `path` in the folder a move to a repository with none puts the Spaces in.
+fn in_folder(path: &str) -> String {
+    format!("{DEFAULT_ROOT}/{path}")
+}
+
 fn empty_github(folder: &Path) -> Arc<GitHub> {
     Arc::new(GitHub::new(folder, false))
 }
@@ -144,8 +149,9 @@ fn is_on_github(home: &Path, host: &Host, id: &SpaceId) {
     assert_eq!(space.storage.repository, storage::github(NAME));
     let clone = host.storage_folder(&space.storage.repository);
     assert!(clone.join(".git").exists());
+    let folder = host.root_folder(&space.storage.repository).unwrap();
     assert!(
-        clone
+        folder
             .join(storage::space_file(&space.storage.folder))
             .exists()
     );
@@ -272,11 +278,25 @@ fn a_local_space_moves_to_an_empty_private_repository_and_everything_carries_on(
     let runner = shown.runner.as_ref().unwrap();
     assert_eq!(runner.machine, sync::machine_name());
     let pushed = github
-        .show(&jobs::recipe_file(&space.storage.folder, &recipe.id))
+        .show(&in_folder(&jobs::recipe_file(
+            &space.storage.folder,
+            &recipe.id,
+        )))
         .unwrap();
     assert!(pushed.contains("runner"), "{pushed}");
-    assert_eq!(github.show(&output).as_deref(), Some("# Brief\n"));
-    assert!(github.show(&format!("issues/{two}/issue.md")).is_some());
+    assert_eq!(
+        github.show(&in_folder(&output)).as_deref(),
+        Some("# Brief\n")
+    );
+    assert!(
+        github
+            .show(&in_folder(&format!("issues/{two}/issue.md")))
+            .is_some()
+    );
+    assert_eq!(
+        host.space(&space.id).unwrap().space.storage.root,
+        DEFAULT_ROOT
+    );
     let log = github.log("%s");
     assert_eq!(log.len(), 4, "a first commit and one per rule set: {log:?}");
 
@@ -387,8 +407,11 @@ fn a_shared_space_moves_to_another_github_repository_and_the_old_one_stays() {
 
     assert_eq!(moved.space.storage.repository, storage::github(OTHER));
     assert_eq!(github.log("%H"), head, "the old repository is unchanged");
-    assert!(other.show("issues/SAGE-1/issue.md").is_some());
-    assert!(other.show("spaces/sage/space.yaml").is_some());
+    // A repository at the root moves into the folder of one that has none.
+    assert!(other.show(&in_folder("issues/SAGE-1/issue.md")).is_some());
+    assert!(other.show(&in_folder("spaces/sage/space.yaml")).is_some());
+    assert_eq!(other.show("spaces/sage/space.yaml"), None);
+    assert_eq!(moved.space.storage.root, DEFAULT_ROOT);
     assert_eq!(listed(&host, &sage.id), before);
     assert!(host.storage_pass(&repos::key(NAME)).unwrap().is_none());
     assert!(host.storage_pass(&repos::key(OTHER)).unwrap().is_some());
@@ -413,10 +436,9 @@ fn two_spaces_in_one_repository_move_together() {
     let staged = storage::stage(&host.home, NAME, &github.tools(), &[]).unwrap();
     let ticked = ["sage", "sage-watch"].map(|folder| JoinSpace {
         folder: folder.into(),
-        brain_path: None,
         clones: vec![],
     });
-    host.join_spaces(staged, &ticked).unwrap();
+    host.join_spaces(staged, &ticked, false).unwrap();
     let sage = space_named(&host, "Sage");
     let check = host.check_storage_move(&sage.id, None).unwrap();
     assert_eq!(check.spaces, ["Sage", "Sage Watch"]);
@@ -424,9 +446,10 @@ fn two_spaces_in_one_repository_move_together() {
     let other = space_named(&host, "Sage Watch");
     assert_eq!(other.storage.repository, moved.space.storage.repository);
     assert_eq!(other.storage.folder, "sage-watch");
-    let folder = host.storage_folder(&other.storage.repository);
+    let folder = host.root_folder(&other.storage.repository).unwrap();
     assert!(folder.join("spaces/sage-watch/space.yaml").exists());
     assert!(folder.join("spaces/sage/space.yaml").exists());
+    assert_eq!(other.storage.root, moved.space.storage.root);
 }
 
 #[test]
@@ -439,17 +462,17 @@ fn a_public_repository_is_refused_and_nothing_is_written() {
     let space = personal(&host);
     let said = refusal(&mut host, &space.id, Some(NAME), &github.tools());
     assert!(
-        said.contains("Choose a private repository. Its Spaces and issues"),
+        said.contains("Issues and logs need a private repository"),
         "{said}"
     );
     is_local(&host, &space);
 }
 
 #[test]
-fn a_brain_is_refused_naming_its_space() {
+fn a_repository_a_space_names_as_its_brain_can_take_its_storage() {
     let folder = tempfile::tempdir().unwrap();
     let github = empty_github(folder.path());
-    let (_home, mut host) = host();
+    let (home, mut host) = host();
     let mut space = personal(&host);
     let (owner, name) = NAME.split_once('/').unwrap();
     space.brain = Some(SpaceBrain {
@@ -461,16 +484,105 @@ fn a_brain_is_refused_naming_its_space() {
         folder: SpaceBrain::DEFAULT_FOLDER.into(),
         extra: Extra::new(),
     });
-    host.update_space(space.clone()).unwrap();
-    let said = refusal(&mut host, &space.id, Some(NAME), &github.tools());
-    assert_eq!(
-        said,
-        format!(
-            "{NAME} is Personal’s brain. A repository is a brain or storage, not both, because a brain changes only through reviewed pull requests."
+    // As an earlier release recorded it; no screen edits a brain now.
+    (host.db)
+        .execute(
+            "UPDATE spaces SET data=?2 WHERE id=?1",
+            params![space.id.as_str(), encode(&space).unwrap()],
         )
+        .unwrap();
+    host.check_storage_move(
+        &space.id,
+        Some(&storage::stage(&host.home, NAME, &github.tools(), &[]).unwrap()),
+    )
+    .unwrap();
+    host.move_storage(&space.id, Some(NAME), &github.tools())
+        .unwrap();
+    is_on_github(home.path(), &host, &space.id);
+    let moved = host.space(&space.id).unwrap().space;
+    assert_eq!(moved.brain, space.brain, "its brain stays as it was named");
+}
+
+#[test]
+fn a_move_carries_the_whole_folder_with_its_logs_wiki_and_compilers() {
+    let folder = tempfile::tempdir().unwrap();
+    let github = empty_github(folder.path());
+    let (home, mut host) = host();
+    let space = personal(&host);
+    let entry = "second-brain/logs/wiffletree/2026/11/01T0900-01jbrain.md";
+    let page = "second-brain/notes/Wiffletree.md";
+    let compiler = "compilers/this-mac.yaml";
+    let source = host.root_folder(&space.storage.repository).unwrap();
+    for (path, text) in [
+        (entry, "An entry.\n"),
+        (page, "A page.\n"),
+        (compiler, "machine: M\n"),
+    ] {
+        fs::create_dir_all(source.join(path).parent().unwrap()).unwrap();
+        fs::write(source.join(path), text).unwrap();
+    }
+    let clone = host.storage_folder(&space.storage.repository);
+    git(&clone, &["add", "--all"]);
+    git(&clone, &["commit", "-qm", "The folder's brain"]);
+    host.move_storage(&space.id, Some(NAME), &github.tools())
+        .unwrap();
+    let moved = host.space(&space.id).unwrap().space;
+    assert_eq!(moved.storage.root, DEFAULT_ROOT);
+    for (path, text) in [
+        (entry, "An entry.\n"),
+        (page, "A page.\n"),
+        (compiler, "machine: M\n"),
+    ] {
+        assert_eq!(
+            github.show(&in_folder(path)).as_deref(),
+            Some(text),
+            "{path}"
+        );
+        assert_eq!(github.show(path), None, "{path} is not at the root");
+    }
+    assert!(github.show(&in_folder(TRACKER)).is_some());
+    // Each rule set's files are a commit of their own.
+    for commit in github.log("%H") {
+        let changed = git(&github.bare, &["show", "--format=", "--name-only", &commit]);
+        let logs = changed
+            .lines()
+            .filter(|p| p.contains("/second-brain/logs/"))
+            .count();
+        assert!(logs == 0 || logs == changed.lines().count(), "{changed}");
+    }
+    is_on_github(home.path(), &host, &space.id);
+    // The next pass finds the folder as it moved, with nothing to push.
+    let head = github.log("%H")[0].clone();
+    sync(&mut host, &github);
+    assert_eq!(github.log("%H")[0], head);
+    assert!(host.workspace_notes(&[]).unwrap().is_empty());
+}
+
+#[test]
+fn a_move_into_a_repository_that_holds_a_folder_puts_the_space_in_it() {
+    let folder = tempfile::tempdir().unwrap();
+    let github = Arc::new(GitHub::new(folder.path(), true));
+    github.commit(
+        "team/storage/wiffletree-issues.yaml",
+        "format: 1\nprefix: SAGE\n",
     );
-    is_local(&host, &space);
-    assert_eq!(commits(&github), 0);
+    let (_home, mut host) = host();
+    let space = personal(&host);
+    let staged = storage::stage(&host.home, NAME, &github.tools(), &[]).unwrap();
+    let check = host.check_storage_move(&space.id, Some(&staged)).unwrap();
+    assert_eq!(check.adopts.as_deref(), Some("SAGE"));
+    drop(staged);
+    let moved = host
+        .move_storage(&space.id, Some(NAME), &github.tools())
+        .unwrap();
+    assert_eq!(moved.space.storage.root, "team/storage");
+    assert!(
+        github
+            .show("team/storage/spaces/personal/space.yaml")
+            .is_some()
+    );
+    assert_eq!(github.show(&in_folder("spaces/personal/space.yaml")), None);
+    assert_eq!(host.tracker(&moved.space).unwrap().prefix, "SAGE");
 }
 
 #[test]
@@ -888,7 +1000,7 @@ fn a_teammates_change_to_what_a_stopped_move_pushed_puts_the_refusal_back() {
     push(&run, &tools).unwrap();
     std::mem::forget(run);
     let mut host = restart(home.path(), host);
-    let file = storage::space_file(&space.storage.folder);
+    let file = in_folder(&storage::space_file(&space.storage.folder));
     let edited = github.show(&file).unwrap() + "extra: a teammate's edit\n";
     github.commit(&file, edited);
     let said = refusal(&mut host, &space.id, Some(NAME), &tools);
@@ -967,7 +1079,7 @@ fn a_stop_after_the_switch_to_this_mac_is_finished_by_the_next_start() {
     std::mem::forget(switched);
     let host = restart(home.path(), host);
     let moved = space_named(&host, "Sage");
-    let folder = host.storage_folder(&moved.storage.repository);
+    let folder = host.root_folder(&moved.storage.repository).unwrap();
     assert!(folder.join("spaces/sage/space.yaml").exists());
     assert!(staging_folders(home.path()).is_empty());
     assert_eq!(git(&folder, &["status", "--porcelain"]), "");
@@ -1064,7 +1176,7 @@ fn a_space_keeps_following_its_roots_after_it_moves() {
     let refresh = host.refresh_repositories().unwrap();
     assert_eq!(refresh.joined.len(), 1, "{:?}", refresh.not_joined);
     sync(&mut host, &github);
-    let file = storage::space_file(&personal(&host).storage.folder);
+    let file = in_folder(&storage::space_file(&personal(&host).storage.folder));
     let pushed = github.show(&file).unwrap();
     assert!(pushed.contains("Vyttle-LLC/pica-web"), "{pushed}");
     assert!(!pushed.contains("followed_roots"), "{pushed}");
@@ -1092,7 +1204,7 @@ fn a_root_check_joining_during_a_move_ends_it_and_the_repository_is_kept() {
 
     is_local(&host, &space);
     let joined = "Vyttle-LLC/pica-web";
-    let file = storage::space_file(&space.storage.folder);
+    let file = in_folder(&storage::space_file(&space.storage.folder));
     let source = host.storage_folder(&space.storage.repository);
     let committed = git(&source, &["show", &format!("HEAD:{file}")]);
     assert!(committed.contains(joined), "{committed}");

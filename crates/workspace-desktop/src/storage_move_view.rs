@@ -1,4 +1,4 @@
-//! Move storage… on a Space's page (OpenSpec change `move-space-storage`, screens 2 to 5 of its
+//! Move… on a Space's page (OpenSpec change `move-space-storage`, screens 2 to 5 of its
 //! mockup): this Mac or a GitHub repository, who can read it and what moves, or why it is
 //! refused. Only the human moves storage, and the host checks everything again at Move.
 use super::*;
@@ -30,7 +30,7 @@ pub(super) struct MoveStorageSheet {
 }
 impl EventEmitter<Moved> for MoveStorageSheet {}
 
-/// Opens Move storage… for `space` over `window`.
+/// Opens Move… for `space` over `window`.
 pub(super) fn open(
     bridge: Bridge,
     shared: Shared,
@@ -418,6 +418,7 @@ mod tests {
             storage: SpaceStorage {
                 repository,
                 folder: "vyttle".into(),
+                root: DEFAULT_ROOT.into(),
             },
             repositories: vec![],
             models: Default::default(),
@@ -485,10 +486,10 @@ mod tests {
     #[test]
     fn a_refusal_leads_with_its_first_sentence() {
         assert_eq!(
-            refusal_parts("x is Vyttle’s brain. A repository is a brain or storage, not both."),
+            refusal_parts("x is already a tracker. Choose another repository."),
             (
-                "x is Vyttle’s brain.".to_owned(),
-                " A repository is a brain or storage, not both.".to_owned()
+                "x is already a tracker.".to_owned(),
+                " Choose another repository.".to_owned()
             )
         );
         assert_eq!(

@@ -15,7 +15,7 @@ The Models page SHALL have a scope bar, This Mac · Space ▾. At a Space it SHA
 - **WHEN** the human opens Effective settings on an implementer of a `sagechat-sms` ticket in Sage, whose Space entry sets Publishing to always ask first
 - **THEN** Publishing reads "Always ask first" from "sagechat-sms in Sage", naming the layers it overrode
 
-#### Scenario: From a Space's brain row to the Brains page
+#### Scenario: From the Repository box to the Brains page
 - **WHEN** the human presses "Change on Brains →" on the Compile row of Sage's Repository box
 - **THEN** the Brains page opens, and nothing changes on the Space page
 

@@ -171,6 +171,7 @@ fn new_space(name: &str, prefixes: &mut Vec<String>) -> (Space, TrackerConfig) {
         storage: SpaceStorage {
             repository: StorageRepository::Local { id: new_id() },
             folder: settings::slug(name, "space"),
+            root: DEFAULT_ROOT.into(),
         },
         repositories: vec![],
         models: SpaceModels::default(),
@@ -214,15 +215,6 @@ pub(crate) enum GhAccount {
     SignedOut,
     /// `gh` could not say, such as while GitHub is out of reach.
     Unknown,
-}
-impl GhAccount {
-    /// The login `gh` is signed in as, if it said.
-    pub(crate) fn login(self) -> Option<String> {
-        match self {
-            Self::SignedIn(login) => Some(login),
-            Self::SignedOut | Self::Unknown => None,
-        }
-    }
 }
 /// `gh`'s exit code when a command needs it signed in.
 const GH_AUTH_REQUIRED: i32 = 4;
@@ -270,6 +262,9 @@ fn most(counts: impl Iterator<Item = (SpaceId, usize)>) -> Option<SpaceId> {
 
 pub(crate) fn validate(space: &Space) -> Result<()> {
     text(&space.name, 128)?;
+    if !space.storage.root.is_empty() {
+        validate_root(&space.storage.root)?;
+    }
     ensure!(
         space.description.len() <= 4096,
         "A Space's description is at most 4,096 bytes"
@@ -409,7 +404,25 @@ impl Host {
         additions: &str,
         prefix: Option<&str>,
     ) -> Result<SpaceRecord> {
+        self.create_local_space(name, description, additions, prefix, &SpaceSetup::default())
+    }
+    /// `create_space` with New Space's folder and compile time. The time is the folder's from
+    /// the first commit, as a local repository's one Mac always compiles it.
+    pub fn create_local_space(
+        &mut self,
+        name: &str,
+        description: &str,
+        additions: &str,
+        prefix: Option<&str>,
+        setup: &SpaceSetup,
+    ) -> Result<SpaceRecord> {
         self.ensure_unused_name(name, None)?;
+        let root = setup.folder.as_deref().unwrap_or(DEFAULT_ROOT);
+        let root = root.trim().trim_end_matches('/');
+        validate_root(root)?;
+        if let Some(compile) = &setup.compile {
+            compile::schedule(compile)?;
+        }
         let mut prefixes = prefixes(&self.db)?;
         if let Some(prefix) = prefix {
             validate_prefix(prefix)?;
@@ -424,6 +437,8 @@ impl Host {
         if let Some(prefix) = prefix {
             tracker.prefix = prefix.into();
         }
+        space.storage.root = root.into();
+        tracker.compile = setup.compile.clone();
         validate(&space)?;
         let local = SpaceLocal::default();
         // A savepoint, so removing a Space can recreate Personal within its own change.
@@ -434,6 +449,23 @@ impl Host {
             })
         })?;
         Ok(SpaceRecord { space, local })
+    }
+    /// What New Space proposes: the most common owner of the workspace's GitHub repositories,
+    /// or else the `gh` login, for the repository it offers to create, and this Mac's timezone.
+    pub fn space_form_defaults(&self) -> Result<SpaceFormDefaults> {
+        let mut owners: BTreeMap<String, usize> = BTreeMap::new();
+        for repository in self.repositories()? {
+            if let Some(github) = repository.github {
+                *owners.entry(github.owner).or_default() += 1;
+            }
+        }
+        let most = owners.into_iter().max_by_key(|(_, count)| *count);
+        Ok(SpaceFormDefaults {
+            owner: most
+                .map(|(owner, _)| owner)
+                .or_else(|| self.gh_login.clone()),
+            timezone: jobs::local_timezone(),
+        })
     }
     /// Replaces a Space's definition. Its storage stays where it is.
     pub fn update_space(&mut self, space: Space) -> Result<SpaceRecord> {
@@ -446,15 +478,10 @@ impl Host {
         self.check_space_behaviors(&current.space, &space)?;
         self.check_space_models(&current.space, &space)?;
         self.ensure_unused_name(&space.name, Some(&space.id))?;
-        if let Some(SpaceBrain {
-            repository: BrainRepository::GitHub { owner, name, .. },
-            ..
-        }) = &space.brain
-        {
-            self.refuse_second_use(&format!("{owner}/{name}"), storage::Use::Brain)?;
-        }
+        // The `brain` key is a record of an older brain, which no screen edits.
         let space = Space {
             name: space.name.trim().into(),
+            brain: current.space.brain.clone(),
             ..space
         };
         self.atomically(|host| {
@@ -499,6 +526,11 @@ impl Host {
             projects.is_empty() || !is_personal(&removed),
             "Personal holds archived projects, which have nowhere else to go"
         );
+        let last_in_repository = !(spaces.iter())
+            .any(|r| r.space.id != *id && r.space.storage.repository == removed.storage.repository);
+        if last_in_repository {
+            self.refuse_unlanded_entries(&removed)?;
+        }
         self.atomically(|host| {
             if !projects.is_empty() {
                 let personal = match spaces.iter().find(|r| is_personal(&r.space)) {
@@ -548,69 +580,6 @@ impl Host {
         Self::event(&tx, &project.id, None, "space_changed", &target.name)?;
         tx.commit()?;
         Ok(project)
-    }
-    /// Sets the Space's brain from its page: where a GitHub brain is cloned on this Mac, or else
-    /// a local folder.
-    pub fn set_space_brain(&mut self, space: &SpaceId, path: &str) -> Result<()> {
-        let SpaceRecord { space, mut local } = self.space(space)?;
-        let Some(SpaceBrain {
-            repository: BrainRepository::GitHub { owner, name, .. },
-            ..
-        }) = &space.brain
-        else {
-            return self.set_local_brain(&space.id, path);
-        };
-        let brain = format!("{owner}/{name}");
-        let path = fs::canonicalize(path).context("The brain's clone must already exist")?;
-        let cloned = match repositories::read_origin(&path) {
-            repositories::Origin::GitHub { owner, name, .. } => format!("{owner}/{name}"),
-            _ => String::new(),
-        };
-        ensure!(
-            cloned.eq_ignore_ascii_case(&brain),
-            "{} is not a clone of {brain}",
-            path.display()
-        );
-        local.brain_path = Some(path.to_str().context("Brain path is not UTF-8")?.into());
-        self.db.execute(
-            "UPDATE spaces SET local=?2 WHERE id=?1",
-            params![space.id.as_str(), encode(&local)?],
-        )?;
-        Ok(())
-    }
-    /// Sets the Space's brain to the local folder `path`, keeping the folder in it that a local
-    /// brain already names.
-    fn set_local_brain(&mut self, space: &SpaceId, path: &str) -> Result<()> {
-        let path = fs::canonicalize(path)
-            .context("Brain directory must already exist; setup is explicit")?;
-        ensure!(path.is_dir(), "Brain attachment must be a directory");
-        let path: String = path.to_str().context("Brain path is not UTF-8")?.into();
-        let SpaceRecord {
-            mut space,
-            mut local,
-        } = self.space(space)?;
-        // A local brain keeps its folder and the keys this release does not know.
-        space.brain = Some(match space.brain {
-            Some(
-                brain @ SpaceBrain {
-                    repository: BrainRepository::Local { .. },
-                    ..
-                },
-            ) => brain,
-            _ => SpaceBrain {
-                repository: BrainRepository::local(),
-                folder: SpaceBrain::DEFAULT_FOLDER.into(),
-                extra: Extra::new(),
-            },
-        });
-        local.brain_path = Some(path.clone());
-        self.atomically(|host| {
-            host.db.execute(
-                "UPDATE spaces SET data=?2,local=?3 WHERE id=?1",
-                params![space.id.as_str(), encode(&space)?, encode(&local)?],
-            )?;
-            host.write_space_file(&space)
-        })
     }
     /// The workspace repositories whose GitHub name `space` lists, and the ones it lists that
     /// are not cloned on this Mac.

@@ -4,7 +4,7 @@
 //! Enter opens the note in Wiki or the entry in Logs, Tab cycles the scope chips, and Esc closes
 //! and gives focus back to where it was.
 use super::*;
-use brain_browser_view::{BrainOpening, BrainTarget, github_brain, short_id};
+use brain_browser_view::{BrainOpening, BrainTarget, short_id, space_brain};
 use gpui_component::input::Input;
 use ui::{hint, icon, mono, pill};
 
@@ -54,11 +54,8 @@ pub(super) enum Searched {
         /// `(id, name)` of the project offered as a scope chip.
         project: Option<(String, String)>,
     },
-    /// The Space has no brain the host indexes: none, or a local folder.
-    NoBrain {
-        space: Option<(SpaceId, String)>,
-        local: bool,
-    },
+    /// No project or Space is in use, so there is no brain to search.
+    NoBrain,
 }
 
 struct Opened {
@@ -268,8 +265,9 @@ impl BrainSearch {
             .child(mono("esc", p));
         panel = panel.child(field);
         let (repository, project) = match &opened.searched {
-            Searched::NoBrain { space, local } => {
-                return panel.child(self.no_brain(space.as_ref(), *local, p, cx));
+            Searched::NoBrain => {
+                let line = "Open a project or a brain to search its brain.";
+                return panel.child(div().p_3().child(hint(line, p)));
             }
             Searched::Brain {
                 repository,
@@ -355,30 +353,6 @@ impl BrainSearch {
                 .child(div().flex_1())
                 .child(foot),
         )
-    }
-
-    fn no_brain(
-        &self,
-        space: Option<&(SpaceId, String)>,
-        local: bool,
-        p: Palette,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let line = no_brain_line(space.map(|(_, name)| name.as_str()), local);
-        let mut body = div().p_3().flex().flex_col().gap_2().child(hint(line, p));
-        if let Some((id, _)) = space {
-            let id = id.clone();
-            body = body.child(
-                ui::button("search-space-settings")
-                    .outline()
-                    .label("Settings › Spaces")
-                    .on_click(cx.listener(move |view, _, window, cx| {
-                        view.close(window, cx);
-                        cx.emit(Intent::OpenSpace(id.clone()));
-                    })),
-            );
-        }
-        body
     }
 }
 
@@ -507,69 +481,36 @@ fn excerpt(parts: &[ExcerptPart]) -> (String, Vec<std::ops::Range<usize>>) {
     (text, marks)
 }
 
-fn no_brain_line(space: Option<&str>, local: bool) -> String {
-    match (space, local) {
-        (Some(space), true) => format!(
-            "The {space} Space’s brain is a folder on this Mac, which search does not index. Name a GitHub brain in the Space’s settings to search it."
-        ),
-        (Some(space), false) => format!(
-            "The {space} Space names no brain, so there is nothing to search. Name one in Settings › Spaces."
-        ),
-        (None, _) => "Open a project or a brain to search its brain.".into(),
-    }
-}
-
 /// What ⌘K searches outside the brain browser: the selected project's Space's brain, with that
 /// project as a scope, or else the brain of `last_space`, the Space last used.
 pub(super) fn searched_for(shared: &Shared, last_space: Option<&SpaceId>) -> Searched {
     let Some(snapshot) = shared.snapshot() else {
-        return Searched::NoBrain {
-            space: None,
-            local: false,
-        };
+        return Searched::NoBrain;
     };
     let project =
         (shared.project_id()).and_then(|id| snapshot.projects.iter().find(|p| p.id == id));
     let space_id = project.map(|p| &p.space).or(last_space);
     let Some(space) = space_id.and_then(|id| snapshot.spaces.iter().find(|s| &s.id == id)) else {
-        return Searched::NoBrain {
-            space: None,
-            local: false,
-        };
+        return Searched::NoBrain;
     };
-    match github_brain(space) {
-        Some(repository) => Searched::Brain {
-            repository,
-            project: project.map(|p| (p.id.clone(), p.name.clone())),
-        },
-        None => Searched::NoBrain {
-            space: Some((space.id.clone(), space.name.clone())),
-            local: space.brain.is_some(),
-        },
+    Searched::Brain {
+        repository: space_brain(space),
+        project: project.map(|p| (p.id.clone(), p.name.clone())),
     }
 }
 
 /// What ⌘K searches in an assistant thread: its Space's whole brain, since a thread has no
-/// project, or the "no brain" panel when that Space names none.
+/// project.
 pub(super) fn searched_in_thread(shared: &Shared, space: &SpaceId) -> Searched {
     let space = shared
         .snapshot()
         .and_then(|snapshot| snapshot.spaces.iter().find(|s| &s.id == space));
     let Some(space) = space else {
-        return Searched::NoBrain {
-            space: None,
-            local: false,
-        };
+        return Searched::NoBrain;
     };
-    match github_brain(space) {
-        Some(repository) => Searched::Brain {
-            repository,
-            project: None,
-        },
-        None => Searched::NoBrain {
-            space: Some((space.id.clone(), space.name.clone())),
-            local: space.brain.is_some(),
-        },
+    Searched::Brain {
+        repository: space_brain(space),
+        project: None,
     }
 }
 
@@ -581,9 +522,7 @@ pub(super) fn space_in_use(shared: &Shared) -> Option<SpaceId> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Searched, excerpt, no_brain_line, searched_for, searched_in_thread, slash_outside_any_field,
-    };
+    use super::{Searched, excerpt, searched_for, searched_in_thread, slash_outside_any_field};
     use crate::Shared;
     use gpui::{KeyContext, Keystroke};
     use std::rc::Rc;
@@ -636,6 +575,7 @@ mod tests {
             storage: SpaceStorage {
                 repository: StorageRepository::Local { id: "l".into() },
                 folder: "sage".into(),
+                root: String::new(),
             },
             repositories: vec![],
             models: SpaceModels::default(),
@@ -655,26 +595,23 @@ mod tests {
         assert_eq!(
             searched_for(&shared, Some(&last)),
             Searched::Brain {
-                repository: "Sage-Social/sagehaven-docs".into(),
+                repository: "local-l".into(),
                 project: None,
             }
         );
-        assert!(matches!(
-            searched_for(&shared, None),
-            Searched::NoBrain { space: None, .. }
-        ));
-        // A thread searches its own Space's whole brain; one in a Space with none is told so.
+        assert!(matches!(searched_for(&shared, None), Searched::NoBrain));
+        // A thread searches its own Space's whole brain.
         assert_eq!(
             searched_in_thread(&shared, &last),
             Searched::Brain {
-                repository: "Sage-Social/sagehaven-docs".into(),
+                repository: "local-l".into(),
                 project: None,
             }
         );
         let personal = SpaceId("personal".into());
         assert!(matches!(
             searched_in_thread(&shared, &personal),
-            Searched::NoBrain { space: None, .. }
+            Searched::NoBrain
         ));
     }
 
@@ -694,12 +631,5 @@ mod tests {
         assert_eq!(text, "…the relay retries once on a Telnyx timeout");
         let marked: Vec<&str> = marks.iter().map(|r| &text[r.clone()]).collect();
         assert_eq!(marked, ["retries", "Telnyx"]);
-    }
-
-    #[test]
-    fn a_space_without_a_searchable_brain_says_why_and_where_to_name_one() {
-        assert!(no_brain_line(Some("Vyttle"), false).contains("Settings › Spaces"));
-        assert!(no_brain_line(Some("Notes"), true).contains("folder on this Mac"));
-        assert!(no_brain_line(None, false).contains("Open a project"));
     }
 }

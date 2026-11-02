@@ -1,9 +1,10 @@
-//! The scans before a push (OpenSpec change `spaces`, task 4.4): the brain gate's
-//! `sensitive-info` and `secret-scan` checks, at the version this release bundles, with their
-//! default rules and inline `gate:allow` markers, run on this Mac over the files a storage
-//! repository's pass would push under `spaces/`, `issues/` and `wiffletree-issues.yaml`. A file
-//! that fails, or that a check cannot scan, is held: never pushed, and kept here. Local storage
-//! is never pushed, so never scanned. Nothing here keeps or shows what a check matched.
+//! The scans before a push (OpenSpec change `spaces`, task 4.4): the `sensitive-info` and
+//! `secret-scan` checks, at the version this release bundles, with their default rules and inline
+//! `gate:allow` markers, run on this Mac over the files a storage repository's pass would push
+//! under the scanned paths. A file that fails, or that a check cannot scan, is held: never pushed,
+//! and kept here. Local storage is never pushed, so never scanned. Only scanned paths reach the
+//! scratch repository, so no file in a repository is read as a check's config. Nothing here keeps
+//! or shows what a check matched.
 use crate::*;
 use repos::Content;
 use sha2::{Digest, Sha256};
@@ -34,14 +35,21 @@ const GATE: [(&str, &str); 5] = [
     ),
 ];
 /// Each check by its gate name, and its script.
-const CHECKS: [(&str, &str); 2] = [
+pub(crate) const CHECKS: [(&str, &str); 2] = [
     ("sensitive-info", "checks/sensitive_scan.py"),
     ("secret-scan", "checks/secret_scan.py"),
 ];
 
-/// Whether a file at `path` is scanned before it is pushed.
+/// The config `gate_config.py` reads from the scratch repository, which this file alone writes.
+const CONFIG: &str = "wiffletree-brain.json";
+/// The folders a scan reads, relative to a repository's folder.
+const SCANNED: [&str; 4] = ["spaces/", "issues/", "compilers/", "second-brain/"];
+
+/// Whether a file at `path`, relative to a repository's folder, is scanned before it is pushed:
+/// a Wiffletree file with no hidden part in its path.
 pub(crate) fn scanned(path: &str) -> bool {
-    path == storage::TRACKER || path.starts_with("spaces/") || path.starts_with("issues/")
+    !path.split('/').any(|part| part.starts_with('.'))
+        && (path == storage::TRACKER || SCANNED.iter().any(|folder| path.starts_with(folder)))
 }
 
 /// A file held back from a push: the check, and the rule it failed or why it could not run.
@@ -50,16 +58,19 @@ pub(crate) struct Held {
     pub(crate) path: String,
     pub(crate) check: String,
     pub(crate) rule: Option<String>,
+    /// The first line a finding names.
+    pub(crate) line: Option<u64>,
     pub(crate) reason: Option<String>,
 }
 
 impl Held {
-    /// Why it was held, naming the check and rule and never what matched.
+    /// Why it was held, naming the check, rule and line and never what matched.
     pub(crate) fn why(&self) -> String {
         let check = &self.check;
+        let at = (self.line).map_or(String::new(), |line| format!(" on line {line}"));
         match (&self.rule, &self.reason) {
             (Some(rule), _) => {
-                format!("the {check} check found a possible match of its {rule} rule")
+                format!("the {check} check found a possible match of its {rule} rule{at}")
             }
             (None, Some(reason)) => format!("the {check} check could not run: {reason}"),
             (None, None) => format!("the {check} check could not run"),
@@ -68,10 +79,15 @@ impl Held {
 }
 
 /// Runs the bundled checks with Python from `PATH`.
+#[derive(Clone)]
 pub(crate) struct Scanner {
     gate: PathBuf,
     /// `PATH` for the checks and the tools they run; the host's own when `None`.
     path: Option<OsString>,
+    /// The folder of the repository it scans for.
+    root: folder::Root,
+    /// The domains whose email addresses that folder lets through.
+    allowed_email_domains: Vec<String>,
 }
 impl Scanner {
     /// The bundled gate, written once per version to `<data folder>/gate/<hash>/`, run with
@@ -95,11 +111,25 @@ impl Scanner {
             // Another host's write of the same version may have won; either is the same.
             let _ = fs::rename(staging.keep(), &gate);
         }
-        Ok(Self { gate, path })
+        Ok(Self {
+            gate,
+            path,
+            root: Default::default(),
+            allowed_email_domains: vec![],
+        })
     }
-    /// The files of `files` that may not be pushed: each scanned file with content is checked
-    /// as a change from its version at the clone's `remote` commit, so only lines it adds are
-    /// scanned, as the gate scans a pull request.
+    /// This scanner for a repository whose Wiffletree folder is `root`, which lets email
+    /// addresses at `allowed_email_domains` through.
+    pub(crate) fn in_folder(self, root: folder::Root, allowed_email_domains: Vec<String>) -> Self {
+        Self {
+            root,
+            allowed_email_domains,
+            ..self
+        }
+    }
+    /// The files of `files`, by their paths in the repository, that may not be pushed: each
+    /// scanned file with content is checked as a change from its version at the clone's `remote`
+    /// commit, so only lines it adds are scanned, as the gate scans a pull request.
     pub(crate) fn scan(
         &self,
         clone: &Path,
@@ -107,7 +137,7 @@ impl Scanner {
         files: &[(String, Content)],
     ) -> Vec<Held> {
         let candidates: Vec<(&String, &Vec<u8>)> = (files.iter())
-            .filter(|(path, _)| scanned(path))
+            .filter(|(path, _)| self.root.scanned(path))
             .filter_map(|(path, content)| Some((path, content.as_ref()?)))
             .collect();
         if candidates.is_empty() {
@@ -119,11 +149,12 @@ impl Scanner {
                     path: (*path).clone(),
                     check: check.into(),
                     rule: None,
+                    line: None,
                     reason: Some(reason.clone()),
                 })
                 .collect()
         };
-        let scratch = match self.scratch(clone, remote, &candidates) {
+        let scratch = match self.scratch(clone, Some(remote), &candidates) {
             Ok(scratch) => scratch,
             Err(error) => return hold_all(CHECKS[0].0, format!("{error:#}")),
         };
@@ -140,12 +171,13 @@ impl Scanner {
                     continue;
                 }
             };
-            for (path, rule) in found {
+            for (path, rule, line) in found {
                 if !held.iter().any(|h| h.path == path) {
                     held.push(Held {
                         path,
                         check: check.into(),
                         rule: Some(rule),
+                        line,
                         reason: None,
                     });
                 }
@@ -153,12 +185,32 @@ impl Scanner {
         }
         held
     }
-    /// A scratch repository of two commits: the files as GitHub's head holds them, then as they
-    /// would be pushed. Its first commit is `GATE_BASE`.
+    /// One check of `files`, each a change from its version at the clone's `base` commit, or
+    /// whole with no base: what it found, or why it could not run. The caller chooses the files,
+    /// which must be scanned ones, as they are written to the scratch repository as given.
+    pub(crate) fn check(
+        &self,
+        clone: &Path,
+        base: Option<&str>,
+        files: &[(String, Vec<u8>)],
+        check: &str,
+    ) -> std::result::Result<Vec<Finding>, String> {
+        let script = (CHECKS.iter())
+            .find(|(name, _)| *name == check)
+            .map(|(_, script)| *script)
+            .ok_or_else(|| format!("no check is named {check}"))?;
+        let candidates: Vec<(&String, &Vec<u8>)> = files.iter().map(|(p, c)| (p, c)).collect();
+        let scratch = (self.scratch(clone, base, &candidates)).map_err(|e| format!("{e:#}"))?;
+        let paths: Vec<&str> = files.iter().map(|(path, _)| path.as_str()).collect();
+        self.run(&scratch, script, &paths)
+    }
+    /// A scratch repository of two commits: the plain files as `base` holds them, GitHub's head
+    /// before a push, then as they would be pushed, beside a config naming only the allowed
+    /// domains. Its first commit is `GATE_BASE`.
     fn scratch(
         &self,
         clone: &Path,
-        remote: &str,
+        base: Option<&str>,
         candidates: &[(&String, &Vec<u8>)],
     ) -> Result<(tempfile::TempDir, String)> {
         let scratch = tempfile::Builder::new()
@@ -176,9 +228,13 @@ impl Scanner {
             runtime::git_output(at, &[&identity[..], &signing[..], args].concat())
         };
         git(&["init", "--quiet", "--initial-branch=main"])?;
+        let config = json!({"gate": {"allowed_email_domains": self.allowed_email_domains}});
+        shared::write_atomically(&at.join(CONFIG), config.to_string().as_bytes())?;
         let wanted = |path: &str| candidates.iter().any(|(c, _)| *c == path);
-        for (path, content) in repos::files_at(clone, remote, &wanted)? {
-            shared::write_atomically(&at.join(path), &content)?;
+        if let Some(base) = base {
+            for (path, content) in folder::plain_files(clone, base, &wanted)? {
+                shared::write_atomically(&at.join(path), &content)?;
+            }
         }
         git(&["add", "--all"])?;
         git(&[
@@ -213,7 +269,7 @@ impl Scanner {
         (scratch, base): &(tempfile::TempDir, String),
         script: &str,
         paths: &[&str],
-    ) -> std::result::Result<Vec<(String, String)>, String> {
+    ) -> std::result::Result<Vec<Finding>, String> {
         let mut command = Command::new("python3");
         command
             .arg(self.gate.join(script))
@@ -234,7 +290,7 @@ impl Scanner {
                 let reported: Vec<&str> = (stdout.lines())
                     .filter(|line| line.starts_with("ERROR: "))
                     .collect();
-                let found: Vec<(String, String)> = (reported.iter())
+                let found: Vec<Finding> = (reported.iter())
                     .filter_map(|line| finding(line, paths))
                     .collect();
                 match !found.is_empty() && found.len() == reported.len() {
@@ -256,10 +312,13 @@ impl Scanner {
     }
 }
 
-/// The file of `paths` and the rule a finding line names, `ERROR: <path>:<line>: … [rule: <rule>]`.
-/// The path is matched against the files given, as a name may hold `: `, and Git follows a name
-/// with a space by a tab.
-fn finding(line: &str, paths: &[&str]) -> Option<(String, String)> {
+/// A finding's file, rule and line.
+pub(crate) type Finding = (String, String, Option<u64>);
+
+/// The file of `paths`, the rule and the line a finding line names,
+/// `ERROR: <path>:<line>: … [rule: <rule>]`. The path is matched against the files given, as a
+/// name may hold `: `, and Git follows a name with a space by a tab.
+fn finding(line: &str, paths: &[&str]) -> Option<Finding> {
     let rest = line.strip_prefix("ERROR: ")?;
     let path = (paths.iter())
         .filter(|path| {
@@ -268,7 +327,10 @@ fn finding(line: &str, paths: &[&str]) -> Option<(String, String)> {
         })
         .max_by_key(|path| path.len())?;
     let rule = rest.rsplit_once("[rule: ")?.1.strip_suffix(']')?;
-    Some(((*path).to_owned(), rule.to_owned()))
+    let at = rest[path.len()..].trim_start_matches(['\t', ' ']);
+    let at = at.strip_prefix(':').unwrap_or(at);
+    let number = at.split(':').next().and_then(|n| n.parse().ok());
+    Some(((*path).to_owned(), rule.to_owned(), number))
 }
 
 #[cfg(test)]
@@ -311,6 +373,7 @@ mod tests {
                 path: "issues/SAGE-1/issue.md".into(),
                 check: "sensitive-info".into(),
                 rule: Some("phone".into()),
+                line: Some(1),
                 reason: None,
             }]
         );
@@ -382,9 +445,103 @@ mod tests {
     }
 
     #[test]
+    fn a_repositorys_own_config_files_stay_out_of_the_scratch_repository_and_silence_nothing() {
+        let allows_all = "[allowlist]\npaths = ['''.*''']\n";
+        let names_a_list = r#"{"gate": {"allowlist": "brain-gate-allowlist.toml"}}"#;
+        let allow_list = "[[path]]\nglob = \"*\"\nreason = \"all\"\n";
+        let held = scanned_with(
+            true,
+            &[
+                (".gitleaks.toml", allows_all),
+                (".gitleaksignore", "everything\n"),
+                ("wiffletree-brain.json", names_a_list),
+                ("brain-gate-allowlist.toml", allow_list),
+                ("issues/.gitleaks.toml", allows_all),
+                ("issues/SAGE-1/issue.md", PHONE),
+            ],
+        );
+        assert_eq!(held.len(), 1, "{held:?}");
+        assert_eq!(
+            (&*held[0].path, held[0].rule.as_deref()),
+            ("issues/SAGE-1/issue.md", Some("phone"))
+        );
+    }
+
+    #[test]
+    fn a_moved_repositorys_config_files_stay_out_of_the_scratch_repository_too() {
+        let (home, clone) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        git(clone.path(), &["init", "-q", "-b", "main"]);
+        git(
+            clone.path(),
+            &["commit", "-q", "--allow-empty", "-m", "GitHub"],
+        );
+        let bin = scan_tools(true);
+        let scanner = Scanner::bundled(home.path(), Some(bin.path().into())).unwrap();
+        let scanner = scanner.in_folder(folder::Root::new("wiffletree"), vec![]);
+        let file = |path: &str, text: &str| (path.to_owned(), Some(text.as_bytes().to_vec()));
+        let allows_all = "[allowlist]\npaths = ['''.*''']\n";
+        let held = scanner.scan(
+            clone.path(),
+            "HEAD",
+            &[
+                file(".gitleaks.toml", allows_all),
+                file(".gitleaksignore", "everything\n"),
+                file("wiffletree/.gitleaks.toml", allows_all),
+                file(
+                    "wiffletree-brain.json",
+                    r#"{"gate": {"allowlist": "all.toml"}}"#,
+                ),
+                file("wiffletree/wiffletree-brain.json", "{}"),
+                file("wiffletree/issues/SAGE-1/issue.md", PHONE),
+            ],
+        );
+        assert_eq!(held.len(), 1, "{held:?}");
+        assert_eq!(held[0].path, "wiffletree/issues/SAGE-1/issue.md");
+    }
+
+    #[test]
+    fn only_a_folders_allowed_domains_let_an_email_address_through() {
+        let scan = |domains: Vec<String>, text: &str| {
+            let (home, clone) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            git(clone.path(), &["init", "-q", "-b", "main"]);
+            git(
+                clone.path(),
+                &["commit", "-q", "--allow-empty", "-m", "Start"],
+            );
+            let bin = scan_tools(true);
+            let scanner = Scanner::bundled(home.path(), Some(bin.path().into())).unwrap();
+            let scanner = scanner.in_folder(folder::Root::new("wiffletree"), domains);
+            let path = "wiffletree/second-brain/logs/app/2026/10/a.md".to_owned();
+            scanner.scan(
+                clone.path(),
+                "HEAD",
+                &[(path, Some(text.as_bytes().to_vec()))],
+            )
+        };
+        let allowed = vec!["sagehaven.example".to_owned()];
+        assert_eq!(scan(allowed.clone(), "Ask rb@sagehaven.example.\n"), []);
+        let held = scan(allowed, "Ask rb@elsewhere.example.\n");
+        assert_eq!(held[0].rule.as_deref(), Some("email"));
+        assert_eq!(held[0].line, Some(1));
+        assert_eq!(scan(vec![], "Ask rb@sagehaven.example.\n").len(), 1);
+    }
+
+    #[test]
     fn only_storage_paths_with_content_are_scanned() {
         assert!(scanned("spaces/sage/space.yaml") && scanned("issues/A-1/issue.md"));
         assert!(scanned(storage::TRACKER) && !scanned("settings/review.json"));
+        assert!(scanned("compilers/a.yaml") && scanned("second-brain/notes/A.md"));
+        assert!(scanned("second-brain/logs/app/2026/10/a.md"));
+        for hidden in [".gitleaks.toml", ".gitleaksignore", "spaces/.gitleaks.toml"] {
+            assert!(!scanned(hidden), "{hidden}");
+        }
+        for other in [
+            "wiffletree-brain.json",
+            "README.md",
+            "brain-gate-allowlist.toml",
+        ] {
+            assert!(!scanned(other), "{other}");
+        }
         let home = tempfile::tempdir().unwrap();
         let scanner = Scanner::bundled(home.path(), Some("/nowhere".into())).unwrap();
         let removed = [("spaces/sage/space.yaml".to_owned(), None)];

@@ -589,12 +589,12 @@ impl Host {
                 .add(counts, price);
             if !lines.contains_key(&group.coordinator) {
                 let session = self.session(&group.coordinator)?;
-                // A brain's compile runs are one line, "Brain compile · <brain>".
+                // A wiki's compile runs are one line, "Brain compile · <Space>".
                 let line = match (session.role, &session.owner) {
                     (Role::Compiler, Some(SessionOwner::Brain(brain))) => CoordinatorUsage {
                         id: format!("{COMPILE_LINE}{brain}"),
                         name: "Brain compile".into(),
-                        project: brain.clone(),
+                        project: self.wiki_name(brain)?,
                         own: TokenTotals::default(),
                         workers: TokenTotals::default(),
                         cost: None,

@@ -170,6 +170,7 @@ pub fn create_space(
     additions: String,
     prefix: Option<String>,
     storage: Option<String>,
+    setup: SpaceSetup,
 ) -> Ask<SpaceRecord> {
     Ask::new(Command::CreateSpace {
         name,
@@ -177,6 +178,27 @@ pub fn create_space(
         additions,
         prefix,
         storage,
+        setup,
+    })
+}
+pub fn space_form_defaults() -> Ask<SpaceFormDefaults> {
+    Ask::new(Command::SpaceFormDefaults)
+}
+pub fn protect_history(repository: String) -> Ask<()> {
+    Ask::new(Command::ProtectHistory { repository })
+}
+pub fn preview_bring_in(space_id: SpaceId, from: String, folder: String) -> Ask<BringInPlan> {
+    Ask::new(Command::PreviewBringIn {
+        space_id,
+        from,
+        folder,
+    })
+}
+pub fn bring_in(space_id: SpaceId, from: String, folder: String) -> Ask<BringInPlan> {
+    Ask::new(Command::BringIn {
+        space_id,
+        from,
+        folder,
     })
 }
 pub fn update_space(space: Space) -> Ask<SpaceRecord> {
@@ -190,8 +212,16 @@ pub fn set_followed_roots(space_id: SpaceId, roots: Vec<String>) -> Ask<SpaceRec
 pub fn check_storage_repository(repository: String) -> Ask<StorageCheck> {
     Ask::new(Command::CheckStorageRepository { repository })
 }
-pub fn join_spaces(repository: String, spaces: Vec<JoinSpace>) -> Ask<Vec<SpaceRecord>> {
-    Ask::new(Command::JoinSpaces { repository, spaces })
+pub fn join_spaces(
+    repository: String,
+    spaces: Vec<JoinSpace>,
+    compile_here: bool,
+) -> Ask<Vec<SpaceRecord>> {
+    Ask::new(Command::JoinSpaces {
+        repository,
+        spaces,
+        compile_here,
+    })
 }
 pub fn check_storage_move(space_id: SpaceId, repository: Option<String>) -> Ask<StorageMove> {
     Ask::new(Command::CheckStorageMove {
@@ -257,6 +287,9 @@ pub fn brain_conflicts(repository: String, project_id: Option<String>) -> Ask<Ve
 pub fn run_brain_compile(repository: String) -> Ask<CompileRun> {
     Ask::new(Command::RunBrainCompile { repository })
 }
+pub fn held_entry_text(repository: String, path: String) -> Ask<String> {
+    Ask::new(Command::HeldEntryText { repository, path })
+}
 pub fn brain_compile_runs(repository: String, offset: usize, limit: usize) -> Ask<CompileRunPage> {
     Ask::new(Command::BrainCompileRuns {
         repository,
@@ -294,6 +327,9 @@ pub fn set_tracker_prefix(space_id: SpaceId, prefix: String) -> Ask<TrackerConfi
 }
 pub fn set_up_issues(space_id: SpaceId, prefix: String) -> Ask<TrackerConfig> {
     Ask::new(Command::SetUpIssues { space_id, prefix })
+}
+pub fn move_into_folder(space_id: SpaceId) -> Ask<()> {
+    Ask::new(Command::MoveIntoFolder { space_id })
 }
 pub fn sync_issues(space_id: Option<SpaceId>) -> Ask<()> {
     Ask::new(Command::SyncIssues { space_id })

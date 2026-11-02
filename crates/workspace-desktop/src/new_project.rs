@@ -24,7 +24,6 @@ pub(super) struct NewProject {
 pub(super) struct NewProjectForm {
     bridge: Bridge,
     spaces: Vec<Space>,
-    locals: BTreeMap<SpaceId, SpaceLocal>,
     repositories: Vec<Repository>,
     /// The Space chosen and its repositories here, once the host has answered.
     defaults: Option<SpaceRepositories>,
@@ -47,7 +46,6 @@ impl NewProjectForm {
         let mut form = Self {
             bridge,
             spaces: snapshot.spaces.clone(),
-            locals: snapshot.space_locals.clone(),
             repositories: snapshot.repositories.clone(),
             defaults: None,
             added: BTreeSet::new(),
@@ -285,10 +283,7 @@ impl Render for NewProjectForm {
         let p = palette(is_dark(cx));
         let chosen = self.defaults.as_ref().map(|d| d.space_id.clone());
         let space = self.spaces.iter().find(|s| Some(&s.id) == chosen.as_ref());
-        let logs = space.map(|space| {
-            let local = self.locals.get(&space.id);
-            format!("Logs to {}.", brain_label(space, local))
-        });
+        let logs = space.map(|space| format!("Logs to {}.", brain_label(space)));
         let mark = chosen
             .as_ref()
             .map(|id| space_mark(space_color(&self.spaces, id, p)));

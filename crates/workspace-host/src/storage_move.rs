@@ -6,12 +6,15 @@
 //! to the repository in one transaction, which also records the renames
 //! `Host::finish_storage_move` makes. That transaction's commit is the move: a stop before it
 //! leaves the Spaces where they were, and a stop after it is finished by the next start, as
-//! `repo_moves` is. design.md lists every reference to a storage repository.
+//! `repo_moves` is. design.md lists every reference to a storage repository. The Spaces' folder
+//! moves whole: paths here are relative to it, read from the source's folder and written to the
+//! target's, the one it holds or else `wiffletree/` (OpenSpec change `one-space-repository`).
 use crate::*;
+use folder::Root;
 use publish::Tools;
 use repos::{Content, Record, Remote};
 use std::collections::BTreeMap;
-use storage::{Staged, TRACKER, under};
+use storage::{COMPILERS, Staged, TRACKER, under};
 use tempfile::TempDir;
 use tracker::ISSUES;
 use workspace_core::job::{Recipe, RunOutcome, Runner, Sharing};
@@ -31,7 +34,16 @@ const ISSUE_TABLES: [&str; 9] = [
 /// What this Mac knows of the old repository's collaborators, read again for the new one.
 const COLLABORATOR_TABLES: [&str; 2] = ["issue_collaborators", "issue_collaborators_read"];
 /// The tables that hold a file's state against the old repository, by `repos::key`.
-const SYNC_TABLES: [&str; 4] = ["sync_record", "sync_paused", "sync_held", "issue_parts"];
+const SYNC_TABLES: [&str; 6] = [
+    "sync_record",
+    "sync_paused",
+    "sync_held",
+    "issue_parts",
+    "scan_marks",
+    "scan_alerts",
+];
+/// A folder's logs and wiki, which move with its tracker.
+const BRAIN: &str = "second-brain";
 
 /// Why a move ended at the switch, with its Spaces where they were.
 const CHANGED: &str = "Storage changed during the move, so nothing switched. Move it again.";
@@ -42,13 +54,16 @@ pub(crate) struct Move {
     to: StorageRepository,
     /// The repository moved to on GitHub; `None` for a new local one.
     repository: Option<SettingsRepository>,
-    /// The folder the files move from.
+    /// The clone the files move from, and its folder and the target's.
     source: PathBuf,
+    from_root: Root,
+    to_root: Root,
     /// The clone of the target, or the new local repository, until the switch puts it in place.
     staging: TempDir,
-    /// The paths that move: each Space's folder, and the tracker unless the target's is adopted.
+    /// The paths that move, relative to the folder: each Space's folder, and the tracker, issues,
+    /// logs, wiki and compilers unless the target's tracker is adopted.
     roots: Vec<String>,
-    /// The files that move as other than the source holds them.
+    /// The files that move as other than the source holds them, relative to the folder.
     rewritten: BTreeMap<String, Vec<u8>>,
     /// The tracker the Spaces take in place of the one they had: the target's, or a new one for
     /// a move to this Mac from storage with none.
@@ -72,13 +87,16 @@ struct Plan {
     new_tracker: Option<TrackerConfig>,
 }
 
-/// The rule set of a moved file, by its place among a storage repository's rule sets: a commit
-/// holds one rule set's files.
+/// The rule set of a moved file, by its path relative to the folder and its place among a
+/// storage repository's rule sets: a commit holds one rule set's files.
 fn rule_set(path: &str) -> usize {
     match (path.starts_with("spaces/"), path.split('/').nth(2)) {
         (true, Some("boards")) => 1,
         (true, _) => 0,
-        (false, _) => 2,
+        _ if path.starts_with(&format!("{COMPILERS}/")) => 0,
+        _ if path.starts_with(&format!("{BRAIN}/logs/")) => 3,
+        _ if path.starts_with(&format!("{BRAIN}/")) => 4,
+        _ => 2,
     }
 }
 
@@ -104,23 +122,27 @@ fn head(at: &Path) -> Result<Option<String>> {
         .then(|| answer.output.trim().to_owned()))
 }
 
-/// The paths a move takes: each Space's folder and, unless its tracker stays behind, the tracker.
+/// The paths a move takes, relative to the folder: each Space's folder and, unless its tracker
+/// stays behind, the rest of the folder, which belongs to the tracker's Spaces.
 fn moved_roots(spaces: &[Space], with_tracker: bool) -> Vec<String> {
     let mut roots: Vec<String> = (spaces.iter())
         .map(|space| format!("spaces/{}", space.storage.folder))
         .collect();
     if with_tracker {
-        roots.extend([ISSUES.to_owned(), TRACKER.to_owned()]);
+        roots.extend([ISSUES, TRACKER, COMPILERS, BRAIN].map(str::to_owned));
     }
     roots
 }
 
-/// The files under `roots` of `source`, with `rewritten` in place of what it holds.
+/// The files under `roots` of the folder `from` of `source`, by their paths in the target's
+/// folder `to`, with `rewritten` in place of what it holds.
 fn files_to_move(
     source: &Path,
+    (from, to): (&Root, &Root),
     roots: &[String],
     rewritten: &BTreeMap<String, Vec<u8>>,
 ) -> Result<BTreeMap<String, Vec<u8>>> {
+    let source = from.in_clone(source);
     let mut files = BTreeMap::new();
     for root in roots {
         let at = source.join(root);
@@ -130,13 +152,11 @@ fn files_to_move(
             false => vec![],
         };
         for file in found {
-            let path = (file.strip_prefix(source)?.to_str())
-                .context("A path is not UTF-8")?
-                .to_owned();
-            files.insert(path, fs::read(&file)?);
+            let path = (file.strip_prefix(&source)?.to_str()).context("A path is not UTF-8")?;
+            files.insert(to.join(path), fs::read(&file)?);
         }
     }
-    files.extend(rewritten.clone());
+    files.extend((rewritten.iter()).map(|(path, content)| (to.join(path), content.clone())));
     Ok(files)
 }
 
@@ -145,11 +165,28 @@ impl Move {
     pub(crate) fn pushes(&self) -> bool {
         self.repository.is_some()
     }
+    /// The moved paths in the target repository.
+    fn target_roots(&self) -> Vec<String> {
+        self.roots
+            .iter()
+            .map(|root| self.to_root.join(root))
+            .collect()
+    }
+    /// The files that move, by their paths in the target repository.
+    fn files(&self, rewritten: &BTreeMap<String, Vec<u8>>) -> Result<BTreeMap<String, Vec<u8>>> {
+        let roots = (&self.from_root, &self.to_root);
+        files_to_move(&self.source, roots, &self.roots, rewritten)
+    }
+    /// The rule set of `path` in the target repository.
+    fn rule_set(&self, path: &str) -> usize {
+        rule_set(self.to_root.strip(path).unwrap_or(path))
+    }
     /// How `files` differ from the staging clone's head under the moved paths.
     fn changes(&self, files: &BTreeMap<String, Vec<u8>>) -> Result<Vec<(String, Content)>> {
         let at = self.staging.path();
+        let roots = self.target_roots();
         let there = match head(at)? {
-            Some(head) => repos::files_at(at, &head, &|path| under(&self.roots, path))?,
+            Some(head) => repos::files_at(at, &head, &|path| under(&roots, path))?,
             None => BTreeMap::new(),
         };
         let gone = (there.keys())
@@ -183,11 +220,12 @@ fn write_files(at: &Path, changes: &[(String, Content)]) -> Result<()> {
 /// nothing.
 pub(crate) fn copy(run: &Move, tools: &Tools) -> Result<()> {
     let at = run.staging.path();
-    let files = files_to_move(&run.source, &run.roots, &run.rewritten)?;
+    let files = run.files(&run.rewritten)?;
     let changes = run.changes(&files)?;
     let Some(scanner) = &run.scanner else {
         write_files(at, &changes)?;
-        let roots: Vec<&str> = run.roots.iter().map(String::as_str).collect();
+        let roots = run.target_roots();
+        let roots: Vec<&str> = roots.iter().map(String::as_str).collect();
         return storage::commit_local(at, &roots, &run.subject("moved here"));
     };
     if head(at)?.is_none() {
@@ -212,9 +250,11 @@ pub(crate) fn copy(run: &Move, tools: &Tools) -> Result<()> {
         (0, "moved the Space here"),
         (1, "moved saved outputs here"),
         (2, "moved issues here"),
+        (3, "moved log entries here"),
+        (4, "moved the wiki here"),
     ] {
         let files: Vec<(String, Content)> = (changes.iter())
-            .filter(|(path, _)| rule_set(path) == set)
+            .filter(|(path, _)| run.rule_set(path) == set)
             .cloned()
             .collect();
         if !files.is_empty() {
@@ -237,7 +277,7 @@ pub(crate) fn push(run: &Move, tools: &Tools) -> Result<()> {
         url: &repository.push_url,
         branch: &repository.branch,
     };
-    let Err(error) = repos::push(at, &remote, &|path| Some(rule_set(path)), &tools.git) else {
+    let Err(error) = repos::push(at, &remote, &|path| Some(run.rule_set(path)), &tools.git) else {
         return Ok(());
     };
     let there = github_access::remote_head(at, remote.url, remote.branch, &tools.git);
@@ -298,38 +338,21 @@ impl Host {
         Ok(())
     }
     /// Refuses what needs nothing from GitHub, before the repository the human named is read.
-    pub(crate) fn precheck_storage_move(
-        &self,
-        space_id: &SpaceId,
-        repository: Option<&str>,
-    ) -> Result<()> {
-        self.refuse_moving(&self.stored_with(space_id)?)?;
-        if let Some(input) = repository
-            && let Ok((owner, name, _)) = github_access::candidates(input, "https")
-        {
-            self.refuse_brain(&format!("{owner}/{name}"))?;
-        }
-        Ok(())
-    }
-    fn refuse_brain(&self, name: &str) -> Result<()> {
-        match self.space_with_brain(name)? {
-            Some(space) => bail!(
-                "{name} is {space}’s brain. A repository is a brain or storage, not both, because a brain changes only through reviewed pull requests."
-            ),
-            None => Ok(()),
-        }
+    pub(crate) fn precheck_storage_move(&self, space_id: &SpaceId) -> Result<()> {
+        self.refuse_moving(&self.stored_with(space_id)?)
     }
     /// Whether the storage holds any issue.
     fn storage_has_issues(&self, storage: &StorageRepository) -> Result<bool> {
         let folder = self.storage_folder(storage);
+        let root = self.root_of(storage)?;
         match Self::storage_key(storage) {
-            None => Ok(!storage::files_under(&folder.join(ISSUES))?.is_empty()),
+            None => Ok(!storage::files_under(&root.in_clone(&folder).join(ISSUES))?.is_empty()),
             Some(key) => {
                 let record = Record::read(&self.db, &key)?;
                 let commit = record
                     .context("The storage repository has no record")?
                     .commit;
-                storage::has_issues(&folder, &commit)
+                storage::has_issues(&folder, &root, &commit)
             }
         }
     }
@@ -348,7 +371,9 @@ impl Host {
         .collect::<rusqlite::Result<_>>()?;
         let unchanged = |commit: &str, with_tracker: bool| {
             let diff = ["diff", "--quiet", commit, "HEAD", "--"];
-            let roots = moved_roots(moved, with_tracker);
+            let roots: Vec<String> = (moved_roots(moved, with_tracker).iter())
+                .map(|root| staged.root.join(root))
+                .collect();
             let paths: Vec<&str> = roots.iter().map(String::as_str).collect();
             runtime::git_answer(at, &[&diff[..], &paths].concat())
                 .is_ok_and(|answer| answer.status.success())
@@ -403,10 +428,9 @@ impl Host {
             "{} is already stored in {name}.",
             names(moved)
         );
-        self.refuse_brain(name)?;
         repos::refuse_another(&self.home, repository)?;
         let to = storage::github(name);
-        let at = staged.staging.path();
+        let at = &staged.root.in_clone(staged.staging.path());
         let left = self.left_by_earlier_move(moved, staged)?;
         let tracker_left = left == Some(true);
         // A tracker set up here and not pushed yet counts as much as one on GitHub.
@@ -521,29 +545,42 @@ impl Host {
         let spaces = self.stored_with(space_id)?;
         let plan = self.plan_storage_move(&spaces, staged.as_ref())?;
         drop(sync::no_pass_running(&self.sync_passes)?);
-        let (to, repository, staging, scanner) = match staged {
+        // The folder keeps the tracker it moves with, or takes the target's.
+        let tracker = (plan.new_tracker.clone()).or_else(|| self.tracker(&spaces[0]).ok());
+        let domains = tracker.map(|t| t.allowed_email_domains).unwrap_or_default();
+        let (to, to_root, repository, staging, scanner) = match staged {
             Some(staged) => {
                 let repository = staged.check.repository;
                 let scanner = scan::Scanner::bundled(&self.home, self.scan_path.clone())?;
+                let scanner = scanner.in_folder(staged.root.clone(), domains);
                 let to = storage::github(&repository.name);
-                (to, Some(repository), staged.staging, Some(scanner))
+                (
+                    to,
+                    staged.root,
+                    Some(repository),
+                    staged.staging,
+                    Some(scanner),
+                )
             }
             None => {
                 let staging = tempfile::Builder::new()
                     .prefix("shared-staging-")
                     .tempdir_in(&self.home)?;
                 let to = StorageRepository::Local { id: new_id() };
-                (to, None, staging, None)
+                (to, Root::default_folder(), None, staging, None)
             }
         };
         let rewritten = self.rewritten_files(&spaces, &to, plan.new_tracker.as_ref())?;
         let source = self.storage_folder(&spaces[0].storage.repository);
+        let from_root = Root::new(&spaces[0].storage.root);
         self.storage_moving = true;
         Ok(Move {
             spaces,
             to,
             repository,
             source,
+            from_root,
+            to_root,
             staging,
             roots: plan.roots,
             rewritten,
@@ -558,7 +595,7 @@ impl Host {
         repository: Option<&str>,
         tools: &Tools,
     ) -> Result<SpaceRecord> {
-        self.precheck_storage_move(space_id, repository)?;
+        self.precheck_storage_move(space_id)?;
         let staged = repository
             .map(|input| storage::stage(&self.home, input, tools, &self.space_ids()?))
             .transpose()?;
@@ -614,11 +651,8 @@ impl Host {
         if let Some(prefix) = &prefix {
             self.refuse_prefix_outside(prefix, &[&from.key(), &run.to.key()])?;
         }
-        if let Some(repository) = &run.repository {
-            self.refuse_brain(&repository.name)?;
-        }
         let rewritten = self.rewritten_files(&moved, &run.to, run.new_tracker.as_ref())?;
-        let files = files_to_move(&run.source, &run.roots, &rewritten)?;
+        let files = run.files(&rewritten)?;
         ensure!(run.changes(&files)?.is_empty(), CHANGED);
         // A move that takes on the target's tracker compares no issue, and leaves none behind.
         let takes_issues = run.roots.iter().any(|root| root == ISSUES);
@@ -655,10 +689,13 @@ impl Host {
             let db = &host.db;
             if let Some(repository) = &run.repository {
                 let key = repos::key(&repository.name);
+                let ours = |path: &str| run.to_root.scanned(path);
                 if Record::read(db, &key)?.is_none() {
-                    let held = repos::files_at(at, &synced_at, &scan::scanned)?;
-                    Record::restart_within(db, &key, &synced_at, &held, &held, &scan::scanned)?;
+                    let held = repos::files_at(at, &synced_at, &ours)?;
+                    Record::restart_within(db, &key, &synced_at, &held, &held, &ours)?;
                 }
+                // The clone is new to the Spaces, so its pull scan starts at what they take.
+                host.restart_scan_marks(&key, Some(&synced_at))?;
                 for (path, content) in &files {
                     db.execute(
                         "INSERT INTO sync_record(repository,path,synced,written) VALUES (?1,?2,?3,?3) ON CONFLICT(repository,path) DO UPDATE SET synced=excluded.synced, written=excluded.written",
@@ -679,6 +716,7 @@ impl Host {
             for space in &moved {
                 let mut space = space.clone();
                 space.storage.repository = run.to.clone();
+                space.storage.root = run.to_root.name().into();
                 db.execute(
                     "UPDATE spaces SET data=?2 WHERE id=?1",
                     params![space.id.as_str(), encode(&space)?],

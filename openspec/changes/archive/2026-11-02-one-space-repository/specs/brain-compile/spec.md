@@ -79,9 +79,10 @@ A Mac whose Brain compiler row waits, or has no row, SHALL NOT claim. It SHALL r
 
 ### Requirement: A compile lands straight on main
 After its checks pass, a run's wiki files, cursor and `reconcile-queue.md` SHALL land through the wiki rule set of the repository's sync engine, as one commit on the current head, scanned like any other. A push refused because `main` moved, as when logs landed during the run, SHALL fetch and go again with the same files, with no model call and no change to the cursor. A landing SHALL be all or nothing. It SHALL land nothing and end the run when:
-- `main` already holds a cursor at or past the run's, recorded as already compiled;
+- `main` already holds a cursor at or past the run's, recorded as compiled elsewhere;
 - a wiki file the run changed also changed on `main` since the run began, which fails the run and overwrites no one's edit;
-- a file fails the scan, which fails the run, naming the file and rule and never the text.
+- a file fails the scan, which fails the run, naming the file and rule and never the text;
+- GitHub rejects the push for a reason another pass will not change, such as a ruleset that requires pull requests, which fails the run with GitHub's reason and releases its claim. A push that could not reach GitHub, or that `main` moved under, waits for the next pass.
 
 A run that lands nothing SHALL leave the cursor on `main` as it was, so the next run finds the same entries. A local repository SHALL commit the same files at once.
 
@@ -100,6 +101,14 @@ A run that lands nothing SHALL leave the cursor on `main` as it was, so the next
 #### Scenario: A wiki file fails the scan
 - **WHEN** a compile writes a phone number into a note
 - **THEN** nothing of the run lands, the run's record names the file and rule, and the entries stay pending
+
+#### Scenario: GitHub rejects the push
+- **WHEN** a repository's ruleset requires pull requests, and a run's push is rejected with `main` where it was
+- **THEN** nothing lands, the run fails naming GitHub's reason, its claim is released, and Run now works again
+
+#### Scenario: A network drop under the push
+- **WHEN** a run's push fails on its way to GitHub
+- **THEN** the run stays waiting to land, and the next pass pushes the same files
 
 ### Requirement: The app says when the wiki is falling behind
 With no volunteer, logs SHALL keep landing, and the Brains page and the Space's Repository box SHALL say how many entries wait. The wiki SHALL also count as falling behind when two scheduled times have passed with entries waiting and no run landed, and both places SHALL say so, naming the last run.

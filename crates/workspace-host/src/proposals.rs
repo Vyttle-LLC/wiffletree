@@ -195,7 +195,8 @@ impl Host {
         let named = (|| -> Option<(String, String)> {
             let (space, _) = self.tracker_for(id.prefix()).ok()?;
             let folder = self.storage_folder(&space.storage.repository);
-            let file = format!(":(literal){}", tracker::issue_file(id));
+            let root = folder::Root::new(&space.storage.root);
+            let file = format!(":(literal){}", root.join(&tracker::issue_file(id)));
             let args = ["log", "-1", "--format=%an%x00%aI", "--", file.as_str()];
             let line = runtime::git_output(&folder, &args).ok()?;
             let (by, at) = line.trim_end().split_once('\0')?;
@@ -458,10 +459,9 @@ mod tests {
         let staged = storage::stage(&host.home, NAME, &github.tools(), &[]).unwrap();
         let ticked = ["sage", "watch"].map(|folder| JoinSpace {
             folder: folder.into(),
-            brain_path: None,
             clones: vec![],
         });
-        host.join_spaces(staged, &ticked).unwrap();
+        host.join_spaces(staged, &ticked, false).unwrap();
         let (sage, watch) = (space_named(&host, "Sage"), space_named(&host, "Sage Watch"));
         host.record_gh_login(Some("jlin".into()));
         let new = NewIssue {
@@ -675,10 +675,9 @@ mod tests {
         let staged = storage::stage(&host.home, NAME, &github.tools(), &[]).unwrap();
         let sage = JoinSpace {
             folder: "sage".into(),
-            brain_path: None,
             clones: vec![],
         };
-        host.join_spaces(staged, &[sage]).unwrap();
+        host.join_spaces(staged, &[sage], false).unwrap();
         let sage = space_named(&host, "Sage");
         host.record_gh_login(Some("jlin".into()));
         let new = NewIssue {
@@ -736,7 +735,8 @@ mod tests {
         assert_eq!(count(&host), 1, "no new issue was filed");
         // The original can't be read meanwhile, so its link fails after the filings.
         let file = host
-            .storage_folder(&sage.storage.repository)
+            .root_folder(&sage.storage.repository)
+            .unwrap()
             .join(tracker::issue_file(&issue.id));
         let written = fs::read_to_string(&file).unwrap();
         fs::write(&file, "Edited by hand, with no front matter.\n").unwrap();

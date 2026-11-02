@@ -349,23 +349,15 @@ fn imported(store: &Store) -> BTreeMap<String, IssueId> {
 }
 
 /// The numbers the tracker's issues have, or have had in any commit here, so none is reused.
-fn used_numbers(store: &Store) -> Result<BTreeSet<u64>> {
-    let args = [
-        "log",
-        "--all",
-        "--format=",
-        "--name-only",
-        "--",
-        tracker::ISSUES,
-    ];
-    let committed = runtime::git_output(&store.folder, &args)?;
-    let ids = (committed.lines().filter_map(tracker::issue_of)).chain(store.ids());
-    Ok(ids
-        .filter_map(|id| match id {
-            IssueId::Numbered { prefix, number } if prefix == store.prefix => Some(number),
-            _ => None,
-        })
-        .collect())
+fn used_numbers(host: &Host, space: &Space, store: &Store) -> Result<BTreeSet<u64>> {
+    let clone = host.storage_folder(&space.storage.repository);
+    let root = folder::Root::new(&space.storage.root);
+    let mut used = tracker::numbers_in_history(&clone, &root, &["--all"], &store.prefix)?;
+    used.extend(store.ids().into_iter().filter_map(|id| match id {
+        IssueId::Numbered { prefix, number } if prefix == store.prefix => Some(number),
+        _ => None,
+    }));
+    Ok(used)
 }
 
 /// What a step of an import leaves to do.
@@ -553,7 +545,7 @@ impl Host {
                 (store.issue(id)).is_ok_and(|mut issue| relate(&mut issue, adds.clone()))
             })
             .count();
-        let used = used_numbers(&store)?;
+        let used = used_numbers(self, &space, &store)?;
         let new: Vec<&LinearIssue> = (team.issues.iter())
             .filter(|issue| !before.contains_key(&issue.identifier))
             .collect();
@@ -643,7 +635,7 @@ impl Host {
             }
         };
         let before = imported(&store);
-        let used = used_numbers(&store)?;
+        let used = used_numbers(self, &space, &store)?;
         // Every relation of the team, so a run cut short before its relations are written
         // has them written by the next.
         let relations = team_relations(&team.issues);
@@ -802,9 +794,10 @@ impl Host {
     /// The tracker's issue files this Mac wrote that no pass has pushed, leaving out those a
     /// scan holds or sync paused, which wait for the human.
     fn unpushed_issue_files(&self, storage: &StorageRepository) -> Result<usize> {
+        let issues = format!("{}/%", self.root_of(storage)?.join(tracker::ISSUES));
         Ok(self.db.query_row(
-            "SELECT count(*) FROM sync_record r WHERE repository=?1 AND path LIKE 'issues/%' AND written IS NOT synced AND NOT EXISTS (SELECT 1 FROM sync_held h WHERE h.repository=r.repository AND h.path=r.path) AND NOT EXISTS (SELECT 1 FROM sync_paused p WHERE p.repository=r.repository AND p.path=r.path)",
-            [repos::key(&storage.key())],
+            "SELECT count(*) FROM sync_record r WHERE repository=?1 AND path LIKE ?2 AND written IS NOT synced AND NOT EXISTS (SELECT 1 FROM sync_held h WHERE h.repository=r.repository AND h.path=r.path) AND NOT EXISTS (SELECT 1 FROM sync_paused p WHERE p.repository=r.repository AND p.path=r.path)",
+            params![repos::key(&storage.key()), issues],
             |r| r.get(0),
         )?)
     }
@@ -814,7 +807,7 @@ impl Host {
         let space = self.space(&run.space_id)?.space;
         let store = self.store(&space, &self.tracker(&space)?.prefix);
         if !run.queue.is_empty() {
-            let mut used = used_numbers(&store)?;
+            let mut used = used_numbers(self, &space, &store)?;
             let mut writes = vec![];
             for _ in 0..BATCH.min(run.queue.len()) {
                 let issue = run.queue.pop_front().context("A queued issue")?;

@@ -252,7 +252,7 @@ fn the_features_page_says_what_wiffletree_publishes_and_what_it_cannot_prevent()
         "pushes a ticket's branch and opens its pull request only through its own checked operation",
         "It merges a ticket's pull request only through its own checked merge",
         "It never merges into a protected branch and never approves, closes or comments on a ticket's pull request.",
-        "it closes one only when you choose Discard",
+        "Wiffletree pushes straight to its `main`, with no pull request and no review",
         "Agents can still run any command on your Mac, including a push or a merge",
         "**Humans own integration.**",
         "You merge into protected branches",
@@ -505,7 +505,7 @@ fn the_assignment_tools_ask_for_a_job_and_small_work_never_a_model() {
 #[test]
 fn the_implementer_may_object_to_a_finding_instead_of_implementing_it() {
     let core = core(Role::Implementer);
-    assert!(core.contains("Implementer core — v4"));
+    assert!(core.contains("Implementer core — v5"));
     assert!(core.contains("may rebase this ticket's branch onto its base between your turns"));
     assert!(core.contains("Change files with your edit tools"));
     let implementer = provider::skill(Role::Implementer);
@@ -713,12 +713,50 @@ fn a_job_run_is_told_it_only_reads_and_saves_and_offers_no_card() {
 fn a_brain_compile_runs_under_its_bundled_procedure_with_no_skill() {
     assert_eq!(Skill::for_role(Role::Compiler), None);
     let procedure = provider::skill(Role::Compiler);
-    assert!(procedure.starts_with("# Brain compile procedure — v1"));
+    assert!(procedure.starts_with("# Brain compile procedure — v2"));
     for tool in ["`queue_conflict`", "`finish_compile`"] {
         assert!(procedure.contains(tool), "{tool}");
     }
     for absent in ["create_ticket", "`log_work`", "`report`", "`send_message`"] {
         assert!(!procedure.contains(absent), "{absent}");
+    }
+}
+
+#[test]
+fn no_bundled_text_names_a_retired_brain_skill_or_sends_entries_by_pull_request() {
+    let mut texts: Vec<String> = Role::ALL.into_iter().map(provider::skill).collect();
+    texts.extend(Skill::ALL.into_iter().map(|s| skills::stock(s).to_owned()));
+    for tools in [
+        mcp::tools(),
+        mcp::thread_tools(),
+        mcp::issue_thread_tools(),
+        mcp::job_run_tools(),
+        mcp::compile_tools(),
+    ] {
+        let tools = tools.as_array().unwrap().clone();
+        texts.extend(tools.iter().map(|t| t["description"].to_string()));
+    }
+    for text in &texts {
+        for retired in [
+            "brain-log",
+            "brain-query",
+            "brain-compile",
+            "brain-reconcile",
+        ] {
+            assert!(!text.contains(retired), "{retired} in {text}");
+        }
+        // A sentence about the brain or its entries says nothing of batches or pull requests.
+        for sentence in text.split(". ") {
+            let lower = sentence.to_lowercase();
+            if lower.contains("brain") || lower.contains("log_work") {
+                for word in ["batch", "pull request", " pr "] {
+                    assert!(!lower.contains(word), "{word}: {sentence}");
+                }
+            }
+        }
+    }
+    for role in [Role::ProjectOrchestrator, Role::Implementer] {
+        assert!(core(role).contains("each entry lands straight in the project's brain"));
     }
 }
 

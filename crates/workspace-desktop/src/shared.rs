@@ -260,9 +260,7 @@ pub(super) enum Intent {
     OpenRepositories(Option<RepositoriesCard>),
     /// Opens the brain browser on a brain, a scope and a view, note or entry.
     OpenBrain(brain_browser_view::BrainOpening),
-    /// Opens the Brains page with one batch's checks shown.
-    OpenBatch(String),
-    /// Opens the search overlay over a brain (`owner/name`), in a project's scope when given.
+    /// Opens the search overlay over a brain, in a project's scope when given.
     SearchBrain {
         repository: String,
         project: Option<String>,

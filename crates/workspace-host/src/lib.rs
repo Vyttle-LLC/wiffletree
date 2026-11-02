@@ -1,10 +1,12 @@
 //! Single-writer durable host, independent of graphics and provider inference.
 mod agent_processes;
+mod alerts;
 mod assistant;
 pub mod attachments;
 pub mod behaviors;
 mod boards;
 mod brain_index;
+mod brain_sync;
 mod brains;
 pub mod build_gate;
 mod checkout;
@@ -16,6 +18,7 @@ mod diffs;
 pub mod events;
 mod files;
 mod flatten;
+mod folder;
 mod github_access;
 pub mod host_files;
 mod issue_inbox;
@@ -174,7 +177,8 @@ pub struct Host {
     /// The GitHub storage repositories, by `repos::key`, the host wrote to since their sync took
     /// this; see `storage`.
     pub(crate) storage_written: std::cell::RefCell<std::collections::BTreeSet<String>>,
-    /// Likewise for writes to their issues, whose push is due sooner; see `tracker`.
+    /// Likewise for writes to their issues and brains, whose push is due sooner; see `tracker`
+    /// and `brain_sync`.
     pub(crate) issues_written: std::cell::RefCell<std::collections::BTreeSet<String>>,
     /// By `repos::key`, what the latest pass of each storage repository that syncs on its own
     /// did; see `storage`.
@@ -195,12 +199,10 @@ pub struct Host {
     router_runs: Vec<router::RouterRun>,
     /// By provider, whether detection last found its CLI installed and signed in.
     pub(crate) detected: std::collections::BTreeMap<Provider, bool>,
-    /// The legacy pointer file `~/.config/claude-second-brain`; tests name another.
-    pub(crate) legacy_pointer: PathBuf,
-    /// The gate releases and entry contract this Wiffletree ships; tests name others.
-    pub(crate) gate: brains::Shipped,
-    /// A brain command queued, amended or granted something, so every brain's pass is due now.
+    /// A pass or a commit moved a repository, so every brain's index refresh is due now.
     pub(crate) brains_now: bool,
+    /// What an earlier release left waiting has all landed.
+    pub(crate) carried_over: bool,
     /// The import from Linear on this Mac; see `linear_import`.
     pub(crate) linear: linear_import::Linear,
     /// The built-in host jobs the scheduler runs. Only the host's code adds one.
@@ -212,6 +214,12 @@ pub struct Host {
     /// Compile runs whose pending entries wait to be read and verified, for the service to do
     /// off the host thread.
     pub(crate) compile_preparations: Vec<compile::Prepare>,
+    /// Run now's runs waiting for their repository's next pass, by wiki, with each run's id.
+    pub(crate) run_now_pulls: std::collections::BTreeMap<String, String>,
+    /// Owed runs' tips to read after a pull, off the host thread.
+    pub(crate) compile_tip_reads: Vec<compile::TipRead>,
+    /// Ended runs' claims to end on GitHub, off the host thread.
+    pub(crate) claim_ends: Vec<compile::ClaimEnd>,
 }
 /// A report that set its ticket's state while the reporter's turn ran.
 pub(crate) struct MidTurnReport {
@@ -260,14 +268,14 @@ pub(crate) const TURN_COUNT: &str = "turn-count:";
 /// not confirm and so did not stop; the rest is the id of its `process_groups` record. Reserved
 /// like `CHECK_IN`. While the note of a provider's own group is open, its session starts no turn.
 pub(crate) const LEFTOVER_PROCESS: &str = "leftover-process:";
-/// Prefix of a brain batch's Inbox item: the batch's id and the item's number. Reserved like
+/// Prefix of the brain's Inbox items, such as the card for held log entries. Reserved like
 /// `CHECK_IN`.
 pub(crate) const BRAIN_NOTICE_PREFIX: &str = "brain:";
 /// SQL condition for a `provider_runs` row that is a turn. A compaction's row has a `kind`
 /// and must not count as the session's turn: not for check-ins, not as its latest turn.
 pub(crate) const IS_TURN_RUN: &str =
     "CASE WHEN json_valid(detail) THEN json_extract(detail,'$.kind') END IS NULL";
-/// Whether an inbox item is a host check-in or brain batch item rather than an agent's question.
+/// Whether an inbox item is a host check-in or brain item rather than an agent's question.
 pub(crate) fn is_check_in(operation: &str) -> bool {
     [CHECK_IN, TURN_COUNT, LEFTOVER_PROCESS, BRAIN_NOTICE_PREFIX]
         .iter()
@@ -421,27 +429,27 @@ impl Host {
             detected: Default::default(),
             uploads: Default::default(),
             gh_login: None,
-            legacy_pointer: std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_default()
-                .join(brains::LEGACY_POINTER),
-            gate: brains::SHIPPED,
             brains_now: false,
+            carried_over: false,
             linear: linear_import::Linear::new(linear_import::Tools::real(&home)),
             built_ins: vec![],
             source_env: None,
             source_checks: vec![],
             compile_preparations: vec![],
+            run_now_pulls: Default::default(),
+            compile_tip_reads: vec![],
+            claim_ends: vec![],
         };
         // Before anything reads or writes a shared setting, so the shared folder is in place:
         // clones an earlier release named `<owner>-<name>` first, then one still in `shared/`.
         repos::migrate_clone_folders(&host.db, &host.home)?;
         host.move_settings_clone()?;
+        // Before the move, which rewrites the paths in the table this adds.
+        brain_sync::migrate(&host.db)?;
+        alerts::migrate(&host.db)?;
         host.ensure_local_storage()?;
-        // After local storage is in place, as turning a brain folder into its repository writes
-        // the Space's file.
+        host.move_local_repositories()?;
         brains::migrate(&mut host)?;
-        // After the brains, as an unexported entry is queued for its Space's brain.
         memory::migrate(&mut host)?;
         host.rebuild_issue_index()?;
         host.clear_uploads()?;
@@ -616,7 +624,7 @@ impl Host {
                 record.space
             })
             .collect();
-        Ok(Snapshot { projects: self.projects()?, spaces, space_locals, issue_trackers: self.issue_trackers()?, last_filed_space: self.last_filed_space()?, linear_import: self.linear.status.clone(), repositories: self.repositories()?, open_ticket_repositories: repositories::open_ticket_repositories(&self.db)?, sessions: self.live_sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} OR id IN (SELECT json_extract(data,'$.ticket_id') FROM runtimes WHERE session_id IN ({in_turn})) ORDER BY rowid", tickets_listed(true)), [&turning])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id IN (SELECT id FROM sessions WHERE {}) OR session_id IN ({in_turn}) ORDER BY rowid", sessions_where(true)), [&turning])?, archive_stamp: self.archive_stamp()?, message_revisions: self.message_revisions()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, core_instructions: provider::core_instructions(), still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held(), assistant_name: self.assistant_name(), threads: self.thread_tabs(now())?, held: self.held_messages()?, jobs: self.job_states()?, brains_logs_held: self.brains_logs_held()? })
+        Ok(Snapshot { projects: self.projects()?, spaces, space_locals, issue_trackers: self.issue_trackers()?, last_filed_space: self.last_filed_space()?, linear_import: self.linear.status.clone(), repositories: self.repositories()?, open_ticket_repositories: repositories::open_ticket_repositories(&self.db)?, sessions: self.live_sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} OR id IN (SELECT json_extract(data,'$.ticket_id') FROM runtimes WHERE session_id IN ({in_turn})) ORDER BY rowid", tickets_listed(true)), [&turning])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id IN (SELECT id FROM sessions WHERE {}) OR session_id IN ({in_turn}) ORDER BY rowid", sessions_where(true)), [&turning])?, archive_stamp: self.archive_stamp()?, message_revisions: self.message_revisions()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, core_instructions: provider::core_instructions(), still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held(), assistant_name: self.assistant_name(), threads: self.thread_tabs(now())?, held: self.held_messages()?, jobs: self.job_states()? })
     }
     /// The snapshot's sessions: the live ones, then archived ones still in a turn, which show as
     /// working until it ends.
@@ -1036,11 +1044,6 @@ impl Host {
         let save = move |host: &mut Self| -> Result<Vec<Session>> {
             let project = affected[0].project_id.clone();
             let stops_project = archived && affected[0].role == Role::ProjectOrchestrator;
-            // An implementer's log entries collect per ticket, not per session.
-            let implemented: Vec<String> = (affected.iter())
-                .filter(|s| s.role == Role::Implementer)
-                .filter_map(|s| host.session_runtime(&s.id).ok()?.ticket_id)
-                .collect();
             // A savepoint, so a ticket close or accept can include this in its own change.
             let tx = host.db.savepoint()?;
             for session in &mut affected {
@@ -1066,18 +1069,9 @@ impl Host {
                     Self::event(&tx, &project, Some(id), kind, &session.name)?;
                 }
             }
-            let mut closed_logs = 0;
             if archived {
                 let sessions = affected.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
                 Self::stop_schedules_in(&tx, &sessions, None, "archived")?;
-                for session in &sessions {
-                    let closing = memory::Closing::Session(session);
-                    closed_logs += memory::close_log_batches(&tx, closing, now())?;
-                }
-                for ticket in &implemented {
-                    let closing = memory::Closing::Ticket(ticket);
-                    closed_logs += memory::close_log_batches(&tx, closing, now())?;
-                }
             }
             if stops_project {
                 tx.execute(
@@ -1093,7 +1087,6 @@ impl Host {
                 )?;
             }
             tx.commit()?;
-            host.brains_now |= closed_logs > 0;
             Ok(affected)
         };
         if !archived {
@@ -1991,11 +1984,13 @@ impl Host {
                 additions,
                 prefix,
                 storage: None,
-            } => serde_json::to_value(self.create_space(
+                setup,
+            } => serde_json::to_value(self.create_local_space(
                 &name,
                 &description,
                 &additions,
                 prefix.as_deref(),
+                &setup,
             )?)?,
             Command::CreateSpace {
                 name,
@@ -2003,15 +1998,20 @@ impl Host {
                 additions,
                 prefix,
                 storage: Some(repository),
+                setup,
             } => {
                 let new = storage::NewSpace {
                     name: &name,
                     description: &description,
                     additions: &additions,
                     prefix: prefix.as_deref(),
+                    setup: &setup,
                 };
                 let requested = self.precheck_stored_space(&new, &repository)?;
                 let tools = publish::Tools::default();
+                if setup.create_repository {
+                    github_access::create_private(&tools, &self.home, &requested)?;
+                }
                 let staged = storage::stage(&self.home, &repository, &tools, &[])?;
                 storage::start_if_empty(&self.home, &staged, &requested, &tools)?;
                 serde_json::to_value(self.create_stored_space(&new, staged)?)?
@@ -2081,59 +2081,15 @@ impl Host {
                 project_id.as_deref(),
                 &query,
             )?)?,
-            Command::SuggestSpaceBrain { repositories } => {
-                serde_json::to_value(self.suggest_space_brain(&repositories)?)?
-            }
-            Command::ConfirmBrain { repository } => {
-                serde_json::to_value(self.confirm_brain(&repository)?)?
-            }
-            Command::ForgetBrain { repository } => {
-                self.forget_brain(&repository)?;
-                json!({"forgotten":true})
-            }
-            Command::SetUpBrain {
-                repository,
-                compile,
-            } => serde_json::to_value(self.set_up_brain(
-                &repository,
-                &compile,
-                &publish::Tools::default().git,
-            )?)?,
-            Command::UpdateBrainGate { repository } => serde_json::to_value(
-                self.update_brain_gate(&repository, &publish::Tools::default().git)?,
-            )?,
-            Command::SetBrainCompiler {
-                repository,
-                compiler,
-            } => serde_json::to_value(self.set_brain_compiler(
-                &repository,
-                &compiler,
-                &publish::Tools::default().git,
-            )?)?,
-            Command::SetBrainCompileTime {
-                repository,
-                compile,
-            } => serde_json::to_value(self.set_brain_compile_time(
-                &repository,
-                &compile,
-                &publish::Tools::default().git,
-            )?)?,
-            Command::AmendBrainBatch {
-                batch_id,
-                amendment,
-            } => serde_json::to_value(self.amend_brain_batch(
-                &batch_id,
-                &amendment,
-                &publish::Tools::default().git,
-            )?)?,
-            Command::SendLogsNow { repository } => {
-                json!({"closed": self.send_logs_now(repository.as_deref())?})
-            }
-            Command::ImportLegacyLogs { repository } => serde_json::to_value(
-                self.import_legacy_logs(&repository, &publish::Tools::default())?,
-            )?,
             Command::RunBrainCompile { repository } => {
                 serde_json::to_value(self.run_brain_compile(&repository)?)?
+            }
+            Command::SetCompileHere { space_id, compiles } => {
+                self.set_compile_here(&space_id, compiles)?;
+                Value::Null
+            }
+            Command::SetCompileTime { space_id, compile } => {
+                serde_json::to_value(self.set_compile_time(&space_id, compile)?)?
             }
             Command::BrainCompileRuns {
                 repository,
@@ -2144,12 +2100,40 @@ impl Host {
                 repository,
                 conflict_id,
                 ruling,
-            } => serde_json::to_value(self.rule_conflict(
-                &repository,
-                &conflict_id,
-                ruling,
-                &publish::Tools::default().git,
-            )?)?,
+            } => serde_json::to_value(self.rule_conflict(&repository, &conflict_id, ruling)?)?,
+            Command::HeldEntryText { repository, path } => {
+                serde_json::to_value(self.held_entry_text(&repository, &path)?)?
+            }
+            Command::EditHeldEntry {
+                repository,
+                path,
+                text,
+            } => {
+                self.edit_held_entry(&repository, &path, &text)?;
+                json!({"scanned_again": true})
+            }
+            Command::MarkEntryNotSensitive {
+                repository,
+                path,
+                reason,
+            } => {
+                self.mark_entry_not_sensitive(&repository, &path, &reason)?;
+                json!({"scanned_again": true})
+            }
+            Command::MarkAlertNotSensitive {
+                repository,
+                path,
+                check,
+                rule,
+                reason,
+            } => {
+                self.mark_alert_not_sensitive(&repository, &path, &check, &rule, &reason)?;
+                json!({"closed": true})
+            }
+            Command::DiscardHeldEntry { repository, path } => {
+                self.discard_held_entry(&repository, &path)?;
+                json!({"discarded": true})
+            }
             Command::FixHeldLog { log_id, fix } => {
                 serde_json::to_value(self.fix_held_log(&log_id, fix)?)?
             }
@@ -2239,7 +2223,7 @@ impl Host {
                 space_id,
                 repository,
             } => {
-                self.precheck_storage_move(&space_id, repository.as_deref())?;
+                self.precheck_storage_move(&space_id)?;
                 let added = self.space_ids()?;
                 let tools = publish::Tools::default();
                 let staged = repository
@@ -2255,25 +2239,69 @@ impl Host {
                 let moved = self.move_storage(&space_id, repository.as_deref(), &tools)?;
                 serde_json::to_value(moved)?
             }
-            Command::JoinSpaces { repository, spaces } => {
-                self.refuse_second_use_of(&repository, storage::Use::Storage)?;
+            Command::JoinSpaces {
+                repository,
+                spaces,
+                compile_here,
+            } => {
                 let added = self.space_ids()?;
                 let tools = publish::Tools::default();
                 let staged = storage::stage(&self.home, &repository, &tools, &added)?;
-                serde_json::to_value(self.join_spaces(staged, &spaces)?)?
+                serde_json::to_value(self.join_spaces(staged, &spaces, compile_here)?)?
+            }
+            Command::SpaceFormDefaults => serde_json::to_value(self.space_form_defaults()?)?,
+            Command::ProtectHistory { repository } => {
+                validate_repository_identity(&repository)?;
+                let tools = publish::Tools::default();
+                github_access::protect_history(&tools, &self.home, &repository)?;
+                Value::Null
+            }
+            Command::PreviewBringIn {
+                space_id,
+                from,
+                folder,
+            } => {
+                let importer = self.bring_in_importer(&space_id)?;
+                let tools = publish::Tools::default();
+                let read = legacy_logs::LegacyRead::read(
+                    Path::new(&from),
+                    &folder,
+                    &importer,
+                    false,
+                    &tools,
+                )?;
+                serde_json::to_value(self.plan_bring_in(&space_id, &read)?)?
+            }
+            Command::BringIn {
+                space_id,
+                from,
+                folder,
+            } => {
+                let importer = self.bring_in_importer(&space_id)?;
+                let tools = publish::Tools::default();
+                let read = legacy_logs::LegacyRead::read(
+                    Path::new(&from),
+                    &folder,
+                    &importer,
+                    true,
+                    &tools,
+                )?;
+                serde_json::to_value(self.bring_in(&space_id, read)?)?
             }
             Command::SpaceStorage { space_id } => {
                 serde_json::to_value(self.storage_status(&space_id)?)?
-            }
-            Command::SetSpaceBrain { space_id, path } => {
-                self.set_space_brain(&space_id, &path)?;
-                Value::Null
             }
             Command::SetTrackerPrefix { space_id, prefix } => {
                 serde_json::to_value(self.set_tracker_prefix(&space_id, &prefix)?)?
             }
             Command::SetUpIssues { space_id, prefix } => {
                 serde_json::to_value(self.set_up_issues(&space_id, &prefix)?)?
+            }
+            Command::MoveIntoFolder { space_id } => {
+                let moving = self.start_move(&space_id)?;
+                let root = moving.run(&publish::Tools::default())?;
+                self.finish_move(&moving.key, &root)?;
+                Value::Null
             }
             Command::SyncIssues { space_id } => {
                 self.sync_issues(space_id.as_ref(), &publish::Tools::default())?;

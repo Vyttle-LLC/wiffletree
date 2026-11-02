@@ -2987,7 +2987,7 @@ pub(crate) mod tests {
         assert_eq!(failed[0].0, implementer);
         assert!(
             failed[0].1.starts_with(&format!(
-                "Publishing {BRANCH} to allowed-org/app failed: git push failed: error: failed to push some refs to"
+                "Publishing {BRANCH} to allowed-org/app failed: git push failed: ! [remote rejected]"
             )) && failed[0].1.ends_with(". Nothing was pushed."),
             "{}",
             failed[0].1
@@ -3569,7 +3569,9 @@ pub(crate) mod tests {
         let mut f = fixture();
         let remote = remote(&f);
         let (implementer, coordinator) = (f.implementer.id.clone(), f.coordinator.id.clone());
-        let (first, _) = f.publish(&implementer).unwrap();
+        let (mut first, _) = f.publish(&implementer).unwrap();
+        // The milestone's prompt comes once.
+        first.as_object_mut().unwrap().remove(memory::PROMPT_KEY);
         let item = waiting_item(&f);
         // Again, from either caller: the same item still waits.
         let (again, step) = f.publish(&coordinator).unwrap();

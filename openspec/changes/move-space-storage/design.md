@@ -107,7 +107,7 @@ The service runs stage, copy and push off the host thread as jobs, each answerin
 
 ### Beside `one-space-repository`
 
-This change keeps today's rules. `one-space-repository` drops the brain refusal and has Move carry a Space's folder with its logs, wiki and `compilers/` and set `SpaceStorage.root`; that waits for its own code. Both changes modify "The Spaces page", so whichever archives second must keep Move storage… in its wording.
+`one-space-repository` landed first. Move takes no brain refusal, carries a Space's folder as `shared-repositories` describes, and records the target's folder in `SpaceStorage.root`: the paths a move takes are relative to the folder, read from the source's and written to the target's, the one it holds or else `wiffletree/`. With the tracker, the folder's `compilers/` and `second-brain/` move too. "The Spaces page" already offers Move… in its Repository box, so this change no longer modifies it.
 
 ## Risks
 

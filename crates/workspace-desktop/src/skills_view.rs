@@ -2486,7 +2486,7 @@ mod tests {
             [
                 "Contract v12",
                 "Coordinator v15",
-                "Implementer v4",
+                "Implementer v5",
                 "Verifier v2",
                 "PR keeper v1",
                 "Thread contract v2",

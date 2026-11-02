@@ -45,7 +45,7 @@ pub(crate) fn runs_here(recipe: &Recipe) -> bool {
         && (recipe.runner.as_ref()).is_some_and(|runner| runner.machine == sync::machine_name())
 }
 
-/// `spaces/<folder>/boards/<id>`: a job's outputs, relative to its storage repository.
+/// `spaces/<folder>/boards/<id>`: a job's outputs, relative to its repository's folder.
 pub(crate) fn board_folder(folder: &str, id: &str) -> String {
     format!("spaces/{folder}/boards/{id}")
 }
@@ -58,7 +58,7 @@ fn approval(recipe: &Recipe) -> String {
 }
 
 /// A job Wiffletree defines, such as a brain's compile: it takes due times, catch-up, Run now
-/// and run records from the scheduler, and keeps its own owner, trigger and run. It is no
+/// and run records from the scheduler, and keeps its own owner and run. It is no
 /// recipe and in no Space; only the host's code registers one.
 pub(crate) struct BuiltIn {
     /// Unique among built-in jobs, such as `brain-compile:<brain>`.
@@ -67,10 +67,8 @@ pub(crate) struct BuiltIn {
     pub(crate) subject: String,
     /// Who it belongs to, such as "the Sage brain".
     pub(crate) owner: String,
-    /// Its due times; with none, only Run now and its trigger start it.
+    /// Its due times; with none, only Run now starts it.
     pub(crate) schedule: Option<Schedule>,
-    /// Its own trigger beside its due times: a run starts when this says so.
-    pub(crate) triggered: fn(&Host, &str) -> bool,
     /// Runs it on its subject by its own rules for sessions and models, and says what it did.
     pub(crate) run: fn(&mut Host, &str, BuiltInStart) -> Result<String>,
 }
@@ -81,15 +79,15 @@ impl BuiltIn {
 }
 
 /// Why a built-in job's run started.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum BuiltInStart {
-    /// At its due time; `catch_up` is how many missed times the run stands for, 0 on time.
+    /// At its due time; `catch_up` is how many missed times the run stands for, 0 on time, and
+    /// `due` names the latest of them, as every Mac due then names it.
     Due {
         catch_up: u32,
+        due: String,
     },
     RunNow,
-    /// Its own trigger.
-    Triggered,
 }
 
 /// What one pass of the scheduler did.
@@ -105,7 +103,7 @@ pub(crate) enum RunEnd {
     Stopped(String),
 }
 
-/// `spaces/<folder>/jobs/<id>.yaml`, relative to the storage repository.
+/// `spaces/<folder>/jobs/<id>.yaml`, relative to the repository's folder.
 pub(crate) fn recipe_file(folder: &str, id: &str) -> String {
     format!("spaces/{folder}/jobs/{id}.yaml")
 }
@@ -245,6 +243,40 @@ pub(crate) fn times_between(cron: &Cron, zone: Tz, from: i64, to: i64) -> u32 {
         }
     }
     count
+}
+
+/// The last time `cron` names in `zone` from `from`, a time it names, up to `to`.
+fn latest_time(cron: &Cron, zone: Tz, from: i64, to: i64) -> i64 {
+    let mut at = from;
+    while let Some(next) = next_after(cron, zone, at).filter(|next| *next <= to) {
+        at = next;
+    }
+    at
+}
+
+/// A scheduled time as a claim names it: `2026-11-02T06:00 America/Chicago`.
+fn due_name(at: i64, zone: Tz) -> String {
+    let local = zone.timestamp_millis_opt(at).single();
+    let local = local.map(|local| local.format("%Y-%m-%dT%H:%M").to_string());
+    format!("{} {}", local.unwrap_or_default(), zone.name())
+}
+
+/// Whether `schedule` names the time `at`.
+pub(crate) fn names_time(schedule: &Schedule, at: i64) -> Result<bool> {
+    let (cron, zone) = (Cron::parse(&schedule.cron)?, timezone(&schedule.timezone)?);
+    Ok(next_after(&cron, zone, at - 1) == Some(at))
+}
+
+/// The first time after `after` that `schedule` names.
+pub(crate) fn next_time(schedule: &Schedule, after: i64) -> Result<Option<i64>> {
+    let (cron, zone) = (Cron::parse(&schedule.cron)?, timezone(&schedule.timezone)?);
+    Ok(next_after(&cron, zone, after))
+}
+
+/// How many times `schedule` named after `from`, up to `to`.
+pub(crate) fn times_since(schedule: &Schedule, from: i64, to: i64) -> Result<u32> {
+    let (cron, zone) = (Cron::parse(&schedule.cron)?, timezone(&schedule.timezone)?);
+    Ok(times_between(&cron, zone, from + 1, to))
 }
 
 /// The next `count` times after `after`, as the recipe card shows them in the job's zone.
@@ -857,7 +889,7 @@ impl Host {
     }
     /// When the newest output of a job in its Space's storage was saved, as its metadata says.
     fn last_stored_output(&self, recipe: &Recipe, space: &Space) -> Option<i64> {
-        let storage = self.storage_folder(&space.storage.repository);
+        let storage = self.root_folder(&space.storage.repository).ok()?;
         let folder = storage.join(board_folder(&space.storage.folder, &recipe.id));
         (fs::read_dir(folder).ok()?.flatten())
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
@@ -924,14 +956,6 @@ impl Host {
                 Err(error) => eprintln!("Job {}: {error:#}", key.as_str()),
             }
         }
-        let triggered: Vec<JobKey> = (self.built_ins.iter())
-            .filter(|b| (b.triggered)(self, &b.subject))
-            .map(BuiltIn::key)
-            .collect();
-        for key in triggered {
-            self.run_job(&key, None, BuiltInStart::Triggered, now)?;
-            pass.changed = true;
-        }
         Ok(pass)
     }
     /// Fires `key` when its time has come and returns its next time and whether it fired.
@@ -969,7 +993,14 @@ impl Host {
         let next = next_after(&cron, zone, now);
         self.set_due(key, next)?;
         if !running {
-            self.run_job(key, Some(due), BuiltInStart::Due { catch_up }, now)?;
+            let start = BuiltInStart::Due {
+                catch_up,
+                due: match key.is_built_in() {
+                    true => due_name(latest_time(&cron, zone, due, now), zone),
+                    false => String::new(),
+                },
+            };
+            self.run_job(key, Some(due), start, now)?;
         }
         Ok((next, !running))
     }
@@ -1010,8 +1041,8 @@ impl Host {
         at: i64,
     ) -> Result<JobRun> {
         let catch_up = match start {
-            BuiltInStart::Due { catch_up } => catch_up,
-            BuiltInStart::RunNow | BuiltInStart::Triggered => 0,
+            BuiltInStart::Due { catch_up, .. } => catch_up,
+            BuiltInStart::RunNow => 0,
         };
         let mut run = JobRun {
             id: new_id(),
@@ -1260,7 +1291,15 @@ impl Host {
         let output = if local {
             let storage = self.storage_folder(&space.storage.repository);
             let base = board_folder(&space.storage.folder, &recipe.id);
-            let (file, version) = assistant::store_output(&storage, &base, title, source, about)?;
+            let root = folder::Root::new(&space.storage.root);
+            let (file, version) = assistant::store_output_in(
+                &root,
+                &storage,
+                &root.join(&base),
+                title,
+                source,
+                about,
+            )?;
             RunOutput {
                 title: title.into(),
                 file,
@@ -1334,9 +1373,11 @@ impl Host {
         let base = board_folder(&space.storage.folder, &recipe.id);
         let storage = self.storage_folder(&space.storage.repository);
         let title = about["title"].as_str().context("An output has a title")?;
+        let root = folder::Root::new(&space.storage.root);
+        let in_repository = root.join(&base);
         let folder = format!(
-            "{base}/{}",
-            assistant::output_folder(&storage.join(&base), title)?
+            "{in_repository}/{}",
+            assistant::output_folder(&storage.join(&in_repository), title)?
         );
         let metadata = format!("{folder}.json");
         let key = repos::key(&space.storage.repository.key());
@@ -1347,11 +1388,8 @@ impl Host {
         let kept_here = self.keep_replaced_here(space, recipe, title, &metadata, &record)?;
         let message = format!("{}: saved an output of {}", space.name, recipe.name);
         self.write_output(space, &base, file, bytes, about, &message)?;
-        let pushed =
-            runtime::git_output(&storage, &["rev-list", "--count", "HEAD", "--", &metadata]);
-        Ok(Some(
-            pushed.map_or(0, |count| count.trim().parse().unwrap_or(0)) + kept_here + 1,
-        ))
+        let pushed = folder::saves(&storage, &root, &metadata).unwrap_or(0);
+        Ok(Some(pushed + kept_here + 1))
     }
     /// Whether the files of the output at `folder` in the clone are not what Wiffletree last
     /// wrote or synced: an edit made outside Wiffletree, which the next pass pauses and no save
@@ -1697,7 +1735,8 @@ mod tests {
             fs::write(self.home.path().join("user/.claude.json"), config).unwrap();
         }
         fn storage(&self) -> PathBuf {
-            self.host.storage_folder(&self.personal.storage.repository)
+            let repository = &self.personal.storage.repository;
+            self.host.root_folder(repository).unwrap()
         }
         fn thread_of(&self, run: &JobRun) -> Thread {
             self.host.thread(run.thread_id.as_ref().unwrap()).unwrap()
@@ -2299,7 +2338,6 @@ mod tests {
                 cron: "0 2 * * *".into(),
                 timezone: "America/New_York".into(),
             }),
-            triggered: |_, _| false,
             run: |_, subject, _| {
                 assert_eq!(subject, "Personal");
                 COMPILES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2342,7 +2380,7 @@ mod tests {
             .save_job(recipe(&s.personal, "Brain compile", "0 2 * * *"))
             .unwrap();
         assert_ne!(saved.recipe.key(), key);
-        assert_eq!(s.host.built_ins.len(), 1);
+        assert!(s.host.built_in(&key).is_some());
     }
 
     #[test]
@@ -2374,7 +2412,8 @@ mod tests {
         let file = recipe_file(&space.storage.folder, "release-dashboard");
         assert!(
             s.host
-                .storage_folder(&space.storage.repository)
+                .root_folder(&space.storage.repository)
+                .unwrap()
                 .join(&file)
                 .exists()
         );

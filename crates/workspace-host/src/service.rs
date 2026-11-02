@@ -483,6 +483,15 @@ fn spawn_storage_pass(
         Event::StorageSynced,
     );
 }
+fn spawn_pull_scan(sender: Sender<Event>, job: alerts::PullScan) {
+    spawn_job(
+        sender,
+        job,
+        |job| Some(job.run()),
+        |_| None,
+        |job, scanned| Event::PullScanned(job.key().to_owned(), scanned),
+    );
+}
 fn spawn_brain_pass(
     sender: Sender<Event>,
     repository: String,
@@ -613,8 +622,10 @@ enum StorageChoice {
         description: String,
         additions: String,
         prefix: Option<String>,
+        setup: SpaceSetup,
     },
-    Join(Vec<JoinSpace>),
+    /// The Spaces to join, and whether this Mac compiles their wiki too.
+    Join(Vec<JoinSpace>, bool),
     /// Only answers what moving this Space's storage there would do.
     CheckMove(SpaceId),
 }
@@ -643,6 +654,8 @@ enum Event {
     ),
     /// A compile run's pending entries were read and verified on their own thread.
     CompilePrepared(Box<crate::compile::Prepared>),
+    CompileTipRead(Box<crate::compile::TipReading>),
+    ClaimEnded,
     /// A job run's sources were checked on their own thread.
     SourcesChecked(
         String,
@@ -663,18 +676,28 @@ enum Event {
     },
     /// A storage repository's pass finished on its own thread.
     StorageSynced(String, Result<storage::Passed>),
-    /// A brain's pass finished on its own thread; `None` when it panicked.
-    BrainPassed(String, Option<brains::Passed>),
-    /// Import legacy logs read the brain's legacy logs and their authors off the host thread.
-    LegacyLogsRead {
-        found: Result<legacy_logs::LegacyFound>,
+    /// A repository's move into its folder ended, for this Mac to adopt it.
+    FolderMoved {
+        key: String,
+        moved: Result<folder::Root>,
         reply: Reply,
     },
+    /// A brain's pass finished on its own thread; `None` when it panicked.
+    BrainPassed(String, Option<brains::Passed>),
+    PullScanned(String, Option<alerts::Scanned>),
     /// A storage repository was checked and cloned off the host thread, for a new Space or the
     /// Spaces to join.
     StorageStaged {
         staged: Result<storage::Staged>,
         then: StorageChoice,
+        reply: Reply,
+    },
+    /// A brain folder on this Mac was read off the host thread, for Bring in's form or, with
+    /// `land`, to bring it in.
+    BrainRead {
+        space_id: SpaceId,
+        read: Result<legacy_logs::LegacyRead>,
+        land: bool,
         reply: Reply,
     },
     /// The target of a storage move, checked and cloned.
@@ -994,12 +1017,14 @@ struct Actor {
     gh_account_seen: Option<std::time::SystemTime>,
     /// `gh` as every GitHub read runs it, and Git as publish steps run it.
     publish_tools: publish::Tools,
-    /// The settings repository's pace, at `settings_cadence`: every minute while it is also a
-    /// Space's tracker, else the settings cadence.
+    /// The settings repository's pace, at `settings_cadence`: every minute while it also holds a
+    /// Space, else the settings cadence.
     sync_pace: repos::Pace,
     /// By `repos::key`, the pace of each GitHub storage repository that is not the settings
     /// repository, whose pass runs with the settings rule set.
     storage_paces: std::collections::BTreeMap<String, repos::Pace>,
+    /// The repositories with a pull scan job running.
+    pull_scans: std::collections::BTreeSet<String>,
     /// By `owner/name`, the pace of each brain a Space names.
     brain_paces: std::collections::BTreeMap<String, repos::Pace>,
     /// The listener for paired devices, open while remote access is on.
@@ -1153,6 +1178,7 @@ impl Service {
                     publish_tools: publish::Tools::default(),
                     sync_pace: repos::Pace::every(&[sync::CADENCE_MS]),
                     storage_paces: Default::default(),
+                    pull_scans: Default::default(),
                     brain_paces: Default::default(),
                     remote: remote::Remote::new(remote, requests),
                     attention: None,
@@ -1561,17 +1587,87 @@ impl Actor {
                 additions,
                 prefix,
                 storage: Some(repository),
+                setup,
             } => {
                 let then = StorageChoice::Create {
                     name: name.clone(),
                     description: description.clone(),
                     additions: additions.clone(),
                     prefix: prefix.clone(),
+                    setup: setup.clone(),
                 };
                 self.stage_storage(repository, then, reply)?;
             }
-            Command::JoinSpaces { repository, spaces } => {
-                self.stage_storage(repository, StorageChoice::Join(spaces.clone()), reply)?;
+            Command::JoinSpaces {
+                repository,
+                spaces,
+                compile_here,
+            } => {
+                let then = StorageChoice::Join(spaces.clone(), *compile_here);
+                self.stage_storage(repository, then, reply)?;
+            }
+            // With no repository to take an owner from and no login read yet, `gh` is asked
+            // off the host thread.
+            Command::SpaceFormDefaults => {
+                let defaults = self.host.space_form_defaults()?;
+                let (tools, home, reply) = (
+                    self.publish_tools.clone(),
+                    self.host.home.clone(),
+                    reply.clone(),
+                );
+                std::thread::spawn(move || {
+                    let mut defaults = defaults;
+                    if defaults.owner.is_none()
+                        && let spaces::GhAccount::SignedIn(login) =
+                            spaces::gh_account(&tools, &home)
+                    {
+                        defaults.owner = Some(login);
+                    }
+                    let _ =
+                        reply.try_send(serde_json::to_value(defaults).map_err(|e| e.to_string()));
+                });
+            }
+            // GitHub answers off the host thread; nothing here changes.
+            Command::ProtectHistory { repository } => {
+                validate_repository_identity(repository)?;
+                let (home, name, reply) =
+                    (self.host.home.clone(), repository.clone(), reply.clone());
+                let tools = self.publish_tools.clone();
+                std::thread::spawn(move || {
+                    let result = github_access::protect_history(&tools, &home, &name)
+                        .map(|()| Value::Null)
+                        .map_err(|e| format!("{e:#}"));
+                    let _ = reply.try_send(result);
+                });
+            }
+            // The original is read off the host thread, as authors are asked of GitHub; the
+            // Space's folder is compared and written on it.
+            Command::PreviewBringIn {
+                space_id,
+                from,
+                folder,
+            }
+            | Command::BringIn {
+                space_id,
+                from,
+                folder,
+            } => {
+                let land = matches!(command, Command::BringIn { .. });
+                let importer = self.host.bring_in_importer(space_id)?;
+                let (from, folder) = (PathBuf::from(from), folder.clone());
+                let tools = self.publish_tools.clone();
+                spawn_job(
+                    self.sender.clone(),
+                    (space_id.clone(), reply.clone()),
+                    move |_| legacy_logs::LegacyRead::read(&from, &folder, &importer, land, &tools),
+                    |_| Err(anyhow::anyhow!("Reading the brain stopped unexpectedly")),
+                    move |(space_id, reply), read| Event::BrainRead {
+                        space_id,
+                        read,
+                        land,
+                        reply,
+                    },
+                );
             }
             Command::CheckStorageMove {
                 space_id,
@@ -1584,8 +1680,7 @@ impl Actor {
                 space_id,
                 repository: Some(repository),
             } => {
-                self.host
-                    .precheck_storage_move(space_id, Some(repository))?;
+                self.host.precheck_storage_move(space_id)?;
                 let then = StorageChoice::CheckMove(space_id.clone());
                 self.stage_storage(repository, then, reply)?;
             }
@@ -1597,9 +1692,6 @@ impl Actor {
             }
             Command::SetUpSettingsRepository { repository }
             | Command::JoinSettingsRepository { repository, .. } => {
-                // Before anything is pushed: a brain here is never the settings repository.
-                self.host
-                    .refuse_second_use_of(repository, storage::Use::Settings)?;
                 let with = match command {
                     Command::JoinSettingsRepository { with, .. } => Some(*with),
                     _ => None,
@@ -1613,21 +1705,21 @@ impl Actor {
                         sender.send_blocking(Event::SettingsRepositoryPrepared { prepared, reply });
                 });
             }
-            // The read makes one `gh api` call per commit, so it runs off the host thread; the
-            // reply answers once its batches are queued, or with why it failed.
-            Command::ImportLegacyLogs { repository } => {
-                let read = self.host.begin_legacy_import(repository)?;
+            // The move fetches and pushes, so it runs off the host thread; the reply answers
+            // once this Mac adopted it, or with why it failed.
+            Command::MoveIntoFolder { space_id } => {
+                let moving = self.host.start_move(space_id)?;
                 let tools = self.publish_tools.clone();
                 spawn_job(
                     self.sender.clone(),
-                    (read, reply.clone()),
-                    move |(read, _)| read.run(&tools),
-                    |_| {
-                        Err(anyhow::anyhow!(
-                            "The legacy log import stopped unexpectedly"
-                        ))
+                    (moving, reply.clone()),
+                    move |(moving, _)| moving.run(&tools),
+                    |_| Err(anyhow::anyhow!("The move stopped unexpectedly")),
+                    |(moving, reply), moved| Event::FolderMoved {
+                        key: moving.key,
+                        moved,
+                        reply,
                     },
-                    |(_, reply), found| Event::LegacyLogsRead { found, reply },
                 );
             }
             Command::SyncNow => {
@@ -1836,9 +1928,11 @@ impl Actor {
                         .is_some_and(|read| reservations.blocks_repository(&self.host, &read.id))
             }
             Event::Synced(_)
+            | Event::PullScanned(..)
             | Event::GitHub(_)
             | Event::SettingsRepositoryPrepared { .. }
             | Event::StorageSynced(..)
+            | Event::FolderMoved { .. }
             | Event::StorageStaged { .. } => true,
             Event::KeeperPolled(plan, ..) => self.host.tickets().is_ok_and(|tickets| {
                 tickets.iter().any(|ticket| {
@@ -1901,9 +1995,33 @@ impl Actor {
                 move |prepare| prepare.run(&tools),
                 |prepare| crate::compile::Prepared {
                     run_id: prepare.run_id.clone(),
-                    gathered: Err("The compile's preparation stopped unexpectedly".into()),
+                    claim: None,
+                    pending: 0,
+                    gathered: Err(crate::compile::Stopped::Failed(
+                        "The compile's preparation stopped unexpectedly".into(),
+                    )),
                 },
                 |_, prepared| Event::CompilePrepared(Box::new(prepared)),
+            );
+        }
+        for read in self.host.take_compile_tip_reads() {
+            let tools = self.publish_tools.clone();
+            spawn_job(
+                self.sender.clone(),
+                read,
+                move |read| read.run(&tools.git),
+                |read| read.failed(),
+                |_, reading| Event::CompileTipRead(Box::new(reading)),
+            );
+        }
+        for end in self.host.take_claim_ends() {
+            let tools = self.publish_tools.clone();
+            spawn_job(
+                self.sender.clone(),
+                end,
+                move |end| end.push(&tools.git),
+                |_| (),
+                |_, ()| Event::ClaimEnded,
             );
         }
     }
@@ -1940,44 +2058,54 @@ impl Actor {
         started
     }
 
-    /// Checks and clones a storage repository off the host thread, once the repository is known
-    /// not to be a brain here, for the Space it is chosen for.
+    /// Checks and clones a storage repository off the host thread, for the Space it is chosen
+    /// for.
     fn stage_storage(
         &mut self,
         repository: &str,
         then: StorageChoice,
         reply: &Reply,
     ) -> Result<()> {
-        self.host
-            .refuse_second_use_of(repository, storage::Use::Storage)?;
         let added = self.host.space_ids()?;
         let (home, input, reply) = (self.host.home.clone(), repository.to_owned(), reply.clone());
         let (sender, tools) = (self.sender.clone(), self.publish_tools.clone());
-        // Every refusal runs before an empty repository gets its first commit.
-        let requested = match &then {
+        // Every refusal runs before GitHub creates the repository or an empty one gets its first
+        // commit.
+        let (requested, create) = match &then {
             StorageChoice::Create {
                 name,
                 description,
                 additions,
                 prefix,
-            } => Some(self.host.precheck_stored_space(
-                &storage::NewSpace {
-                    name,
-                    description,
-                    additions,
-                    prefix: prefix.as_deref(),
-                },
-                repository,
-            )?),
-            StorageChoice::Join(_) | StorageChoice::CheckMove(_) => None,
+                setup,
+            } => {
+                let requested = self.host.precheck_stored_space(
+                    &storage::NewSpace {
+                        name,
+                        description,
+                        additions,
+                        prefix: prefix.as_deref(),
+                        setup,
+                    },
+                    repository,
+                )?;
+                (Some(requested), setup.create_repository)
+            }
+            StorageChoice::Join(..) | StorageChoice::CheckMove(_) => (None, false),
         };
         std::thread::spawn(move || {
-            let staged = storage::stage(&home, &input, &tools, &added).and_then(|staged| {
-                if let Some(requested) = requested {
-                    storage::start_if_empty(&home, &staged, &requested, &tools)?;
-                }
-                Ok(staged)
-            });
+            let created = match (&requested, create) {
+                (Some(requested), true) => github_access::create_private(&tools, &home, requested),
+                _ => Ok(()),
+            };
+            let staged = created
+                .and_then(|()| storage::stage(&home, &input, &tools, &added))
+                .and_then(|staged| {
+                    if let Some(requested) = requested {
+                        storage::start_if_empty(&home, &staged, &requested, &tools)?;
+                    }
+                    Ok(staged)
+                });
             let _ = sender.send_blocking(Event::StorageStaged {
                 staged,
                 then,
@@ -1999,7 +2127,7 @@ impl Actor {
             !self.sync_pace.running() && !self.storage_paces.values().any(repos::Pace::running),
             "Sync is running. Try again in a moment."
         );
-        self.host.precheck_storage_move(space_id, repository)?;
+        self.host.precheck_storage_move(space_id)?;
         let Some(repository) = repository else {
             return self.copy_storage_move(space_id, None, reply.clone());
         };
@@ -2074,8 +2202,8 @@ impl Actor {
 
     /// Starts a pass of each GitHub storage repository that syncs on its own when one is due,
     /// and arms a wake-up for the next; `true` when a pass started. A write to the settings
-    /// repository's clone makes its own pass due instead. An issue's change is pushed sooner
-    /// than a Space's, as issues are a conversation.
+    /// repository's clone makes its own pass due instead. An issue's change and a log entry are
+    /// pushed sooner than a Space's, as issues are a conversation and an entry lands in seconds.
     fn refresh_storage_sync(&mut self, at: i64) -> bool {
         let settings = self.host.settings_key();
         let written = [
@@ -2101,8 +2229,6 @@ impl Actor {
         for (key, cadence) in cadences {
             let pace = (self.storage_paces.entry(key.clone()))
                 .or_insert_with(|| repos::Pace::every(&[cadence]));
-            // A repository that has just become a tracker is fetched every minute from now on.
-            pace.set_every(cadence);
             if !pace.start(at) {
                 continue;
             }
@@ -2130,14 +2256,13 @@ impl Actor {
         started
     }
 
-    /// Starts a pass of each brain a Space names when one is due, off the host thread, and arms a
-    /// wake-up for the next: every minute while it has a batch in flight, every five otherwise,
-    /// backing off to thirty minutes while GitHub cannot be reached. A brain command makes every
-    /// pass due at once.
+    /// Starts an index refresh of each brain when one is due, off the host thread, and arms a
+    /// wake-up for the next. A pass or a commit that moved a repository makes every refresh due
+    /// at once.
     fn refresh_brains(&mut self, at: i64) {
-        // First, so a log batch closed since the last call is queued for this pass.
-        if let Err(e) = self.host.send_log_batches(at, &self.publish_tools.git) {
-            eprintln!("Log batches: {e:#}");
+        // First, as what an earlier release left waiting lands through the sync engine.
+        if let Err(e) = self.host.land_what_waits() {
+            eprintln!("Log entries left waiting: {e:#}");
         }
         let now_due = std::mem::take(&mut self.host.brains_now);
         let cadences = self.host.brain_cadences().unwrap_or_else(|e| {
@@ -2266,6 +2391,20 @@ impl Actor {
     }
 
     /// After the pass of the storage repository `key`: the import waiting on it goes on.
+    /// Starts the repository's next pull scan job, off the pass, unless one is running.
+    fn start_pull_scan(&mut self, key: &str) {
+        if self.pull_scans.contains(key) {
+            return;
+        }
+        match self.host.pull_scan(key) {
+            Ok(Some(job)) => {
+                self.pull_scans.insert(key.to_owned());
+                spawn_pull_scan(self.sender.clone(), job);
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!("Scanning {key}: {error:#}"),
+        }
+    }
     fn linear_pass_ended(&mut self, key: &str) -> bool {
         let Some(step) = self.host.linear_pass_ended(key) else {
             return false;
@@ -2446,31 +2585,11 @@ impl Actor {
                 adopted
             }
             Event::BrainPassed(repository, passed) => {
-                let reached = passed.as_ref().is_some_and(|p| p.reached);
-                let merged = match passed {
-                    Some(passed) => self.host.finish_brain_pass(passed).unwrap_or_else(|e| {
-                        eprintln!("Brain {repository}: {e:#}");
-                        false
-                    }),
-                    None => false,
-                };
+                let reached = passed.is_some_and(|p| p.reached);
                 if let Some(pace) = self.brain_paces.get_mut(&repository) {
                     pace.finish(now(), reached);
-                    // The next batch starts from the merged commit.
-                    if merged {
-                        pace.sync_now();
-                    }
                 }
                 true
-            }
-            Event::LegacyLogsRead { found, reply } => {
-                let git = &self.publish_tools.git;
-                let result = (found.and_then(|found| self.host.finish_legacy_import(found, git)))
-                    .and_then(|import| Ok(serde_json::to_value(import)?))
-                    .map_err(|e| format!("{e:#}"));
-                let imported = result.is_ok();
-                let _ = reply.try_send(result);
-                imported
             }
             Event::StorageSynced(key, passed) => {
                 if let Some(pace) = self.storage_paces.get_mut(&key) {
@@ -2482,7 +2601,29 @@ impl Actor {
                         eprintln!("Syncing {key}: {e:#}");
                     });
                 self.linear_pass_ended(&key);
+                self.start_pull_scan(&key);
                 true
+            }
+            Event::PullScanned(key, scanned) => {
+                self.pull_scans.remove(&key);
+                let finished = scanned.map(|scanned| self.host.finish_pull_scan(scanned));
+                let (more, changed) = finished.unwrap_or(Ok((false, false))).unwrap_or_else(|e| {
+                    eprintln!("Scanning {key}: {e:#}");
+                    (false, false)
+                });
+                if more {
+                    self.start_pull_scan(&key);
+                }
+                changed
+            }
+            Event::FolderMoved { key, moved, reply } => {
+                let result = moved
+                    .and_then(|root| self.host.finish_move(&key, &root))
+                    .map(|()| Value::Null)
+                    .map_err(|e| format!("{e:#}"));
+                let adopted = result.is_ok();
+                let _ = reply.try_send(result);
+                adopted
             }
             Event::StorageStaged {
                 staged,
@@ -2497,19 +2638,21 @@ impl Actor {
                             description,
                             additions,
                             prefix,
+                            setup,
                         } => {
                             let new = storage::NewSpace {
                                 name: &name,
                                 description: &description,
                                 additions: &additions,
                                 prefix: prefix.as_deref(),
+                                setup: &setup,
                             };
                             Ok(serde_json::to_value(
                                 self.host.create_stored_space(&new, staged)?,
                             )?)
                         }
-                        StorageChoice::Join(spaces) => Ok(serde_json::to_value(
-                            self.host.join_spaces(staged, &spaces)?,
+                        StorageChoice::Join(spaces, compile_here) => Ok(serde_json::to_value(
+                            self.host.join_spaces(staged, &spaces, compile_here)?,
                         )?),
                         StorageChoice::CheckMove(space_id) => Ok(serde_json::to_value(
                             self.host.check_storage_move(&space_id, Some(&staged))?,
@@ -2524,6 +2667,22 @@ impl Actor {
                     spawn_gh_login_read(self.sender.clone(), tools, home);
                 }
                 added
+            }
+            Event::BrainRead {
+                space_id,
+                read,
+                land,
+                reply,
+            } => {
+                let result = read
+                    .and_then(|read| match land {
+                        true => self.host.bring_in(&space_id, read),
+                        false => self.host.plan_bring_in(&space_id, &read),
+                    })
+                    .and_then(|plan| Ok(serde_json::to_value(plan)?))
+                    .map_err(|e| format!("{e:#}"));
+                let _ = reply.try_send(result);
+                land
             }
             Event::StorageMoveStaged {
                 space_id,
@@ -2557,6 +2716,9 @@ impl Actor {
                     false
                 });
                 let key = self.host.settings_key();
+                if let Some(key) = &key {
+                    self.start_pull_scan(key);
+                }
                 changed | key.is_some_and(|key| self.linear_pass_ended(&key))
             }
             Event::LinearTeamsRead { flow, teams, reply } => {
@@ -2587,6 +2749,13 @@ impl Actor {
                 }
                 true
             }
+            Event::CompileTipRead(reading) => {
+                if let Err(e) = self.host.compile_tip_read(*reading) {
+                    eprintln!("Reading a compile claim: {e:#}");
+                }
+                true
+            }
+            Event::ClaimEnded => false,
             Event::SourcesChecked(run, checked, checks) => {
                 if let Err(e) = self.host.sources_checked(&run, &checked, checks) {
                     eprintln!("Starting job run {run}: {e:#}");
@@ -2973,10 +3142,7 @@ impl Actor {
                     // A thread is offered its own tools, and only those; so is a compile.
                     let session = self.host.session(&id)?;
                     if session.role == Role::Compiler {
-                        let git = self.publish_tools.git.clone();
-                        return (self.host)
-                            .compile_tool(&session, &name, &args, &git)
-                            .map(Some);
+                        return self.host.compile_tool(&session, &name, &args).map(Some);
                     }
                     if session.role.is_thread() {
                         if name == "propose_job" {
@@ -5445,6 +5611,7 @@ mod tests {
             publish_tools: publish::Tools::default(),
             sync_pace: repos::Pace::every(&[sync::CADENCE_MS]),
             storage_paces: Default::default(),
+            pull_scans: Default::default(),
             brain_paces: Default::default(),
             remote: remote::Remote::new(remote::Options::default(), requests),
             attention: None,
@@ -5453,27 +5620,19 @@ mod tests {
     }
 
     #[test]
-    fn a_storage_repository_that_becomes_a_tracker_is_fetched_every_minute_at_once() {
+    fn a_repository_holding_a_space_is_fetched_every_minute_with_or_without_a_tracker() {
         let folder = tempfile::tempdir().unwrap();
         let github = storage::tests::shared_storage(folder.path(), None);
         let (_home, mut host) = storage::tests::host();
         storage::tests::join_sage(&mut host, &github).unwrap();
         let sage = storage::tests::space_named(&host, "Sage");
-        let (mut actor, _, _) = idle_actor(host);
         let key = repos::key(sync::tests::NAME);
-        let at = now();
-        let cadences = actor.host.storage_cadences().unwrap();
-        assert_eq!(cadences, [(key.clone(), 300_000)], "no tracker yet");
-        let mut pace = repos::Pace::every(&[cadences[0].1]);
-        assert!(pace.start(at));
-        pace.finish(at, true);
-        actor.storage_paces.insert(key.clone(), pace);
+        let cadences = host.storage_cadences().unwrap();
+        assert_eq!(cadences, [(key.clone(), 60_000)], "no tracker yet");
         let pulled = b"format: 1\nprefix: SAGE\n";
-        (actor.host)
-            .take_pulled(&sage.storage.repository, storage::TRACKER, Some(pulled))
+        host.take_pulled(&sage.storage.repository, storage::TRACKER, Some(pulled))
             .unwrap();
-        assert!(!actor.refresh_storage_sync(at), "no pass is due yet");
-        assert_eq!(actor.storage_paces[&key].next_due(), Some(at + 60_000));
+        assert_eq!(host.storage_cadences().unwrap(), [(key, 60_000)]);
     }
 
     /// A ticket whose tester is in its turn, run `run`, under its project coordinator.
@@ -5984,7 +6143,8 @@ mod tests {
             crate::sync::tests::NAME
         );
         assert!(!actor.host.storage_moving);
-        assert!(github.show(storage::TRACKER).is_some());
+        let tracker = format!("{DEFAULT_ROOT}/{}", storage::TRACKER);
+        assert!(github.show(&tracker).is_some(), "the folder moved with it");
     }
 
     #[test]
@@ -6076,11 +6236,13 @@ mod tests {
         let staged = storage::stage(&host.home, sync::tests::NAME, &github.tools(), &[]);
         let (mut actor, events, reads) = login_actor(host);
         let (reply, replies) = async_channel::bounded(1);
-        let then = StorageChoice::Join(vec![JoinSpace {
-            folder: "sage".into(),
-            brain_path: None,
-            clones: vec![],
-        }]);
+        let then = StorageChoice::Join(
+            vec![JoinSpace {
+                folder: "sage".into(),
+                clones: vec![],
+            }],
+            false,
+        );
         actor.handle(Event::StorageStaged {
             staged,
             then,
@@ -8691,7 +8853,7 @@ mod tests {
         // The actor answers another command while the server's handshake hangs.
         ask_now(&mut actor, Command::SeeJobRuns { job: key });
         assert!(started.elapsed() < HANG_LIMIT, "{:?}", started.elapsed());
-        let checked = events.recv_blocking().unwrap();
+        let checked = not_a_brain_refresh(&events);
         assert!(matches!(checked, Event::SourcesChecked(..)));
         actor.process(checked);
         let ended = actor.host.job_run(&run.id).unwrap();
@@ -8742,7 +8904,7 @@ mod tests {
         assert!(proposed.try_recv().is_err());
         ask_now(&mut actor, Command::SeeJobRuns { job: recipe.key() });
         assert!(started.elapsed() < HANG_LIMIT, "{:?}", started.elapsed());
-        let checked = events.recv_blocking().unwrap();
+        let checked = not_a_brain_refresh(&events);
         assert!(matches!(checked, Event::JobProposed { .. }));
         actor.process(checked);
         proposed.try_recv().unwrap().unwrap();
@@ -8772,7 +8934,7 @@ mod tests {
         assert_eq!((run.outcome, &run.thread_id), (RunOutcome::Running, &None));
         ask_now(&mut actor, Command::SeeJobRuns { job: key });
         assert!(started.elapsed() < HANG_LIMIT, "{:?}", started.elapsed());
-        let checked = events.recv_blocking().unwrap();
+        let checked = not_a_brain_refresh(&events);
         assert!(matches!(checked, Event::SourcesChecked(..)));
         actor.process(checked);
         let ended = actor.host.job_run(&run.id).unwrap();
@@ -9744,49 +9906,14 @@ mod tests {
         assert_eq!(report[0].agents[0].session_id, tester.id);
     }
 
-    #[test]
-    fn import_legacy_logs_reads_off_the_host_thread_and_replies_once_its_batch_is_queued() {
-        use crate::brains::tests::{GitHub, REPO, name_brain, run};
-        let home = tempfile::tempdir().unwrap();
-        let mut host = Host::open_set_up(home.path()).unwrap();
-        host.legacy_pointer = home.path().join("no-pointer");
-        let sage = host.create_space("Sage", "", "", None).unwrap().space;
-        name_brain(&mut host, &sage.id, REPO);
-        host.record_gh_login(Some("mhohlios".into()));
-        let folder = tempfile::tempdir().unwrap();
-        let github = GitHub::new(folder.path());
-        let tools = github.tools();
-        github.commit_file_on_main(
-            "second-brain/logs/calls.md",
-            "## 2026-09-02 — Retry once\n- type: decision\n- changed: retry\n",
-        );
-        assert!(run(&mut host, &tools));
-        let (mut actor, _, _) = idle_actor(host);
-        actor.publish_tools = tools;
-        let (sender, events) = async_channel::bounded(8);
-        actor.sender = sender;
-        let command = Command::ImportLegacyLogs {
-            repository: REPO.into(),
-        };
-        let (reply, replies) = async_channel::bounded(1);
-
-        assert!(actor.scan_in_background(&command, &reply).unwrap());
-        let read = events.recv_blocking().unwrap();
-        assert!(matches!(read, Event::LegacyLogsRead { .. }));
-        assert!(replies.try_recv().is_err(), "answered once queued");
-        assert!(actor.host.brain_batches(Some(REPO)).unwrap().is_empty());
-
-        assert!(actor.handle(read), "the Brains page reads its batch");
-        let import: LegacyImport =
-            serde_json::from_value(replies.recv_blocking().unwrap().unwrap()).unwrap();
-        assert_eq!((import.added, import.batches, import.done), (1, 1, false));
-        assert_eq!(actor.host.brain_batches(Some(REPO)).unwrap().len(), 1);
-
-        // A brain that cannot import is refused at once, with nothing left running.
-        actor.host.record_gh_login(None);
-        let error = actor.scan_in_background(&command, &reply).unwrap_err();
-        assert!(format!("{error:#}").contains("GitHub login"), "{error:#}");
-        assert!(events.try_recv().is_err());
+    /// The next event, past the index refreshes every Space's brain starts.
+    fn not_a_brain_refresh(events: &async_channel::Receiver<Event>) -> Event {
+        loop {
+            match events.recv_blocking().unwrap() {
+                Event::BrainPassed(..) | Event::ClaimEnded | Event::PullScanned(..) => {}
+                event => return event,
+            }
+        }
     }
 
     #[test]
@@ -12582,7 +12709,10 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': text,
         };
         command(&mut actor, list.clone()).unwrap();
         assert!(!actor.changes.state, "nothing changed on disk");
-        let folder = actor.host.storage_folder(&personal.storage.repository);
+        let folder = actor
+            .host
+            .root_folder(&personal.storage.repository)
+            .unwrap();
         let file = folder
             .join(tracker::issue_folder(&filed.id))
             .join("issue.md");

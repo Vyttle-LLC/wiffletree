@@ -3,7 +3,7 @@
 use crate::{BrainConflict, ModelProfile};
 use serde::{Deserialize, Serialize};
 
-/// The usage report's id of a brain's compile line, before the brain's `owner/name`.
+/// The usage report's id of a brain's compile line, before its repository.
 pub const COMPILE_LINE: &str = "brain-compile:";
 
 /// Why a compile run started.
@@ -14,7 +14,7 @@ pub enum CompileTrigger {
     /// The one run for due times missed while the host was stopped or the Mac slept.
     CatchUp,
     RunNow,
-    /// A fetched `main` added a ruling entry.
+    /// A fetched `main` added a ruling entry, in an earlier release.
     Ruling,
 }
 impl CompileTrigger {
@@ -35,12 +35,19 @@ pub enum CompileOutcome {
     Running,
     /// Nothing was pending: no model call and no write.
     Skipped,
-    /// It did not start: a compile PR is open, or no Brain compiler model is chosen.
+    /// It did not start: no Brain compiler model is chosen, or the row waits.
     Waiting,
     Failed,
     TimedOut,
-    /// Its compile PR is on its way to `main`.
-    PrOpened,
+    /// Another Mac held or won the claim, or took over this run's, so this Mac did not run it.
+    Lost,
+    /// Another Mac did this work: the claim says it landed this due time, or `main` already held
+    /// a cursor at or past the run's, so it landed nothing.
+    CompiledElsewhere,
+    /// Its commit is on `main`. A run of an earlier release that opened its pull request reads
+    /// as landed too.
+    #[serde(alias = "pr_opened")]
+    Landed,
 }
 impl CompileOutcome {
     pub fn label(self) -> &'static str {
@@ -50,7 +57,9 @@ impl CompileOutcome {
             Self::Waiting => "Waiting",
             Self::Failed => "Failed",
             Self::TimedOut => "Timed out",
-            Self::PrOpened => "PR opened",
+            Self::Lost => "Lost to another Mac",
+            Self::CompiledElsewhere => "Compiled elsewhere",
+            Self::Landed => "Landed",
         }
     }
 }
@@ -59,7 +68,7 @@ impl CompileOutcome {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompileRun {
     pub id: String,
-    /// The brain, `owner/name`.
+    /// The repository of its wiki.
     pub repository: String,
     pub trigger: CompileTrigger,
     pub started_at: i64,
@@ -68,6 +77,9 @@ pub struct CompileRun {
     /// Entries pending when it started, and how many of them it compiled.
     pub pending: usize,
     pub processed: usize,
+    /// Of those, the entries whose refs GitHub could not be asked about.
+    #[serde(default)]
+    pub unasked: usize,
     /// Model sessions it started: 0 or 1.
     pub model_calls: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -82,13 +94,9 @@ pub struct CompileRun {
     /// Conflicts it queued.
     #[serde(default)]
     pub conflicts: usize,
-    /// Its compile batch, and that batch's pull request once open.
+    /// The commit it landed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub batch_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pull_request: Option<u64>,
-    #[serde(default)]
-    pub merged: bool,
+    pub commit: Option<String>,
     /// Its model session's tokens and estimated cost, from the usage ledger.
     #[serde(default)]
     pub tokens: u64,
@@ -104,20 +112,56 @@ pub struct CompileRunPage {
     pub total: usize,
 }
 
-/// A brain's compile as the Brains page shows it on the compiler host.
+/// A Mac that compiles a wiki, from its file in `compilers/`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Compiler {
+    pub host: String,
+    pub machine: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<String>,
+    /// When its last run landed, as the claim branch this Mac read says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_ran: Option<i64>,
+}
+
+/// A wiki's compile as the Brains page shows it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BrainCompileState {
     pub repository: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run: Option<CompileRun>,
-    /// The next scheduled run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_at: Option<i64>,
     /// Entries on `main` added since the brain's last compile.
     pub pending: usize,
-    /// Why Run now waits, when it does: a run in progress or an open compile PR.
+    /// Why Run now waits, when it does: a run in progress here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_now_waits: Option<String>,
+    /// This Mac compiles the wiki, by this Mac's id among `compilers` and its name.
+    #[serde(default)]
+    pub compiles_here: bool,
+    #[serde(default)]
+    pub this_host: String,
+    #[serde(default)]
+    pub this_mac: String,
+    /// This Mac's timezone, which Change proposes for a wiki with no compile time yet.
+    #[serde(default)]
+    pub this_timezone: String,
+    /// When the folder's wiki compiles, and its next scheduled time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compile: Option<crate::BrainCompile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_run: Option<i64>,
+    /// A Space in the folder, for the commands that name one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<crate::SpaceId>,
+    /// The repository is on this Mac alone, whose one Mac always compiles it.
+    #[serde(default)]
+    pub local: bool,
+    /// The Macs that compile the wiki, as `compilers/` lists them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compilers: Vec<Compiler>,
+    /// Why the wiki is falling behind, when it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behind: Option<String>,
     /// No Brain compiler row is chosen in Models, so a run with entries pending waits for one.
     #[serde(default)]
     pub needs_model: bool,
@@ -154,15 +198,13 @@ impl Ruling {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ConflictState {
     Open,
-    /// Ruled by `by`, a GitHub login: here, with the ruling's batch PR once open, or on another
-    /// install, whose ruling entry is on `main`. The card leaves when a compile clears it.
+    /// Ruled by `by`: here, or on another install, whose ruling entry is on `main`. The card
+    /// leaves when a compile clears it.
     Ruled {
         ruling: String,
         by: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pull_request: Option<u64>,
-        /// The ruling entry is on `main`, so the compiler starts a run.
-        merged: bool,
+        /// The ruling entry is on `main`, so the next compile picks it up.
+        landed: bool,
     },
 }
 
@@ -181,7 +223,7 @@ pub struct ConflictSide {
 /// page when it is empty.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConflictCard {
-    /// The brain, `owner/name`.
+    /// The repository of its brain.
     pub repository: String,
     pub conflict: BrainConflict,
     /// What the established note or entry says, and what the new entry says, when the index

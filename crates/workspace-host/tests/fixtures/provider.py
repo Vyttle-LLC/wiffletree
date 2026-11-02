@@ -150,7 +150,8 @@ def rpc(method,params):
     result=value['result']
     if method=='tools/call':
         assert not result.get('isError'),result
-        return json.loads(result['content'][0]['text'])
+        # A milestone's prompt follows the result as its last line.
+        return json.JSONDecoder().raw_decode(result['content'][0]['text'])[0]
     return result
 def tool(name,**arguments):return rpc('tools/call',{'name':name,'arguments':arguments})
 def model_usage(sid,spent):

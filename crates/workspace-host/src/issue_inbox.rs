@@ -7,7 +7,7 @@
 use crate::*;
 use repos::Record;
 use std::collections::BTreeSet;
-use tracker::{issue_file, issue_of};
+use tracker::issue_file;
 
 /// How long a tracker's collaborators, and a login's profile name, are kept before an ask for
 /// the assignee picker reads them again.
@@ -270,14 +270,15 @@ impl Host {
         storage: &StorageRepository,
         paths: impl Iterator<Item = &'a String>,
     ) -> Vec<(IssueId, Option<IssueRecord>)> {
-        let mut ids: Vec<IssueId> = paths.filter_map(|path| issue_of(path)).collect();
+        let root = self.root_of(storage).unwrap_or_default();
+        let mut ids: Vec<IssueId> = paths.filter_map(|path| root.issue_of(path)).collect();
         ids.sort();
         ids.dedup();
         let key = storage.key();
         (ids.into_iter())
             .map(|id| {
                 let store = tracker::Store {
-                    folder: self.storage_folder(storage),
+                    folder: root.in_clone(&self.storage_folder(storage)),
                     prefix: id.prefix().to_owned(),
                 };
                 let record = store.record(&id, &key).ok();
@@ -313,7 +314,7 @@ impl Host {
     ) -> Result<()> {
         let key = storage.key();
         let store = tracker::Store {
-            folder: self.storage_folder(storage),
+            folder: self.root_folder(storage)?,
             prefix: id.prefix().to_owned(),
         };
         if !store.exists(id) {
@@ -494,10 +495,11 @@ impl Host {
                 Paused::TwoMachines { machine: by },
             ));
         }
+        let root = self.root_of_key(key)?;
         let mut files = (self.db).prepare(
-            "SELECT path,why FROM sync_paused WHERE repository=?1 AND path LIKE 'issues/%' ORDER BY path",
+            "SELECT path,why FROM sync_paused WHERE repository=?1 AND path LIKE ?2 ORDER BY path",
         )?;
-        for row in files.query_map([key], |r| {
+        for row in files.query_map(params![key, format!("{}/%", root.join("issues"))], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })? {
             let (path, why) = row?;
@@ -505,7 +507,7 @@ impl Host {
         }
         let mut notes = vec![];
         for (path, why) in rows {
-            let Some(id) = issue_of(&path) else {
+            let Some(id) = root.issue_of(&path) else {
                 continue;
             };
             let what = named_part(&path);
@@ -590,9 +592,11 @@ impl Host {
             "That note does not offer this choice"
         );
         let storage = storage::github(name);
-        let id = issue_of(file).context("Not an issue's file")?;
+        let root = self.root_of(&storage)?;
+        let id = root.issue_of(file).context("Not an issue's file")?;
+        let own = issue_file(&id);
         ensure!(
-            file == issue_file(&id) && !self.changed_outside(&storage, &[file])?,
+            file == root.join(&own) && !self.changed_outside(&storage, &[&own])?,
             "{id} was changed outside Wiffletree on this Mac; settle that first"
         );
         if settle == Settle::UseTheOthers {

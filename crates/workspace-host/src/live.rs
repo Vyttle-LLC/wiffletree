@@ -483,7 +483,6 @@ impl Host {
             }
             ticket.state = state;
             host.save_ticket(&ticket)?;
-            host.close_logs(memory::Closing::Ticket(&ticket.id))?;
             let coordinator = host.session(&ticket.coordinator_id)?;
             let body = match &ticket.waiver {
                 Some(waiver) => {

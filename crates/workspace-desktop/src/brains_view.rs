@@ -1,86 +1,54 @@
-//! The Brains page (OpenSpec change `brain-registry-sync`, `design/mockups/current/brains.html`
-//! without its repository mapping): each brain this Mac's Spaces name, with the Spaces that name
-//! it, its grant, sync and compiler, and for a brain this Mac compiles its last and next compile,
-//! Run now and its runs (`brain-compile`), and its compile time (`settings-brain-fixes`); then the
-//! conflicts no project's Inbox shows, then the PR gate's batches with their checks. Brains are
-//! added and removed in a Space's settings. Every action here is the human's, and nothing on the
-//! page shows a check's output. Only a conflict card quotes brain text, as plain text.
+//! The Brains page (OpenSpec change `one-space-repository`, screen 7 of its mockup): one group per
+//! wiki on this Mac, named after its Spaces, with Run now, its compile time and Change, its last
+//! and next run, each Mac that compiles it with this Mac's tick, and its runs; then the pull
+//! requests an earlier release left open, the alerts from pull scans, and the held entries and
+//! conflicts no project's Inbox shows. Every action here is the human's, and nothing on the page
+//! shows a matched value. Only a conflict card quotes brain text, as plain text.
 use super::*;
 use brain_browser_view::{BrainOpening, BrainTarget, BrainView};
 use gpui_component::{
     Disableable, Sizable,
     button::ButtonVariants,
-    input::Input,
-    menu::{DropdownMenu, PopupMenuItem},
-    select::{SearchableVec, Select, SelectState},
+    checkbox::Checkbox,
+    input::{Input, InputState},
 };
+use held_entry::{HeldAction, HeldForm};
+use scan_alert::{AlertAction, AlertForm};
 use std::collections::HashMap;
-use ui::{banner, card, empty_state, hint, icon, mono, pill, section};
-use wording::{age, plural};
+use ui::{banner, card, empty_state, hint, icon, pill, section};
+use wording::age;
 use workspace_core::BrainsPage as Listing;
 
-const SUBTITLE: &str = "Git-backed Markdown memory shared with your team · every change reaches main through a pull request";
-const IN_SPACES: &str =
-    "A Space names its brain in its settings. Brains are added and removed there.";
-const GATE_HINT: &str =
-    "Log batches, compile runs and config changes on their way to main · select one for its checks";
-/// The gate README's release notes, which What changed opens.
-const GATE_RELEASE_NOTES: &str =
-    "https://github.com/Vyttle-LLC/wiffletree/blob/main/gate/README.md#releases";
+const SUBTITLE: &str =
+    "Your Spaces' logs and wikis · every change lands straight on main, scanned on this Mac";
+const NO_BRAINS: &str = "Every Space has a brain. Create a Space and it starts here.";
 /// How long a reading stands before a change to the workspace asks again.
 const FRESH_MS: i64 = 10_000;
 /// After Sync now, how long the passes get before the page reads again.
 const AFTER_SYNC: std::time::Duration = std::time::Duration::from_secs(5);
-/// The Next compile line of a brain with no compile time.
-pub(super) const NOT_SCHEDULED: &str = "Not scheduled";
-const SET_UP_NOTE: &str = "Opens one PR adding wiffletree-brain.json with this Mac as compiler, and the brain gate. It waits for your review.";
-const NEW_TIME_NOTE: &str = "The new time applies once the config PR merges.";
-/// The zone a form fills in when the host names none.
-const FALLBACK_TIMEZONE: &str = "UTC";
-
-/// What the human is in the middle of on the page.
-#[derive(Clone, PartialEq, Eq)]
-enum Editing {
-    Grant(String),
-    /// Confirming forgetting a brain no Space names any longer.
-    Forget(String),
-    /// Naming another host, by id, as a brain's compiler.
-    Compiler(String),
-    /// Set up's form, which asks for a compile time.
-    SetUp(String),
-    /// Setting or changing a brain's compile time.
-    CompileTime(String),
-    Discard(String),
-    /// Giving the reason a reported line is not sensitive.
-    NotSensitive {
-        batch: String,
-        path: String,
-        line: u64,
-        rule: String,
-    },
-}
 
 pub(super) struct BrainsPage {
     bridge: Bridge,
     shared: Shared,
     read: Option<Result<Listing, String>>,
     asked_at: i64,
-    open_batch: Option<String>,
-    editing: Option<Editing>,
-    host_id: Entity<InputState>,
-    host_name: Entity<InputState>,
-    reason: Entity<InputState>,
-    compile_at: Entity<InputState>,
-    compile_timezone: Entity<SelectState<SearchableVec<String>>>,
     /// Why the host refused the last action.
     error: Option<String>,
-    /// Each compiled brain's page of compile runs, and where that page starts.
+    /// Each wiki's page of compile runs, and where that page starts.
     runs: HashMap<String, CompileRunPage>,
     run_offsets: HashMap<String, usize>,
     /// The conflict with no project whose Keep both line is open, by its card's key, and that
     /// line.
     keeping_both: Option<String>,
     scope: Entity<InputState>,
+    /// The form of the held entry being edited or marked.
+    held: HeldForm,
+    /// The reason line of the alert being marked.
+    alert: AlertForm,
+    /// The wiki whose compile time Change is editing, with its time and timezone.
+    changing_time: Option<String>,
+    time: Entity<InputState>,
+    timezone: Entity<InputState>,
 }
 
 /// Compile runs shown per page.
@@ -88,37 +56,57 @@ const RUNS_PAGE: usize = 6;
 impl EventEmitter<Intent> for BrainsPage {}
 impl BrainsPage {
     pub(super) fn new(bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = |placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>| {
-            cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
-        };
-        let zones: Vec<String> = (chrono_tz::TZ_VARIANTS.iter())
-            .map(|zone| zone.name().to_owned())
-            .collect();
-        let compile_timezone = cx.new(|cx| {
-            SelectState::new(SearchableVec::new(zones), None, window, cx).searchable(true)
-        });
         Self {
             bridge,
             shared: Shared::default(),
             read: None,
             asked_at: 0,
-            open_batch: None,
-            editing: None,
-            host_id: input("The other host's id", window, cx),
-            host_name: input("Its name, such as Michael’s Mac", window, cx),
-            reason: input(
-                "Why it is not sensitive, such as fixture call ID",
-                window,
-                cx,
-            ),
-            compile_at: input(BrainCompile::DEFAULT_AT, window, cx),
-            compile_timezone,
             error: None,
             runs: HashMap::new(),
             run_offsets: HashMap::new(),
             keeping_both: None,
-            scope: input("One line that scopes both", window, cx),
+            scope: cx
+                .new(|cx| InputState::new(window, cx).placeholder("One line that scopes both")),
+            held: HeldForm::new(window, cx),
+            alert: AlertForm::new(window, cx),
+            changing_time: None,
+            time: cx.new(|cx| InputState::new(window, cx).placeholder("06:00")),
+            timezone: cx.new(|cx| InputState::new(window, cx).placeholder("America/Chicago")),
         }
+    }
+
+    /// Opens Change on a wiki's compile time, filled in as it is.
+    fn change_time(
+        &mut self,
+        compile: &BrainCompileState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (at, timezone) = (compile.compile.as_ref())
+            .map_or(("06:00".to_owned(), compile.this_timezone.clone()), |c| {
+                (c.at.clone(), c.timezone.clone())
+            });
+        self.time
+            .update(cx, |input, cx| input.set_value(at, window, cx));
+        self.timezone
+            .update(cx, |input, cx| input.set_value(timezone, window, cx));
+        self.changing_time = Some(compile.repository.clone());
+        cx.notify();
+    }
+
+    /// Saves Change: the host refuses a time or timezone the schedule could not read.
+    fn save_time(&mut self, space_id: SpaceId, window: &mut Window, cx: &mut Context<Self>) {
+        let compile = BrainCompile {
+            at: self.time.read(cx).value().trim().to_owned(),
+            timezone: self.timezone.read(cx).value().trim().to_owned(),
+            extra: Extra::new(),
+        };
+        self.changing_time = None;
+        let command = Command::SetCompileTime {
+            space_id,
+            compile: Some(compile),
+        };
+        self.request(command, window, cx);
     }
 
     /// Reads the brains when the page opens, and again after a change to the workspace once the
@@ -190,54 +178,6 @@ impl BrainsPage {
         .detach();
     }
 
-    /// Shows a batch's checks, as the brain browser's Status links to it.
-    pub(super) fn open_batch(&mut self, id: String, cx: &mut Context<Self>) {
-        self.open_batch = Some(id);
-        cx.notify();
-    }
-
-    fn edit(&mut self, editing: Option<Editing>, window: &mut Window, cx: &mut Context<Self>) {
-        for input in [&self.host_id, &self.host_name, &self.reason] {
-            input.update(cx, |input, cx| input.set_value("", window, cx));
-        }
-        self.editing = editing;
-        self.error = None;
-        cx.notify();
-    }
-
-    /// Opens a compile time form on the brain's time, or else 06:00 in the host's timezone.
-    fn edit_compile_time(
-        &mut self,
-        editing: Editing,
-        compile: Option<BrainCompile>,
-        this_timezone: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.edit(Some(editing), window, cx);
-        let (at, timezone) = match compile {
-            Some(compile) => (compile.at, compile.timezone),
-            None => (
-                BrainCompile::DEFAULT_AT.to_owned(),
-                this_timezone.unwrap_or_else(|| FALLBACK_TIMEZONE.to_owned()),
-            ),
-        };
-        (self.compile_at).update(cx, |input, cx| input.set_value(at, window, cx));
-        (self.compile_timezone).update(cx, |zone, cx| {
-            zone.set_selected_value(&timezone, window, cx)
-        });
-    }
-
-    /// The compile time the form holds, for the host to validate.
-    fn compile_in_form(&self, cx: &App) -> BrainCompile {
-        BrainCompile {
-            at: self.compile_at.read(cx).value().trim().to_owned(),
-            timezone: (self.compile_timezone.read(cx).selected_value().cloned())
-                .unwrap_or_default(),
-            extra: Extra::new(),
-        }
-    }
-
     fn space_name(&self, id: &SpaceId) -> String {
         (self.shared.snapshot().into_iter())
             .flat_map(|s| s.spaces.iter())
@@ -269,26 +209,9 @@ impl BrainsPage {
                 .on_click(cx.listener(|v, _, w, c| v.sync_now(w, c))),
             ),
         );
-        if let Some(snapshot) = self.shared.snapshot() {
-            for (id, name, folder) in without_origin(&snapshot.spaces, &snapshot.space_locals) {
-                body = body.child(
-                    banner(p.yellow)
-                        .child(div().flex_1().child(without_origin_line(&name, &folder)))
-                        .child(
-                            button(SharedString::from(format!("without-origin-{}", id.0)))
-                                .link()
-                                .xsmall()
-                                .label("Space settings")
-                                .on_click(cx.listener(move |_, _, _, c| {
-                                    c.emit(Intent::OpenSpace(id.clone()))
-                                })),
-                        ),
-                );
-            }
-        }
         if listing.brains.is_empty() {
             return body.child(
-                empty_state("brain", "No brains yet", IN_SPACES, p).child(
+                empty_state("brain", "No brains yet", NO_BRAINS, p).child(
                     button("open-spaces")
                         .outline()
                         .label("Open Spaces")
@@ -296,9 +219,37 @@ impl BrainsPage {
                 ),
             );
         }
-        body = body.child(hint(IN_SPACES, p));
         for brain in &listing.brains {
             body = body.child(self.brain_card(brain, listing, p, cx));
+        }
+        if !listing.left_pull_requests.is_empty() {
+            body = body
+                .child(section("PULL REQUESTS LEFT OPEN", p))
+                .child(hint(left_line(), p));
+            for left in &listing.left_pull_requests {
+                let line = format!("{} #{}", left.repository, left.number);
+                body = body.child(card(p).child(line));
+            }
+        }
+        if !listing.alerts.is_empty() {
+            body = body.child(section(
+                format!("FAILED A SCAN · {}", listing.alerts.len()),
+                p,
+            ));
+            for alert in &listing.alerts {
+                body = body.child(self.alert_card(alert, p, cx));
+            }
+        }
+        if !listing.held.is_empty() {
+            body = body
+                .child(section(
+                    format!("HELD ON THIS MAC · {}", listing.held.len()),
+                    p,
+                ))
+                .child(hint("No project wrote these, so no Inbox shows them.", p));
+            for entry in &listing.held {
+                body = body.child(self.held_card(entry, p, cx));
+            }
         }
         if !listing.conflicts.is_empty() {
             body = body
@@ -314,18 +265,29 @@ impl BrainsPage {
                 body = body.child(self.unplaced_conflict(conflict, p, cx));
             }
         }
-        body = body.child(section("PR GATE", p)).child(hint(GATE_HINT, p));
-        if listing.batches.is_empty() {
-            return body.child(hint("No batch is on its way to main.", p));
-        }
-        for batch in &listing.batches {
-            let brain = (listing.brains.iter())
-                .find(|b| b.repository.eq_ignore_ascii_case(&batch.repository));
-            let required = brain.map_or(&[][..], |b| &b.required_checks);
-            let held = brain.and_then(|b| held_for(b, batch));
-            body = body.child(self.gate_row(batch, required, held, p, cx));
-        }
         body
+    }
+
+    fn alert_card(&self, alert: &ScanAlert, p: Palette, cx: &mut Context<Self>) -> Div {
+        let (view, kept) = (cx.entity().downgrade(), alert.clone());
+        let on: scan_alert::OnAlert = Rc::new(move |action: AlertAction, window, cx| {
+            let alert = kept.clone();
+            let _ = view.update(cx, |view: &mut Self, cx| {
+                scan_alert::act(view, |v| &mut v.alert, alert, action, window, cx)
+            });
+        });
+        scan_alert::alert_card(alert, &self.alert, on, p)
+    }
+
+    fn held_card(&self, entry: &HeldEntry, p: Palette, cx: &mut Context<Self>) -> Div {
+        let (view, kept) = (cx.entity().downgrade(), entry.clone());
+        let on: held_entry::OnHeld = Rc::new(move |action: HeldAction, window, cx| {
+            let entry = kept.clone();
+            let _ = view.update(cx, |view: &mut Self, cx| {
+                held_entry::act(view, |v| &mut v.held, entry, action, window, cx)
+            });
+        });
+        held_entry::held_entry_card(entry, &self.held, on, p)
     }
 
     fn brain_card(
@@ -335,307 +297,226 @@ impl BrainsPage {
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
-        let repository = brain.repository.clone();
-        let batches: Vec<&BrainBatch> = (listing.batches.iter())
-            .filter(|b| b.repository.eq_ignore_ascii_case(&brain.repository))
-            .collect();
-        let (sync, tone) = sync_state(brain, &listing.batches);
-        let fact = |label: &'static str, value: AnyElement| {
-            div()
-                .flex()
-                .gap_3()
-                .text_size(px(font::SMALL))
-                .child(
-                    div()
-                        .w(px(110.))
-                        .flex_none()
-                        .text_color(p.subtle)
-                        .child(label),
-                )
-                .child(div().min_w_0().flex_1().child(value))
+        let names: Vec<String> = brain.spaces.iter().map(|id| self.space_name(id)).collect();
+        let (sync, tone) = sync_state(brain);
+        let compile = (listing.compiles.iter()).find(|c| c.repository == brain.repository);
+        let opening = BrainOpening {
+            repository: brain.repository.clone(),
+            project: None,
+            target: BrainTarget::View(BrainView::Status),
         };
-        let text = |value: String| div().child(value).into_any_element();
-        let scheduled = |line: String| {
-            div()
-                .when(line == NOT_SCHEDULED, |d| d.text_color(p.yellow))
-                .child(line)
-                .into_any_element()
-        };
-        let mut spaces = div().flex().flex_wrap().gap_1();
-        for space in &brain.spaces {
-            let id = space.clone();
-            spaces = spaces.child(
-                button(SharedString::from(format!(
-                    "brain-space-{repository}-{}",
-                    space.0
-                )))
-                .link()
-                .xsmall()
-                .label(self.space_name(space))
-                .tooltip("Open this Space’s settings")
-                .on_click(cx.listener(move |_, _, _, c| c.emit(Intent::OpenSpace(id.clone())))),
-            );
-        }
-        if brain.spaces.is_empty() {
-            spaces = spaces.child(hint("No Space names it any longer", p));
-        }
-        let mut card = card(p)
+        let mut head = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(icon("brain").text_color(p.subtle))
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(icon("brain").text_color(p.subtle))
-                    .child(
-                        div()
-                            .font_weight(FontWeight::MEDIUM)
-                            .flex_1()
-                            .child(repository.clone()),
-                    )
-                    .child(pill(sync, tone.color(p))),
+                    .flex_1()
+                    .min_w_0()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(wiki_name(&names)),
             )
-            .child(fact("Spaces", spaces.into_any_element()))
-            .child(fact(
-                "Remote",
-                mono(format!("github.com/{repository}"), p).into_any_element(),
-            ))
-            .child(fact(
-                "Checkout",
-                mono(brain.checkout.clone(), p).into_any_element(),
-            ))
-            .children(brain.gate.as_ref().map(|gate| {
-                let line = gate_line(gate, updating(&batches));
-                let mut value = div().flex().flex_wrap().items_baseline().gap_1();
-                if let Some((name, commit)) = line.release {
-                    value = value
-                        .child(div().font_weight(FontWeight::MEDIUM).child(name))
-                        .child(mono(format!("· {commit} ·"), p));
-                }
-                fact(
-                    "Gate",
-                    value
-                        .child(div().text_color(line.tone.color(p)).child(line.status))
-                        .into_any_element(),
-                )
-            }))
-            .child(fact("Last PR", text(last_pr(brain, &batches))))
-            .child(fact(
-                "Compiles on",
-                text(compiler_line(&brain.config, listing.this_host.as_ref())),
-            ));
-        let compile = (listing.compiles.iter())
-            .find(|c| c.repository.eq_ignore_ascii_case(&brain.repository));
-        card = match compile {
-            Some(compile) => card
-                .child(fact(
-                    "Last compile",
-                    text(last_compile(compile.last_run.as_ref())),
-                ))
-                .child(fact(
-                    "Next compile",
-                    scheduled(next_run(compile, &brain.config)),
-                )),
-            // Set up's form sets what this would say.
-            None if self.editing == Some(Editing::SetUp(repository.clone())) => card,
-            None => card.child(fact("Next compile", scheduled(next_compile(&brain.config)))),
+            .child(pill(sync, tone.color(p)));
+        if let Some(compile) = compile {
+            head = head.child(self.run_now(compile, cx));
+        }
+        let mut card = card(p).child(head).child(hint(brain.repository.clone(), p));
+        let Some(compile) = compile else {
+            return card.child(ui::property("Last run", last_compile(None), p));
         };
-        let pending = pending_line(compile.map(|c| c.pending), held_entries(brain, &batches));
-        card = card.children(pending.map(|line| fact("Pending", text(line))));
-        let held_gate = brain.gate.as_ref().filter(|g| g.logs_held);
-        if let Some(gate) = held_gate {
-            card = card.child(
-                banner(p.yellow)
-                    .child(div().flex_1().child(logs_held_line(gate)))
-                    .children(self.update_gate_button(brain, &batches, cx)),
-            );
+        let today = chrono::Local::now().date_naive();
+        card = card
+            .child(fact("Compile time", self.compile_time(compile, p, cx), p))
+            .child(fact("Last run", last_run_line(compile, today), p))
+            .children(next_run_line(compile, today).map(|line| fact("Next run", line, p)));
+        if !compile.local {
+            card = card.child(self.macs(compile, p, cx));
         }
-        for (warning, tone) in warnings(brain, &batches) {
-            card = card.child(banner(tone.color(p)).child(div().flex_1().min_w_0().child(warning)));
+        if let Some(behind) = &compile.behind {
+            card = card.child(self.behind_banner(compile, behind, p, cx));
         }
-        if held_gate.is_none()
-            && let Some(gate) = &brain.gate
-            && let Some((_, hint_text)) = gate_action(gate, updating(&batches))
-        {
-            card = card.child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_2()
-                    .children(self.update_gate_button(brain, &batches, cx))
-                    .child(div().flex_1().child(hint(hint_text, p)))
-                    .child(
-                        button(SharedString::from(format!("gate-notes-{repository}")))
-                            .link()
-                            .xsmall()
-                            .label("What changed ↗")
-                            .on_click(|_, _, c| c.open_url(GATE_RELEASE_NOTES)),
-                    ),
-            );
-        }
-        if let Some(compile) = compile.filter(|c| c.needs_model) {
-            card = card.child(
-                banner(p.yellow)
-                    .child(div().flex_1().child(format!(
-                        "No Brain compiler model is chosen, so {}'s pending entries are not compiled. Choose one in Models.",
-                        compile.repository
-                    )))
-                    .child(
-                        button(SharedString::from(format!("models-{}", compile.repository)))
-                            .link()
-                            .xsmall()
-                            .label("Open Models")
-                            .on_click(cx.listener(|_, _, _, c| c.emit(Intent::OpenPage(Page::Models)))),
-                    ),
-            );
-        }
-        card = card.children(self.no_time_banner(brain, listing, p, cx));
-        card = card.child(self.brain_actions(brain, listing, &batches, p, cx));
-        match compile {
-            Some(compile) => card.child(self.compile_runs(compile, p, cx)),
-            None => card,
-        }
-    }
-
-    /// For a brain with a config and no compile time: that it never compiles on its own, with
-    /// Set compile time…, until that form is open.
-    fn no_time_banner(
-        &self,
-        brain: &Brain,
-        listing: &Listing,
-        p: Palette,
-        cx: &mut Context<Self>,
-    ) -> Option<Div> {
-        let repository = brain.repository.clone();
-        let editing = Editing::CompileTime(repository.clone());
-        if self.editing.as_ref() == Some(&editing) || brain.config.config()?.compile.is_some() {
-            return None;
-        }
-        let this_timezone = listing.this_timezone.clone();
-        Some(
-            banner(p.yellow)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_wrap()
-                        .gap_1()
-                        .child(
-                            div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(p.yellow)
-                                .child("No compile time."),
-                        )
-                        .child("This brain compiles only on Run now or a merged ruling."),
-                )
-                .child(
-                    ui::gated(
-                        button(SharedString::from(format!("set-compile-time-{repository}")))
-                            .small()
-                            .label("Set compile time…"),
-                        &self.shared.host,
-                    )
-                    .on_click(cx.listener(move |v, _, w, c| {
-                        v.edit_compile_time(editing.clone(), None, this_timezone.clone(), w, c)
-                    })),
-                ),
+        card = card.child(self.compile_runs(compile, p, cx));
+        card.child(
+            button(SharedString::from(format!(
+                "open-brain-{}",
+                brain.repository
+            )))
+            .ghost()
+            .label("Open brain browser")
+            .on_click(cx.listener(move |_, _, _, c| c.emit(Intent::OpenBrain(opening.clone())))),
         )
     }
 
-    /// The form that opens a PR with a compile time: Set up's, or changing one.
-    fn compile_time_form(
-        &self,
-        title: Option<&'static str>,
-        note: &'static str,
-        open_pr: fn(String, BrainCompile) -> Command,
-        repository: String,
-        p: Palette,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        div()
-            .p_3()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .rounded_lg()
-            .border_1()
-            .border_color(p.edge)
-            .bg(p.base)
-            .children(title.map(|title| div().font_weight(FontWeight::SEMIBOLD).child(title)))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_2()
-                    .child("Compile daily at")
-                    .child(div().w(px(80.)).child(Input::new(&self.compile_at).small()))
-                    .child(
-                        div()
-                            .w(px(240.))
-                            .child(Select::new(&self.compile_timezone).small()),
-                    ),
-            )
-            .child(hint(note, p))
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(
-                        button("cancel-compile-time")
-                            .ghost()
-                            .label("Cancel")
-                            .on_click(cx.listener(|v, _, w, c| v.edit(None, w, c))),
-                    )
-                    .child(
-                        ui::gated(
-                            button("save-compile-time").primary().label("Open the PR"),
-                            &self.shared.host,
-                        )
-                        .on_click(cx.listener(move |v, _, w, c| {
-                            let compile = v.compile_in_form(c);
-                            v.request(open_pr(repository.clone(), compile), w, c)
-                        })),
-                    ),
-            )
-    }
-
-    /// Run now and the brain's compile runs, a page at a time, newest first.
-    fn compile_runs(&self, compile: &BrainCompileState, p: Palette, cx: &mut Context<Self>) -> Div {
+    /// Run now, or why it waits.
+    fn run_now(&self, compile: &BrainCompileState, cx: &mut Context<Self>) -> Button {
         let repository = compile.repository.clone();
         let waits = compile.run_now_waits.clone().or_else(|| {
             compile
                 .needs_model
                 .then(|| "Choose a Brain compiler model first.".to_owned())
         });
+        let off =
+            (!compile.compiles_here).then(|| "Turn compiling on for this Mac first.".to_owned());
+        let waits = waits.or(off);
         let r = repository.clone();
-        let run_now = ui::gated(
-            button(SharedString::from(format!("run-compile-{repository}")))
-                .outline()
-                .icon(icon("play"))
-                .label("Run now")
-                .disabled(waits.is_some()),
-            &self.shared.host,
-        )
-        .on_click(cx.listener(move |v, _, w, c| {
+        let mut run_now = button(SharedString::from(format!("run-compile-{repository}")))
+            .outline()
+            .small()
+            .icon(icon("play"))
+            .label("Run now")
+            .disabled(waits.is_some());
+        if let Some(why) = waits {
+            run_now = run_now.tooltip(why);
+        }
+        ui::gated(run_now, &self.shared.host).on_click(cx.listener(move |v, _, w, c| {
             let repository = r.clone();
             v.request(Command::RunBrainCompile { repository }, w, c)
+        }))
+    }
+
+    /// Daily at 06:00 America/Chicago · Change, or its editor.
+    fn compile_time(&self, compile: &BrainCompileState, p: Palette, cx: &mut Context<Self>) -> Div {
+        let editing = self.changing_time.as_deref() == Some(compile.repository.as_str());
+        let Some(space_id) = compile.space_id.clone() else {
+            return div().child(compile_time_line(compile));
+        };
+        if !editing {
+            let shown = compile.clone();
+            return div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(compile_time_line(compile))
+                .child(hint("·", p))
+                .child(
+                    ui::gated(
+                        button(SharedString::from(format!(
+                            "change-time-{}",
+                            compile.repository
+                        )))
+                        .link()
+                        .xsmall()
+                        .label("Change"),
+                        &self.shared.host,
+                    )
+                    .on_click(
+                        cx.listener(move |view, _, window, cx| {
+                            view.change_time(&shown, window, cx)
+                        }),
+                    ),
+                );
+        }
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(hint("Daily at", p))
+            .child(div().w(px(70.)).child(Input::new(&self.time).small()))
+            .child(div().w(px(180.)).child(Input::new(&self.timezone).small()))
+            .child(
+                button("save-compile-time")
+                    .xsmall()
+                    .primary()
+                    .label("Save")
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.save_time(space_id.clone(), window, cx)
+                    })),
+            )
+            .child(
+                button("cancel-compile-time")
+                    .xsmall()
+                    .ghost()
+                    .label("Cancel")
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        view.changing_time = None;
+                        cx.notify();
+                    })),
+            )
+    }
+
+    /// Each Mac that compiles the wiki, this Mac first with its tick, another with when it last
+    /// ran.
+    fn macs(&self, compile: &BrainCompileState, p: Palette, cx: &mut Context<Self>) -> Div {
+        let today = chrono::Local::now().date_naive();
+        let mut macs = div().flex().flex_col().gap_1();
+        let space_id = compile.space_id.clone();
+        let tick = Checkbox::new(SharedString::from(format!(
+            "compile-here-{}",
+            compile.repository
+        )))
+        .checked(compile.compiles_here)
+        .on_click(cx.listener(move |view, checked: &bool, window, cx| {
+            let Some(space_id) = space_id.clone() else {
+                return;
+            };
+            let command = Command::SetCompileHere {
+                space_id,
+                compiles: *checked,
+            };
+            view.request(command, window, cx);
         }));
+        macs = macs.child(mac_row(
+            format!("{} (this Mac)", compile.this_mac),
+            compile.compiles_here,
+            div().child(tick),
+            p,
+        ));
+        for other in (compile.compilers.iter()).filter(|c| c.host != compile.this_host) {
+            let last = (other.last_ran)
+                .and_then(wording::local)
+                .map(|at| format!("Last ran {}", wording::day(at, today)));
+            macs = macs.child(mac_row(
+                other.machine.clone(),
+                true,
+                hint(last.unwrap_or_default(), p),
+                p,
+            ));
+        }
+        macs
+    }
+
+    /// No Mac compiles the wiki and entries wait, with Compile on this Mac.
+    fn behind_banner(
+        &self,
+        compile: &BrainCompileState,
+        behind: &str,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let offer = (compile.compilers.is_empty() && !compile.local)
+            .then(|| compile.space_id.clone())
+            .flatten()
+            .map(|space_id| {
+                ui::gated(
+                    button(SharedString::from(format!(
+                        "compile-on-{}",
+                        compile.repository
+                    )))
+                    .xsmall()
+                    .label("Compile on this Mac"),
+                    &self.shared.host,
+                )
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    let command = Command::SetCompileHere {
+                        space_id: space_id.clone(),
+                        compiles: true,
+                    };
+                    view.request(command, window, cx);
+                }))
+            });
+        banner(p.yellow)
+            .child(div().flex_1().min_w_0().child(behind.to_owned()))
+            .children(offer)
+    }
+
+    fn compile_runs(&self, compile: &BrainCompileState, p: Palette, cx: &mut Context<Self>) -> Div {
+        let repository = compile.repository.clone();
         let mut body = div()
             .flex()
             .flex_col()
             .gap_2()
-            .child(section("COMPILE RUNS", p))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(run_now)
-                    .children(waits.map(|why| hint(why, p))),
-            );
+            .child(section("COMPILE RUNS", p));
         let Some(page) = self.runs.get(&repository) else {
             return body.child(hint("Reading the runs…", p));
         };
@@ -720,631 +601,6 @@ impl BrainsPage {
         });
         conflict_card::conflict_card(card, open, &self.scope, on, p)
     }
-
-    fn brain_actions(
-        &self,
-        brain: &Brain,
-        listing: &Listing,
-        batches: &[&BrainBatch],
-        p: Palette,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let repository = brain.repository.clone();
-        let host = &self.shared.host;
-        match &self.editing {
-            Some(Editing::Grant(r)) if *r == repository => {
-                let confirm = repository.clone();
-                return ui::confirm_card(
-                    format!("Allow Wiffletree to push to {repository}?"),
-                    grant_lines(&repository),
-                    button("cancel-grant").on_click(cx.listener(|v, _, w, c| v.edit(None, w, c))),
-                    ui::gated(button("confirm-grant").primary().label("Allow"), host).on_click(
-                        cx.listener(move |v, _, w, c| {
-                            let repository = confirm.clone();
-                            v.request(Command::ConfirmBrain { repository }, w, c)
-                        }),
-                    ),
-                    p,
-                );
-            }
-            Some(Editing::Forget(r)) if *r == repository => {
-                let confirm = repository.clone();
-                return ui::confirm_card(
-                    format!("Forget {repository} on this Mac?"),
-                    [format!(
-                        "Deletes the host’s own checkout of {repository} and its batches here. GitHub is untouched: open batch PRs stay for you to close."
-                    )],
-                    button("cancel-forget").on_click(cx.listener(|v, _, w, c| v.edit(None, w, c))),
-                    ui::gated(button("confirm-forget").danger().label("Forget"), host).on_click(
-                        cx.listener(move |v, _, w, c| {
-                            let repository = confirm.clone();
-                            v.request(Command::ForgetBrain { repository }, w, c)
-                        }),
-                    ),
-                    p,
-                );
-            }
-            Some(Editing::Compiler(r)) if *r == repository => {
-                let chosen = repository.clone();
-                return div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(hint(
-                        "Another host compiles this brain once the config PR merges.",
-                        p,
-                    ))
-                    .child(Input::new(&self.host_id).small())
-                    .child(Input::new(&self.host_name).small())
-                    .child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .gap_2()
-                            .child(
-                                button("cancel-compiler")
-                                    .ghost()
-                                    .label("Cancel")
-                                    .on_click(cx.listener(|v, _, w, c| v.edit(None, w, c))),
-                            )
-                            .child(
-                                ui::gated(
-                                    button("save-compiler").primary().label("Open the PR"),
-                                    host,
-                                )
-                                .on_click(cx.listener(
-                                    move |v, _, w, c| {
-                                        let compiler = BrainCompiler {
-                                            host_id: v.host_id.read(c).value().trim().to_owned(),
-                                            name: v.host_name.read(c).value().trim().to_owned(),
-                                            extra: Extra::new(),
-                                        };
-                                        let repository = chosen.clone();
-                                        v.request(
-                                            Command::SetBrainCompiler {
-                                                repository,
-                                                compiler,
-                                            },
-                                            w,
-                                            c,
-                                        )
-                                    },
-                                )),
-                            ),
-                    );
-            }
-            Some(Editing::SetUp(r)) if *r == repository => {
-                return self.compile_time_form(
-                    Some("Set up this brain"),
-                    SET_UP_NOTE,
-                    |repository, compile| Command::SetUpBrain {
-                        repository,
-                        compile,
-                    },
-                    repository,
-                    p,
-                    cx,
-                );
-            }
-            Some(Editing::CompileTime(r)) if *r == repository => {
-                return self.compile_time_form(
-                    None,
-                    NEW_TIME_NOTE,
-                    |repository, compile| Command::SetBrainCompileTime {
-                        repository,
-                        compile,
-                    },
-                    repository,
-                    p,
-                    cx,
-                );
-            }
-            _ => {}
-        }
-        let mut actions = div().flex().flex_wrap().gap_2();
-        if !brain.spaces.is_empty() {
-            let r = repository.clone();
-            actions = actions.child(
-                button(SharedString::from(format!("browse-{repository}")))
-                    .outline()
-                    .icon(icon("book"))
-                    .label("Open brain browser")
-                    .on_click(cx.listener(move |_, _, _, c| {
-                        c.emit(Intent::OpenBrain(BrainOpening {
-                            repository: r.clone(),
-                            project: None,
-                            target: BrainTarget::View(BrainView::Status),
-                        }))
-                    })),
-            );
-        }
-        if !brain.granted && !brain.spaces.is_empty() {
-            let r = repository.clone();
-            actions = actions.child(
-                ui::gated(
-                    button(SharedString::from(format!("grant-{repository}")))
-                        .primary()
-                        .label("Allow pushes…"),
-                    host,
-                )
-                .on_click(
-                    cx.listener(move |v, _, w, c| v.edit(Some(Editing::Grant(r.clone())), w, c)),
-                ),
-            );
-        }
-        let setting_up = batches
-            .iter()
-            .any(|b| b.kind == BrainBatchKind::SetUp && !b.is_finished());
-        if brain.config == BrainConfigReading::Missing && !setting_up {
-            let editing = Editing::SetUp(repository.clone());
-            let this_timezone = listing.this_timezone.clone();
-            actions = actions.child(
-                ui::gated(
-                    button(SharedString::from(format!("set-up-{repository}")))
-                        .outline()
-                        .label("Set up"),
-                    host,
-                )
-                .on_click(cx.listener(move |v, _, w, c| {
-                    v.edit_compile_time(editing.clone(), None, this_timezone.clone(), w, c)
-                })),
-            );
-        }
-        if !brain.spaces.is_empty() {
-            let r = repository.clone();
-            actions = actions.child(
-                ui::gated(button(SharedString::from(format!("send-now-{repository}"))).outline().label("Send now"), host)
-                    .tooltip("Closes every open log batch of this brain, so each opens its PR on the next sync instead of waiting up to a day.")
-                    .on_click(cx.listener(move |v, _, w, c| {
-                        let repository = Some(r.clone());
-                        v.request(Command::SendLogsNow { repository }, w, c)
-                    })),
-            );
-        }
-        if brain.legacy_import {
-            let r = repository.clone();
-            actions = actions.child(
-                ui::gated(button(SharedString::from(format!("import-{repository}"))).outline().label("Import legacy logs"), host)
-                    .tooltip("Copies each entry of the legacy logs/<repo>.md files into its own entry file, in log PRs of at most 200 files. The legacy files are not changed. Import again once the PRs merge to finish.")
-                    .on_click(cx.listener(move |v, _, w, c| {
-                        let repository = r.clone();
-                        v.request(Command::ImportLegacyLogs { repository }, w, c)
-                    })),
-            );
-        }
-        if let Some(compile) = brain.config.config().and_then(|c| c.compile.clone()) {
-            let editing = Editing::CompileTime(repository.clone());
-            actions = actions.child(
-                ui::gated(
-                    button(SharedString::from(format!(
-                        "change-compile-time-{repository}"
-                    )))
-                    .outline()
-                    .label("Change compile time"),
-                    host,
-                )
-                .on_click(cx.listener(move |v, _, w, c| {
-                    v.edit_compile_time(editing.clone(), Some(compile.clone()), None, w, c)
-                })),
-            );
-        }
-        if brain.config.config().is_some() {
-            let weak = cx.entity().downgrade();
-            let (here, r) = (listing.this_host.clone(), repository.clone());
-            actions = actions.child(
-                ui::gated(
-                    button(SharedString::from(format!("compiler-{repository}")))
-                        .outline()
-                        .label("Change compiler")
-                        .dropdown_caret(true),
-                    host,
-                )
-                .dropdown_menu(move |mut menu, _, _| {
-                    if let Some(here) = here.clone() {
-                        let (weak, repository) = (weak.clone(), r.clone());
-                        menu = menu.item(PopupMenuItem::new("This Mac").on_click(
-                            move |_, window, cx| {
-                                let (compiler, repository) = (here.clone(), repository.clone());
-                                let _ = weak.update(cx, |view, cx| {
-                                    view.request(
-                                        Command::SetBrainCompiler {
-                                            repository,
-                                            compiler,
-                                        },
-                                        window,
-                                        cx,
-                                    )
-                                });
-                            },
-                        ));
-                    }
-                    let (weak, repository) = (weak.clone(), r.clone());
-                    menu.item(
-                        PopupMenuItem::new("Another host…").on_click(move |_, window, cx| {
-                            let repository = repository.clone();
-                            let _ = weak.update(cx, |view, cx| {
-                                view.edit(Some(Editing::Compiler(repository)), window, cx)
-                            });
-                        }),
-                    )
-                }),
-            );
-        }
-        if brain.spaces.is_empty() {
-            let r = repository.clone();
-            actions = actions.child(
-                ui::gated(
-                    button(SharedString::from(format!("forget-{repository}")))
-                        .ghost()
-                        .label("Forget…"),
-                    host,
-                )
-                .on_click(
-                    cx.listener(move |v, _, w, c| v.edit(Some(Editing::Forget(r.clone())), w, c)),
-                ),
-            );
-        }
-        actions
-    }
-
-    fn gate_row(
-        &self,
-        batch: &BrainBatch,
-        required: &[String],
-        held_for: Option<u64>,
-        p: Palette,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let id = batch.id.clone();
-        let open = self.open_batch.as_ref() == Some(&batch.id);
-        let note = match held_for {
-            Some(_) => "Held on this Mac until the gate is updated".into(),
-            None => batch_note(batch, required),
-        };
-        let failed = batch.stage == BrainStage::Failed;
-        let mut detail = vec![batch.repository.clone()];
-        detail.extend(self.source_name(&batch.source));
-        detail.extend(author(batch).map(str::to_owned));
-        let mut row = card(p).child(
-            div()
-                .id(SharedString::from(format!("batch-{id}")))
-                .flex()
-                .items_center()
-                .gap_3()
-                .cursor_pointer()
-                .on_click(cx.listener(move |v, _, _, c| {
-                    v.open_batch = (v.open_batch.as_ref() != Some(&id)).then(|| id.clone());
-                    c.notify();
-                }))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_ellipsis()
-                                .child(format!("{} · {}", kind_label(batch.kind), batch.title)),
-                        )
-                        .child(hint(detail.join(" · "), p)),
-                )
-                .child(stepper(batch, held_for, p))
-                .child(
-                    div()
-                        .w(px(220.))
-                        .flex_none()
-                        .text_right()
-                        .text_size(px(font::SMALL))
-                        .text_color(if failed { p.red } else { p.subtle })
-                        .child(note),
-                ),
-        );
-        if let (true, BrainSource::Project(project)) = (failed, &batch.source)
-            && let Some(coordinator) = self.coordinator_of(project)
-        {
-            row = row.child(
-                div().flex().justify_end().child(
-                    button(SharedString::from(format!("inbox-{}", batch.id)))
-                        .link()
-                        .xsmall()
-                        .label("Open in Inbox")
-                        .on_click(cx.listener(move |_, _, _, c| {
-                            c.emit(Intent::Select(coordinator.clone()));
-                            c.emit(Intent::ShowPanel(Panel::Attention));
-                        })),
-                ),
-            );
-        }
-        if open {
-            row = row.child(self.checks(batch, required, p, cx));
-        }
-        row
-    }
-
-    fn source_name(&self, source: &BrainSource) -> Option<String> {
-        let snapshot = self.shared.snapshot()?;
-        Some(match source {
-            BrainSource::Project(id) => (snapshot.projects.iter())
-                .find(|p| &p.id == id)
-                .map_or_else(|| "a project".into(), |p| p.name.clone()),
-            BrainSource::Space(id) => format!("{} Space", self.space_name(id)),
-            BrainSource::BrainsPage => "Brains page".into(),
-        })
-    }
-
-    fn coordinator_of(&self, project: &str) -> Option<String> {
-        let snapshot = self.shared.snapshot()?;
-        (snapshot.sessions.iter())
-            .find(|s| {
-                s.project_id == project
-                    && s.parent_id.is_none()
-                    && s.role == Role::ProjectOrchestrator
-            })
-            .map(|s| s.id.clone())
-    }
-
-    /// The batch's required checks, the files and lines its failed checks reported with what the
-    /// human can do about each, and Discard.
-    fn checks(
-        &self,
-        batch: &BrainBatch,
-        required: &[String],
-        p: Palette,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let mut list = div().flex().flex_col().gap_1().pt_1();
-        let checks = required_checks(batch, required);
-        if checks.is_empty() {
-            list = list.child(hint(no_checks_yet(batch), p));
-        }
-        for check in checks {
-            let (glyph, color) = match check.conclusion {
-                BrainCheckConclusion::Success => ("circle-check", p.green),
-                BrainCheckConclusion::Failure => ("circle-x", p.red),
-                BrainCheckConclusion::Pending => ("loader-circle", p.subtle),
-                BrainCheckConclusion::Neutral | BrainCheckConclusion::Skipped => {
-                    ("circle", p.subtle)
-                }
-            };
-            list = list.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_size(px(font::SMALL))
-                    .child(icon(glyph).size(px(14.)).text_color(color))
-                    .child(check.name.clone()),
-            );
-            for annotation in &check.annotations {
-                list = list.child(self.annotation(batch, annotation, p, cx));
-            }
-        }
-        if !batch.is_finished() {
-            list = list.child(self.discard(batch, p, cx));
-        }
-        list
-    }
-
-    /// One reported file and line, never its text, with Redact and Not sensitive while the
-    /// batch's PR is open.
-    fn annotation(
-        &self,
-        batch: &BrainBatch,
-        at: &BrainAnnotation,
-        p: Palette,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let mut row = div()
-            .pl_6()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(mono(format!("{} line {}", at.path, at.line), p).flex_1());
-        if !batch.is_amendable() {
-            return row;
-        }
-        let editing = Editing::NotSensitive {
-            batch: batch.id.clone(),
-            path: at.path.clone(),
-            line: at.line,
-            rule: String::new(),
-        };
-        if let Some(Editing::NotSensitive { rule, .. }) =
-            (self.editing.as_ref()).filter(|e| same_line(e, &editing))
-        {
-            let (id, path, line, rule) = (batch.id.clone(), at.path.clone(), at.line, rule.clone());
-            return div()
-                .pl_6()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(hint(
-                    format!(
-                        "{} line {} is not sensitive for {rule} because:",
-                        at.path, at.line
-                    ),
-                    p,
-                ))
-                .child(Input::new(&self.reason).small())
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            button("cancel-not-sensitive")
-                                .ghost()
-                                .label("Cancel")
-                                .on_click(cx.listener(|v, _, w, c| v.edit(None, w, c))),
-                        )
-                        .child(
-                            ui::gated(
-                                button("save-not-sensitive")
-                                    .primary()
-                                    .label("Mark not sensitive"),
-                                &self.shared.host,
-                            )
-                            .on_click(cx.listener(
-                                move |v, _, w, c| {
-                                    let amendment = BrainAmendment::NotSensitive {
-                                        path: path.clone(),
-                                        line,
-                                        rule: rule.clone(),
-                                        reason: v.reason.read(c).value().trim().to_owned(),
-                                    };
-                                    v.amend(id.clone(), amendment, w, c)
-                                },
-                            )),
-                        ),
-                );
-        }
-        let weak = cx.entity().downgrade();
-        let rules = move |marking: bool| {
-            let weak = weak.clone();
-            let editing = editing.clone();
-            move |mut menu: gpui_component::menu::PopupMenu,
-                  _: &mut Window,
-                  _: &mut Context<gpui_component::menu::PopupMenu>| {
-                for rule in GATE_RULES {
-                    let (weak, editing) = (weak.clone(), editing.clone());
-                    menu = menu.item(PopupMenuItem::new(rule).on_click(move |_, window, cx| {
-                        let Editing::NotSensitive {
-                            batch, path, line, ..
-                        } = editing.clone()
-                        else {
-                            return;
-                        };
-                        let _ = weak.update(cx, |view, cx| match marking {
-                            true => {
-                                let rule = rule.to_owned();
-                                view.edit(
-                                    Some(Editing::NotSensitive {
-                                        batch,
-                                        path,
-                                        line,
-                                        rule,
-                                    }),
-                                    window,
-                                    cx,
-                                )
-                            }
-                            false => {
-                                let amendment = BrainAmendment::Redact {
-                                    path,
-                                    line,
-                                    rule: rule.to_owned(),
-                                };
-                                view.amend(batch, amendment, window, cx)
-                            }
-                        });
-                    }));
-                }
-                menu
-            }
-        };
-        let key = format!("{}-{}-{}", batch.id, at.path, at.line);
-        row = row
-            .child(
-                ui::gated(
-                    button(SharedString::from(format!("redact-{key}")))
-                        .ghost()
-                        .xsmall()
-                        .label("Redact the line")
-                        .dropdown_caret(true),
-                    &self.shared.host,
-                )
-                .tooltip("Replaces the line’s value with [removed: ‹rule›] in one more commit")
-                .dropdown_menu(rules(false)),
-            )
-            .child(
-                ui::gated(
-                    button(SharedString::from(format!("not-sensitive-{key}")))
-                        .ghost()
-                        .xsmall()
-                        .label("Not sensitive")
-                        .dropdown_caret(true),
-                    &self.shared.host,
-                )
-                .tooltip("Adds the gate’s allow marker with your reason in one more commit")
-                .dropdown_menu(rules(true)),
-            );
-        row
-    }
-
-    fn discard(&self, batch: &BrainBatch, p: Palette, cx: &mut Context<Self>) -> Div {
-        let id = batch.id.clone();
-        if self.editing == Some(Editing::Discard(batch.id.clone())) {
-            return ui::confirm_card(
-                "Discard this batch?",
-                [discard_line(batch)],
-                button("cancel-discard").on_click(cx.listener(|v, _, w, c| v.edit(None, w, c))),
-                ui::gated(
-                    button("confirm-discard").danger().label("Discard"),
-                    &self.shared.host,
-                )
-                .on_click(
-                    cx.listener(move |v, _, w, c| {
-                        v.amend(id.clone(), BrainAmendment::Discard, w, c)
-                    }),
-                ),
-                p,
-            );
-        }
-        div().flex().justify_end().child(
-            ui::gated(
-                button(SharedString::from(format!("discard-{id}")))
-                    .ghost()
-                    .xsmall()
-                    .label("Discard the batch…"),
-                &self.shared.host,
-            )
-            .on_click(
-                cx.listener(move |v, _, w, c| v.edit(Some(Editing::Discard(id.clone())), w, c)),
-            ),
-        )
-    }
-
-    /// Update gate, or Pin to for a pin no release names; off while its PR is open.
-    fn update_gate_button(
-        &self,
-        brain: &Brain,
-        batches: &[&BrainBatch],
-        cx: &mut Context<Self>,
-    ) -> Option<Button> {
-        let gate = brain.gate.as_ref()?;
-        let (label, _) = gate_action(gate, updating(batches))?;
-        let repository = brain.repository.clone();
-        let button = button(SharedString::from(format!("update-gate-{repository}")))
-            .label(label)
-            .disabled(updating(batches).is_some());
-        let button = match gate.pin {
-            BrainGatePin::Release { .. } => button.primary(),
-            BrainGatePin::Unknown { .. } => button.outline(),
-        };
-        Some(
-            ui::gated(button, &self.shared.host).on_click(cx.listener(move |v, _, w, c| {
-                let repository = repository.clone();
-                v.request(Command::UpdateBrainGate { repository }, w, c)
-            })),
-        )
-    }
-
-    fn amend(
-        &mut self,
-        batch_id: String,
-        amendment: BrainAmendment,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.request(
-            Command::AmendBrainBatch {
-                batch_id,
-                amendment,
-            },
-            window,
-            cx,
-        );
-    }
 }
 
 impl Requests for BrainsPage {
@@ -1360,15 +616,13 @@ impl Requests for BrainsPage {
     ) {
         match reply {
             Err(error) => self.error = Some(error),
-            Ok(answer) => {
+            Ok(_) => {
                 self.error = None;
-                if let Command::ImportLegacyLogs { .. } = command
-                    && let Ok(import) = serde_json::from_value::<LegacyImport>(answer)
-                {
-                    toast(import_line(&import), window, cx);
+                if held_entry::settles(&command) {
+                    self.held.close();
                 }
-                if !matches!(command, Command::SyncNow) {
-                    self.edit(None, window, cx);
+                if scan_alert::settles(&command) {
+                    self.alert.close();
                 }
             }
         }
@@ -1411,106 +665,104 @@ impl Tone {
     }
 }
 
-fn same_line(a: &Editing, b: &Editing) -> bool {
-    match (a, b) {
-        (
-            Editing::NotSensitive {
-                batch, path, line, ..
-            },
-            Editing::NotSensitive {
-                batch: b,
-                path: p,
-                line: l,
-                ..
-            },
-        ) => batch == b && path == p && line == l,
-        _ => false,
+/// How the brain's repository syncs: its problem, when it last reached GitHub, or that a local
+/// one has no remote.
+pub(super) fn sync_state(brain: &Brain) -> (String, Tone) {
+    match (&brain.problem, brain.synced_at) {
+        (Some(_), _) => ("Not syncing".into(), Tone::Bad),
+        (None, Some(at)) => (format!("Synced {}", age(at).to_lowercase()), Tone::Good),
+        (None, None) if brain.repository.contains('/') => ("Not synced yet".into(), Tone::Quiet),
+        (None, None) => ("On this Mac".into(), Tone::Quiet),
     }
 }
 
-/// The brain's sync pill: held, failing, a log batch among `batches` held for the gate,
-/// waiting for the grant, or when it last synced.
-pub(super) fn sync_state(brain: &Brain, batches: &[BrainBatch]) -> (String, Tone) {
-    let holds_logs = (batches.iter())
-        .filter(|b| b.repository.eq_ignore_ascii_case(&brain.repository))
-        .any(|b| held_for(brain, b).is_some());
-    if brain.held.is_some() {
-        ("Writing held".into(), Tone::Bad)
-    } else if brain.problem.is_some() {
-        ("Sync failed".into(), Tone::Bad)
-    } else if holds_logs {
-        ("Logs held".into(), Tone::Warn)
-    } else if !brain.granted {
-        ("Waits for your grant".into(), Tone::Warn)
-    } else {
-        match brain.synced_at {
-            Some(at) => (format!("Synced {}", age(at).to_lowercase()), Tone::Good),
-            None => ("Not synced yet".into(), Tone::Quiet),
-        }
+/// What the pull requests an earlier release left open are.
+/// "Vyttle's wiki", or "Sage and Sage Watch's wiki" for Spaces that share one.
+fn wiki_name(names: &[String]) -> String {
+    let named = match names {
+        [] => "This".to_owned(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    format!("{named}’s wiki")
+}
+
+/// One line of a wiki's group.
+fn fact(label: &'static str, value: impl IntoElement, p: Palette) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_3()
+        .text_size(px(font::SMALL))
+        .child(
+            div()
+                .w(px(110.))
+                .flex_none()
+                .text_color(p.subtle)
+                .child(label),
+        )
+        .child(div().flex_1().min_w_0().child(value))
+}
+
+/// A Mac in a wiki's group: whether it compiles, its name, and its tick or last run.
+fn mac_row(name: String, on: bool, right: Div, p: Palette) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_size(px(font::SMALL))
+        .child(div().size(px(7.)).flex_none().rounded_full().bg(if on {
+            p.green
+        } else {
+            p.subtle
+        }))
+        .child(div().flex_1().min_w_0().child(name))
+        .child(right)
+}
+
+/// "Daily at 06:00 America/Chicago", or that it runs only on Run now.
+fn compile_time_line(compile: &BrainCompileState) -> String {
+    match &compile.compile {
+        Some(at) => format!("Daily at {} {}", at.at, at.timezone),
+        None => "Only on Run now".to_owned(),
     }
 }
 
-fn grant_lines(repository: &str) -> Vec<String> {
-    vec![
-        format!("Wiffletree may push its own wiffletree/brain/‹login›/‹batch› branches to {repository}, open pull requests from them into main, turn on auto-merge for them, close a batch PR you discard and delete a branch it pushed."),
-        "It never pushes main, forces a push, or approves, comments on or merges a pull request itself.".into(),
-        "Allowing this owner for ticket PRs does not grant this, and this grant allows no ticket PRs.".into(),
-    ]
-}
-
-/// Who compiles the brain, from `wiffletree-brain.json` on `main`.
-pub(super) fn compiler_line(
-    config: &BrainConfigReading,
-    this_host: Option<&BrainCompiler>,
-) -> String {
-    match config {
-        BrainConfigReading::Unread => "Not read yet".into(),
-        BrainConfigReading::Missing => "No compiler · Set up adds wiffletree-brain.json".into(),
-        BrainConfigReading::Invalid { reason } => format!("No compiler · {reason}"),
-        BrainConfigReading::Newer { version } => {
-            format!(
-                "Not compiled here · version {version} of wiffletree-brain.json is newer than this Wiffletree"
-            )
-        }
-        BrainConfigReading::Read { config } => match &config.compiler {
-            None => "No compiler named".into(),
-            Some(c) if this_host.is_some_and(|h| h.host_id == c.host_id) => {
-                format!("{} (this Mac)", c.name)
-            }
-            Some(c) => c.name.clone(),
-        },
+/// "Today at 06:04 on Michael's Mac · 9 entries · 1 conflict", or how the last run ended.
+fn last_run_line(compile: &BrainCompileState, today: chrono::NaiveDate) -> String {
+    let Some(run) = &compile.last_run else {
+        return last_compile(None);
+    };
+    if run.outcome != CompileOutcome::Landed {
+        return last_compile(Some(run));
     }
-}
-
-pub(super) fn next_compile(config: &BrainConfigReading) -> String {
-    match config.config().and_then(|c| c.compile.as_ref()) {
-        Some(compile) => format!("Daily at {} {}", compile.at, compile.timezone),
-        None => NOT_SCHEDULED.into(),
-    }
-}
-
-/// Each Space the upgrade left with no brain, because its brain folder has no GitHub `origin`,
-/// while it still names none: its id, its name and the folder.
-fn without_origin(
-    spaces: &[Space],
-    locals: &BTreeMap<SpaceId, SpaceLocal>,
-) -> Vec<(SpaceId, String, String)> {
-    (spaces.iter())
-        .filter(|space| space.brain.is_none())
-        .filter_map(|space| {
-            let folder = locals.get(&space.id)?.brain_without_origin.clone()?;
-            Some((space.id.clone(), space.name.clone(), folder))
-        })
-        .collect()
-}
-
-fn without_origin_line(space: &str, folder: &str) -> String {
+    let when =
+        wording::local(run.started_at).map_or(String::new(), |at| wording::day_at(at, today));
     format!(
-        "The {space} Space has no brain: its brain folder {folder} has no GitHub origin, so the upgrade could not make it a brain repository. Name a brain repository in the Space's settings."
+        "{when} on {} · {} · {}",
+        compile.this_mac,
+        wording::counted_as(run.processed, "entry", "entries"),
+        wording::counted(run.conflicts, "conflict")
     )
 }
 
-/// The brain's last compile run in a line: when, what it did and its PR.
+/// "Tomorrow at 06:00, on the first of these Macs awake", or `None` with no time or no Mac.
+fn next_run_line(compile: &BrainCompileState, today: chrono::NaiveDate) -> Option<String> {
+    let at = wording::local(compile.next_run?)?;
+    let who = match (compile.local, compile.compilers.len()) {
+        (true, _) => "on this Mac",
+        (false, 0) => return None,
+        (false, 1) => "on that Mac",
+        (false, _) => "on the first of these Macs awake",
+    };
+    Some(format!("{}, {who}", wording::day_at(at, today)))
+}
+
+fn left_line() -> &'static str {
+    "An earlier release left these on the old brains. They stay on GitHub for you to merge or close, and nothing watches them."
+}
+
+/// The wiki's last run, in a line.
 fn last_compile(run: Option<&CompileRun>) -> String {
     let Some(run) = run else {
         return "None yet".into();
@@ -1523,47 +775,19 @@ fn last_compile(run: Option<&CompileRun>) -> String {
     if !run.reason.is_empty() {
         line.push_str(&format!(" · {}", run.reason));
     }
-    if let Some(number) = run.pull_request {
-        let state = if run.merged { "merged" } else { "open" };
-        line.push_str(&format!(" · PR #{number} {state}"));
-    }
     line
 }
 
-/// The next scheduled run, and that it waits while a compile PR is open.
-fn next_run(compile: &BrainCompileState, config: &BrainConfigReading) -> String {
-    let Some(at) = compile.next_at else {
-        return next_compile(config);
-    };
-    let schedule = config.config().and_then(|c| c.compile.as_ref());
-    let mut line = match schedule {
-        Some(s) => format!("{} {}", wording::day_and_time(at), s.timezone),
-        None => wording::day_and_time(at),
-    };
-    if let Some(why) = compile
-        .run_now_waits
-        .as_deref()
-        .filter(|w| w.starts_with("Waiting for"))
-    {
-        line.push_str(&format!(" · {}", why.to_lowercase()));
-    }
-    line
-}
-
-/// One compile run: when and why it started, its counts and model, how it ended and its PR,
-/// then its reason, usage and procedure.
+/// One compile run: when and why it started, its counts and model, how it ended, then its
+/// reason, commit, usage and procedure.
 fn run_row(run: &CompileRun, p: Palette) -> Div {
     let tone = match run.outcome {
         CompileOutcome::Running => Tone::Warn,
-        CompileOutcome::Skipped => Tone::Quiet,
+        CompileOutcome::Skipped | CompileOutcome::Lost => Tone::Quiet,
         CompileOutcome::Waiting => Tone::Warn,
         CompileOutcome::Failed | CompileOutcome::TimedOut => Tone::Bad,
-        CompileOutcome::PrOpened => Tone::Good,
-    };
-    let outcome = match (run.outcome, run.pull_request) {
-        (CompileOutcome::PrOpened, Some(number)) if run.merged => format!("PR #{number} merged"),
-        (CompileOutcome::PrOpened, Some(number)) => format!("PR #{number} open"),
-        (outcome, _) => outcome.label().to_owned(),
+        CompileOutcome::CompiledElsewhere => Tone::Quiet,
+        CompileOutcome::Landed => Tone::Good,
     };
     let model = (run.profile.as_ref())
         .map(|profile| format!(" · {}", profile.short()))
@@ -1580,6 +804,12 @@ fn run_row(run: &CompileRun, p: Palette) -> Div {
     let mut detail = vec![];
     if !run.reason.is_empty() && run.outcome != CompileOutcome::Skipped {
         detail.push(run.reason.clone());
+    }
+    if run.unasked > 0 {
+        detail.push(format!("GitHub could not be asked about {}", run.unasked));
+    }
+    if let Some(commit) = &run.commit {
+        detail.push(commit.chars().take(7).collect());
     }
     if run.tokens > 0 {
         let cost = run.cost.map(|c| format!(" · ${c:.2}")).unwrap_or_default();
@@ -1613,914 +843,69 @@ fn run_row(run: &CompileRun, p: Palette) -> Div {
                 )
                 .child(pill(run.trigger.label(), p.subtle))
                 .child(div().flex_1().min_w_0().text_ellipsis().child(counts))
-                .child(pill(outcome, tone.color(p))),
+                .child(pill(run.outcome.label(), tone.color(p))),
         )
         .when(!detail.is_empty(), |row| {
             row.child(hint(detail.join(" · "), p))
         })
 }
 
-/// The brain's most recent PR, however old, and how many of its batches are still in the gate.
-fn last_pr(brain: &Brain, batches: &[&BrainBatch]) -> String {
-    let in_gate = batches.iter().filter(|b| !b.is_finished()).count();
-    let last = (brain.last_pull_request.as_ref()).map(|pr| {
-        format!(
-            "#{} {} · {}",
-            pr.number,
-            kind_label(pr.kind).to_lowercase(),
-            stage_label(pr.stage)
-        )
-    });
-    match (last, in_gate) {
-        (None, 0) => "None yet".into(),
-        (None, n) => format!("{n} {} in the gate", plural(n, "batch", "batches")),
-        (Some(last), 0) => last,
-        (Some(last), n) => format!("{last} · {n} in the gate"),
-    }
-}
-
-/// The brain's warnings: writing held, a sync problem, auto-merge refused or waiting on `main`'s
-/// required checks, the config, and the legacy pointer.
-fn warnings(brain: &Brain, batches: &[&BrainBatch]) -> Vec<(String, Tone)> {
-    let repository = &brain.repository;
-    let mut warnings = vec![];
-    match &brain.held {
-        Some(BrainHold::ChangedFiles { files }) => warnings.push((
-            format!("Writing is held: something other than Wiffletree changed {} in the host’s checkout. Wiffletree leaves the change as it is; settle it, then Sync now.", files.join(", ")),
-            Tone::Bad,
-        )),
-        Some(BrainHold::NotFastForward) => warnings.push((
-            "Writing is held: the host’s checkout has commits main does not, so it cannot fast-forward. Wiffletree never resets it; settle it, then Sync now.".into(),
-            Tone::Bad,
-        )),
-        None => {}
-    }
-    if let Some(problem) = &brain.problem {
-        warnings.push((problem.clone(), Tone::Bad));
-    }
-    if batches
-        .iter()
-        .any(|b| b.problem == Some(BrainProblem::AutoMergeRefused))
-    {
-        warnings.push((
-            format!("GitHub refused auto-merge for {repository}. Turn on Allow auto-merge and protect main with the brain gate’s checks, as the gate’s README says, then Sync now."),
-            Tone::Warn,
-        ));
-    }
-    if !brain.missing_checks.is_empty() {
-        let missing = &brain.missing_checks;
-        warnings.push((
-            format!(
-                "Auto-merge waits: main does not require the brain gate’s {} {}. Protect main with all seven, then Sync now.",
-                missing.join(", "),
-                if missing.len() == 1 { "check" } else { "checks" }
-            ),
-            Tone::Warn,
-        ));
-    }
-    if let BrainConfigReading::Invalid { reason } = &brain.config {
-        warnings.push((
-            format!("{reason}. Batches still open PRs; nothing compiles until it is fixed."),
-            Tone::Warn,
-        ));
-    }
-    if let BrainConfigReading::Newer { .. } = &brain.config {
-        warnings.push(("A newer Wiffletree wrote wiffletree-brain.json. Update Wiffletree to compile this brain; logs still go in.".into(), Tone::Warn));
-    }
-    if brain.legacy_pointer {
-        warnings.push((
-            format!("The legacy pointer ~/.config/claude-second-brain names your own clone of {repository}. Its safety-net must open pull requests instead of pushing to main for this brain."),
-            Tone::Warn,
-        ));
-    }
-    warnings
-}
-
-/// The Gate line: the release the caller pins with its short commit, then whether it is the
-/// latest this Wiffletree ships, a newer one is available, or a gate update PR is open.
-#[derive(Debug, PartialEq, Eq)]
-struct GateLine {
-    /// The pinned release's name and short commit; `None` for a pin no release names.
-    release: Option<(String, String)>,
-    status: String,
-    tone: Tone,
-}
-
-fn short(commit: &str) -> &str {
-    &commit[..commit.len().min(7)]
-}
-
-/// `updating` is the open gate update batch's PR, `Some(None)` before it opens.
-fn gate_line(gate: &BrainGate, updating: Option<Option<u64>>) -> GateLine {
-    let latest = gate.latest.version();
-    let in_pr = |verb: &str| match updating {
-        Some(Some(number)) => format!("{verb} to {latest} in PR #{number}"),
-        _ => format!("{verb} to {latest} · its PR opens on the next sync"),
-    };
-    match &gate.pin {
-        BrainGatePin::Release { release } => {
-            let (mut status, tone) = match (gate.update(), updating) {
-                (None, _) => ("latest".to_owned(), Tone::Good),
-                (Some(_), Some(_)) => (in_pr("updating"), Tone::Quiet),
-                (Some(_), None) => (format!("{latest} is available"), Tone::Warn),
-            };
-            if let Some(version) = &gate.config_version {
-                status.push_str(&format!(" · the config says {version}"));
-            }
-            GateLine {
-                release: Some((release.name.clone(), short(&release.commit).to_owned())),
-                status,
-                tone,
-            }
-        }
-        BrainGatePin::Unknown { commit } => {
-            let mut status = format!(
-                "Pinned to {}, which is not a gate release this Wiffletree knows",
-                short(commit)
-            );
-            if updating.is_some() {
-                status.push_str(&format!(" · {}", in_pr("pinning")));
-            }
-            GateLine {
-                release: None,
-                status,
-                tone: Tone::Warn,
-            }
-        }
-    }
-}
-
-/// Update gate's button label and the hint beside it, or `None` for a gate that is current.
-fn gate_action(gate: &BrainGate, updating: Option<Option<u64>>) -> Option<(String, String)> {
-    let target = gate.update()?.version();
-    let label = match gate.pin {
-        BrainGatePin::Release { .. } => format!("Update gate to {target}"),
-        BrainGatePin::Unknown { .. } => format!("Pin to {target}"),
-    };
-    let hint = match (updating, &gate.pin) {
-        (Some(Some(number)), _) => format!(
-            "PR #{number} is open. It merges when your code owner approves it; it does not auto-merge."
-        ),
-        (Some(None), _) => "Its PR opens on the next sync and waits for your code owner.".into(),
-        (None, BrainGatePin::Release { .. }) => "Opens a PR that changes only the caller's pins and the config's version. Your code owner reviews it.".into(),
-        (None, BrainGatePin::Unknown { .. }) => "Opens the same review PR as Update gate.".into(),
-    };
-    Some((label, hint))
-}
-
-/// The held-logs banner: why the brain's log batches wait on this Mac.
-fn logs_held_line(gate: &BrainGate) -> String {
-    let pinned = match &gate.pin {
-        BrainGatePin::Release { release } => release.version().to_owned(),
-        BrainGatePin::Unknown { commit } => short(commit).to_owned(),
-    };
-    format!(
-        "Log batches are held. This Wiffletree writes log entries in gate contract v{}, and this brain's gate ({pinned}) would reject them. Update the gate; held entries go in once the update merges.",
-        gate.contract
-    )
-}
-
-/// The contract a batch waits for while the brain's pinned gate rejects it: an unfinished log
-/// batch with no PR yet, which the host keeps on this Mac.
-pub(super) fn held_for(brain: &Brain, batch: &BrainBatch) -> Option<u64> {
-    let gate = brain.gate.as_ref().filter(|g| g.logs_held)?;
-    let waiting = batch.pull_request.is_none() && !batch.is_finished();
-    (batch.kind == BrainBatchKind::Log && waiting).then_some(gate.contract)
-}
-
-/// How many log entries the brain's held batches keep on this Mac.
-fn held_entries(brain: &Brain, batches: &[&BrainBatch]) -> usize {
-    (batches.iter())
-        .filter(|b| held_for(brain, b).is_some())
-        .map(|b| b.files.len())
-        .sum()
-}
-
-/// The card's Pending line: entries since the last compile, for a brain this Mac compiles, and
-/// log entries held here.
-fn pending_line(since_compile: Option<usize>, held: usize) -> Option<String> {
-    let compiled = since_compile.map(|n| {
-        format!(
-            "{n} {} since the last compile",
-            plural(n, "entry", "entries")
-        )
-    });
-    let held = (held > 0).then(|| {
-        format!(
-            "{held} log {} held on this Mac",
-            plural(held, "entry", "entries")
-        )
-    });
-    match (compiled, held) {
-        (Some(compiled), Some(held)) => Some(format!("{compiled} · {held}")),
-        (compiled, held) => compiled.or(held),
-    }
-}
-
-/// The open gate update batch's PR, `Some(None)` before it opens.
-fn updating(batches: &[&BrainBatch]) -> Option<Option<u64>> {
-    (batches.iter())
-        .find(|b| b.kind == BrainBatchKind::GateUpdate && !b.is_finished())
-        .map(|b| b.pull_request.as_ref().map(|pr| pr.number))
-}
-
-fn kind_label(kind: BrainBatchKind) -> &'static str {
-    match kind {
-        BrainBatchKind::Log => "Log batch",
-        BrainBatchKind::Compile => "Compile run",
-        BrainBatchKind::Config => "Config change",
-        BrainBatchKind::SetUp => "Set up",
-        BrainBatchKind::GateUpdate => "Gate update",
-    }
-}
-
-/// The GitHub login a batch branch `wiffletree/brain/<login>/<batch>` names.
-fn author(batch: &BrainBatch) -> Option<&str> {
-    batch
-        .branch
-        .as_deref()?
-        .strip_prefix("wiffletree/brain/")?
-        .split('/')
-        .next()
-}
-
-/// The stepper's four steps, as the mockup draws them.
-const STEPS: [&str; 4] = ["Queued", "PR open", "Checks", "Auto-merged"];
-/// A batch that waits for the code owner, Set up or a gate update, ends with their review.
-const REVIEWED_STEPS: [&str; 5] = [
-    "Queued",
-    "PR open",
-    "Checks",
-    "Waiting for code owner",
-    "Merged",
-];
-
-/// How far the batch is, from 0 for queued to the last step for auto-merging or merged.
-fn step_of(batch: &BrainBatch) -> usize {
-    let reviewed = batch.kind.awaits_review();
-    match batch.stage {
-        BrainStage::Queued => 0,
-        // The host keeps a reviewed batch open for the review while its checks run and after.
-        BrainStage::PrOpen if reviewed && batch.problem == Some(BrainProblem::AwaitingReview) => {
-            let running =
-                (batch.checks.iter()).any(|c| c.conclusion == BrainCheckConclusion::Pending);
-            if batch.checks.is_empty() || running {
-                2
-            } else {
-                3
-            }
-        }
-        BrainStage::PrOpen => 1,
-        BrainStage::Checks => 2,
-        BrainStage::Merged if reviewed => 4,
-        BrainStage::AutoMerging | BrainStage::Merged => 3,
-        // A failed batch stops where it failed: at its checks once its PR is open.
-        BrainStage::Failed if batch.pull_request.is_some() => 2,
-        BrainStage::Failed => 0,
-        BrainStage::Discarded => 0,
-    }
-}
-
-/// Each step's label and tone: done, the current one, or not reached. `held_for` is the entry
-/// contract a held log batch waits for the gate to accept.
-fn steps(batch: &BrainBatch, held_for: Option<u64>) -> Vec<(String, Option<Tone>)> {
-    let at = step_of(batch);
-    let names: &[&str] = match batch.kind.awaits_review() {
-        true => &REVIEWED_STEPS,
-        false => &STEPS,
-    };
-    (names.iter().enumerate())
-        .map(|(i, step)| {
-            let mut label = step.to_string();
-            if i == 1
-                && let Some(pr) = &batch.pull_request
-            {
-                label = format!("PR #{}", pr.number);
-            }
-            if let (0, Some(contract)) = (i, held_for) {
-                label = format!("Held · waiting for gate v{contract}");
-            }
-            let tone = match (i.cmp(&at), batch.stage) {
-                (std::cmp::Ordering::Less, _) => Some(Tone::Good),
-                (std::cmp::Ordering::Equal, BrainStage::Failed) => {
-                    if i == 2 {
-                        label = "Checks failed".into();
-                    }
-                    Some(Tone::Bad)
-                }
-                (std::cmp::Ordering::Equal, BrainStage::AutoMerging) => {
-                    label = "Auto-merging".into();
-                    Some(Tone::Warn)
-                }
-                (std::cmp::Ordering::Equal, BrainStage::Merged) => Some(Tone::Good),
-                (std::cmp::Ordering::Equal, _) => Some(Tone::Warn),
-                (std::cmp::Ordering::Greater, _) => None,
-            };
-            (label, tone)
-        })
-        .collect()
-}
-
-pub(super) fn stepper(batch: &BrainBatch, held_for: Option<u64>, p: Palette) -> Div {
-    let mut row = div().flex_none().flex().items_center().gap_2();
-    for (i, (label, tone)) in steps(batch, held_for).into_iter().enumerate() {
-        if i > 0 {
-            row = row.child(div().w(px(10.)).h(px(1.)).bg(p.edge));
-        }
-        let color = tone.map_or(p.subtle, |t| t.color(p));
-        row = row.child(
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .text_size(px(font::META))
-                .text_color(if tone.is_some() { p.text } else { p.subtle })
-                .child(div().size(px(7.)).rounded_full().bg(if tone.is_some() {
-                    color
-                } else {
-                    p.edge
-                }))
-                .child(label),
-        );
-    }
-    row
-}
-
-pub(super) fn stage_label(stage: BrainStage) -> &'static str {
-    match stage {
-        BrainStage::Queued => "queued",
-        BrainStage::PrOpen => "open",
-        BrainStage::Checks => "checks running",
-        BrainStage::AutoMerging => "auto-merging",
-        BrainStage::Merged => "merged",
-        BrainStage::Failed => "failed",
-        BrainStage::Discarded => "discarded",
-    }
-}
-
-/// The gate row's note: what stops the batch, or where it is. It names checks, never their text.
-fn batch_note(batch: &BrainBatch, required: &[String]) -> String {
-    match &batch.problem {
-        Some(BrainProblem::ChecksFailed { checks }) => {
-            format!("{} failed · auto-merge paused", checks.join(", "))
-        }
-        Some(BrainProblem::PushRefused { .. }) => "GitHub refused the push".into(),
-        Some(BrainProblem::Conflict) => "Conflicts with main".into(),
-        Some(BrainProblem::AutoMergeRefused) => "GitHub refused auto-merge".into(),
-        Some(BrainProblem::GateNotRequired { missing }) => {
-            format!(
-                "Auto-merge waits: main does not require {}",
-                missing.join(", ")
-            )
-        }
-        Some(BrainProblem::AwaitingReview) => "Waits for your review on GitHub".into(),
-        Some(BrainProblem::ChangedOutside) => "Changed outside Wiffletree · not pushed".into(),
-        Some(BrainProblem::Error { .. }) => "Could not move on · retries next pass".into(),
-        None => match batch.stage {
-            BrainStage::Queued => "Waits to be pushed".into(),
-            BrainStage::PrOpen => "PR open".into(),
-            BrainStage::Checks => {
-                let passed = (required_checks(batch, required).iter())
-                    .filter(|c| c.conclusion == BrainCheckConclusion::Success)
-                    .count();
-                format!("Checks running · {passed} of {} passed", required.len())
-            }
-            BrainStage::AutoMerging => "All checks passed · auto-merging".into(),
-            BrainStage::Merged => format!("Merged {}", age(batch.updated_at).to_lowercase()),
-            BrainStage::Failed => "Failed".into(),
-            BrainStage::Discarded => "Discarded".into(),
-        },
-    }
-}
-
-/// The batch's checks that `main` requires, which alone decide it, as the host's watch judges.
-fn required_checks<'a>(batch: &'a BrainBatch, required: &[String]) -> Vec<&'a BrainCheck> {
-    (batch.checks.iter())
-        .filter(|check| required.contains(&check.name))
-        .collect()
-}
-
-fn no_checks_yet(batch: &BrainBatch) -> &'static str {
-    match batch.pull_request {
-        None => "No checks until its PR opens.",
-        Some(_) => "GitHub has reported none of the checks main requires yet.",
-    }
-}
-
-fn discard_line(batch: &BrainBatch) -> String {
-    match &batch.pull_request {
-        Some(pr) => format!(
-            "Closes PR #{} and deletes the branch Wiffletree pushed. Its entries can go in a new batch.",
-            pr.number
-        ),
-        None => "Nothing has been pushed yet; the batch is dropped here.".into(),
-    }
-}
-
-/// What Import legacy logs did, in a line.
-fn import_line(import: &LegacyImport) -> String {
-    if import.done {
-        return "Every legacy entry is on main. The import is done.".into();
-    }
-    match (import.added, import.batches) {
-        (0, _) => "Nothing new to import. Import again once the import PRs merge to finish.".into(),
-        (1, _) => "1 entry queued in 1 log PR.".into(),
-        (n, 1) => format!("{n} entries queued in 1 log PR."),
-        (n, b) => format!("{n} entries queued in {b} log PRs."),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        GateLine, Tone, author, batch_note, compiler_line, gate_action, gate_line, grant_lines,
-        held_entries, held_for, import_line, last_compile, last_pr, logs_held_line, pending_line,
-        required_checks, steps, sync_state, warnings, without_origin, without_origin_line,
-    };
-    use crate::ui;
-    use std::collections::BTreeMap;
-    use workspace_core::*;
+    use super::{Tone, last_compile, sync_state, ui};
+    use workspace_core::{Brain, CompileOutcome, CompileRun, CompileTrigger};
 
-    fn release(name: &str, commit: &str) -> BrainGateRelease {
-        BrainGateRelease {
-            name: name.into(),
-            commit: commit.into(),
-        }
-    }
-    /// A gate pinned to v1.0.0 while this Wiffletree ships `latest`.
-    fn gate(latest: &str) -> BrainGate {
-        BrainGate {
-            pin: BrainGatePin::Release {
-                release: release("brain-gate-v1.0.0", "083ab25267aa"),
-            },
-            config_version: None,
-            latest: release(latest, "5d1e07c00000"),
-            contract: 1,
-            logs_held: false,
-        }
-    }
-
-    #[test]
-    fn the_gate_line_names_the_pin_and_offers_update_gate_only_when_a_newer_release_ships() {
-        let mut current = gate("brain-gate-v1.0.0");
-        current.latest = release("brain-gate-v1.0.0", "083ab25267aa");
-        assert_eq!(
-            gate_line(&current, None),
-            GateLine {
-                release: Some(("brain-gate-v1.0.0".into(), "083ab25".into())),
-                status: "latest".into(),
-                tone: Tone::Good,
-            }
-        );
-        assert_eq!(
-            gate_action(&current, None),
-            None,
-            "a current brain shows no button"
-        );
-
-        let behind = gate("brain-gate-v1.1.0");
-        assert_eq!(gate_line(&behind, None).status, "v1.1.0 is available");
-        let (label, hint) = gate_action(&behind, None).unwrap();
-        assert_eq!(label, "Update gate to v1.1.0");
-        assert!(hint.contains("changes only the caller's pins and the config's version"));
-        let updating = gate_line(&behind, Some(Some(221)));
-        assert_eq!(updating.status, "updating to v1.1.0 in PR #221");
-        let (_, waiting) = gate_action(&behind, Some(Some(221))).unwrap();
-        assert!(waiting.contains("PR #221 is open") && waiting.contains("does not auto-merge"));
-
-        let mut disagreeing = gate("brain-gate-v1.1.0");
-        disagreeing.config_version = Some("brain-gate-v0.9.0".into());
-        assert!(
-            (gate_line(&disagreeing, None).status).ends_with("· the config says brain-gate-v0.9.0")
-        );
-
-        let mut unknown = gate("brain-gate-v1.1.0");
-        unknown.pin = BrainGatePin::Unknown {
-            commit: "9f2c4aa1234".into(),
-        };
-        let line = gate_line(&unknown, None);
-        assert_eq!(line.release, None);
-        assert_eq!(
-            line.status,
-            "Pinned to 9f2c4aa, which is not a gate release this Wiffletree knows"
-        );
-        assert_eq!(gate_action(&unknown, None).unwrap().0, "Pin to v1.1.0");
-    }
-
-    #[test]
-    fn a_contract_mismatch_holds_only_log_batches_without_a_pr_and_says_so() {
-        let mut held = brain();
-        let mut mismatch = gate("brain-gate-v2.0.0");
-        mismatch.pin = BrainGatePin::Release {
-            release: release("brain-gate-v1.1.0", "5d1e07c00000"),
-        };
-        mismatch.contract = 2;
-        mismatch.logs_held = true;
-        held.gate = Some(mismatch.clone());
-        held.synced_at = Some(ui::now());
-        assert!(logs_held_line(&mismatch).contains(
-            "writes log entries in gate contract v2, and this brain's gate (v1.1.0) would reject them"
-        ));
-
-        let mut queued = batch(BrainStage::Queued, None);
-        queued.files = vec!["a.md".into(); 14];
-        let open = batch(BrainStage::Checks, None);
-        let held_pill = sync_state(&held, &[queued.clone(), open.clone()]);
-        assert_eq!(held_pill, ("Logs held".into(), Tone::Warn));
-        assert_eq!(
-            sync_state(&held, std::slice::from_ref(&open)).0,
-            "Synced just now",
-            "a mismatch with no log batch waiting holds nothing"
-        );
-        let mut config = batch(BrainStage::Queued, None);
-        config.kind = BrainBatchKind::Config;
-        assert_eq!(held_for(&held, &queued), Some(2));
-        assert_eq!(held_for(&held, &open), None, "a PR already open goes on");
-        assert_eq!(
-            held_for(&held, &config),
-            None,
-            "config PRs still go through"
-        );
-        let mut discarded = batch(BrainStage::Discarded, None);
-        discarded.pull_request = None;
-        assert_eq!(
-            held_for(&held, &discarded),
-            None,
-            "a discarded batch waits for nothing"
-        );
-        assert_eq!(
-            held_entries(&held, &[&queued, &open, &config, &discarded]),
-            14
-        );
-        assert_eq!(
-            steps(&queued, Some(2))[0],
-            ("Held · waiting for gate v2".into(), Some(Tone::Warn))
-        );
-        assert_eq!(
-            pending_line(None, 14).as_deref(),
-            Some("14 log entries held on this Mac")
-        );
-        assert_eq!(
-            pending_line(Some(3), 1).as_deref(),
-            Some("3 entries since the last compile · 1 log entry held on this Mac")
-        );
-        assert_eq!(pending_line(None, 0), None);
-        assert_eq!(held_for(&brain(), &queued), None);
-    }
-
-    #[test]
-    fn a_gate_update_ends_with_the_code_owners_review_not_auto_merge() {
-        let check = |conclusion| BrainCheck {
-            name: "secret-scan".into(),
-            conclusion,
-            annotations: vec![],
-        };
-        let mut update = batch(BrainStage::PrOpen, Some(BrainProblem::AwaitingReview));
-        update.kind = BrainBatchKind::GateUpdate;
-        update.checks = vec![check(BrainCheckConclusion::Pending)];
-        let running: Vec<String> = steps(&update, None).into_iter().map(|s| s.0).collect();
-        assert_eq!(
-            running,
-            [
-                "Queued",
-                "PR #214",
-                "Checks",
-                "Waiting for code owner",
-                "Merged"
-            ]
-        );
-        assert_eq!(steps(&update, None)[2].1, Some(Tone::Warn));
-        update.checks = vec![check(BrainCheckConclusion::Success)];
-        let waiting = steps(&update, None);
-        assert_eq!(waiting[2].1, Some(Tone::Good));
-        assert_eq!(waiting[3].1, Some(Tone::Warn));
-        update.stage = BrainStage::Merged;
-        assert_eq!(steps(&update, None)[4].1, Some(Tone::Good));
-    }
-
-    fn brain() -> Brain {
+    fn brain(repository: &str) -> Brain {
         Brain {
-            repository: "Sage-Social/sagehaven-docs".into(),
-            spaces: vec![SpaceId("sage".into())],
-            granted: true,
-            checkout: "/data/repos/github.com/Sage-Social/sagehaven-docs".into(),
-            push_url: None,
-            head: None,
+            repository: repository.into(),
+            spaces: vec![],
             synced_at: None,
             problem: None,
-            held: None,
-            config: BrainConfigReading::Missing,
-            missing_checks: vec![],
-            required_checks: vec![],
-            legacy_pointer: false,
-            last_pull_request: None,
-            legacy_import: false,
-            gate: None,
-        }
-    }
-    fn batch(stage: BrainStage, problem: Option<BrainProblem>) -> BrainBatch {
-        BrainBatch {
-            id: "01jbatch".into(),
-            repository: "Sage-Social/sagehaven-docs".into(),
-            kind: BrainBatchKind::Log,
-            source: BrainSource::BrainsPage,
-            title: "Log batch: Call relay retry (1 entry)".into(),
-            files: vec!["second-brain/logs/a.md".into()],
-            branch: Some("wiffletree/brain/mhohlios/01jbatch".into()),
-            pull_request: (stage != BrainStage::Queued).then(|| BrainPullRequest {
-                number: 214,
-                url: "u".into(),
-                auto_merge: false,
-            }),
-            stage,
-            problem,
-            checks: vec![],
-            created_at: 0,
-            updated_at: 0,
-        }
-    }
-    fn compiler(id: &str, name: &str) -> BrainCompiler {
-        BrainCompiler {
-            host_id: id.into(),
-            name: name.into(),
-            extra: Extra::new(),
         }
     }
 
     #[test]
-    fn the_grant_names_the_repository_and_exactly_what_it_allows() {
-        let lines = grant_lines("Sage-Social/sagehaven-docs").join(" ");
-        assert!(lines.contains("to Sage-Social/sagehaven-docs"));
-        for allowed in [
-            "push its own wiffletree/brain/",
-            "into main",
-            "auto-merge",
-            "close a batch PR",
-            "delete a branch it pushed",
-        ] {
-            assert!(lines.contains(allowed), "{allowed}");
-        }
-        assert!(lines.contains("never pushes main"));
-        assert!(lines.contains("no ticket PRs"));
-    }
-
-    #[test]
-    fn a_brain_waits_for_the_grant_and_a_hold_or_problem_outranks_its_sync() {
-        let mut waiting = brain();
-        waiting.granted = false;
-        assert_eq!(
-            sync_state(&waiting, &[]),
-            ("Waits for your grant".into(), Tone::Warn)
-        );
-        let mut held = brain();
-        held.held = Some(BrainHold::NotFastForward);
-        held.synced_at = Some(ui::now());
-        assert_eq!(sync_state(&held, &[]).1, Tone::Bad);
-        let mut synced = brain();
-        synced.synced_at = Some(ui::now());
-        assert_eq!(
-            sync_state(&synced, &[]),
-            ("Synced just now".into(), Tone::Good)
-        );
-    }
-
-    #[test]
-    fn the_compiler_comes_from_the_config_on_main_and_this_mac_is_named() {
-        let here = compiler("h1", "Michael’s Mac");
-        let read = |name: &str, id: &str| BrainConfigReading::Read {
-            config: Box::new(BrainConfig {
-                version: 1,
-                brain_dir: "second-brain".into(),
-                compiler: Some(compiler(id, name)),
-                compile: None,
-                gate: None,
-                extra: Extra::new(),
-            }),
+    fn a_problem_outranks_a_sync_and_a_local_brain_says_it_stays_here() {
+        assert_eq!(sync_state(&brain("local-7k2q")).0, "On this Mac");
+        assert_eq!(sync_state(&brain("Sage/x")).0, "Not synced yet");
+        let synced = Brain {
+            synced_at: Some(ui::now()),
+            ..brain("Sage/x")
         };
-        assert_eq!(
-            compiler_line(&read("Michael’s Mac", "h1"), Some(&here)),
-            "Michael’s Mac (this Mac)"
-        );
-        assert_eq!(
-            compiler_line(&read("RB’s Mac", "h2"), Some(&here)),
-            "RB’s Mac"
-        );
-        assert!(compiler_line(&BrainConfigReading::Missing, None).starts_with("No compiler"));
-        assert!(compiler_line(&BrainConfigReading::Newer { version: 2 }, None).contains("newer"));
-    }
-
-    #[test]
-    fn the_warnings_cover_auto_merge_required_checks_the_config_and_the_legacy_pointer() {
-        let mut warned = brain();
-        warned.missing_checks = vec!["sensitive-info".into()];
-        warned.legacy_pointer = true;
-        warned.config = BrainConfigReading::Invalid {
-            reason: "wiffletree-brain.json is not valid JSON (line 1, column 2)".into(),
+        assert_eq!(sync_state(&synced).1, Tone::Good);
+        let failing = Brain {
+            problem: Some("offline".into()),
+            ..synced
         };
-        let refused = batch(BrainStage::PrOpen, Some(BrainProblem::AutoMergeRefused));
-        let text: Vec<String> = warnings(&warned, &[&refused])
-            .into_iter()
-            .map(|(w, _)| w)
-            .collect();
-        assert_eq!(text.len(), 4, "{text:?}");
-        assert!(text[0].contains("refused auto-merge") && text[0].contains("Allow auto-merge"));
-        assert!(text[1].contains("does not require the brain gate’s sensitive-info check."));
-        assert!(text[2].contains("not valid JSON"));
-        assert!(
-            text[3].contains("~/.config/claude-second-brain")
-                && text[3].contains("open pull requests instead of pushing to main")
-        );
-        assert!(warnings(&brain(), &[]).is_empty());
+        assert_eq!(sync_state(&failing), ("Not syncing".into(), Tone::Bad));
     }
 
     #[test]
-    fn the_stepper_stops_a_failed_batch_at_its_checks_and_shows_auto_merging() {
-        let failed = batch(
-            BrainStage::Failed,
-            Some(BrainProblem::ChecksFailed {
-                checks: vec!["sensitive-info".into()],
-            }),
-        );
-        let labels: Vec<(String, Option<Tone>)> = steps(&failed, None);
-        assert_eq!(labels[1], ("PR #214".into(), Some(Tone::Good)));
-        assert_eq!(labels[2], ("Checks failed".into(), Some(Tone::Bad)));
-        assert_eq!(labels[3].1, None);
-        let merging = steps(&batch(BrainStage::AutoMerging, None), None);
-        assert_eq!(merging[3], ("Auto-merging".into(), Some(Tone::Warn)));
-        let queued = steps(&batch(BrainStage::Queued, None), None);
-        assert_eq!(queued[0], ("Queued".into(), Some(Tone::Warn)));
-        assert_eq!(queued[1], ("PR open".into(), None));
-    }
-
-    #[test]
-    fn a_gate_row_names_the_failed_check_and_the_set_up_review_never_any_text() {
-        let failed = batch(
-            BrainStage::Failed,
-            Some(BrainProblem::ChecksFailed {
-                checks: vec!["sensitive-info".into()],
-            }),
-        );
-        assert_eq!(
-            batch_note(&failed, &[]),
-            "sensitive-info failed · auto-merge paused"
-        );
-        let review = batch(BrainStage::PrOpen, Some(BrainProblem::AwaitingReview));
-        assert_eq!(batch_note(&review, &[]), "Waits for your review on GitHub");
-        let refused = batch(
-            BrainStage::Failed,
-            Some(BrainProblem::PushRefused {
-                reason: "remote: secret 555".into(),
-            }),
-        );
-        assert!(!batch_note(&refused, &[]).contains("555"));
-        assert_eq!(author(&failed), Some("mhohlios"));
-    }
-
-    #[test]
-    fn a_selected_batch_lists_and_counts_only_the_checks_main_requires() {
-        let check = |name: &str, conclusion| BrainCheck {
-            name: name.into(),
-            conclusion,
-            annotations: vec![],
-        };
-        let mut running = batch(BrainStage::Checks, None);
-        running.checks = vec![
-            check("secret-scan", BrainCheckConclusion::Success),
-            check("sensitive-info", BrainCheckConclusion::Pending),
-            check("summary-comment", BrainCheckConclusion::Failure),
-        ];
-        let required = [
-            "secret-scan".to_owned(),
-            "sensitive-info".to_owned(),
-            "not-reported-yet".to_owned(),
-        ];
-        let listed: Vec<&str> = (required_checks(&running, &required).into_iter())
-            .map(|c| c.name.as_str())
-            .collect();
-        assert_eq!(listed, ["secret-scan", "sensitive-info"]);
-        assert_eq!(
-            batch_note(&running, &required),
-            "Checks running · 1 of 3 passed"
-        );
-        assert!(required_checks(&running, &[]).is_empty());
-    }
-
-    #[test]
-    fn the_last_pr_is_the_brains_latest_however_old_with_the_batches_still_in_the_gate() {
-        let mut merged_long_ago = brain();
-        merged_long_ago.last_pull_request = Some(BrainLastPullRequest {
-            number: 212,
-            kind: BrainBatchKind::Compile,
-            stage: BrainStage::Merged,
-        });
-        // No batch is on the page any longer, yet the last PR is still named.
-        assert_eq!(last_pr(&merged_long_ago, &[]), "#212 compile run · merged");
-        let open = batch(BrainStage::Checks, None);
-        assert_eq!(
-            last_pr(&merged_long_ago, &[&open]),
-            "#212 compile run · merged · 1 in the gate"
-        );
-        assert_eq!(last_pr(&brain(), &[]), "None yet");
-        let queued = batch(BrainStage::Queued, None);
-        assert_eq!(
-            last_pr(&brain(), &[&queued, &queued]),
-            "2 batches in the gate"
-        );
+    fn the_last_run_says_how_it_ended_and_why() {
         assert_eq!(last_compile(None), "None yet");
         let run = CompileRun {
-            id: "r".into(),
-            repository: "Sage-Social/sagehaven-docs".into(),
-            trigger: CompileTrigger::Scheduled,
-            started_at: 1_790_000_000_000,
+            id: "01".into(),
+            repository: "Sage/x".into(),
+            trigger: CompileTrigger::RunNow,
+            started_at: ui::now(),
             ended_at: None,
-            pending: 37,
-            processed: 37,
-            model_calls: 1,
+            pending: 0,
+            processed: 0,
+            unasked: 0,
+            model_calls: 0,
             profile: None,
-            procedure: Some(1),
-            outcome: CompileOutcome::PrOpened,
-            reason: "37 entries compiled · 2 conflicts queued".into(),
-            conflicts: 2,
-            batch_id: None,
-            pull_request: Some(212),
-            merged: false,
+            procedure: None,
+            outcome: CompileOutcome::Failed,
+            reason: "notes/A.md failed the scan".into(),
+            conflicts: 0,
+            commit: None,
             tokens: 0,
             cost: None,
         };
+        let line = last_compile(Some(&run));
         assert!(
-            last_compile(Some(&run))
-                .ends_with("PR opened · 37 entries compiled · 2 conflicts queued · PR #212 open")
+            line.contains("Failed") && line.contains("failed the scan"),
+            "{line}"
         );
-    }
-
-    #[test]
-    fn a_space_whose_brain_folder_has_no_github_origin_is_explained_until_it_names_a_brain() {
-        let space = |name: &str, brain: Option<SpaceBrain>| Space {
-            id: SpaceId(name.to_lowercase()),
-            name: name.into(),
-            description: String::new(),
-            additions: String::new(),
-            behaviors: Default::default(),
-            repository_settings: Default::default(),
-            brain,
-            storage: SpaceStorage {
-                repository: StorageRepository::Local { id: "l".into() },
-                folder: name.to_lowercase(),
-            },
-            repositories: vec![],
-            models: SpaceModels::default(),
-            reviews: Default::default(),
-            sources: vec![],
-            extra: Extra::new(),
-        };
-        let left = SpaceLocal {
-            brain_without_origin: Some("/Users/m/notes".into()),
-            ..SpaceLocal::default()
-        };
-        let named = SpaceBrain {
-            repository: BrainRepository::GitHub {
-                owner: "Vyttle-LLC".into(),
-                name: "vyttle-docs".into(),
-                extra: Extra::new(),
-            },
-            folder: "second-brain".into(),
-            extra: Extra::new(),
-        };
-        let spaces = [space("Notes", None), space("Vyttle", Some(named))];
-        let locals = BTreeMap::from([
-            (SpaceId("notes".into()), left.clone()),
-            (SpaceId("vyttle".into()), left),
-        ]);
-        let shown = without_origin(&spaces, &locals);
-        assert_eq!(
-            shown,
-            [(
-                SpaceId("notes".into()),
-                "Notes".into(),
-                "/Users/m/notes".into()
-            )],
-            "a Space that names a brain since is not explained"
-        );
-        let line = without_origin_line("Notes", "/Users/m/notes");
-        assert!(
-            line.contains("/Users/m/notes has no GitHub origin")
-                && line.contains("Space's settings")
-        );
-    }
-
-    #[test]
-    fn the_import_says_what_it_queued_and_when_it_is_done() {
-        let import = |added, batches, done| LegacyImport {
-            added,
-            batches,
-            compiled: 0,
-            done,
-        };
-        assert_eq!(
-            import_line(&import(202, 2, false)),
-            "202 entries queued in 2 log PRs."
-        );
-        assert!(import_line(&import(0, 0, false)).contains("once the import PRs merge"));
-        assert!(import_line(&import(0, 0, true)).contains("done"));
     }
 }

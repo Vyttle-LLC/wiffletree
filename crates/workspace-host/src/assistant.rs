@@ -493,10 +493,9 @@ impl Host {
             .prepare("SELECT id FROM messages WHERE recipient=?1")?
             .query_map([id], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        // Its brain entries stay and are sent: its batch closes now, and a session with entries
-        // keeps its bare row, which they name, and loses everything else.
-        let closed = self.atomically(|host| {
-            let closed = memory::close_log_batches(&host.db, memory::Closing::Session(id), now())?;
+        // Its brain entries stay: a session with entries keeps its bare row, which they name, and
+        // loses everything else.
+        self.atomically(|host| {
             let logged: bool = host.db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM work_logs WHERE session_id=?1)",
                 [id],
@@ -506,9 +505,8 @@ impl Host {
                 true => delete_dependents(&host.db, "sessions", "id=?1", id, &["work_logs"])?,
                 false => delete_with_dependents(&host.db, "sessions", "id=?1", id)?,
             }
-            Ok(closed)
+            Ok(())
         })?;
-        self.brains_now |= closed > 0;
         for message in messages {
             if let Ok(folder) = attachments_folder(&self.home, &message) {
                 let _ = fs::remove_dir_all(folder);
@@ -648,7 +646,11 @@ impl Host {
             return None;
         }
         let clone = self.storage_folder(&space.storage.repository);
-        let file = format!(":(literal)spaces/{}/space.yaml", space.storage.folder);
+        let file = format!("spaces/{}/space.yaml", space.storage.folder);
+        let file = format!(
+            ":(literal){}",
+            folder::Root::new(&space.storage.root).join(&file)
+        );
         let args = ["log", "-1", "--format=%an%x00%s", "--", file.as_str()];
         let line = runtime::git_output(&clone, &args).ok()?;
         let (author, subject) = line.trim_end().split_once('\0')?;
@@ -816,6 +818,20 @@ pub(crate) fn store_output(
     base: &str,
     title: &str,
     source: &Path,
+    about: Value,
+) -> Result<(String, u32)> {
+    let root = folder::Root::default();
+    store_output_in(&root, repository, base, title, source, about)
+}
+
+/// `store_output` for a repository whose Wiffletree folder is `root`, whose versions from before
+/// its move still count.
+pub(crate) fn store_output_in(
+    root: &folder::Root,
+    repository: &Path,
+    base: &str,
+    title: &str,
+    source: &Path,
     mut about: Value,
 ) -> Result<(String, u32)> {
     if !repository.join(".git").exists() {
@@ -866,11 +882,7 @@ pub(crate) fn store_output(
     ]);
     runtime::git_output(repository, &commit)?;
     // Each save rewrites the metadata, so its commits count the versions.
-    let count = runtime::git_output(
-        repository,
-        &["rev-list", "--count", "HEAD", "--", &metadata],
-    )?;
-    Ok((file, count.trim().parse().unwrap_or(1)))
+    Ok((file, folder::saves(repository, root, &metadata)?))
 }
 
 /// The recipe a thread's `propose_job` describes, in the thread's own Space, for its card.
@@ -1292,6 +1304,7 @@ mod tests {
             owner: "Sage-Social".into(),
             name: "wiffletree-storage".into(),
         };
+        record.storage.root = String::new();
         host.db
             .execute(
                 "UPDATE spaces SET data=?2 WHERE id=?1",

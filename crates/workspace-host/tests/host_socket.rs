@@ -734,11 +734,8 @@ fn removing_a_protected_branch_needs_the_apps_credential() {
 #[test]
 fn space_commands_need_the_apps_credential_and_reads_do_not() {
     let project = std::cell::OnceCell::new();
-    let brain = tempfile::tempdir().unwrap();
     let fixture = Fixture::new(|host| {
         let calls = host.create_project("Calls").unwrap();
-        host.set_space_brain(&calls.space, brain.path().to_str().unwrap())
-            .unwrap();
         project.set(calls).unwrap();
     });
     let project = project.get().unwrap();
@@ -748,8 +745,6 @@ fn space_commands_need_the_apps_credential_and_reads_do_not() {
     for human_only in ["space_locals", "threads", "held", "jobs"] {
         assert!(read.get(human_only).is_none(), "{human_only}");
     }
-    let brain_path = std::fs::canonicalize(brain.path()).unwrap();
-    assert!(!read.to_string().contains(brain_path.to_str().unwrap()));
     let spaces = snapshot(&mut agent).spaces;
     let personal = spaces[0].clone();
     let instructed = Space {
@@ -763,6 +758,7 @@ fn space_commands_need_the_apps_credential_and_reads_do_not() {
             additions: String::new(),
             prefix: None,
             storage: None,
+            setup: Default::default(),
         },
         Command::UpdateSpace {
             space: Box::new(instructed.clone()),
@@ -774,9 +770,30 @@ fn space_commands_need_the_apps_credential_and_reads_do_not() {
             project_id: project.id.clone(),
             space_id: personal.id.clone(),
         },
-        Command::SetSpaceBrain {
-            space_id: personal.id.clone(),
-            path: fixture.data.path().to_string_lossy().into_owned(),
+        Command::HeldEntryText {
+            repository: "Sage-Social/api".into(),
+            path: "a.md".into(),
+        },
+        Command::EditHeldEntry {
+            repository: "Sage-Social/api".into(),
+            path: "a.md".into(),
+            text: "Text.".into(),
+        },
+        Command::MarkAlertNotSensitive {
+            repository: "Sage-Social/api".into(),
+            path: "a.md".into(),
+            check: "sensitive-info".into(),
+            rule: "phone".into(),
+            reason: "A fixture".into(),
+        },
+        Command::MarkEntryNotSensitive {
+            repository: "Sage-Social/api".into(),
+            path: "a.md".into(),
+            reason: "A fixture".into(),
+        },
+        Command::DiscardHeldEntry {
+            repository: "Sage-Social/api".into(),
+            path: "a.md".into(),
         },
         Command::SetRepositorySpaces {
             repository: "Sage-Social/api".into(),
@@ -820,8 +837,74 @@ fn space_commands_need_the_apps_credential_and_reads_do_not() {
     assert_eq!(edited.error, None);
     assert_eq!(snapshot(&mut agent).spaces[0], instructed);
     // The app reads them.
-    let local = &snapshot(&mut app).space_locals[&personal.id];
-    assert_eq!(local.brain_path.as_deref(), brain_path.to_str());
+    assert!(snapshot(&mut app).space_locals.contains_key(&personal.id));
+}
+
+#[test]
+fn compile_and_repository_commands_need_the_apps_credential() {
+    let stored = std::cell::OnceCell::new();
+    let fixture = Fixture::new(|host| {
+        let personal = host.spaces().unwrap().remove(0).space;
+        let folder = (host.home.join("repos"))
+            .join(personal.storage.repository.key())
+            .join(&personal.storage.root);
+        stored.set((personal, folder)).unwrap();
+    });
+    let (personal, folder) = stored.get().unwrap();
+    let tracker = std::fs::read(folder.join("wiffletree-issues.yaml")).unwrap();
+    let original = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(original.path().join("second-brain/logs")).unwrap();
+    let mut agent = fixture.welcomed(None);
+    let space_id = personal.id.clone();
+    let from = original.path().to_string_lossy().into_owned();
+    let writes = [
+        Command::SetCompileHere {
+            space_id: space_id.clone(),
+            compiles: true,
+        },
+        Command::SetCompileHere {
+            space_id: space_id.clone(),
+            compiles: false,
+        },
+        Command::SetCompileTime {
+            space_id: space_id.clone(),
+            compile: Some(BrainCompile {
+                at: "02:00".into(),
+                timezone: "America/Chicago".into(),
+                extra: Extra::new(),
+            }),
+        },
+        Command::ProtectHistory {
+            repository: "Sage-Social/sage-docs".into(),
+        },
+        Command::PreviewBringIn {
+            space_id: space_id.clone(),
+            from: from.clone(),
+            folder: "second-brain".into(),
+        },
+        Command::BringIn {
+            space_id: space_id.clone(),
+            from,
+            folder: "second-brain".into(),
+        },
+        Command::MoveIntoFolder { space_id },
+    ];
+    for command in writes {
+        let refused = agent.request(PROTOCOL_VERSION, command.clone());
+        assert!(
+            refused.error.unwrap().contains("client credential"),
+            "{command:?}"
+        );
+    }
+    assert!(!folder.join("compilers").exists(), "no compiler file");
+    assert_eq!(
+        std::fs::read(folder.join("wiffletree-issues.yaml")).unwrap(),
+        tracker
+    );
+    assert!(
+        !folder.join("second-brain/logs").exists(),
+        "nothing brought in"
+    );
 }
 
 #[test]
@@ -833,6 +916,7 @@ fn tracker_writes_need_the_apps_credential_and_reading_issues_does_not() {
         let id = IssueId::parse(&format!("{prefix}-1")).unwrap();
         let folder = (host.home.join("repos"))
             .join(personal.storage.repository.key())
+            .join(&personal.storage.root)
             .join("issues")
             .join(id.to_string());
         std::fs::create_dir_all(&folder).unwrap();

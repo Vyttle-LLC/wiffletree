@@ -1,412 +1,156 @@
-//! Brains as Spaces name them (OpenSpec change `brain-registry-sync`): the registry on this Mac,
-//! each brain's `wiffletree-brain.json`, and the batches that reach `main` through pull requests
-//! that auto-merge. Nothing here holds a brain file's content or a check's output text.
-use crate::{Extra, SpaceId};
+//! The brains of this Mac's Spaces (OpenSpec change `one-space-repository`): a Space's brain is
+//! `second-brain/` in its repository's folder, and every change lands through the repository's
+//! sync engine. Nothing here holds a brain file's content or a check's output text.
+use crate::SpaceId;
 use serde::{Deserialize, Serialize};
 
-/// A brain this Mac's Spaces name: a GitHub repository with the host's own checkout of it.
+/// The brain of the Spaces in one repository's folder.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Brain {
-    /// `owner/name`, as the Spaces name it.
+    /// The repository, as `StorageRepository::key` names it.
     pub repository: String,
-    /// The Spaces that name it; none once the human removed it from every Space, until they
-    /// confirm forgetting it.
+    /// The Spaces in the folder.
     pub spaces: Vec<SpaceId>,
-    /// The human confirmed that the host may push its batch branches here, open pull requests
-    /// into `main` and turn on auto-merge for them.
-    pub granted: bool,
-    /// The host's own clone, never a folder the human chose.
-    pub checkout: String,
-    /// The URL the host reaches it by, once found.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub push_url: Option<String>,
-    /// `main` as the host last fetched it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub head: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub synced_at: Option<i64>,
-    /// Why the last pass could not reach or read it; `None` once one did.
+    /// Why the last pass could not reach the repository; `None` once one did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
-    /// Writing is held while something other than the host changed its checkout.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub held: Option<BrainHold>,
-    pub config: BrainConfigReading,
-    /// The gate's checks `main` does not require, as the last pass that could write read them;
-    /// auto-merge waits while any is missing.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub missing_checks: Vec<String>,
-    /// The checks `main` requires, as the last pass read them; only these decide a batch.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required_checks: Vec<String>,
-    /// The legacy pointer `~/.config/claude-second-brain` names the human's clone of this brain,
-    /// whose safety-net must open pull requests instead of pushing to `main`.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub legacy_pointer: bool,
-    /// The most recent batch PR here, however long ago it was opened.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_pull_request: Option<BrainLastPullRequest>,
-    /// `main` holds legacy `logs/<repo>.md` files and their import is not done, so the page
-    /// offers Import legacy logs.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub legacy_import: bool,
-    /// The gate the caller on `main` pins, as the last pass read it; `None` without a caller.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gate: Option<BrainGate>,
 }
 
-/// The brain gate the caller on `main` pins, beside the newest release this Wiffletree ships.
-/// Nothing is fetched from GitHub to find releases.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BrainGate {
-    pub pin: BrainGatePin,
-    /// `gate.version` in `wiffletree-brain.json`, only when it names another release than the pin.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_version: Option<String>,
-    /// The newest release this Wiffletree ships, which Update gate pins.
-    pub latest: BrainGateRelease,
-    /// The log entry contract this Wiffletree writes. A gate accepts the contract of its major
-    /// version.
-    pub contract: u64,
-    /// The pinned release does not accept `contract`, so the brain's log batches are held on
-    /// this Mac before any PR opens.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub logs_held: bool,
-}
-impl BrainGate {
-    /// The release Update gate would pin, while the caller pins something else.
-    pub fn update(&self) -> Option<&BrainGateRelease> {
-        match &self.pin {
-            BrainGatePin::Release { release } if release.commit == self.latest.commit => None,
-            _ => Some(&self.latest),
-        }
-    }
-}
-
-/// How the caller's `uses:` lines pin the gate.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum BrainGatePin {
-    /// Every job pins this release's commit.
-    Release { release: BrainGateRelease },
-    /// A commit that is not a release this Wiffletree knows, or jobs pinning different commits.
-    Unknown { commit: String },
-}
-
-/// A gate release: its name, such as `brain-gate-v1.0.0`, and the commit callers pin.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BrainGateRelease {
-    pub name: String,
-    pub commit: String,
-}
-impl BrainGateRelease {
-    /// The name without its `brain-gate-` prefix, such as `v1.0.0`.
-    pub fn version(&self) -> &str {
-        self.name.strip_prefix("brain-gate-").unwrap_or(&self.name)
-    }
-}
-
-/// What Import legacy logs did.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LegacyImport {
-    /// Entry files queued, in `batches` log-only batches of at most 200 files.
-    pub added: usize,
-    pub batches: usize,
-    /// Entries newly recorded as already compiled.
-    pub compiled: usize,
-    /// Every legacy entry is on `main`, so the import is recorded as done.
-    pub done: bool,
-}
-
-/// A brain's most recent batch pull request and the stage its batch reached.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BrainLastPullRequest {
-    pub number: u64,
-    pub kind: BrainBatchKind,
-    pub stage: BrainStage,
-}
-
-/// Why the host stopped writing to a brain. It never resets, stashes or overwrites; the human
-/// settles it and syncs again.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum BrainHold {
-    /// Files in the checkout differ from what the host last fetched.
-    ChangedFiles { files: Vec<String> },
-    /// The checkout's `main` has commits GitHub's has not, so it cannot fast-forward.
-    NotFastForward,
-}
-
-/// What the host read of `wiffletree-brain.json` on the brain's `main`.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum BrainConfigReading {
-    /// Not fetched yet.
-    #[default]
-    Unread,
-    /// No file: batches still open pull requests, there is no compiler, and Set up is offered.
-    Missing,
-    /// A file the host refuses, and why.
-    Invalid {
-        reason: String,
-    },
-    /// A version newer than this host understands: logs are written, nothing is compiled.
-    Newer {
-        version: u64,
-    },
-    Read {
-        config: Box<BrainConfig>,
-    },
-}
-impl BrainConfigReading {
-    /// The config this host may act on, when it read one.
-    pub fn config(&self) -> Option<&BrainConfig> {
-        match self {
-            Self::Read { config } => Some(config),
-            _ => None,
-        }
-    }
-}
-
-/// `wiffletree-brain.json`, version 1. Keys this release does not know are kept in `extra`, so a
-/// change the host makes puts them back.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BrainConfig {
-    pub version: u64,
-    #[serde(default = "BrainConfig::default_dir")]
-    pub brain_dir: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compiler: Option<BrainCompiler>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compile: Option<BrainCompile>,
-    /// The gate's settings, which `brain-gate` defines.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gate: Option<serde_json::Value>,
-    #[serde(flatten)]
-    pub extra: Extra,
-}
-impl BrainConfig {
-    pub const FILE: &str = "wiffletree-brain.json";
-    pub const VERSION: u64 = 1;
-    fn default_dir() -> String {
-        "second-brain".into()
-    }
-}
-
-/// The host that compiles a brain, by its stable host id, with a name to show.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BrainCompiler {
-    pub host_id: String,
-    pub name: String,
-    #[serde(flatten)]
-    pub extra: Extra,
-}
-
+/// When a folder's wiki compiles.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrainCompile {
     /// `HH:MM`.
     pub at: String,
     pub timezone: String,
     #[serde(flatten)]
-    pub extra: Extra,
-}
-impl BrainCompile {
-    /// The time Set up fills in.
-    pub const DEFAULT_AT: &str = "06:00";
+    pub extra: crate::Extra,
 }
 
-/// One branch, one pull request and one squash merge of changes to a brain.
+/// A log entry a scan held on this Mac. It names the rule and the line, never the matched text.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BrainBatch {
-    /// A lowercase ULID.
-    pub id: String,
-    /// The brain, `owner/name`.
+pub struct HeldEntry {
+    /// The repository, as `Brain::repository` names it.
     pub repository: String,
-    pub kind: BrainBatchKind,
-    pub source: BrainSource,
-    /// The pull request's title, such as "Log batch: Call relay retry (3 entries)".
-    pub title: String,
-    /// The files it adds or changes, relative to the repository.
-    pub files: Vec<String>,
-    /// `wiffletree/brain/<login>/<id>`, once pushed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pull_request: Option<BrainPullRequest>,
-    pub stage: BrainStage,
-    /// What went wrong, while something did; a project's batch raises it as its one Inbox item.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub problem: Option<BrainProblem>,
-    /// The checks GitHub ran on the pull request's head: names, conclusions, files and lines.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub checks: Vec<BrainCheck>,
-    pub created_at: i64,
-    pub updated_at: i64,
-}
-impl BrainBatch {
-    /// Merged or discarded: nothing more happens to it, and nothing is offered for it.
-    pub fn is_finished(&self) -> bool {
-        matches!(self.stage, BrainStage::Merged | BrainStage::Discarded)
-    }
-    /// Its pull request is open and unmerged, so the human may amend or discard it.
-    pub fn is_amendable(&self) -> bool {
-        self.pull_request.is_some() && !self.is_finished()
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BrainBatchKind {
-    Log,
-    Compile,
-    /// A change to `wiffletree-brain.json` alone, such as the compiler.
-    Config,
-    /// Adds `wiffletree-brain.json` with the gate's caller, config and `CODEOWNERS` lines.
-    SetUp,
-    /// Moves the caller's gate pins and `gate.version` to another release, and nothing else.
-    GateUpdate,
-}
-impl BrainBatchKind {
-    /// `CODEOWNERS` covers its files, so its PR waits for the code owner's review and never
-    /// auto-merges.
-    pub fn awaits_review(self) -> bool {
-        matches!(self, Self::SetUp | Self::GateUpdate)
-    }
-}
-
-/// Who wrote a batch: the project whose Inbox gets its item, or no project, whose problem shows
-/// on the Brains page only.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
-pub enum BrainSource {
-    Project(String),
-    Space(SpaceId),
-    /// The Brains page: Set up, Update gate, a compiler change or an import.
-    BrainsPage,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BrainPullRequest {
-    pub number: u64,
-    pub url: String,
-    /// GitHub accepted auto-merge with squash for it.
-    #[serde(default)]
-    pub auto_merge: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BrainStage {
-    /// Committed here and waiting to be pushed.
-    Queued,
-    PrOpen,
-    Checks,
-    AutoMerging,
-    Merged,
-    Failed,
-    Discarded,
-}
-
-/// What stops a batch, which its Inbox item names. It holds no check output and no matched text.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum BrainProblem {
-    /// Required checks failed, by name, with the files and lines their annotations reported.
-    ChecksFailed { checks: Vec<String> },
-    /// GitHub refused the push, with Git's reason.
-    PushRefused { reason: String },
-    /// The pull request conflicts with `main`.
-    Conflict,
-    /// GitHub refused auto-merge: it is off for the repository, or `main` requires no checks.
-    AutoMergeRefused,
-    /// `main` does not require these gate checks, so the host does not turn on auto-merge.
-    GateNotRequired { missing: Vec<String> },
-    /// A Set up or gate update pull request: `CODEOWNERS` covers its files, so it waits for the
-    /// code owner's review instead of auto-merging. Both come from the Brains page, which alone
-    /// shows it.
-    AwaitingReview,
-    /// Something other than the host changed the batch's worktree, so it is not pushed.
-    ChangedOutside,
-    /// Git or `gh` failed on this batch, with its reason; the brain's other batches went on.
-    Error { reason: String },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BrainCheck {
-    pub name: String,
-    pub conclusion: BrainCheckConclusion,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub annotations: Vec<BrainAnnotation>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BrainCheckConclusion {
-    Pending,
-    Success,
-    Failure,
-    Neutral,
-    Skipped,
-}
-
-/// Where a check reported something: the file and line only, never its message.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BrainAnnotation {
+    /// The entry's file in the repository.
     pub path: String,
-    pub line: u64,
+    /// The project that wrote it; with none, its card is on the Brains page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// `sensitive-info` or `secret-scan`.
+    pub check: String,
+    /// The rule it failed, or `None` when the check could not run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u64>,
+    /// Why the check could not run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+impl HeldEntry {
+    /// Not sensitive is for a `sensitive-info` finding: one click should not push what looks
+    /// like a live secret, and a check that could not run found nothing to mark.
+    pub fn offers_not_sensitive(&self) -> bool {
+        self.check == SENSITIVE_INFO && self.rule.is_some() && self.line.is_some()
+    }
 }
 
-/// The human's change to an unmerged batch, from their client only.
+/// Something on a repository's default branch that failed a scan of what this Mac pulled. Each
+/// Mac raises and settles its own. It names the rule and the line, never the matched text.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum BrainAmendment {
-    /// Replaces the value of the reported field line with `[removed: <rule>]`.
-    Redact {
-        path: String,
-        line: u64,
-        rule: String,
-    },
-    /// Appends the gate's inline marker `<!-- gate:allow <rule> <reason> -->` to the line.
-    NotSensitive {
-        path: String,
-        line: u64,
-        rule: String,
-        reason: String,
-    },
-    /// Closes the pull request and deletes the branch the host pushed.
-    Discard,
+pub struct ScanAlert {
+    /// The repository, as `Brain::repository` names it.
+    pub repository: String,
+    /// The file in the repository.
+    pub path: String,
+    /// `sensitive-info` or `secret-scan`.
+    pub check: String,
+    pub rule: String,
+    /// The line of the latest finding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u64>,
+    /// The commit of the latest finding.
+    pub commit: String,
+    /// Who that commit names as its author.
+    pub pushed_by: String,
+    /// GitHub's web editor made that commit.
+    #[serde(default)]
+    pub web_editor: bool,
+    /// The projects of the Spaces using the folder; with none, it is on the Brains page alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<String>,
+}
+impl ScanAlert {
+    /// Who pushed the commit, as the card says it.
+    pub fn pushed(&self) -> String {
+        match self.web_editor {
+            true => "pushed from GitHub's web editor".to_owned(),
+            false => format!("pushed by {}", self.pushed_by),
+        }
+    }
+    /// What the card says was found: the check, rule, file and line.
+    pub fn found(&self) -> String {
+        let line = (self.line).map_or(String::new(), |line| format!(" line {line}"));
+        format!(
+            "{} · rule {} · {}{line} · {}",
+            self.check,
+            self.rule,
+            self.path,
+            self.pushed()
+        )
+    }
+    /// The file on GitHub, at the commit of the latest finding.
+    pub fn url(&self) -> String {
+        let path = (self.path.replace('%', "%25").replace(' ', "%20"))
+            .replace('#', "%23")
+            .replace('?', "%3F");
+        format!(
+            "https://github.com/{}/blob/{}/{path}",
+            self.repository, self.commit
+        )
+    }
 }
 
-/// The rules of the gate's `sensitive-info` check, which its inline marker and an amendment name.
-pub const GATE_RULES: [&str; 10] = [
-    "phone",
-    "email",
-    "street-address",
-    "gps",
-    "aws-access-key",
-    "aws-secret-key",
-    "private-key",
-    "token",
-    "url-credentials",
-    "secret-assignment",
-];
+/// A check that cannot run on what this Mac pulls, which catches up when it can.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanStopped {
+    pub check: String,
+    /// The repositories it is not scanning, by name.
+    pub repositories: Vec<String>,
+    pub text: String,
+}
 
-/// What the Brains command answers: every registered brain and its batches that are not merged,
-/// or merged in the last day.
+/// The check whose findings an inline `gate:allow` marker may suppress.
+pub const SENSITIVE_INFO: &str = "sensitive-info";
+
+/// A batch pull request an earlier release left open on an old brain. It stays on GitHub for the
+/// human to merge or close, and nothing watches it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeftPullRequest {
+    /// The old brain, `owner/name`.
+    pub repository: String,
+    pub number: u64,
+}
+
+/// What the Brains command answers: every wiki of this Mac's Spaces.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct BrainsPage {
     pub brains: Vec<Brain>,
-    pub batches: Vec<BrainBatch>,
-    /// This host as a compiler, which the page offers as the one to compile on.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub this_host: Option<BrainCompiler>,
-    /// This host's timezone, which a compile time form fills in.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub this_timezone: Option<String>,
-    /// The compile of each brain this host compiles.
+    /// The compile of each wiki.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compiles: Vec<crate::BrainCompileState>,
     /// Open conflicts no project's Inbox shows, as no project includes their claim's repository.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflicts: Vec<crate::ConflictCard>,
+    /// The entries held on this Mac that no project wrote.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held: Vec<HeldEntry>,
+    /// What this Mac's pull scans raised.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alerts: Vec<ScanAlert>,
+    /// The pull requests an earlier release left open, each once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left_pull_requests: Vec<LeftPullRequest>,
 }
