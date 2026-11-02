@@ -264,14 +264,14 @@ pub(crate) const TURN_COUNT: &str = "turn-count:";
 /// not confirm and so did not stop; the rest is the id of its `process_groups` record. Reserved
 /// like `CHECK_IN`. While the note of a provider's own group is open, its session starts no turn.
 pub(crate) const LEFTOVER_PROCESS: &str = "leftover-process:";
-/// Prefix of a brain batch's Inbox item: the batch's id and the item's number. Reserved like
+/// Prefix of the brain's Inbox items, such as the card for held log entries. Reserved like
 /// `CHECK_IN`.
 pub(crate) const BRAIN_NOTICE_PREFIX: &str = "brain:";
 /// SQL condition for a `provider_runs` row that is a turn. A compaction's row has a `kind`
 /// and must not count as the session's turn: not for check-ins, not as its latest turn.
 pub(crate) const IS_TURN_RUN: &str =
     "CASE WHEN json_valid(detail) THEN json_extract(detail,'$.kind') END IS NULL";
-/// Whether an inbox item is a host check-in or brain batch item rather than an agent's question.
+/// Whether an inbox item is a host check-in or brain item rather than an agent's question.
 pub(crate) fn is_check_in(operation: &str) -> bool {
     [CHECK_IN, TURN_COUNT, LEFTOVER_PROCESS, BRAIN_NOTICE_PREFIX]
         .iter()

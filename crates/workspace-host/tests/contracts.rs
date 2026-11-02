@@ -295,7 +295,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = core(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator core — v14"));
+    assert!(coordinator.contains("Project coordinator core — v15"));
     // A background reply the records show unchanged folds; news keeps it full.
     assert!(
         coordinator
@@ -503,7 +503,7 @@ fn the_assignment_tools_ask_for_a_job_and_small_work_never_a_model() {
 #[test]
 fn the_implementer_may_object_to_a_finding_instead_of_implementing_it() {
     let core = core(Role::Implementer);
-    assert!(core.contains("Implementer core — v4"));
+    assert!(core.contains("Implementer core — v5"));
     assert!(core.contains("may rebase this ticket's branch onto its base between your turns"));
     assert!(core.contains("Change files with your edit tools"));
     let implementer = provider::skill(Role::Implementer);
