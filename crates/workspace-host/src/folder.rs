@@ -347,9 +347,10 @@ pub(crate) fn carried(
         .is_some_and(|kind| kind.rsplit(' ').next() == Some(blob))
 }
 
-/// Moves this clone's files a move carries under the folder, unpushed ones with them. Run again
-/// after a start cut short, it leaves a file already there and a file left at the root, which is
-/// a stub or what the first run moved.
+/// Moves this clone's files a move carries under the folder, unpushed ones with them. A file
+/// left at the root replaces the one in the folder, unless it is a stub: an older release that
+/// pulled the move wrote GitHub's files into the folder and kept its paused edits at the root,
+/// which the next pass pauses again at their moved paths.
 pub(crate) fn move_files(clone: &Path, root: &Root) -> Result<()> {
     for covered in COVERED {
         let at = clone.join(covered);
@@ -360,7 +361,7 @@ pub(crate) fn move_files(clone: &Path, root: &Root) -> Result<()> {
         };
         for file in files {
             let moved = root.in_clone(clone).join(file.strip_prefix(clone)?);
-            if !moved.exists() {
+            if !(moved.exists() && stub_target(&fs::read(&file)?).is_some()) {
                 fs::create_dir_all(moved.parent().context("A file is in a folder")?)?;
                 fs::rename(&file, &moved)?;
             }
