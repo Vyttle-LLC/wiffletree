@@ -20,7 +20,8 @@ On November 1, 2026 Michael approved `ui/mockups.html`. Approving adds the repos
 
 ### Modified Capabilities
 
-None.
+- `ticket-workspaces`: the refusal of a repository outside the project now names `request_repository`.
+- `spaces`: a repository no Space lists can also reach a project through a request the human approves.
 
 ## Impact
 

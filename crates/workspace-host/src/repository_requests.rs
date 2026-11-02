@@ -26,6 +26,14 @@ fn in_folder(folder: RepositoryCandidate, reason: &str) -> RepositoryRequest {
     }
 }
 
+/// A linked worktree has a Git directory of its own, apart from its main clone's. A submodule
+/// does not count: its two are the same.
+fn is_linked_worktree(path: &Path) -> Result<bool> {
+    let dirs = runtime::git_output(path, &["rev-parse", "--git-dir", "--git-common-dir"])?;
+    let dirs: Vec<&str> = dirs.lines().collect();
+    Ok(dirs.first() != dirs.last())
+}
+
 impl Host {
     /// `request_repository`: raises the human's card, unless the project already uses the
     /// repository or the same request still waits.
@@ -82,14 +90,18 @@ impl Host {
             let path = fs::canonicalize(asked)
                 .with_context(|| format!("Folder {asked} does not exist on this Mac"))?;
             let known = (repositories.into_iter()).find(|r| Path::new(&r.path) == path);
-            return Ok(match known {
-                Some(repository) => in_workspace(repository, reason),
-                None => in_folder(candidate(&path, &BTreeSet::new())?, reason),
-            });
+            let Some(repository) = known else {
+                let folder = candidate(&path, &BTreeSet::new())?;
+                ensure!(
+                    !is_linked_worktree(&path)?,
+                    "{asked} is a linked Git worktree. Ask for its main clone instead"
+                );
+                return Ok(in_folder(folder, reason));
+            };
+            return Ok(in_workspace(repository, reason));
         }
-        let parts: Vec<&str> = asked.split('/').collect();
         ensure!(
-            matches!(parts[..], [owner, name] if !owner.is_empty() && !name.is_empty()),
+            validate_repository_identity(asked).is_ok(),
             "Give repository as owner/name or an absolute folder path"
         );
         let mut matches: Vec<Repository> = (repositories.into_iter())

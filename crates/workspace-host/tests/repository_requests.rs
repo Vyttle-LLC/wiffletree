@@ -289,9 +289,40 @@ fn what_needs_no_decision_raises_no_card() {
 
     // Neither a name nor an absolute path.
     assert!(f.ask("plugins").is_err());
+    assert!(f.ask("~/plugins").is_err());
     assert!(f.ask("a/b/c").is_err());
 
     assert!(f.items().is_empty());
+}
+
+#[test]
+fn a_linked_worktree_is_refused_but_stays_addable_by_hand() {
+    let mut f = fixture();
+    let main = f.new_clone("main-clone");
+    let linked = f.folder.join("linked");
+    git(
+        Path::new(&main),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "side",
+            linked.to_str().unwrap(),
+        ],
+    );
+    let linked = linked.to_str().unwrap();
+
+    let refused = f.ask(linked).unwrap_err().to_string();
+    assert!(
+        refused.contains("linked Git worktree") && refused.contains("main clone"),
+        "{refused}"
+    );
+    assert!(f.items().is_empty());
+    assert!(!(f.host.repositories().unwrap().iter()).any(|r| r.path == linked));
+
+    assert_eq!(f.ask(&main).unwrap()["status"], "waiting_for_human");
+    f.host.add_repository(linked, "HEAD").unwrap();
 }
 
 #[test]

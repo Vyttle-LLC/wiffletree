@@ -39,6 +39,11 @@ A request that needs no decision SHALL raise no item and SHALL say why.
 - **WHEN** a path does not exist, is not a repository root or has no commit
 - **THEN** the call is refused with the reason, and no item is raised
 
+#### Scenario: A linked worktree
+
+- **WHEN** a path is a linked Git worktree the workspace does not have
+- **THEN** the call is refused, telling the coordinator to ask for the main clone, and no item is raised
+
 #### Scenario: Several clones
 
 - **WHEN** an `owner/name` matches more than one workspace repository the project does not use
