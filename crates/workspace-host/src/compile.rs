@@ -1166,6 +1166,10 @@ impl Host {
     /// once.
     fn finish_compile(&mut self, run: &mut CompileRun, mut work: Work) -> Result<()> {
         let changed = check_changes(&work.worktree, &work.brain_dir)?;
+        for path in changed.iter().map(String::as_str).chain([INDEX, QUEUE]) {
+            let path = format!("{}/{path}", work.brain_dir);
+            brain_sync::refuse_links(&work.worktree, &path)?;
+        }
         let brain = work.worktree.join(&work.brain_dir);
         let queued: Vec<Queued> = (self
             .db
@@ -2193,6 +2197,51 @@ mod tests {
         b.github.offline.store(false, Ordering::SeqCst);
         b.sync();
         assert_eq!(b.run_named(&run).outcome, CompileOutcome::Landed);
+    }
+
+    #[test]
+    fn a_link_on_main_fails_the_run_and_no_file_is_written_through_it() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        let outside = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let at = work.path();
+        let git = crate::test_support::git;
+        git(at, &["clone", "-q", b.github.bare.to_str().unwrap(), "."]);
+        fs::create_dir_all(at.join(BRAIN)).unwrap();
+        std::os::unix::fs::symlink(outside.path(), at.join(BRAIN).join("notes")).unwrap();
+        git(at, &["add", "--all"]);
+        git(at, &["commit", "-q", "-m", "A link"]);
+        git(at, &["push", "-q", "origin", "HEAD:main"]);
+        b.sync();
+        let (run, session, _) = b.started();
+        let failed = b
+            .tool(&session, "finish_compile", json!({"summary": "Done"}))
+            .unwrap_err();
+        assert!(failed.to_string().contains("symbolic link"), "{failed:#}");
+        let run = b.run_named(&run);
+        assert_eq!(run.outcome, CompileOutcome::Failed);
+        assert!(run.reason.contains("notes/INDEX.md"), "{}", run.reason);
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+        assert_eq!(b.cursor_on_main(), Cursor::default());
+    }
+
+    #[test]
+    fn a_link_in_the_clone_fails_the_landing_and_no_file_is_written_through_it() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        let (run, _) = b.finished(&relay_note(&id(1)));
+        let outside = tempfile::tempdir().unwrap();
+        let clone = b.clone_folder().join(BRAIN);
+        fs::create_dir_all(&clone).unwrap();
+        std::os::unix::fs::symlink(outside.path(), clone.join("notes")).unwrap();
+        b.sync();
+        let run = b.run_named(&run);
+        assert_eq!(run.outcome, CompileOutcome::Failed);
+        assert!(run.reason.contains("symbolic link"), "{}", run.reason);
+        assert!(run.reason.contains("/notes/"), "{}", run.reason);
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+        assert_eq!(b.cursor_on_main(), Cursor::default());
     }
 
     #[test]

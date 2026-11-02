@@ -53,7 +53,7 @@ pub(crate) fn in_brain(root: &Root, path: &str) -> bool {
 
 /// Refuses a path in `clone` that passes through a symbolic link, which a repository may hold
 /// pointing outside it, so the host never writes through one.
-fn refuse_links(clone: &Path, path: &str) -> Result<()> {
+pub(crate) fn refuse_links(clone: &Path, path: &str) -> Result<()> {
     let mut at = clone.to_path_buf();
     for component in Path::new(path).components() {
         at.push(component);
@@ -195,8 +195,8 @@ pub(crate) enum Verdict {
 
 impl Landing {
     /// Reads this run against `remote`, the head it would land on: a cursor at or past its own
-    /// lands nothing, a wiki file changed there since the run's commit fails it, and otherwise
-    /// its exact files land.
+    /// lands nothing, a wiki file changed there since the run's commit fails it, as does a path
+    /// through a symbolic link in the clone, and otherwise its exact files land.
     pub(crate) fn verdict(&self, clone: &Path, remote: &str) -> Result<Verdict> {
         let main = read_cursor(&file_at(clone, remote, &self.index));
         if at_or_past(clone, &main, &self.cursor) {
@@ -208,6 +208,9 @@ impl Landing {
             "main changed {} while the run worked, so nothing landed; the next run compiles again",
             moved.join(", ")
         );
+        for path in &self.files {
+            refuse_links(clone, path)?;
+        }
         let read = |path: &String| -> Result<(String, Vec<u8>)> {
             Ok((path.clone(), fs::read(self.worktree.join(path))?))
         };
@@ -572,7 +575,9 @@ impl Host {
                 let Some(commit) = pushed else {
                     return Ok(());
                 };
-                for path in &landing.files {
+                // The commit is on GitHub by now, so a link that arrived since `verdict` read the
+                // clone leaves its file for the next pull and fails nothing.
+                for path in (landing.files.iter()).filter(|p| refuse_links(clone, p).is_ok()) {
                     let content = fs::read(landing.worktree.join(path))?;
                     shared::write_atomically(&clone.join(path), &content)?;
                 }
