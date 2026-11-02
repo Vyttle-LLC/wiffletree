@@ -300,8 +300,14 @@ impl Listed {
     }
 }
 
-/// Every readable `.json` theme directly in `folder`, by name; a missing folder lists none.
+/// Every `.json` theme directly in `folder`, by name; a missing folder lists none. A file that
+/// can't be used is in neither menu, but keeps its name if it has one, so a menu still showing
+/// it as chosen can name it.
 fn list(folder: &Path) -> Vec<Listed> {
+    #[derive(Deserialize)]
+    struct Named {
+        name: String,
+    }
     let Ok(entries) = std::fs::read_dir(folder) else {
         return vec![];
     };
@@ -310,7 +316,16 @@ fn list(folder: &Path) -> Vec<Listed> {
         .filter_map(|entry| {
             let file = entry.file_name().into_string().ok()?;
             Choice::file(&file)?;
-            let theme = read_file(&entry.path()).ok()?;
+            let Ok(theme) = read_file(&entry.path()) else {
+                let text = std::fs::read_to_string(entry.path()).ok()?;
+                let named: Named = serde_json::from_str(&text).ok()?;
+                return Some(Listed {
+                    file,
+                    name: named.name,
+                    light: false,
+                    dark: false,
+                });
+            };
             Some(Listed {
                 light: theme.variants.light.is_some(),
                 dark: theme.variants.dark.is_some(),
@@ -420,14 +435,17 @@ pub(crate) fn choose(
         let other = (!both).then(|| other_name(*side).as_str());
         notices.push(broken(file, fault, *side, other));
     }
-    for (_, shown) in &shown {
-        if let Some(notice) = missing_fonts(shown)
-            && !notices.contains(&notice)
-        {
-            notices.push(notice);
-        }
-    }
+    // Two themes lacking the same fonts share one warning, as the study's Celadon pair does.
     let [(_, light), (_, dark)] = shown;
+    let own = |shown: &Shown| missing_fonts(shown, &format!("{}'s", shown.name));
+    match (own(&light), own(&dark)) {
+        (Some(a), Some(b)) if a == b => notices.push(a),
+        (Some(a), Some(b)) if a.head == b.head => notices.extend(missing_fonts(
+            &light,
+            &format!("{}'s and {}'s", light.name, dark.name),
+        )),
+        (a, b) => notices.extend(a.into_iter().chain(b)),
+    }
     Chosen {
         light: light.look,
         dark: dark.look,
@@ -474,14 +492,14 @@ fn broken(file: &str, fault: &Fault, side: Side, other: Option<&str>) -> Notice 
     }
 }
 
-fn missing_fonts(shown: &Shown) -> Option<Notice> {
+/// `whose` names the themes whose colors are in use, such as "Celadon Jade's".
+fn missing_fonts(shown: &Shown, whose: &str) -> Option<Notice> {
     let (ui, mono) = (&shown.named_fonts.ui, &shown.named_fonts.mono);
     let lacks = |font: &Option<String>| {
         font.as_ref()
             .is_some_and(|f| shown.missing_fonts.contains(f))
     };
     let (no_ui, no_mono) = (lacks(ui), lacks(mono));
-    let name = &shown.name;
     let (head, body) = match (no_ui, no_mono) {
         (false, false) => return None,
         (true, true) => (
@@ -490,24 +508,24 @@ fn missing_fonts(shown: &Shown) -> Option<Notice> {
                 ui.as_deref()?,
                 mono.as_deref()?
             ),
-            format!("{name}'s colors are in use; the UI text and code use the system fonts."),
+            format!("{whose} colors are in use; the UI text and code use the system fonts."),
         ),
         (true, false) => (
             format!("{} isn't installed.", ui.as_deref()?),
             match mono {
                 Some(mono) => format!(
-                    "{name}'s colors and {mono} are in use; the UI text uses the system font."
+                    "{whose} colors and {mono} are in use; the UI text uses the system font."
                 ),
-                None => format!("{name}'s colors are in use; the UI text uses the system font."),
+                None => format!("{whose} colors are in use; the UI text uses the system font."),
             },
         ),
         (false, true) => (
             format!("{} isn't installed.", mono.as_deref()?),
             match ui {
                 Some(ui) => {
-                    format!("{name}'s colors and {ui} are in use; code uses the system font.")
+                    format!("{whose} colors and {ui} are in use; code uses the system font.")
                 }
-                None => format!("{name}'s colors are in use; code uses the system font."),
+                None => format!("{whose} colors are in use; code uses the system font."),
             },
         ),
     };
@@ -870,6 +888,17 @@ mod tests {
         assert_eq!(names(Side::Light), ["celadon-sky.json", "a-tidal.json"]);
         assert_eq!(names(Side::Dark), ["celadon-jade.json", "a-tidal.json"]);
         assert!(list(&themes.path().join("missing")).is_empty());
+
+        // A broken file is in neither menu, but a menu that still has it chosen names it.
+        let bad = JADE.replace("#ffaee7", "#ffaee");
+        let themes = folder(&[("celadon-jade.json", &bad), ("broken.json", "{")]);
+        let page = Themes {
+            listed: list(themes.path()),
+            ..Themes::new(themes.path().into())
+        };
+        assert!(!page.listed.iter().any(|l| l.has(Side::Dark)));
+        assert_eq!(page.label(&file("celadon-jade.json")), "Celadon Jade");
+        assert_eq!(page.label(&file("broken.json")), "broken.json");
     }
 
     #[test]
@@ -949,6 +978,31 @@ mod tests {
                     .into(),
                 use_tidal: vec![],
             }]
+        );
+    }
+
+    #[test]
+    fn two_themes_lacking_the_same_fonts_share_one_warning() {
+        let sky = SKY.replace(
+            "\"variants\"",
+            "\"fonts\": { \"ui\": \"Figtree\", \"mono\": \"JetBrains Mono\" }, \"variants\"",
+        );
+        let themes = folder(&[("celadon-jade.json", JADE), ("celadon-sky.json", &sky)]);
+        let chosen = choose(
+            themes.path(),
+            &file("celadon-sky.json"),
+            &file("celadon-jade.json"),
+            &mut |_| false,
+        );
+        assert_eq!(chosen.notices.len(), 1);
+        assert_eq!(
+            chosen.notices[0].head,
+            "Figtree and JetBrains Mono aren't installed."
+        );
+        assert_eq!(
+            chosen.notices[0].body,
+            "Celadon Sky's and Celadon Jade's colors are in use; the UI text and code use the \
+             system fonts."
         );
     }
 
