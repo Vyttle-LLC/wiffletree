@@ -196,10 +196,9 @@ impl Host {
             let (space, _) = self.tracker_for(id.prefix()).ok()?;
             let folder = self.storage_folder(&space.storage.repository);
             let root = folder::Root::new(&space.storage.root);
-            let file = format!(":(literal){}", root.join(&tracker::issue_file(id)));
-            let args = ["log", "-1", "--format=%an%x00%aI", "--", file.as_str()];
-            let line = runtime::git_output(&folder, &args).ok()?;
-            let (by, at) = line.trim_end().split_once('\0')?;
+            let file = root.join(&tracker::issue_file(id));
+            let line = folder::last_change(&folder, "HEAD", &root, &file, "%an%x00%aI")?;
+            let (by, at) = line.split_once('\0')?;
             Some((by.to_owned(), at.to_owned()))
         })();
         ChangedSince {
@@ -409,7 +408,9 @@ fn changes(args: &Value) -> Result<IssueChanges> {
 mod tests {
     use super::*;
     use crate::issue_work::tests::clone_here;
-    use crate::storage::tests::{sage, shared_storage, space_named};
+    use crate::storage::tests::{
+        issue, join_sage, press_move, sage, shared_storage, space_named, sync,
+    };
     use crate::sync::tests::NAME;
     use crate::test_support::git;
     use workspace_core::assistant::proposal::{Attached, FILED_FOR, filed_for};
@@ -919,5 +920,46 @@ mod tests {
             git(&folder, &["branch", "--show-current"]).trim(),
             "feature"
         );
+    }
+
+    #[test]
+    fn after_a_move_each_last_author_is_the_teammate_who_changed_the_file_not_the_mover() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let work = tempfile::tempdir().unwrap();
+        git(
+            work.path(),
+            &["clone", "-q", github.bare.to_str().unwrap(), "."],
+        );
+        let issue_file = "issues/SAGE-1/issue.md";
+        fs::create_dir_all(work.path().join("issues/SAGE-1")).unwrap();
+        fs::write(work.path().join(issue_file), issue("SAGE-1")).unwrap();
+        fs::write(work.path().join("spaces/sage/space.yaml"), sage("Ana's")).unwrap();
+        git(work.path(), &["add", "--all"]);
+        git(
+            work.path(),
+            &["-c", "user.name=Ana", "commit", "-qm", "Edit"],
+        );
+        git(work.path(), &["push", "-q", "origin", "main"]);
+        let (_home, mut host) = storage::tests::host();
+        let (_mover_home, mut mover) = storage::tests::host();
+        join_sage(&mut host, &github).unwrap();
+        join_sage(&mut mover, &github).unwrap();
+        press_move(&mut mover, &github);
+        // Adopting the move, then taking its commit at the head.
+        sync(&mut host, &github);
+        sync(&mut host, &github);
+
+        let sage = space_named(&host, "Sage");
+        let root = folder::Root::new(&sage.storage.root);
+        let clone = host.storage_folder(&sage.storage.repository);
+        let moved = root.join(issue_file);
+        let touched = git(&clone, &["log", "-1", "--format=%an", "--", &moved]);
+        assert_eq!(touched.trim(), "F", "the mover's commit touched the file");
+        let id = tracker::tests::id("SAGE-1");
+        assert_eq!(host.last_change(&id).by.as_deref(), Some("Ana"));
+        assert_eq!(host.space_changed_by(&sage).as_deref(), Some("Ana"));
+        let author = issues_sync::last_author(&clone, "HEAD", &root, &moved);
+        assert_eq!(author, "Ana");
     }
 }

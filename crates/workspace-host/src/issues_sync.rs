@@ -206,11 +206,10 @@ fn union_events(mine: &[u8], theirs: &[u8]) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// Who last changed `path` on GitHub's head `remote`: its commit's author.
-pub(crate) fn last_author(clone: &Path, remote: &str, path: &str) -> String {
-    let literal = format!(":(literal){path}");
-    let args = ["log", "-1", "--format=%an", remote, "--", &literal];
-    let author = runtime::git_output(clone, &args).unwrap_or_default();
+/// Who last changed `path` on GitHub's head `remote`, in a repository moved into `root`: its
+/// commit's author.
+pub(crate) fn last_author(clone: &Path, remote: &str, root: &Root, path: &str) -> String {
+    let author = folder::last_change(clone, remote, root, path, "%an").unwrap_or_default();
     match author.trim() {
         "" => "a teammate".into(),
         author => author.to_owned(),
