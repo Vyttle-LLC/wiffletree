@@ -1606,23 +1606,17 @@ impl Actor {
                 let then = StorageChoice::Join(spaces.clone(), *compile_here);
                 self.stage_storage(repository, then, reply)?;
             }
-            // With no repository to take an owner from and no login read yet, `gh` is asked
-            // off the host thread.
+            // gh lists the organizations, and the login when none is read yet, off the host
+            // thread.
             Command::SpaceFormDefaults => {
-                let defaults = self.host.space_form_defaults()?;
-                let (tools, home, reply) = (
+                let (tools, home, login, reply) = (
                     self.publish_tools.clone(),
                     self.host.home.clone(),
+                    self.host.gh_login.clone(),
                     reply.clone(),
                 );
                 std::thread::spawn(move || {
-                    let mut defaults = defaults;
-                    if defaults.owner.is_none()
-                        && let spaces::GhAccount::SignedIn(login) =
-                            spaces::gh_account(&tools, &home)
-                    {
-                        defaults.owner = Some(login);
-                    }
+                    let defaults = spaces::space_form_defaults(&tools, &home, login);
                     let _ =
                         reply.try_send(serde_json::to_value(defaults).map_err(|e| e.to_string()));
                 });

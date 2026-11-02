@@ -598,13 +598,71 @@ pub struct SpaceSetup {
     pub color: Option<SpaceColor>,
 }
 
-/// What New Space proposes: the owner of the repository it offers to create, and this Mac's
+/// What New Space proposes: the owners it can create the repository in, and this Mac's
 /// timezone for the compile time.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpaceFormDefaults {
-    /// The most common owner among the workspace's GitHub repositories, or the `gh` login.
-    pub owner: Option<String>,
+    /// The `gh` login first, the default, then the organizations gh can see; empty while gh is
+    /// signed out.
+    pub owners: Vec<RepositoryOwner>,
     pub timezone: String,
+}
+
+/// A GitHub account New Space can create a repository in.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryOwner {
+    pub login: String,
+    pub organization: bool,
+}
+
+/// The owners in New Space's order: `login`, then each of `organizations` once.
+pub fn repository_owners(
+    login: Option<String>,
+    organizations: Vec<String>,
+) -> Vec<RepositoryOwner> {
+    let Some(login) = login else {
+        return vec![];
+    };
+    let mut owners = vec![RepositoryOwner {
+        login,
+        organization: false,
+    }];
+    for organization in organizations {
+        if !(owners.iter()).any(|o| o.login.eq_ignore_ascii_case(&organization)) {
+            owners.push(RepositoryOwner {
+                login: organization,
+                organization: true,
+            });
+        }
+    }
+    owners
+}
+
+/// A repository GitHub can create as `owner/name`: an owner of letters, digits, single hyphens
+/// inside it and underscores, as Enterprise Managed Users' logins such as `octocat_acme` have,
+/// up to 39 characters, and a name of letters, digits, `-`, `_` and `.`, up to 100, other than
+/// `.` and `..`.
+pub fn validate_new_repository(owner: &str, name: &str) -> Result<()> {
+    let owner_valid = (1..=39).contains(&owner.len())
+        && (owner.chars()).all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        && !owner.starts_with('-')
+        && !owner.ends_with('-')
+        && !owner.contains("--");
+    ensure!(
+        owner_valid,
+        "{owner:?} is not a GitHub owner: use letters, digits, underscores and single hyphens inside it"
+    );
+    let name_valid = (1..=100).contains(&name.len())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && name != "."
+        && name != "..";
+    ensure!(
+        name_valid,
+        "{name:?} is not a repository name GitHub accepts: use letters, digits, hyphens, underscores and periods"
+    );
+    Ok(())
 }
 
 /// What Bring in a brain reads from a brain folder on this Mac and what it would bring.
@@ -949,5 +1007,45 @@ mod tests {
         let brain = SessionOwner::Brain("Sage-Social/sagehaven-docs".into());
         assert!(SessionOwner::Project("p".into()).offers_coordination_tools());
         assert!(!space.offers_coordination_tools() && !brain.offers_coordination_tools());
+    }
+
+    #[test]
+    fn owners_start_with_the_login_and_list_each_organization_once() {
+        let owners = repository_owners(
+            Some("MHohlios".into()),
+            vec!["Vyttle-LLC".into(), "mhohlios".into(), "Vyttle-LLC".into()],
+        );
+        let listed: Vec<_> = (owners.iter())
+            .map(|o| (o.login.as_str(), o.organization))
+            .collect();
+        assert_eq!(listed, [("MHohlios", false), ("Vyttle-LLC", true)]);
+        assert!(repository_owners(None, vec!["Vyttle-LLC".into()]).is_empty());
+    }
+
+    #[test]
+    fn a_new_repository_follows_githubs_owner_and_name_rules() {
+        assert!(validate_new_repository("Vyttle-LLC", "vyttle-wiffletree-storage").is_ok());
+        assert!(validate_new_repository("a1", "my_repo.v2").is_ok());
+        assert!(
+            validate_new_repository("octocat_acme", "storage").is_ok(),
+            "a managed user"
+        );
+        for (owner, name) in [
+            ("", "storage"),
+            ("-vyttle", "storage"),
+            ("vyttle-", "storage"),
+            ("vy--ttle", "storage"),
+            ("vy.ttle", "storage"),
+            (&"a".repeat(40), "storage"),
+            ("vyttle", ""),
+            ("vyttle", ".."),
+            ("vyttle", "my storage"),
+            ("vyttle", "a/b"),
+        ] {
+            assert!(
+                validate_new_repository(owner, name).is_err(),
+                "{owner}/{name}"
+            );
+        }
     }
 }

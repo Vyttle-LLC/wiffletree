@@ -64,6 +64,8 @@ pub(super) struct SpacesPage {
     /// The repository New chose, or the repository to add Spaces from.
     storage_input: Entity<InputState>,
     prefix_input: Entity<InputState>,
+    /// The name of the repository New Space creates, under `owner`.
+    repository_name_input: Entity<InputState>,
     /// New Space's folder, compile time and timezone, and Bring in's brain folder.
     folder_input: Entity<InputState>,
     time_input: Entity<InputState>,
@@ -77,6 +79,10 @@ pub(super) struct SpacesPage {
     new_color: SpaceColor,
     /// The prefix New proposed from the name, which follows the name until the human types.
     prefix_proposed: Option<String>,
+    /// The repository name New proposed from the Space's name, which follows it the same way.
+    repository_name_proposed: Option<String>,
+    /// The owner New Space creates the repository in, one of `defaults`' owners.
+    owner: Option<String>,
     defaults: Option<SpaceFormDefaults>,
     /// Why GitHub turned Protect history down.
     protect_refused: Option<String>,
@@ -136,6 +142,7 @@ impl SpacesPage {
             sources: textarea("mcp linear: list_issues, get_issue", window, cx),
             storage_input: input("owner/name or a GitHub URL", window, cx),
             prefix_input: input("2 to 5 capitals, such as SAGE", window, cx),
+            repository_name_input: input("sage-wiffletree-storage", window, cx),
             folder_input: input("wiffletree/", window, cx),
             time_input: input("06:00", window, cx),
             timezone_input: input("America/Chicago", window, cx),
@@ -144,6 +151,8 @@ impl SpacesPage {
             compile_here: true,
             new_color: SpaceColor::Teal,
             prefix_proposed: None,
+            repository_name_proposed: None,
+            owner: None,
             defaults: None,
             protect_refused: None,
             bringing_in: None,
@@ -319,6 +328,8 @@ impl SpacesPage {
         self.show(Shown::New, window, cx);
         self.name
             .update(cx, |input, cx| input.set_value(name.to_owned(), window, cx));
+        // `set_value` sends no change, so the proposals follow the name here.
+        self.name_changed(window, cx);
         self.description.update(cx, |input, cx| {
             input.set_value(description.to_owned(), window, cx)
         });
@@ -334,7 +345,13 @@ impl SpacesPage {
             self.joining = None;
             self.checked = None;
             self.on_github = false;
-            for input in [&self.name, &self.storage_input, &self.prefix_input] {
+            let inputs = [
+                &self.name,
+                &self.storage_input,
+                &self.prefix_input,
+                &self.repository_name_input,
+            ];
+            for input in inputs {
                 input.update(cx, |input, cx| input.set_value("", window, cx));
             }
             self.description
@@ -1506,7 +1523,10 @@ mod tests {
         brings_lines, compile_words, leaves_line, logs_line, not_on_github_line, plan_notes,
         where_line, wiki_line,
     };
-    use super::setup::{Mark, check_lines, compiles_now, join_choices, proposed_repository};
+    use super::setup::{
+        Mark, check_lines, compiles_now, join_choices, owner_label, proposed_repository_name,
+        repository_to_create,
+    };
     use super::{
         Joining, STORAGE_FRESH_MS, behaviors_changed, brain_label, format_sources, holds_draft,
         issues_line, join_refused_by, merged, models_changed, parse_sources, pass_finished,
@@ -1737,13 +1757,21 @@ mod tests {
             [(Mark::Refused, public.to_owned())]
         );
         assert_eq!(
-            proposed_repository("Vyttle-LLC", "Vyttle"),
+            proposed_repository_name("Sage Watch"),
+            "sage-watch-wiffletree-storage"
+        );
+        assert_eq!(proposed_repository_name("—"), "wiffletree-storage");
+        assert_eq!(
+            repository_to_create("Vyttle-LLC", &proposed_repository_name("Vyttle")).unwrap(),
             "Vyttle-LLC/vyttle-wiffletree-storage"
         );
-        assert_eq!(
-            proposed_repository("Sage-Social", "Sage Watch"),
-            "Sage-Social/sage-watch-wiffletree-storage"
-        );
+        let refused = repository_to_create("Vyttle-LLC", "vyttle storage").unwrap_err();
+        assert!(refused.contains("not a repository name"), "{refused}");
+        let mine = RepositoryOwner {
+            login: "MHohlios".into(),
+            organization: false,
+        };
+        assert_eq!(owner_label(&mine), "MHohlios — your account");
         assert_eq!(
             compiles_now(1),
             "1 Mac compiles this wiki now. Turning this on would use your model subscription."

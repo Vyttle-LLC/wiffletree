@@ -1749,6 +1749,9 @@ impl Host {
     /// with the repository as `owner/name`.
     pub(crate) fn precheck_stored_space(&self, new: &NewSpace, input: &str) -> Result<String> {
         let (owner, name, _) = github_access::candidates(input, "https")?;
+        if new.setup.create_repository {
+            validate_new_repository(&owner, &name)?;
+        }
         let repository = format!("{owner}/{name}");
         if let Some(folder) = &new.setup.folder {
             validate_root(folder.trim().trim_end_matches('/'))?;
@@ -3113,6 +3116,23 @@ repository_settings:
         assert!(format!("{error:#}").contains("holds a clone of another repository"));
         let branches = git(&github.bare, &["branch", "--list"]);
         assert_eq!(branches, "", "nothing is pushed");
+    }
+
+    #[test]
+    fn a_repository_to_create_needs_a_name_github_accepts() {
+        let (_home, host) = host();
+        let setup = SpaceSetup {
+            create_repository: true,
+            ..SpaceSetup::default()
+        };
+        let new = NewSpace {
+            setup: &setup,
+            ..form("Sage", None)
+        };
+        let error = host.precheck_stored_space(&new, "vy.ttle/sage-wiffletree-storage");
+        assert!(format!("{:#}", error.unwrap_err()).contains("not a GitHub owner"));
+        let requested = host.precheck_stored_space(&new, "Vyttle-LLC/sage-wiffletree-storage");
+        assert_eq!(requested.unwrap(), "Vyttle-LLC/sage-wiffletree-storage");
     }
 
     #[test]
