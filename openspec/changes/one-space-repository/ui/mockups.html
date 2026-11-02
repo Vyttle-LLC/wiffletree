@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · One place for issues, logs and the wiki</title>
+<!--
+  Static study for setting up a Space's one repository. No script, no network.
+  Styles copied from openspec/changes/choose-space-repositories/ui/mockups.html.
+  Vyttle's repositories, folders and the brain's file counts are real, read 2026-11-01.
+  Issue counts, teammates, times, entries in the Brains page and scan findings are sample data.
+  APPROVED by Michael on 2026-11-01.
+-->
+<style>
+.light,:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}}
+body:has(#force-light:checked){--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+body:has(#force-dark:checked){--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+h2{font-size:15px;font-weight:600;margin:0 0 2px}
+h3{font-size:13px;font-weight:600;margin:0}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.intro{max-width:880px;margin-bottom:22px}
+.intro p{color:var(--subtle);font-size:12px;margin-top:4px}
+.intro p b{color:var(--text)}
+.pending{display:inline-block;margin:6px 0 4px;padding:3px 10px;border-radius:9px;font-size:11.5px;font-weight:600;color:var(--yellow);background:color-mix(in srgb,var(--yellow) 16%,transparent)}
+.switch{display:flex;gap:6px;margin:10px 0 0;font-size:12px;color:var(--subtle)}
+.switch input{display:none}
+.switch label{padding:3px 10px;border:1px solid var(--edge);border-radius:7px;cursor:pointer}
+.switch input:checked+label{background:var(--overlay);color:var(--text)}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:26px;align-items:start}
+.wide{grid-column:1/-1}
+.study>.eyebrow{margin-bottom:6px}
+.caption{margin:10px 2px 0;font-size:11.5px;color:var(--subtle)}
+.caption b{color:var(--text);font-weight:600}
+.frame{background:var(--surface);border:1px solid var(--edge);border-radius:12px;overflow:hidden;color:var(--text)}
+.chip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--edge);border-radius:7px;padding:1px 8px;font-size:11.5px;color:var(--subtle)}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--edge);border-radius:7px;padding:4px 11px;font-size:12px;background:var(--surface);color:var(--text);white-space:nowrap}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.btn.quiet{border-color:transparent;color:var(--subtle)}
+code{font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--overlay);padding:0 4px;border-radius:4px}
+.ok{color:var(--green)}.warn{color:var(--yellow)}.bad{color:var(--red)}
+.note{font-size:11.5px;color:var(--subtle)}
+.page{padding:16px 18px;display:flex;flex-direction:column;gap:12px}
+.form{display:grid;grid-template-columns:130px 1fr;gap:10px 16px;font-size:12.5px;align-items:start}
+.form>label{color:var(--subtle);padding-top:5px}
+.field{border:1px solid var(--edge);border-radius:7px;padding:5px 9px;background:var(--surface)}
+.field.short{max-width:150px}
+.inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.banner{border:1px solid color-mix(in srgb,var(--yellow) 45%,var(--edge));background:color-mix(in srgb,var(--yellow) 9%,transparent);border-radius:9px;padding:8px 11px;font-size:12px}
+.banner b{color:var(--yellow)}
+.banner.calm{border-color:var(--edge);background:var(--base)}
+.banner.calm b{color:var(--text)}
+.banner.bad{border-color:color-mix(in srgb,var(--red) 45%,var(--edge));background:color-mix(in srgb,var(--red) 8%,transparent)}
+.banner.bad b{color:var(--red)}
+.group{border:1px solid var(--edge);border-radius:10px;background:var(--base);padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.group h3{display:flex;align-items:center;gap:8px}
+.group h3 .r{margin-left:auto;font-weight:400;font-size:11.5px;color:var(--subtle)}
+.kv{display:grid;grid-template-columns:110px 1fr;gap:5px 12px;font-size:12px}
+.kv dt{color:var(--subtle)}
+.kv dd{margin:0}
+.box{width:13px;height:13px;border:1.5px solid var(--edge);border-radius:3px;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:10px;line-height:1}
+.box.on{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.radio{width:13px;height:13px;border:1.5px solid var(--edge);border-radius:50%;flex:none;display:inline-block}
+.radio.on{border:4px solid var(--accent)}
+.opt{display:flex;gap:8px;align-items:flex-start;padding:3px 0}
+.opt .radio,.opt .box{margin-top:3px}
+.opt small{display:block;color:var(--subtle);font-size:11.5px}
+.check{display:flex;gap:8px;align-items:flex-start;font-size:12.5px;padding:3px 0}
+.check .i{width:14px;flex:none;font-weight:700;text-align:center}
+.check .r{margin-left:auto}
+.head{padding:11px 16px;border-bottom:1px solid var(--edge);display:flex;align-items:center;gap:10px}
+.head .r{margin-left:auto;font-size:11.5px;color:var(--subtle)}
+.foot{padding:10px 16px;border-top:1px solid var(--edge);display:flex;align-items:center;gap:8px}
+.foot .note{flex:1}
+.body{padding:14px 16px;display:flex;flex-direction:column;gap:12px}
+.badge{display:inline-block;margin:0 0 6px;padding:1px 8px;border-radius:7px;font-size:11px;font-weight:600}
+.badge.was{color:var(--red);background:color-mix(in srgb,var(--red) 12%,transparent)}
+.badge.now{color:var(--green);background:color-mix(in srgb,var(--green) 14%,transparent)}
+.tree{font:11.5px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--base);border:1px solid var(--edge);border-radius:9px;padding:9px 12px;white-space:pre;overflow:auto}
+.tree i{font-style:normal;color:var(--subtle)}
+.mac{display:flex;align-items:center;gap:8px;font-size:12.5px;padding:3px 0}
+.mac .r{margin-left:auto;font-size:11.5px;color:var(--subtle)}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--green);flex:none}
+.dot.off{background:var(--muted)}
+.card{border:1px solid var(--edge);border-radius:10px;background:var(--base);padding:10px 12px;display:flex;flex-direction:column;gap:7px;font-size:12.5px}
+.card .top{display:flex;gap:8px;align-items:center}
+.card .r{margin-left:auto;font-size:11px;color:var(--subtle)}
+ul.legend{margin:6px 0 0;padding-left:18px;color:var(--subtle);font-size:12px;max-width:900px}
+ul.legend li{margin:3px 0}
+ul.legend b{color:var(--text);font-weight:600}
+.end{margin-top:30px;max-width:900px}
+.end h2{margin-top:20px}
+@media(max-width:1100px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="intro">
+  <div class="eyebrow">Wiffletree · design study</div>
+  <h1>One place for issues, logs and the wiki</h1>
+  <span class="pending">Approved by Michael, November 1, 2026</span>
+  <p><b>The change:</b> a Space names one repository and one folder. Its issues, log entries and wiki all live there and are written the same way. Setting up a company takes one form.</p>
+  <p>Issues are what you call tickets. Log entries are what I called notes in our chat. Nothing here runs. Vyttle's repositories, folders and file counts are real. Issue counts, teammates, times and scan findings are sample data.</p>
+  <div class="switch">
+    <span>Appearance:</span>
+    <input type="radio" name="theme" id="force-system" checked><label for="force-system">System</label>
+    <input type="radio" name="theme" id="force-light"><label for="force-light">Light</label>
+    <input type="radio" name="theme" id="force-dark"><label for="force-dark">Dark</label>
+  </div>
+</div>
+
+<div class="grid">
+
+  <div class="study">
+    <div class="eyebrow">1 · New Space</div>
+    <div class="frame">
+      <div class="head"><h2>New Space</h2></div>
+      <div class="body">
+        <div class="form">
+          <label>Name</label>
+          <div class="field">Vyttle</div>
+          <label>Where it lives</label>
+          <div>
+            <div class="opt"><span class="radio on"></span><div>A private GitHub repository<small>Shared with everyone who can read it.</small></div></div>
+            <div class="opt"><span class="radio"></span><div>Only this Mac<small>Nothing is pushed. You can move it to GitHub later.</small></div></div>
+          </div>
+          <label>Repository</label>
+          <div>
+            <div class="field">Create <b>Vyttle-LLC/vyttle-wiffletree-storage</b> ▾</div>
+            <div class="note" style="margin-top:4px">Or choose a private repository you already have.</div>
+          </div>
+          <label>Folder</label>
+          <div>
+            <div class="field short">wiffletree/</div>
+            <div class="note" style="margin-top:4px">Everything Wiffletree writes stays in this folder.</div>
+          </div>
+          <label>Issue prefix</label>
+          <div class="field short">VYT</div>
+          <label>Compile the wiki</label>
+          <div>
+            <div class="opt"><span class="box on">✓</span><div>On this Mac</div></div>
+            <div class="inline" style="margin-top:4px"><span class="note">Daily at</span><div class="field">06:00</div><div class="field">America/Chicago</div></div>
+            <div class="note" style="margin-top:4px">It uses your model subscription. Teammates can turn this on too.</div>
+          </div>
+        </div>
+        <div class="banner calm"><b>Choosing this repository lets Wiffletree push to its <code>main</code></b>, only inside <code>wiffletree/</code>. Everyone who can read it can read its issues, logs and wiki.</div>
+      </div>
+      <div class="foot"><span class="note"></span><span class="btn quiet">Cancel</span><span class="btn primary">Create Space</span></div>
+    </div>
+    <p class="caption"><b>One form, no Brain field.</b> Every Space has issues, logs and a wiki. A Space on this Mac alone gets them too, because nothing needs GitHub any more.</p>
+  </div>
+
+  <div class="study">
+    <div class="eyebrow">2 · What it creates</div>
+    <div class="tree">Vyttle-LLC/vyttle-wiffletree-storage   <i>private</i>
+└─ wiffletree/
+   ├─ spaces/vyttle/            <i>Space settings, jobs, boards</i>
+   ├─ issues/VYT-1/             <i>each issue and its comments</i>
+   ├─ wiffletree-issues.yaml    <i>prefix and states</i>
+   └─ second-brain/
+      ├─ STATUS.md              <i>the current picture</i>
+      ├─ logs/                  <i>everyone's work, labelled by person</i>
+      └─ notes/                 <i>the compiled wiki</i></div>
+    <p class="caption"><b>Same folders either way.</b> In a repository that holds other things, such as <code>vyttle-docs</code>, only <code>wiffletree/</code> is touched. Two Spaces in one repository share its issues and wiki, as Sage and Sage Watch would.</p>
+
+    <div class="eyebrow" style="margin-top:22px">3 · Checking a repository you chose</div>
+    <div class="frame">
+      <div class="body">
+        <div class="group">
+          <h3>Vyttle-LLC/vyttle-wiffletree-storage <span class="r ok">Can be used</span></h3>
+          <div class="check"><span class="i ok">✓</span><span>Private. 3 members of Vyttle-LLC can read it.</span></div>
+          <div class="check"><span class="i ok">✓</span><span>Wiffletree can write to <code>main</code>.</span></div>
+          <div class="check"><span class="i warn">!</span><span>History isn't protected. Anyone with access could force-push over it.</span><span class="r"><span class="btn">Protect history</span></span></div>
+        </div>
+        <div class="group">
+          <h3>Vyttle-LLC/pica-api <span class="r bad">Can't be used</span></h3>
+          <div class="check"><span class="i bad">×</span><span><code>main</code> requires pull requests, so Wiffletree can't write to it. Choose another repository, or turn that rule off on GitHub.</span></div>
+        </div>
+        <div class="group">
+          <h3>Vyttle-LLC/wiffletree <span class="r bad">Can't be used</span></h3>
+          <div class="check"><span class="i bad">×</span><span>Public. Issues and logs need a private repository.</span></div>
+        </div>
+      </div>
+    </div>
+    <p class="caption"><b>Protect history</b> blocks force-pushes and deleting <code>main</code>. It doesn't require pull requests. <code>vyttle-docs</code> already works this way. It needs a repository admin.</p>
+  </div>
+
+  <div class="study">
+    <div class="eyebrow">4 · The Space page, today</div>
+    <span class="badge was">Today</span>
+    <div class="frame"><div class="page">
+      <div class="form">
+        <label>Brain</label>
+        <div><div>Vyttle-LLC/vyttle-docs · ~/dev/vyttle/vyttle-docs</div><div class="inline" style="margin-top:6px"><span class="note">Folder</span><div class="field short">second-brain</div></div><div class="note" style="margin-top:4px">Changes reach main through gated pull requests.</div></div>
+        <label>Brain compile</label>
+        <div>Daily at 06:00 on Michael's Mac (this Mac)</div>
+        <label>Brain gate</label>
+        <div>main requires gate-tests, log-schema, markdown-lint, path-ownership, secret-scan, sensitive-info, wikilinks</div>
+      </div>
+      <div class="group">
+        <h3>Storage and issues</h3>
+        <dl class="kv"><dt>Repository</dt><dd>Local, no remote</dd><dt>Issues</dt><dd>Prefix VYT · 0 issues</dd></dl>
+      </div>
+    </div></div>
+    <p class="caption">Two repositories, two sets of rules and three places to look. Vyttle names no brain yet, so this is how it would look with one.</p>
+  </div>
+
+  <div class="study">
+    <div class="eyebrow">4 · The Space page, proposed</div>
+    <span class="badge now">Proposed</span>
+    <div class="frame"><div class="page">
+      <div class="group">
+        <h3>Repository <span class="r ok">Synced 30 seconds ago</span></h3>
+        <dl class="kv">
+          <dt>Where</dt><dd>Vyttle-LLC/vyttle-wiffletree-storage · <code>wiffletree/</code></dd>
+          <dt>Who can read</dt><dd>3 members of Vyttle-LLC</dd>
+          <dt>Issues</dt><dd>Prefix VYT · 48 issues</dd>
+          <dt>Logs</dt><dd>214 entries · 9 waiting for the next compile</dd>
+          <dt>Wiki</dt><dd>10 pages · compiled today at 06:04 on Michael's Mac</dd>
+          <dt>Compile</dt><dd>Daily at 06:00 · on this Mac and 1 other · <span style="color:var(--accent)">Change on Brains →</span></dd>
+        </dl>
+        <div class="inline"><span class="btn">Sync now</span><span class="btn">Import from Linear…</span><span class="btn">Bring in a brain…</span><span class="btn">Move…</span></div>
+      </div>
+    </div></div>
+    <p class="caption"><b>One box replaces four rows.</b> The Brain, Folder, Brain compile and Brain gate rows go. Name, instructions, code repositories and sources stay as they are.</p>
+  </div>
+
+  <div class="study">
+    <div class="eyebrow">5 · Bringing in an existing brain, once</div>
+    <div class="frame">
+      <div class="head"><h2>Bring in a brain</h2></div>
+      <div class="body">
+        <div class="form">
+          <label>From</label>
+          <div class="field">~/dev/vyttle/vyttle-docs</div>
+          <label>Folder</label>
+          <div class="field short">second-brain</div>
+          <label>Brings in</label>
+          <div>
+            <div class="check"><span class="i ok">✓</span><span>10 wiki pages and <code>STATUS.md</code></span></div>
+            <div class="check"><span class="i ok">✓</span><span>191 log entries from 17 files, each with its date and repository</span></div>
+          </div>
+          <label>Leaves behind</label>
+          <div class="note">The original folder is left as it is, along with <code>archive/</code>, <code>automation/</code> and <code>raw/</code>. You can delete it once you're happy.</div>
+        </div>
+        <div class="banner"><b>17 of these files aren't on GitHub yet.</b> They exist only in this Mac's clone, and 11 have never been committed. Bringing in reads this Mac's copy, so none of them are lost.</div>
+      </div>
+      <div class="foot"><span class="note">Scanned on this Mac before anything is pushed.</span><span class="btn quiet">Cancel</span><span class="btn primary">Bring in</span></div>
+    </div>
+    <p class="caption"><b>The counts and the warning are real.</b> Today's import reads only GitHub, so it would miss those 17 files. This form has to read the clone on this Mac.</p>
+  </div>
+
+  <div class="study">
+    <div class="eyebrow">6 · A teammate joins</div>
+    <div class="frame">
+      <div class="head"><h2>Add Space from a repository</h2></div>
+      <div class="body">
+        <div class="form">
+          <label>Repository</label>
+          <div class="field">Vyttle-LLC/vyttle-wiffletree-storage</div>
+          <label>Found in <code>wiffletree/</code></label>
+          <div>
+            <div class="opt"><span class="box on">✓</span><div>Vyttle<small>Prefix VYT · 48 issues · 10 wiki pages</small></div></div>
+          </div>
+          <label>Code repositories</label>
+          <div>
+            <div class="check"><span class="i ok">✓</span><span>wiffletree, ~/dev/vyttle/wiffletree</span></div>
+            <div class="check"><span class="i ok">✓</span><span>mudling, ~/dev/vyttle/mudling</span></div>
+            <div class="check"><span class="i">–</span><span>wiffletree-website, not cloned here</span><span class="r"><span class="btn">Choose…</span></span></div>
+          </div>
+          <label>Compile the wiki</label>
+          <div><div class="opt"><span class="box"></span><div>Also on this Mac<small>1 Mac compiles this wiki now. Turning this on would use your model subscription.</small></div></div></div>
+        </div>
+      </div>
+      <div class="foot"><span class="note"></span><span class="btn quiet">Cancel</span><span class="btn primary">Add Space</span></div>
+    </div>
+    <p class="caption"><b>One repository to name.</b> Today a teammate also has to place the brain. Compiling is off unless they choose it, because it spends their subscription.</p>
+  </div>
+
+  <div class="study">
+    <div class="eyebrow">7 · Brains page: who compiles</div>
+    <div class="frame"><div class="page">
+      <div class="group">
+        <h3>Vyttle's wiki <span class="r"><span class="btn">Run now</span></span></h3>
+        <dl class="kv">
+          <dt>Compile time</dt><dd>Daily at 06:00 America/Chicago · <span style="color:var(--accent)">Change</span></dd>
+          <dt>Last run</dt><dd>Today at 06:04 on Michael's Mac · 9 entries · 1 conflict</dd>
+          <dt>Next run</dt><dd>Tomorrow at 06:00, on the first of these Macs awake</dd>
+        </dl>
+        <div>
+          <div class="mac"><span class="dot"></span><span>Michael's Mac (this Mac)</span><span class="r"><span class="box on">✓</span></span></div>
+          <div class="mac"><span class="dot"></span><span>Sample teammate's Mac</span><span class="r">Last ran Tuesday</span></div>
+        </div>
+      </div>
+      <div class="banner"><b>No Mac compiles Sage's wiki.</b> 31 entries are waiting. <span style="color:var(--accent)">Compile on this Mac</span></div>
+    </div></div>
+    <p class="caption"><b>The Pull request gate list, Set up and Update gate leave this page.</b> The wiki browser and conflict cards stay as they are, and a ruling lands straight in.</p>
+  </div>
+
+  <div class="study">
+    <div class="eyebrow">8 · When a scan finds something</div>
+    <div class="frame"><div class="page">
+      <div class="card">
+        <div class="top"><b>A log entry was held on this Mac</b><span class="r">Before it was pushed</span></div>
+        <div class="note"><code>sensitive-info</code> · rule <code>phone</code> · line 9 of the entry from "Call relay retries"</div>
+        <div class="inline"><span class="btn">Edit it</span><span class="btn">Not sensitive</span><span class="btn quiet">Discard</span></div>
+      </div>
+      <div class="card" style="border-color:color-mix(in srgb,var(--red) 45%,var(--edge))">
+        <div class="top"><b class="bad">Something on <code>main</code> failed a scan</b><span class="r">Vyttle · reached GitHub</span></div>
+        <div class="note"><code>sensitive-info</code> · rule <code>phone</code> · <code>wiffletree/issues/VYT-52/issue.md</code> line 4 · pushed from GitHub's web editor</div>
+        <div class="note">Removing it adds a new commit. The old text stays in Git history until someone cleans the history.</div>
+        <div class="inline"><span class="btn">Open the file</span><span class="btn">Not sensitive</span><span class="btn">How to clean history</span></div>
+      </div>
+    </div></div>
+    <p class="caption"><b>The first card is the normal case:</b> the Mac stops it before it leaves. <b>The second is the alert you asked for.</b> Neither ever shows the matched text.</p>
+  </div>
+
+</div>
+
+<div class="end">
+  <h2>How it behaves</h2>
+  <ul class="legend">
+    <li><b>One way in.</b> Issues, log entries and wiki changes are scanned on the Mac, then pushed straight to <code>main</code> inside the folder. A file that fails stays on that Mac.</li>
+    <li><b>Compile.</b> Every Mac with compiling on is due at the set time. The first awake claims the run, and Git accepts only the first claim. A claim from a crashed Mac expires after an hour. A Mac out of model quota skips, and the next one takes the run.</li>
+    <li><b>Nothing to compile.</b> No claim, no commit and no model call.</li>
+    <li><b>Conflicts.</b> The same Inbox cards as today. A ruling is written straight in, and the next compile picks it up.</li>
+    <li><b>No Mac compiles.</b> Logs keep landing, and the Brains and Space pages say the wiki is falling behind.</li>
+  </ul>
+  <h2>What leaves the app</h2>
+  <ul class="legend">
+    <li>The separate brain and storage settings, and the rule that a repository can't be both.</li>
+    <li>Batch branches, auto-merge, watching brain pull requests, and redact or discard on a batch.</li>
+    <li>Set up, Update gate, the required GitHub checks and <code>CODEOWNERS</code> lines for a brain.</li>
+    <li>The compiler named in <code>wiffletree-brain.json</code>, and the warnings for the old second-brain skills.</li>
+  </ul>
+</div>
+</body>
+</html>
