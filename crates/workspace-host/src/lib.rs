@@ -27,8 +27,6 @@ mod issues_sync;
 mod jobs;
 mod keeper;
 pub mod keychain;
-// What Bring in a brain will read with; only its tests call it until then.
-#[cfg_attr(not(test), expect(dead_code))]
 mod legacy_logs;
 mod linear_import;
 pub mod live;
@@ -212,6 +210,8 @@ pub struct Host {
     /// Compile runs whose pending entries wait to be read and verified, for the service to do
     /// off the host thread.
     pub(crate) compile_preparations: Vec<compile::Prepare>,
+    /// Run now's runs waiting for their repository's next pass, by wiki, with each run's id.
+    pub(crate) run_now_pulls: std::collections::BTreeMap<String, String>,
     /// Owed runs' tips to read after a pull, off the host thread.
     pub(crate) compile_tip_reads: Vec<compile::TipRead>,
     /// Ended runs' claims to end on GitHub, off the host thread.
@@ -427,6 +427,7 @@ impl Host {
             source_env: None,
             source_checks: vec![],
             compile_preparations: vec![],
+            run_now_pulls: Default::default(),
             compile_tip_reads: vec![],
             claim_ends: vec![],
         };
@@ -1951,11 +1952,13 @@ impl Host {
                 additions,
                 prefix,
                 storage: None,
-            } => serde_json::to_value(self.create_space(
+                setup,
+            } => serde_json::to_value(self.create_local_space(
                 &name,
                 &description,
                 &additions,
                 prefix.as_deref(),
+                &setup,
             )?)?,
             Command::CreateSpace {
                 name,
@@ -1963,15 +1966,20 @@ impl Host {
                 additions,
                 prefix,
                 storage: Some(repository),
+                setup,
             } => {
                 let new = storage::NewSpace {
                     name: &name,
                     description: &description,
                     additions: &additions,
                     prefix: prefix.as_deref(),
+                    setup: &setup,
                 };
                 let requested = self.precheck_stored_space(&new, &repository)?;
                 let tools = publish::Tools::default();
+                if setup.create_repository {
+                    github_access::create_private(&tools, &self.home, &requested)?;
+                }
                 let staged = storage::stage(&self.home, &repository, &tools, &[])?;
                 storage::start_if_empty(&self.home, &staged, &requested, &tools)?;
                 serde_json::to_value(self.create_stored_space(&new, staged)?)?
@@ -2179,11 +2187,54 @@ impl Host {
                     storage::stage(&self.home, &repository, &tools, &added)?.check,
                 )?
             }
-            Command::JoinSpaces { repository, spaces } => {
+            Command::JoinSpaces {
+                repository,
+                spaces,
+                compile_here,
+            } => {
                 let added = self.space_ids()?;
                 let tools = publish::Tools::default();
                 let staged = storage::stage(&self.home, &repository, &tools, &added)?;
-                serde_json::to_value(self.join_spaces(staged, &spaces)?)?
+                serde_json::to_value(self.join_spaces(staged, &spaces, compile_here)?)?
+            }
+            Command::SpaceFormDefaults => serde_json::to_value(self.space_form_defaults()?)?,
+            Command::ProtectHistory { repository } => {
+                validate_repository_identity(&repository)?;
+                let tools = publish::Tools::default();
+                github_access::protect_history(&tools, &self.home, &repository)?;
+                Value::Null
+            }
+            Command::PreviewBringIn {
+                space_id,
+                from,
+                folder,
+            } => {
+                let importer = self.bring_in_importer(&space_id)?;
+                let tools = publish::Tools::default();
+                let read = legacy_logs::LegacyRead::read(
+                    Path::new(&from),
+                    &folder,
+                    &importer,
+                    false,
+                    &tools,
+                )?;
+                serde_json::to_value(self.plan_bring_in(&space_id, &read)?)?
+            }
+            Command::BringIn {
+                space_id,
+                from,
+                folder,
+            } => {
+                let importer = self.bring_in_importer(&space_id)?;
+                let tools = publish::Tools::default();
+                let read = legacy_logs::LegacyRead::read(
+                    Path::new(&from),
+                    &folder,
+                    &importer,
+                    true,
+                    &tools,
+                )?;
+                serde_json::to_value(self.bring_in(&space_id, read)?)?
             }
             Command::SpaceStorage { space_id } => {
                 serde_json::to_value(self.storage_status(&space_id)?)?

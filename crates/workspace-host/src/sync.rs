@@ -57,7 +57,13 @@ fn read_machine_name() -> String {
 /// What GitHub and Git say about the repository, with a clone of its branch in a new folder of
 /// the data folder that is removed when dropped.
 fn read(home: &Path, input: &str, tools: &Tools) -> Result<(SettingsRepositoryCheck, TempDir)> {
-    let (repository, organization, staging) = repos::clone_to_staging(home, input, tools)?;
+    let public = "Choose a private repository. Your skills and settings would be public.";
+    let repos::Staging {
+        repository,
+        organization,
+        clone: staging,
+        ..
+    } = repos::clone_to_staging(home, input, public, tools)?;
     for path in SHARED_PATHS {
         refuse_links(staging.path(), Path::new(path))?;
     }
@@ -1609,6 +1615,8 @@ pub(crate) mod tests {
     use std::sync::{Arc, Mutex};
 
     pub(crate) const NAME: &str = "MHohlios/wiffletree-storage";
+    /// What `gh` says when the plan has no rulesets for a private repository.
+    pub(crate) const PLAN_REFUSES: &str = "gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)";
     const URL: &str = "https://github.com/MHohlios/wiffletree-storage.git";
     const README: &str = "# My Wiffletree storage\n";
 
@@ -1633,6 +1641,10 @@ pub(crate) mod tests {
         /// Runs before the next Git command of that name, as another machine's push or a
         /// save made meanwhile would.
         pub(crate) before: Mutex<Option<Hook>>,
+        /// The rules GitHub reports on the default branch, or with `null` its refusal on a plan
+        /// without rulesets for a private repository, and its classic branch protection.
+        pub(crate) rules: Mutex<Value>,
+        pub(crate) protection: Mutex<Option<Value>>,
     }
     impl GitHub {
         pub(crate) fn new(folder: &Path, readme: bool) -> Self {
@@ -1664,6 +1676,8 @@ pub(crate) mod tests {
                 protocol: Mutex::new("https"),
                 unreadable: Mutex::default(),
                 before: Mutex::default(),
+                rules: Mutex::new(json!([])),
+                protection: Mutex::default(),
             }
         }
         pub(crate) fn tools(self: &Arc<Self>) -> Tools {
@@ -1684,13 +1698,28 @@ pub(crate) mod tests {
                 }
                 assert_eq!(args[..3], ["api", "--hostname", "github.com"], "reads only");
                 assert_eq!(args.len(), 4, "a GET with no fields: {args:?}");
-                let answer = match args[3].split_once('/') {
-                    Some(("repos", _)) => Some(&github.repository),
-                    _ => github.organization.as_ref(),
+                let endpoint = args[3];
+                let protection = github.protection.lock().unwrap().clone();
+                let rules = github.rules.lock().unwrap().clone();
+                if endpoint.contains("/rules/branches/") && rules.is_null() {
+                    return Ok(runtime::GhAnswer {
+                        status: exit(1),
+                        output: String::new(),
+                        error: PLAN_REFUSES.into(),
+                    });
+                }
+                let answer = match endpoint.split_once('/') {
+                    _ if endpoint.contains("/rules/branches/") => Some(rules),
+                    _ if endpoint.ends_with("/protection") => protection,
+                    _ if endpoint.contains("/branches/") => {
+                        Some(json!({"protected": protection.is_some()}))
+                    }
+                    Some(("repos", _)) => Some(github.repository.clone()),
+                    _ => github.organization.clone(),
                 };
                 Ok(runtime::GhAnswer {
                     status: exit(if answer.is_some() { 0 } else { 1 }),
-                    output: answer.map(Value::to_string).unwrap_or_default(),
+                    output: answer.as_ref().map(Value::to_string).unwrap_or_default(),
                     error: answer.map_or("HTTP 404: Not Found", |_| "").into(),
                 })
             };

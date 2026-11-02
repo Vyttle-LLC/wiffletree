@@ -459,10 +459,9 @@ mod tests {
         let staged = storage::stage(&host.home, NAME, &github.tools(), &[]).unwrap();
         let ticked = ["sage", "watch"].map(|folder| JoinSpace {
             folder: folder.into(),
-            brain_path: None,
             clones: vec![],
         });
-        host.join_spaces(staged, &ticked).unwrap();
+        host.join_spaces(staged, &ticked, false).unwrap();
         let (sage, watch) = (space_named(&host, "Sage"), space_named(&host, "Sage Watch"));
         host.record_gh_login(Some("jlin".into()));
         let new = NewIssue {
@@ -676,10 +675,9 @@ mod tests {
         let staged = storage::stage(&host.home, NAME, &github.tools(), &[]).unwrap();
         let sage = JoinSpace {
             folder: "sage".into(),
-            brain_path: None,
             clones: vec![],
         };
-        host.join_spaces(staged, &[sage]).unwrap();
+        host.join_spaces(staged, &[sage], false).unwrap();
         let sage = space_named(&host, "Sage");
         host.record_gh_login(Some("jlin".into()));
         let new = NewIssue {

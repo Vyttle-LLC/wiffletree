@@ -353,34 +353,102 @@ pub(crate) struct Staged {
     root: Root,
     staging: TempDir,
 }
-
-/// The folder a joining Mac finds in the clone at `clone`, by reading the tree at its head:
-/// a repository with no Wiffletree files gets the default folder, unless something else is
-/// already there.
-fn folder_of(clone: &Path) -> Result<Root> {
-    let head = ["rev-parse", "--verify", "--quiet", "HEAD"];
-    let head = runtime::git_answer(clone, &head)?;
-    let found = match head.status.success() {
-        true => folder::find(clone, head.output.trim())?,
-        false => None,
-    };
-    if let Some(root) = found {
-        return Ok(root);
+impl Staged {
+    /// The folder a new Space uses: the one the repository holds, or else `asked`, which must
+    /// be valid and not someone else's.
+    fn root_for(&self, asked: Option<&str>) -> Result<Root> {
+        if self.check.folder.is_some() {
+            return Ok(self.root.clone());
+        }
+        let asked = asked.unwrap_or(DEFAULT_ROOT).trim().trim_end_matches('/');
+        validate_root(asked)?;
+        let root = Root::new(asked);
+        refuse_others_folder(self.staging.path(), &root)?;
+        Ok(root)
     }
-    let root = Root::default_folder();
+}
+
+/// Refuses a folder that already exists in `clone` without Wiffletree's files.
+fn refuse_others_folder(clone: &Path, root: &Root) -> Result<()> {
     ensure!(
         !root.in_clone(clone).exists(),
         "{}/ holds other files, and the folder must be Wiffletree's",
         root.name()
     );
-    Ok(root)
+    Ok(())
 }
 
-/// Checks `input` as a storage repository and clones it, off the host thread. `added` names the
+/// The folder a joining Mac finds in the clone at `clone`, by reading the tree at its head, or
+/// `None` when it holds no Wiffletree files.
+fn folder_of(clone: &Path) -> Result<Option<Root>> {
+    let head = ["rev-parse", "--verify", "--quiet", "HEAD"];
+    let head = runtime::git_answer(clone, &head)?;
+    match head.status.success() {
+        true => folder::find(clone, head.output.trim()),
+        false => Ok(None),
+    }
+}
+
+/// The issues under `issues/` in the folder, and the wiki's pages under its `notes/`.
+fn folder_counts(in_clone: &Path) -> (usize, usize) {
+    let issues = (fs::read_dir(in_clone.join(ISSUES))
+        .into_iter()
+        .flatten()
+        .flatten())
+    .filter(|entry| entry.path().is_dir())
+    .count();
+    let notes = in_clone
+        .join(SpaceBrain::DEFAULT_FOLDER)
+        .join(compile::NOTES);
+    let pages = (files_under(&notes).into_iter().flatten())
+        .filter(|file| file.extension().is_some_and(|e| e == "md"))
+        .count();
+    (issues, pages)
+}
+
+/// When a compile last landed on the clone's head, and the Mac its message names, as a landing
+/// writes "Compiled 9 entries · Michael's Mac".
+fn last_compiled(clone: &Path, root: &Root) -> Option<(i64, String)> {
+    let index = format!("{}/{}", brain_sync::brain_dir(root), compile::INDEX);
+    let args = [
+        "log",
+        "-1",
+        "--format=%ct%x00%s",
+        "--grep=^Compiled ",
+        "HEAD",
+        "--",
+        &index,
+    ];
+    let log = runtime::git_output(clone, &args).ok()?;
+    let (at, subject) = log.trim().split_once('\0')?;
+    let (_, machine) = subject.rsplit_once(" · ")?;
+    Some((at.parse::<i64>().ok()? * 1000, machine.to_owned()))
+}
+
+/// Why a repository cannot be a Space's storage when it is public.
+const PUBLIC: &str = "Public. Issues and logs need a private repository.";
+
+/// Checks `input` as a storage repository and clones it, off the host thread: it must be
+/// private, and its default branch must take a direct push from this Mac. `added` names the
 /// Spaces already on this Mac. Writes nothing that outlasts the check.
 pub(crate) fn stage(home: &Path, input: &str, tools: &Tools, added: &[SpaceId]) -> Result<Staged> {
-    let (repository, organization, staging) = repos::clone_to_staging(home, input, tools)?;
-    let root = folder_of(staging.path())?;
+    let repos::Staging {
+        repository,
+        organization,
+        push,
+        clone: staging,
+    } = repos::clone_to_staging(home, input, PUBLIC, tools)?;
+    ensure!(
+        push,
+        "You can't push to {}, so Wiffletree can't write to it.",
+        repository.name
+    );
+    let history_protected =
+        github_access::direct_push(tools, home, &repository.name, &repository.branch)?;
+    let reader_count =
+        github_access::reader_count(tools, home, &repository.name, repository.readers);
+    let found = folder_of(staging.path())?;
+    let root = found.clone().unwrap_or_else(Root::default_folder);
     let in_staging = root.in_clone(staging.path());
     let mut spaces = vec![];
     for entry in fs::read_dir(in_staging.join("spaces"))
@@ -404,7 +472,6 @@ pub(crate) fn stage(home: &Path, input: &str, tools: &Tools, added: &[SpaceId]) 
             id: space.id,
             name: space.name,
             description: space.description,
-            brain: space.brain,
             repositories: space.repositories,
         });
     }
@@ -413,11 +480,25 @@ pub(crate) fn stage(home: &Path, input: &str, tools: &Tools, added: &[SpaceId]) 
         Ok(content) => Some(read_tracker(&content)?),
         Err(_) => None,
     };
+    let (issues, wiki_pages) = folder_counts(&in_staging);
+    let compilers = (fs::read_dir(in_staging.join(COMPILERS))
+        .into_iter()
+        .flatten()
+        .flatten())
+    .filter(|entry| entry.file_name().to_string_lossy().ends_with(".yaml"))
+    .count();
     let check = StorageCheck {
         repository,
         organization,
+        reader_count,
+        history_protected,
+        folder: found.map(|root| root.name().to_owned()),
         spaces,
         prefix: tracker.as_ref().map(|tracker| tracker.prefix.clone()),
+        compile: tracker.as_ref().and_then(|tracker| tracker.compile.clone()),
+        issues,
+        wiki_pages,
+        compilers,
     };
     Ok(Staged {
         check,
@@ -478,6 +559,7 @@ pub(crate) struct NewSpace<'a> {
     pub(crate) description: &'a str,
     pub(crate) additions: &'a str,
     pub(crate) prefix: Option<&'a str>,
+    pub(crate) setup: &'a SpaceSetup,
 }
 
 /// What a storage repository's pass compares: the folders of the Spaces this Mac added, by
@@ -498,16 +580,22 @@ pub(crate) struct Input {
     pub(crate) preferred: BTreeMap<IssueId, u64>,
     /// The board folders of the jobs this Mac is the runner of.
     runs_here: Vec<String>,
-    /// The log entries waiting or held here, by their paths in the repository.
+    /// The log entries and brought-in pages waiting or held here, by their paths in the
+    /// repository.
     pub(crate) entries: Vec<String>,
+    /// The brought-in ids waiting to join `compiled-after`.
+    pub(crate) compiled: Vec<String>,
     /// A compile run's files waiting to land.
     pub(crate) landing: Option<compile::Landing>,
-    /// Another Mac took that run's claim over, so it ends with nothing pushed.
+    /// Another Mac took that run's claim over, so it ends with nothing pushed; that Mac, when its
+    /// claim could be read.
     pub(crate) outrun: bool,
+    pub(crate) outrun_by: Option<String>,
 }
 impl Input {
     /// Reads the claim branch's tip before a landing: a tip that is not the run's own claim ends
-    /// the run, and with GitHub out of reach the landing waits for the next pass.
+    /// the run, naming the Mac whose claim it is, and with GitHub out of reach the landing waits
+    /// for the next pass.
     pub(crate) fn read_claim(&mut self, clone: &Path, url: &str, git: &publish::GitTool) {
         let Some(claim) = self.landing.as_ref().and_then(|l| l.claim.as_deref()) else {
             return;
@@ -515,6 +603,9 @@ impl Input {
         match github_access::remote_head(clone, url, repos::CLAIM_BRANCH, git) {
             Ok(tip) => self.outrun = tip.as_deref() != Some(claim),
             Err(_) => self.landing = None,
+        }
+        if self.outrun {
+            self.outrun_by = repos::claimed_by(clone, url, git);
         }
     }
 }
@@ -1235,10 +1326,12 @@ impl Host {
         let file = Root::new(&space.storage.root).join(&space_file(&space.storage.folder));
         self.write_stored(&key, &folder, &file, &space_yaml(space)?)
     }
-    /// The Macs whose files in `compilers/` say they compile the wiki of the repository's folder.
+    /// The Macs whose files in `compilers/` say they compile the wiki of the repository's folder,
+    /// with when each last landed a run, as the claim branch this Mac last read says.
     pub(crate) fn compilers(&self, repository: &StorageRepository) -> Result<Vec<Compiler>> {
         let root = self.root_of(repository)?;
         let clone = self.storage_folder(repository);
+        let landed = repos::last_landed(&clone);
         let files = fs::read_dir(root.in_clone(&clone).join(COMPILERS));
         let mut compilers: Vec<Compiler> = (files.into_iter().flatten().flatten())
             .filter_map(|file| {
@@ -1247,6 +1340,7 @@ impl Host {
                 let content = fs::read(path).ok()?;
                 let file: CompilerFile = serde_yaml::from_slice(&content).ok()?;
                 Some(Compiler {
+                    last_ran: landed.get(&host).copied(),
                     host,
                     machine: file.machine,
                     login: file.login,
@@ -1297,25 +1391,31 @@ impl Host {
             extra: extra.unwrap_or_default(),
             ..compile
         });
-        if current.compile == compile {
-            return Ok(current);
-        }
         let tracker = TrackerConfig { compile, ..current };
-        let content = tracker_yaml(&tracker)?;
+        self.save_tracker(&space, &tracker)?;
+        Ok(tracker)
+    }
+    /// Writes the folder's `wiffletree-issues.yaml` as `tracker`, when it changed: committed at
+    /// once in a local repository, and pushed by the next pass from a GitHub one.
+    pub(crate) fn save_tracker(&mut self, space: &Space, tracker: &TrackerConfig) -> Result<()> {
+        if self.tracker(space)? == *tracker {
+            return Ok(());
+        }
+        let content = tracker_yaml(tracker)?;
         let folder = self.storage_folder(&space.storage.repository);
         let file = Root::new(&space.storage.root).join(TRACKER);
         match Self::storage_key(&space.storage.repository) {
             None => {
                 shared::write_atomically(&folder.join(&file), &content)?;
-                commit_local(&folder, &[file.as_str()], "Changed the compile time")?;
+                commit_local(&folder, &[file.as_str()], "Changed the tracker's settings")?;
             }
             Some(key) => self.write_stored(&key, &folder, &file, &content)?,
         }
         self.db.execute(
             "UPDATE trackers SET data=?2 WHERE storage=?1",
-            params![space.storage.repository.key(), encode(&tracker)?],
+            params![space.storage.repository.key(), encode(tracker)?],
         )?;
-        Ok(tracker)
+        Ok(())
     }
     /// Writes this Mac's file saying it compiles the Space's wiki, or with `compiles` false
     /// removes it. It is the one shared file only this Mac writes, so it never conflicts.
@@ -1540,9 +1640,12 @@ impl Host {
                 )?;
             }
         }
+        // How many can read it rides along, for the Repository box; older hosts ignore it.
+        let mut data = serde_json::to_value(repository)?;
+        data["reader_count"] = serde_json::to_value(staged.check.reader_count)?;
         self.db.execute(
             "INSERT OR IGNORE INTO storage_repositories VALUES (?1,?2)",
-            params![key, encode(repository)?],
+            params![key, data.to_string()],
         )?;
         Ok((key, clone))
     }
@@ -1557,7 +1660,7 @@ impl Host {
     ) -> Result<SpaceRecord> {
         let repository = staged.check.repository.clone();
         repos::refuse_another(&self.home, &repository)?;
-        let root = staged.root.clone();
+        let root = staged.root_for(new.setup.folder.as_deref())?;
         let spaces = root.in_clone(staged.staging.path()).join("spaces");
         let (mut space, tracker) = self.check_new_stored_space(
             new,
@@ -1586,10 +1689,29 @@ impl Host {
             if new_tracker && !clone.join(&file).exists() {
                 host.write_stored(&key, &clone, &file, &tracker_yaml(&tracker)?)?;
             }
-            Ok(())
+            host.set_up_compile(&space, new.setup.compile.as_ref())
         })?;
         self.reindex_tracker(&space, &self.tracker(&space)?.prefix)?;
         Ok(SpaceRecord { space, local })
+    }
+    /// New Space's Compile the wiki, on this Mac at `compile`: the folder's time, unless it
+    /// already has one, and this Mac's file in `compilers/` in a GitHub repository, whose
+    /// teammates may compile too. A local repository's one Mac always compiles it.
+    pub(crate) fn set_up_compile(
+        &mut self,
+        space: &Space,
+        compile: Option<&BrainCompile>,
+    ) -> Result<()> {
+        let Some(compile) = compile else {
+            return Ok(());
+        };
+        if self.tracker(space)?.compile.is_none() {
+            self.set_compile_time(&space.id, Some(compile.clone()))?;
+        }
+        if Self::storage_key(&space.storage.repository).is_some() {
+            self.set_compile_here(&space.id, true)?;
+        }
+        Ok(())
     }
     /// Refuses a Space in a repository whose head is in another folder than this Mac's other
     /// Spaces there, which adopt it at the next pass, as Spaces in a repository share one.
@@ -1611,6 +1733,9 @@ impl Host {
     pub(crate) fn precheck_stored_space(&self, new: &NewSpace, input: &str) -> Result<String> {
         let (owner, name, _) = github_access::candidates(input, "https")?;
         let repository = format!("{owner}/{name}");
+        if let Some(folder) = &new.setup.folder {
+            validate_root(folder.trim().trim_end_matches('/'))?;
+        }
         self.check_new_stored_space(new, &repository, None, &|_| false)?;
         Ok(repository)
     }
@@ -1631,8 +1756,12 @@ impl Host {
             description,
             additions,
             prefix,
+            setup,
         } = *new;
         self.ensure_unused_name(name, None)?;
+        if let Some(compile) = &setup.compile {
+            compile::schedule(compile)?;
+        }
         let storage = github(repository);
         let tracker = match (theirs, prefix) {
             (Some(theirs), Some(asked)) if theirs.prefix != asked => bail!(
@@ -1681,13 +1810,14 @@ impl Host {
         Ok((space, tracker))
     }
     /// Adds the ticked Spaces of a GitHub storage repository, checked and cloned in `staged`,
-    /// with where each one's brain is on this Mac and the clones of its code repositories here,
-    /// which join the workspace. Refused when its tracker's prefix is used by another storage
-    /// repository here, or a clone is of a repository the Space does not list.
+    /// with the clones of their code repositories here, which join the workspace, and with
+    /// `compile_here`, this Mac's file in `compilers/`. Refused when its tracker's prefix is used
+    /// by another storage repository here, or a clone is of a repository the Space does not list.
     pub(crate) fn join_spaces(
         &mut self,
         staged: Staged,
         ticked: &[JoinSpace],
+        compile_here: bool,
     ) -> Result<Vec<SpaceRecord>> {
         ensure!(!ticked.is_empty(), "Tick at least one Space to add");
         let repository = staged.check.repository.clone();
@@ -1727,7 +1857,6 @@ impl Host {
                 check_clone(&space, clone)?;
             }
             let local = SpaceLocal {
-                brain_path: tick.brain_path.clone(),
                 notes: self.model_notes(&space)?,
                 ..SpaceLocal::default()
             };
@@ -1754,6 +1883,9 @@ impl Host {
                     "{}",
                     imported.failures.join("; ")
                 );
+            }
+            if compile_here {
+                host.set_compile_here(&joined[0].space.id, true)?;
             }
             Ok(())
         })?;
@@ -1855,8 +1987,10 @@ impl Host {
             key: key.to_owned(),
             root,
             entries,
+            compiled: self.brought_compiled(key)?,
             landing,
             outrun: false,
+            outrun_by: None,
             names,
             prefix,
             synced: record.synced,
@@ -1927,6 +2061,7 @@ impl Host {
             Ok(passed) => passed,
             Err(error) => {
                 synced.error = Some(format!("{error:#}"));
+                self.compile_pull_failed(key)?;
                 return Err(error);
             }
         };
@@ -2193,34 +2328,45 @@ impl Host {
             [space.storage.repository.key()],
             |r| r.get(0),
         )?;
-        let wiki_behind = (self.brain_compile_states()?.into_iter())
-            .find(|state| state.repository == space.storage.repository.key())
-            .and_then(|state| state.behind);
-        let Some(key) = Self::storage_key(&space.storage.repository) else {
-            return Ok(StorageStatus {
-                prefix,
-                issues,
-                readers: None,
-                settings_repository: false,
-                path,
-                synced_at: None,
-                error: None,
-                wiki_behind,
-            });
-        };
-        let repository = self.stored_repository(&key)?;
-        let settings_repository = self.settings_key().as_ref() == Some(&key);
-        let (synced_at, error) = self.storage_sync_state(&key)?;
-        Ok(StorageStatus {
+        let repository_key = space.storage.repository.key();
+        let state = (self.brain_compile_states()?.into_iter())
+            .find(|state| state.repository == repository_key);
+        let (entries, wiki_pages) = self.brain_counts(&repository_key).unwrap_or_default();
+        let root = Root::new(&space.storage.root);
+        let mut status = StorageStatus {
+            entries,
+            waiting: state.as_ref().map_or(0, |state| state.pending),
+            wiki_pages,
+            compiled: last_compiled(&folder, &root),
+            compile: self
+                .tracker(&space)
+                .ok()
+                .and_then(|tracker| tracker.compile),
+            compilers: state.as_ref().map_or(0, |state| state.compilers.len()),
+            compiles_here: state.as_ref().is_some_and(|state| state.compiles_here),
+            reader_count: None,
             prefix,
             issues,
-            readers: Some(repository.readers),
-            settings_repository,
+            readers: None,
+            settings_repository: false,
             path,
-            synced_at,
-            error,
-            wiki_behind,
-        })
+            synced_at: None,
+            error: None,
+            wiki_behind: state.and_then(|state| state.behind),
+        };
+        let Some(key) = Self::storage_key(&space.storage.repository) else {
+            return Ok(status);
+        };
+        let repository = self.stored_repository(&key)?;
+        status.readers = Some(repository.readers);
+        status.reader_count = self.db.query_row(
+            "SELECT json_extract(data,'$.reader_count') FROM storage_repositories WHERE key=?1",
+            [&key],
+            |r| r.get(0),
+        )?;
+        status.settings_repository = self.settings_key().as_ref() == Some(&key);
+        (status.synced_at, status.error) = self.storage_sync_state(&key)?;
+        Ok(status)
     }
     /// When a pass of the GitHub storage repository `key` last reached GitHub, and why the
     /// latest one failed: the settings sync's, when it is also the settings repository.
@@ -2343,11 +2489,17 @@ pub(crate) mod tests {
 
     /// The human's form for a new Space named `name`.
     fn form<'a>(name: &'a str, prefix: Option<&'a str>) -> NewSpace<'a> {
+        static NO_SETUP: SpaceSetup = SpaceSetup {
+            folder: None,
+            create_repository: false,
+            compile: None,
+        };
         NewSpace {
             name,
             description: "",
             additions: "",
             prefix,
+            setup: &NO_SETUP,
         }
     }
 
@@ -2374,10 +2526,9 @@ pub(crate) mod tests {
         let staged = stage(&host.home, NAME, &github.tools(), &[])?;
         let ticked = [JoinSpace {
             folder: "sage".into(),
-            brain_path: None,
             clones,
         }];
-        host.join_spaces(staged, &ticked)
+        host.join_spaces(staged, &ticked, false)
     }
 
     /// Runs the pass of the storage repository `NAME`.
@@ -3094,8 +3245,267 @@ repository_settings:
         let error = stage(&host.home, NAME, &Arc::new(github).tools(), &[])
             .err()
             .unwrap();
-        assert!(format!("{error:#}").contains("Choose a private repository"));
+        assert_eq!(
+            format!("{error:#}"),
+            "Public. Issues and logs need a private repository."
+        );
         assert!(!home.path().join("repos/github.com").exists());
+    }
+
+    #[test]
+    fn a_repository_whose_main_requires_pull_requests_or_checks_is_refused_naming_the_rule() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let (home, host) = host();
+        let refused = |github: &Arc<GitHub>| match stage(&host.home, NAME, &github.tools(), &[]) {
+            Err(error) => format!("{error:#}"),
+            Ok(_) => panic!("refused"),
+        };
+        *github.rules.lock().unwrap() = json!([{"type": "pull_request", "ruleset_id": 7}]);
+        assert_eq!(
+            refused(&github),
+            "main requires pull requests, so Wiffletree can't write to it. Choose another repository, or turn that rule off on GitHub."
+        );
+        *github.rules.lock().unwrap() = json!([{"type": "required_status_checks"}]);
+        assert!(refused(&github).starts_with("main requires status checks"));
+        // Classic branch protection, read whole by an admin, refuses the same way.
+        *github.rules.lock().unwrap() = json!([]);
+        *github.protection.lock().unwrap() =
+            Some(json!({"required_pull_request_reviews": {"required_approving_review_count": 1}}));
+        assert!(refused(&github).starts_with("main requires pull requests"));
+        assert!(!home.path().join("repos/github.com").exists());
+    }
+
+    #[test]
+    fn a_usable_repository_says_whether_its_history_is_protected() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let (_home, host) = host();
+        let protected = |github: &Arc<GitHub>| {
+            let staged = stage(&host.home, NAME, &github.tools(), &[]).unwrap();
+            staged.check.history_protected
+        };
+        assert!(!protected(&github), "nothing blocks a force-push");
+        *github.rules.lock().unwrap() = Value::Null;
+        assert!(
+            !protected(&github),
+            "a plan with no rulesets for it has none to apply"
+        );
+        *github.rules.lock().unwrap() = json!([{"type": "non_fast_forward"}, {"type": "deletion"}]);
+        assert!(protected(&github), "Protect history's ruleset");
+        *github.rules.lock().unwrap() = json!([{"type": "non_fast_forward"}]);
+        assert!(!protected(&github), "deleting main is still allowed");
+        *github.rules.lock().unwrap() = json!([]);
+        *github.protection.lock().unwrap() = Some(json!({
+            "allow_force_pushes": {"enabled": false},
+            "allow_deletions": {"enabled": false},
+        }));
+        assert!(protected(&github), "classic protection");
+        *github.protection.lock().unwrap() = Some(json!({"allow_force_pushes": {"enabled": true}}));
+        assert!(!protected(&github));
+    }
+
+    #[test]
+    fn a_repository_of_other_documents_is_used_and_only_its_folder_is_written() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        github.commit("second-brain/notes/Pica.md", "Someone's wiki.\n");
+        let (_home, mut host) = host();
+        let staged = stage(&host.home, NAME, &github.tools(), &[]).unwrap();
+        let space = host
+            .create_stored_space(&form("Vyttle", None), staged)
+            .unwrap();
+        assert_eq!(space.space.storage.root, DEFAULT_ROOT);
+        let before = github.show("second-brain/notes/Pica.md");
+        sync(&mut host, &github);
+        let listed = git(&github.bare, &["ls-tree", "-r", "--name-only", "main"]);
+        let outside: Vec<&str> = (listed.lines())
+            .filter(|path| !path.starts_with("wiffletree/"))
+            .collect();
+        assert_eq!(outside, ["README.md", "second-brain/notes/Pica.md"]);
+        assert_eq!(github.show("second-brain/notes/Pica.md"), before);
+    }
+
+    fn at(time: &str) -> BrainCompile {
+        BrainCompile {
+            at: time.into(),
+            timezone: "America/Chicago".into(),
+            extra: Extra::new(),
+        }
+    }
+
+    #[test]
+    fn a_new_space_takes_its_folder_and_compiles_here_at_its_time() {
+        let (_home, mut host) = host();
+        let setup = SpaceSetup {
+            folder: Some("tracking/".into()),
+            create_repository: false,
+            compile: Some(at("06:00")),
+        };
+        let local = host
+            .create_local_space("Woodworking", "", "", None, &setup)
+            .unwrap()
+            .space;
+        assert_eq!(local.storage.root, "tracking");
+        assert_eq!(host.tracker(&local).unwrap().compile, Some(at("06:00")));
+        let clone = host.storage_folder(&local.storage.repository);
+        let first = committed(&clone);
+        assert!(
+            first.contains(&"tracking/wiffletree-issues.yaml".to_owned()),
+            "{first:?}"
+        );
+        let refused = SpaceSetup {
+            compile: Some(at("25:00")),
+            ..SpaceSetup::default()
+        };
+        assert!(
+            host.create_local_space("Other", "", "", None, &refused)
+                .is_err()
+        );
+
+        // On GitHub: the folder's time, and this Mac's file in compilers/.
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let staged = stage(&host.home, NAME, &github.tools(), &[]).unwrap();
+        let new = NewSpace {
+            setup: &setup,
+            ..form("Vyttle", Some("VYT"))
+        };
+        let vyttle = host.create_stored_space(&new, staged).unwrap().space;
+        sync(&mut host, &github);
+        let tracker = github.show("tracking/wiffletree-issues.yaml").unwrap();
+        assert!(
+            tracker.contains("at: 06:00") || tracker.contains("at: '06:00'"),
+            "{tracker}"
+        );
+        let host_id = host.host_id().unwrap();
+        assert!(
+            github
+                .show(&format!("tracking/compilers/{host_id}.yaml"))
+                .is_some()
+        );
+        assert!(host.compiles_here(&vyttle.storage.repository).unwrap());
+    }
+
+    #[test]
+    fn a_second_space_keeps_the_folders_time_and_joining_compiles_only_when_ticked() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = in_a_folder(folder.path());
+        github.commit(
+            &format!("wiffletree/{TRACKER}"),
+            "format: 1\nprefix: SAGE\ncompile:\n  at: '02:00'\n  timezone: America/Chicago\n",
+        );
+        let (_home, mut host) = host();
+        let staged = stage(&host.home, NAME, &github.tools(), &[]).unwrap();
+        assert_eq!(staged.check.folder.as_deref(), Some("wiffletree"));
+        assert_eq!(staged.check.compile, Some(at("02:00")));
+        assert_eq!((staged.check.compilers, staged.check.issues), (0, 0));
+        let ticked = [JoinSpace {
+            folder: "sage".into(),
+            clones: vec![],
+        }];
+        let sage = host
+            .join_spaces(staged, &ticked, false)
+            .unwrap()
+            .remove(0)
+            .space;
+        assert!(
+            !host.compiles_here(&sage.storage.repository).unwrap(),
+            "off unless ticked"
+        );
+        let setup = SpaceSetup {
+            folder: Some("elsewhere".into()),
+            create_repository: false,
+            compile: Some(at("06:00")),
+        };
+        let added = std::slice::from_ref(&sage.id);
+        let staged = stage(&host.home, NAME, &github.tools(), added).unwrap();
+        let new = NewSpace {
+            setup: &setup,
+            ..form("Sage Watch", None)
+        };
+        let watch = host.create_stored_space(&new, staged).unwrap().space;
+        assert_eq!(
+            watch.storage.root, "wiffletree",
+            "the folder it holds is fixed"
+        );
+        assert_eq!(host.tracker(&watch).unwrap().compile, Some(at("02:00")));
+        assert!(host.compiles_here(&watch.storage.repository).unwrap());
+    }
+
+    #[test]
+    fn the_last_compile_after_a_move_into_the_folder_is_still_the_one_before_it() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let compiled = github.commit_files(
+            &[("second-brain/notes/Pica.md".into(), "# Pica\n".into())],
+            "Compiled 1 entries · Their Mac",
+        );
+        let (_home, mut host) = host();
+        join_sage(&mut host, &github).unwrap();
+        let index = |host: &mut Host, github: &Arc<GitHub>| {
+            let pass = host.brain_pass(NAME).unwrap().unwrap();
+            assert!(brains::pass(pass, &github.tools()).reached);
+        };
+        sync(&mut host, &github);
+        index(&mut host, &github);
+        assert_eq!(
+            host.last_compile_commit(NAME).unwrap(),
+            Some(compiled.clone())
+        );
+        press_move(&mut host, &github);
+        sync(&mut host, &github);
+        index(&mut host, &github);
+        assert!(
+            github
+                .show("wiffletree/second-brain/notes/Pica.md")
+                .is_some()
+        );
+        assert_eq!(host.last_compile_commit(NAME).unwrap(), Some(compiled));
+    }
+
+    #[test]
+    fn protect_history_asks_github_for_its_ruleset_and_says_why_in_githubs_words() {
+        use std::os::unix::process::ExitStatusExt;
+        /// Each call `gh` got, with the body of its `--input` file.
+        type Sent = Vec<(Vec<String>, String)>;
+        let sent: Arc<std::sync::Mutex<Sent>> = Arc::default();
+        let answering = |code: i32, error: &'static str| {
+            let sent = sent.clone();
+            Tools {
+                gh: Arc::new(move |_, args: &[&str]| {
+                    let input = args.iter().position(|a| *a == "--input").unwrap();
+                    let body = fs::read_to_string(args[input + 1]).unwrap();
+                    sent.lock()
+                        .unwrap()
+                        .push((args.iter().map(|a| a.to_string()).collect(), body));
+                    Ok(runtime::GhAnswer {
+                        status: ExitStatusExt::from_raw(code << 8),
+                        output: String::new(),
+                        error: error.into(),
+                    })
+                }),
+                ..Tools::default()
+            }
+        };
+        let home = tempfile::tempdir().unwrap();
+        github_access::protect_history(&answering(0, ""), home.path(), NAME).unwrap();
+        let (args, body) = sent.lock().unwrap().remove(0);
+        assert_eq!(
+            args[3..6],
+            ["--method", "POST", &format!("repos/{NAME}/rulesets")]
+        );
+        let body: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body, github_access::history_ruleset());
+        assert_eq!(
+            body["rules"],
+            json!([{"type": "non_fast_forward"}, {"type": "deletion"}]),
+            "no pull request or check is required"
+        );
+        let plan = "gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)";
+        let error =
+            github_access::protect_history(&answering(1, plan), home.path(), NAME).unwrap_err();
+        assert_eq!(format!("{error:#}"), format!("GitHub refused: {plan}"));
     }
 
     #[test]
@@ -3573,10 +3983,9 @@ repository_settings:
         assert_eq!(staged.check.spaces.len(), 2);
         let tick = |folder: &str| JoinSpace {
             folder: folder.into(),
-            brain_path: None,
             clones: vec![],
         };
-        (host.join_spaces(staged, &[tick("sage"), tick("watch")])).unwrap();
+        (host.join_spaces(staged, &[tick("sage"), tick("watch")], false)).unwrap();
         let (sage, watch) = (space_named(&host, "Sage"), space_named(&host, "Sage Watch"));
         assert_eq!(sage.storage.root, watch.storage.root);
         assert_eq!(host.tracker(&watch).unwrap().prefix, "SAGE");
@@ -3650,13 +4059,18 @@ repository_settings:
         let github = Arc::new(GitHub::new(folder.path(), true));
         let (_home, host) = host();
         let staged = stage(&host.home, NAME, &github.tools(), &[]).unwrap();
-        assert_eq!(staged.root, Root::default_folder());
+        assert_eq!(staged.check.folder, None, "a new Space chooses it");
+        assert_eq!(staged.root_for(None).unwrap(), Root::default_folder());
         github.commit("wiffletree/notes.md", "Someone's notes.\n");
-        let error = match stage(&host.home, NAME, &github.tools(), &[]) {
-            Err(error) => format!("{error:#}"),
-            Ok(_) => panic!("refused"),
-        };
+        let staged = stage(&host.home, NAME, &github.tools(), &[]).unwrap();
+        let error = format!("{:#}", staged.root_for(None).unwrap_err());
         assert!(error.contains("must be Wiffletree's"), "{error}");
+        // Another folder can be chosen instead.
+        assert_eq!(
+            staged.root_for(Some("tracking/")).unwrap(),
+            Root::new("tracking")
+        );
+        assert!(staged.root_for(Some("../up")).is_err());
     }
 
     #[test]

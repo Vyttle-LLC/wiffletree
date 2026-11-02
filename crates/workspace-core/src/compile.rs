@@ -119,6 +119,9 @@ pub struct Compiler {
     pub machine: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login: Option<String>,
+    /// When its last run landed, as the claim branch this Mac read says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_ran: Option<i64>,
 }
 
 /// A wiki's compile as the Brains page shows it.
@@ -132,9 +135,27 @@ pub struct BrainCompileState {
     /// Why Run now waits, when it does: a run in progress here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_now_waits: Option<String>,
-    /// This Mac compiles the wiki.
+    /// This Mac compiles the wiki, by this Mac's id among `compilers` and its name.
     #[serde(default)]
     pub compiles_here: bool,
+    #[serde(default)]
+    pub this_host: String,
+    #[serde(default)]
+    pub this_mac: String,
+    /// This Mac's timezone, which Change proposes for a wiki with no compile time yet.
+    #[serde(default)]
+    pub this_timezone: String,
+    /// When the folder's wiki compiles, and its next scheduled time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compile: Option<crate::BrainCompile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_run: Option<i64>,
+    /// A Space in the folder, for the commands that name one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<crate::SpaceId>,
+    /// The repository is on this Mac alone, whose one Mac always compiles it.
+    #[serde(default)]
+    pub local: bool,
     /// The Macs that compile the wiki, as `compilers/` lists them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compilers: Vec<Compiler>,

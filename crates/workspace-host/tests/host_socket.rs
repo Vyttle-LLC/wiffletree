@@ -758,6 +758,7 @@ fn space_commands_need_the_apps_credential_and_reads_do_not() {
             additions: String::new(),
             prefix: None,
             storage: None,
+            setup: Default::default(),
         },
         Command::UpdateSpace {
             space: Box::new(instructed.clone()),

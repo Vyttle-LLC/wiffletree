@@ -42,7 +42,7 @@ pub(crate) const TIMED_OUT: &str = "The compile ran for 30 minutes and was stopp
 const MISSED_TIMES_BEHIND: u32 = 2;
 /// A built-in compile job's name before its brain.
 const JOB: &str = "brain-compile:";
-const INDEX: &str = "notes/INDEX.md";
+pub(crate) const INDEX: &str = "notes/INDEX.md";
 pub(crate) const STATUS: &str = "STATUS.md";
 pub(crate) const QUEUE: &str = "reconcile-queue.md";
 pub(crate) const NOTES: &str = "notes/";
@@ -102,6 +102,22 @@ pub(crate) fn write_cursor(index: &str, cursor: &Cursor) -> String {
         ),
         format!("compiled-after: [{}]", cursor.after.join(", ")),
     ];
+    let (mut kept, body) = frontmatter_without_cursor(index);
+    kept.extend(lines);
+    format!("---\n{}\n---\n{body}", kept.join("\n"))
+}
+
+/// `index` without the cursor's keys, as Bring in copies another repository's, whose commits
+/// do not exist here. A frontmatter left empty goes too.
+pub(crate) fn without_cursor(index: &str) -> String {
+    match frontmatter_without_cursor(index) {
+        (kept, body) if kept.is_empty() => body,
+        (kept, body) => format!("---\n{}\n---\n{body}", kept.join("\n")),
+    }
+}
+
+/// The lines of `index`'s frontmatter but the cursor's, and the text after it.
+fn frontmatter_without_cursor(index: &str) -> (Vec<String>, String) {
     let cursor_key =
         |line: &str| line.starts_with("compiled-through:") || line.starts_with("compiled-after:");
     let (head, body) = match index.strip_prefix("---\n").and_then(|rest| {
@@ -133,8 +149,7 @@ pub(crate) fn write_cursor(index: &str, cursor: &Cursor) -> String {
         dropping = false;
         kept.push(line.to_owned());
     }
-    kept.extend(lines);
-    format!("---\n{}\n---\n{body}", kept.join("\n"))
+    (kept, body)
 }
 
 /// Whether `main`'s cursor has compiled everything `run`'s did: the same `compiled-through`
@@ -170,7 +185,7 @@ pub(crate) struct PendingEntry {
 }
 
 /// An entry file's path relative to the brain folder: `logs/<repo>/YYYY/MM/<file>.md`.
-fn is_entry_path(path: &str) -> bool {
+pub(crate) fn is_entry_path(path: &str) -> bool {
     let parts: Vec<&str> = path.split('/').collect();
     matches!(parts.as_slice(), ["logs", _, year, month, file]
         if year.len() == 4 && month.len() == 2 && file.ends_with(".md")
@@ -178,7 +193,7 @@ fn is_entry_path(path: &str) -> bool {
 }
 
 /// The id in an entry file's name, `<date>-<id>.md`.
-fn id_in_name(path: &str) -> Option<&str> {
+pub(crate) fn id_in_name(path: &str) -> Option<&str> {
     let name = path.rsplit('/').next()?.strip_suffix(".md")?;
     name.get(11..).filter(|id| !id.is_empty())
 }
@@ -441,6 +456,8 @@ pub(crate) struct Prepared {
     pub(crate) run_id: String,
     /// The commit of the claim it won, and the due time that claim is for.
     pub(crate) claim: Option<(String, String)>,
+    /// The entries pending on `main`, 0 when it stopped before reading them.
+    pub(crate) pending: usize,
     pub(crate) gathered: Result<Gathered, Stopped>,
 }
 
@@ -456,8 +473,8 @@ pub(crate) enum Stopped {
     Waits(String),
     /// That Mac holds a live claim.
     Live(String),
-    /// Another Mac's claim beat its own.
-    Lost,
+    /// Another Mac's claim beat its own: that Mac's, when its claim could be read.
+    Lost(Option<String>),
     /// GitHub turned its claim down.
     Refused(String),
 }
@@ -465,8 +482,7 @@ pub(crate) enum Stopped {
 pub(crate) struct Gathered {
     /// The commit of `main` the run read, which its worktree starts from.
     pub(crate) head: String,
-    /// Every pending entry, though the run takes at most `MAX_ENTRIES`.
-    pub(crate) pending: usize,
+    /// The pending entries it takes, at most `MAX_ENTRIES`; `Prepared::pending` counts them all.
     pub(crate) entries: Vec<PendingEntry>,
     pub(crate) checked: Vec<Checked>,
     /// The cursor the run's commit writes.
@@ -497,20 +513,23 @@ fn pending_entries(
 
 impl Prepare {
     pub(crate) fn run(&self, tools: &publish::Tools) -> Prepared {
-        let mut claim = None;
-        let gathered = self.gather(tools, &mut claim);
+        let (mut claim, mut pending) = (None, 0);
+        let gathered = self.gather(tools, &mut claim, &mut pending);
         Prepared {
             run_id: self.run_id.clone(),
             claim,
+            pending,
             gathered,
         }
     }
     /// The tip first, then what is pending, then the model, and only then the claim, so a Mac
-    /// with nothing to do writes nothing.
+    /// with nothing to do writes nothing. `pending` is how many entries wait, once read, so a
+    /// run that stops after it records them.
     fn gather(
         &self,
         tools: &publish::Tools,
         claim: &mut Option<(String, String)>,
+        pending_count: &mut usize,
     ) -> Result<Gathered, Stopped> {
         let failed = |error: anyhow::Error| Stopped::Failed(format!("{error:#}"));
         let prefix = format!("{}/", self.brain_dir);
@@ -530,6 +549,7 @@ impl Prepare {
         let (index, cursor, mut pending) =
             pending_entries(checkout, head, &prefix).map_err(failed)?;
         let total = pending.len();
+        *pending_count = total;
         pending.truncate(MAX_ENTRIES);
         let cursor = match total > MAX_ENTRIES {
             true => Cursor {
@@ -546,7 +566,6 @@ impl Prepare {
         if pending.is_empty() {
             return Ok(Gathered {
                 head: self.head.clone(),
-                pending: 0,
                 entries: vec![],
                 checked: vec![],
                 cursor,
@@ -566,7 +585,12 @@ impl Prepare {
             let claiming = claimer.claim(checkout, &self.run_id, tip.as_ref(), &tools.git);
             match claiming.map_err(|_| Stopped::Unreachable)? {
                 Claiming::Won(commit) => *claim = Some((commit, claimer.due.clone())),
-                Claiming::Lost => return Err(Stopped::Lost),
+                // Its attempt has ended; reading the winning claim names its Mac.
+                Claiming::Lost => {
+                    let tip = claimer.read_tip(checkout, &tools.git).ok().flatten();
+                    let machine = tip.and_then(|tip| tip.claim).map(|claim| claim.machine);
+                    return Err(Stopped::Lost(machine));
+                }
                 Claiming::Refused(why) => return Err(Stopped::Refused(why)),
             }
         }
@@ -578,7 +602,6 @@ impl Prepare {
         let notes = self.named_notes(&prefix, &pending).map_err(failed)?;
         Ok(Gathered {
             head: self.head.clone(),
-            pending: total,
             entries: pending,
             checked,
             cursor,
@@ -1119,11 +1142,40 @@ impl Host {
         Ok(())
     }
 
-    /// A pull of the repository `key` ended: a run owed starts, or reads the tip when it lost.
+    /// Settles the due run this Mac owes once `run` dealt with it. A Run now owes nothing and
+    /// leaves a due run as it stood.
+    fn settle_owed(&self, run: &CompileRun) -> Result<()> {
+        match run.trigger {
+            CompileTrigger::RunNow => Ok(()),
+            _ => self.clear_owed(&run.repository),
+        }
+    }
+
+    /// A pass of the repository `key` could not reach GitHub: a Run now waiting for it ends.
+    pub(crate) fn compile_pull_failed(&mut self, key: &str) -> Result<()> {
+        let Some(repository) = self.brain_keys()?.remove(key) else {
+            return Ok(());
+        };
+        let Some(run_id) = self.run_now_pulls.remove(&repository) else {
+            return Ok(());
+        };
+        let mut run = self.compile_run(&run_id)?;
+        let reason = "GitHub could not be reached, so nothing was claimed".to_owned();
+        self.end_compile(&mut run, CompileOutcome::Waiting, reason)
+    }
+
+    /// A pull of the repository `key` ended: a Run now waiting for it starts, and a run owed
+    /// starts, or reads the tip when it lost.
     pub(crate) fn compile_after_pull(&mut self, key: &str) -> Result<()> {
         let Some(repository) = self.brain_keys()?.remove(key) else {
             return Ok(());
         };
+        if let Some(run_id) = self.run_now_pulls.remove(&repository) {
+            let run = self.compile_run(&run_id)?;
+            if run.outcome == CompileOutcome::Running {
+                return self.prepare_compile(run, None);
+            }
+        }
         let Some(owed) = self.owed(&repository)? else {
             return Ok(());
         };
@@ -1320,8 +1372,9 @@ impl Host {
     }
 
     /// Records a run of the wiki started by `trigger`, for the due time `due` or else as a Run
-    /// now of its own, running while its preparation is queued. `None` while another run is in
-    /// progress.
+    /// now of its own, running while its preparation is queued. A Run now in a GitHub
+    /// repository waits for a pass first, as a due run does, so it reads a fresh `main`. `None`
+    /// while another run is in progress.
     pub(crate) fn start_compile(
         &mut self,
         repository: &str,
@@ -1333,7 +1386,7 @@ impl Host {
             return Ok(None);
         }
         let at = now();
-        let mut run = CompileRun {
+        let run = CompileRun {
             id: brains::new_ulid(at),
             repository: brain.repository.clone(),
             trigger,
@@ -1352,12 +1405,28 @@ impl Host {
             tokens: 0,
             cost: None,
         };
+        let (storage, _) = self.brain_home(&brain)?;
+        let key = Self::storage_key(&storage);
+        if let (CompileTrigger::RunNow, Some(key)) = (trigger, key) {
+            self.save_compile_run(&run)?;
+            (self.run_now_pulls).insert(brain.repository.clone(), run.id.clone());
+            self.issues_written.borrow_mut().insert(key);
+            return Ok(Some(run));
+        }
+        self.prepare_compile(run.clone(), due)?;
+        Ok(Some(self.compile_run(&run.id)?))
+    }
+
+    /// Queues `run`'s preparation on the head this Mac last synced, for the due time `due` or
+    /// else as a Run now of its own.
+    fn prepare_compile(&mut self, mut run: CompileRun, due: Option<String>) -> Result<()> {
+        let brain = self.brain(&run.repository)?;
         let (storage, root) = self.brain_home(&brain)?;
         match self.brain_head(&storage)? {
             None => {
                 run.outcome = CompileOutcome::Failed;
                 run.reason = "The repository has not been synced yet".into();
-                run.ended_at = Some(at);
+                run.ended_at = Some(now());
             }
             Some(head) => {
                 let due = due.unwrap_or_else(|| format!("run-now:{}", run.id));
@@ -1376,8 +1445,7 @@ impl Host {
                 });
             }
         }
-        self.save_compile_run(&run)?;
-        Ok(Some(run))
+        self.save_compile_run(&run)
     }
 
     pub(crate) fn take_compile_preparations(&mut self) -> Vec<Prepare> {
@@ -1491,27 +1559,30 @@ impl Host {
                 lost(self, run)?;
                 self.end_compile(run, CompileOutcome::Lost, reason)
             }
-            Stopped::Lost => {
+            Stopped::Lost(machine) => {
                 lost(self, run)?;
-                let reason = "Another Mac claimed this run first".to_owned();
+                let reason = match machine {
+                    Some(machine) => format!("{machine} claimed this run first"),
+                    None => "Another Mac claimed this run first".to_owned(),
+                };
                 self.end_compile(run, CompileOutcome::Lost, reason)
             }
             Stopped::CompiledElsewhere(machine) => {
-                self.clear_owed(&repository)?;
+                self.settle_owed(run)?;
                 let reason = compiled_elsewhere(Some(&machine));
                 self.end_compile(run, CompileOutcome::CompiledElsewhere, reason)
             }
             Stopped::Waits(reason) => {
-                self.clear_owed(&repository)?;
+                self.settle_owed(run)?;
                 self.end_compile(run, CompileOutcome::Waiting, reason)
             }
             Stopped::Refused(why) => {
-                self.clear_owed(&repository)?;
+                self.settle_owed(run)?;
                 let reason = format!("GitHub refused the claim: {why}");
                 self.end_compile(run, CompileOutcome::Failed, reason)
             }
             Stopped::Failed(error) => {
-                self.clear_owed(&repository)?;
+                self.settle_owed(run)?;
                 self.end_compile(run, CompileOutcome::Failed, error)
             }
         }
@@ -1528,18 +1599,18 @@ impl Host {
                 "INSERT INTO compile_claims(run,commit_id,due) VALUES (?1,?2,?3)",
                 params![run.id, commit, due],
             )?;
-            self.clear_owed(&run.repository)?;
+            self.settle_owed(&run)?;
         }
         if run.outcome != CompileOutcome::Running {
             return self.end_claim(&run);
         }
+        run.pending = prepared.pending;
         let gathered = match prepared.gathered {
             Ok(gathered) => gathered,
             Err(stopped) => return self.compile_stopped(&mut run, stopped),
         };
-        run.pending = gathered.pending;
         if gathered.entries.is_empty() {
-            self.clear_owed(&run.repository)?;
+            self.settle_owed(&run)?;
             let reason = "No pending entries · no model call".to_owned();
             return self.end_compile(&mut run, CompileOutcome::Skipped, reason);
         }
@@ -2034,11 +2105,23 @@ impl Host {
                 let oldest = status.oldest_pending?;
                 Some(status.last_compile.map_or(oldest, |at| at.max(oldest)))
             });
+            let space = brain.spaces.first().map(|id| self.space(id)).transpose()?;
+            let compile = space.and_then(|space| self.tracker(&space.space).ok()?.compile);
+            let next_run = (compile.as_ref())
+                .and_then(|compile| jobs::next_time(&schedule(compile).ok()?, now()).ok())
+                .flatten();
             states.push(BrainCompileState {
                 behind: self.falling_behind(&brain, &compilers, pending, waiting_since)?,
                 run_now_waits: (self.running_compile(&brain.repository)?)
                     .map(|_| "A compile run is in progress".into()),
                 compiles_here: self.compiles_here(&storage)?,
+                this_host: self.host_id()?,
+                this_mac: sync::machine_name(),
+                this_timezone: jobs::local_timezone(),
+                compile,
+                next_run,
+                space_id: brain.spaces.first().cloned(),
+                local: Self::storage_key(&storage).is_none(),
                 last_run,
                 compilers,
                 repository: brain.repository,
@@ -2369,6 +2452,9 @@ mod tests {
     impl Stored {
         /// What a run's preparation finds now, as the service gathers it.
         fn gather(&self) -> Gathered {
+            self.prepared().gathered.unwrap()
+        }
+        fn prepared(&self) -> Prepared {
             let prepare = Prepare {
                 run_id: "r".into(),
                 checkout: self.clone_folder(),
@@ -2378,7 +2464,7 @@ mod tests {
                 claimer: None,
                 waits: None,
             };
-            prepare.run(&self.tools).gathered.unwrap()
+            prepare.run(&self.tools)
         }
         fn head(&self) -> String {
             let brain = self.f.host.brain(REPO).unwrap();
@@ -2386,8 +2472,11 @@ mod tests {
             self.f.host.brain_head(&storage).unwrap().unwrap()
         }
         /// Prepares every queued run, reads every owed tip and ends every claim, handing each to
-        /// the host, as the service does.
+        /// the host, as the service does, after the pass a Run now waits for.
         fn prepare(&mut self) {
+            if !self.f.host.run_now_pulls.is_empty() {
+                self.sync();
+            }
             self.end_claims();
             for read in self.f.host.take_compile_tip_reads() {
                 let reading = read.run(&self.tools.git);
@@ -2518,8 +2607,9 @@ mod tests {
         let mut b = brained();
         let entries: Vec<(String, String)> = (1..=203).map(relay).collect();
         let head = b.merge(&entries);
-        let gathered = b.gather();
-        assert_eq!((gathered.pending, gathered.entries.len()), (203, 200));
+        let prepared = b.prepared();
+        let gathered = prepared.gathered.unwrap();
+        assert_eq!((prepared.pending, gathered.entries.len()), (203, 200));
         assert_eq!(gathered.entries[0].id, id(1));
         assert_eq!(gathered.cursor.through, None);
         assert_eq!(gathered.cursor.after.len(), 200);
@@ -3688,6 +3778,10 @@ mod tests {
         let run = b.runs().remove(0);
         assert_eq!(run.outcome, CompileOutcome::Waiting);
         assert!(run.reason.contains("Brain compiler"), "{}", run.reason);
+        assert_eq!(
+            run.pending, 1,
+            "it read the entry waiting before it stopped"
+        );
         assert_eq!(b.tip(), None);
         assert!(b.owed().is_none());
         b.with_compiler_row();
@@ -3696,6 +3790,56 @@ mod tests {
         let run = b.runs().remove(0);
         assert_eq!((run.outcome, run.model_calls), (CompileOutcome::Waiting, 0));
         assert_eq!(b.tip(), None, "the next volunteer takes the run");
+    }
+
+    #[test]
+    fn run_now_reads_main_after_a_pass_and_leaves_a_due_run_this_mac_owes() {
+        let mut b = brained();
+        b.with_compiler_row();
+        // A teammate's entry this Mac has not pulled, and a due run waiting for a pull.
+        b.commit(&[relay(1)]);
+        (b.f.host.owe_compile(REPO, DUE, CompileTrigger::Scheduled)).unwrap();
+        b.f.host.run_brain_compile(REPO).unwrap();
+        let run = b.runs().remove(0);
+        assert_eq!((run.outcome, run.pending), (CompileOutcome::Running, 0));
+        assert!(
+            b.f.host.take_compile_preparations().is_empty(),
+            "a pass goes first"
+        );
+        b.prepare();
+        let run = b.runs().remove(0);
+        assert_eq!(
+            (run.outcome, run.pending),
+            (CompileOutcome::Running, 1),
+            "{}",
+            run.reason
+        );
+        assert!(b.tip().is_some(), "Run now claimed");
+        assert_eq!(
+            b.owed().map(|owed| owed.due).as_deref(),
+            Some(DUE),
+            "still owed"
+        );
+    }
+
+    #[test]
+    fn a_run_now_whose_pass_cannot_reach_github_waits_and_claims_nothing() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        b.with_compiler_row();
+        b.f.host.run_brain_compile(REPO).unwrap();
+        b.github
+            .offline
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(b.sync_answering().is_err());
+        let run = b.runs().remove(0);
+        assert_eq!(run.outcome, CompileOutcome::Waiting);
+        assert!(
+            run.reason.contains("could not be reached"),
+            "{}",
+            run.reason
+        );
+        assert!(b.f.host.run_now_pulls.is_empty());
     }
 
     #[test]
@@ -3914,7 +4058,7 @@ mod tests {
         ));
         let lost = b.runs().remove(0);
         assert_eq!(lost.outcome, CompileOutcome::Lost);
-        assert_eq!(lost.reason, "Another Mac claimed this run first");
+        assert_eq!(lost.reason, format!("{THEIR_MAC} claimed this run first"));
         // This Mac's one push and the teammate's: nothing goes again.
         assert_eq!(b.claims(), 1);
         assert_eq!(b.tip().unwrap().machine, THEIR_MAC);
@@ -4021,6 +4165,7 @@ mod tests {
         b.pull();
         let run = b.run_named(&run);
         assert_eq!(run.outcome, CompileOutcome::Lost);
+        assert!(run.reason.starts_with(THEIR_MAC), "{}", run.reason);
         assert_eq!(run.commit, None);
         assert_eq!((b.github.log("%s").len(), b.claims()), (commits, claims));
         assert_eq!(b.cursor_on_main(), Cursor::default());

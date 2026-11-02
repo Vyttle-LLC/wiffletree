@@ -83,18 +83,18 @@ Each Mac scans what it pulls, and raises the Inbox card.
 
 New Space, repository checks, the Space page, Bring in a brain, joining, and the Brains page, as `ui/mockups.html` draws them.
 
-- [ ] 5.1 New Space: the one form, Create with `gh` as private, a repository that already holds a folder fixing its folder, prefix and time, and compile on this Mac by default.
-- [ ] 5.2 Repository checks: private and who can read it, direct push read from rulesets and branch protection, and the warning for history.
-- [ ] 5.3 Protect history: the ruleset through `gh`, GitHub's refusal shown, and the warning kept.
-- [ ] 5.4 The Space page: one Repository box, the four Brain rows gone, and Sync now, Import from Linear…, Bring in a brain…, Move… and Move into `wiffletree/`.
-- [ ] 5.5 Bring in a brain, reader: `legacy_logs.rs` reads a folder on this Mac, `blame --contents` with `GIT_OPTIONAL_LOCKS=0`, the pointer for an uncommitted copy, and no write there (decision 7).
-- [ ] 5.6 Bring in a brain, landing: entries byte for byte or derived, pages byte for byte, skipped pages listed, compiled ids added to `compiled-after` with any cursor kept, commits of at most 200 files, scanned, `compile`, `allowed_email_domains` and the compiler carried from `wiffletree-brain.json`, and the `brain` key and old checkout dropped at the end.
-- [ ] 5.7 Bring in a brain, form: what it brings, what it leaves, shortened entries, and the warning for files not on GitHub, filled in from a Space's `brain` key.
-- [ ] 5.8 Joining: one repository, the folder found, Spaces with counts, code repositories only, and Also on this Mac off by default.
-- [ ] 5.9 The Brains page: groups by wiki, Macs with this Mac's tick, Change, Run now, the no-volunteer banner, and what has no project to go to, drawn in the space 2.12 left.
-- [ ] 5.10 Check tests: a public repository, a repository requiring pull requests, a usable one with history unprotected, and a repository of other documents.
-- [ ] 5.11 Bring in tests, on a repository with changed, untracked and never-committed files: all land; `git status`, the index and every file in the original are byte-identical after; again adds nothing; `repos:` survives; a held entry lands nothing twice; already-compiled entries read as compiled on a second Mac; uncompiled entries already in the folder stay pending, and an existing cursor is unchanged, on a first and a second Bring in.
-- [ ] 5.12 Run the app on a seeded store, dark and light, and compare each screen with `ui/mockups.html`.
+- [x] 5.1 New Space: the one form, Create with `gh` as private, a repository that already holds a folder fixing its folder, prefix and time, and compile on this Mac by default.
+- [x] 5.2 Repository checks: private and who can read it, direct push read from rulesets and branch protection, and the warning for history.
+- [x] 5.3 Protect history: the ruleset through `gh`, GitHub's refusal shown, and the warning kept.
+- [x] 5.4 The Space page: one Repository box, the four Brain rows gone, and Sync now, Import from Linear…, Bring in a brain…, Move… and Move into `wiffletree/`.
+- [x] 5.5 Bring in a brain, reader: `legacy_logs.rs` reads a folder on this Mac, `blame --contents` with `GIT_OPTIONAL_LOCKS=0`, the pointer for an uncommitted copy, and no write there (decision 7).
+- [x] 5.6 Bring in a brain, landing: entries byte for byte or derived, pages byte for byte, skipped pages listed, compiled ids added to `compiled-after` with any cursor kept, commits of at most 200 files, scanned, `compile`, `allowed_email_domains` and the compiler carried from `wiffletree-brain.json`, and the `brain` key and old checkout dropped at the end.
+- [x] 5.7 Bring in a brain, form: what it brings, what it leaves, shortened entries, and the warning for files not on GitHub, filled in from a Space's `brain` key.
+- [x] 5.8 Joining: one repository, the folder found, Spaces with counts, code repositories only, and Also on this Mac off by default.
+- [x] 5.9 The Brains page: groups by wiki, Macs with this Mac's tick, Change, Run now, the no-volunteer banner, and what has no project to go to, drawn in the space 2.12 left.
+- [x] 5.10 Check tests: a public repository, a repository requiring pull requests, a usable one with history unprotected, and a repository of other documents.
+- [x] 5.11 Bring in tests, on a repository with changed, untracked and never-committed files: all land; `git status`, the index and every file in the original are byte-identical after; again adds nothing; `repos:` survives; a held entry lands nothing twice; already-compiled entries read as compiled on a second Mac; uncompiled entries already in the folder stay pending, and an existing cursor is unchanged, on a first and a second Bring in.
+- [x] 5.12 Run the app on a seeded store, dark and light, and compare each screen with `ui/mockups.html`.
 
 ## 6. Words and docs
 

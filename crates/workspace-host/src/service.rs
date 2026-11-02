@@ -622,8 +622,10 @@ enum StorageChoice {
         description: String,
         additions: String,
         prefix: Option<String>,
+        setup: SpaceSetup,
     },
-    Join(Vec<JoinSpace>),
+    /// The Spaces to join, and whether this Mac compiles their wiki too.
+    Join(Vec<JoinSpace>, bool),
 }
 enum Event {
     KeeperPolled(
@@ -686,6 +688,14 @@ enum Event {
     StorageStaged {
         staged: Result<storage::Staged>,
         then: StorageChoice,
+        reply: Reply,
+    },
+    /// A brain folder on this Mac was read off the host thread, for Bring in's form or, with
+    /// `land`, to bring it in.
+    BrainRead {
+        space_id: SpaceId,
+        read: Result<legacy_logs::LegacyRead>,
+        land: bool,
         reply: Reply,
     },
     /// Codex's account limits, read on their own thread, to record.
@@ -1565,17 +1575,87 @@ impl Actor {
                 additions,
                 prefix,
                 storage: Some(repository),
+                setup,
             } => {
                 let then = StorageChoice::Create {
                     name: name.clone(),
                     description: description.clone(),
                     additions: additions.clone(),
                     prefix: prefix.clone(),
+                    setup: setup.clone(),
                 };
                 self.stage_storage(repository, then, reply)?;
             }
-            Command::JoinSpaces { repository, spaces } => {
-                self.stage_storage(repository, StorageChoice::Join(spaces.clone()), reply)?;
+            Command::JoinSpaces {
+                repository,
+                spaces,
+                compile_here,
+            } => {
+                let then = StorageChoice::Join(spaces.clone(), *compile_here);
+                self.stage_storage(repository, then, reply)?;
+            }
+            // With no repository to take an owner from and no login read yet, `gh` is asked
+            // off the host thread.
+            Command::SpaceFormDefaults => {
+                let defaults = self.host.space_form_defaults()?;
+                let (tools, home, reply) = (
+                    self.publish_tools.clone(),
+                    self.host.home.clone(),
+                    reply.clone(),
+                );
+                std::thread::spawn(move || {
+                    let mut defaults = defaults;
+                    if defaults.owner.is_none()
+                        && let spaces::GhAccount::SignedIn(login) =
+                            spaces::gh_account(&tools, &home)
+                    {
+                        defaults.owner = Some(login);
+                    }
+                    let _ =
+                        reply.try_send(serde_json::to_value(defaults).map_err(|e| e.to_string()));
+                });
+            }
+            // GitHub answers off the host thread; nothing here changes.
+            Command::ProtectHistory { repository } => {
+                validate_repository_identity(repository)?;
+                let (home, name, reply) =
+                    (self.host.home.clone(), repository.clone(), reply.clone());
+                let tools = self.publish_tools.clone();
+                std::thread::spawn(move || {
+                    let result = github_access::protect_history(&tools, &home, &name)
+                        .map(|()| Value::Null)
+                        .map_err(|e| format!("{e:#}"));
+                    let _ = reply.try_send(result);
+                });
+            }
+            // The original is read off the host thread, as authors are asked of GitHub; the
+            // Space's folder is compared and written on it.
+            Command::PreviewBringIn {
+                space_id,
+                from,
+                folder,
+            }
+            | Command::BringIn {
+                space_id,
+                from,
+                folder,
+            } => {
+                let land = matches!(command, Command::BringIn { .. });
+                let importer = self.host.bring_in_importer(space_id)?;
+                let (from, folder) = (PathBuf::from(from), folder.clone());
+                let tools = self.publish_tools.clone();
+                spawn_job(
+                    self.sender.clone(),
+                    (space_id.clone(), reply.clone()),
+                    move |_| legacy_logs::LegacyRead::read(&from, &folder, &importer, land, &tools),
+                    |_| Err(anyhow::anyhow!("Reading the brain stopped unexpectedly")),
+                    move |(space_id, reply), read| Event::BrainRead {
+                        space_id,
+                        read,
+                        land,
+                        reply,
+                    },
+                );
             }
             Command::SetUpSettingsRepository { repository }
             | Command::JoinSettingsRepository { repository, .. } => {
@@ -1883,6 +1963,7 @@ impl Actor {
                 |prepare| crate::compile::Prepared {
                     run_id: prepare.run_id.clone(),
                     claim: None,
+                    pending: 0,
                     gathered: Err(crate::compile::Stopped::Failed(
                         "The compile's preparation stopped unexpectedly".into(),
                     )),
@@ -1955,31 +2036,43 @@ impl Actor {
         let added = self.host.space_ids()?;
         let (home, input, reply) = (self.host.home.clone(), repository.to_owned(), reply.clone());
         let (sender, tools) = (self.sender.clone(), self.publish_tools.clone());
-        // Every refusal runs before an empty repository gets its first commit.
-        let requested = match &then {
+        // Every refusal runs before GitHub creates the repository or an empty one gets its first
+        // commit.
+        let (requested, create) = match &then {
             StorageChoice::Create {
                 name,
                 description,
                 additions,
                 prefix,
-            } => Some(self.host.precheck_stored_space(
-                &storage::NewSpace {
-                    name,
-                    description,
-                    additions,
-                    prefix: prefix.as_deref(),
-                },
-                repository,
-            )?),
-            StorageChoice::Join(_) => None,
+                setup,
+            } => {
+                let requested = self.host.precheck_stored_space(
+                    &storage::NewSpace {
+                        name,
+                        description,
+                        additions,
+                        prefix: prefix.as_deref(),
+                        setup,
+                    },
+                    repository,
+                )?;
+                (Some(requested), setup.create_repository)
+            }
+            StorageChoice::Join(..) => (None, false),
         };
         std::thread::spawn(move || {
-            let staged = storage::stage(&home, &input, &tools, &added).and_then(|staged| {
-                if let Some(requested) = requested {
-                    storage::start_if_empty(&home, &staged, &requested, &tools)?;
-                }
-                Ok(staged)
-            });
+            let created = match (&requested, create) {
+                (Some(requested), true) => github_access::create_private(&tools, &home, requested),
+                _ => Ok(()),
+            };
+            let staged = created
+                .and_then(|()| storage::stage(&home, &input, &tools, &added))
+                .and_then(|staged| {
+                    if let Some(requested) = requested {
+                        storage::start_if_empty(&home, &staged, &requested, &tools)?;
+                    }
+                    Ok(staged)
+                });
             let _ = sender.send_blocking(Event::StorageStaged {
                 staged,
                 then,
@@ -2426,19 +2519,21 @@ impl Actor {
                             description,
                             additions,
                             prefix,
+                            setup,
                         } => {
                             let new = storage::NewSpace {
                                 name: &name,
                                 description: &description,
                                 additions: &additions,
                                 prefix: prefix.as_deref(),
+                                setup: &setup,
                             };
                             Ok(serde_json::to_value(
                                 self.host.create_stored_space(&new, staged)?,
                             )?)
                         }
-                        StorageChoice::Join(spaces) => Ok(serde_json::to_value(
-                            self.host.join_spaces(staged, &spaces)?,
+                        StorageChoice::Join(spaces, compile_here) => Ok(serde_json::to_value(
+                            self.host.join_spaces(staged, &spaces, compile_here)?,
                         )?),
                     })
                     .map_err(|e| format!("{e:#}"));
@@ -2450,6 +2545,22 @@ impl Actor {
                     spawn_gh_login_read(self.sender.clone(), tools, home);
                 }
                 added
+            }
+            Event::BrainRead {
+                space_id,
+                read,
+                land,
+                reply,
+            } => {
+                let result = read
+                    .and_then(|read| match land {
+                        true => self.host.bring_in(&space_id, read),
+                        false => self.host.plan_bring_in(&space_id, &read),
+                    })
+                    .and_then(|plan| Ok(serde_json::to_value(plan)?))
+                    .map_err(|e| format!("{e:#}"));
+                let _ = reply.try_send(result);
+                land
             }
             Event::Synced(passed) => {
                 let at = now();
@@ -5878,11 +5989,13 @@ mod tests {
         let staged = storage::stage(&host.home, sync::tests::NAME, &github.tools(), &[]);
         let (mut actor, events, reads) = login_actor(host);
         let (reply, replies) = async_channel::bounded(1);
-        let then = StorageChoice::Join(vec![JoinSpace {
-            folder: "sage".into(),
-            brain_path: None,
-            clones: vec![],
-        }]);
+        let then = StorageChoice::Join(
+            vec![JoinSpace {
+                folder: "sage".into(),
+                clones: vec![],
+            }],
+            false,
+        );
         actor.handle(Event::StorageStaged {
             staged,
             then,

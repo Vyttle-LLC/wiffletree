@@ -473,15 +473,36 @@ fn all_states() -> Vec<crate::IssueState> {
     crate::IssueState::ALL.to_vec()
 }
 
-/// What checking a GitHub repository as a Space's storage found. Nothing was written.
+/// What checking a GitHub repository as a Space's storage found: it is private and its default
+/// branch takes a direct push, or the check is refused saying why. Nothing was written.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageCheck {
     pub repository: crate::SettingsRepository,
     pub organization: bool,
+    /// How many people GitHub lists as able to read it, when it lets this Mac count them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader_count: Option<usize>,
+    /// A ruleset or branch protection blocks force-pushes and deleting its default branch.
+    #[serde(default)]
+    pub history_protected: bool,
+    /// The Wiffletree folder it already holds, empty for one at its root; `None` for none, so a
+    /// new Space chooses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
     /// The Spaces under its `spaces/`, by folder.
     pub spaces: Vec<SpaceListing>,
     /// Its tracker's prefix; `None` when it has no `wiffletree-issues.yaml` yet.
     pub prefix: Option<String>,
+    /// When its wiki compiles, as its tracker says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compile: Option<crate::BrainCompile>,
+    /// The folder's issues, wiki pages and the Macs that compile its wiki, which its Spaces share.
+    #[serde(default)]
+    pub issues: usize,
+    #[serde(default)]
+    pub wiki_pages: usize,
+    #[serde(default)]
+    pub compilers: usize,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpaceListing {
@@ -489,31 +510,98 @@ pub struct SpaceListing {
     pub id: SpaceId,
     pub name: String,
     pub description: String,
-    /// Its brain, which joining asks for on this Mac.
-    #[serde(default)]
-    pub brain: Option<SpaceBrain>,
     /// Its code repositories, as `owner/name`, which joining asks for on this Mac.
     #[serde(default)]
     pub repositories: Vec<String>,
     /// Already added on this Mac.
     pub added: bool,
 }
-/// A Space ticked to join, with where its brain and code repositories are on this Mac. A
-/// repository with no clone named here stays missing.
+/// A Space ticked to join, with where its code repositories are on this Mac. A repository with
+/// no clone named here stays missing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JoinSpace {
     pub folder: String,
-    #[serde(default)]
-    pub brain_path: Option<String>,
     /// Folders on this Mac, each a clone of one of the Space's code repositories, which join
     /// the workspace's repositories.
     #[serde(default)]
     pub clones: Vec<String>,
 }
 
-/// What the Space page's Storage and issues box shows about a Space's storage repository.
+/// What New Space asks beyond the Space itself.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceSetup {
+    /// The Wiffletree folder of a repository that holds none yet; `DEFAULT_ROOT` without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
+    /// `gh` creates the GitHub repository, private, before anything else.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub create_repository: bool,
+    /// Compile the wiki on this Mac at this time; `None` leaves it to the human or a teammate.
+    /// A repository whose tracker already sets a time keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compile: Option<crate::BrainCompile>,
+}
+
+/// What New Space proposes: the owner of the repository it offers to create, and this Mac's
+/// timezone for the compile time.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceFormDefaults {
+    /// The most common owner among the workspace's GitHub repositories, or the `gh` login.
+    pub owner: Option<String>,
+    pub timezone: String,
+}
+
+/// What Bring in a brain reads from a brain folder on this Mac and what it would bring.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BringInPlan {
+    /// The wiki pages under `notes/`, and whether `STATUS.md` comes with them.
+    pub pages: usize,
+    pub status: bool,
+    /// The log entries and how many files hold them.
+    pub entries: usize,
+    pub entry_files: usize,
+    /// Entries shortened to fit the cap, whose full text stays in the original.
+    pub shortened: usize,
+    /// Entries and pages the Space's folder already holds, which add nothing.
+    pub already: usize,
+    /// Pages the folder already has with other text, which are left and not brought.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
+    /// Files changed or untracked in the original, so not on GitHub, and of those, the ones
+    /// never committed.
+    pub not_on_github: usize,
+    pub never_committed: usize,
+    /// Folders beside the logs and wiki that stay behind, such as `archive/`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left_behind: Vec<String>,
+    /// Entries the original had compiled, which every Mac reads as compiled.
+    pub compiled: usize,
+}
+
+/// What the Space page's Repository box shows about a Space's repository and folder.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageStatus {
+    /// The log entries in the folder, and how many wait for the next compile.
+    #[serde(default)]
+    pub entries: usize,
+    #[serde(default)]
+    pub waiting: usize,
+    /// The wiki's pages under `notes/`.
+    #[serde(default)]
+    pub wiki_pages: usize,
+    /// When the wiki last compiled, and on which Mac.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiled: Option<(i64, String)>,
+    /// When it compiles, how many Macs compile it, and whether this Mac is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compile: Option<crate::BrainCompile>,
+    #[serde(default)]
+    pub compilers: usize,
+    #[serde(default)]
+    pub compiles_here: bool,
+    /// How many people GitHub lists as able to read it, when it lets this Mac count them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader_count: Option<usize>,
     /// Its tracker's prefix; `None` for a GitHub repository joined without a tracker, which
     /// offers Set up issues.
     pub prefix: Option<String>,

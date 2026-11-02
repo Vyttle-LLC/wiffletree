@@ -3569,9 +3569,16 @@ pub enum Command {
         prefix: Option<String>,
         #[serde(default)]
         storage: Option<String>,
+        /// The folder, whether `gh` creates the repository first, and when the wiki compiles.
+        #[serde(default, flatten)]
+        setup: SpaceSetup,
     },
-    /// Read-only: checks a GitHub repository as a Space's storage and lists the Spaces it holds
-    /// and its tracker's prefix; answers with `StorageCheck`. Writes nothing.
+    /// Read-only, the human's: what New Space proposes before the human types, as
+    /// `SpaceFormDefaults`.
+    SpaceFormDefaults,
+    /// Read-only: checks a GitHub repository as a Space's storage, refusing one that is public
+    /// or whose default branch takes no direct push, and lists the Spaces it holds and its
+    /// tracker's prefix; answers with `StorageCheck`. Writes nothing.
     CheckStorageRepository {
         repository: String,
     },
@@ -3580,6 +3587,30 @@ pub enum Command {
     JoinSpaces {
         repository: String,
         spaces: Vec<JoinSpace>,
+        /// Also on this Mac: this Mac compiles the folder's wiki too.
+        #[serde(default)]
+        compile_here: bool,
+    },
+    /// Protect history: adds a GitHub ruleset on the repository's default branch that blocks
+    /// force-pushes and deleting it, and requires nothing else. GitHub's refusal is the error.
+    ProtectHistory {
+        repository: String,
+    },
+    /// Read-only, the human's: what Bring in a brain would bring into the Space's folder from
+    /// the brain folder `folder` of the clone `from` on this Mac, as `BringInPlan`. Nothing is
+    /// written anywhere.
+    PreviewBringIn {
+        space_id: SpaceId,
+        from: String,
+        folder: String,
+    },
+    /// Bring in a brain: copies the entries and pages of the brain folder `folder` of the clone
+    /// `from` into the Space's folder, through the sync engine, writing nothing in `from`;
+    /// answered with the `BringInPlan` it carried out.
+    BringIn {
+        space_id: SpaceId,
+        from: String,
+        folder: String,
     },
     /// Read-only, the human's: what the Space page shows about the Space's storage repository;
     /// answered with `StorageStatus`.
@@ -4214,6 +4245,8 @@ impl Command {
             | Self::Settings
             | Self::CheckSettingsRepository { .. }
             | Self::CheckStorageRepository { .. }
+            | Self::SpaceFormDefaults
+            | Self::PreviewBringIn { .. }
             | Self::ComparePausedFile { .. }
             | Self::SkillHistory { .. }
             | Self::BehaviorCatalog
@@ -4319,6 +4352,8 @@ impl Command {
             | Self::SetTrackerPrefix { .. }
             | Self::SetUpIssues { .. }
             | Self::MoveIntoFolder { .. }
+            | Self::ProtectHistory { .. }
+            | Self::BringIn { .. }
             | Self::RunBrainCompile { .. }
             | Self::SetCompileHere { .. }
             | Self::SetCompileTime { .. }
@@ -4389,10 +4424,10 @@ impl Command {
     /// So are the settings each layer sets: a Space's Behaviors and additions shape every agent
     /// in it, and the Workspace's every agent the human runs.
     /// Spaces are the human's: creating, editing or removing one, moving a project into one and
-    /// choosing which repositories it lists, and reading where its storage is on this Mac. So
-    /// are a project's added repositories. So are brains: a compile's Run now, ruling on a
-    /// conflict, fixing or releasing a held entry, and reading, editing, marking or discarding
-    /// one a scan held.
+    /// choosing which repositories it lists, reading where its storage is on this Mac, and
+    /// protecting its repository's history. So are a project's added repositories. So are
+    /// brains: a compile's Run now, ruling on a conflict, fixing or releasing a held entry,
+    /// reading, editing, marking or discarding one a scan held, and bringing a brain in.
     /// Every write to a tracker is the human's, settling a paused issue file, following an issue
     /// and every step of a Linear import too; reading issues is not. Remote access is the human's
     /// too: its state carries the pairing code. The assistant is the human's: its threads, their
@@ -4456,6 +4491,10 @@ impl Command {
                 | Self::SetTrackerPrefix { .. }
                 | Self::SetUpIssues { .. }
                 | Self::MoveIntoFolder { .. }
+                | Self::ProtectHistory { .. }
+                | Self::PreviewBringIn { .. }
+                | Self::BringIn { .. }
+                | Self::SpaceFormDefaults
                 | Self::CreateIssue { .. }
                 | Self::EditIssue { .. }
                 | Self::Comment { .. }
