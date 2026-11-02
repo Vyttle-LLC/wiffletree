@@ -5291,12 +5291,17 @@ mod tests {
     fn hot_path_measurements() {
         let (_home, host, ticket, _) = ticket_fixture();
         let (mut actor, _, _) = idle_actor(host);
-        actor.publish_tools.git = Arc::new(|path, args| {
-            std::thread::sleep(Duration::from_millis(300));
+        // Every Git call waits until `release` is dropped.
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = std::sync::Mutex::new(released);
+        actor.publish_tools.git = Arc::new(move |path, args| {
+            let _ = released
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10));
             runtime::git_answer(path, args)
         });
         let (reply, history_reply) = async_channel::bounded(1);
-        let started = Instant::now();
         actor.handle(Event::Command(
             Command::GitHistory {
                 repository_id: ticket.repository_id,
@@ -5305,16 +5310,13 @@ mod tests {
             },
             reply,
         ));
+        // Git is held until the release below, so a read that waited for the history could
+        // not answer here. A wall clock would also count a loaded machine's scheduling.
         let (reply, replies) = async_channel::bounded(1);
         actor.handle(Event::Command(Command::Snapshot, reply));
         replies.try_recv().unwrap().unwrap();
-        let latency = started.elapsed();
-        println!("slow Git actor turn latency: {latency:?}");
-        assert!(
-            latency < Duration::from_millis(200),
-            "unrelated read waited for Git: {latency:?}"
-        );
-        assert!(history_reply.try_recv().is_err());
+        assert!(history_reply.try_recv().is_err(), "Git is still held");
+        drop(release);
         history_reply.recv_blocking().unwrap().unwrap();
         let (_home, mut actor, session, run) = actor_with_turn();
         actor.overlaps_due_at = i64::MAX;
@@ -10454,7 +10456,7 @@ mod tests {
         let mut provider = processes::tests::Provider::start();
         let run = own_run(&mut actor, &tester, &provider);
         let watch = processes::Watch::start(provider.pid(), &run);
-        let tool = provider.run("sleep 30 >/dev/null 2>&1 & echo $!");
+        let tool = provider.run("tool sh -c 'echo $$; exec sleep 30 >/dev/null 2>&1'");
         let tool: i32 = tool.parse().unwrap();
         let _started = processes::tests::Started(vec![tool]);
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -10552,7 +10554,7 @@ mod tests {
         let mut provider = processes::tests::Provider::start();
         let run = own_run(&mut actor, &tester, &provider);
         let watch = processes::Watch::start(provider.pid(), &run);
-        let tool = provider.run("sleep 30 >/dev/null 2>&1 & echo $!");
+        let tool = provider.run("tool sh -c 'echo $$; exec sleep 30 >/dev/null 2>&1'");
         let tool: i32 = tool.parse().unwrap();
         let _started = processes::tests::Started(vec![tool]);
         // The run's thread has taken the tool's sighting from the watcher and not handed it

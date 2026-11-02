@@ -502,6 +502,9 @@ impl World {
                 .and_then(|c| c.group);
             group.is_some()
         });
+        // Until it waits at its gate, the double still reads from the host and would exit with it.
+        let waiting = self.scratch.path().join("gate-compact.waiting");
+        until("the compaction to wait at its gate", || waiting.exists());
         headless.kill().unwrap();
         headless.wait().unwrap();
         // A child the host was starting holds a copy of the store's lock until its exec, past

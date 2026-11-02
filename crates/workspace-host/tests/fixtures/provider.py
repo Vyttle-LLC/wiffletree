@@ -43,8 +43,10 @@ if '/context' in args:
     print(json.dumps({'is_error':False,'num_turns':0,'result':report}))
     sys.exit(0)
 def wait_for(gate):
+    # `<gate>.waiting` says the double has got this far and no longer needs the host.
+    scratch=Path(os.environ['WORKSPACE_TEST_USAGE_DIR']);(scratch/f'{gate}.waiting').touch()
     deadline=time.time()+30
-    while not (Path(os.environ['WORKSPACE_TEST_USAGE_DIR'])/gate).exists() and time.time()<deadline:time.sleep(0.02)
+    while not (scratch/gate).exists() and time.time()<deadline:time.sleep(0.02)
 if args[:1]==['app-server']:
     # Codex's app-server for one compaction, not a turn: it checks the four requests it reads
     # and replays the server side of a recorded exchange. `codex-compact.json` in the test's
