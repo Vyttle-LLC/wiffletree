@@ -20,7 +20,7 @@
 - **One goal, one coordinator.** You describe an outcome, and a coordinator plans it, staffs it and reports back.
 - **A team of agents.** Claude and Codex play any role, and you choose who runs what.
 - **Tested branches.** Someone other than the author checks every ticket before it is accepted.
-- **Memory that lasts.** A Space can keep a second brain, a Git repository of what your team decided and learned.
+- **Memory that lasts.** Every Space keeps a second brain of what your team decided and learned, in the Space's own repository.
 - **Why we built it.** The hard part moved from writing code to keeping several agents on one goal, and that work cuts across repositories.
 
 The full explanation of everything below is in **[docs/FEATURES.md](docs/FEATURES.md)**.
@@ -113,25 +113,26 @@ The full explanation of everything below is in **[docs/FEATURES.md](docs/FEATURE
 ### Spaces
 
 - A Space answers "where does this go?" for projects, threads, jobs and issues.
-- It holds a brain, code repositories, instructions for every role and its own model rows.
-- A new Space is local and never pushed. To share one, store it in a private GitHub repository.
+- It holds code repositories, instructions for every role and its own model rows.
+- One repository holds everything a Space shares in its `wiffletree/` folder: the Space, its issues and its brain.
+- A local repository is never pushed. To share a Space, keep it in a private GitHub repository.
 - Only you create and edit Spaces. No agent tool can.
 
 [More on Spaces](docs/FEATURES.md#spaces)
 
 ### Second brain
 
-- **Logging:** agents record decisions as they work, and entries reach the brain in batched pull requests.
+- **Logging:** agents record decisions as they work, and each entry lands straight in the brain within seconds.
 - **Reading:** agents ask with `query_brain`, and you use the brain browser's Status, Wiki, Logs and Conflicts views or ⌘K.
-- **Compile:** one Mac folds entries into notes on a schedule, and conflicts come to you as Inbox cards.
-- **The brain gate:** seven deterministic checks guard `main`, including secret and personal-data scans.
+- **Compile:** a Mac that volunteers folds entries into the wiki on a schedule, and conflicts come to you as Inbox cards.
+- **Scans:** each Mac scans what it pushes for secrets and personal data and holds a slip back, and scans what it pulls and raises an alert.
 
 [More on the second brain](docs/FEATURES.md#second-brain)
 
 ### Issues
 
 - The Issues page shows every Space's issues as a list or a board.
-- Each issue is plain files in its Space's storage repository, and it stays in Git history for good.
+- Each issue is plain files in its Space's repository, and it stays in Git history for good.
 - Start a project from an issue, import from Linear, or let the assistant suggest changes for you to apply.
 
 [More on issues](docs/FEATURES.md#issues)
@@ -183,7 +184,8 @@ The full explanation of everything below is in **[docs/FEATURES.md](docs/FEATURE
 > - **Agents can run any command on your Mac with your credentials,** including a push or a merge. Wiffletree does not prevent that.
 > - **Wiffletree pushes and opens pull requests itself:** without asking for owners you allow, and after your approval elsewhere.
 > - **It merges through its checked merge,** when the coordinator asks, for allowed owners, and never into a protected branch.
-> - **Brain branches auto-merge.** It pushes `wiffletree/brain/` branches, and GitHub merges each once the gate passes, except Set up's and Update gate's.
+> - **A Space's repository takes direct pushes.** Every log entry, issue change and compile is a commit on `main` with no review, and anyone with write access can change anything there.
+> - **A slip stays in history.** Removing it adds a commit; [cleaning history](docs/clean-history.md) needs an admin.
 > - **The PR keeper, if you turn it on, rewrites branches,** which changes every commit id on a pull request.
 > - **The PR keeper's model gets one try** at a conflict or failed checks, and only what it leaves behind is checked.
 > - **Your checks command runs as you wrote it.**

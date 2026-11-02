@@ -251,7 +251,7 @@ fn the_features_page_says_what_wiffletree_publishes_and_what_it_cannot_prevent()
         "pushes a ticket's branch and opens its pull request only through its own checked operation",
         "It merges a ticket's pull request only through its own checked merge",
         "It never merges into a protected branch and never approves, closes or comments on a ticket's pull request.",
-        "it closes one only when you choose Discard",
+        "Wiffletree pushes straight to its `main`, with no pull request and no review",
         "Agents can still run any command on your Mac, including a push or a merge",
         "**Humans own integration.**",
         "You merge into protected branches",
