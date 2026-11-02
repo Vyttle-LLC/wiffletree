@@ -200,6 +200,11 @@ fn ticket_row(ticket: &Ticket, p: Palette) -> Div {
                 .text_color(p.focus)
                 .child(
                     div()
+                        // The id keeps the hover state, which text laid out before painting needs.
+                        .id(SharedString::from(format!(
+                            "ticket-table-pr-label-{}",
+                            ticket.id
+                        )))
                         .min_w_0()
                         .text_ellipsis()
                         .underline()
