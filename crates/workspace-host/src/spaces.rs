@@ -238,6 +238,51 @@ pub(crate) fn gh_account(tools: &publish::Tools, home: &Path) -> GhAccount {
     }
 }
 
+/// What New Space proposes: `login`, or else the account gh is signed in to, then the
+/// organizations gh can see, and this Mac's timezone. An organization listing that fails
+/// leaves just the login. Runs `gh`, so it belongs off the host thread.
+pub(crate) fn space_form_defaults(
+    tools: &publish::Tools,
+    home: &Path,
+    login: Option<String>,
+) -> SpaceFormDefaults {
+    let login = login.or_else(|| match gh_account(tools, home) {
+        GhAccount::SignedIn(login) => Some(login),
+        GhAccount::SignedOut | GhAccount::Unknown => None,
+    });
+    let organizations = match login {
+        Some(_) => gh_organizations(tools, home).unwrap_or_default(),
+        None => vec![],
+    };
+    SpaceFormDefaults {
+        owners: repository_owners(login, organizations),
+        timezone: jobs::local_timezone(),
+    }
+}
+
+/// The logins of the organizations gh's account belongs to, every page of them.
+fn gh_organizations(tools: &publish::Tools, home: &Path) -> Result<Vec<String>> {
+    let args = [
+        "api",
+        "--hostname",
+        repositories::GITHUB_HOST,
+        "--paginate",
+        "--jq",
+        ".[].login",
+        "user/orgs",
+    ];
+    let answer = (tools.gh)(home, &args)?;
+    ensure!(
+        answer.status.success(),
+        "GitHub could not list organizations: {}",
+        answer.error
+    );
+    Ok((answer.output.lines().map(str::trim))
+        .filter(|login| !login.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
 /// When `gh`'s account file last changed, which signing in, out or to another account does;
 /// `None` while it has none.
 pub(crate) fn gh_account_stamp() -> Option<std::time::SystemTime> {
@@ -451,23 +496,6 @@ impl Host {
             })
         })?;
         Ok(SpaceRecord { space, local })
-    }
-    /// What New Space proposes: the most common owner of the workspace's GitHub repositories,
-    /// or else the `gh` login, for the repository it offers to create, and this Mac's timezone.
-    pub fn space_form_defaults(&self) -> Result<SpaceFormDefaults> {
-        let mut owners: BTreeMap<String, usize> = BTreeMap::new();
-        for repository in self.repositories()? {
-            if let Some(github) = repository.github {
-                *owners.entry(github.owner).or_default() += 1;
-            }
-        }
-        let most = owners.into_iter().max_by_key(|(_, count)| *count);
-        Ok(SpaceFormDefaults {
-            owner: most
-                .map(|(owner, _)| owner)
-                .or_else(|| self.gh_login.clone()),
-            timezone: jobs::local_timezone(),
-        })
     }
     /// Replaces a Space's definition. Its storage stays where it is.
     pub fn update_space(&mut self, space: Space) -> Result<SpaceRecord> {
@@ -982,6 +1010,58 @@ mod tests {
             }),
             ..publish::Tools::default()
         }
+    }
+
+    /// gh answering `user` with `login` and `user/orgs` with `orgs`, or failing it.
+    fn gh_with_organizations(login: &'static str, orgs: Option<&'static str>) -> publish::Tools {
+        publish::Tools {
+            gh: std::sync::Arc::new(move |_, args| {
+                let (code, output) = match args.last() {
+                    Some(&"user") => (0, json!({"login": login}).to_string()),
+                    Some(&"user/orgs") => match orgs {
+                        Some(orgs) => (0, orgs.to_owned()),
+                        None => (1, String::new()),
+                    },
+                    _ => panic!("unexpected gh {args:?}"),
+                };
+                Ok(runtime::GhAnswer {
+                    status: std::os::unix::process::ExitStatusExt::from_raw(code << 8),
+                    output,
+                    error: String::new(),
+                })
+            }),
+            ..publish::Tools::default()
+        }
+    }
+
+    fn owner_logins(defaults: &SpaceFormDefaults) -> Vec<&str> {
+        defaults.owners.iter().map(|o| o.login.as_str()).collect()
+    }
+
+    #[test]
+    fn new_space_offers_the_login_first_then_its_organizations() {
+        let home = Path::new("/");
+        let gh = gh_with_organizations("MHohlios", Some("Vyttle-LLC\nSage-Social\n"));
+        let defaults = space_form_defaults(&gh, home, None);
+        assert_eq!(
+            owner_logins(&defaults),
+            ["MHohlios", "Vyttle-LLC", "Sage-Social"]
+        );
+        assert!(!defaults.owners[0].organization && defaults.owners[1].organization);
+        let known = space_form_defaults(&gh, home, Some("jlin".into()));
+        assert_eq!(owner_logins(&known)[0], "jlin", "the login already read");
+    }
+
+    #[test]
+    fn a_failed_organization_listing_offers_just_the_login() {
+        let home = Path::new("/");
+        let gh = gh_with_organizations("MHohlios", None);
+        assert_eq!(
+            owner_logins(&space_form_defaults(&gh, home, None)),
+            ["MHohlios"]
+        );
+        let signed_out = space_form_defaults(&gh_answering(4, ""), home, None);
+        assert!(signed_out.owners.is_empty());
     }
 
     #[test]

@@ -23,13 +23,15 @@ pub(super) enum Mark {
 }
 
 impl SpacesPage {
-    /// Fills New Space as it opens: the owner to propose, this Mac's timezone and the first
-    /// color no Space shows.
+    /// Fills New Space as it opens: the owners to offer, the human's own account first, this
+    /// Mac's timezone and the first color no Space shows.
     pub(super) fn open_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.choice = RepositoryChoice::Create;
         self.compile_here = true;
         self.new_color = SpaceColor::first_unused(self.spaces());
         self.prefix_proposed = None;
+        self.repository_name_proposed = None;
+        self.owner = None;
         self.folder_input.update(cx, |input, cx| {
             input.set_value(format!("{DEFAULT_ROOT}/"), window, cx)
         });
@@ -43,7 +45,8 @@ impl SpacesPage {
                 let Ok(defaults) = defaults else {
                     return;
                 };
-                view.on_github = defaults.owner.is_some();
+                view.owner = defaults.owners.first().map(|owner| owner.login.clone());
+                view.on_github = view.owner.is_some();
                 view.timezone_input.update(cx, |input, cx| {
                     input.set_value(defaults.timezone.clone(), window, cx)
                 });
@@ -53,43 +56,52 @@ impl SpacesPage {
         );
     }
 
-    /// Proposes the prefix from the name as the human types it, until they type their own.
+    /// Proposes the prefix and the repository's name from the Space's name as the human types
+    /// it, each until they type their own.
     pub(super) fn name_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.shown != Some(Shown::New) {
-            return;
-        }
-        let typed = self.prefix_input.read(cx).value().to_string();
-        if !typed.is_empty() && self.prefix_proposed.as_deref() != Some(typed.as_str()) {
             return;
         }
         let name = self.name.read(cx).value().trim().to_owned();
         let taken: Vec<String> = (self.shared.snapshot().into_iter())
             .flat_map(|s| s.issue_trackers.iter().filter_map(|t| t.prefix.clone()))
             .collect();
-        let proposed = (!name.is_empty()).then(|| propose_prefix(&name, &taken));
-        let value = proposed.clone().unwrap_or_default();
-        self.prefix_input
-            .update(cx, |input, cx| input.set_value(value, window, cx));
-        self.prefix_proposed = proposed;
+        let prefix = (!name.is_empty()).then(|| propose_prefix(&name, &taken));
+        follow(
+            &self.prefix_input,
+            &mut self.prefix_proposed,
+            prefix,
+            window,
+            cx,
+        );
+        let repository = Some(proposed_repository_name(&name));
+        let input = &self.repository_name_input;
+        follow(
+            input,
+            &mut self.repository_name_proposed,
+            repository,
+            window,
+            cx,
+        );
         cx.notify();
     }
 
-    /// The repository Create would make, `<owner>/<name>-wiffletree-storage`.
-    fn proposed_repository(&self, cx: &App) -> Option<String> {
-        let owner = self.defaults.as_ref()?.owner.as_deref()?;
-        let name = self.name.read(cx).value().trim().to_owned();
-        Some(proposed_repository(owner, &name))
+    /// The repository Create makes, `owner/name`, once gh is signed in.
+    fn repository_to_create(&self, cx: &App) -> Option<Result<String, String>> {
+        let owner = self.owner.as_deref()?;
+        let name = self
+            .repository_name_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_owned();
+        Some(repository_to_create(owner, &name))
     }
 
-    /// What the repository field names now: the one Create makes, or the one typed.
+    /// The private repository typed, to check and use.
     fn chosen_repository(&self, cx: &App) -> Option<String> {
-        match self.choice {
-            RepositoryChoice::Create => self.proposed_repository(cx),
-            RepositoryChoice::Existing => {
-                let typed = self.storage_input.read(cx).value().trim().to_owned();
-                (!typed.is_empty()).then_some(typed)
-            }
-        }
+        let typed = self.storage_input.read(cx).value().trim().to_owned();
+        (self.choice == RepositoryChoice::Existing && !typed.is_empty()).then_some(typed)
     }
 
     /// What checking the typed repository found, once checked.
@@ -115,8 +127,12 @@ impl SpacesPage {
             .then(|| self.usable(cx).cloned());
         let storage = match (self.on_github, self.choice) {
             (false, _) => None,
-            (true, RepositoryChoice::Create) => match self.proposed_repository(cx) {
-                Some(repository) => Some(repository),
+            (true, RepositoryChoice::Create) => match self.repository_to_create(cx) {
+                Some(Ok(repository)) => Some(repository),
+                Some(Err(error)) => {
+                    self.error = Some(error);
+                    return cx.notify();
+                }
                 None => {
                     self.error =
                         Some("Sign gh in to create a repository, or choose one you have".into());
@@ -426,29 +442,23 @@ impl SpacesPage {
         })
     }
 
-    /// The repository: Create `owner/name-wiffletree-storage`, or one the human has, checked.
+    /// The repository: Create under an owner with a name, or one the human has, checked.
     fn repository_field(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let proposed = self.proposed_repository(cx);
-        let label = match (self.choice, &proposed) {
-            (RepositoryChoice::Create, Some(proposed)) => format!("Create {proposed}"),
-            _ => "A private repository you already have".to_owned(),
+        const EXISTING: &str = "A private repository you already have";
+        let can_create = self.owner.is_some();
+        let label = match (self.choice, can_create) {
+            (RepositoryChoice::Create, true) => "Create",
+            _ => EXISTING,
         };
         let weak = cx.weak_entity();
-        let offered = proposed.clone();
         let menu = button("repository-choice")
             .label(label)
             .dropdown_caret(true)
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu;
                 let choices = [
-                    (
-                        offered.as_ref().map(|r| format!("Create {r}")),
-                        RepositoryChoice::Create,
-                    ),
-                    (
-                        Some("A private repository you already have".into()),
-                        RepositoryChoice::Existing,
-                    ),
+                    (can_create.then_some("Create"), RepositoryChoice::Create),
+                    (Some(EXISTING), RepositoryChoice::Existing),
                 ];
                 for (label, choice) in choices {
                     let Some(label) = label else {
@@ -464,15 +474,27 @@ impl SpacesPage {
                 }
                 menu
             });
-        let mut field = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(div().flex().child(menu));
-        if self.choice == RepositoryChoice::Create && proposed.is_some() {
-            return field.child(hint("Or choose a private repository you already have.", p));
+        let mut field = div().flex().flex_col().gap_1();
+        if self.choice == RepositoryChoice::Create && can_create {
+            let row = div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(menu)
+                .child(self.owner_menu(cx))
+                .child(hint("/", p))
+                .child(
+                    Input::new(&self.repository_name_input)
+                        .small()
+                        .flex_1()
+                        .min_w_0(),
+                );
+            return field
+                .child(row)
+                .child(hint("Or choose a private repository you already have.", p));
         }
-        if proposed.is_none() {
+        field = field.child(div().flex().child(menu));
+        if !can_create {
             field = field.child(hint("Sign gh in and Wiffletree can create one for you.", p));
         }
         let named = self.storage_input.read(cx).value().trim().to_owned();
@@ -496,6 +518,35 @@ impl SpacesPage {
             Some(check) => field.child(self.check_card(&named, check, p, cx)),
             None => field,
         }
+    }
+
+    /// The owner Create makes the repository in: the human's account or one of their
+    /// organizations.
+    fn owner_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let owners = (self.defaults.as_ref())
+            .map(|defaults| defaults.owners.clone())
+            .unwrap_or_default();
+        let chosen = self.owner.clone().unwrap_or_default();
+        let weak = cx.weak_entity();
+        button("repository-owner")
+            .label(chosen.clone())
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, _| {
+                let mut menu = menu;
+                for owner in &owners {
+                    let (weak, login) = (weak.clone(), owner.login.clone());
+                    let item = PopupMenuItem::new(owner_label(owner))
+                        .checked(owner.login == chosen)
+                        .on_click(move |_, _, cx| {
+                            let _ = weak.update(cx, |view, cx| {
+                                view.owner = Some(login.clone());
+                                cx.notify();
+                            });
+                        });
+                    menu = menu.item(item);
+                }
+                menu
+            })
     }
 
     /// Compile the wiki: On this Mac, daily at a time in a timezone, or the folder's own time.
@@ -823,16 +874,48 @@ fn radio(
         .child(div().child(title).child(hint(caption, p)))
 }
 
-/// `owner/<name>-wiffletree-storage`, the name in lowercase words.
-pub(super) fn proposed_repository(owner: &str, name: &str) -> String {
+/// Puts `proposed` in `input` and remembers it, unless the human typed their own value there.
+fn follow(
+    input: &Entity<InputState>,
+    remembered: &mut Option<String>,
+    proposed: Option<String>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let typed = input.read(cx).value().to_string();
+    if !typed.is_empty() && remembered.as_deref() != Some(typed.as_str()) {
+        return;
+    }
+    let value = proposed.clone().unwrap_or_default();
+    input.update(cx, |input, cx| input.set_value(value, window, cx));
+    *remembered = proposed;
+}
+
+/// `<name>-wiffletree-storage`, the Space's name in lowercase words.
+pub(super) fn proposed_repository_name(name: &str) -> String {
     let words: Vec<String> = (name.split(|c: char| !c.is_ascii_alphanumeric()))
         .filter(|word| !word.is_empty())
         .map(str::to_ascii_lowercase)
         .collect();
     match words.is_empty() {
-        true => format!("{owner}/wiffletree-storage"),
-        false => format!("{owner}/{}-wiffletree-storage", words.join("-")),
+        true => "wiffletree-storage".to_owned(),
+        false => format!("{}-wiffletree-storage", words.join("-")),
     }
+}
+
+/// `owner/name` for gh to create, or why GitHub would refuse it.
+pub(super) fn repository_to_create(owner: &str, name: &str) -> Result<String, String> {
+    validate_new_repository(owner, name).map_err(|error| error.to_string())?;
+    Ok(format!("{owner}/{name}"))
+}
+
+/// How the Owner menu names an owner.
+pub(super) fn owner_label(owner: &RepositoryOwner) -> String {
+    let kind = match owner.organization {
+        true => "organization",
+        false => "your account",
+    };
+    format!("{} — {kind}", owner.login)
 }
 
 /// A folder as the forms show it, `wiffletree/`, or the root for an empty one.

@@ -2249,7 +2249,11 @@ impl Host {
                 let staged = storage::stage(&self.home, &repository, &tools, &added)?;
                 serde_json::to_value(self.join_spaces(staged, &spaces, compile_here)?)?
             }
-            Command::SpaceFormDefaults => serde_json::to_value(self.space_form_defaults()?)?,
+            Command::SpaceFormDefaults => {
+                let tools = publish::Tools::default();
+                let login = self.gh_login.clone();
+                serde_json::to_value(spaces::space_form_defaults(&tools, &self.home, login))?
+            }
             Command::ProtectHistory { repository } => {
                 validate_repository_identity(&repository)?;
                 let tools = publish::Tools::default();
