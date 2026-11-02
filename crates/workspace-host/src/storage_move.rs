@@ -61,6 +61,8 @@ pub(crate) struct Move {
 pub(crate) struct Switched {
     asked: SpaceId,
     from: StorageRepository,
+    /// Says that the Spaces moved, should the rest fail.
+    moved: String,
 }
 
 /// What a move will do, as `Host::plan_storage_move` found it.
@@ -699,20 +701,31 @@ impl Host {
             // The rename now belongs to `repo_moves`, and only it may remove this folder.
             let _ = run.staging.keep();
         }
-        Ok(Switched { asked, from })
+        let place = match &run.to {
+            StorageRepository::Local { .. } => "this Mac".to_owned(),
+            repository => repository.key(),
+        };
+        Ok(Switched {
+            asked,
+            from,
+            moved: format!("{} moved to {place}", names(&moved)),
+        })
     }
     /// Makes a switched move's renames, which the next start makes after a stop, and reads the
-    /// moved tracker into the index.
+    /// moved tracker into the index. A failure here is of the rest: the Spaces have moved.
     pub(crate) fn finish_storage_move(&mut self, switched: Switched) -> Result<SpaceRecord> {
         self.end_storage_move();
-        repos::finish_moves(&self.db, &self.home)?;
         self.storage_synced
             .remove(&repos::key(&switched.from.key()));
-        let record = self.space(&switched.asked)?;
-        if let Ok(tracker) = self.tracker(&record.space) {
-            self.reindex_tracker(&record.space, &tracker.prefix)?;
-        }
-        Ok(record)
+        let finished = repos::finish_moves(&self.db, &self.home)
+            .and_then(|()| self.space(&switched.asked))
+            .and_then(|record| {
+                if let Ok(tracker) = self.tracker(&record.space) {
+                    self.reindex_tracker(&record.space, &tracker.prefix)?;
+                }
+                Ok(record)
+            });
+        finished.with_context(|| format!("{}. The next start finishes the rest", switched.moved))
     }
 }
 

@@ -894,6 +894,40 @@ fn a_stop_after_the_switch_is_finished_by_the_next_start() {
 }
 
 #[test]
+fn a_rename_that_fails_after_the_switch_says_the_space_moved_and_the_next_start_finishes_it() {
+    let folder = tempfile::tempdir().unwrap();
+    let github = empty_github(folder.path());
+    let (home, mut host) = host();
+    let (space, run) = begun(&mut host, &github);
+    let tools = github.tools();
+    copy(&run, &tools).unwrap();
+    host.note_push(&run).unwrap();
+    push(&run, &tools).unwrap();
+    let switched = host.switch_storage(run).unwrap();
+    // A file where the clone's folder must go stops the rename.
+    let blocker = home.path().join(repos::FOLDER).join("github.com");
+    fs::write(&blocker, "").unwrap();
+
+    let error = host.finish_storage_move(switched).err().unwrap();
+
+    let said = format!("{error:#}");
+    assert!(
+        said.starts_with(&format!(
+            "{PERSONAL} moved to {NAME}. The next start finishes the rest: "
+        )),
+        "{said}"
+    );
+    assert!(!host.storage_moving);
+    assert_eq!(
+        host.space(&space.id).unwrap().space.storage.repository,
+        storage::github(NAME)
+    );
+    fs::remove_file(blocker).unwrap();
+    let host = restart(home.path(), host);
+    is_on_github(home.path(), &host, &space.id);
+}
+
+#[test]
 fn a_stop_after_the_switch_to_this_mac_is_finished_by_the_next_start() {
     let folder = tempfile::tempdir().unwrap();
     let github = shared_storage(folder.path(), Some("SAGE"));

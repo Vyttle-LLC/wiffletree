@@ -2065,7 +2065,7 @@ impl Actor {
         spawn_gh_login_read(self.sender.clone(), tools, home);
         Ok(true)
     }
-    /// Ends a storage move that failed, answering why, as its Spaces stay where they were.
+    /// Ends a storage move that failed, answering why.
     fn storage_move_failed(&mut self, error: anyhow::Error, reply: &Reply) -> bool {
         self.host.end_storage_move();
         let _ = reply.try_send(Err(format!("{error:#}")));

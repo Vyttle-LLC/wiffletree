@@ -25,6 +25,8 @@ pub(super) struct MoveStorageSheet {
     /// Why the host refused, or why the Spaces stayed where they were.
     refused: Option<String>,
     busy: bool,
+    /// A Move is running, so the sheet stays open for its answer.
+    moving: bool,
 }
 impl EventEmitter<Moved> for MoveStorageSheet {}
 
@@ -39,8 +41,14 @@ pub(super) fn open(
     let sheet = cx.new(|cx| MoveStorageSheet::new(bridge, shared, space, window, cx));
     let shown = sheet.clone();
     window.open_dialog(cx, move |dialog, _, cx| {
-        let title = sheet.read(cx).title();
-        dialog.title(title).width(px(620.)).child(sheet.clone())
+        let (title, open) = (sheet.read(cx).title(), !sheet.read(cx).moving);
+        dialog
+            .title(title)
+            .width(px(620.))
+            .keyboard(open)
+            .overlay_closable(open)
+            .close_button(open)
+            .child(sheet.clone())
     });
     shown
 }
@@ -65,6 +73,7 @@ impl MoveStorageSheet {
             checked: None,
             refused: None,
             busy: false,
+            moving: false,
         };
         if !on_github {
             sheet.check(window, cx);
@@ -87,6 +96,9 @@ impl MoveStorageSheet {
             .map(|(_, plan)| plan)
     }
     fn choose_side(&mut self, on_github: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.moving {
+            return;
+        }
         self.on_github = on_github;
         self.checked = None;
         self.refused = None;
@@ -121,11 +133,13 @@ impl MoveStorageSheet {
     /// Moves the Spaces; the host checks again first, as the answer can go stale.
     fn start_move(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.busy = true;
+        self.moving = true;
         self.refused = None;
         let name = self.space.name.clone();
         let ask = ask::move_storage(self.space.id.clone(), self.target(cx));
         self.ask(ask, window, cx, move |view, moved, window, cx| {
             view.busy = false;
+            view.moving = false;
             match moved {
                 Ok(_) => {
                     window.close_dialog(cx);
@@ -133,7 +147,10 @@ impl MoveStorageSheet {
                     cx.emit(Moved);
                 }
                 Err(error) => {
-                    view.checked = None;
+                    // This Mac has no Check to press, so its plan stands for another try.
+                    if view.on_github {
+                        view.checked = None;
+                    }
                     view.refused = Some(error);
                 }
             }
@@ -171,11 +188,7 @@ impl MoveStorageSheet {
             )
     }
     fn footer(&self, plan: bool, p: Palette, cx: &mut Context<Self>) -> Div {
-        let label = match (self.busy && plan, self.on_github) {
-            (true, _) => "Moving…",
-            (false, true) => "Move to GitHub",
-            (false, false) => "Move to this Mac",
-        };
+        let label = move_label(self.moving, self.on_github);
         div()
             .flex()
             .items_center()
@@ -236,6 +249,14 @@ impl Render for MoveStorageSheet {
             body = body.child(notice(p.yellow, p.yellow, lead, rest));
         }
         body.child(self.footer(plan.is_some(), p, cx))
+    }
+}
+
+fn move_label(moving: bool, on_github: bool) -> &'static str {
+    match (moving, on_github) {
+        (true, _) => "Moving…",
+        (false, true) => "Move to GitHub",
+        (false, false) => "Move to this Mac",
     }
 }
 
@@ -362,7 +383,7 @@ fn refusal_parts(refused: &str) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{keeps_reading, refusal_parts, starts_on_github, what_moves};
+    use super::{keeps_reading, move_label, refusal_parts, starts_on_github, what_moves};
     use workspace_core::*;
 
     fn repository(name: &str) -> SettingsRepository {
@@ -415,6 +436,14 @@ mod tests {
         };
         assert!(starts_on_github(&space(local)));
         assert!(!starts_on_github(&space(github)));
+    }
+
+    #[test]
+    fn the_button_says_moving_only_during_a_move() {
+        assert_eq!(move_label(true, true), "Moving…");
+        assert_eq!(move_label(true, false), "Moving…");
+        assert_eq!(move_label(false, true), "Move to GitHub");
+        assert_eq!(move_label(false, false), "Move to this Mac");
     }
 
     #[test]
