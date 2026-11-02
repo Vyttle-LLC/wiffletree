@@ -35,6 +35,10 @@ CREATE TABLE IF NOT EXISTS log_batches (id TEXT PRIMARY KEY, brain TEXT NOT NULL
 CREATE TABLE IF NOT EXISTS log_prompts (session_id TEXT NOT NULL, ticket_id TEXT NOT NULL, milestone TEXT NOT NULL, prompted_at INTEGER NOT NULL, PRIMARY KEY(session_id,ticket_id,milestone));
 ";
 
+/// Whether the brain batch `b` an earlier release left stopped before GitHub had its entries on
+/// a pull request: still queued, or failed at its push.
+const NEVER_OPENED: &str = "json_extract(b.data,'$.stage') IN ('queued','failed') AND json_extract(b.data,'$.pull_request') IS NULL";
+
 /// Which agents may log: the project coordinator and implementers. Assistant threads log too,
 /// in their Space's brain, through their own tools; a job's run does not.
 pub(crate) fn logs_work(role: Role) -> bool {
@@ -723,11 +727,11 @@ impl Host {
     }
 
     /// Lands what an earlier release left waiting on this Mac and nothing else: each row never
-    /// exported whose batch never reached GitHub, and each queued log batch's other files, such
-    /// as a ruling, in the folder of a Space naming its brain. A row that breaks the entry
+    /// exported whose batch never reached GitHub, and each such log batch's other files, such as
+    /// a ruling, in the folder of a Space naming its brain. A row that breaks the entry
     /// contract or the cap as it stands is held, its text unchanged, and is never sent; the
     /// project's coordinator gets one Inbox item saying how many it holds. A row in a batch that
-    /// reached GitHub stays there. `true` when nothing is left for a later call, which a row with
+    /// opened a pull request or merged stays there, and one the human discarded stays discarded. `true` when nothing is left for a later call, which a row with
     /// no author until gh's login is read leaves.
     fn land_carried_over(&mut self) -> Result<bool> {
         let rows: Vec<(String, WorkLog)> = (self.db.prepare(
@@ -738,7 +742,7 @@ impl Host {
         let mut done = true;
         let mut newly_held = std::collections::BTreeSet::new();
         for (id, mut entry) in rows {
-            if self.reached_github(&entry)? {
+            if self.batch_settled(&entry)? {
                 entry.written = true;
                 self.db.execute(
                     "UPDATE work_logs SET data=?2 WHERE id=?1",
@@ -776,17 +780,19 @@ impl Host {
         Ok(done)
     }
 
-    /// Whether the batch an earlier release put `entry` in got as far as GitHub.
-    fn reached_github(&self, entry: &WorkLog) -> Result<bool> {
-        let stage: Option<String> = self
+    /// Whether the batch an earlier release put `entry` in is past landing here: it opened a pull
+    /// request, or it merged or was discarded. One that stopped before any pull request still
+    /// waits.
+    fn batch_settled(&self, entry: &WorkLog) -> Result<bool> {
+        let settled: Option<bool> = self
             .db
             .query_row(
-                "SELECT json_extract(b.data,'$.stage') FROM log_batches l JOIN brain_batches b ON b.id=l.brain_batch_id WHERE l.id=?1",
+                &format!("SELECT NOT ({NEVER_OPENED}) FROM log_batches l JOIN brain_batches b ON b.id=l.brain_batch_id WHERE l.id=?1"),
                 [&entry.batch_id],
                 |r| r.get(0),
             )
             .optional()?;
-        Ok(stage.is_some_and(|stage| stage != "queued"))
+        Ok(settled.unwrap_or(false))
     }
 
     /// Writes an unsent row to its Space's folder, giving it an entry id, its brain and its
@@ -832,13 +838,13 @@ impl Host {
         })
     }
 
-    /// Lands the files of each queued log batch no row wrote, as they stand in its worktree, in
+    /// Lands the files of each log batch that never opened a pull request and no row wrote, as they stand in its worktree, in
     /// the folder of a Space naming its brain. Nothing marks a batch done, as its rows stay
     /// unwritten: a file already in the folder, or discarded here, is left.
     fn land_queued_batches(&mut self) -> Result<()> {
-        let batches: Vec<(String, String, Value)> = (self.db.prepare(
-            "SELECT id,repository,data FROM brain_batches WHERE json_extract(data,'$.stage')='queued' AND json_extract(data,'$.kind')='log'",
-        )?)
+        let batches: Vec<(String, String, Value)> = (self.db.prepare(&format!(
+            "SELECT b.id,b.repository,b.data FROM brain_batches b WHERE {NEVER_OPENED} AND json_extract(b.data,'$.kind')='log'",
+        ))?)
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, decode(r, 2)?)))?
         .collect::<rusqlite::Result<_>>()?;
         for (id, repository, batch) in batches {
@@ -1919,6 +1925,14 @@ mod tests {
         in_a_batch(&s, queued, "queued", None);
         in_a_batch(&s, open, "checks", Some(214));
         in_a_batch(&s, merged, "merged", Some(213));
+        let (failed, refused, discarded) = (
+            "01jbx4m2k8q6v9z3n5r7t0w2yf",
+            "01jbx4m2k8q6v9z3n5r7t0w2yg",
+            "01jbx4m2k8q6v9z3n5r7t0w2yh",
+        );
+        in_a_batch(&s, failed, "failed", None);
+        in_a_batch(&s, refused, "failed", Some(215));
+        in_a_batch(&s, discarded, "discarded", None);
         // Two rows of one pull request name it once.
         s.f.host
             .db
@@ -1935,7 +1949,11 @@ mod tests {
             s.github.show(&landed(queued)).is_some(),
             "the queued entry lands"
         );
-        for left in [open, merged] {
+        assert!(
+            s.github.show(&landed(failed)).is_some(),
+            "it never reached GitHub"
+        );
+        for left in [open, merged, refused, discarded] {
             assert!(
                 s.github.show(&landed(left)).is_none(),
                 "{left} stays where it went"
@@ -1944,10 +1962,10 @@ mod tests {
         let page = s.f.host.brains_page().unwrap();
         assert_eq!(
             page.left_pull_requests,
-            [LeftPullRequest {
+            [214, 215].map(|number| LeftPullRequest {
                 repository: "Sage-Social/sagehaven-docs".into(),
-                number: 214
-            }]
+                number,
+            })
         );
         // The rows are done, so a later start lands nothing more.
         let commits = s.github.log("%s").len();
@@ -1958,7 +1976,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ruling_a_queued_batch_held_lands_from_its_worktree() {
+    fn a_ruling_in_a_batch_that_failed_before_any_pull_request_lands_from_its_worktree() {
         let mut s = tests::stored_with(NAMES_A_BRAIN);
         let id = "01jbx4m2k8q6v9z3n5r7t0w2yd";
         let file = format!("second-brain/logs/app/2026/10/2026-10-20-{id}.md");
@@ -1967,7 +1985,7 @@ mod tests {
         fs::write(worktree.join(&file), "A ruling's file.\n").unwrap();
         let batch = json!({"id": "ruling", "repository": "Sage-Social/sagehaven-docs",
             "kind": "log", "source": {"kind": "brains_page"}, "title": "Ruling",
-            "files": [file], "stage": "queued", "created_at": 1, "updated_at": 1});
+            "files": [file], "stage": "failed", "created_at": 1, "updated_at": 1});
         s.f.host
             .db
             .execute(

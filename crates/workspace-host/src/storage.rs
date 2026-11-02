@@ -3531,6 +3531,19 @@ repository_settings:
     }
 
     #[test]
+    fn a_local_repository_moves_at_first_start_on_a_store_from_before_entry_files() {
+        let (home, host) = host();
+        at_the_root_again(&host);
+        drop(host);
+        let db = Connection::open(home.path().join(STORE_FILE)).unwrap();
+        db.execute_batch("DROP TABLE entry_files; ALTER TABLE sync_held DROP COLUMN line;")
+            .unwrap();
+        drop(db);
+        let host = Host::open(home.path()).unwrap();
+        assert_eq!(personal(&host).storage.root, "wiffletree");
+    }
+
+    #[test]
     fn a_move_a_start_cut_short_is_finished_at_the_next_start() {
         let (home, host) = host();
         at_the_root_again(&host);

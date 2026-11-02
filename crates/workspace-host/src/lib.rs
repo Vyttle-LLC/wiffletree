@@ -427,10 +427,11 @@ impl Host {
         // clones an earlier release named `<owner>-<name>` first, then one still in `shared/`.
         repos::migrate_clone_folders(&host.db, &host.home)?;
         host.move_settings_clone()?;
+        // Before the move, which rewrites the paths in the table this adds.
+        brain_sync::migrate(&host.db)?;
         host.ensure_local_storage()?;
         host.move_local_repositories()?;
         brains::migrate(&mut host)?;
-        brain_sync::migrate(&host.db)?;
         memory::migrate(&mut host)?;
         host.rebuild_issue_index()?;
         host.clear_uploads()?;
