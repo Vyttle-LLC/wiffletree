@@ -328,6 +328,8 @@ impl SpacesPage {
         self.show(Shown::New, window, cx);
         self.name
             .update(cx, |input, cx| input.set_value(name.to_owned(), window, cx));
+        // `set_value` sends no change, so the proposals follow the name here.
+        self.name_changed(window, cx);
         self.description.update(cx, |input, cx| {
             input.set_value(description.to_owned(), window, cx)
         });
