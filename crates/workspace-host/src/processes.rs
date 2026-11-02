@@ -1040,8 +1040,11 @@ sys.stdin.readline()
         assert_eq!(unrelated.try_wait().unwrap(), None, "never signalled");
     }
 
-    /// A stand-in provider: a shell that runs each line it reads, with job control, so every
-    /// background command leads a process group of its own as a tool command does.
+    /// A stand-in provider: a shell that runs each line it reads. `tool command…` starts the
+    /// command in the background leading a process group of its own, as a tool command does.
+    /// It makes the group itself before the exec: job control's `set -m` leaves that to a race
+    /// between the shell and its child, which a loaded machine can lose. A tool says its own id,
+    /// since `$!` is known before the group is made.
     pub(crate) struct Provider {
         child: Child,
         input: ChildStdin,
@@ -1049,8 +1052,12 @@ sys.stdin.readline()
     }
     impl Provider {
         pub(crate) fn start() -> Self {
+            let tool = "tool() { python3 -c 'import os, sys; os.setpgid(0, 0); os.execvp(sys.argv[1], sys.argv[1:])' \"$@\" & }";
             let mut child = Command::new("/bin/sh")
-                .args(["-c", "set -m; while read -r line; do eval \"$line\"; done"])
+                .arg("-c")
+                .arg(format!(
+                    "{tool}; while read -r line; do eval \"$line\"; done"
+                ))
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -1122,7 +1129,7 @@ sys.stdin.readline()
         watcher.take(key);
         let tool: i32 = provider
             .run(&format!(
-                "python3 -c 'import os,sys,time; print(os.getpid(),flush=True); open(sys.argv[1]).readline(); os.setpgid(0,int(sys.argv[2])); print(\"moved\",flush=True); time.sleep(30)' {} {} & :",
+                "tool python3 -c 'import os,sys,time; print(os.getpid(),flush=True); open(sys.argv[1]).readline(); os.setpgid(0,int(sys.argv[2])); print(\"moved\",flush=True); time.sleep(30)' {} {}",
                 gate.path(), provider.pid()
             ))
             .parse()
@@ -1169,7 +1176,7 @@ sys.stdin.readline()
         // A tool shell in its own group starts `sleep` in the background, says both ids and
         // waits at the gate.
         let line = provider.run(&format!(
-            "sh -c 'sleep 30 >/dev/null 2>&1 & echo $$ $!; read -r go < \"$0\"' {} & :",
+            "tool sh -c 'sleep 30 >/dev/null 2>&1 & echo $$ $!; read -r go < \"$0\"' {}",
             gate.path()
         ));
         let (shell, sleep) = line.split_once(' ').unwrap();
@@ -1213,7 +1220,7 @@ sys.stdin.readline()
         // A tool shell in its own group says its id and waits at the gate.
         let shell: i32 = provider
             .run(&format!(
-                "sh -c 'echo $$; read -r go < \"$0\"; sleep 30 >/dev/null 2>&1 & echo $!' {} & :",
+                "tool sh -c 'echo $$; read -r go < \"$0\"; sleep 30 >/dev/null 2>&1 & echo $!' {}",
                 gate.path()
             ))
             .parse()
@@ -1242,7 +1249,7 @@ sys.stdin.readline()
         let key = watcher.add(provider.pid());
         let shell: i32 = provider
             .run(&format!(
-                "sh -c 'echo $$; read -r go < \"$0\"; sleep 30 >/dev/null 2>&1 & echo $!' {} & :",
+                "tool sh -c 'echo $$; read -r go < \"$0\"; sleep 30 >/dev/null 2>&1 & echo $!' {}",
                 gate.path()
             ))
             .parse()
@@ -1271,7 +1278,7 @@ sys.stdin.readline()
 
         // A group nothing is in any more has exited, however long the watcher was away.
         let gone = provider
-            .run("sh -c 'echo $$; exec sleep 30' >&1 & :")
+            .run("tool sh -c 'echo $$; exec sleep 30'")
             .parse()
             .unwrap();
         started.0.push(gone);
@@ -1293,7 +1300,7 @@ sys.stdin.readline()
         let run = format!("run-{}", provider.pid());
         let watch = Watch::start(provider.pid(), &run);
         let sleep: i32 = provider
-            .run("sleep 30 >/dev/null 2>&1 & echo $!")
+            .run("tool sh -c 'echo $$; exec sleep 30 >/dev/null 2>&1'")
             .parse()
             .unwrap();
         let _started = Started(vec![sleep]);
@@ -1329,7 +1336,7 @@ sys.stdin.readline()
         watcher.take(key);
 
         let sleep: i32 = provider
-            .run("sh -c 'sleep 30 >/dev/null 2>&1 & echo $!' & wait")
+            .run("tool sh -c 'sleep 30 >/dev/null 2>&1 & echo $!'; wait")
             .parse()
             .unwrap();
         let _started = Started(vec![sleep]);
@@ -1352,7 +1359,7 @@ sys.stdin.readline()
         watcher.take(key);
 
         let shell: i32 = provider
-            .run("sh -c 'echo $$; exec sleep 30' >&1 & :")
+            .run("tool sh -c 'echo $$; exec sleep 30'")
             .parse()
             .unwrap();
         let _started = Started(vec![shell]);
@@ -1400,7 +1407,7 @@ sys.stdin.readline()
         let run = format!("run-{}", provider.pid());
         let watch = Watch::start(provider.pid(), &run);
         let sleep: i32 = provider
-            .run("sleep 30 >/dev/null 2>&1 & echo $!")
+            .run("tool sh -c 'echo $$; exec sleep 30 >/dev/null 2>&1'")
             .parse()
             .unwrap();
         let _started = Started(vec![sleep]);
