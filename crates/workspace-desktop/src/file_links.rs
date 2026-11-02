@@ -1296,6 +1296,35 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_second_click_of_a_double_click_opens_nothing_more(cx: &mut TestAppContext) {
+        let (cx, at) = web_link(cx);
+        let modifiers = Modifiers::default();
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: at,
+            button: MouseButton::Left,
+            modifiers,
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: at,
+            button: MouseButton::Left,
+            modifiers,
+            click_count: 2,
+        });
+        assert_eq!(cx.opened_url(), None, "the first click already opened it");
+    }
+
+    #[gpui::test]
+    fn a_right_click_reaches_the_link_as_a_right_click(cx: &mut TestAppContext) {
+        let (cx, at) = web_link(cx);
+        cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(at, MouseButton::Right, Modifiers::default());
+        // A web link has no menu; a right-click read as a left one would have opened it.
+        assert_eq!(cx.opened_url(), None);
+    }
+
+    #[gpui::test]
     fn a_drag_across_the_link_selects_it_without_opening_it(cx: &mut TestAppContext) {
         let (cx, at) = web_link(cx);
         let dragged = at + point(px(60.), px(0.));
