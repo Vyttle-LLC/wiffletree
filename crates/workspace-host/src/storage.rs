@@ -3129,7 +3129,7 @@ repository_settings:
             setup: &setup,
             ..form("Sage", None)
         };
-        let error = host.precheck_stored_space(&new, "vy_ttle/sage-wiffletree-storage");
+        let error = host.precheck_stored_space(&new, "vy.ttle/sage-wiffletree-storage");
         assert!(format!("{:#}", error.unwrap_err()).contains("not a GitHub owner"));
         let requested = host.precheck_stored_space(&new, "Vyttle-LLC/sage-wiffletree-storage");
         assert_eq!(requested.unwrap(), "Vyttle-LLC/sage-wiffletree-storage");

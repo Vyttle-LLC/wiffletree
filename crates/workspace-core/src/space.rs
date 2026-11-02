@@ -638,18 +638,19 @@ pub fn repository_owners(
     owners
 }
 
-/// A repository GitHub can create as `owner/name`: an owner of letters, digits and single
-/// hyphens inside it, up to 39 characters, and a name of letters, digits, `-`, `_` and `.`, up
-/// to 100, other than `.` and `..`.
+/// A repository GitHub can create as `owner/name`: an owner of letters, digits, single hyphens
+/// inside it and underscores, as Enterprise Managed Users' logins such as `octocat_acme` have,
+/// up to 39 characters, and a name of letters, digits, `-`, `_` and `.`, up to 100, other than
+/// `.` and `..`.
 pub fn validate_new_repository(owner: &str, name: &str) -> Result<()> {
     let owner_valid = (1..=39).contains(&owner.len())
-        && owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && (owner.chars()).all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
         && !owner.starts_with('-')
         && !owner.ends_with('-')
         && !owner.contains("--");
     ensure!(
         owner_valid,
-        "{owner:?} is not a GitHub owner: use letters, digits and single hyphens inside it"
+        "{owner:?} is not a GitHub owner: use letters, digits, underscores and single hyphens inside it"
     );
     let name_valid = (1..=100).contains(&name.len())
         && name
@@ -1025,12 +1026,16 @@ mod tests {
     fn a_new_repository_follows_githubs_owner_and_name_rules() {
         assert!(validate_new_repository("Vyttle-LLC", "vyttle-wiffletree-storage").is_ok());
         assert!(validate_new_repository("a1", "my_repo.v2").is_ok());
+        assert!(
+            validate_new_repository("octocat_acme", "storage").is_ok(),
+            "a managed user"
+        );
         for (owner, name) in [
             ("", "storage"),
             ("-vyttle", "storage"),
             ("vyttle-", "storage"),
             ("vy--ttle", "storage"),
-            ("vy_ttle", "storage"),
+            ("vy.ttle", "storage"),
             (&"a".repeat(40), "storage"),
             ("vyttle", ""),
             ("vyttle", ".."),

@@ -903,13 +903,11 @@ pub(super) fn proposed_repository_name(name: &str) -> String {
     }
 }
 
-/// `owner/name` for gh to create, or why GitHub would refuse it.
 pub(super) fn repository_to_create(owner: &str, name: &str) -> Result<String, String> {
     validate_new_repository(owner, name).map_err(|error| error.to_string())?;
     Ok(format!("{owner}/{name}"))
 }
 
-/// How the Owner menu names an owner.
 pub(super) fn owner_label(owner: &RepositoryOwner) -> String {
     let kind = match owner.organization {
         true => "organization",
