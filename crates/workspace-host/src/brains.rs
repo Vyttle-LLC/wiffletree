@@ -30,15 +30,25 @@ pub(crate) fn new_ulid(at: i64) -> String {
     ulid(at, u128::from_be_bytes(*uuid::Uuid::new_v4().as_bytes()))
 }
 
+const ULID_ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
+
+/// When the ULID `id` was made; `None` for another kind of id, such as a legacy entry's.
+pub(crate) fn ulid_time(id: &str) -> Option<i64> {
+    (id.len() == 26).then_some(())?;
+    id[..10].bytes().try_fold(0i64, |time, byte| {
+        let digit = ULID_ALPHABET.iter().position(|&c| c == byte)?;
+        Some(time << 5 | digit as i64)
+    })
+}
+
 /// A lowercase ULID of `at` and the low 80 bits of `random`.
 pub(crate) fn ulid(at: i64, random: u128) -> String {
-    const ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
     let time = (at as u128) & ((1 << 48) - 1);
     let random = random & ((1 << 80) - 1);
     let mut value = (time << 80) | random;
     let mut id = [0u8; 26];
     for slot in id.iter_mut().rev() {
-        *slot = ALPHABET[(value & 31) as usize];
+        *slot = ULID_ALPHABET[(value & 31) as usize];
         value >>= 5;
     }
     String::from_utf8_lossy(&id).into_owned()
@@ -153,16 +163,7 @@ impl Host {
             let head = runtime::git_answer(&clone, &head)?;
             return Ok(head.status.success().then(|| head.output.trim().to_owned()));
         };
-        let synced: Option<Vec<u8>> = self
-            .db
-            .query_row(
-                "SELECT synced FROM sync_record WHERE repository=?1 AND path=''",
-                [key],
-                |r| r.get(0),
-            )
-            .optional()?
-            .flatten();
-        Ok(synced.map(String::from_utf8).transpose()?)
+        self.brain_commit(&key)
     }
 
     /// The Brains page: every wiki, with its compile, and what has no project to go to.
@@ -234,7 +235,8 @@ impl Host {
         };
         Ok(Some(Pass {
             index: brain_index::index_file(&self.home, &brain.repository),
-            clones: verify_refs::Clones::of(&self.repositories()?),
+            clones: verify_refs::Clones::of(&self.repositories()?)
+                .with_listed(&self.listed_repositories(&storage)?, &self.home),
             clone: self.storage_folder(&storage),
             brain_dir: brain_sync::brain_dir(&root),
             repository: brain.repository,

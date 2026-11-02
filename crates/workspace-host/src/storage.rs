@@ -87,7 +87,7 @@ fn space_yaml(space: &Space) -> Result<Vec<u8>> {
 }
 
 /// `compilers/<host id>.yaml`: a Mac that compiles its folder's wiki.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct CompilerFile {
     machine: String,
     login: Option<String>,
@@ -195,6 +195,25 @@ fn rename_issues(folder: &Path, old: &str, new: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Rewrites a local tracker's issue IDs in the wiki, `notes/` and `STATUS.md`, as a log entry is
+/// never changed. Answers the files it rewrote, by their paths in the repository.
+fn rename_in_wiki(clone: &Path, root: &Root, old: &str, new: &str) -> Result<Vec<String>> {
+    let brain = brain_sync::brain_dir(root);
+    let mut wiki = files_under(&clone.join(&brain).join(compile::NOTES))?;
+    wiki.push(clone.join(&brain).join(compile::STATUS));
+    let mut rewritten = vec![];
+    for file in wiki.into_iter().filter(|file| file.is_file()) {
+        let text = fs::read_to_string(&file)?;
+        let renamed = rename_ids(&text, old, new);
+        if renamed != text {
+            shared::write_atomically(&file, renamed.as_bytes())?;
+            let path = file.strip_prefix(clone)?.to_str();
+            rewritten.push(path.context("A wiki path is not UTF-8")?.to_owned());
+        }
+    }
+    Ok(rewritten)
 }
 
 /// The number of an issue ID such as `SAGE-12` with the prefix `prefix`.
@@ -479,6 +498,21 @@ pub(crate) struct Input {
     pub(crate) entries: Vec<String>,
     /// A compile run's files waiting to land.
     pub(crate) landing: Option<compile::Landing>,
+    /// Another Mac took that run's claim over, so it ends with nothing pushed.
+    pub(crate) outrun: bool,
+}
+impl Input {
+    /// Reads the claim branch's tip before a landing: a tip that is not the run's own claim ends
+    /// the run, and with GitHub out of reach the landing waits for the next pass.
+    pub(crate) fn read_claim(&mut self, clone: &Path, url: &str, git: &publish::GitTool) {
+        let Some(claim) = self.landing.as_ref().and_then(|l| l.claim.as_deref()) else {
+            return;
+        };
+        match github_access::remote_head(clone, url, repos::CLAIM_BRANCH, git) {
+            Ok(tip) => self.outrun = tip.as_deref() != Some(claim),
+            Err(_) => self.landing = None,
+        }
+    }
 }
 
 /// A part of an `issue.md` both sides changed to different values, which this Mac keeps and
@@ -891,13 +925,14 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
         clone,
         repository,
         commit,
-        input,
+        mut input,
         scanner,
         running,
     } = pass;
     let _running = running
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    input.read_claim(&clone, &repository.push_url, &tools.git);
     let remote = || Remote {
         url: &repository.push_url,
         branch: &repository.branch,
@@ -1151,7 +1186,7 @@ impl Host {
         }
     }
     /// The GitHub storage repository `key` as this Mac recorded it.
-    fn stored_repository(&self, key: &str) -> Result<SettingsRepository> {
+    pub(crate) fn stored_repository(&self, key: &str) -> Result<SettingsRepository> {
         let data: String = self.db.query_row(
             "SELECT data FROM storage_repositories WHERE key=?1",
             [key],
@@ -1195,9 +1230,91 @@ impl Host {
         let file = Root::new(&space.storage.root).join(&space_file(&space.storage.folder));
         self.write_stored(&key, &folder, &file, &space_yaml(space)?)
     }
+    /// The Macs whose files in `compilers/` say they compile the wiki of the repository's folder.
+    pub(crate) fn compilers(&self, repository: &StorageRepository) -> Result<Vec<Compiler>> {
+        let root = self.root_of(repository)?;
+        let clone = self.storage_folder(repository);
+        let files = fs::read_dir(root.in_clone(&clone).join(COMPILERS));
+        let mut compilers: Vec<Compiler> = (files.into_iter().flatten().flatten())
+            .filter_map(|file| {
+                let (path, name) = (file.path(), file.file_name());
+                let host = name.to_str()?.strip_suffix(".yaml")?.to_owned();
+                let content = fs::read(path).ok()?;
+                let file: CompilerFile = serde_yaml::from_slice(&content).ok()?;
+                Some(Compiler {
+                    host,
+                    machine: file.machine,
+                    login: file.login,
+                })
+            })
+            .collect();
+        compilers.sort_by(|a, b| a.machine.cmp(&b.machine));
+        Ok(compilers)
+    }
+    /// Whether this Mac compiles the wiki of the repository's folder: a local repository's one
+    /// Mac always does, and otherwise its own file there says so.
+    pub(crate) fn compiles_here(&self, repository: &StorageRepository) -> Result<bool> {
+        if Self::storage_key(repository).is_none() {
+            return Ok(true);
+        }
+        let host = self.host_id()?;
+        Ok((self.compilers(repository)?.iter()).any(|compiler| compiler.host == host))
+    }
+    /// Turns compiling on or off for this Mac, for the wiki of the Space's folder. A local
+    /// repository has no one else to compile it, so it has no such choice.
+    pub fn set_compile_here(&mut self, space_id: &SpaceId, compiles: bool) -> Result<()> {
+        let space = self.space(space_id)?.space;
+        ensure!(
+            Self::storage_key(&space.storage.repository).is_some(),
+            "A local repository's wiki compiles on this Mac"
+        );
+        self.write_compiler_file(&space, compiles)?;
+        if !compiles {
+            self.forget_compile_due(&space.storage.repository.key())?;
+        }
+        Ok(())
+    }
+    /// Sets the compile time of the Space's folder, shared by the Spaces in it, or with `None`
+    /// leaves its wiki to Run now. Refuses a time or timezone the schedule could not read.
+    pub fn set_compile_time(
+        &mut self,
+        space_id: &SpaceId,
+        compile: Option<BrainCompile>,
+    ) -> Result<TrackerConfig> {
+        if let Some(compile) = &compile {
+            compile::schedule(compile)?;
+        }
+        let space = self.space(space_id)?.space;
+        let current = self.tracker(&space)?;
+        // Keys of `compile` this release does not know stay.
+        let extra = current.compile.as_ref().map(|c| c.extra.clone());
+        let compile = compile.map(|compile| BrainCompile {
+            extra: extra.unwrap_or_default(),
+            ..compile
+        });
+        if current.compile == compile {
+            return Ok(current);
+        }
+        let tracker = TrackerConfig { compile, ..current };
+        let content = tracker_yaml(&tracker)?;
+        let folder = self.storage_folder(&space.storage.repository);
+        let file = Root::new(&space.storage.root).join(TRACKER);
+        match Self::storage_key(&space.storage.repository) {
+            None => {
+                shared::write_atomically(&folder.join(&file), &content)?;
+                commit_local(&folder, &[file.as_str()], "Changed the compile time")?;
+            }
+            Some(key) => self.write_stored(&key, &folder, &file, &content)?,
+        }
+        self.db.execute(
+            "UPDATE trackers SET data=?2 WHERE storage=?1",
+            params![space.storage.repository.key(), encode(&tracker)?],
+        )?;
+        Ok(tracker)
+    }
     /// Writes this Mac's file saying it compiles the Space's wiki, or with `compiles` false
     /// removes it. It is the one shared file only this Mac writes, so it never conflicts.
-    pub fn write_compiler_file(&self, space: &Space, compiles: bool) -> Result<()> {
+    fn write_compiler_file(&self, space: &Space, compiles: bool) -> Result<()> {
         let file = format!("{COMPILERS}/{}.yaml", self.host_id()?);
         let content = compiles
             .then(|| {
@@ -1328,9 +1445,13 @@ impl Host {
         match Self::storage_key(&space.storage.repository) {
             None => {
                 rename_issues(&root.in_clone(&folder), &current.prefix, prefix)?;
+                let wiki = rename_in_wiki(&folder, &root, &current.prefix, prefix)?;
                 shared::write_atomically(&folder.join(&file), &content)?;
                 let message = format!("Renamed the issue prefix {} to {prefix}", current.prefix);
-                commit_local(&folder, &[file.as_str(), &root.join(ISSUES)], &message)?;
+                let issues = root.join(ISSUES);
+                let paths = [file.as_str(), issues.as_str()];
+                let paths = paths.into_iter().chain(wiki.iter().map(String::as_str));
+                commit_local(&folder, &paths.collect::<Vec<_>>(), &message)?;
                 // The issues' links, derived states and follows follow them to their new IDs.
                 for table in ["issue_links", "issue_derived", "issue_follows"] {
                     self.db.execute(
@@ -1727,6 +1848,7 @@ impl Host {
             root,
             entries,
             landing,
+            outrun: false,
             names,
             prefix,
             synced: record.synced,
@@ -1809,13 +1931,38 @@ impl Host {
             return self.finish_move(key, root);
         }
         let commit = passed.pushed.clone().unwrap_or(passed.remote);
+        let synced_before = self.brain_commit(key)?;
         self.finish_storage(passed.found, passed.pushed.as_deref())?;
         self.db.execute(
             "UPDATE sync_record SET synced=?2 WHERE repository=?1 AND path=''",
             params![key, commit.as_bytes()],
         )?;
-        self.brains_now = true;
-        Ok(())
+        self.after_storage(key, synced_before.as_deref(), &commit)
+    }
+    /// What follows a pass of the repository `key` that left it at `commit`: its wiki's index is
+    /// due at once only when the pass pushed or GitHub's head moved, and a run owed starts or
+    /// reads its tip.
+    pub(crate) fn after_storage(
+        &mut self,
+        key: &str,
+        before: Option<&str>,
+        commit: &str,
+    ) -> Result<()> {
+        self.brains_now |= before != Some(commit);
+        self.compile_after_pull(key)
+    }
+    /// The commit sync last recorded for the repository `key`.
+    pub(crate) fn brain_commit(&self, key: &str) -> Result<Option<String>> {
+        let synced: Option<Vec<u8>> = self
+            .db
+            .query_row(
+                "SELECT synced FROM sync_record WHERE repository=?1 AND path=''",
+                [key],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(synced.map(String::from_utf8).transpose()?)
     }
     /// Writes what a storage repository's rule sets pulled, unless the host wrote it meanwhile,
     /// records what they synced, paused and held, and takes pulled Space definitions and tracker
@@ -2037,6 +2184,9 @@ impl Host {
             [space.storage.repository.key()],
             |r| r.get(0),
         )?;
+        let wiki_behind = (self.brain_compile_states()?.into_iter())
+            .find(|state| state.repository == space.storage.repository.key())
+            .and_then(|state| state.behind);
         let Some(key) = Self::storage_key(&space.storage.repository) else {
             return Ok(StorageStatus {
                 prefix,
@@ -2046,6 +2196,7 @@ impl Host {
                 path,
                 synced_at: None,
                 error: None,
+                wiki_behind,
             });
         };
         let repository = self.stored_repository(&key)?;
@@ -2059,6 +2210,7 @@ impl Host {
             path,
             synced_at,
             error,
+            wiki_behind,
         })
     }
     /// When a pass of the GitHub storage repository `key` last reached GitHub, and why the
@@ -2587,6 +2739,33 @@ repository_settings:
         assert!(two.contains("blocked_by: [ME-1]"));
         assert!(!folder.join(format!("issues/{old}-1")).exists());
         assert_eq!(host.tracker(&space).unwrap().prefix, "ME");
+        assert_eq!(git(&folder, &["status", "--porcelain"]), "");
+    }
+
+    #[test]
+    fn renaming_a_local_prefix_rewrites_the_wiki_and_leaves_log_entries_alone() {
+        let (_home, mut host) = host();
+        let space = personal(&host);
+        let folder = host.root_folder(&space.storage.repository).unwrap();
+        let old = host.tracker(&space).unwrap().prefix;
+        let written = |path: &str| {
+            let file = folder.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, format!("See {old}-1, not X{old}-1.\n")).unwrap();
+        };
+        let (note, status) = ("second-brain/notes/Home.md", "second-brain/STATUS.md");
+        let entry = "second-brain/logs/app/2026/10/2026-10-20-a.md";
+        for path in [note, status, entry] {
+            written(path);
+        }
+        git(&folder, &["add", "--all"]);
+        git(&folder, &["commit", "-q", "-m", "A wiki"]);
+        host.set_tracker_prefix(&space.id, "ME").unwrap();
+        let read = |path: &str| fs::read_to_string(folder.join(path)).unwrap();
+        for path in [note, status] {
+            assert_eq!(read(path), format!("See ME-1, not X{old}-1.\n"), "{path}");
+        }
+        assert_eq!(read(entry), format!("See {old}-1, not X{old}-1.\n"));
         assert_eq!(git(&folder, &["status", "--porcelain"]), "");
     }
 

@@ -180,8 +180,10 @@ impl RuleSet for LogRules {
 pub(crate) enum Landed {
     /// Its commit is made; it landed when the push went through.
     Committed,
-    /// `main` holds a cursor at or past the run's.
-    Elsewhere,
+    /// `main` holds a cursor at or past the run's, which that Mac's commit wrote.
+    CompiledElsewhere(Option<String>),
+    /// Another Mac took the run's claim over.
+    Outrun,
     /// A file failed the scan, which ends the run with nothing landed.
     Refused(scan::Held),
     Failed(String),
@@ -190,7 +192,8 @@ pub(crate) enum Landed {
 /// What a landing's next step is on the head `remote`.
 pub(crate) enum Verdict {
     Land(Vec<(String, Vec<u8>)>),
-    Elsewhere,
+    /// `main` already holds a cursor at or past the run's, which that Mac's commit wrote.
+    CompiledElsewhere(Option<String>),
 }
 
 impl Landing {
@@ -200,7 +203,11 @@ impl Landing {
     pub(crate) fn verdict(&self, clone: &Path, remote: &str) -> Result<Verdict> {
         let main = read_cursor(&file_at(clone, remote, &self.index));
         if at_or_past(clone, &main, &self.cursor) {
-            return Ok(Verdict::Elsewhere);
+            return Ok(Verdict::CompiledElsewhere(cursor_machine(
+                clone,
+                remote,
+                &self.index,
+            )));
         }
         let moved = self.changed_meanwhile(clone, remote)?;
         ensure!(
@@ -238,11 +245,20 @@ impl Landing {
     }
 }
 
+/// The Mac the last commit to change `index` by `remote` names, as a landing's message does.
+fn cursor_machine(clone: &Path, remote: &str, index: &str) -> Option<String> {
+    let last = ["log", "-1", "--format=%s", remote, "--", index];
+    let subject = runtime::git_output(clone, &last).ok()?;
+    let (_, machine) = subject.trim().rsplit_once(" · ")?;
+    Some(machine.to_owned())
+}
+
 /// `<folder>/second-brain/notes/`, `STATUS.md` and `reconcile-queue.md`: a run's files land
 /// together or not at all. The engine gets the other Macs' from Git.
 pub(crate) struct WikiRules {
     brain: String,
     landing: Option<Landing>,
+    outrun: bool,
     retries_alone: bool,
     files: Vec<(String, Content)>,
     ended: Option<Landed>,
@@ -252,6 +268,7 @@ impl WikiRules {
         Self {
             brain: brain_dir(&input.root),
             landing: input.landing.clone(),
+            outrun: input.outrun,
             retries_alone,
             files: vec![],
             ended: None,
@@ -287,12 +304,18 @@ impl RuleSet for WikiRules {
         let Some(landing) = &self.landing else {
             return Ok(());
         };
+        if self.outrun {
+            self.ended = Some(Landed::Outrun);
+            return Ok(());
+        }
         ensure!(
             landing.files.iter().all(|path| self.claims(path)),
             "The repository moved while the run worked, so nothing landed; the next run compiles again"
         );
         match landing.verdict(clone, remote)? {
-            Verdict::Elsewhere => self.ended = Some(Landed::Elsewhere),
+            Verdict::CompiledElsewhere(machine) => {
+                self.ended = Some(Landed::CompiledElsewhere(machine));
+            }
             Verdict::Land(files) => {
                 self.files = (files.into_iter())
                     .map(|(path, content)| (path, Some(content)))
@@ -583,10 +606,14 @@ impl Host {
                 }
                 self.end_landing(&landing, CompileOutcome::Landed, None, Some(commit))
             }
-            Landed::Elsewhere => {
-                let reason = "Another run compiled these entries first, so nothing landed";
+            Landed::CompiledElsewhere(machine) => {
+                let reason = compile::compiled_elsewhere(machine.as_deref());
                 let outcome = CompileOutcome::CompiledElsewhere;
-                self.end_landing(&landing, outcome, Some(reason.into()), None)
+                self.end_landing(&landing, outcome, Some(reason), None)
+            }
+            Landed::Outrun => {
+                let reason = "Another Mac took this run over, so nothing landed".to_owned();
+                self.end_landing(&landing, CompileOutcome::Lost, Some(reason), None)
             }
             Landed::Refused(held) => {
                 let name = held.path.clone();
@@ -755,6 +782,23 @@ pub(crate) mod tests {
         );
         s.sync();
         assert_eq!(s.github.log("%s").len(), 4, "a second pass pushes nothing");
+    }
+
+    #[test]
+    fn only_a_pass_that_pushed_or_saw_github_move_refreshes_the_brains_at_once() {
+        let mut s = stored();
+        s.f.host.brains_now = false;
+        s.sync();
+        assert!(
+            !s.f.host.brains_now,
+            "a quiet pass leaves the five-minute recheck be"
+        );
+        s.commit(&[("notes/A.md".into(), "A\n".into())]);
+        s.sync();
+        assert!(std::mem::take(&mut s.f.host.brains_now));
+        s.log("Retry once.");
+        s.sync();
+        assert!(s.f.host.brains_now, "its own push moved the head");
     }
 
     #[test]

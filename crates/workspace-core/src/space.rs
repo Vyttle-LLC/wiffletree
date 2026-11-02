@@ -528,6 +528,9 @@ pub struct StorageStatus {
     pub synced_at: Option<i64>,
     /// Why the latest pass failed.
     pub error: Option<String>,
+    /// Why its wiki is falling behind, when it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wiki_behind: Option<String>,
 }
 
 /// The owner of a session: a project, or, for sessions that are not project work, a Space or a

@@ -263,6 +263,12 @@ impl BrainsPage {
                     compile.pending.to_string(),
                     p,
                 ))
+                .children(
+                    compile
+                        .behind
+                        .clone()
+                        .map(|behind| div().text_xs().text_color(p.yellow).child(behind)),
+                )
                 .child(self.compile_runs(compile, p, cx));
         }
         card.child(
@@ -491,7 +497,7 @@ fn last_compile(run: Option<&CompileRun>) -> String {
 fn run_row(run: &CompileRun, p: Palette) -> Div {
     let tone = match run.outcome {
         CompileOutcome::Running => Tone::Warn,
-        CompileOutcome::Skipped => Tone::Quiet,
+        CompileOutcome::Skipped | CompileOutcome::Lost => Tone::Quiet,
         CompileOutcome::Waiting => Tone::Warn,
         CompileOutcome::Failed | CompileOutcome::TimedOut => Tone::Bad,
         CompileOutcome::CompiledElsewhere => Tone::Quiet,
@@ -512,6 +518,9 @@ fn run_row(run: &CompileRun, p: Palette) -> Div {
     let mut detail = vec![];
     if !run.reason.is_empty() && run.outcome != CompileOutcome::Skipped {
         detail.push(run.reason.clone());
+    }
+    if run.unasked > 0 {
+        detail.push(format!("GitHub could not be asked about {}", run.unasked));
     }
     if let Some(commit) = &run.commit {
         detail.push(commit.chars().take(7).collect());
@@ -596,6 +605,7 @@ mod tests {
             ended_at: None,
             pending: 0,
             processed: 0,
+            unasked: 0,
             model_calls: 0,
             profile: None,
             procedure: None,

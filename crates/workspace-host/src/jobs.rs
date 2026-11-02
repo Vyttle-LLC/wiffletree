@@ -79,11 +79,13 @@ impl BuiltIn {
 }
 
 /// Why a built-in job's run started.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum BuiltInStart {
-    /// At its due time; `catch_up` is how many missed times the run stands for, 0 on time.
+    /// At its due time; `catch_up` is how many missed times the run stands for, 0 on time, and
+    /// `due` names the latest of them, as every Mac due then names it.
     Due {
         catch_up: u32,
+        due: String,
     },
     RunNow,
 }
@@ -241,6 +243,34 @@ pub(crate) fn times_between(cron: &Cron, zone: Tz, from: i64, to: i64) -> u32 {
         }
     }
     count
+}
+
+/// The last time `cron` names in `zone` from `from`, a time it names, up to `to`.
+fn latest_time(cron: &Cron, zone: Tz, from: i64, to: i64) -> i64 {
+    let mut at = from;
+    while let Some(next) = next_after(cron, zone, at).filter(|next| *next <= to) {
+        at = next;
+    }
+    at
+}
+
+/// A scheduled time as a claim names it: `2026-11-02T06:00 America/Chicago`.
+fn due_name(at: i64, zone: Tz) -> String {
+    let local = zone.timestamp_millis_opt(at).single();
+    let local = local.map(|local| local.format("%Y-%m-%dT%H:%M").to_string());
+    format!("{} {}", local.unwrap_or_default(), zone.name())
+}
+
+/// Whether `schedule` names the time `at`.
+pub(crate) fn names_time(schedule: &Schedule, at: i64) -> Result<bool> {
+    let (cron, zone) = (Cron::parse(&schedule.cron)?, timezone(&schedule.timezone)?);
+    Ok(next_after(&cron, zone, at - 1) == Some(at))
+}
+
+/// How many times `schedule` named after `from`, up to `to`.
+pub(crate) fn times_since(schedule: &Schedule, from: i64, to: i64) -> Result<u32> {
+    let (cron, zone) = (Cron::parse(&schedule.cron)?, timezone(&schedule.timezone)?);
+    Ok(times_between(&cron, zone, from + 1, to))
 }
 
 /// The next `count` times after `after`, as the recipe card shows them in the job's zone.
@@ -957,7 +987,14 @@ impl Host {
         let next = next_after(&cron, zone, now);
         self.set_due(key, next)?;
         if !running {
-            self.run_job(key, Some(due), BuiltInStart::Due { catch_up }, now)?;
+            let start = BuiltInStart::Due {
+                catch_up,
+                due: match key.is_built_in() {
+                    true => due_name(latest_time(&cron, zone, due, now), zone),
+                    false => String::new(),
+                },
+            };
+            self.run_job(key, Some(due), start, now)?;
         }
         Ok((next, !running))
     }
@@ -998,7 +1035,7 @@ impl Host {
         at: i64,
     ) -> Result<JobRun> {
         let catch_up = match start {
-            BuiltInStart::Due { catch_up } => catch_up,
+            BuiltInStart::Due { catch_up, .. } => catch_up,
             BuiltInStart::RunNow => 0,
         };
         let mut run = JobRun {

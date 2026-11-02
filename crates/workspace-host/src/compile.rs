@@ -1,21 +1,27 @@
-//! Brain compile (OpenSpec change `one-space-repository`, decision 2): one built-in job per wiki
-//! on this Mac, on the scheduler of `jobs.rs`, which until claims arrive runs only on Run now. A
-//! run finds the entries pending by the cursor in `notes/INDEX.md`, verifies their refs off the
-//! host thread, and with any pending starts one session owned by the wiki, on the Brain compiler
-//! row, in a worktree of the repository's clone at the commit it read. The session edits only the
-//! wiki and has only `queue_conflict` and `finish_compile`. The host checks its changes, writes
-//! the cursor and `reconcile-queue.md`, and hands the run's exact files to the wiki rule set
-//! (`brain_sync`), which lands them on the current head, scanned, all or nothing.
-//! Nothing here logs an entry's or a note's text; records and errors name ids and paths only.
+//! Brain compile (OpenSpec change `one-space-repository`, decisions 1 and 2): one built-in job per
+//! wiki this Mac compiles, on the scheduler of `jobs.rs`. A due run takes a pass first, so `main`
+//! is fresh, and then, off the host thread, reads the claim branch's tip, finds the entries
+//! pending by the cursor in `notes/INDEX.md`, and with any pending and a Brain compiler model
+//! claims the run (`repos::claim`). A Mac that lost, or found a live claim, stays owed and reads
+//! the tip after each pull until the run is done or the claim frees. The run that won verifies
+//! its refs and starts one session owned by the wiki, in a worktree of the repository's clone at
+//! the commit it read. The session edits only the wiki and has only `queue_conflict` and
+//! `finish_compile`. The host checks its changes, writes the cursor and `reconcile-queue.md`, and
+//! hands the run's exact files to the wiki rule set (`brain_sync`), which lands them on the
+//! current head, scanned, all or nothing. A run's end pushes `landed` or `released`, tried once.
+//! A local repository takes no claim. Nothing here logs an entry's or a note's text; records and
+//! errors name ids and paths only.
 use crate::*;
 use brain_index::{
     RULING_PREFIX, entry_fields, footnote_targets, footnotes, frontmatter, link_key, list,
     wikilinks,
 };
+use repos::{Claim, ClaimState, Claiming, Tip};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, PoisonError};
 use verify_refs::{Checked, Clones};
-use workspace_core::job::JobKey;
+use workspace_core::job::{JobKey, Schedule};
 use workspace_core::{
     BrainCompileState, BrainConflict, CompileOutcome, CompileRun, CompileRunPage, CompileTrigger,
     ConflictCard, ConflictState, Ruling,
@@ -23,7 +29,7 @@ use workspace_core::{
 
 /// The bundled compile procedure, the compile session's whole instructions, and its version.
 pub(crate) const PROCEDURE: &str = include_str!("../skills/procedures/compile.md");
-pub(crate) const PROCEDURE_VERSION: u32 = 1;
+pub(crate) const PROCEDURE_VERSION: u32 = 2;
 /// A run compiles at most this many pending entries, oldest id first.
 const MAX_ENTRIES: usize = 200;
 /// The notes a run's input carries, in characters.
@@ -32,6 +38,8 @@ const MAX_NOTE_CHARS: usize = 60_000;
 pub(crate) const TIMEOUT_MINUTES: i64 = 30;
 /// What a compile session's stopped turn is told, which marks its run timed out.
 pub(crate) const TIMED_OUT: &str = "The compile ran for 30 minutes and was stopped.";
+/// A wiki is falling behind after this many scheduled times with entries waiting.
+const MISSED_TIMES_BEHIND: u32 = 2;
 /// A built-in compile job's name before its brain.
 const JOB: &str = "brain-compile:";
 const INDEX: &str = "notes/INDEX.md";
@@ -54,6 +62,8 @@ CREATE INDEX IF NOT EXISTS compile_runs_by_brain ON compile_runs(repository, sta
 CREATE TABLE IF NOT EXISTS compile_conflicts (run_id TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(run_id, id));
 CREATE TABLE IF NOT EXISTS conflict_rulings (repository TEXT NOT NULL COLLATE NOCASE, conflict_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(repository, conflict_id));
 CREATE TABLE IF NOT EXISTS ruling_triggers (repository TEXT NOT NULL COLLATE NOCASE, entry_id TEXT NOT NULL, PRIMARY KEY(repository, entry_id));
+CREATE TABLE IF NOT EXISTS compile_owed (repository TEXT PRIMARY KEY COLLATE NOCASE, due TEXT NOT NULL, catch_up INTEGER NOT NULL, lost_run TEXT);
+CREATE TABLE IF NOT EXISTS compile_claims (run TEXT PRIMARY KEY, commit_id TEXT NOT NULL, due TEXT NOT NULL);
 ";
 
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
@@ -297,6 +307,123 @@ fn entry_paths(
     Ok(paths)
 }
 
+/// The schedule of a compile time, or why the schedule could not read it.
+pub(crate) fn schedule(compile: &BrainCompile) -> Result<Schedule> {
+    let (hour, minute) = (compile.at.split_once(':'))
+        .filter(|(hour, minute)| hour.len() == 2 && minute.len() == 2)
+        .and_then(|(hour, minute)| Some((hour.parse::<u32>().ok()?, minute.parse::<u32>().ok()?)))
+        .filter(|(hour, minute)| *hour < 24 && *minute < 60)
+        .with_context(|| format!("{:?} is not a time; use HH:MM", compile.at))?;
+    jobs::timezone(&compile.timezone)?;
+    Ok(Schedule {
+        cron: format!("{minute} {hour} * * *"),
+        timezone: compile.timezone.clone(),
+    })
+}
+
+fn entries_waiting(count: usize) -> String {
+    match count {
+        1 => "1 entry is waiting".to_owned(),
+        count => format!("{count} entries are waiting"),
+    }
+}
+
+/// What a run compiled elsewhere says, naming the Mac when `main` does.
+pub(crate) fn compiled_elsewhere(machine: Option<&str>) -> String {
+    match machine {
+        Some(machine) => format!("Compiled elsewhere, on {machine}, so nothing landed"),
+        None => "Compiled elsewhere, so nothing landed".to_owned(),
+    }
+}
+
+/// What a run needs to claim on GitHub. The pass lock keeps a claim's Git commands apart from a
+/// pass's, which reads the `FETCH_HEAD` its own fetch wrote.
+#[derive(Clone)]
+pub(crate) struct Claimer {
+    url: String,
+    host: String,
+    machine: String,
+    login: String,
+    due: String,
+    running: Arc<Mutex<()>>,
+}
+impl Claimer {
+    fn read_tip(&self, checkout: &Path, git: &publish::GitTool) -> Result<Option<Tip>> {
+        let _running = (self.running.lock()).unwrap_or_else(PoisonError::into_inner);
+        repos::read_tip(checkout, &self.url, git)
+    }
+    fn claim(
+        &self,
+        checkout: &Path,
+        run: &str,
+        tip: Option<&Tip>,
+        git: &publish::GitTool,
+    ) -> Result<Claiming> {
+        let claim = Claim {
+            host: self.host.clone(),
+            machine: self.machine.clone(),
+            login: self.login.clone(),
+            run: run.to_owned(),
+            due: self.due.clone(),
+            state: ClaimState::Claimed,
+            at: now(),
+        };
+        let _running = (self.running.lock()).unwrap_or_else(PoisonError::into_inner);
+        repos::claim(checkout, &self.url, tip, &claim, git)
+    }
+}
+
+/// A run's claim to end on GitHub, tried once.
+pub(crate) struct ClaimEnd {
+    clone: PathBuf,
+    url: String,
+    parent: String,
+    claim: Claim,
+    running: Arc<Mutex<()>>,
+}
+impl ClaimEnd {
+    pub(crate) fn push(&self, git: &publish::GitTool) {
+        let _running = (self.running.lock()).unwrap_or_else(PoisonError::into_inner);
+        let ended = repos::end_claim(&self.clone, &self.url, &self.parent, &self.claim, git);
+        if let Err(error) = ended {
+            eprintln!("Ending compile claim {}: {error:#}", self.claim.run);
+        }
+    }
+}
+
+/// An owed run's read of the tip after a pull, off the host thread.
+pub(crate) struct TipRead {
+    repository: String,
+    checkout: PathBuf,
+    head: String,
+    brain_dir: String,
+    claimer: Claimer,
+}
+impl TipRead {
+    pub(crate) fn run(&self, git: &publish::GitTool) -> TipReading {
+        let prefix = format!("{}/", self.brain_dir);
+        let pending = pending_entries(&self.checkout, &self.head, &prefix);
+        TipReading {
+            repository: self.repository.clone(),
+            tip: (self.claimer.read_tip(&self.checkout, git)).map_err(|e| format!("{e:#}")),
+            nothing_pending: pending.is_ok_and(|(_, _, pending)| pending.is_empty()),
+        }
+    }
+    pub(crate) fn failed(&self) -> TipReading {
+        TipReading {
+            repository: self.repository.clone(),
+            tip: Err("The read of the claim stopped unexpectedly".into()),
+            nothing_pending: false,
+        }
+    }
+}
+
+pub(crate) struct TipReading {
+    repository: String,
+    tip: Result<Option<Tip>, String>,
+    nothing_pending: bool,
+}
+
 /// What a run gathers off the host thread before any model call.
 pub(crate) struct Prepare {
     pub(crate) run_id: String,
@@ -304,11 +431,35 @@ pub(crate) struct Prepare {
     pub(crate) head: String,
     pub(crate) brain_dir: String,
     pub(crate) clones: Clones,
+    /// How it claims; `None` for a local repository, which takes no claim.
+    pub(crate) claimer: Option<Claimer>,
+    /// Why the Brain compiler row waits, which ends a run with entries pending before its claim.
+    pub(crate) waits: Option<String>,
 }
 
 pub(crate) struct Prepared {
     pub(crate) run_id: String,
-    pub(crate) gathered: Result<Gathered, String>,
+    /// The commit of the claim it won, and the due time that claim is for.
+    pub(crate) claim: Option<(String, String)>,
+    pub(crate) gathered: Result<Gathered, Stopped>,
+}
+
+/// Why a run stopped before its model.
+#[derive(Debug)]
+pub(crate) enum Stopped {
+    Failed(String),
+    /// GitHub could not be reached, so it claimed nothing.
+    Unreachable,
+    /// The tip says that Mac landed this due time.
+    CompiledOn(String),
+    /// Its Brain compiler row waits, or it has none.
+    Waits(String),
+    /// A live claim stands at this tip.
+    Live(Box<Tip>),
+    /// Another Mac's claim beat its own.
+    Lost,
+    /// GitHub turned its claim down.
+    Refused(String),
 }
 
 pub(crate) struct Gathered {
@@ -326,26 +477,58 @@ pub(crate) struct Gathered {
     pub(crate) notes: Vec<(String, String)>,
 }
 
+/// `notes/INDEX.md` at `head`, its cursor, and the entries pending there, oldest id first.
+fn pending_entries(
+    checkout: &Path,
+    head: &str,
+    prefix: &str,
+) -> Result<(String, Cursor, Vec<PendingEntry>)> {
+    let index = file_at(checkout, head, &format!("{prefix}{INDEX}"));
+    let cursor = read_cursor(&index);
+    let paths = entry_paths(checkout, head, prefix, cursor.through.as_deref())?;
+    let texts = read_at(checkout, head, prefix, &paths)?;
+    let mut pending: Vec<PendingEntry> = (paths.iter().zip(&texts))
+        .map(|(path, text)| entry(path, text))
+        .filter(|entry| !cursor.after.contains(&entry.id))
+        .collect();
+    pending.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok((index, cursor, pending))
+}
+
 impl Prepare {
     pub(crate) fn run(&self, tools: &publish::Tools) -> Prepared {
-        let run_id = self.run_id.clone();
+        let mut claim = None;
+        let gathered = self.gather(tools, &mut claim);
         Prepared {
-            run_id,
-            gathered: self.gather(tools).map_err(|error| format!("{error:#}")),
+            run_id: self.run_id.clone(),
+            claim,
+            gathered,
         }
     }
-    fn gather(&self, tools: &publish::Tools) -> Result<Gathered> {
+    /// The tip first, then what is pending, then the model, and only then the claim, so a Mac
+    /// with nothing to do writes nothing.
+    fn gather(
+        &self,
+        tools: &publish::Tools,
+        claim: &mut Option<(String, String)>,
+    ) -> Result<Gathered, Stopped> {
+        let failed = |error: anyhow::Error| Stopped::Failed(format!("{error:#}"));
         let prefix = format!("{}/", self.brain_dir);
         let (checkout, head) = (&self.checkout, self.head.as_str());
-        let index = file_at(checkout, head, &format!("{prefix}{INDEX}"));
-        let cursor = read_cursor(&index);
-        let paths = entry_paths(checkout, head, &prefix, cursor.through.as_deref())?;
-        let texts = read_at(checkout, head, &prefix, &paths)?;
-        let mut pending: Vec<PendingEntry> = (paths.iter().zip(&texts))
-            .map(|(path, text)| entry(path, text))
-            .filter(|entry| !cursor.after.contains(&entry.id))
-            .collect();
-        pending.sort_by(|a, b| a.id.cmp(&b.id));
+        let tip = match &self.claimer {
+            Some(claimer) => {
+                let tip = claimer.read_tip(checkout, &tools.git);
+                let tip = tip.map_err(|_| Stopped::Unreachable)?;
+                let landed = tip.as_ref().and_then(|tip| tip.landed(&claimer.due));
+                if let Some(machine) = landed {
+                    return Err(Stopped::CompiledOn(machine.to_owned()));
+                }
+                tip
+            }
+            None => None,
+        };
+        let (index, cursor, mut pending) =
+            pending_entries(checkout, head, &prefix).map_err(failed)?;
         let total = pending.len();
         pending.truncate(MAX_ENTRIES);
         let cursor = match total > MAX_ENTRIES {
@@ -372,12 +555,26 @@ impl Prepare {
                 notes: vec![],
             });
         }
+        if let Some(waits) = &self.waits {
+            return Err(Stopped::Waits(waits.clone()));
+        }
+        if let Some(claimer) = &self.claimer {
+            if let Some(tip) = tip.as_ref().filter(|tip| !tip.free(now())) {
+                return Err(Stopped::Live(Box::new(tip.clone())));
+            }
+            let claiming = claimer.claim(checkout, &self.run_id, tip.as_ref(), &tools.git);
+            match claiming.map_err(|_| Stopped::Unreachable)? {
+                Claiming::Won(commit) => *claim = Some((commit, claimer.due.clone())),
+                Claiming::Lost => return Err(Stopped::Lost),
+                Claiming::Refused(why) => return Err(Stopped::Refused(why)),
+            }
+        }
         let refs: Vec<(&str, &str)> = (pending.iter())
             .map(|e| (e.folder.as_str(), e.reference.as_str()))
             .collect();
         let checked = verify_refs::for_compile(&self.clones, &refs, tools);
         let status = file_at(checkout, head, &format!("{prefix}{STATUS}"));
-        let notes = self.named_notes(&prefix, &pending)?;
+        let notes = self.named_notes(&prefix, &pending).map_err(failed)?;
         Ok(Gathered {
             head: self.head.clone(),
             pending: total,
@@ -389,8 +586,8 @@ impl Prepare {
             notes,
         })
     }
-    /// The notes the entries link to by `[[wikilink]]` or name by title, in that order, until
-    /// the next would pass `MAX_NOTE_CHARS`.
+    /// The product pages whose `repos:` list the entries' folders, then the notes the entries
+    /// link to by `[[wikilink]]` or name by title, until the next would pass `MAX_NOTE_CHARS`.
     fn named_notes(&self, prefix: &str, entries: &[PendingEntry]) -> Result<Vec<(String, String)>> {
         let listed = runtime::git_bytes_large(
             &self.checkout,
@@ -412,9 +609,21 @@ impl Prepare {
             .filter(|path| path.ends_with(".md") && *path != INDEX)
             .map(str::to_owned)
             .collect();
+        let texts = read_at(&self.checkout, &self.head, prefix, &notes)?;
         let by_key: HashMap<String, &String> =
             notes.iter().map(|path| (link_key(path), path)).collect();
-        let mut wanted: Vec<&String> = vec![];
+        let mut wanted: Vec<&String> = (notes.iter().zip(&texts))
+            .filter(|(_, text)| {
+                let (keys, _) = frontmatter(text);
+                let repos = keys.get("repos").map(|names| list(names));
+                repos.is_some_and(|repos| {
+                    (repos.iter()).any(|name| {
+                        (entries.iter()).any(|entry| entry.folder.eq_ignore_ascii_case(name))
+                    })
+                })
+            })
+            .map(|(path, _)| path)
+            .collect();
         for entry in entries {
             let text = entry.text.to_lowercase();
             let linked = wikilinks(&entry.text).into_iter().map(|t| link_key(&t));
@@ -429,10 +638,10 @@ impl Prepare {
                 }
             }
         }
-        let wanted: Vec<String> = wanted.into_iter().cloned().collect();
-        let texts = read_at(&self.checkout, &self.head, prefix, &wanted)?;
+        let texts: HashMap<&String, &String> = notes.iter().zip(&texts).collect();
         let mut chars = 0;
-        Ok((wanted.into_iter().zip(texts))
+        Ok((wanted.into_iter())
+            .map(|path| (path.clone(), texts[path].clone()))
             .filter(|(_, text)| {
                 let count = text.chars().count();
                 let fits = chars + count <= MAX_NOTE_CHARS;
@@ -510,6 +719,9 @@ pub(crate) struct Landing {
     pub(crate) index: String,
     /// How many entries it compiled.
     pub(crate) entries: usize,
+    /// The commit of its claim, which must still be the tip when it lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) claim: Option<String>,
 }
 
 /// A conflict the session queued.
@@ -588,9 +800,16 @@ fn queue_text(existing: &str, ruled: &HashSet<String>, queued: &[String]) -> Str
     text
 }
 
+/// Whether `source` has the shape of an entry's id, a ULID. A note from before this procedure
+/// may list file paths, which stay until a page is rewritten.
+fn is_entry_id(source: &str) -> bool {
+    brains::ulid_time(source).is_some()
+}
+
 /// Why a compile session's changes may not be pushed, checked in its worktree: only the wiki
-/// changed, every changed note has its frontmatter, every wikilink resolves, and every source
-/// and footnote names an entry file. Answers the changed files relative to the brain folder.
+/// changed, every changed note has its frontmatter and keeps each name its `repos:` had, every
+/// wikilink resolves, and every entry id in its sources and footnotes names an entry file.
+/// Answers the changed files relative to the brain folder.
 fn check_changes(worktree: &Path, brain_dir: &str) -> Result<Vec<String>> {
     let status = runtime::git_bytes(
         worktree,
@@ -652,9 +871,22 @@ fn check_changes(worktree: &Path, brain_dir: &str) -> Result<Vec<String>> {
             );
             for source in list(&keys["sources"]) {
                 ensure!(
-                    entries.contains(&source),
+                    !is_entry_id(&source) || entries.contains(&source),
                     "{path} names the source {source}, which is no entry file"
                 );
+            }
+            let before = file_at(worktree, "HEAD", &format!("{prefix}{path}"));
+            let (had, _) = frontmatter(&before);
+            let now = keys
+                .get("repos")
+                .map(|names| list(names))
+                .unwrap_or_default();
+            for name in had
+                .get("repos")
+                .map(|names| list(names))
+                .unwrap_or_default()
+            {
+                ensure!(now.contains(&name), "{path} dropped {name} from its repos");
             }
         }
         for link in wikilinks(body) {
@@ -681,7 +913,7 @@ fn check_changes(worktree: &Path, brain_dir: &str) -> Result<Vec<String>> {
                 let exists = match file.ends_with(".md") {
                     true => resolved(path, file)
                         .is_some_and(|entry| is_entry_path(&entry) && brain.join(entry).is_file()),
-                    false => entries.contains(file),
+                    false => !is_entry_id(file) || entries.contains(file),
                 };
                 ensure!(
                     exists,
@@ -754,14 +986,27 @@ fn compile_key(repository: &str) -> JobKey {
     JobKey::built_in(&format!("{JOB}{}", repository.to_ascii_lowercase()))
 }
 
-/// The scheduler's `run` for a wiki's compile job.
+/// The scheduler's `run` for a wiki's compile job. A run due in a GitHub repository is owed until
+/// a pass made `main` fresh; the pass asked for here starts it.
 fn run_built_in(host: &mut Host, repository: &str, start: jobs::BuiltInStart) -> Result<String> {
-    let trigger = match start {
-        jobs::BuiltInStart::Due { catch_up: 0 } => CompileTrigger::Scheduled,
-        jobs::BuiltInStart::Due { .. } => CompileTrigger::CatchUp,
-        jobs::BuiltInStart::RunNow => CompileTrigger::RunNow,
+    let (trigger, due) = match start {
+        jobs::BuiltInStart::Due { catch_up, due } => (
+            match catch_up {
+                0 => CompileTrigger::Scheduled,
+                _ => CompileTrigger::CatchUp,
+            },
+            Some(due),
+        ),
+        jobs::BuiltInStart::RunNow => (CompileTrigger::RunNow, None),
     };
-    let Some(run) = host.start_compile(repository, trigger)? else {
+    let brain = host.brain(repository)?;
+    let (storage, _) = host.brain_home(&brain)?;
+    if let (Some(due), Some(key)) = (&due, Host::storage_key(&storage)) {
+        host.owe_compile(&brain.repository, due, trigger)?;
+        host.issues_written.borrow_mut().insert(key);
+        return Ok("a pull goes first".into());
+    }
+    let Some(run) = host.start_compile(repository, trigger, due)? else {
         return Ok("a compile run is in progress".into());
     };
     Ok(match run.reason.is_empty() {
@@ -770,21 +1015,223 @@ fn run_built_in(host: &mut Host, repository: &str, start: jobs::BuiltInStart) ->
     })
 }
 
+/// A run this Mac still owes: due and waiting for a pull, or, with `lost_run`, lost to another
+/// Mac's claim and reading the tip after each pull.
+struct Owed {
+    due: String,
+    catch_up: bool,
+    lost_run: Option<String>,
+}
+
 impl Host {
-    /// Registers one built-in compile job per wiki on this Mac, which only Run now starts.
+    /// Registers one built-in compile job per wiki this Mac compiles, due at the folder's compile
+    /// time, or only on Run now without one.
     pub(crate) fn refresh_compile_jobs(&mut self) -> Result<()> {
-        let wanted: Vec<jobs::BuiltIn> = (self.brains()?.into_iter())
-            .map(|brain| jobs::BuiltIn {
-                name: format!("{JOB}{}", brain.repository.to_ascii_lowercase()),
-                owner: format!("the wiki in {}", brain.repository),
-                subject: brain.repository,
-                schedule: None,
+        let mut wanted = vec![];
+        for (storage, spaces) in self.wiki_spaces()? {
+            if !self.compiles_here(&storage)? {
+                continue;
+            }
+            let repository = storage.key();
+            let tracker = (spaces.first()).and_then(|space| self.tracker(space).ok());
+            let compile = tracker.and_then(|tracker| tracker.compile);
+            let schedule = compile.and_then(|compile| match schedule(&compile) {
+                Ok(schedule) => Some(schedule),
+                Err(error) => {
+                    eprintln!("The compile time of {repository}: {error:#}");
+                    None
+                }
+            });
+            wanted.push(jobs::BuiltIn {
+                name: format!("{JOB}{}", repository.to_ascii_lowercase()),
+                owner: format!("the wiki in {repository}"),
+                subject: repository,
+                schedule,
                 run: run_built_in,
-            })
-            .collect();
+            });
+        }
         self.built_ins.retain(|b| !b.name.starts_with(JOB));
+        for job in &wanted {
+            self.forget_stale_due(job)?;
+        }
         self.built_ins.extend(wanted);
         Ok(())
+    }
+
+    /// Forgets a job's stored due time when its schedule no longer names it, as after the compile
+    /// time changed. A due time the schedule still names stays, so a missed run catches up.
+    fn forget_stale_due(&self, job: &jobs::BuiltIn) -> Result<()> {
+        let key = job.key();
+        let stored: Option<i64> = self
+            .db
+            .query_row(
+                "SELECT next_at FROM job_due WHERE key=?1",
+                [key.as_str()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let named = match (stored, &job.schedule) {
+            (Some(due), Some(schedule)) => jobs::names_time(schedule, due)?,
+            _ => stored.is_none(),
+        };
+        if !named {
+            (self.db).execute("DELETE FROM job_due WHERE key=?1", [key.as_str()])?;
+        }
+        Ok(())
+    }
+
+    /// Forgets the wiki's job's due time, as this Mac stopped compiling it.
+    pub(crate) fn forget_compile_due(&self, repository: &str) -> Result<()> {
+        let key = compile_key(repository);
+        (self.db).execute("DELETE FROM job_due WHERE key=?1", [key.as_str()])?;
+        Ok(())
+    }
+
+    fn owed(&self, repository: &str) -> Result<Option<Owed>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT due,catch_up,lost_run FROM compile_owed WHERE repository=?1",
+                [repository],
+                |r| {
+                    Ok(Owed {
+                        due: r.get(0)?,
+                        catch_up: r.get(1)?,
+                        lost_run: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    fn owe_compile(&self, repository: &str, due: &str, trigger: CompileTrigger) -> Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO compile_owed(repository,due,catch_up) VALUES (?1,?2,?3)",
+            params![repository, due, trigger == CompileTrigger::CatchUp],
+        )?;
+        Ok(())
+    }
+
+    fn clear_owed(&self, repository: &str) -> Result<()> {
+        self.db
+            .execute("DELETE FROM compile_owed WHERE repository=?1", [repository])?;
+        Ok(())
+    }
+
+    /// A pull of the repository `key` ended: a run owed starts, or reads the tip when it lost.
+    pub(crate) fn compile_after_pull(&mut self, key: &str) -> Result<()> {
+        let Some(repository) = self.brain_keys()?.remove(key) else {
+            return Ok(());
+        };
+        let Some(owed) = self.owed(&repository)? else {
+            return Ok(());
+        };
+        let brain = self.brain(&repository)?;
+        let (storage, root) = self.brain_home(&brain)?;
+        if !self.compiles_here(&storage)? {
+            return self.clear_owed(&repository);
+        }
+        if owed.lost_run.is_none() {
+            let trigger = match owed.catch_up {
+                true => CompileTrigger::CatchUp,
+                false => CompileTrigger::Scheduled,
+            };
+            self.start_compile(&repository, trigger, Some(owed.due))?;
+            return Ok(());
+        }
+        let Some(head) = self.brain_head(&storage)? else {
+            return Ok(());
+        };
+        self.compile_tip_reads.push(TipRead {
+            claimer: self.claimer(key, &owed.due)?,
+            checkout: self.storage_folder(&storage),
+            brain_dir: brain_sync::brain_dir(&root),
+            repository,
+            head,
+        });
+        Ok(())
+    }
+
+    /// An owed run's tip: done when it landed this due time or nothing is pending, and a claim
+    /// that freed starts the run. A live claim, or no answer, leaves it owed.
+    pub(crate) fn compile_tip_read(&mut self, reading: TipReading) -> Result<()> {
+        let repository = reading.repository;
+        let (Some(owed), Ok(tip)) = (self.owed(&repository)?, reading.tip) else {
+            return Ok(());
+        };
+        if let Some(tip) = &tip {
+            self.name_winner(&owed, tip)?;
+            if tip.landed(&owed.due).is_some() {
+                return self.clear_owed(&repository);
+            }
+            self.compile_tips.insert(repository.clone(), tip.clone());
+        }
+        if reading.nothing_pending {
+            return self.clear_owed(&repository);
+        }
+        if tip.is_none_or(|tip| tip.free(now())) {
+            let trigger = match owed.catch_up {
+                true => CompileTrigger::CatchUp,
+                false => CompileTrigger::Scheduled,
+            };
+            self.start_compile(&repository, trigger, Some(owed.due))?;
+        }
+        Ok(())
+    }
+
+    /// Names the Mac a run lost to, which it could not read at the moment it lost, as a refused
+    /// claim fetches nothing.
+    fn name_winner(&mut self, owed: &Owed, tip: &Tip) -> Result<()> {
+        let (Some(lost), Some(claim)) = (&owed.lost_run, &tip.claim) else {
+            return Ok(());
+        };
+        let mut run = self.compile_run(lost)?;
+        let reason = format!("Lost to {}", claim.machine);
+        if run.reason != reason {
+            run.reason = reason;
+            self.save_compile_run(&run)?;
+        }
+        Ok(())
+    }
+
+    fn claimer(&self, key: &str, due: &str) -> Result<Claimer> {
+        Ok(Claimer {
+            url: self.stored_repository(key)?.push_url,
+            host: self.host_id()?,
+            machine: sync::machine_name(),
+            login: self.gh_login.clone().unwrap_or_default(),
+            due: due.to_owned(),
+            running: self.sync_passes.clone(),
+        })
+    }
+
+    /// The Spaces of each wiki on this Mac, by the repository that holds it.
+    fn wiki_spaces(&self) -> Result<Vec<(StorageRepository, Vec<Space>)>> {
+        let mut wikis: Vec<(StorageRepository, Vec<Space>)> = vec![];
+        for record in self.spaces()? {
+            let storage = record.space.storage.repository.clone();
+            match wikis
+                .iter_mut()
+                .find(|(repository, _)| *repository == storage)
+            {
+                Some((_, spaces)) => spaces.push(record.space),
+                None => wikis.push((storage, vec![record.space])),
+            }
+        }
+        Ok(wikis)
+    }
+
+    /// The names of the Spaces in the repository, as usage names a wiki.
+    pub(crate) fn wiki_name(&self, repository: &str) -> Result<String> {
+        let names: Vec<String> = (self.wiki_spaces()?.into_iter())
+            .filter(|(storage, _)| storage.key() == repository)
+            .flat_map(|(_, spaces)| spaces)
+            .map(|space| space.name)
+            .collect();
+        Ok(match names.is_empty() {
+            true => repository.to_owned(),
+            false => names.join(", "),
+        })
     }
 
     fn compile_run(&self, id: &str) -> Result<CompileRun> {
@@ -834,14 +1281,29 @@ impl Host {
         })
     }
 
-    /// Run now: starts a run through the scheduler, or says why it waits. Two Macs may both
-    /// press it, and the cursor on `main` stops the second landing.
+    /// Why Run now waits on a wiki: a run in progress here, or a live claim last read for it.
+    fn run_now_waits(&self, repository: &str) -> Result<Option<String>> {
+        if self.running_compile(repository)?.is_some() {
+            return Ok(Some("A compile run is in progress".into()));
+        }
+        let live = (self.compile_tips.get(repository))
+            .filter(|tip| !tip.free(now()))
+            .and_then(|tip| tip.claim.as_ref());
+        Ok(live.map(|claim| format!("The wiki is compiling on {}", claim.machine)))
+    }
+
+    /// Run now: starts a run through the scheduler, or says why it waits. A claim decides between
+    /// Macs that press it at once.
     pub fn run_brain_compile(&mut self, repository: &str) -> Result<CompileRun> {
         let brain = self.brain(repository)?;
+        let (storage, _) = self.brain_home(&brain)?;
         ensure!(
-            self.running_compile(&brain.repository)?.is_none(),
-            "A compile run is in progress"
+            self.compiles_here(&storage)?,
+            "Compiling is off on this Mac. Turn on Compile on this Mac first."
         );
+        if let Some(waits) = self.run_now_waits(&brain.repository)? {
+            bail!("{waits}");
+        }
         self.refresh_compile_jobs()?;
         self.run_job_now(&compile_key(&brain.repository))?;
         (self
@@ -852,12 +1314,28 @@ impl Host {
         .context("The compile run was not recorded")
     }
 
-    /// Records a run of the wiki started by `trigger`, running while its preparation is queued.
-    /// `None` while another run is in progress.
+    /// Why this Mac's Brain compiler row cannot run a compile now, when it cannot.
+    fn compiler_waits(&self) -> Result<Option<String>> {
+        if self.model_selection()?.row(&Job::Compiler).is_none() {
+            return Ok(Some(
+                "Waiting for a Brain compiler model: choose one in Models".into(),
+            ));
+        }
+        Ok(match self.resolve_job(None, &Job::Compiler, false, false) {
+            Ok(pick) if !pick.waits => None,
+            Ok(pick) => Some(pick.reason),
+            Err(error) => Some(format!("{error:#}")),
+        })
+    }
+
+    /// Records a run of the wiki started by `trigger`, for the due time `due` or else as a Run
+    /// now of its own, running while its preparation is queued. `None` while another run is in
+    /// progress.
     pub(crate) fn start_compile(
         &mut self,
         repository: &str,
         trigger: CompileTrigger,
+        due: Option<String>,
     ) -> Result<Option<CompileRun>> {
         let brain = self.brain(repository)?;
         if self.running_compile(&brain.repository)?.is_some() {
@@ -872,6 +1350,7 @@ impl Host {
             ended_at: None,
             pending: 0,
             processed: 0,
+            unasked: 0,
             model_calls: 0,
             profile: None,
             procedure: None,
@@ -889,13 +1368,22 @@ impl Host {
                 run.reason = "The repository has not been synced yet".into();
                 run.ended_at = Some(at);
             }
-            Some(head) => self.compile_preparations.push(Prepare {
-                run_id: run.id.clone(),
-                checkout: self.storage_folder(&storage),
-                head,
-                brain_dir: brain_sync::brain_dir(&root),
-                clones: Clones::of(&self.repositories()?),
-            }),
+            Some(head) => {
+                let due = due.unwrap_or_else(|| format!("run-now:{}", run.id));
+                let claimer = (Self::storage_key(&storage))
+                    .map(|key| self.claimer(&key, &due))
+                    .transpose()?;
+                self.compile_preparations.push(Prepare {
+                    run_id: run.id.clone(),
+                    checkout: self.storage_folder(&storage),
+                    head,
+                    brain_dir: brain_sync::brain_dir(&root),
+                    clones: Clones::of(&self.repositories()?)
+                        .with_listed(&self.listed_repositories(&storage)?, &self.home),
+                    claimer,
+                    waits: self.compiler_waits()?,
+                });
+            }
         }
         self.save_compile_run(&run)?;
         Ok(Some(run))
@@ -903,6 +1391,15 @@ impl Host {
 
     pub(crate) fn take_compile_preparations(&mut self) -> Vec<Prepare> {
         std::mem::take(&mut self.compile_preparations)
+    }
+
+    /// The code repositories the Spaces in `storage` list, as `owner/name`.
+    pub(crate) fn listed_repositories(&self, storage: &StorageRepository) -> Result<Vec<String>> {
+        Ok((self.wiki_spaces()?.into_iter())
+            .filter(|(repository, _)| repository == storage)
+            .flat_map(|(_, spaces)| spaces)
+            .flat_map(|space| space.repositories)
+            .collect())
     }
 
     fn end_compile(
@@ -922,27 +1419,141 @@ impl Host {
             }
         }
         let _ = fs::remove_file(self.home.join(INPUTS).join(format!("{}.md", run.id)));
+        self.end_claim(run)
+    }
+
+    /// Queues the end of the run's claim on GitHub, `landed` for one that landed and otherwise
+    /// `released`, as a child of the claim. One another Mac took over ends with nothing pushed.
+    fn end_claim(&mut self, run: &CompileRun) -> Result<()> {
+        let held: Option<(String, String)> = self
+            .db
+            .query_row(
+                "SELECT commit_id,due FROM compile_claims WHERE run=?1",
+                [&run.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((commit, due)) = held else {
+            return Ok(());
+        };
+        self.db
+            .execute("DELETE FROM compile_claims WHERE run=?1", [&run.id])?;
+        let state = match run.outcome {
+            CompileOutcome::Lost => return Ok(()),
+            CompileOutcome::Landed => ClaimState::Landed,
+            _ => ClaimState::Released,
+        };
+        let brain = self.brain(&run.repository)?;
+        let (storage, _) = self.brain_home(&brain)?;
+        let key = Self::storage_key(&storage).context("A local repository takes no claim")?;
+        let claimer = self.claimer(&key, &due)?;
+        self.claim_ends.push(ClaimEnd {
+            clone: self.storage_folder(&storage),
+            parent: commit,
+            claim: Claim {
+                host: claimer.host,
+                machine: claimer.machine,
+                login: claimer.login,
+                run: run.id.clone(),
+                due,
+                state,
+                at: now(),
+            },
+            url: claimer.url,
+            running: claimer.running,
+        });
         Ok(())
     }
 
-    /// What the preparation found: nothing pending ends the run with no model call; otherwise
-    /// the Brain compiler row is resolved and the run's session starts in its own worktree.
+    pub(crate) fn take_claim_ends(&mut self) -> Vec<ClaimEnd> {
+        std::mem::take(&mut self.claim_ends)
+    }
+
+    pub(crate) fn take_compile_tip_reads(&mut self) -> Vec<TipRead> {
+        std::mem::take(&mut self.compile_tip_reads)
+    }
+
+    /// A run that stopped before its model. A Mac stays owed when it lost or found a live claim,
+    /// reading the tip from then on, and when it could not reach GitHub; otherwise it is done.
+    fn compile_stopped(&mut self, run: &mut CompileRun, stopped: Stopped) -> Result<()> {
+        let repository = run.repository.clone();
+        let lost = |host: &Self, run: &CompileRun| -> Result<()> {
+            host.db.execute(
+                "UPDATE compile_owed SET lost_run=?2 WHERE repository=?1",
+                params![repository, run.id],
+            )?;
+            Ok(())
+        };
+        match stopped {
+            Stopped::Unreachable => {
+                let reason = "GitHub could not be reached, so nothing was claimed".to_owned();
+                self.end_compile(run, CompileOutcome::Waiting, reason)
+            }
+            Stopped::Live(tip) => {
+                let machine = (tip.claim.as_ref()).map_or("another Mac", |c| c.machine.as_str());
+                let reason = format!("Lost to {machine}");
+                self.compile_tips.insert(repository.clone(), *tip.clone());
+                lost(self, run)?;
+                self.end_compile(run, CompileOutcome::Lost, reason)
+            }
+            Stopped::Lost => {
+                lost(self, run)?;
+                let reason = "Another Mac claimed this run first".to_owned();
+                self.end_compile(run, CompileOutcome::Lost, reason)
+            }
+            Stopped::CompiledOn(machine) => {
+                self.clear_owed(&repository)?;
+                let reason = format!("Compiled on {machine}");
+                self.end_compile(run, CompileOutcome::CompiledElsewhere, reason)
+            }
+            Stopped::Waits(reason) => {
+                self.clear_owed(&repository)?;
+                self.end_compile(run, CompileOutcome::Waiting, reason)
+            }
+            Stopped::Refused(why) => {
+                self.clear_owed(&repository)?;
+                let reason = format!("GitHub refused the claim: {why}");
+                self.end_compile(run, CompileOutcome::Failed, reason)
+            }
+            Stopped::Failed(error) => {
+                self.clear_owed(&repository)?;
+                self.end_compile(run, CompileOutcome::Failed, error)
+            }
+        }
+    }
+
+    /// What the preparation found: a run that stopped ends; nothing pending ends it with no
+    /// model call; otherwise it holds its claim, the Brain compiler row is resolved again and
+    /// the run's session starts in its own worktree. A run that ended meanwhile gives its claim
+    /// back.
     pub(crate) fn compile_prepared(&mut self, prepared: Prepared) -> Result<()> {
         let mut run = self.compile_run(&prepared.run_id)?;
+        if let Some((commit, due)) = &prepared.claim {
+            self.db.execute(
+                "INSERT INTO compile_claims(run,commit_id,due) VALUES (?1,?2,?3)",
+                params![run.id, commit, due],
+            )?;
+            self.clear_owed(&run.repository)?;
+        }
         if run.outcome != CompileOutcome::Running {
-            return Ok(());
+            return self.end_claim(&run);
         }
         let gathered = match prepared.gathered {
             Ok(gathered) => gathered,
-            Err(error) => return self.end_compile(&mut run, CompileOutcome::Failed, error),
+            Err(stopped) => return self.compile_stopped(&mut run, stopped),
         };
         run.pending = gathered.pending;
         if gathered.entries.is_empty() {
+            self.clear_owed(&run.repository)?;
             let reason = "No pending entries · no model call".to_owned();
             return self.end_compile(&mut run, CompileOutcome::Skipped, reason);
         }
-        if self.model_selection()?.row(&Job::Compiler).is_none() {
-            let reason = "Waiting for a Brain compiler model: choose one in Models".to_owned();
+        run.unasked = (gathered.checked.iter())
+            .filter(|checked| {
+                checked.verification.reason.as_deref() == Some(verify_refs::NOT_ASKED)
+            })
+            .count();
+        if let Some(reason) = self.compiler_waits()? {
             return self.end_compile(&mut run, CompileOutcome::Waiting, reason);
         }
         let pick = match self.resolve_job(None, &Job::Compiler, false, false) {
@@ -1204,7 +1815,16 @@ impl Host {
             shared::write_atomically(&brain.join(QUEUE), queue.as_bytes())?;
             files.push(in_repository(QUEUE));
         }
+        let claim = self
+            .db
+            .query_row(
+                "SELECT commit_id FROM compile_claims WHERE run=?1",
+                [&run.id],
+                |r| r.get(0),
+            )
+            .optional()?;
         let landing = Landing {
+            claim,
             run: run.id.clone(),
             worktree: work.worktree.clone(),
             head: work.head.clone(),
@@ -1237,10 +1857,10 @@ impl Host {
     fn land_locally(&mut self, landing: &Landing, clone: &Path) -> Result<()> {
         let head = runtime::git_output(clone, &["rev-parse", "HEAD"])?;
         match landing.verdict(clone, head.trim())? {
-            brain_sync::Verdict::Elsewhere => {
-                let reason = "Another run compiled these entries first, so nothing landed";
+            brain_sync::Verdict::CompiledElsewhere(machine) => {
+                let reason = compiled_elsewhere(machine.as_deref());
                 let outcome = CompileOutcome::CompiledElsewhere;
-                self.end_landing(landing, outcome, Some(reason.into()), None)
+                self.end_landing(landing, outcome, Some(reason), None)
             }
             brain_sync::Verdict::Land(files) => {
                 for (path, content) in &files {
@@ -1385,22 +2005,74 @@ impl Host {
         let needs_model = self.model_selection()?.row(&Job::Compiler).is_none();
         let mut states = vec![];
         for brain in self.brains()? {
-            let pending = (self.brain_status(&brain.repository).ok())
-                .map_or(0, |status| status.pending_entries);
-            let running = self.running_compile(&brain.repository)?.is_some();
+            let status = self.brain_status(&brain.repository).ok();
+            let pending = status.as_ref().map_or(0, |status| status.pending_entries);
+            let (storage, _) = self.brain_home(&brain)?;
+            let compilers = self.compilers(&storage)?;
+            let last_run = (self.brain_compile_runs(&brain.repository, 0, 1)?.runs)
+                .into_iter()
+                .next();
+            // Scheduled times count from when entries began to wait since the last compile.
+            let waiting_since = status.and_then(|status| {
+                let oldest = status.oldest_pending?;
+                Some(status.last_compile.map_or(oldest, |at| at.max(oldest)))
+            });
             states.push(BrainCompileState {
-                last_run: self
-                    .brain_compile_runs(&brain.repository, 0, 1)?
-                    .runs
-                    .into_iter()
-                    .next(),
+                behind: self.falling_behind(&brain, &compilers, pending, waiting_since)?,
+                run_now_waits: self.run_now_waits(&brain.repository)?,
+                compiles_here: self.compiles_here(&storage)?,
+                last_run,
+                compilers,
                 repository: brain.repository,
                 pending,
-                run_now_waits: running.then(|| "A compile run is in progress".into()),
                 needs_model,
             });
         }
         Ok(states)
+    }
+
+    /// Why the wiki is falling behind: no Mac compiles it and entries wait, or two scheduled
+    /// times passed with entries waiting since `waiting_since`. A local repository's one Mac
+    /// always compiles it.
+    fn falling_behind(
+        &self,
+        brain: &Brain,
+        compilers: &[Compiler],
+        pending: usize,
+        waiting_since: Option<i64>,
+    ) -> Result<Option<String>> {
+        if pending == 0 {
+            return Ok(None);
+        }
+        let (storage, _) = self.brain_home(brain)?;
+        let name = self.wiki_name(&brain.repository)?;
+        if compilers.is_empty() && Self::storage_key(&storage).is_some() {
+            return Ok(Some(format!(
+                "No Mac compiles {name}'s wiki. {}.",
+                entries_waiting(pending)
+            )));
+        }
+        let space = (self.wiki_spaces()?.into_iter())
+            .find(|(repository, _)| *repository == storage)
+            .and_then(|(_, mut spaces)| spaces.pop());
+        let compile = space.and_then(|space| self.tracker(&space).ok()?.compile);
+        let (Some(compile), Some(waiting_since)) = (compile, waiting_since) else {
+            return Ok(None);
+        };
+        let last_run = (self
+            .brain_compile_runs(&brain.repository, 0, 1)?
+            .runs
+            .first())
+        .map_or("no compile yet".to_owned(), |run| {
+            format!("last run {}", memory::local_date(run.started_at))
+        });
+        let missed = jobs::times_since(&schedule(&compile)?, waiting_since, now())?;
+        Ok((missed >= MISSED_TIMES_BEHIND).then(|| {
+            format!(
+                "{name}'s wiki is falling behind: {}, {last_run}.",
+                entries_waiting(pending).to_lowercase()
+            )
+        }))
     }
 
     /// Every open conflict of this Mac's wikis, as cards for the Inbox of each project in a Space
@@ -1644,15 +2316,19 @@ fn ruling_text(conflict: &BrainConflict, ruling: &Ruling) -> Result<(String, Str
 mod tests {
     use super::*;
     use crate::brain_index::tests::{entry as entry_file, id, note};
-    use crate::brain_sync::tests::{PHONE, REPO, Stored, stored};
-    use std::sync::atomic::Ordering;
+    use crate::brain_sync::tests::{FOLDER, PHONE, REPO, Stored, stored};
     use workspace_core::{Line, ModelProfile, Then};
 
     /// The brain folder as a path of the repository.
     const BRAIN: &str = "wiffletree/second-brain";
 
+    /// The stored Space's wiki, compiled on this Mac.
     fn brained() -> Stored {
-        stored()
+        let mut b = stored();
+        let space = b.sage.id.clone();
+        b.f.host.set_compile_here(&space, true).unwrap();
+        b.sync();
+        b
     }
 
     /// Makes GitHub refuse every push, with the branch left where it is; the hook that does.
@@ -1678,6 +2354,8 @@ mod tests {
                 head: self.head(),
                 brain_dir: BRAIN.into(),
                 clones: Clones::default(),
+                claimer: None,
+                waits: None,
             };
             prepare.run(&self.tools).gathered.unwrap()
         }
@@ -1686,11 +2364,23 @@ mod tests {
             let (storage, _) = self.f.host.brain_home(&brain).unwrap();
             self.f.host.brain_head(&storage).unwrap().unwrap()
         }
-        /// Prepares every queued run and hands each to the host, as the service does.
+        /// Prepares every queued run, reads every owed tip and ends every claim, handing each to
+        /// the host, as the service does.
         fn prepare(&mut self) {
+            self.end_claims();
+            for read in self.f.host.take_compile_tip_reads() {
+                let reading = read.run(&self.tools.git);
+                self.f.host.compile_tip_read(reading).unwrap();
+            }
             for prepare in self.f.host.take_compile_preparations() {
                 let prepared = prepare.run(&self.tools);
                 self.f.host.compile_prepared(prepared).unwrap();
+            }
+            self.end_claims();
+        }
+        fn end_claims(&mut self) {
+            for end in self.f.host.take_claim_ends() {
+                end.push(&self.tools.git);
             }
         }
         fn runs(&self) -> Vec<CompileRun> {
@@ -2184,18 +2874,23 @@ mod tests {
         let mut b = brained();
         b.merge(&[relay(1)]);
         let (run, _) = b.finished(&relay_note(&id(1)));
-        // The push fails, and GitHub is out of reach by the time the pass looks at why.
-        let hook = refusing_pushes(&b);
-        let github = b.github.clone();
-        *b.github.before.lock().unwrap() = Some((
-            "push",
-            Box::new(move || github.offline.store(true, Ordering::SeqCst)),
-        ));
+        // The network drops under the push, with GitHub back in reach as the pass looks at why.
+        let real = b.tools.git.clone();
+        let dropping = real.clone();
+        b.tools.git = std::sync::Arc::new(move |path: &Path, args: &[&str]| {
+            match publish::subcommand(args) {
+                "push" => Ok(runtime::GitAnswer {
+                    status: publish::tests::exit(128),
+                    output: String::new(),
+                    error: "fatal: unable to access: Connection reset by peer".into(),
+                }),
+                _ => dropping(path, args),
+            }
+        });
         let _ = b.sync_answering();
         assert_eq!(b.run_named(&run).outcome, CompileOutcome::Running);
-        fs::remove_file(&hook).unwrap();
-        b.github.offline.store(false, Ordering::SeqCst);
-        b.sync();
+        b.tools.git = real;
+        b.sync_answering().unwrap();
         assert_eq!(b.run_named(&run).outcome, CompileOutcome::Landed);
     }
 
@@ -2706,10 +3401,739 @@ mod tests {
             .unwrap();
         assert_eq!(
             (line.name.as_str(), line.project.as_str()),
-            ("Brain compile", REPO)
+            ("Brain compile", "Sage")
         );
         assert_eq!(line.own.output, 200);
         let runs = b.runs();
         assert!(runs[0].tokens >= 1200, "{}", runs[0].tokens);
+    }
+
+    const DUE: &str = "2026-11-02T06:00 America/Chicago";
+    const MINUTE: i64 = 60_000;
+    const THEIR_MAC: &str = "A teammate's Mac";
+
+    impl Stored {
+        fn url(&self) -> String {
+            let key = repos::key(REPO);
+            self.f.host.stored_repository(&key).unwrap().push_url
+        }
+        /// The claim at the tip of the claim branch on GitHub.
+        fn tip(&self) -> Option<Claim> {
+            let log = std::process::Command::new("git")
+                .current_dir(&self.github.bare)
+                .args(["log", "-1", "--format=%B", repos::CLAIM_BRANCH])
+                .output()
+                .unwrap();
+            log.status
+                .success()
+                .then(|| serde_json::from_slice(&log.stdout).unwrap())
+        }
+        fn claims(&self) -> usize {
+            let log = std::process::Command::new("git")
+                .current_dir(&self.github.bare)
+                .args(["rev-list", "--count", repos::CLAIM_BRANCH])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&log.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0)
+        }
+        /// A teammate's Mac puts `state` at the tip of the claim branch, written at `at`, from a
+        /// clone of its own.
+        fn teammate(&self, state: ClaimState, at: i64, due: &str) -> String {
+            let folder = tempfile::tempdir().unwrap();
+            let clone = folder.path().join("teammate");
+            crate::test_support::git(
+                folder.path(),
+                &[
+                    "clone",
+                    "-q",
+                    "--single-branch",
+                    self.github.bare.to_str().unwrap(),
+                    clone.to_str().unwrap(),
+                ],
+            );
+            let (url, git) = (self.url(), &self.tools.git);
+            let tip = repos::read_tip(&clone, &url, git).unwrap();
+            let claim = Claim {
+                host: "their-host".into(),
+                machine: THEIR_MAC.into(),
+                login: "jlin".into(),
+                run: brains::new_ulid(now()),
+                due: due.into(),
+                state,
+                at,
+            };
+            match repos::claim(&clone, &url, tip.as_ref(), &claim, git).unwrap() {
+                Claiming::Won(commit) => commit,
+                other => panic!("{other:?}"),
+            }
+        }
+        /// The scheduler finds the run due, and the pull it asks for ends.
+        fn due(&mut self) {
+            let due = jobs::BuiltInStart::Due {
+                catch_up: 0,
+                due: DUE.into(),
+            };
+            run_built_in(&mut self.f.host, REPO, due).unwrap();
+            self.pull();
+        }
+        fn pull(&mut self) {
+            self.sync();
+            self.prepare();
+        }
+        fn owed(&self) -> Option<Owed> {
+            self.f.host.owed(REPO).unwrap()
+        }
+        fn state(&self) -> BrainCompileState {
+            let states = self.f.host.brain_compile_states().unwrap();
+            (states.into_iter())
+                .find(|state| state.repository == REPO)
+                .unwrap()
+        }
+        fn exhaust_quota(&mut self) {
+            let window = QuotaWindow {
+                key: "weekly".into(),
+                label: "Weekly".into(),
+                used_percent: Some(100.0),
+                observed_at: now(),
+                duration_mins: None,
+                resets_at: Some(now() + 60 * MINUTE),
+                status: None,
+            };
+            let reading = QuotaReading {
+                provider: Provider::Claude,
+                account: None,
+                observed_at: now(),
+                source: "test".into(),
+                windows: vec![window],
+                error: None,
+            };
+            self.f.host.record_quota(reading).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_mac_turns_compiling_on_and_off_and_its_job_follows_the_folders_compile_time() {
+        let mut b = stored();
+        let (space, key) = (b.sage.id.clone(), compile_key(REPO));
+        b.f.host.refresh_compile_jobs().unwrap();
+        assert!(b.f.host.built_in(&key).is_none(), "compiling is off");
+        let refused = b.f.host.run_brain_compile(REPO).unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("Compile on this Mac"),
+            "{refused:#}"
+        );
+        b.f.host.set_compile_here(&space, true).unwrap();
+        b.sync();
+        let file = format!("wiffletree/compilers/{}.yaml", b.f.host.host_id().unwrap());
+        assert!(b.github.show(&file).is_some());
+        b.f.host.refresh_compile_jobs().unwrap();
+        let job = b.f.host.built_in(&key).unwrap();
+        assert_eq!(job.schedule, None, "no compile time, only Run now");
+        let at = |at: &str, timezone: &str| BrainCompile {
+            at: at.into(),
+            timezone: timezone.into(),
+            extra: Extra::new(),
+        };
+        // A time the schedule cannot read is refused with nothing written.
+        for bad in [at("25:00", "America/Chicago"), at("06:00", "Mars/Olympus")] {
+            assert!(b.f.host.set_compile_time(&space, Some(bad)).is_err());
+        }
+        assert_eq!(b.f.host.tracker(&b.sage).unwrap().compile, None);
+        let commits = b.github.log("%s").len();
+        (b.f.host
+            .set_compile_time(&space, Some(at("06:30", "America/Chicago"))))
+        .unwrap();
+        b.sync();
+        assert_eq!(b.github.log("%s").len(), commits + 1);
+        let shown = git_show_names(&b);
+        assert_eq!(shown, ["wiffletree/wiffletree-issues.yaml"]);
+        b.f.host.refresh_compile_jobs().unwrap();
+        let job = b.f.host.built_in(&key).unwrap();
+        let schedule = job.schedule.clone().unwrap();
+        assert_eq!(schedule.cron, "30 6 * * *");
+        // Due at that time, by the scheduler, on this Mac.
+        b.f.host.fire_and_check(now()).unwrap();
+        let next: i64 = (b.f.host.db)
+            .query_row(
+                "SELECT next_at FROM job_due WHERE key=?1",
+                [key.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        b.merge(&[relay(1)]);
+        b.with_compiler_row();
+        b.f.host.fire_and_check(next + 1).unwrap();
+        assert!(b.owed().is_some(), "a due run waits for its pull");
+        assert!(b.f.host.issues_written.borrow().contains(&repos::key(REPO)));
+        assert_eq!(b.tip(), None, "nothing is claimed before the pull");
+        b.pull();
+        let claim = b.tip().unwrap();
+        assert!(
+            claim.due.ends_with("T06:30 America/Chicago"),
+            "{}",
+            claim.due
+        );
+        assert_eq!(claim.state, ClaimState::Claimed);
+        assert_eq!(b.runs()[0].trigger, CompileTrigger::Scheduled);
+        // A restart keeps a due time the schedule still names, so a missed run catches up.
+        let kept = |b: &Stored| -> Option<i64> {
+            (b.f.host.db)
+                .query_row(
+                    "SELECT next_at FROM job_due WHERE key=?1",
+                    [key.as_str()],
+                    |r| r.get(0),
+                )
+                .optional()
+                .unwrap()
+        };
+        let stored = kept(&b).unwrap();
+        b.f.host.built_ins.clear();
+        b.f.host.refresh_compile_jobs().unwrap();
+        assert_eq!(kept(&b), Some(stored));
+        // A changed time forgets the old due time; compiling off drops the job.
+        (b.f.host
+            .set_compile_time(&space, Some(at("02:00", "America/Chicago"))))
+        .unwrap();
+        b.f.host.refresh_compile_jobs().unwrap();
+        assert_eq!(kept(&b), None);
+        b.f.host.set_compile_here(&space, false).unwrap();
+        b.f.host.refresh_compile_jobs().unwrap();
+        assert!(b.f.host.built_in(&key).is_none());
+        for command in [
+            Command::SetCompileHere {
+                space_id: space.clone(),
+                compiles: true,
+            },
+            Command::SetCompileTime {
+                space_id: space,
+                compile: None,
+            },
+        ] {
+            assert!(command.is_human_only());
+        }
+    }
+
+    fn git_show_names(b: &Stored) -> Vec<String> {
+        let shown = crate::test_support::git(
+            &b.github.bare,
+            &["show", "--format=", "--name-only", "main"],
+        );
+        shown.lines().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn nothing_pending_pushes_nothing_not_even_a_claim_and_makes_no_model_call() {
+        let mut b = brained();
+        b.with_compiler_row();
+        let (sessions, pushes) = (b.f.host.sessions().unwrap().len(), b.github.pushes());
+        b.due();
+        let run = b.runs().remove(0);
+        assert_eq!((run.outcome, run.model_calls), (CompileOutcome::Skipped, 0));
+        assert_eq!(b.github.pushes(), pushes);
+        assert_eq!(b.tip(), None);
+        assert_eq!(b.f.host.sessions().unwrap().len(), sessions);
+        assert!(b.owed().is_none());
+    }
+
+    #[test]
+    fn a_tip_landed_for_this_due_time_is_recorded_as_compiled_on_that_mac_whatever_is_pending() {
+        for pending in [false, true] {
+            let mut b = brained();
+            b.with_compiler_row();
+            if pending {
+                b.merge(&[relay(1)]);
+            }
+            b.teammate(ClaimState::Landed, now(), DUE);
+            let (sessions, claims) = (b.f.host.sessions().unwrap().len(), b.claims());
+            b.due();
+            let run = b.runs().remove(0);
+            assert_eq!(run.outcome, CompileOutcome::CompiledElsewhere);
+            assert_eq!(run.reason, format!("Compiled on {THEIR_MAC}"));
+            assert_eq!((run.model_calls, run.tokens), (0, 0));
+            assert_eq!(b.claims(), claims, "it claims nothing");
+            assert_eq!(b.f.host.sessions().unwrap().len(), sessions);
+            assert!(b.owed().is_none());
+        }
+    }
+
+    #[test]
+    fn with_no_row_or_out_of_quota_a_mac_waits_says_why_and_claims_nothing() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        b.due();
+        let run = b.runs().remove(0);
+        assert_eq!(run.outcome, CompileOutcome::Waiting);
+        assert!(run.reason.contains("Brain compiler"), "{}", run.reason);
+        assert_eq!(b.tip(), None);
+        assert!(b.owed().is_none());
+        b.with_compiler_row();
+        b.exhaust_quota();
+        b.due();
+        let run = b.runs().remove(0);
+        assert_eq!((run.outcome, run.model_calls), (CompileOutcome::Waiting, 0));
+        assert_eq!(b.tip(), None, "the next volunteer takes the run");
+    }
+
+    #[test]
+    fn a_run_that_claims_lands_and_pushes_landed_as_a_child_of_its_claim() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        b.with_compiler_row();
+        b.due();
+        let (run, session, work) = {
+            let run = b.runs().remove(0);
+            assert_eq!(run.outcome, CompileOutcome::Running, "{}", run.reason);
+            let id: String = (b.f.host.db)
+                .query_row(
+                    "SELECT session_id FROM compile_runs WHERE id=?1",
+                    [&run.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let work = b.f.host.compile_work(&run.id).unwrap();
+            (run, b.f.host.session(&id).unwrap(), work)
+        };
+        let claimed = b.tip().unwrap();
+        assert_eq!(
+            (claimed.run.as_str(), claimed.due.as_str()),
+            (run.id.as_str(), DUE)
+        );
+        assert_eq!(claimed.state, ClaimState::Claimed);
+        assert!(b.owed().is_none(), "the winner owes nothing");
+        let refused = b.f.host.run_brain_compile(REPO).unwrap_err();
+        assert!(format!("{refused:#}").contains("in progress"));
+        let brain = work.worktree.join(BRAIN);
+        fs::create_dir_all(brain.join("notes")).unwrap();
+        fs::write(brain.join("notes/Call Relay.md"), relay_note(&id(1))).unwrap();
+        b.tool(&session, "finish_compile", json!({"summary": "Done"}))
+            .unwrap();
+        b.pull();
+        assert_eq!(b.run_named(&run).outcome, CompileOutcome::Landed);
+        let landed = b.tip().unwrap();
+        assert_eq!(landed.state, ClaimState::Landed);
+        assert_eq!(
+            (landed.run.as_str(), landed.due.as_str()),
+            (run.id.as_str(), DUE)
+        );
+        assert_eq!(b.claims(), 2);
+    }
+
+    #[test]
+    fn a_failed_run_releases_its_claim_for_the_next_mac_and_leaves_the_cursor() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        b.with_compiler_row();
+        b.due();
+        let session: String = (b.f.host.db)
+            .query_row(
+                "SELECT session_id FROM compile_runs WHERE id=?1",
+                [&b.runs()[0].id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // The session stops as the provider's quota runs out.
+        let quota = Some("You have hit your limit");
+        b.f.host.compile_turn_ended(&session, None, quota).unwrap();
+        b.prepare();
+        let run = b.runs().remove(0);
+        assert_eq!(run.outcome, CompileOutcome::Failed);
+        assert_eq!(b.tip().unwrap().state, ClaimState::Released);
+        assert_eq!(b.cursor_on_main(), Cursor::default());
+    }
+
+    #[test]
+    fn a_live_claim_leaves_a_mac_owed_until_it_is_released_then_it_runs_as_its_child() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        b.with_compiler_row();
+        b.teammate(ClaimState::Claimed, now() - 59 * MINUTE, DUE);
+        let sessions = b.f.host.sessions().unwrap().len();
+        b.due();
+        let lost = b.runs().remove(0);
+        assert_eq!(lost.outcome, CompileOutcome::Lost);
+        assert_eq!(lost.reason, format!("Lost to {THEIR_MAC}"));
+        assert!(b.owed().unwrap().lost_run.is_some());
+        assert_eq!(b.f.host.sessions().unwrap().len(), sessions);
+        // Run now says the wiki is compiling on that Mac.
+        let waits = b.f.host.run_brain_compile(REPO).unwrap_err();
+        assert_eq!(
+            format!("{waits:#}"),
+            format!("The wiki is compiling on {THEIR_MAC}")
+        );
+        assert_eq!(
+            b.state().run_now_waits,
+            Some(format!("The wiki is compiling on {THEIR_MAC}"))
+        );
+        // A pull with the claim still live changes nothing and adds no row.
+        b.pull();
+        assert_eq!(b.runs().len(), 2 - 1);
+        b.teammate(ClaimState::Released, now(), DUE);
+        b.pull();
+        b.prepare();
+        let run = b.runs().remove(0);
+        assert_eq!(run.outcome, CompileOutcome::Running, "{}", run.reason);
+        assert_eq!(b.tip().unwrap().run, run.id);
+        assert_eq!(b.claims(), 3, "as a child of the release");
+        assert!(b.owed().is_none());
+    }
+
+    #[test]
+    fn an_owed_mac_takes_over_a_claim_older_than_an_hour_at_its_next_pull() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        b.with_compiler_row();
+        b.teammate(ClaimState::Claimed, now() - 58 * MINUTE, DUE);
+        b.due();
+        assert_eq!(b.runs()[0].outcome, CompileOutcome::Lost);
+        // A crashed Mac's claim, an hour old by the time of this pull.
+        let expired = Tip {
+            commit: "c".into(),
+            claim: Some(Claim {
+                host: "h".into(),
+                machine: "m".into(),
+                login: "l".into(),
+                run: "r".into(),
+                due: DUE.into(),
+                state: ClaimState::Claimed,
+                at: now() - 61 * MINUTE,
+            }),
+        };
+        assert!(expired.free(now()));
+        b.f.host.compile_tips.remove(REPO);
+        b.teammate(ClaimState::Claimed, now() - 61 * MINUTE, DUE);
+        b.pull();
+        b.prepare();
+        let run = b.runs().remove(0);
+        assert_eq!(run.outcome, CompileOutcome::Running, "{}", run.reason);
+        let tip = b.tip().unwrap();
+        assert_eq!(
+            (tip.run.as_str(), tip.state),
+            (run.id.as_str(), ClaimState::Claimed)
+        );
+    }
+
+    #[test]
+    fn a_lost_claim_is_not_pushed_again_and_its_winner_is_named_at_the_next_pull() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        b.with_compiler_row();
+        let teammate_tip = std::sync::Arc::new(std::sync::Mutex::new(None));
+        // A teammate's claim lands between this Mac's read of the tip and its push.
+        let bare = b.github.bare.clone();
+        // The fake's own tool is locked while its hook runs, so this Mac's rival goes straight
+        // to the bare repository.
+        let rival: publish::GitTool = std::sync::Arc::new(|path: &Path, args: &[&str]| {
+            let identity = ["-c", "user.name=T", "-c", "user.email=t@example.invalid"];
+            let args = [&identity[..], args].concat();
+            match publish::subcommand(&args) {
+                "push" => runtime::git_push(path, &args),
+                _ => runtime::git_answer(path, &args),
+            }
+        });
+        let folder = tempfile::tempdir().unwrap();
+        let clone = folder.path().join("teammate");
+        crate::test_support::git(
+            folder.path(),
+            &[
+                "clone",
+                "-q",
+                "--single-branch",
+                bare.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+        );
+        let (won, bare_url) = (teammate_tip.clone(), bare.clone());
+        *b.github.before.lock().unwrap() = Some((
+            "push",
+            Box::new(move || {
+                let claim = Claim {
+                    host: "their-host".into(),
+                    machine: THEIR_MAC.into(),
+                    login: "jlin".into(),
+                    run: "theirs".into(),
+                    due: DUE.into(),
+                    state: ClaimState::Claimed,
+                    at: now(),
+                };
+                let url = bare_url.to_str().unwrap();
+                let answer = repos::claim(&clone, url, None, &claim, &rival).unwrap();
+                *won.lock().unwrap() = Some(answer);
+            }),
+        ));
+        b.due();
+        assert!(matches!(
+            teammate_tip.lock().unwrap().as_ref(),
+            Some(Claiming::Won(_))
+        ));
+        let lost = b.runs().remove(0);
+        assert_eq!(lost.outcome, CompileOutcome::Lost);
+        assert_eq!(lost.reason, "Another Mac claimed this run first");
+        // This Mac's one push and the teammate's: nothing goes again.
+        assert_eq!(b.claims(), 1);
+        assert_eq!(b.tip().unwrap().machine, THEIR_MAC);
+        b.pull();
+        assert_eq!(
+            b.run_named(&lost).reason,
+            format!("Lost to {THEIR_MAC}"),
+            "the next read names the Mac"
+        );
+        // That Mac lands: the run is done, with no second row.
+        b.teammate(ClaimState::Landed, now(), DUE);
+        b.pull();
+        assert!(b.owed().is_none());
+        assert_eq!(b.runs().len(), 1);
+    }
+
+    #[test]
+    fn an_owed_mac_stops_when_nothing_is_pending_any_more() {
+        let mut b = brained();
+        let head = b.merge(&[relay(1)]);
+        b.with_compiler_row();
+        b.teammate(ClaimState::Claimed, now(), DUE);
+        b.due();
+        assert!(b.owed().is_some());
+        let index = write_cursor(
+            "",
+            &Cursor {
+                through: Some(head),
+                after: vec![],
+            },
+        );
+        b.merge(&[("notes/INDEX.md".into(), index)]);
+        b.pull();
+        assert!(b.owed().is_none());
+    }
+
+    #[test]
+    fn offline_at_the_due_time_a_mac_claims_nothing_and_stays_due() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        b.with_compiler_row();
+        let due = jobs::BuiltInStart::Due {
+            catch_up: 1,
+            due: DUE.into(),
+        };
+        run_built_in(&mut b.f.host, REPO, due).unwrap();
+        b.github
+            .offline
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(b.sync_answering().is_err());
+        b.prepare();
+        assert!(b.runs().is_empty());
+        assert!(b.owed().is_some());
+        b.github
+            .offline
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        b.pull();
+        let run = b.runs().remove(0);
+        assert_eq!(
+            (run.outcome, run.trigger),
+            (CompileOutcome::Running, CompileTrigger::CatchUp),
+            "{}",
+            run.reason
+        );
+    }
+
+    #[test]
+    fn a_mac_that_slept_through_its_claim_lands_nothing_and_pushes_nothing() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        b.with_compiler_row();
+        let (run, _) = b.finished(&relay_note(&id(1)));
+        // A takeover while this Mac slept.
+        b.teammate(ClaimState::Claimed, now(), DUE);
+        let (commits, claims) = (b.github.log("%s").len(), b.claims());
+        b.pull();
+        let run = b.run_named(&run);
+        assert_eq!(run.outcome, CompileOutcome::Lost);
+        assert_eq!(run.commit, None);
+        assert_eq!((b.github.log("%s").len(), b.claims()), (commits, claims));
+        assert_eq!(b.cursor_on_main(), Cursor::default());
+    }
+
+    #[test]
+    fn a_run_compiled_elsewhere_names_the_mac_and_releases_its_claim() {
+        let mut b = brained();
+        let head = b.merge(&[relay(1)]);
+        let (run, _) = b.finished(&relay_note(&id(1)));
+        let index = format!("{FOLDER}/second-brain/notes/INDEX.md");
+        let cursor = Cursor {
+            through: Some(head),
+            after: vec![],
+        };
+        b.github.commit_files(
+            &[(index, write_cursor("", &cursor))],
+            &format!("Compiled 1 entries · {THEIR_MAC}"),
+        );
+        b.pull();
+        let run = b.run_named(&run);
+        assert_eq!(run.outcome, CompileOutcome::CompiledElsewhere);
+        assert!(run.reason.contains(THEIR_MAC), "{}", run.reason);
+        assert_eq!(b.tip().unwrap().state, ClaimState::Released);
+    }
+
+    #[test]
+    fn a_claim_github_refuses_fails_the_run_with_its_reason_and_stops_there() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        b.with_compiler_row();
+        let hook = refusing_pushes(&b);
+        b.due();
+        fs::remove_file(hook).unwrap();
+        let run = b.runs().remove(0);
+        assert_eq!(run.outcome, CompileOutcome::Failed);
+        assert!(
+            run.reason.contains("main needs a pull request"),
+            "{}",
+            run.reason
+        );
+        assert!(b.owed().is_none());
+    }
+
+    #[test]
+    fn a_wiki_says_when_it_is_falling_behind() {
+        let mut b = stored();
+        let old = entry_file("app", &id(1), ("mhohlios", "observation", "Old"), "—");
+        b.merge(&[old]);
+        let behind = |b: &Stored| b.state().behind;
+        assert_eq!(
+            behind(&b).as_deref(),
+            Some("No Mac compiles Sage's wiki. 1 entry is waiting.")
+        );
+        let space = b.sage.id.clone();
+        b.f.host.set_compile_here(&space, true).unwrap();
+        b.sync();
+        assert_eq!(behind(&b), None, "no compile time, and a volunteer");
+        let compile = BrainCompile {
+            at: "06:00".into(),
+            timezone: "America/Chicago".into(),
+            extra: Extra::new(),
+        };
+        b.f.host.set_compile_time(&space, Some(compile)).unwrap();
+        let shown = behind(&b).unwrap();
+        assert!(
+            shown.contains("is falling behind: 1 entry is waiting"),
+            "{shown}"
+        );
+        // An entry logged now has seen no scheduled time.
+        let mut fresh = brained();
+        let space = fresh.sage.id.clone();
+        let compile = BrainCompile {
+            at: "06:00".into(),
+            timezone: "America/Chicago".into(),
+            extra: Extra::new(),
+        };
+        fresh
+            .f
+            .host
+            .set_compile_time(&space, Some(compile))
+            .unwrap();
+        let new = brains::new_ulid(now());
+        fresh.merge(&[entry_file(
+            "app",
+            &new,
+            ("mhohlios", "observation", "New"),
+            "—",
+        )]);
+        assert_eq!(behind(&fresh), None);
+    }
+
+    #[test]
+    fn entries_fold_by_repos_and_a_changed_note_keeps_its_repos_and_its_keys() {
+        let mut b = brained();
+        let pica = "---\ncreated: 2026-01-02\nrepos: [pica-ios, pica-api]\nsources: [vyttle-overview.md]\ntags: [mobile]\n---\nPica ships weekly.\n";
+        let entry = entry_file(
+            "pica-api",
+            &id(1),
+            ("mhohlios", "observation", "Relay"),
+            "—",
+        );
+        let elsewhere = "---\ntitle: Reviso\nkind: observation\nupdated: 2026-10-01\nsources: []\nrepos: [reviso-api]\n---\nReviso.\n";
+        b.merge(&[
+            entry,
+            ("notes/Pica.md".into(), pica.into()),
+            ("notes/Reviso.md".into(), elsewhere.into()),
+        ]);
+        let gathered = b.gather();
+        let named: Vec<&str> = gathered
+            .notes
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect();
+        assert_eq!(
+            named,
+            ["notes/Pica.md"],
+            "the page whose repos list its folder"
+        );
+        // A note that drops a name fails the run, naming the note and the repository.
+        let (run, session, work) = b.started();
+        let page = work.worktree.join(BRAIN).join("notes/Pica.md");
+        let id_one = id(1);
+        let rewritten = |repos: &str| {
+            format!(
+                "---\ntitle: Pica\nkind: observation\nupdated: 2026-11-01\ncreated: 2026-01-02\nrepos: [{repos}]\nsources: [vyttle-overview.md, {id_one}]\ntags: [mobile]\n---\nPica ships weekly.\n"
+            )
+        };
+        fs::write(&page, rewritten("pica-ios")).unwrap();
+        let failed = b.tool(&session, "finish_compile", json!({"summary": "Done"}));
+        let failed = format!("{:#}", failed.unwrap_err());
+        assert!(
+            failed.contains("notes/Pica.md") && failed.contains("pica-api"),
+            "{failed}"
+        );
+        assert_eq!(b.run_named(&run).outcome, CompileOutcome::Failed);
+        // One that keeps them gains `title` and `kind`, and a path among its sources stays valid.
+        let (run, session, work) = b.started();
+        let page = work.worktree.join(BRAIN).join("notes/Pica.md");
+        fs::write(&page, rewritten("pica-ios, pica-api")).unwrap();
+        b.tool(&session, "finish_compile", json!({"summary": "Done"}))
+            .unwrap();
+        b.pull();
+        assert_eq!(b.run_named(&run).outcome, CompileOutcome::Landed);
+        let landed = b.github.show(&format!("{BRAIN}/notes/Pica.md")).unwrap();
+        for kept in [
+            "title: Pica",
+            "kind: observation",
+            "created: 2026-01-02",
+            "tags: [mobile]",
+        ] {
+            assert!(landed.contains(kept), "{kept}");
+        }
+    }
+
+    #[test]
+    fn a_changed_note_still_needs_title_and_kind_and_an_entry_id_must_name_an_entry() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        let (run, session, work) = b.started();
+        let page = work.worktree.join(BRAIN).join("notes/Old.md");
+        fs::create_dir_all(page.parent().unwrap()).unwrap();
+        let missing = id(99);
+        fs::write(
+            &page,
+            format!("---\ntitle: Old\nkind: observation\nupdated: 2026-11-01\nsources: [{missing}]\n---\nOld.\n"),
+        )
+        .unwrap();
+        let failed = b.tool(&session, "finish_compile", json!({"summary": "Done"}));
+        assert!(format!("{:#}", failed.unwrap_err()).contains("which is no entry file"));
+        assert_eq!(b.run_named(&run).outcome, CompileOutcome::Failed);
+    }
+
+    #[test]
+    fn the_compile_procedure_is_v2_and_tells_the_model_how_to_keep_a_wiki_by_product() {
+        assert_eq!(PROCEDURE_VERSION, 2);
+        assert!(PROCEDURE.starts_with("# Brain compile procedure — v2"));
+        for rule in [
+            "`repos:`",
+            "Keep every frontmatter key",
+            "VYT-42",
+            "plain text",
+        ] {
+            assert!(PROCEDURE.contains(rule), "{rule}");
+        }
+        assert!(!PROCEDURE.contains("compile PR"));
     }
 }

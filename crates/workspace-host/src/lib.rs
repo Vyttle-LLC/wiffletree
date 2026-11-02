@@ -211,6 +211,12 @@ pub struct Host {
     /// Compile runs whose pending entries wait to be read and verified, for the service to do
     /// off the host thread.
     pub(crate) compile_preparations: Vec<compile::Prepare>,
+    /// Owed runs' tips to read after a pull, off the host thread.
+    pub(crate) compile_tip_reads: Vec<compile::TipRead>,
+    /// Ended runs' claims to end on GitHub, off the host thread.
+    pub(crate) claim_ends: Vec<compile::ClaimEnd>,
+    /// The claim branch's tip as a run last read it, by repository, for what Run now says.
+    pub(crate) compile_tips: std::collections::HashMap<String, repos::Tip>,
 }
 /// A report that set its ticket's state while the reporter's turn ran.
 pub(crate) struct MidTurnReport {
@@ -422,6 +428,9 @@ impl Host {
             source_env: None,
             source_checks: vec![],
             compile_preparations: vec![],
+            compile_tip_reads: vec![],
+            claim_ends: vec![],
+            compile_tips: std::collections::HashMap::new(),
         };
         // Before anything reads or writes a shared setting, so the shared folder is in place:
         // clones an earlier release named `<owner>-<name>` first, then one still in `shared/`.
@@ -2035,6 +2044,13 @@ impl Host {
             )?)?,
             Command::RunBrainCompile { repository } => {
                 serde_json::to_value(self.run_brain_compile(&repository)?)?
+            }
+            Command::SetCompileHere { space_id, compiles } => {
+                self.set_compile_here(&space_id, compiles)?;
+                Value::Null
+            }
+            Command::SetCompileTime { space_id, compile } => {
+                serde_json::to_value(self.set_compile_time(&space_id, compile)?)?
             }
             Command::BrainCompileRuns {
                 repository,

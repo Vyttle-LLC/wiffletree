@@ -283,7 +283,8 @@ impl BrainBrowser {
                         if view.repository.as_ref() == Some(&asked) {
                             view.status = Some(read.map(|status| {
                                 let body = status.body.as_deref().unwrap_or_default();
-                                let markdown = brain_markdown::prepare(body, &status.links);
+                                let markdown =
+                                    brain_markdown::prepare(body, &status.links, &status.issues);
                                 (status, markdown.into())
                             }));
                             cx.notify();
@@ -356,7 +357,8 @@ impl BrainBrowser {
                 ) == asked
                 {
                     view.note = Some(read.map(|note| ShownNote {
-                        markdown: brain_markdown::prepare(&note.body, &note.links).into(),
+                        markdown:
+                            brain_markdown::prepare(&note.body, &note.links, &note.issues).into(),
                         note,
                     }));
                     cx.notify();
@@ -447,6 +449,10 @@ impl BrainBrowser {
                 cx.notify();
             }
             LinkTarget::Entry(id) => self.go(BrainTarget::Entry { id, pending: false }, window, cx),
+            LinkTarget::Issue(id) => match IssueId::parse(&id) {
+                Ok(id) => cx.emit(Intent::OpenIssue(id)),
+                Err(_) => toast_error("That issue cannot be opened.", window, cx),
+            },
             LinkTarget::Web(url) => cx.open_url(&url),
             LinkTarget::Ignored => {}
         }

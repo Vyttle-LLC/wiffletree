@@ -2987,7 +2987,7 @@ pub(crate) mod tests {
         assert_eq!(failed[0].0, implementer);
         assert!(
             failed[0].1.starts_with(&format!(
-                "Publishing {BRANCH} to allowed-org/app failed: git push failed: error: failed to push some refs to"
+                "Publishing {BRANCH} to allowed-org/app failed: git push failed: ! [remote rejected]"
             )) && failed[0].1.ends_with(". Nothing was pushed."),
             "{}",
             failed[0].1

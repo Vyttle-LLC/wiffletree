@@ -2,13 +2,15 @@
 //! become their alt text and raw HTML shows as text, so nothing loads remote content or runs.
 //! `[[wikilinks]]` become links into the browser, a broken one is struck through, and each
 //! footnote marker becomes a link that selects its claim; the definitions are left out, since the
-//! Sources list shows them. Every link opens only on the human's click (see [`LinkTarget`]).
+//! Sources list shows them. An ID of an issue the wiki's tracker holds becomes a link to it. Every
+//! link opens only on the human's click (see [`LinkTarget`]).
 use markdown::mdast::Node;
 use std::ops::Range;
-use workspace_core::BrainLink;
+use workspace_core::{BrainIssues, BrainLink};
 
 const NOTE: &str = "wiffletree-note:";
 const CLAIM: &str = "wiffletree-claim:";
+const ISSUE: &str = "wiffletree-issue:";
 
 /// What a link in a rendered note opens.
 #[derive(Debug, PartialEq, Eq)]
@@ -21,19 +23,29 @@ pub(super) enum LinkTarget {
     Claim(String),
     /// A log entry, by its id, from a relative link to its file.
     Entry(String),
+    /// An issue, by its ID.
+    Issue(String),
     /// A web page, opened in the browser.
     Web(String),
     /// Anything else, which opens nothing.
     Ignored,
 }
 
-/// The Markdown to draw for a note or STATUS body whose wikilinks resolve as `links` says.
-pub(super) fn prepare(body: &str, links: &[BrainLink]) -> String {
+/// What resolves in a note or STATUS body: its wikilinks' notes and its tracker's issues.
+#[derive(Clone, Copy)]
+struct Resolving<'a> {
+    links: &'a [BrainLink],
+    issues: &'a BrainIssues,
+}
+
+/// The Markdown to draw for a note or STATUS body whose wikilinks resolve as `links` says, with
+/// each of `issues` it names as a link.
+pub(super) fn prepare(body: &str, links: &[BrainLink], issues: &BrainIssues) -> String {
     let Ok(root) = markdown::to_mdast(body, &markdown::ParseOptions::gfm()) else {
         return escape(body);
     };
     let mut edits = vec![];
-    collect(&root, body, links, &mut edits);
+    collect(&root, body, Resolving { links, issues }, &mut edits);
     edits.sort_by_key(|(range, _)| range.start);
     let mut out = String::with_capacity(body.len());
     let mut at = 0;
@@ -54,13 +66,13 @@ fn span(node: &Node) -> Option<Range<usize>> {
     Some(position.start.offset..position.end.offset)
 }
 
-fn collect(node: &Node, body: &str, links: &[BrainLink], edits: &mut Vec<(Range<usize>, String)>) {
+fn collect(node: &Node, body: &str, resolving: Resolving, edits: &mut Vec<(Range<usize>, String)>) {
     let Some(range) = span(node) else {
         return node
             .children()
             .into_iter()
             .flatten()
-            .for_each(|child| collect(child, body, links, edits));
+            .for_each(|child| collect(child, body, resolving, edits));
     };
     if neutralise(node, &range, edits) {
         return;
@@ -74,12 +86,16 @@ fn collect(node: &Node, body: &str, links: &[BrainLink], edits: &mut Vec<(Range<
                 format!("[\\[{}\\]]({CLAIM}{})", escape(label), encode(label)),
             ));
         }
-        Node::Text(_) => wikilinks(&body[range.clone()], range.start, links, edits),
+        Node::Text(_) => {
+            let text = &body[range.clone()];
+            wikilinks(text, range.start, resolving.links, edits);
+            issue_links(text, range.start, resolving.issues, edits);
+        }
         Node::Link(_) | Node::LinkReference(_) => in_link(node, edits),
         Node::Code(_) | Node::InlineCode(_) => {}
         _ => {
             for child in node.children().into_iter().flatten() {
-                collect(child, body, links, edits);
+                collect(child, body, resolving, edits);
             }
         }
     }
@@ -142,6 +158,35 @@ fn wikilinks(
     }
 }
 
+/// Each whole-word `<prefix>-<n>` in a text run that names one of `issues`, as a link to it. An
+/// ID inside a wikilink stays with the wikilink, whose edit starts first.
+fn issue_links(
+    text: &str,
+    offset: usize,
+    issues: &BrainIssues,
+    edits: &mut Vec<(Range<usize>, String)>,
+) {
+    if issues.ids.is_empty() {
+        return;
+    }
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let start_of = format!("{}-", issues.prefix);
+    for (start, _) in text.match_indices(&start_of) {
+        let rest = &text[start + start_of.len()..];
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let end = start + start_of.len() + digits;
+        let id = &text[start..end];
+        let whole = !text[..start].chars().next_back().is_some_and(word)
+            && !text[end..].chars().next().is_some_and(word);
+        if digits > 0 && whole && issues.ids.iter().any(|known| known == id) {
+            edits.push((
+                offset + start..offset + end,
+                format!("[{id}]({ISSUE}{})", encode(id)),
+            ));
+        }
+    }
+}
+
 /// The key a wikilink matches a note by, as the host's index keys it.
 pub(super) fn link_key(target: &str) -> String {
     let target = target.rsplit('/').next().unwrap_or(target);
@@ -154,6 +199,9 @@ pub(super) fn link_target(url: &str) -> LinkTarget {
     }
     if let Some(label) = url.strip_prefix(CLAIM) {
         return LinkTarget::Claim(decode(label));
+    }
+    if let Some(id) = url.strip_prefix(ISSUE) {
+        return LinkTarget::Issue(decode(id));
     }
     let lower = url.to_ascii_lowercase();
     if lower.starts_with("https://") || lower.starts_with("http://") {
@@ -231,8 +279,12 @@ fn decode(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{LinkTarget, link_target, prepare};
-    use workspace_core::BrainLink;
+    use super::{LinkTarget, link_target};
+    use workspace_core::{BrainIssues, BrainLink};
+
+    fn prepare(body: &str, links: &[BrainLink]) -> String {
+        super::prepare(body, links, &BrainIssues::default())
+    }
 
     fn links() -> Vec<BrainLink> {
         vec![
@@ -301,6 +353,38 @@ mod tests {
         assert!(linked.contains("[\\<img src="), "shown as text: {linked}");
         assert!(linked.contains("[pixel](https://example.com)"), "{linked}");
         assert!(linked.contains("[ref][site]"), "{linked}");
+    }
+
+    #[test]
+    fn a_known_issue_id_links_and_nothing_else_does() {
+        let issues = BrainIssues {
+            prefix: "VYT".into(),
+            ids: vec!["VYT-42".into()],
+        };
+        let shown = |body: &str| super::prepare(body, &[], &issues);
+        assert_eq!(
+            shown("Fixed in VYT-42."),
+            "Fixed in [VYT-42](wiffletree-issue:VYT-42)."
+        );
+        assert_eq!(
+            link_target("wiffletree-issue:VYT-42"),
+            LinkTarget::Issue("VYT-42".into())
+        );
+        for plain in [
+            "See SAGE-12.",
+            "Not VYT-9999.",
+            "XVYT-42 and VYT-42a and VYT-421.",
+            "Code `VYT-42` stays.",
+            "```\nVYT-42\n```",
+            "[VYT-42](https://example.com) stays.",
+        ] {
+            assert_eq!(shown(plain), plain);
+        }
+        assert_eq!(
+            shown("[[Note|VYT-42]]").matches("wiffletree-issue").count(),
+            0,
+            "a wikilink keeps its own link"
+        );
     }
 
     #[test]

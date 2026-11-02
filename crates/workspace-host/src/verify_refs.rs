@@ -1,10 +1,11 @@
-//! Ref verification (`brain-compile`, decision 2): what an entry's `ref` names, and whether this
-//! machine's clone of its repository holds it on the repository's default branch on GitHub.
-//! `verify` is deterministic and local: it never fetches and never asks GitHub. Results are
-//! cached by each clone's default-branch head, so a repeat costs one ref read. `verify_with` also
-//! reads named PRs' states with `gh`; the brain index stores what it finds during the brain's
-//! pass, for the browser, and a compile's `for_compile` fetches each clone first, once, then
-//! uses it and records the release tag containing a verified commit.
+//! Ref verification (`brain-compile`, decision 6): what an entry's `ref` names, and whether its
+//! repository's default branch on GitHub holds it. `verify` is deterministic and local: it never
+//! fetches and never asks GitHub. Results are cached by each clone's default-branch head, so a
+//! repeat costs one ref read. `verify_with` also reads named PRs' states with `gh`, and asks
+//! GitHub about the commits of a repository a Space lists and this Mac has not cloned, each once
+//! per call; the brain index stores what it finds during the brain's pass, for the browser, and a
+//! compile's `for_compile` fetches each clone first, once, then uses it and records the release
+//! tag containing a verified commit.
 use crate::*;
 use std::collections::{HashMap, HashSet};
 use workspace_core::{RefAnchors, RefState, RefVerification};
@@ -49,10 +50,45 @@ pub(crate) struct RepoClone {
     pub(crate) github: Option<String>,
 }
 
-/// This machine's clones of the workspace repositories, by log folder in lower case.
+/// A repository a Space lists with no clone on this machine, which only GitHub can answer for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Listed {
+    /// `owner/name`.
+    pub(crate) github: String,
+    /// Where `gh` runs.
+    pub(crate) at: PathBuf,
+}
+
+/// This machine's clones of the workspace repositories, by log folder in lower case, then the
+/// repositories Spaces list that it has no clone of, by the same key.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Clones(pub(crate) HashMap<String, Vec<RepoClone>>);
+pub(crate) struct Clones(
+    pub(crate) HashMap<String, Vec<RepoClone>>,
+    pub(crate) HashMap<String, Vec<Listed>>,
+);
 impl Clones {
+    /// Adds each `owner/name` of `listed`, a Space's list, whose name has no clone here. A name
+    /// under two owners is kept under both, and the first that holds a commit answers.
+    pub(crate) fn with_listed(mut self, listed: &[String], at: &Path) -> Self {
+        for github in listed {
+            let name = github.rsplit('/').next().unwrap_or(github);
+            let name = name.to_ascii_lowercase();
+            if self.0.contains_key(&name) {
+                continue;
+            }
+            let entry = self.1.entry(name).or_default();
+            if !entry
+                .iter()
+                .any(|known| known.github.eq_ignore_ascii_case(github))
+            {
+                entry.push(Listed {
+                    github: github.clone(),
+                    at: at.to_owned(),
+                });
+            }
+        }
+        self
+    }
     pub(crate) fn of(repositories: &[Repository]) -> Self {
         let mut clones: HashMap<String, Vec<RepoClone>> = HashMap::new();
         for repository in repositories {
@@ -75,7 +111,7 @@ impl Clones {
                         .map(|github| format!("{}/{}", github.owner, github.name)),
                 });
         }
-        Self(clones)
+        Self(clones, HashMap::new())
     }
 }
 
@@ -168,8 +204,12 @@ pub(crate) fn verify(
             if anchors.commits.is_empty() {
                 return unverified("its ref names no commit");
             }
-            let Some(here) = clones.0.get(&folder.to_ascii_lowercase()) else {
-                return unverified("not on this machine");
+            let key = folder.to_ascii_lowercase();
+            if clones.1.contains_key(&key) {
+                return unverified(NOT_ASKED);
+            }
+            let Some(here) = clones.0.get(&key) else {
+                return unverified(NOT_LISTED);
             };
             let checked: Vec<&HashMap<String, Option<Found>>> = (here.iter())
                 .filter_map(|clone| {
@@ -195,7 +235,7 @@ pub(crate) fn verify(
                 },
                 Some(Found::Elsewhere) => RefVerification {
                     state: RefState::Claimed,
-                    reason: Some("its commit is not on the default branch".into()),
+                    reason: Some(ON_A_BRANCH.into()),
                 },
                 None => unverified("its commit is not in this machine's clone"),
             }
@@ -210,6 +250,13 @@ pub(crate) struct Checked {
     pub(crate) tag: Option<String>,
 }
 
+/// Why a ref in a repository only GitHub can answer for is unverified, until it answers.
+pub(crate) const NOT_ASKED: &str = "GitHub could not be asked";
+/// Why a ref whose commit GitHub or a clone holds off the default branch is claimed.
+pub(crate) const ON_A_BRANCH: &str = "its commit is not on the default branch";
+/// Why a ref in a folder no clone or Space's list matches is unverified.
+pub(crate) const NOT_LISTED: &str = "no repository of that name";
+
 /// How a verification's reason ends for a PR closed without merging, which is final: it is not
 /// asked about again.
 pub(crate) const CLOSED_UNMERGED: &str = "was closed without merging";
@@ -222,18 +269,40 @@ enum PullState {
     Closed,
 }
 
+/// What `gh api` answered: its JSON, or that it said no such thing, or nothing to go on.
+enum Answer {
+    Found(Value),
+    NotFound,
+    Unasked,
+}
+
+fn ask(gh: &publish::Tool<runtime::GhAnswer>, at: &Path, endpoint: &str) -> Answer {
+    let Ok(answer) = gh(at, &["api", "--hostname", "github.com", endpoint]) else {
+        return Answer::Unasked;
+    };
+    if answer.status.success() {
+        return (serde_json::from_str(&answer.output)).map_or(Answer::Unasked, Answer::Found);
+    }
+    // GitHub answers an unknown commit with a 422 where it cannot read the name as a SHA.
+    match ["HTTP 404", "HTTP 422"]
+        .iter()
+        .any(|code| answer.error.contains(code))
+    {
+        true => Answer::NotFound,
+        false => Answer::Unasked,
+    }
+}
+
 fn pull_state(
     gh: &publish::Tool<runtime::GhAnswer>,
-    clone: &RepoClone,
+    at: &Path,
+    github: &str,
     number: u64,
 ) -> Option<PullState> {
-    let github = clone.github.as_deref()?;
     let endpoint = format!("repos/{github}/pulls/{number}");
-    let answer = gh(&clone.path, &["api", "--hostname", "github.com", &endpoint]).ok()?;
-    if !answer.status.success() {
+    let Answer::Found(pull) = ask(gh, at, &endpoint) else {
         return None;
-    }
-    let pull: Value = serde_json::from_str(&answer.output).ok()?;
+    };
     Some(match (pull["merged"].as_bool(), pull["state"].as_str()) {
         (Some(true), _) => PullState::Merged,
         (_, Some("open")) => PullState::Open,
@@ -249,30 +318,161 @@ fn tag_containing(clone: &Path, sha: &str) -> Option<String> {
     answer.output.lines().next().map(str::to_owned)
 }
 
-/// `verify`, then with `gh` each named PR's state: one that merged verifies its entry and an
-/// open one claims it. The brain index and compile runs both verify this way, so an entry reads
-/// the same wherever it is shown; each PR is asked about once per call.
+/// What GitHub says of a commit in one repository.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Asked {
+    Holds(Found),
+    NoCommit,
+    Unasked,
+}
+
+/// Asks GitHub about one repository, and each thing once, however many entries name it.
+struct Asking<'a> {
+    gh: &'a publish::Tool<runtime::GhAnswer>,
+    defaults: HashMap<String, Option<String>>,
+    commits: HashMap<(String, String), Asked>,
+}
+impl Asking<'_> {
+    /// The repository's default branch; `None` when its login cannot read it, as GitHub answers
+    /// a private repository with a 404 then too.
+    fn default_branch(&mut self, listed: &Listed) -> Option<String> {
+        if let Some(known) = self.defaults.get(&listed.github) {
+            return known.clone();
+        }
+        let branch = match ask(self.gh, &listed.at, &format!("repos/{}", listed.github)) {
+            Answer::Found(repository) => repository["default_branch"].as_str().map(str::to_owned),
+            _ => None,
+        };
+        self.defaults.insert(listed.github.clone(), branch.clone());
+        branch
+    }
+    fn commit(&mut self, listed: &Listed, sha: &str) -> Asked {
+        let asked = (listed.github.clone(), sha.to_owned());
+        if let Some(known) = self.commits.get(&asked) {
+            return *known;
+        }
+        let answer = self.ask_commit(listed, sha);
+        self.commits.insert(asked, answer);
+        answer
+    }
+    fn ask_commit(&mut self, listed: &Listed, sha: &str) -> Asked {
+        let Some(default) = self.default_branch(listed) else {
+            return Asked::Unasked;
+        };
+        let github = &listed.github;
+        let endpoint = format!("repos/{github}/commits/{sha}");
+        let full = match ask(self.gh, &listed.at, &endpoint) {
+            Answer::Found(commit) => commit["sha"].as_str().map(str::to_owned),
+            Answer::NotFound => return Asked::NoCommit,
+            Answer::Unasked => None,
+        };
+        let Some(full) = full else {
+            return Asked::Unasked;
+        };
+        let endpoint = format!("repos/{github}/compare/{default}...{full}");
+        match ask(self.gh, &listed.at, &endpoint) {
+            Answer::Found(compared) => match compared["status"].as_str() {
+                Some("behind" | "identical") => Asked::Holds(Found::OnDefault),
+                Some("ahead" | "diverged") => Asked::Holds(Found::Elsewhere),
+                _ => Asked::Unasked,
+            },
+            Answer::NotFound => Asked::NoCommit,
+            Answer::Unasked => Asked::Unasked,
+        }
+    }
+    /// The verification of commits in a repository only GitHub can answer for: the first
+    /// repository that holds one answers. One that could not be asked keeps a commit unverified
+    /// as "could not be asked" rather than "no such commit".
+    fn verify(&mut self, listed: &[Listed], commits: &[String]) -> RefVerification {
+        let mut unasked = false;
+        for repository in listed {
+            let mut held = None;
+            for sha in commits {
+                match self.commit(repository, sha) {
+                    Asked::Holds(found) => held = held.max(Some(found)),
+                    Asked::NoCommit => {}
+                    Asked::Unasked => unasked = true,
+                }
+            }
+            match held {
+                Some(Found::OnDefault) => {
+                    return RefVerification {
+                        state: RefState::Verified,
+                        reason: None,
+                    };
+                }
+                Some(Found::Elsewhere) => {
+                    return RefVerification {
+                        state: RefState::Claimed,
+                        reason: Some(ON_A_BRANCH.into()),
+                    };
+                }
+                None => {}
+            }
+        }
+        RefVerification {
+            state: RefState::Unverified,
+            reason: Some(match unasked {
+                true => NOT_ASKED.to_owned(),
+                false => "no such commit".to_owned(),
+            }),
+        }
+    }
+}
+
+/// `verify`, then with `gh` the commits of each folder only GitHub can answer for, and each
+/// named PR's state: one that merged verifies its entry and an open one claims it. The brain
+/// index and compile runs both verify this way, so an entry reads the same wherever it is shown;
+/// each commit and PR is asked about once per call.
 pub(crate) fn verify_with(
     clones: &Clones,
     refs: &[(&str, &str)],
     cache: &mut Cache,
     gh: Option<&publish::Tool<runtime::GhAnswer>>,
 ) -> Vec<RefVerification> {
-    let mut pulls: HashMap<(PathBuf, u64), Option<PullState>> = HashMap::new();
+    let mut pulls: HashMap<(String, u64), Option<PullState>> = HashMap::new();
+    let verified = verify(clones, refs, cache);
+    let Some(gh) = gh else {
+        return verified;
+    };
+    let mut asking = Asking {
+        gh,
+        defaults: HashMap::new(),
+        commits: HashMap::new(),
+    };
     (refs.iter())
-        .zip(verify(clones, refs, cache))
+        .zip(verified)
         .map(|((folder, reference), verification)| {
-            let (Some(gh), Some(number)) = (gh, anchors(reference).pull_request) else {
+            let key = folder.to_ascii_lowercase();
+            let anchored = anchors(reference);
+            let listed = clones
+                .1
+                .get(&key)
+                .filter(|_| !anchored.commits.is_empty() || anchored.pull_request.is_some());
+            let verification = match listed.filter(|_| !anchored.commits.is_empty()) {
+                Some(listed) => asking.verify(listed, &anchored.commits),
+                None => verification,
+            };
+            let Some(number) = anchored.pull_request else {
                 return verification;
             };
-            let here = clones.0.get(&folder.to_ascii_lowercase());
-            if verification.state == RefState::Verified || here.is_none() {
+            if verification.state == RefState::Verified {
                 return verification;
             }
-            let state = (here.into_iter().flatten()).find_map(|clone| {
-                *(pulls.entry((clone.path.clone(), number)))
-                    .or_insert_with(|| pull_state(gh, clone, number))
+            let here = (clones.0.get(&key).into_iter().flatten())
+                .filter_map(|clone| Some((clone.path.as_path(), clone.github.as_deref()?)));
+            let there = (listed.into_iter().flatten())
+                .map(|listed| (listed.at.as_path(), listed.github.as_str()));
+            let state = here.chain(there).find_map(|(at, github)| {
+                *(pulls.entry((github.to_owned(), number)))
+                    .or_insert_with(|| pull_state(gh, at, github, number))
             });
+            if listed.is_some() && state.is_none() && anchored.commits.is_empty() {
+                return RefVerification {
+                    state: RefState::Unverified,
+                    reason: Some(NOT_ASKED.to_owned()),
+                };
+            }
             match state {
                 Some(PullState::Merged) => RefVerification {
                     state: RefState::Verified,
@@ -445,14 +645,17 @@ mod tests {
         git(&clone, &["checkout", "-q", "-b", "side"]);
         let side = commit("side");
         git(&clone, &["checkout", "-q", "main"]);
-        let clones = Clones(HashMap::from([(
-            "relay".to_owned(),
-            vec![RepoClone {
-                path: clone.clone(),
-                defaults: vec!["refs/remotes/origin/HEAD".into()],
-                github: Some("Sage-Social/relay".into()),
-            }],
-        )]));
+        let clones = Clones(
+            HashMap::from([(
+                "relay".to_owned(),
+                vec![RepoClone {
+                    path: clone.clone(),
+                    defaults: vec!["refs/remotes/origin/HEAD".into()],
+                    github: Some("Sage-Social/relay".into()),
+                }],
+            )]),
+            HashMap::new(),
+        );
         Relay {
             _folder: folder,
             clones,
@@ -487,7 +690,7 @@ mod tests {
         let missing = verified("relay", "main @ 0000000".into());
         assert_eq!(missing.state, RefState::Unverified);
         let elsewhere = verified("other", format!("main @ {}", relay.merged));
-        assert_eq!(elsewhere.reason.as_deref(), Some("not on this machine"));
+        assert_eq!(elsewhere.reason.as_deref(), Some(NOT_LISTED));
         assert_eq!(
             verified("relay", "main @ —".into()).state,
             RefState::Unverified
@@ -656,15 +859,177 @@ mod tests {
             checked[2].verification.reason.as_deref(),
             Some("PR #92 is open")
         );
-        assert_eq!(
-            checked[4].verification.reason.as_deref(),
-            Some("not on this machine")
-        );
+        assert_eq!(checked[4].verification.reason.as_deref(), Some(NOT_LISTED));
         assert_eq!(*fetches.lock().unwrap(), [clone]);
         // The brain index verifies the same refs alike, PRs included, without fetching.
         let indexed = verify_with(&relay.clones, &refs, &mut Cache::default(), Some(&tools.gh));
         let compiled: Vec<RefVerification> = checked.into_iter().map(|c| c.verification).collect();
         assert_eq!(indexed, compiled);
         assert_eq!(fetches.lock().unwrap().len(), 1);
+    }
+
+    /// A `gh` answering `repos/` endpoints from `answers`, 404 for the rest, counting each ask.
+    fn github(
+        answers: Vec<(&'static str, Result<Value, &'static str>)>,
+    ) -> (publish::Tool<runtime::GhAnswer>, Arc<Mutex<Vec<String>>>) {
+        let asked = Arc::new(Mutex::new(vec![]));
+        let log = asked.clone();
+        let gh = move |_: &Path, args: &[&str]| -> Result<runtime::GhAnswer> {
+            let endpoint = *args.last().unwrap();
+            log.lock().unwrap().push(endpoint.to_owned());
+            let answer = (answers.iter()).find(|(asked, _)| *asked == endpoint);
+            let (code, output, error) = match answer.map(|(_, answer)| answer) {
+                Some(Ok(json)) => (0, json.to_string(), ""),
+                Some(Err(error)) => (1, String::new(), *error),
+                None => (1, String::new(), "gh: Not Found (HTTP 404)"),
+            };
+            Ok(runtime::GhAnswer {
+                status: publish::tests::exit(code),
+                output,
+                error: error.into(),
+            })
+        };
+        (Arc::new(gh), asked)
+    }
+
+    const SHA: &str = "7d03b1e7d03b1e7d03b1e7d03b1e7d03b1e7d03b";
+
+    fn listed(names: &[&str]) -> Clones {
+        let names: Vec<String> = names.iter().map(|name| name.to_string()).collect();
+        Clones::default().with_listed(&names, Path::new("/tmp"))
+    }
+
+    fn pica(
+        extra: Vec<(&'static str, Result<Value, &'static str>)>,
+    ) -> Vec<(&'static str, Result<Value, &'static str>)> {
+        let mut answers = vec![
+            (
+                "repos/Vyttle-LLC/pica-api",
+                Ok(json!({"default_branch": "main"})),
+            ),
+            (
+                "repos/Vyttle-LLC/pica-api/commits/7d03b1e",
+                Ok(json!({"sha": SHA})),
+            ),
+        ];
+        answers.extend(extra);
+        answers
+    }
+
+    const COMPARE: &str =
+        "repos/Vyttle-LLC/pica-api/compare/main...7d03b1e7d03b1e7d03b1e7d03b1e7d03b1e7d03b";
+
+    fn verified(
+        clones: &Clones,
+        reference: &str,
+        gh: &publish::Tool<runtime::GhAnswer>,
+    ) -> RefVerification {
+        let refs = [("pica-api", reference)];
+        verify_with(clones, &refs, &mut Cache::default(), Some(gh)).remove(0)
+    }
+
+    #[test]
+    fn a_repository_not_cloned_here_is_verified_through_github() {
+        let clones = listed(&["Vyttle-LLC/pica-api"]);
+        for (status, state) in [
+            ("behind", RefState::Verified),
+            ("identical", RefState::Verified),
+            ("ahead", RefState::Claimed),
+            ("diverged", RefState::Claimed),
+        ] {
+            let (gh, _) = github(pica(vec![(COMPARE, Ok(json!({"status": status})))]));
+            let answer = verified(&clones, "main @ 7d03b1e", &gh);
+            assert_eq!(answer.state, state, "{status}");
+        }
+    }
+
+    #[test]
+    fn a_commit_github_does_not_hold_is_unverified_with_no_such_commit() {
+        let clones = listed(&["Vyttle-LLC/pica-api"]);
+        let (gh, _) = github(vec![(
+            "repos/Vyttle-LLC/pica-api",
+            Ok(json!({"default_branch": "main"})),
+        )]);
+        let answer = verified(&clones, "main @ 7d03b1e", &gh);
+        assert_eq!(answer.state, RefState::Unverified);
+        assert_eq!(answer.reason.as_deref(), Some("no such commit"));
+    }
+
+    #[test]
+    fn a_login_github_refuses_is_unverified_and_counted_as_not_asked() {
+        let clones = listed(&["Vyttle-LLC/pica-api"]);
+        for answers in [
+            vec![("repos/Vyttle-LLC/pica-api", Err("HTTP 403: Forbidden"))],
+            vec![],
+            pica(vec![(COMPARE, Err("HTTP 502: Bad Gateway"))]),
+        ] {
+            let (gh, _) = github(answers);
+            let answer = verified(&clones, "main @ 7d03b1e", &gh);
+            assert_eq!(answer.state, RefState::Unverified);
+            assert_eq!(answer.reason.as_deref(), Some(NOT_ASKED));
+        }
+    }
+
+    #[test]
+    fn a_pr_github_answers_settles_a_repository_not_cloned_here() {
+        let clones = listed(&["Vyttle-LLC/pica-api"]);
+        let pull = "repos/Vyttle-LLC/pica-api/pulls/92";
+        let reference = "side @ 7d03b1e · PR #92";
+        let merged = json!({"state": "closed", "merged": true});
+        let open = json!({"state": "open", "merged": false});
+        let on_side = (COMPARE, Ok(json!({"status": "ahead"})));
+        let (gh, _) = github(pica(vec![on_side.clone(), (pull, Ok(merged))]));
+        assert_eq!(verified(&clones, reference, &gh).state, RefState::Verified);
+        let (gh, _) = github(pica(vec![on_side, (pull, Ok(open))]));
+        let answer = verified(&clones, reference, &gh);
+        assert_eq!(answer.state, RefState::Claimed);
+        assert_eq!(answer.reason.as_deref(), Some("PR #92 is open"));
+    }
+
+    #[test]
+    fn two_owners_of_one_name_are_each_tried_and_each_commit_is_asked_once() {
+        let clones = listed(&["Other-Org/pica-api", "Vyttle-LLC/pica-api"]);
+        let (gh, asked) = github(pica(vec![
+            (
+                "repos/Other-Org/pica-api",
+                Ok(json!({"default_branch": "main"})),
+            ),
+            (COMPARE, Ok(json!({"status": "behind"}))),
+        ]));
+        let refs = [
+            ("pica-api", "main @ 7d03b1e"),
+            ("pica-api", "other @ 7d03b1e"),
+        ];
+        let answers = verify_with(&clones, &refs, &mut Cache::default(), Some(&gh));
+        assert!(answers.iter().all(|v| v.state == RefState::Verified));
+        let asked = asked.lock().unwrap();
+        let once = |endpoint: &str| asked.iter().filter(|e| *e == endpoint).count();
+        assert_eq!(once(COMPARE), 1);
+        assert_eq!(once("repos/Other-Org/pica-api/commits/7d03b1e"), 1);
+        assert_eq!(once("repos/Vyttle-LLC/pica-api"), 1);
+    }
+
+    #[test]
+    fn a_folder_no_space_lists_and_a_ref_with_no_anchor_ask_github_nothing() {
+        let clones = listed(&["Vyttle-LLC/pica-api"]);
+        let (gh, asked) = github(vec![]);
+        let refs = [
+            ("assistant", "main @ 7d03b1e"),
+            ("planning", "—"),
+            ("pica-api", "—"),
+            ("pica-api", "feature/x @ —"),
+        ];
+        let answers = verify_with(&clones, &refs, &mut Cache::default(), Some(&gh));
+        assert!(answers.iter().all(|v| v.state == RefState::Unverified));
+        assert_eq!(answers[0].reason.as_deref(), Some(NOT_LISTED));
+        assert!(asked.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_listed_repository_with_a_clone_here_is_read_from_the_clone() {
+        let relay = relay();
+        let names = ["Sage-Social/relay".to_owned()];
+        let clones = relay.clones.clone().with_listed(&names, Path::new("/tmp"));
+        assert!(clones.1.is_empty());
     }
 }

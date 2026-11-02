@@ -11,7 +11,7 @@ use verify_refs::Clones;
 
 const SCHEMA: &str = include_str!("brain_index.sql");
 /// Raised when `brain_index.sql` changes, so an older file is rebuilt rather than migrated.
-const SCHEMA_VERSION: &str = "2";
+const SCHEMA_VERSION: &str = "3";
 /// Under the data folder, beside `repos/`.
 const FOLDER: &str = "brain-index";
 const STATUS: &str = "STATUS.md";
@@ -378,9 +378,15 @@ fn parse(class: Class, path: &str, text: &str) -> Indexed {
                 .unwrap_or_else(|| stem.to_owned()),
             name: Some(link_key(stem)),
             links: wikilinks(body),
+            // A repository a note's `repos:` lists counts as one of its sources for a scope.
             sources: (keys.get("sources").map(|s| list(s)).unwrap_or_default())
                 .iter()
                 .map(|source| source_target(source))
+                .chain(
+                    (keys.get("repos").map(|r| list(r)).unwrap_or_default())
+                        .into_iter()
+                        .map(|name| (Some(name), None)),
+                )
                 .collect(),
             body: body.to_owned(),
             ..Indexed::default()
@@ -704,8 +710,9 @@ fn squash_pull_request(subject: &str) -> Option<u64> {
 }
 
 /// Checks the ref of every entry not yet verified against this machine's clones, or with
-/// `only_named_prs` asks `gh` about the next unsettled entries' PRs, in turn. A PR closed without
-/// merging is final, and its entry is checked no more.
+/// `only_named_prs` asks `gh` about the next unsettled entries' PRs and the commits only GitHub
+/// can answer for, in turn. A PR closed without merging is final, and its entry is checked no
+/// more. An entry GitHub claimed keeps that answer through a check that could not ask it.
 fn verify_entries(
     db: &Connection,
     clones: &Clones,
@@ -735,12 +742,15 @@ fn verify_entries(
             )?,
             None,
         ),
-        // The next claimed or unverified entries naming a PR, whose repository is on this
-        // machine, after the last one asked about, from the first
-        // again past the end, so every one is asked about in turn.
+        // The next claimed or unverified entries naming a PR or waiting on GitHub, whose
+        // repository is on this machine or listed, after the last one asked about, from the
+        // first again past the end, so every one is asked about in turn.
         true => {
             let which = format!(
-                "verification IN ('claimed','unverified') AND coalesce(verification_reason,'')<>'not on this machine' AND reference LIKE '% · PR #%' AND {open} ORDER BY id LIMIT {RECHECKED_PRS}"
+                "verification IN ('claimed','unverified') AND coalesce(verification_reason,'')<>'{}' AND (reference LIKE '% · PR #%' OR verification_reason IN ('{}','{}')) AND {open} ORDER BY id LIMIT {RECHECKED_PRS}",
+                verify_refs::NOT_LISTED,
+                verify_refs::NOT_ASKED,
+                verify_refs::ON_A_BRANCH
             );
             let from: i64 = (state(db, "pr_recheck_after")?)
                 .and_then(|id| id.parse().ok())
@@ -763,7 +773,8 @@ fn verify_entries(
     for ((id, _, _, state, reason), verification) in unverified.iter().zip(checked) {
         let unchanged =
             state.as_deref() == Some(verification.state.name()) && *reason == verification.reason;
-        if !unchanged {
+        let unasked = verification.reason.as_deref() == Some(verify_refs::NOT_ASKED);
+        if !unchanged && !(unasked && state.as_deref() == Some(RefState::Claimed.name())) {
             update.execute(params![id, verification.state.name(), verification.reason])?;
         }
     }
@@ -784,8 +795,8 @@ impl Scope {
 }
 
 /// Whether note `f` is in scope `?1` (the folders as JSON) with planning folder `?2`: it has no
-/// repository-specific source, or one of the project's. Always true with no scope. Both lists
-/// are computed once per query, not per note.
+/// repository-specific source or `repos:` name, or one of the project's. Always true with no
+/// scope. Both lists are computed once per query, not per note.
 const NOTE_IN_SCOPE: &str = "(?1 IS NULL
   OR f.id NOT IN (SELECT file_id FROM sources WHERE repository IS NOT NULL AND repository<>?2)
   OR f.id IN (SELECT file_id FROM sources WHERE repository IN (SELECT value FROM json_each(?1))))";
@@ -1176,6 +1187,7 @@ fn read_note(db: &Connection, path: &str) -> Result<BrainNote> {
         backlinks,
         claims,
         sources_readable,
+        issues: BrainIssues::default(),
         body,
     })
 }
@@ -1268,6 +1280,11 @@ fn freshness(db: &Connection) -> Result<(Option<i64>, usize)> {
 fn status(db: &Connection) -> Result<BrainStatus> {
     let body = body_of(db, Class::Status)?;
     let (last_compile, pending_entries) = freshness(db)?;
+    let oldest: Option<String> = db.query_row(
+        "SELECT min(entry_id) FROM files WHERE class='entry' AND pending=1",
+        [],
+        |r| r.get(0),
+    )?;
     let indexed = state(db, "commit")?
         .and_then(|at| at.split_once('\0').map(|(_, commit)| commit.to_owned()));
     Ok(BrainStatus {
@@ -1276,8 +1293,10 @@ fn status(db: &Connection) -> Result<BrainStatus> {
             None => vec![],
         },
         body,
+        issues: BrainIssues::default(),
         last_compile,
         pending_entries,
+        oldest_pending: oldest.as_deref().and_then(brains::ulid_time),
         indexed,
     })
 }
@@ -1777,7 +1796,27 @@ impl Host {
 
     pub fn brain_note(&self, repository: &str, path: &str) -> Result<BrainNote> {
         let (_, db) = self.brain_reader(repository)?;
-        read_note(&db, path)
+        let mut note = read_note(&db, path)?;
+        note.issues = self.issues_named(repository, &note.body)?;
+        Ok(note)
+    }
+
+    /// The issues of the wiki's tracker `body` may name.
+    fn issues_named(&self, repository: &str, body: &str) -> Result<BrainIssues> {
+        let space = (self.spaces()?.into_iter())
+            .find(|record| record.space.storage.repository.key() == repository);
+        let Some(tracker) = space.and_then(|record| self.tracker(&record.space).ok()) else {
+            return Ok(BrainIssues::default());
+        };
+        let ids: Vec<String> = (self
+            .db
+            .prepare("SELECT id FROM issue_index WHERE storage=?1")?)
+        .query_map([repository], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+        Ok(BrainIssues {
+            prefix: tracker.prefix,
+            ids: ids.into_iter().filter(|id| body.contains(id)).collect(),
+        })
     }
 
     pub fn brain_conflicts(
@@ -1791,7 +1830,10 @@ impl Host {
 
     pub fn brain_status(&self, repository: &str) -> Result<BrainStatus> {
         let (_, db) = self.brain_reader(repository)?;
-        status(&db)
+        let mut status = status(&db)?;
+        let body = status.body.as_deref().unwrap_or_default();
+        status.issues = self.issues_named(repository, body)?;
+        Ok(status)
     }
 
     /// What each side of a conflict says, as the index holds it: the note or entry it conflicts
@@ -2264,6 +2306,87 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_index_asks_github_about_a_repository_not_cloned_here_and_keeps_its_answer() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let sha = "7d03b1e7d03b1e7d03b1e7d03b1e7d03b1e7d03b";
+        let refusing = Arc::new(AtomicBool::new(false));
+        let refused = refusing.clone();
+        let gh: publish::Tool<runtime::GhAnswer> = Arc::new(move |_, args| {
+            let endpoint = args.last().copied().unwrap_or_default();
+            let answer = match endpoint {
+                _ if refused.load(Ordering::SeqCst) => None,
+                "repos/Vyttle-LLC/pica-api" => Some(json!({"default_branch": "main"})),
+                "repos/Vyttle-LLC/pica-api/commits/7d03b1e" => Some(json!({"sha": sha})),
+                other if other.contains("/compare/") => Some(json!({"status": "ahead"})),
+                other => panic!("unexpected gh call {other}"),
+            };
+            Ok(runtime::GhAnswer {
+                status: publish::tests::exit(if answer.is_some() { 0 } else { 1 }),
+                output: answer.map(|a| a.to_string()).unwrap_or_default(),
+                error: "HTTP 403: Forbidden".into(),
+            })
+        });
+        let clones =
+            Clones::default().with_listed(&["Vyttle-LLC/pica-api".into()], Path::new("/tmp"));
+        let brain = Checkout::new();
+        let logged = |n: u128| {
+            entry(
+                "pica-api",
+                &id(n),
+                ("mhohlios", "observation", "Relay"),
+                "side @ 7d03b1e",
+            )
+        };
+        let refreshed = |head: &str| {
+            refresh(Refresh {
+                index: &brain.index(),
+                checkout: &brain.path(),
+                commit: head,
+                brain_dir: "second-brain",
+                clones: &clones,
+                gh: Some(&gh),
+            })
+            .unwrap()
+        };
+        let state = |n: u128| -> (String, Option<String>) {
+            (brain.db())
+                .query_row(
+                    "SELECT verification,verification_reason FROM files WHERE entry_id=?1",
+                    [id(n)],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        refreshed(&brain.commit(&[logged(1)], "One"));
+        assert_eq!(state(1).0, "claimed");
+        // With GitHub refusing, the answer stays and a new entry says it could not be asked.
+        refusing.store(true, Ordering::SeqCst);
+        refreshed(&brain.commit(&[logged(2)], "Two"));
+        assert_eq!(state(1).0, "claimed");
+        assert_eq!(state(2).1.as_deref(), Some(verify_refs::NOT_ASKED));
+    }
+
+    #[test]
+    fn a_notes_repos_put_it_in_a_projects_scope() {
+        let brain = Checkout::new();
+        let page = |title: &str, repos: &str| {
+            (
+                format!("notes/{title}.md"),
+                format!("---\ntitle: {title}\nrepos: [{repos}]\n---\n{title}.\n"),
+            )
+        };
+        let files = [
+            page("Relay", &format!("pica-ios, {RELAY}")),
+            page("Reviso", "reviso-api"),
+        ];
+        brain.refresh(&brain.commit(&files, "Pages"));
+        let tree = note_tree(&brain.db(), Some(&relay_scope())).unwrap();
+        let shown: Vec<&str> = tree.not_in_index.iter().map(|n| n.title.as_str()).collect();
+        assert_eq!((shown, tree.hidden), (vec!["Relay"], 1));
+    }
+
+    #[test]
     fn project_scope_keeps_its_repositories_and_counts_the_notes_it_hides() {
         let brain = Checkout::new();
         let head = brain.commit(&sample(), "Compile");
@@ -2459,14 +2582,17 @@ pub(crate) mod tests {
         git(&clone, &["checkout", "-q", "-b", "retry"]);
         git(&clone, &["commit", "-q", "--allow-empty", "-m", "retry"]);
         let sha = git(&clone, &["rev-parse", "HEAD"]);
-        let clones = Clones(HashMap::from([(
-            "relay".to_owned(),
-            vec![verify_refs::RepoClone {
-                path: clone,
-                defaults: vec!["refs/remotes/origin/main".into()],
-                github: Some("Sage-Social/relay".into()),
-            }],
-        )]));
+        let clones = Clones(
+            HashMap::from([(
+                "relay".to_owned(),
+                vec![verify_refs::RepoClone {
+                    path: clone,
+                    defaults: vec!["refs/remotes/origin/main".into()],
+                    github: Some("Sage-Social/relay".into()),
+                }],
+            )]),
+            HashMap::new(),
+        );
         (code, clones, sha)
     }
 

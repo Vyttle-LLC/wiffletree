@@ -147,6 +147,8 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::SetUpIssues { .. }
         | Command::MoveIntoFolder { .. }
         | Command::RunBrainCompile { .. }
+        | Command::SetCompileHere { .. }
+        | Command::SetCompileTime { .. }
         | Command::RuleConflict { .. }
         | Command::FixHeldLog { .. }
         | Command::ReleaseHeldLog { .. }

@@ -34,7 +34,8 @@ pub enum RefState {
     Verified,
     /// A named commit exists here but is not on the default branch.
     Claimed,
-    /// No anchor, the anchor is not found, or the repository is not on this machine.
+    /// No anchor, the anchor is not found, no repository of that name is listed, or GitHub could
+    /// not be asked.
     Unverified,
 }
 impl RefState {
@@ -58,7 +59,7 @@ impl RefState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefVerification {
     pub state: RefState,
-    /// Why it is not verified, such as "not on this machine".
+    /// Why it is not verified, such as "no repository of that name".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -235,6 +236,14 @@ pub struct BrainClaim {
     pub sources: Vec<ClaimSource>,
 }
 
+/// The issues of the wiki's tracker a note or STATUS names, which the client turns into links.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrainIssues {
+    /// The tracker's prefix.
+    pub prefix: String,
+    pub ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrainNote {
     pub path: String,
@@ -246,6 +255,8 @@ pub struct BrainNote {
     /// The Markdown after the frontmatter, for the client to render.
     pub body: String,
     pub links: Vec<BrainLink>,
+    #[serde(default)]
+    pub issues: BrainIssues,
     pub backlinks: Vec<BrainNoteRow>,
     pub claims: Vec<BrainClaim>,
     /// `false` when a footnote names no source the host can read, so the client shows "sources
@@ -280,11 +291,16 @@ pub struct BrainStatus {
     pub body: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<BrainLink>,
+    #[serde(default)]
+    pub issues: BrainIssues,
     /// When a commit on `main` last changed the wiki; `None` is "No compile yet".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_compile: Option<i64>,
     /// Entries on `main` added since then.
     pub pending_entries: usize,
+    /// When the oldest of them was logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_pending: Option<i64>,
     /// The commit of `main` the index holds; `None` before the first index build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed: Option<String>,

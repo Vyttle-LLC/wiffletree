@@ -711,7 +711,7 @@ fn a_job_run_is_told_it_only_reads_and_saves_and_offers_no_card() {
 fn a_brain_compile_runs_under_its_bundled_procedure_with_no_skill() {
     assert_eq!(Skill::for_role(Role::Compiler), None);
     let procedure = provider::skill(Role::Compiler);
-    assert!(procedure.starts_with("# Brain compile procedure — v1"));
+    assert!(procedure.starts_with("# Brain compile procedure — v2"));
     for tool in ["`queue_conflict`", "`finish_compile`"] {
         assert!(procedure.contains(tool), "{tool}");
     }

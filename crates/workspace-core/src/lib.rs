@@ -3753,6 +3753,19 @@ pub enum Command {
     RunBrainCompile {
         repository: String,
     },
+    /// Turns compiling on or off for this Mac, for the wiki of the Space's folder: its one file
+    /// in `compilers/`.
+    SetCompileHere {
+        space_id: SpaceId,
+        compiles: bool,
+    },
+    /// Sets when the wiki of the Space's folder compiles, or with `None` leaves it to Run now;
+    /// answered with the `TrackerConfig`.
+    SetCompileTime {
+        space_id: SpaceId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compile: Option<BrainCompile>,
+    },
     /// A page of the brain's compile runs, newest first; answered with `CompileRunPage`.
     BrainCompileRuns {
         repository: String,
@@ -4289,6 +4302,8 @@ impl Command {
             | Self::SetUpIssues { .. }
             | Self::MoveIntoFolder { .. }
             | Self::RunBrainCompile { .. }
+            | Self::SetCompileHere { .. }
+            | Self::SetCompileTime { .. }
             | Self::RuleConflict { .. }
             | Self::FixHeldLog { .. }
             | Self::ReleaseHeldLog { .. }
@@ -4437,6 +4452,8 @@ impl Command {
                 | Self::CancelLinearImport { .. }
                 | Self::SpaceStorage { .. }
                 | Self::RunBrainCompile { .. }
+                | Self::SetCompileHere { .. }
+                | Self::SetCompileTime { .. }
                 | Self::RuleConflict { .. }
                 | Self::FixHeldLog { .. }
                 | Self::ReleaseHeldLog { .. }

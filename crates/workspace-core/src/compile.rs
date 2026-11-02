@@ -39,7 +39,10 @@ pub enum CompileOutcome {
     Waiting,
     Failed,
     TimedOut,
-    /// `main` already held a cursor at or past the run's, so it landed nothing.
+    /// Another Mac held or won the claim, or took over this run's, so this Mac did not run it.
+    Lost,
+    /// Another Mac did this work: the claim says it landed this due time, or `main` already held
+    /// a cursor at or past the run's, so it landed nothing.
     CompiledElsewhere,
     /// Its commit is on `main`. A run of an earlier release that opened its pull request reads
     /// as landed too.
@@ -54,6 +57,7 @@ impl CompileOutcome {
             Self::Waiting => "Waiting",
             Self::Failed => "Failed",
             Self::TimedOut => "Timed out",
+            Self::Lost => "Lost to another Mac",
             Self::CompiledElsewhere => "Compiled elsewhere",
             Self::Landed => "Landed",
         }
@@ -73,6 +77,9 @@ pub struct CompileRun {
     /// Entries pending when it started, and how many of them it compiled.
     pub pending: usize,
     pub processed: usize,
+    /// Of those, the entries whose refs GitHub could not be asked about.
+    #[serde(default)]
+    pub unasked: usize,
     /// Model sessions it started: 0 or 1.
     pub model_calls: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -105,6 +112,15 @@ pub struct CompileRunPage {
     pub total: usize,
 }
 
+/// A Mac that compiles a wiki, from its file in `compilers/`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Compiler {
+    pub host: String,
+    pub machine: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<String>,
+}
+
 /// A wiki's compile as the Brains page shows it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BrainCompileState {
@@ -113,9 +129,19 @@ pub struct BrainCompileState {
     pub last_run: Option<CompileRun>,
     /// Entries on `main` added since the brain's last compile.
     pub pending: usize,
-    /// Why Run now waits, when it does: a run in progress.
+    /// Why Run now waits, when it does: a run in progress here or on another Mac, or compiling
+    /// being off here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_now_waits: Option<String>,
+    /// This Mac compiles the wiki.
+    #[serde(default)]
+    pub compiles_here: bool,
+    /// The Macs that compile the wiki, as `compilers/` lists them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compilers: Vec<Compiler>,
+    /// Why the wiki is falling behind, when it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behind: Option<String>,
     /// No Brain compiler row is chosen in Models, so a run with entries pending waits for one.
     #[serde(default)]
     pub needs_model: bool,

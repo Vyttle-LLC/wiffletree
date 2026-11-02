@@ -48,22 +48,22 @@ Log entries, compiles and rulings go through the sync engine. Batches, auto-merg
 
 Claims, the on-this-Mac choice, checking claims through GitHub, product pages, and links to tickets.
 
-- [ ] 3.1 The on-this-Mac choice: `compilers/<host id>.yaml` written and removed by that Mac, and the compile time written to `wiffletree-issues.yaml`, both human-only commands. The compile job comes back, registered for each wiki this Mac compiles, keyed by repository, on the scheduler.
-- [ ] 3.2 `repos::read_tip`: `ls-remote`, then a fetch of that one branch into `refs/wiffletree/compile-claim` when the clone lacks the commit, then its state, including expiry. `repos::claim`: the empty-tree commit, one plain push, then the `ls-remote` read, with no fetch, merge or second push after a refusal. `pass` never touches the branch (decision 1).
-- [ ] 3.3 The run: a pass, then the tip, then pending, then the model, then the claim; owed Macs read the tip after each pull; `landed` and `released` tried once; the tip read again before landing. Local repositories skip all of it.
-- [ ] 3.4 `verify_refs`: `Clones` gains a GitHub-only entry from the Spaces' repository lists, asking `gh` for the default branch, commit and compare, with `pull_state` kept, a run's count of what could not be asked, and the same path for the index (decision 6).
-- [ ] 3.5 Compile procedure v2: products, `repos:`, keeping frontmatter, issue IDs, and `PROCEDURE_VERSION` 2 (decision 10).
-- [ ] 3.6 `check_changes`: a changed note keeps its `repos:` names, and only ULID-shaped sources are checked.
-- [ ] 3.7 `brain_markdown`: issue links by the tracker's prefix and known IDs, with `link_target` opening the issue. The local prefix rename rewrites `notes/` and `STATUS.md`.
-- [ ] 3.8 Run records: lost to another Mac and compiled elsewhere, and usage shown by Space.
-- [ ] 3.9 Falling behind: no volunteer with entries waiting, or two scheduled times with no landed run.
-- [ ] 3.10 **Two Macs claiming at once** test, against a real bare repository: two distinct commits raced from one tip, and two first claims with no branch at one `main` commit. Exactly one wins, and the loser makes no second push and merges nothing. A clone that has only ever fetched `main` reads a tip and claims as its child.
-- [ ] 3.11 A test that a refused claim is never pushed again in that attempt, by counting pushes, and that a landed push with a lost answer reads as won.
-- [ ] 3.12 **A crashed claim** test: a claim 59 minutes old is live, and one 61 minutes old is taken over as its child with no force; two takeovers race to one winner; an owed Mac takes it at its next pull; a Mac that slept through its claim lands nothing.
-- [ ] 3.13 Quota tests: out of quota, or no Brain compiler row, before the claim is recorded as waiting and claims nothing; mid-run releases and the next owed Mac runs.
-- [ ] 3.14 Idle tests: nothing pending pushes nothing, not even a claim, and makes no model call; with a tip landed for this due time, that run is recorded as compiled on that Mac, not as a skip.
-- [ ] 3.15 GitHub ref tests, with a fake `gh`: on the default branch, on a side branch, 404, a merged PR, an open PR, a 403 giving unverified and counted, two owners of one name, a short SHA, and a folder no Space lists asking nothing.
-- [ ] 3.16 Product tests: entries fold by `repos:`, a dropped `repos:` name fails the run, and an older note gains `title` and `kind` and keeps its keys. Issue link tests: a known ID links; another prefix, no such issue, code and an existing link do not.
+- [x] 3.1 The on-this-Mac choice: `compilers/<host id>.yaml` written and removed by that Mac, and the compile time written to `wiffletree-issues.yaml`, both human-only commands. The compile job comes back, registered for each wiki this Mac compiles, keyed by repository, on the scheduler.
+- [x] 3.2 `repos::read_tip`: `ls-remote`, then a fetch of that one branch into `refs/wiffletree/compile-claim` when the clone lacks the commit, then its state, including expiry. `repos::claim`: the empty-tree commit, one plain push, then the `ls-remote` read, with no fetch, merge or second push after a refusal. `pass` never touches the branch (decision 1).
+- [x] 3.3 The run: a pass, then the tip, then pending, then the model, then the claim; owed Macs read the tip after each pull; `landed` and `released` tried once; the tip read again before landing. Local repositories skip all of it.
+- [x] 3.4 `verify_refs`: `Clones` gains a GitHub-only entry from the Spaces' repository lists, asking `gh` for the default branch, commit and compare, with `pull_state` kept, a run's count of what could not be asked, and the same path for the index (decision 6).
+- [x] 3.5 Compile procedure v2: products, `repos:`, keeping frontmatter, issue IDs, and `PROCEDURE_VERSION` 2 (decision 10).
+- [x] 3.6 `check_changes`: a changed note keeps its `repos:` names, and only ULID-shaped sources are checked.
+- [x] 3.7 `brain_markdown`: issue links by the tracker's prefix and known IDs, with `link_target` opening the issue. The local prefix rename rewrites `notes/` and `STATUS.md`.
+- [x] 3.8 Run records: lost to another Mac and compiled elsewhere, and usage shown by Space.
+- [x] 3.9 Falling behind: no volunteer with entries waiting, or two scheduled times with no landed run.
+- [x] 3.10 **Two Macs claiming at once** test, against a real bare repository: two distinct commits raced from one tip, and two first claims with no branch at one `main` commit. Exactly one wins, and the loser makes no second push and merges nothing. A clone that has only ever fetched `main` reads a tip and claims as its child.
+- [x] 3.11 A test that a refused claim is never pushed again in that attempt, by counting pushes, and that a landed push with a lost answer reads as won.
+- [x] 3.12 **A crashed claim** test: a claim 59 minutes old is live, and one 61 minutes old is taken over as its child with no force; two takeovers race to one winner; an owed Mac takes it at its next pull; a Mac that slept through its claim lands nothing.
+- [x] 3.13 Quota tests: out of quota, or no Brain compiler row, before the claim is recorded as waiting and claims nothing; mid-run releases and the next owed Mac runs.
+- [x] 3.14 Idle tests: nothing pending pushes nothing, not even a claim, and makes no model call; with a tip landed for this due time, that run is recorded as compiled on that Mac, not as a skip.
+- [x] 3.15 GitHub ref tests, with a fake `gh`: on the default branch, on a side branch, 404, a merged PR, an open PR, a 403 giving unverified and counted, two owners of one name, a short SHA, and a folder no Space lists asking nothing.
+- [x] 3.16 Product tests: entries fold by `repos:`, a dropped `repos:` name fails the run, and an older note gains `title` and `kind` and keeps its keys. Issue link tests: a known ID links; another prefix, no such issue, code and an existing link do not.
 
 ## 4. Alerts
 

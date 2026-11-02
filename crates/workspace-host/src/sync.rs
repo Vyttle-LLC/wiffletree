@@ -800,7 +800,10 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
         return Ok(settings.passed);
     }
     let (input, scanner) = storage.unzip();
-    let mut stored = input.map(|input| storage::RuleSets::new(input, true));
+    let mut stored = input.map(|mut input| {
+        input.read_claim(&clone, &repository.push_url, &tools.git);
+        storage::RuleSets::new(input, true)
+    });
     let outcome = {
         let mut rule_sets: Vec<&mut dyn RuleSet> = vec![&mut settings];
         if let Some(stored) = &mut stored {
@@ -1114,9 +1117,11 @@ impl Host {
             self.merge_after_pass(&[]);
             return Ok(true);
         }
-        if let Some(found) = passed.storage.take() {
+        let synced_before = self.brain_commit(&key)?;
+        let stored = passed.storage.take();
+        let held_storage = stored.is_some();
+        if let Some(found) = stored {
             self.finish_storage(found, passed.pushed.as_deref())?;
-            self.brains_now = true;
         }
         if let Some(error) = passed.failed.take() {
             // The other rule sets' commits were pushed; only settings waits.
@@ -1125,6 +1130,9 @@ impl Host {
                 "UPDATE sync_record SET synced=?2 WHERE repository=?1 AND path=''",
                 params![key, commit.as_bytes()],
             )?;
+            if held_storage {
+                self.after_storage(&key, synced_before.as_deref(), &commit)?;
+            }
             self.sync.stopped = error.is::<Stopped>();
             self.sync.failed(at, format!("{error:#}"));
             self.merge_after_pass(&[]);
@@ -1153,7 +1161,7 @@ impl Host {
         let mut synced = passed.alike;
         synced.extend(passed.committed.into_iter().filter(|_| pushed.is_some()));
         let commit = passed.pushed.unwrap_or(passed.remote);
-        synced.push((String::new(), Some(commit.into_bytes())));
+        synced.push((String::new(), Some(commit.clone().into_bytes())));
         let tx = self.db.transaction()?;
         // The host wrote what it pulled; what it pushed or found alike keeps its last write.
         for (rows, written) in [(&pulled, "excluded.written"), (&synced, "written")] {
@@ -1184,6 +1192,9 @@ impl Host {
             )?;
         }
         tx.commit()?;
+        if held_storage {
+            self.after_storage(&key, synced_before.as_deref(), &commit)?;
+        }
         if !sorting && self.settings().keeper.comments {
             self.restart_comments()?;
         }
@@ -1776,7 +1787,7 @@ pub(crate) mod tests {
             git(work.path(), &["rev-parse", "HEAD"])
         }
         /// Every Git command of that name sent, with the options before it.
-        fn calls(&self, command: &str) -> Vec<Vec<String>> {
+        pub(crate) fn calls(&self, command: &str) -> Vec<Vec<String>> {
             let named = |args: &&Vec<String>| {
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
                 publish::subcommand(&args) == command

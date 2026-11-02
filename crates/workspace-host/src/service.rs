@@ -641,6 +641,8 @@ enum Event {
     ),
     /// A compile run's pending entries were read and verified on their own thread.
     CompilePrepared(Box<crate::compile::Prepared>),
+    CompileTipRead(Box<crate::compile::TipReading>),
+    ClaimEnded,
     /// A job run's sources were checked on their own thread.
     SourcesChecked(
         String,
@@ -1866,9 +1868,32 @@ impl Actor {
                 move |prepare| prepare.run(&tools),
                 |prepare| crate::compile::Prepared {
                     run_id: prepare.run_id.clone(),
-                    gathered: Err("The compile's preparation stopped unexpectedly".into()),
+                    claim: None,
+                    gathered: Err(crate::compile::Stopped::Failed(
+                        "The compile's preparation stopped unexpectedly".into(),
+                    )),
                 },
                 |_, prepared| Event::CompilePrepared(Box::new(prepared)),
+            );
+        }
+        for read in self.host.take_compile_tip_reads() {
+            let tools = self.publish_tools.clone();
+            spawn_job(
+                self.sender.clone(),
+                read,
+                move |read| read.run(&tools.git),
+                |read| read.failed(),
+                |_, reading| Event::CompileTipRead(Box::new(reading)),
+            );
+        }
+        for end in self.host.take_claim_ends() {
+            let tools = self.publish_tools.clone();
+            spawn_job(
+                self.sender.clone(),
+                end,
+                move |end| end.push(&tools.git),
+                |_| (),
+                |_, ()| Event::ClaimEnded,
             );
         }
     }
@@ -2423,6 +2448,13 @@ impl Actor {
                 }
                 true
             }
+            Event::CompileTipRead(reading) => {
+                if let Err(e) = self.host.compile_tip_read(*reading) {
+                    eprintln!("Reading a compile claim: {e:#}");
+                }
+                true
+            }
+            Event::ClaimEnded => false,
             Event::SourcesChecked(run, checked, checks) => {
                 if let Err(e) = self.host.sources_checked(&run, &checked, checks) {
                     eprintln!("Starting job run {run}: {e:#}");
@@ -9435,7 +9467,7 @@ mod tests {
     fn not_a_brain_refresh(events: &async_channel::Receiver<Event>) -> Event {
         loop {
             match events.recv_blocking().unwrap() {
-                Event::BrainPassed(..) => {}
+                Event::BrainPassed(..) | Event::ClaimEnded => {}
                 event => return event,
             }
         }

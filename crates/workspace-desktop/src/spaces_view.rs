@@ -2009,6 +2009,7 @@ mod tests {
             path: "/data/repos/local-7k2q".into(),
             synced_at: None,
             error: None,
+            wiki_behind: None,
         }
     }
 
