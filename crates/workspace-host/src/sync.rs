@@ -1111,6 +1111,9 @@ impl Host {
             Err(error) => {
                 self.sync.stopped = error.is::<Stopped>();
                 self.sync.failed(at, format!("{error:#}"));
+                if let Some(key) = self.settings_key() {
+                    self.compile_pull_failed(&key)?;
+                }
                 self.merge_after_pass(&[]);
                 return Ok(true);
             }

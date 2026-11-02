@@ -3829,6 +3829,27 @@ mod tests {
     }
 
     #[test]
+    fn a_run_now_whose_settings_repository_pass_fails_ends_with_the_failure() {
+        let mut b = brained();
+        (b.f.host.choose_settings_repository(REPO, None, &b.tools)).unwrap();
+        b.with_compiler_row();
+        b.f.host.run_brain_compile(REPO).unwrap();
+        assert!(!b.f.host.run_now_pulls.is_empty());
+        b.github
+            .offline
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        b.f.host.sync_now(&b.tools).unwrap();
+        let run = b.runs().remove(0);
+        assert_eq!(run.outcome, CompileOutcome::Waiting);
+        assert!(
+            run.reason.contains("could not be reached"),
+            "{}",
+            run.reason
+        );
+        assert!(b.f.host.run_now_pulls.is_empty());
+    }
+
+    #[test]
     fn a_run_that_claims_lands_and_pushes_landed_as_a_child_of_its_claim() {
         let mut b = brained();
         b.merge(&[relay(1)]);
