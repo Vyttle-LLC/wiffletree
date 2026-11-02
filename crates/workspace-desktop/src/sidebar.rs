@@ -34,6 +34,8 @@ const SCROLL_TICK: std::time::Duration = std::time::Duration::from_millis(16);
 pub(super) struct ProjectDrag {
     moving: tree::Movable,
     target: Option<tree::Drop>,
+    /// The other Space whose row the pointer is over, where the dragged row may not land.
+    refused_space: Option<SpaceId>,
     /// The pointer has been off the dragged row, so a release back on it is not a click.
     left_row: bool,
     glyph: &'static str,
@@ -76,7 +78,7 @@ impl Render for ProjectDrag {
 
 /// What a row needs to know about the drag in progress, if any.
 struct Reorder<'a> {
-    entries: &'a [tree::Entry<'a>],
+    sections: &'a [tree::Section<'a>],
     moving: Option<tree::Movable>,
 }
 
@@ -88,7 +90,14 @@ impl Reorder<'_> {
     /// For the row of `over` itself; nothing while no row is dragged.
     fn onto(&self, over: &tree::Movable) -> Option<Halves> {
         let moving = self.moving.as_ref()?;
-        Some(tree::drops(self.entries, moving, over))
+        Some(tree::drops(self.sections, moving, over))
+    }
+    /// For the row of `space`, where nothing lands: the Space, when it is not the dragged row's
+    /// own; nothing while no row is dragged.
+    fn refused(&self, space: &SpaceId) -> Option<Option<SpaceId>> {
+        let moving = self.moving.as_ref()?;
+        let own = tree::space_of(self.sections, moving) == Some(space);
+        Some((!own).then(|| space.clone()))
     }
     /// For the space under the row of `over`, such as the spacer and New ticket button under a
     /// project or the spacer under a collapsed group: it aims where the lower half of that row
@@ -109,6 +118,22 @@ fn repeat_pointer(window: &mut Window, cx: &mut App) {
         };
         window.dispatch_event(PlatformInput::MouseMove(moved), cx);
     }
+}
+
+/// While a project or group is dragged over a Space's row `element`, hides the insertion line,
+/// and shows why when `refused` names that Space because the dragged row belongs to another.
+fn refusing(element: Div, refused: Option<Option<SpaceId>>, cx: &mut Context<Sidebar>) -> Div {
+    let Some(refused) = refused else {
+        return element;
+    };
+    element.on_drag_move(
+        cx.listener(move |v, event: &DragMoveEvent<tree::Movable>, _, c| {
+            let pointer = event.event.position;
+            if event.bounds.contains(&pointer) && v.tree_scroll.bounds().contains(&pointer) {
+                v.aim_at_space_row(refused.clone(), c);
+            }
+        }),
+    )
 }
 
 /// While a project or group is dragged over `element`, aims the drop, or hides the insertion
@@ -165,8 +190,10 @@ pub(super) struct Sidebar {
     pub(super) creating_project: bool,
     pub(super) project_name: Entity<InputState>,
     pub(super) project_edit: Option<project_name::NameEdit>,
-    /// Collapsed project groups, by their first word in lowercase.
-    collapsed_groups: BTreeSet<String>,
+    /// Collapsed Space sections, by their Space's id.
+    collapsed_spaces: BTreeSet<SpaceId>,
+    /// Collapsed project groups, by their Space and first word in lowercase.
+    collapsed_groups: BTreeSet<tree::GroupKey>,
     /// The project or group being dragged in the sidebar; gone once the drag ends.
     project_drag: Option<WeakEntity<ProjectDrag>>,
     /// The press in progress ended a rename, so it does not also start a drag.
@@ -205,6 +232,7 @@ impl Sidebar {
             creating_project: false,
             project_name,
             project_edit: None,
+            collapsed_spaces: BTreeSet::new(),
             collapsed_groups: BTreeSet::new(),
             project_drag: None,
             rename_press: false,
@@ -226,6 +254,9 @@ impl Sidebar {
         if moved {
             self.name_new_project(window, cx);
         }
+        if selection {
+            self.reveal_selected();
+        }
         let host_version = self.bridge.host_version();
         let host_moved = host_version != self.host_version;
         self.host_version = host_version;
@@ -241,6 +272,25 @@ impl Sidebar {
             cx.notify();
         }
     }
+    /// The Space whose section lists a project.
+    fn section_of(&self, project_id: &str) -> Option<SpaceId> {
+        let index = self.shared.index.as_ref()?;
+        Some(tree::section_of(index, index.project(project_id)?))
+    }
+    /// Opens the collapsed Space and group of a project selected from elsewhere, such as the
+    /// Inbox, so its row shows.
+    fn reveal_selected(&mut self) {
+        let Some(project_id) = self.shared.selected_session().map(|s| s.project_id.clone()) else {
+            return;
+        };
+        let index = self.shared.index.as_ref();
+        let root = index.and_then(|index| index.roots(&project_id).next());
+        let word = root.map(|root| tree::group_key(&root.name));
+        if let (Some(space), Some(word)) = (self.section_of(&project_id), word) {
+            self.collapsed_groups.remove(&(space.clone(), word));
+            self.collapsed_spaces.remove(&space);
+        }
+    }
     fn name_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let root = (self.pending_project_selection.as_ref()).and_then(|project| {
             (self.shared.index.iter())
@@ -252,8 +302,11 @@ impl Sidebar {
         };
         self.pending_project_selection = None;
         self.creating_project = false;
-        // Its row shows, even in a collapsed group.
-        self.collapsed_groups.remove(&tree::group_key(&root.name));
+        // Its row shows, even in a collapsed group; selecting it opens its Space.
+        if let Some(space) = self.section_of(&root.project_id) {
+            let key = (space, tree::group_key(&root.name));
+            self.collapsed_groups.remove(&key);
+        }
         cx.emit(Intent::Select(root.id.clone()));
         self.tree_scroll.set_offset(point(px(0.), px(0.)));
         if let Some(body) = self.pending_first_message.take() {
@@ -1034,17 +1087,18 @@ impl Sidebar {
         }
         let has_tickets = &index.snapshot().tickets_owned;
         let grouping = cx.global::<Preferences>().group_projects;
-        let entries = tree::entries(index, self.shared.show_archived, grouping);
+        let sections = tree::sections(index, self.shared.show_archived, grouping);
         let drag = self.project_drag.as_ref().and_then(|drag| drag.upgrade());
-        let (moving, target) = drag
-            .map(|drag| {
+        let (moving, target, refused_space) = match drag {
+            Some(drag) => {
                 let drag = drag.read(cx);
-                (drag.moving.clone(), drag.target.clone())
-            })
-            .unzip();
-        let target = target.flatten();
+                let (moving, target) = (drag.moving.clone(), drag.target.clone());
+                (Some(moving), target, drag.refused_space.clone())
+            }
+            None => (None, None, None),
+        };
         let reorder = Reorder {
-            entries: &entries,
+            sections: &sections,
             moving,
         };
         let line = |drop: tree::Drop, grouped: bool| {
@@ -1053,20 +1107,23 @@ impl Sidebar {
         let mut project = None;
         // Where a drag over the space under the last project row aims.
         let mut under = None;
-        // The group whose projects are being listed, and whether the last project row is in it.
+        // The Space and the group whose projects are being listed, and whether the last project
+        // row is in that group.
+        let mut space = None;
         let mut group = None;
         let mut in_group = false;
         let rows = tree::rows(
             index,
             self.shared.show_archived,
             grouping,
+            &self.collapsed_spaces,
             &self.collapsed_groups,
         );
         for row in rows {
-            // Every row completes the project above it, and a top-level row completes the
-            // group above it.
+            // Every row completes the project above it, a top-level row completes the group
+            // above it, and a Space's row completes the Space above it.
             let top_level = match &row {
-                tree::Row::Group(_) => true,
+                tree::Row::Space { .. } | tree::Row::Group(_) => true,
                 tree::Row::Project { grouped, .. } => !grouped,
             };
             if let Some(previous) = project.take() {
@@ -1077,6 +1134,32 @@ impl Sidebar {
                 tree = tree.children(line(tree::Drop::EndOfGroup(key), true));
             }
             match row {
+                tree::Row::Space {
+                    space: listed,
+                    name,
+                    projects,
+                } => {
+                    let previous = space.replace(listed.clone());
+                    let first = previous.is_none();
+                    let end = previous.and_then(|previous| line(tree::Drop::End(previous), false));
+                    let refused = reorder.refused(&listed);
+                    let hint = (refused_space.as_ref() == Some(&listed)).then(|| {
+                        hint("Projects move between Spaces from their Overview.", p)
+                            .text_size(px(font::META))
+                            .mt(px(4.))
+                            .ml(inset(0, false) + px(20.))
+                            .mr(px(6.))
+                            .px_2()
+                            .py(px(4.))
+                            .rounded_md()
+                            .bg(p.overlay)
+                    });
+                    let row = self.space_row(listed, &name, &projects, first, p, cx);
+                    tree = tree
+                        .children(end)
+                        .child(refusing(row, refused, cx))
+                        .children(hint);
+                }
                 tree::Row::Group(listed) => {
                     let movable = tree::Movable::Group(listed.key.clone());
                     tree = tree
@@ -1108,7 +1191,7 @@ impl Sidebar {
         if let Some(key) = group {
             tree = tree.children(line(tree::Drop::EndOfGroup(key), true));
         }
-        tree.children(line(tree::Drop::End, false))
+        tree.children(space.and_then(|space| line(tree::Drop::End(space), false)))
     }
 
     /// Makes a project or group row draggable, and a place other rows are dropped on.
@@ -1144,6 +1227,7 @@ impl Sidebar {
                 let drag = cx.new(|_| ProjectDrag {
                     moving: moving.clone(),
                     target: None,
+                    refused_space: None,
                     left_row: false,
                     glyph,
                     label: label.clone(),
@@ -1205,9 +1289,16 @@ impl Sidebar {
         }
     }
 
-    fn toggle_group(&mut self, key: &str, cx: &mut Context<Self>) {
+    fn toggle_group(&mut self, key: &tree::GroupKey, cx: &mut Context<Self>) {
         if !self.collapsed_groups.remove(key) {
-            self.collapsed_groups.insert(key.to_owned());
+            self.collapsed_groups.insert(key.clone());
+        }
+        cx.notify();
+    }
+
+    fn toggle_space(&mut self, space: &SpaceId, cx: &mut Context<Self>) {
+        if !self.collapsed_spaces.remove(space) {
+            self.collapsed_spaces.insert(space.clone());
         }
         cx.notify();
     }
@@ -1273,11 +1364,29 @@ impl Sidebar {
 
     /// Moves the insertion line; `None` hides it, and a drop then moves nothing.
     fn aim_project_drag(&mut self, target: Option<tree::Drop>, cx: &mut Context<Self>) {
+        self.aim(target, None, cx);
+    }
+
+    /// Hides the insertion line over a Space's row, and over another Space's row explains why.
+    fn aim_at_space_row(&mut self, refused: Option<SpaceId>, cx: &mut Context<Self>) {
+        self.aim(None, refused, cx);
+    }
+
+    fn aim(
+        &mut self,
+        target: Option<tree::Drop>,
+        refused: Option<SpaceId>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(drag) = self.project_drag.as_ref().and_then(|drag| drag.upgrade()) else {
             return;
         };
-        if drag.read(cx).target != target {
-            drag.update(cx, |drag, _| drag.target = target);
+        let aimed = drag.read(cx);
+        if aimed.target != target || aimed.refused_space != refused {
+            drag.update(cx, |drag, _| {
+                drag.target = target;
+                drag.refused_space = refused;
+            });
             cx.notify();
         }
     }
@@ -1297,8 +1406,8 @@ impl Sidebar {
             return;
         };
         let grouping = cx.global::<Preferences>().group_projects;
-        let entries = tree::entries(index, self.shared.show_archived, grouping);
-        if let Some(moved) = tree::project_move(&entries, moving, &target) {
+        let sections = tree::sections(index, self.shared.show_archived, grouping);
+        if let Some(moved) = tree::project_move(&sections, moving, &target) {
             let ask = ask::move_projects(moved.project_ids, moved.before);
             self.ask(ask, window, cx, |_, projects, window, cx| match projects {
                 Ok(projects) => cx.emit(Intent::Amend(Amendment::Projects(projects))),
@@ -1320,32 +1429,15 @@ impl Sidebar {
         let collapsed = self.collapsed_groups.contains(&key);
         let count = group.members.len();
         let detail = format!("{count} projects starting with “{}”", group.label);
-        let state = collapsed
-            .then(|| {
-                let needs_you = (self.shared.snapshot().iter())
-                    .flat_map(|s| &s.attention)
-                    .filter(|a| group.members.iter().any(|m| m.project_id == a.project_id))
-                    .count();
-                let stuck = (group.members.iter())
-                    .map(|root| self.agent_counts(root).stuck)
-                    .sum();
-                let shown: Vec<Status> = group
-                    .members
-                    .iter()
-                    .map(|root| self.shared.shown_status(root))
-                    .collect();
-                tree::rollup(needs_you, stuck, &shown)
-            })
-            .flatten()
-            .map(|rollup| match rollup {
-                tree::Rollup::NeedsYou(count) => needs_you_badge(count, p).into_any_element(),
-                tree::Rollup::Stuck(count) => stuck_pill(count, p).into_any_element(),
-                tree::Rollup::Blocked => status_glyph(Status::Blocked, 12., p),
-                tree::Rollup::Working => status_glyph(Status::Working, 12., p),
-            });
+        let state = collapsed.then(|| self.rollup(&group.members, p)).flatten();
         let toggle = key.clone();
+        let (space, word) = &key;
         let row = self
-            .row(SharedString::from(format!("group-{key}")), false, p)
+            .row(
+                SharedString::from(format!("group-{space}-{word}")),
+                false,
+                p,
+            )
             .pl(inset(0, false) - px(4.))
             .text_size(px(font::SMALL))
             .text_color(p.subtle)
@@ -1386,6 +1478,85 @@ impl Sidebar {
             .children(state.map(|state| div().flex_none().child(state)));
         let movable = tree::Movable::Group(key);
         self.reorderable(row, movable, &group.label, reorder, p, cx)
+    }
+
+    /// The most urgent state among `projects`, for a collapsed group or Space.
+    fn rollup(&self, projects: &[&Session], p: Palette) -> Option<AnyElement> {
+        let needs_you = (self.shared.snapshot().iter())
+            .flat_map(|s| &s.attention)
+            .filter(|a| projects.iter().any(|root| root.project_id == a.project_id))
+            .count();
+        let stuck = (projects.iter())
+            .map(|root| self.agent_counts(root).stuck)
+            .sum();
+        let shown: Vec<Status> = (projects.iter())
+            .map(|root| self.shared.shown_status(root))
+            .collect();
+        Some(match tree::rollup(needs_you, stuck, &shown)? {
+            tree::Rollup::NeedsYou(count) => needs_you_badge(count, p).into_any_element(),
+            tree::Rollup::Stuck(count) => stuck_pill(count, p).into_any_element(),
+            tree::Rollup::Blocked => status_glyph(Status::Blocked, 12., p),
+            tree::Rollup::Working => status_glyph(Status::Working, 12., p),
+        })
+    }
+
+    /// A Space's section row: its name and project count, and collapsed, the most urgent state
+    /// among its projects. Activating it collapses or expands the section. A hairline parts it
+    /// from the section above.
+    fn space_row(
+        &self,
+        space: SpaceId,
+        name: &str,
+        projects: &[&Session],
+        first: bool,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let collapsed = self.collapsed_spaces.contains(&space);
+        let state = collapsed.then(|| self.rollup(projects, p)).flatten();
+        let row = self
+            .row(SharedString::from(format!("space-{space}")), false, p)
+            .pl(inset(0, false) - px(4.))
+            .text_color(p.subtle)
+            .on_click(cx.listener(move |v, _, _, c| v.toggle_space(&space, c)))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(18.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        icon(if collapsed {
+                            "chevron-right"
+                        } else {
+                            "chevron-down"
+                        })
+                        .size(px(12.)),
+                    ),
+            )
+            .child(
+                eyebrow(name.to_uppercase(), p)
+                    .flex_1()
+                    .min_w_0()
+                    .text_ellipsis(),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .font_family(".SystemMonoFont")
+                    .text_size(px(font::META))
+                    .child(projects.len().to_string()),
+            )
+            .children(state.map(|state| div().flex_none().child(state)));
+        div()
+            .when(!first, |d| {
+                d.mt_2()
+                    .pt(px(6.))
+                    .border_t_1()
+                    .border_color(p.edge.opacity(0.6))
+            })
+            .child(row)
     }
 
     /// Offers a first ticket under a selected coordinator that has none, then spaces projects.
