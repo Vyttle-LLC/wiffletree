@@ -325,8 +325,8 @@ pub(crate) struct LegacyRead {
     pub(crate) config: Option<Value>,
 }
 
-/// Each path of the original Git reports as changed or untracked, relative to its root, and
-/// whether it was never committed.
+/// Each path of the original Git reports as changed, untracked or ignored, relative to its
+/// root, and whether it was never committed.
 fn uncommitted(clone: &Path, folder: &str) -> Result<HashMap<String, bool>> {
     let listed = runtime::git_bytes_large(
         clone,
@@ -335,6 +335,7 @@ fn uncommitted(clone: &Path, folder: &str) -> Result<HashMap<String, bool>> {
             "--porcelain=v1",
             "-z",
             "--untracked-files=all",
+            "--ignored",
             "--",
             folder,
         ],
@@ -351,7 +352,10 @@ fn uncommitted(clone: &Path, folder: &str) -> Result<HashMap<String, bool>> {
         if code.contains(['R', 'C']) {
             parts.next();
         }
-        paths.insert(path.to_owned(), code == "??" || code.starts_with('A'));
+        paths.insert(
+            path.to_owned(),
+            matches!(code, "??" | "!!") || code.starts_with('A'),
+        );
     }
     Ok(paths)
 }
@@ -1316,6 +1320,21 @@ mod tests {
                     .unwrap()
                     .is_empty()
             );
+        }
+
+        #[test]
+        fn a_git_ignored_file_is_not_on_github_and_was_never_committed() {
+            let docs = tempfile::tempdir().unwrap();
+            git(docs.path(), &["init", "-q", "-b", "main"]);
+            write(docs.path(), ".gitignore", "second-brain/notes/Secret.md\n");
+            write(docs.path(), "second-brain/notes/Kept.md", "# Kept\n");
+            commit(docs.path(), "First");
+            write(docs.path(), "second-brain/notes/Secret.md", "# Secret\n");
+            let read =
+                LegacyRead::read(docs.path(), "second-brain", "me", false, &Tools::default())
+                    .unwrap();
+            assert_eq!(read.plan.pages, 2, "Kept and Secret");
+            assert_eq!((read.plan.not_on_github, read.plan.never_committed), (1, 1));
         }
 
         #[test]
