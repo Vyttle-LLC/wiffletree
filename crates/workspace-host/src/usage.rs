@@ -464,6 +464,22 @@ impl Host {
         tx.commit()?;
         Ok(())
     }
+    /// The project, or the Space for an Assistant thread, a session's usage is listed under.
+    /// One that has since been deleted still counts, under a neutral name.
+    fn usage_owner_name(&self, owner: &Option<SessionOwner>, project_id: &str) -> Result<String> {
+        Ok(match owner {
+            Some(SessionOwner::Space(space)) => self
+                .find_space(space)?
+                .map_or_else(|| "Removed Space".into(), |record| record.space.name),
+            _ => self
+                .db
+                .query_row("SELECT data FROM projects WHERE id=?1", [project_id], |r| {
+                    decode::<Project>(r, 0)
+                })
+                .optional()?
+                .map_or_else(|| "Removed project".into(), |project| project.name),
+        })
+    }
     pub fn usage_report(
         &self,
         days: u16,
@@ -602,7 +618,7 @@ impl Host {
                     _ => CoordinatorUsage {
                         id: group.coordinator.clone(),
                         name: session.name,
-                        project: self.project(&session.project_id)?.name,
+                        project: self.usage_owner_name(&session.owner, &session.project_id)?,
                         own: TokenTotals::default(),
                         workers: TokenTotals::default(),
                         cost: None,
@@ -835,6 +851,44 @@ mod tests {
         assert_eq!(report.totals.partial_requests, 1);
         assert_eq!(report.coordinators[0].own.total(), 370);
         assert_eq!(report.unreported_runs, 1);
+    }
+    fn spend(host: &Host, session: &Session) {
+        let time = now() - 1000;
+        run(host, session, "run", time, Value::Null);
+        let usage = json!({"input_tokens":100,"output_tokens":30});
+        host.record_usage("run", "request", None, &usage, true, time)
+            .unwrap();
+    }
+    #[test]
+    fn an_assistant_thread_is_listed_under_its_space() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(directory.path()).unwrap();
+        let space = host.create_space("Sage", "", "", None).unwrap().space.id;
+        let thread = host.start_thread("t1", &space, "Hi", &[], None).unwrap();
+        spend(&host, &host.session(&thread.id).unwrap());
+        let report = host
+            .usage_report(7, None, None, "America/New_York")
+            .unwrap();
+        assert_eq!(report.coordinators.len(), 1);
+        assert_eq!(report.coordinators[0].project, "Sage");
+        assert_eq!(report.coordinators[0].own.total(), 130);
+    }
+    #[test]
+    fn a_deleted_projects_usage_still_counts_under_a_neutral_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(directory.path()).unwrap();
+        let session = root(&mut host, "Gone");
+        spend(&host, &session);
+        // An older store can hold sessions of a project that is gone.
+        host.db.pragma_update(None, "foreign_keys", false).unwrap();
+        host.db
+            .execute("DELETE FROM projects WHERE id=?1", [&session.project_id])
+            .unwrap();
+        let report = host
+            .usage_report(7, None, None, "America/New_York")
+            .unwrap();
+        assert_eq!(report.coordinators[0].project, "Removed project");
+        assert_eq!(report.totals.input, 100);
     }
     /// A store whose root session has a Claude session to read `modelUsage` for.
     fn claude_session() -> (tempfile::TempDir, Host, Session) {
