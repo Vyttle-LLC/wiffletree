@@ -232,7 +232,7 @@ pub(crate) fn comparison(note: &PausedSetting, compared: &Compared, p: Palette) 
             .child(
                 div()
                     .py_1()
-                    .font_family(".SystemMonoFont")
+                    .font_family(mono_font())
                     .text_size(px(font::DETAIL))
                     .line_height(relative(1.55))
                     .children(rows),

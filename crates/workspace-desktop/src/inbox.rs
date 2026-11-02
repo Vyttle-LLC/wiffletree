@@ -704,7 +704,7 @@ fn code(text: String, p: Palette) -> Div {
             .px_1()
             .rounded(px(4.))
             .bg(p.overlay)
-            .font_family(".SystemMonoFont")
+            .font_family(mono_font())
             .text_size(px(font::CAPTION))
             .child(text),
     )

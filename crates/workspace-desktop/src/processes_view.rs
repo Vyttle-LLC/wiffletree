@@ -389,7 +389,7 @@ impl Inspector {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .font_family(".SystemMonoFont")
+                    .font_family(mono_font())
                     .text_ellipsis()
                     .child(programs(group)),
             )

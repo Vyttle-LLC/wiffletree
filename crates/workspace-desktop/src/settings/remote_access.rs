@@ -180,7 +180,7 @@ impl Settings {
                 .border_1()
                 .border_color(p.edge.opacity(edge::CARD))
                 .bg(p.surface)
-                .font_family(".SystemMonoFont")
+                .font_family(mono_font())
                 .text_size(px(24.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(digit.to_string())

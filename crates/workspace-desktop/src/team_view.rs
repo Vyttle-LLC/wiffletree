@@ -396,7 +396,7 @@ fn ledger_list(rows: Vec<wording::LedgerRow>, p: Palette) -> Div {
                         .child(div().text_size(px(font::SMALL)).child(row.summary))
                         .child(
                             div()
-                                .font_family(".SystemMonoFont")
+                                .font_family(mono_font())
                                 .text_size(px(font::META))
                                 .text_color(p.subtle)
                                 .child(row.place),

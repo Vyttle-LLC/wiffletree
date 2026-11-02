@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Theme files study</title>
+<!--
+  Static study for theme files. No script, no network.
+  Drawn 2026-11-02 from origin/main: palette.rs, apply_theme in main.rs, settings.rs's
+  appearance_section and preferences.rs.
+  The light and dark switch at the top is a CSS-only radio group. Celadon's colors and fonts
+  are real: celadon-theme ports/json at 16ac860 and celadontheme.com's fonts. Project names in
+  the previews are Celadon's sample project.
+  1. Settings › Appearance today and proposed: a light theme and a dark theme.
+  2. What a theme changes: Tidal and Celadon's variants side by side.
+  3. Theme files: one appearance, both, and a partial one.
+  4. A broken file and a missing font.
+-->
+<style>
+.light,:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}}
+body:has(#force-light:checked){--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+body:has(#force-dark:checked){--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+p{margin:0}
+code,pre{font:11.5px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace}
+pre{margin:0;padding:10px 12px;background:var(--base);border:1px solid var(--edge);border-radius:8px;overflow:auto;white-space:pre}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.intro{max-width:900px;margin-bottom:22px}
+.intro p{color:var(--subtle);font-size:12px;margin-top:4px}
+.intro ul{margin:8px 0 0;padding-left:18px;color:var(--subtle);font-size:12px}
+.intro li b{color:var(--text);font-weight:600}
+.pending{display:inline-block;margin:6px 0 4px;padding:3px 10px;border-radius:9px;font-size:11.5px;font-weight:600;color:var(--yellow);background:color-mix(in srgb,var(--yellow) 16%,transparent)}
+.switch{display:flex;gap:6px;margin:10px 0 0;font-size:12px;color:var(--subtle)}
+.switch input{display:none}
+.switch label{padding:3px 10px;border:1px solid var(--edge);border-radius:7px;cursor:pointer}
+body:has(#force-system:checked) label[for=force-system],body:has(#force-light:checked) label[for=force-light],body:has(#force-dark:checked) label[for=force-dark]{background:var(--overlay);color:var(--text)}
+.study{margin-bottom:30px;max-width:1160px}
+.study>.eyebrow{margin-bottom:6px}
+.pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;align-items:start}
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.tag{font-size:11px;font-weight:600;margin-bottom:4px}
+.tag.now{color:var(--muted)}
+.tag.new{color:var(--green)}
+.caption{margin:10px 2px 0;font-size:11.5px;color:var(--subtle);max-width:900px}
+.caption b{color:var(--text);font-weight:600}
+.frame{background:var(--surface);border:1px solid var(--edge);border-radius:12px;overflow:hidden}
+.win{display:grid;grid-template-columns:170px 1fr;min-height:300px}
+.side{background:var(--base);border-right:1px solid var(--edge);padding:10px 8px}
+.side .g{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--subtle);margin:10px 6px 3px}
+.side .i{padding:3px 8px;border-radius:7px;font-size:12.5px}
+.side .i.sel{background:var(--overlay)}
+.page{padding:14px 16px}
+.sec{font-size:10.5px;letter-spacing:.08em;color:var(--subtle);font-weight:600;margin:4px 0 8px}
+.sec+.sec,.block+.sec{margin-top:18px}
+.hint{font-size:11.5px;color:var(--subtle);margin-top:6px}
+.hint b{color:var(--text);font-weight:500}
+.seg{display:inline-flex;gap:4px}
+.seg span{border:1px solid var(--edge);border-radius:7px;padding:2px 10px;font-size:12px}
+.seg span.on{background:var(--overlay);border-color:var(--focus)}
+.row{display:flex;align-items:center;gap:10px;margin:6px 0}
+.row .k{width:52px;font-size:12.5px;color:var(--subtle)}
+.field{border:1px solid var(--edge);border-radius:7px;padding:3px 9px;background:var(--base);font-size:12.5px;display:inline-block;min-width:180px}
+.field.dd::after{content:" ▾";float:right;color:var(--muted);margin-left:10px}
+.menu{border:1px solid var(--edge);border-radius:8px;background:var(--surface);box-shadow:0 6px 18px rgb(0 0 0/.14);padding:4px;width:240px;margin:4px 0 0 62px;font-size:12.5px}
+.menu .m{padding:3px 8px;border-radius:6px;display:flex;gap:8px}
+.menu .m.on{background:var(--overlay)}
+.menu .m .r{margin-left:auto;font-size:11px;color:var(--muted)}
+.menu hr{border:0;border-top:1px solid var(--edge);margin:4px 2px}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--edge);border-radius:7px;padding:3px 10px;font-size:12px;background:var(--surface);color:var(--text);white-space:nowrap}
+.btn.quiet{border-color:transparent;color:var(--subtle)}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.banner{border-radius:8px;padding:7px 10px;font-size:12px;margin:8px 0;background:color-mix(in srgb,var(--red) 10%,transparent)}
+.banner b{color:var(--red)}
+.banner.warn{background:color-mix(in srgb,var(--yellow) 12%,transparent)}
+.banner.warn b{color:var(--yellow)}
+.banner code{font-size:11px}
+.notes{max-width:900px;font-size:12px;color:var(--subtle);padding-left:18px}
+.notes li{margin:3px 0}
+.notes b{color:var(--text);font-weight:600}
+
+/* Theme previews: each sets its own tokens and fonts, whatever the page's mode. */
+.preview{--ui:-apple-system,BlinkMacSystemFont,sans-serif;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--size:13px;background:var(--base);color:var(--text);border:1px solid var(--edge);border-radius:12px;overflow:hidden;font:var(--size)/1.5 var(--ui)}
+.preview .bar{display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border-bottom:1px solid var(--edge);font-size:11px;color:var(--subtle)}
+.preview .bar b{color:var(--text);font-weight:600}
+.preview .body{display:grid;grid-template-columns:96px 1fr;min-height:200px}
+.preview .nav{border-right:1px solid var(--edge);padding:8px 6px;font-size:.88em}
+.preview .nav div{padding:2px 6px;border-radius:6px}
+.preview .nav .sel{background:var(--overlay)}
+.preview .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px}
+.preview .main{padding:10px}
+.preview .bubble{background:var(--surface);border:1px solid var(--edge);border-radius:10px;padding:7px 9px;margin-bottom:8px}
+.preview .bubble code{font:.9em var(--mono);background:color-mix(in srgb,var(--text) 12%,transparent);padding:0 4px;border-radius:4px}
+.preview .sub{color:var(--subtle);font-size:.88em}
+.preview .go{display:inline-block;background:var(--accent);color:var(--on-accent);border-radius:7px;padding:2px 10px;font-weight:600;font-size:.92em}
+.preview .ring{display:inline-block;border:1px solid var(--focus);border-radius:7px;padding:2px 10px;font-size:.92em;margin-left:6px}
+.preview .chips{display:flex;gap:5px;margin-top:8px;flex-wrap:wrap}
+.preview .chips span{font-size:.8em;padding:0 7px;border-radius:8px;background:color-mix(in srgb,currentColor 14%,transparent)}
+.tidal-dark{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8}
+.celadon-dark{--base:#131b11;--surface:#182216;--overlay:#232f20;--text:#c9d5c6;--subtle:#939f91;--edge:#727e70;--accent:#f49cdb;--on-accent:#131b11;--focus:#37d8c9;--green:#9ecf75;--red:#fba29b;--yellow:#dcbb50;--blue:#7cc7fb;--ui:Figtree,system-ui,sans-serif;--mono:"JetBrains Mono",Menlo,monospace;--size:14px}
+.jade-dark{--base:#060d05;--surface:#0b150a;--overlay:#182315;--text:#dbe7d8;--subtle:#9ba799;--edge:#748072;--accent:#ffaee7;--on-accent:#060d05;--focus:#4ce7d8;--green:#acde83;--red:#ffb7b0;--yellow:#ebca60;--blue:#99d4ff;--ui:Figtree,system-ui,sans-serif;--mono:"JetBrains Mono",Menlo,monospace;--size:14px}
+.row .k{width:92px}
+.menu{margin-left:102px}
+.both{font-size:10.5px;color:var(--muted);margin-left:auto}
+.tidal-light{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78}
+.celadon-light{--base:#eaf6e8;--surface:#deedda;--overlay:#cee1ca;--text:#3b423a;--subtle:#5d675b;--edge:#7a8378;--accent:#874576;--on-accent:#eaf6e8;--focus:#1c7472;--green:#40783b;--red:#9b4a43;--yellow:#9c7220;--blue:#246099;--ui:Figtree,system-ui,sans-serif;--mono:"JetBrains Mono",Menlo,monospace;--size:14px}
+.lightrow,.darkrow{margin-top:14px}
+@media(max-width:860px){.pair,.trio{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="intro">
+  <div class="eyebrow">Wiffletree · study</div>
+  <h1>Theme files</h1>
+  <span class="pending">Awaiting approval</span>
+  <p>A theme is a JSON file in <code>~/Library/Application Support/Wiffletree/themes/</code>. It changes the app's colors and fonts. You choose one theme for light and one for dark, and Mode decides which is showing: System follows macOS, Light and Dark hold one. Tidal stays built in and is the default for both. These are this Mac's own choices, saved in <code>desktop-preferences.json</code>.</p>
+  <ul>
+    <li><b>A theme can be light, dark or both.</b> A file with only a light variant appears in the Light theme list, one with only a dark variant in the Dark theme list, and one with both, like Tidal, in both lists.</li>
+    <li><b>Same shape as Tidal.</b> A theme file has a name, its variants with Tidal's 14 color names, and an optional fonts block.</li>
+    <li><b>A color left out comes from Tidal's same variant.</b> A dark theme can change only the accent.</li>
+    <li><b>Re-read without a restart.</b> The file is read again when you pick it and whenever a Wiffletree window comes back to the front, so you can edit, switch back and see the change.</li>
+    <li><b>A broken file never stops the app.</b> Wiffletree draws Tidal's variant instead and shows what is wrong in Settings › Appearance until the file is fixed.</li>
+  </ul>
+  <div class="switch">
+    <input type="radio" name="mode" id="force-system" checked><label for="force-system">System</label>
+    <input type="radio" name="mode" id="force-light"><label for="force-light">Light</label>
+    <input type="radio" name="mode" id="force-dark"><label for="force-dark">Dark</label>
+  </div>
+</div>
+
+<section class="study">
+  <div class="eyebrow">1 · Settings › Appearance</div>
+  <div class="pair">
+    <div>
+      <div class="tag now">Today</div>
+      <div class="frame win">
+        <div class="side">
+          <div class="g">This Mac</div>
+          <div class="i">Who runs what</div>
+          <div class="i">Repositories</div>
+          <div class="i">Workspace folder</div>
+          <div class="i">Builds &amp; remote access</div>
+          <div class="i sel">Appearance</div>
+        </div>
+        <div class="page">
+          <div class="sec">APPEARANCE</div>
+          <div class="seg"><span class="on">◐ System</span><span>☀ Light</span><span>☾ Dark</span></div>
+          <div class="hint">System follows macOS. This Mac remembers its own choice.</div>
+          <div class="sec">LAYOUT</div>
+          <div class="hint">Group projects that share a first word · Collapse a working agent's live work…</div>
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="tag new">Proposed, with the Dark theme menu open</div>
+      <div class="frame win">
+        <div class="side">
+          <div class="g">This Mac</div>
+          <div class="i">Who runs what</div>
+          <div class="i">Repositories</div>
+          <div class="i">Workspace folder</div>
+          <div class="i">Builds &amp; remote access</div>
+          <div class="i sel">Appearance</div>
+        </div>
+        <div class="page">
+          <div class="sec">APPEARANCE</div>
+          <div class="row"><span class="k">Mode</span><span class="seg"><span class="on">◐ System</span><span>☀ Light</span><span>☾ Dark</span></span></div>
+          <div class="row"><span class="k">Light theme</span><span class="field dd">Celadon Sky</span></div>
+          <div class="row"><span class="k">Dark theme</span><span class="field dd">Celadon Jade</span></div>
+          <div class="menu">
+            <div class="m">Tidal<span class="r">built in</span></div>
+            <hr>
+            <div class="m">Celadon<span class="r">celadon.json</span></div>
+            <div class="m on">✓ Celadon Jade<span class="r">celadon-jade.json</span></div>
+            <div class="m">Celadon Powder<span class="r">celadon-powder.json</span></div>
+          </div>
+          <div class="actions">
+            <span class="btn">Open themes folder</span>
+            <span class="btn">New theme from Tidal</span>
+          </div>
+          <div class="hint">System shows the light theme when macOS is light and the dark theme when it is dark. Themes are JSON files in the themes folder; Wiffletree reads one again when you come back to it.</div>
+          <div class="sec">LAYOUT</div>
+          <div class="hint">Group projects that share a first word · Collapse a working agent's live work…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="caption">Each list shows Tidal first, then every <code>.json</code> file in the folder that has that variant, sorted by the name inside it; the file name shows on the right. Celadon Sky is light only, so it is not in the Dark theme list. A file with both variants is in both lists, and you can still pick it for one side only. The Celadon files come from the Celadon theme's own Wiffletree port, installed by copying them into the themes folder, the way Celadon installs everywhere else. <b>New theme from Tidal</b> writes <code>my-theme.json</code> (or <code>my-theme-2.json</code>) with both of Tidal's variants, selects it on both sides and opens the folder. The sidebar's Appearance menu keeps only System, Light and Dark.</p>
+</section>
+
+<section class="study">
+  <div class="eyebrow">2 · What a theme changes</div>
+  <div class="trio darkrow">
+    <div><div class="tag">Tidal · dark</div>
+      <div class="preview tidal-dark">
+        <div class="bar"><b>Wallpapers</b> · coordinator</div>
+        <div class="body">
+          <div class="nav"><div class="sel"><span class="dot" style="background:var(--yellow)"></span>Celadon</div><div><span class="dot" style="background:var(--green)"></span>Website</div><div><span class="dot" style="background:var(--red)"></span>Nvim</div></div>
+          <div class="main">
+            <div class="bubble">Ticket <code>palette-tokens</code> passed review.<div class="sub">Worked 4m 53s · 12 steps</div></div>
+            <span class="go">Publish</span><span class="ring">Focus ring</span>
+            <div class="chips"><span style="color:var(--green)">passed</span><span style="color:var(--yellow)">waiting</span><span style="color:var(--red)">blocked</span><span style="color:var(--blue)">link</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div><div class="tag">Celadon · dark · Figtree 14, JetBrains Mono</div>
+      <div class="preview celadon-dark">
+        <div class="bar"><b>Wallpapers</b> · coordinator</div>
+        <div class="body">
+          <div class="nav"><div class="sel"><span class="dot" style="background:var(--yellow)"></span>Celadon</div><div><span class="dot" style="background:var(--green)"></span>Website</div><div><span class="dot" style="background:var(--red)"></span>Nvim</div></div>
+          <div class="main">
+            <div class="bubble">Ticket <code>palette-tokens</code> passed review.<div class="sub">Worked 4m 53s · 12 steps</div></div>
+            <span class="go">Publish</span><span class="ring">Focus ring</span>
+            <div class="chips"><span style="color:var(--green)">passed</span><span style="color:var(--yellow)">waiting</span><span style="color:var(--red)">blocked</span><span style="color:var(--blue)">link</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div><div class="tag">Celadon Jade · dark · Figtree 14, JetBrains Mono</div>
+      <div class="preview jade-dark">
+        <div class="bar"><b>Wallpapers</b> · coordinator</div>
+        <div class="body">
+          <div class="nav"><div class="sel"><span class="dot" style="background:var(--yellow)"></span>Celadon</div><div><span class="dot" style="background:var(--green)"></span>Website</div><div><span class="dot" style="background:var(--red)"></span>Nvim</div></div>
+          <div class="main">
+            <div class="bubble">Ticket <code>palette-tokens</code> passed review.<div class="sub">Worked 4m 53s · 12 steps</div></div>
+            <span class="go">Publish</span><span class="ring">Focus ring</span>
+            <div class="chips"><span style="color:var(--green)">passed</span><span style="color:var(--yellow)">waiting</span><span style="color:var(--red)">blocked</span><span style="color:var(--blue)">link</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="trio lightrow">
+    <div><div class="tag">Tidal · light</div>
+      <div class="preview tidal-light">
+        <div class="bar"><b>Wallpapers</b> · coordinator</div>
+        <div class="body">
+          <div class="nav"><div class="sel"><span class="dot" style="background:var(--yellow)"></span>Celadon</div><div><span class="dot" style="background:var(--green)"></span>Website</div><div><span class="dot" style="background:var(--red)"></span>Nvim</div></div>
+          <div class="main">
+            <div class="bubble">Ticket <code>palette-tokens</code> passed review.<div class="sub">Worked 4m 53s · 12 steps</div></div>
+            <span class="go">Publish</span><span class="ring">Focus ring</span>
+            <div class="chips"><span style="color:var(--green)">passed</span><span style="color:var(--yellow)">waiting</span><span style="color:var(--red)">blocked</span><span style="color:var(--blue)">link</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div><div class="tag">Celadon Sky · light · Figtree 14, JetBrains Mono</div>
+      <div class="preview celadon-light">
+        <div class="bar"><b>Wallpapers</b> · coordinator</div>
+        <div class="body">
+          <div class="nav"><div class="sel"><span class="dot" style="background:var(--yellow)"></span>Celadon</div><div><span class="dot" style="background:var(--green)"></span>Website</div><div><span class="dot" style="background:var(--red)"></span>Nvim</div></div>
+          <div class="main">
+            <div class="bubble">Ticket <code>palette-tokens</code> passed review.<div class="sub">Worked 4m 53s · 12 steps</div></div>
+            <span class="go">Publish</span><span class="ring">Focus ring</span>
+            <div class="chips"><span style="color:var(--green)">passed</span><span style="color:var(--yellow)">waiting</span><span style="color:var(--red)">blocked</span><span style="color:var(--blue)">link</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div><div class="tag">With the choices in section 1</div>
+      <p class="note" style="font-size:11.5px;color:var(--subtle)">On System, a Mac in light mode shows Celadon Sky; at sunset macOS turns dark and Wiffletree switches to Celadon Jade, fonts included. Light holds Celadon Sky, Dark holds Celadon Jade, whatever macOS does.</p>
+    </div>
+  </div>
+  <p class="caption">A theme recolors everything Tidal colors today: backgrounds, panels, text, borders, the accent button, the focus ring, status colors and the widgets' colors. Fonts change the UI text, code and transcripts, and the base size scales the text that is sized relative to it. The fonts that show are the fonts of the theme on show, so a light and a dark theme with different fonts switch fonts too. These previews do not change with the page's mode; each shows one variant.</p>
+</section>
+
+<section class="study">
+  <div class="eyebrow">3 · Theme files</div>
+  <div class="pair">
+    <div>
+      <div class="tag">celadon-jade.json · dark only, as the Celadon port would ship it</div>
+<pre>{
+  "version": 1,
+  "name": "Celadon Jade",
+  "fonts": {
+    "ui": "Figtree",
+    "mono": "JetBrains Mono",
+    "size": 14
+  },
+  "variants": {
+    "dark": {
+      "base": "#060d05", "surface": "#0b150a", "overlay": "#182315",
+      "text": "#dbe7d8", "subtle": "#9ba799", "edge": "#748072",
+      "accent": "#ffaee7", "on-accent": "#060d05", "focus": "#4ce7d8",
+      "green": "#acde83", "red": "#ffb7b0", "yellow": "#ebca60",
+      "blue": "#99d4ff", "magenta": "#ffaee7"
+    }
+  }
+}</pre>
+      <div class="tag" style="margin-top:14px">celadon-sky.json · light only</div>
+<pre>{
+  "version": 1,
+  "name": "Celadon Sky",
+  "fonts": { "ui": "Figtree", "mono": "JetBrains Mono", "size": 14 },
+  "variants": {
+    "light": {
+      "base": "#eaf6e8", "surface": "#deedda", "overlay": "#cee1ca",
+      "text": "#3b423a", "subtle": "#5d675b", "edge": "#7a8378",
+      "accent": "#874576", "on-accent": "#eaf6e8", "focus": "#1c7472",
+      "green": "#40783b", "red": "#9b4a43", "yellow": "#9c7220",
+      "blue": "#246099", "magenta": "#874576"
+    }
+  }
+}</pre>
+    </div>
+    <div>
+      <div class="tag">rust-accent.json · partial: Tidal dark with a brighter accent</div>
+<pre>{
+  "version": 1,
+  "name": "Tidal, rust accent",
+  "variants": {
+    "dark": { "accent": "#FF7A59" }
+  }
+}</pre>
+      <ul class="notes">
+        <li><b>Variants</b>: <code>light</code>, <code>dark</code> or both. A file with neither is an error. A file with both is Tidal's shape, so Tidal's own file is a valid theme as it stands.</li>
+        <li><b>Colors</b> are <code>#RRGGBB</code>, with Tidal's names. A color a variant leaves out comes from Tidal's same variant.</li>
+        <li><b>Fonts</b> name any font installed on this Mac. <code>size</code> is the base text size in points, from 11 to 20; Tidal's is 14. A font or a fonts block left out is Tidal's: the system fonts at 14.</li>
+        <li><b>Unknown keys</b>, such as Tidal's <code>brand</code>, <code>muted</code> and <code>cyan</code>, are ignored.</li>
+        <li><b>Celadon's four variants</b> ship as four files, one per variant: <code>celadon-sky</code> is light, and <code>celadon</code>, <code>celadon-powder</code> and <code>celadon-jade</code> are dark.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="study">
+  <div class="eyebrow">4 · When something is wrong</div>
+  <div class="pair">
+    <div>
+      <div class="tag">A broken file</div>
+      <div class="frame page">
+        <div class="sec">APPEARANCE</div>
+        <div class="row"><span class="k">Mode</span><span class="seg"><span class="on">◐ System</span><span>☀ Light</span><span>☾ Dark</span></span></div>
+        <div class="row"><span class="k">Light theme</span><span class="field dd">Celadon Sky</span></div>
+        <div class="row"><span class="k">Dark theme</span><span class="field dd">Celadon Jade</span></div>
+        <div class="banner"><b>celadon-jade.json can't be used.</b> Line 13: <code>"accent": "#ffaee"</code> is not a color like <code>#1A262D</code>. Dark mode shows Tidal until the file is fixed; light mode still shows Celadon Sky.</div>
+        <div class="actions"><span class="btn">Open themes folder</span><span class="btn quiet">Use Tidal</span></div>
+      </div>
+    </div>
+    <div>
+      <div class="tag">A font this Mac doesn't have</div>
+      <div class="frame page">
+        <div class="sec">APPEARANCE</div>
+        <div class="row"><span class="k">Mode</span><span class="seg"><span class="on">◐ System</span><span>☀ Light</span><span>☾ Dark</span></span></div>
+        <div class="row"><span class="k">Light theme</span><span class="field dd">Celadon Sky</span></div>
+        <div class="row"><span class="k">Dark theme</span><span class="field dd">Celadon Jade</span></div>
+        <div class="banner warn"><b>Figtree isn't installed.</b> Celadon's colors and JetBrains Mono are in use; the UI text uses the system font.</div>
+        <div class="actions"><span class="btn">Open themes folder</span></div>
+      </div>
+    </div>
+  </div>
+  <p class="caption">The theme stays selected, so fixing and saving the file brings it back the next time the window comes to the front. A theme file that was deleted reads the same way: "celadon-jade.json is gone". <b>Use Tidal</b> sets that side back to Tidal. Nothing else in the app warns; the error lives only here.</p>
+</section>
+</body>
+</html>

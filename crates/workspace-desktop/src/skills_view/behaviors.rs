@@ -589,7 +589,7 @@ impl BehaviorsPage {
                             .pl_2()
                             .border_l_2()
                             .border_color(p.edge)
-                            .font_family(".SystemMonoFont")
+                            .font_family(mono_font())
                             .text_size(px(font::SMALL))
                             .child(offer.line),
                     )

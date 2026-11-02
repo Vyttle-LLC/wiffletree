@@ -795,7 +795,7 @@ impl Render for IssueView {
                         .p_3()
                         .rounded_md()
                         .bg(p.surface)
-                        .font_family(".SystemMonoFont")
+                        .font_family(mono_font())
                         .text_size(px(font::SMALL))
                         .whitespace_normal()
                         .child(record.raw.clone().unwrap_or_default()),

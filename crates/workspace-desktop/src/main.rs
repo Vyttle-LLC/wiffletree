@@ -65,6 +65,7 @@ mod storage_move_view;
 mod team_view;
 #[cfg(test)]
 mod test_support;
+mod themes;
 mod ticket_table;
 mod transcript;
 mod tree;
@@ -87,7 +88,7 @@ use gpui_component::{
     scroll::ScrollableElement,
 };
 use hosts::{HostChoice, HostView, Hosts};
-use palette::{Palette, palette};
+use palette::{Palette, mono_font, palette, ui_font};
 use preferences::{Appearance, Preferences};
 use serde_json::Value;
 use shared::{
@@ -1351,11 +1352,14 @@ fn apply_theme(cx: &mut App) {
         None,
         cx,
     );
+    palette::show_side(dark);
     let p = palette(dark);
+    let fonts = palette::fonts(dark);
     // `update` carries the edits into the component tokens and the Markdown style.
     Theme::update(cx, |theme| {
-        theme.font_family = ".SystemUIFont".into();
-        theme.font_size = px(14.);
+        theme.font_family = fonts.ui;
+        theme.mono_font_family = fonts.mono;
+        theme.font_size = px(fonts.size);
         theme.colors.background = p.base;
         theme.colors.foreground = p.text;
         theme.colors.border = p.edge.opacity(edge::HALF);
@@ -1656,14 +1660,23 @@ fn main() -> anyhow::Result<()> {
         cx.set_global(attachment_chips::HostImages::new());
         cx.set_global(staging);
         boards_view::watch_tooltips(cx);
+        cx.set_global(themes::Themes::new(home.join("themes")));
+        themes::reload(cx);
         apply_theme(cx);
         // Under the System appearance, macOS can switch modes while the app runs. The component
         // theme only changes when told, so every window re-applies it or keeps stale colours.
-        cx.observe_new(|_: &mut Root, window, _| {
+        // Coming back to any window reads the chosen theme files again, so an edit shows.
+        cx.observe_new(|_: &mut Root, window, cx| {
             if let Some(window) = window {
                 window
                     .observe_window_appearance(|_, cx| apply_theme(cx))
                     .detach();
+                cx.observe_window_activation(window, |_, window, cx| {
+                    if window.is_window_active() {
+                        themes::reload(cx);
+                    }
+                })
+                .detach();
             }
         })
         .detach();

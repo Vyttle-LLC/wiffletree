@@ -242,7 +242,7 @@ pub(super) fn detail(step: &Step, p: Palette) -> Div {
         })
         .child(
             div()
-                .font_family(".SystemMonoFont")
+                .font_family(mono_font())
                 .text_size(px(font::CAPTION))
                 .text_color(p.subtle)
                 .child(step.detail.clone().unwrap_or_default()),
@@ -304,7 +304,7 @@ pub(super) fn file_diff(diff: &FileDiff, named: bool, limit: Option<usize>, p: P
         .bg(p.overlay)
         .flex()
         .flex_col()
-        .font_family(".SystemMonoFont")
+        .font_family(mono_font())
         .text_size(px(font::CAPTION))
         .when(named, |d| {
             d.child(
@@ -337,7 +337,7 @@ pub(super) fn file_diff(diff: &FileDiff, named: bool, limit: Option<usize>, p: P
                 div()
                     .px_2()
                     .py_1()
-                    .font_family(".SystemUIFont")
+                    .font_family(ui_font())
                     .text_size(px(font::META))
                     .text_color(p.subtle)
                     .child(more),

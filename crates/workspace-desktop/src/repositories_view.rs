@@ -769,7 +769,7 @@ impl RepositoriesPage {
         let pattern = |text: String| {
             div()
                 .min_w(px(110.))
-                .font_family(".SystemMonoFont")
+                .font_family(mono_font())
                 .text_size(px(font::CAPTION))
                 .text_color(p.text)
                 .child(text)
@@ -1181,7 +1181,7 @@ impl RepositoriesPage {
             // A long command wraps, with its limit under it.
             let command = command.map(|command| {
                 div()
-                    .font_family(".SystemMonoFont")
+                    .font_family(mono_font())
                     .text_size(px(font::CAPTION))
                     .text_color(p.text)
                     .child(command)

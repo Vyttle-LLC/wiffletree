@@ -4,6 +4,7 @@
 //! the shared settings, this Mac's app, with its appearance, layout, finding other Macs and the
 //! computers it is paired with, and the host the window drives, with its workspace folder, builds
 //! at once and, on This Mac, its remote access. A setting belongs to the Mac whose agents it runs.
+mod appearance;
 mod remote_access;
 mod repository;
 
@@ -421,29 +422,7 @@ impl Settings {
     }
 
     fn appearance_section(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let current = cx.global::<Preferences>().appearance;
-        let mut options = div().flex().gap_1();
-        for appearance in [Appearance::System, Appearance::Light, Appearance::Dark] {
-            options = options.child(
-                segment(
-                    SharedString::from(format!("appearance-{}", appearance.label())),
-                    appearance.label(),
-                    appearance == current,
-                )
-                .icon(icon(appearance.icon()).size(px(13.)))
-                .on_click(move |_, _, cx| set_appearance(appearance, cx)),
-            );
-        }
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(section("APPEARANCE", p))
-            .child(options)
-            .child(hint(
-                "System follows macOS. This Mac remembers its own choice.",
-                p,
-            ))
+        appearance::section(p, cx)
     }
 
     /// The sidebar's and the transcript's own layout toggles, here too, saved the same way.
@@ -972,7 +951,7 @@ impl Render for Settings {
             .size_full()
             .bg(p.base)
             .text_color(p.text)
-            .font_family(".SystemUIFont")
+            .font_family(ui_font())
             .text_size(px(font::TEXT))
             .flex()
             .flex_col()
