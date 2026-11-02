@@ -1737,8 +1737,9 @@ impl Host {
         let has_tracker = self.tracker(&joined[0].space).is_ok();
         let passes = self.sync_passes.clone();
         let _no_pass = sync::no_pass_running(&passes)?;
+        let head = runtime::git_output(staged.staging.path(), &["rev-parse", "HEAD"])?;
         let (key, _) = self.place_storage(staged)?;
-        self.forget_scan_marks(&key)?;
+        self.restart_scan_marks(&key, head.trim())?;
         self.atomically(|host| {
             for (at, record) in joined.iter().enumerate() {
                 let tracker = tracker.as_ref().filter(|_| at == 0 && !has_tracker);
