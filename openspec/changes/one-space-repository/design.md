@@ -1,6 +1,6 @@
 ## Context
 
-`model.md` and `ui/mockups.html` are the source of truth, approved by Michael on November 1, 2026. Nothing below reopens a decision in them. This file settles the mechanisms they leave open and gives a reason for each.
+The model Michael approved on November 1, 2026, and its setup screens in `ui/mockups.html`, are the source of truth. Nothing below reopens a decision in them. This file settles the mechanisms they leave open and gives a reason for each.
 
 What exists today, in brief:
 
@@ -14,7 +14,7 @@ What exists today, in brief:
 
 **Goals:** one repository, one folder and one way to write; every Space has issues, logs and a wiki; compiling needs no chosen host; nothing written before this release is lost.
 
-**Non-Goals:** preventing an edit made outside Wiffletree, which the model accepts as a risk; moving the settings repository; rewriting Git history after a slip; any change to Michael's dotfiles, `personal-agents` or `vyttle-docs`; moving Vyttle or Sage, which are done by hand after this ships.
+**Non-Goals:** preventing an edit made outside Wiffletree, which the approved model accepts as a risk; moving the settings repository; rewriting Git history after a slip; any change to Michael's dotfiles, `personal-agents` or `vyttle-docs`; moving Vyttle or Sage, which are done by hand after this ships.
 
 ## Decisions
 
@@ -39,11 +39,12 @@ After the push, `git ls-remote` reads the tip whatever Git answered. The tip bei
 
 **How a due run goes, and who it stays owed to.**
 
-1. At the due time a volunteer runs a pass, so `main` is fresh, then works out what is pending. Nothing pending ends the run with no claim, commit or model call.
-2. It resolves the Brain compiler row. A Mac whose row waits, out of quota, ends the run as skipped and claims nothing.
-3. It reads the tip. `landed` with this `due` means another Mac did the work. A live claim means it stays owed. Otherwise it claims.
-4. A Mac that lost, or found a live claim, stays owed for that `due`. It reads the tip after each one-minute pull until the tip says `landed` for that `due`, the claim frees, or nothing is pending. That is how the next Mac takes a run a crashed Mac or an empty quota left, and it is one `ls-remote` a minute, plus one fetch when the tip moved, only while a run is owed.
-5. A run that ends without landing pushes `released`, so the next Mac need not wait out the hour. One that lands pushes `landed`. Either push is tried once: if it fails, the hour covers it.
+1. At the due time a volunteer runs a pass, so `main` is fresh, then reads the tip, which writes nothing. `landed` with this `due` means another Mac did the work, and the run is recorded as compiled on that Mac, whatever is pending now.
+2. It works out what is pending. Nothing pending ends the run as skipped, with no claim, commit or model call.
+3. It resolves the Brain compiler row. A Mac with no row, or whose row waits, out of quota, ends the run as waiting, as `model-routing` records it, and claims nothing.
+4. A live claim means it stays owed. Otherwise it claims.
+5. A Mac that lost, or found a live claim, stays owed for that `due`. It reads the tip after each one-minute pull until the tip says `landed` for that `due`, the claim frees, or nothing is pending. That is how the next Mac takes a run a crashed Mac or an empty quota left, and it is one `ls-remote` a minute, plus one fetch when the tip moved, only while a run is owed.
+6. A run that ends without landing pushes `released`, so the next Mac need not wait out the hour. One that lands pushes `landed`. Either push is tried once: if it fails, the hour covers it.
 
 **A Mac that wakes after losing its claim.** A compile session stops at 30 minutes, so a live run ends well inside the hour. A Mac that slept through the hour may wake holding an expired claim. Before landing it reads the tip, and a tip that is not its own claim ends the run with nothing pushed. If a takeover slips between that read and the push, the bookmark stops double processing (see 2).
 
@@ -63,7 +64,7 @@ Landing is a fourth kind of rule set, **wiki**, over `notes/`, `STATUS.md` and `
 
 **What ends a landing instead:**
 
-- **`main` already holds a cursor at or past the run's** (`at_or_past`, kept). Another Mac compiled these entries after a takeover. The run ends as "already compiled", lands nothing and releases. The bookmark stops double processing, as the model says.
+- **`main` already holds a cursor at or past the run's** (`at_or_past`, kept). Another Mac compiled these entries after a takeover. The run ends as "already compiled", lands nothing and releases. The bookmark stops double processing, as the approved model says.
 - **A wiki file changed on `main` since `H0`** (`changed_meanwhile`, kept), such as a hand edit on GitHub. The run ends failed, lands nothing and releases, and the next run recompiles from the new wiki. Overwriting the edit would lose it, and a merge of prose is what the compile model is for.
 - **A file fails the scan.** A landing is all or nothing: every wiki file is held from this push, the run ends failed naming the file and rule, and the run's output is discarded. The cursor did not move, so the next run sees the same entries.
 
@@ -115,21 +116,25 @@ Every other Mac on this release adopts the move in its next pass: a recorded emp
 
 The rest ends with it: the other `gate` keys, the compiler's name and `version`.
 
-**Where those settings live.** The compile time and the allowed domains are facts of one folder, and Spaces in a folder share them, so they go in `wiffletree-issues.yaml`, which already holds what a folder's Spaces share and keeps keys older hosts do not know. That adds no file to the model's tree. Who volunteers cannot live there: a whole-file rule set would pause two Macs turning compiling on at once. Each volunteer gets one file, `compilers/<host id>.yaml`, holding its machine name and login. Only that Mac writes it, so it can never conflict. "Last ran Tuesday" comes from the claim chain, so the file holds no time.
+**Where those settings live.** The compile time and the allowed domains are facts of one folder, and Spaces in a folder share them, so they go in `wiffletree-issues.yaml`, which already holds what a folder's Spaces share and keeps keys older hosts do not know. That adds no file to the approved model's tree. Who volunteers cannot live there: a whole-file rule set would pause two Macs turning compiling on at once. Each volunteer gets one file, `compilers/<host id>.yaml`, holding its machine name and login. Only that Mac writes it, so it can never conflict. "Last ran Tuesday" comes from the claim chain, so the file holds no time.
 
 ### 5. Scanning what is pulled
 
-**Which commits.** Every commit between this Mac's mark and the new head, one at a time, oldest first, including this Mac's own, so nothing rests on trusting who wrote it. Each commit is scanned against its first parent, using the existing `Scanner::scan(clone, parent, files)` over the files it changed inside the folder. This is why it runs commit by commit: a tree diff across a whole range would miss a phone number added and then removed in the same minute, which still reached GitHub. Scanning in a scratch repository, as `scan.rs` does, also means a `.gitleaks.toml` or allow-list someone pushed cannot silence it.
+**Which commits.** Every commit between this Mac's mark and the new head, one at a time, oldest first, including this Mac's own, so nothing rests on trusting who wrote it. Each commit is scanned against its first parent, using the existing `Scanner::scan(clone, parent, files)` over the files it changed under the scanned paths. This is why it runs commit by commit: a tree diff across a whole range would miss a phone number added and then removed in the same minute, which still reached GitHub. Scanning in a scratch repository, as `scan.rs` does, also means a `.gitleaks.toml` or allow-list someone pushed cannot silence it.
 
 **Marks.** `scan_marks(repository, check, commit)` holds one mark per check and moves commit by commit, so a quit resumes. A joining Mac, and every repository at upgrade, starts its marks at the head then, because the scan looks forward: a first scan of old history would alert on every old file at once. A mark that is no longer an ancestor of the head, after a rewrite, restarts at the merge base.
 
 **Off the pass.** The scan runs as its own off-thread step after a pass moved the head. A Mac back from a month away never delays its pulls.
 
-**Scope.** Inside the folder only. Files outside it are not Wiffletree's, and alerts on them would be noise.
+**Scope.** A scan reads only `spaces/`, `issues/`, `wiffletree-issues.yaml`, `compilers/` and `second-brain/`, in the folder, with no hidden part in the path, and only those files reach the scratch repository. Other files are not Wiffletree's, and alerts on them would be noise. This also keeps a repository's files from being read as config, even at an empty root, where "inside the folder" would be the whole repository: `secret_scan.py` reads `.gitleaks.toml` from its working folder, gitleaks reads `.gitleaksignore`, and `gate_config.py` reads `wiffletree-brain.json`, whose `gate.allowlist` names a file. None of those paths is ever written there. Limiting the paths is simpler than changing the scripts, and it closes every such file at once.
 
 **Once per Mac.** `scan_alerts` has one row per repository, path, check and rule, with the line, commit and who pushed it. A second finding of the same rule in the same file updates the row, and a teammate's Mac raises its own. The card sits at the top of every project's Inbox in the Spaces using the folder, as a workspace note, and on the Brains page. It names the check, rule, file and line, and never the matched text. "Pushed from GitHub's web editor" is shown when the commit's committer is `GitHub <noreply@github.com>`, and otherwise the author's name.
 
 **Clearing.** After any pull that changes an alert's file, the file at the head is scanned whole. When the rule no longer fires there, the alert closes by itself on each Mac, and the card has already said the old text stays in history. **Not sensitive** takes a reason and closes the alert on this Mac only, keeping the row so the same path, rule and blob never alert here again. It writes nothing to the repository: an entry is never changed, and a shared allow-list is a way to silence a scan.
+
+**Through the move.** The pulled scan skips a rename, so nothing would raise an alert again at the new path. Moving a repository and adopting a move therefore rewrite the paths in `scan_alerts` with the record, in one transaction. An open alert stays open until the rule stops firing in the moved file.
+
+**A held entry's Not sensitive.** It is offered only for a `sensitive-info` finding, where the card writes `gate:allow`. A `secret-scan` finding, or a check that could not run, offers Edit it and Discard. Writing `gitleaks:allow` would be a second marker for the card to get right, and one click should not push what looks like a live secret: a false positive can be edited. An alert's Not sensitive is another thing: it writes nothing, so it works for either check.
 
 **gitleaks missing.** The pre-push rule stays, so a file is held, naming what is missing. A pull cannot be held, because the file is already on `main`, so the check that cannot run keeps its mark where it is, and one workspace note says what is missing and that what is pulled is not being scanned for secrets. `sensitive-info` carries on with its own mark. When gitleaks arrives the note closes and `secret-scan` catches up from its mark, so nothing was skipped. A commit whose scan fails for any other reason is treated the same.
 
@@ -166,9 +171,9 @@ Each commit is asked about once per call, and a run holds at most 200 entries, s
 
 ### 8. The settings repository stays as it is
 
-It keeps `wiffletree.json`, `settings/` and `skills/` at the repository's root, whether or not the repository also holds a folder. Nothing in the model forces it to move, and moving it would touch every Mac's shared folder. Two things change in `settings-repository`: the refusal of a repository that is a brain goes with the one-role rule, and a line says settings stay at the root.
+It keeps `wiffletree.json`, `settings/` and `skills/` at the repository's root, whether or not the repository also holds a folder. Nothing in the approved model forces it to move, and moving it would touch every Mac's shared folder. Two things change in `settings-repository`: the refusal of a repository that is a brain goes with the one-role rule, and a line says settings stay at the root.
 
-So when one repository is both, the settings rule set commits at the root and the Space's rule sets inside the folder. "Anything outside the folder is left alone" is a statement about a Space. The settings repository is a separate choice the human made, and it writes only those three paths.
+So when one repository is both, the settings rule set commits at the root and the Space's rule sets inside the folder. "Anything outside the folder is left alone" is a statement about a Space's rule sets, whose one exception is the move commit's renames and stubs. The settings repository is a separate choice the human made, and it writes only those three paths.
 
 ### 9. What is removed, and what stays
 
@@ -198,21 +203,21 @@ Brains that pin the action by commit keep working, because Git keeps those commi
 
 **The viewer.** `brain_markdown::prepare` gains the wiki's tracker prefix and the set of issue IDs from its tracker. In text nodes, never in code or inside a link, it turns each whole-word `<PREFIX>-<n>` naming an issue that exists into a link, by the same word rule as `rename_ids`, and `link_target` opens it on the Issues page. An ID of another prefix, or with no issue, stays plain text. A local tracker's rename rewrites IDs in `notes/` and `STATUS.md` too, and leaves log entries alone. The project scope also shows a note whose `repos:` names one of the project's repositories.
 
-### Decisions on points the model left open
+### Decisions on points the approved model left open
 
-- **Rulings.** The model says the next compile picks a ruling up, so a ruling no longer starts a run. `ruling_triggers` stops being written. Every volunteer starting a run on the same pull would need a claim for no gain.
+- **Rulings.** The approved model says the next compile picks a ruling up, so a ruling no longer starts a run. `ruling_triggers` stops being written. Every volunteer starting a run on the same pull would need a claim for no gain.
 - **Falling behind.** The wiki is falling behind when no Mac volunteers and entries wait, or when two scheduled times have passed with entries waiting and no run landed. Two scheduled times is the rule stale Boards already use.
 - **Allowed email domains.** On-Mac scans today use no allowed domains, and logs would start holding every staff address Sage's gate allowed. One key in `wiffletree-issues.yaml` carries them, and nothing else of a brain's allow-list comes across. Inline markers remain the way to allow one line.
 - **An author without `gh`.** The entry contract asks for a login. A local Space needs no GitHub, so with no `gh` login its author is the Mac's account name, and an entry for a GitHub repository still needs `gh`.
 - **Planning entries.** A coordinator's planning entry went in a folder named after the brain repository. A local repository has no such name, so these go in `planning`.
-- **The branch name `main`.** The model says `main`. The engine pushes the recorded default branch, so a repository whose default is another name works the same, and the checks read that branch.
+- **The branch name `main`.** The approved model says `main`. The engine pushes the recorded default branch, so a repository whose default is another name works the same, and the checks read that branch.
 
 ### Dependencies
 
 - **The "Move a Space's storage" ticket** in Wiffletree: Spaces refuses a repository that is a brain. That rule goes. Move must carry the folder, as `<folder>/`, with its logs, wiki and `compilers/`, and set `SpaceStorage.root` on the destination. Move then becomes how Vyttle reaches GitHub. Nothing here edits that work.
 - **`choose-space-repositories`**, whose code is merged, has an open delta on `spaces`. "Only the user creates or edits a Space" and "What stays on this machine" here carry its wording, so archive it first.
 - **Michael's dotfiles and `personal-agents`, after Vyttle runs:** remove `brain-log`, `brain-query`, `brain-compile` and `brain-reconcile`, the log nudge hook, the scheduled prune and safety-net tasks, and the `~/.config/claude-second-brain` pointer, and edit the Vyttle instructions that name them. `brain-journal` stays.
-- **`vyttle-docs`, before anything else:** commit the 17 changed or untracked files in `second-brain/`, as `model.md` asks. Bring in is built so they would survive anyway, but one disk is one disk.
+- **`vyttle-docs`, before anything else:** commit the 17 changed or untracked files in `second-brain/`. Bring in is built so they would survive anyway, but one disk is one disk.
 - **`sagehaven-docs`, when Sage moves:** close PR #1. Sage's repository is still to be chosen.
 
 ### Capabilities left out
@@ -222,7 +227,7 @@ Each was read on `origin/main`.
 - **`model-routing`.** "The Brain compiler's row" still holds: each volunteer resolves its own Mac's row, and the waiting and fallback rules are unchanged. What a run does when the row waits is in `brain-compile`.
 - **`assistant-router`.** It names a brain only as where entries stay, which remains true of a Space's brain.
 - **`boards`.** Paths under `spaces/` become relative to the folder through `shared-repositories`, and nothing else differs.
-- **`ticket-verification`.** Its one "batch" is a batch of messages. **`host-process`** has no brain, compile or storage requirement.
+- **`ticket-verification`.** Its one "batch" is a batch of messages.
 - **`workspace-host`'s build gate** is unrelated; only "Enforced hierarchy" changes.
 - **`coordination-migration`, `coordinator-updates`, `files-panel`, `leftover-worktree-cleanup`, `native-workspace`, `pr-keeper`, `pr-watch`, `processes-panel`, `protected-branches`, `remote-access`, `remote-client`, `repository-owners`, `ticket-merging`, `ticket-publishing`, `ticket-workspaces`, `usage-cost`, `work-progress`, `work-stream`.** None names a brain, a batch or a storage repository. `pr-watch` is only cited by the removed brain watch's backoff rule.
 
@@ -232,9 +237,9 @@ Each was read on `origin/main`.
 - **Clock skew moves expiry** → a few minutes against an hour, and the bookmark stops double processing if a takeover is early.
 - **A landing lost to a wiki hand edit wastes a run's model time** → rare, and the alternative is overwriting a person's edit.
 - **A claim branch is a second thing that can be refused** by an organization's ruleset on branch creation → the first claim fails with GitHub's reason on the Brains page. Compiling stops and nothing else does.
-- **A Mac whose `gh` login can't read a code repository leaves entries unverified** → the run says how many, and the model's rule still keeps them from being stated as fact.
+- **A Mac whose `gh` login can't read a code repository leaves entries unverified** → the run says how many, and the approved model's rule still keeps them from being stated as fact.
 - **`Not sensitive` is per Mac**, so each teammate may see an alert once → this is what "once per Mac" costs, and it writes nothing shared that could silence a scan.
-- **The model's accepted risks stand:** anyone with write access can change anything, and a slip stays in Git history.
+- **The approved model's accepted risks stand:** anyone with write access can change anything, and a slip stays in Git history.
 
 ## Migration Plan
 

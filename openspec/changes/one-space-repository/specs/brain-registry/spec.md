@@ -36,7 +36,7 @@ Every change the host makes to a brain SHALL go through the repository's sync en
 ### Requirement: A held entry can be edited, marked or discarded
 A log entry that fails the scan SHALL stay on this Mac, in a held state that survives restarts, and its card (see `shared-repositories`, "Files are scanned before they are pushed") SHALL offer:
 - Edit it, which changes the entry here, scans it again and lands it once it passes;
-- Not sensitive, with a reason, which appends the inline marker `<!-- gate:allow <rule> <reason> -->` to that line and lands it;
+- for a finding of `sensitive-info` only, Not sensitive, with a reason, which appends the inline marker `<!-- gate:allow <rule> <reason> -->` to that line and lands it;
 - Discard, which removes the entry from this Mac's clone, keeps its row as discarded in the store, and pushes nothing.
 
 The card SHALL close when the entry lands or is discarded. Only the human SHALL do these, and no agent tool SHALL. The host SHALL NOT change an entry once it has landed.
@@ -44,6 +44,10 @@ The card SHALL close when the entry lands or is discarded. Only the human SHALL 
 #### Scenario: Not sensitive
 - **WHEN** the human marks line 9 not sensitive with the reason "fixture call ID"
 - **THEN** `<!-- gate:allow phone fixture call ID -->` is appended to line 9, the next scan passes, the entry lands, and the card closes
+
+#### Scenario: Held by secret-scan
+- **WHEN** an entry is held by a gitleaks rule, or because a check could not run
+- **THEN** the card offers Edit it and Discard, and no Not sensitive
 
 #### Scenario: Discard
 - **WHEN** the human discards a held entry

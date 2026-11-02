@@ -25,7 +25,7 @@ Brain compile SHALL be a built-in host job of the scheduler (see `scheduled-jobs
 ### Requirement: The first Mac awake claims the run
 A run on GitHub SHALL be claimed on the branch `wiffletree-compile-claim`, which SHALL hold a chain of commits. A claim SHALL be a commit with an empty tree, whose parent is the branch's tip, or none for the first, and whose message holds its host id, machine name, login, run id, the due time it is for, its state and when it was written; its state SHALL be `claimed`, `landed` or `released`. Because a claim holds its run's id, no two Macs SHALL ever push the same commit. A Mac SHALL claim with one plain push of that commit to that branch, never forced and never through a sync pass: a refused claim SHALL NOT be fetched, merged or pushed again. After the push the Mac SHALL read the tip with `git ls-remote`, whatever the push answered: its own commit SHALL mean the claim was won, another commit SHALL mean it was lost, and no answer SHALL mean it claimed nothing. To read the tip, a Mac SHALL take its SHA from `git ls-remote` and, when its clone lacks that commit, fetch that one branch into a ref outside `refs/heads/`, because a claim's state is in its message and a child needs its parent; that read SHALL come before a claim, and SHALL NOT make a refused claim go again. The sync engine SHALL NOT fetch or push that branch.
 
-Before claiming, a Mac SHALL run a pass and find what is pending, then resolve its model, then read the tip. The tip SHALL be free when its state is `released` or `landed`, or when it is `claimed` and over an hour old. A tip of `landed` for this due time SHALL mean the work is done, and the Mac SHALL record the run as compiled on that Mac and claim nothing.
+A Mac SHALL run a pass, then read the tip, then find what is pending, then resolve its model, and only then claim. A tip of `landed` for this due time SHALL mean the work is done, whatever is pending now, and the Mac SHALL record the run as compiled on that Mac and claim nothing. The tip SHALL be free when its state is `released` or `landed`, or when it is `claimed` and over an hour old.
 
 #### Scenario: Two Macs claim at once
 - **WHEN** two Macs wake at 06:00 with the same tip and push their claims in the same second
@@ -67,7 +67,7 @@ A claim SHALL expire when it is `claimed` and an hour has passed since it was wr
 - **THEN** on waking it reads a tip that is not its own, ends the run, and pushes nothing
 
 ### Requirement: A Mac out of model quota skips
-A Mac whose Brain compiler row waits, or has no row, SHALL NOT claim. It SHALL record the run as skipped, saying why, and the next Mac SHALL take the run. A run that runs out of quota after claiming SHALL end, push `released` and change nothing, and the next Mac SHALL take the run.
+A Mac whose Brain compiler row waits, or has no row, SHALL NOT claim. It SHALL record the run as waiting, saying why (see `model-routing`, "The Brain compiler's row"), and the next Mac SHALL take the run. A run that runs out of quota after claiming SHALL end, push `released` and change nothing, and the next Mac SHALL take the run.
 
 #### Scenario: Out of quota at the due time
 - **WHEN** the first Mac awake has spent its quota and a teammate's Mac is also due
@@ -174,7 +174,7 @@ The cursor SHALL be stored in `notes/INDEX.md`'s frontmatter as `compiled-throug
 ## MODIFIED Requirements
 
 ### Requirement: An idle run makes no model call
-A run that finds no pending entries SHALL take no claim and make no model call, commit or write, and SHALL be recorded as skipped. A run repeated with unchanged inputs SHALL write nothing.
+A run that finds no pending entries SHALL take no claim and make no model call, commit or write, and SHALL be recorded as skipped, unless the tip says another Mac landed this due time. A run repeated with unchanged inputs SHALL write nothing.
 
 #### Scenario: Nothing pending
 - **WHEN** the morning's run of Vyttle's wiki finds no pending entries
@@ -251,8 +251,8 @@ The host SHALL record each run with its id, trigger, start and end, pending coun
 - **THEN** each shows its trigger, counts, outcome and, for the third, its commit and usage
 
 #### Scenario: A run another Mac did
-- **WHEN** this Mac wakes and reads that a teammate's Mac landed today's run
-- **THEN** the history shows one row saying it compiled on that Mac, with no usage on this Mac
+- **WHEN** this Mac wakes with nothing pending, and the tip says a teammate's Mac landed today's run
+- **THEN** the history shows one row saying it compiled on that Mac, not a skip, with no usage on this Mac
 
 ## REMOVED Requirements
 
@@ -261,7 +261,7 @@ The host SHALL record each run with its id, trigger, start and end, pending coun
 **Migration**: See "Volunteer Macs compile" and "The first Mac awake claims the run". A Mac an old config names as compiler becomes a volunteer when it does the Bring in, and any other ticks compiling on.
 
 ### Requirement: Compile runs start on schedule, on demand and after a ruling
-**Reason**: The model says the next compile picks a ruling up, so a ruling no longer starts a run.
+**Reason**: The next compile picks a ruling up, so a ruling no longer starts a run.
 **Migration**: See "Compile runs start on schedule and on demand".
 
 ### Requirement: Pending entries are found by an entry-ID cursor

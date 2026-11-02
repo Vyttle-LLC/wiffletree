@@ -26,8 +26,8 @@ Log entries, compiles and rulings go through the sync engine. Batches, auto-merg
 - [ ] 2.1 Logs rule set: add-only, pushing 2 seconds after the last change with no comparing, in commits that only add entry files.
 - [ ] 2.2 `memory.rs`: `log_work` and the capture form write an entry into the clone and hand it to the engine. Remove batching. Refuse only for a GitHub Space with no `gh` login. Use this Mac's account name as `author` in a local repository. Write planning entries under `planning`.
 - [ ] 2.3 `memory.rs`: milestone prompts for every Space; refusals for "no brain" go.
-- [ ] 2.4 `scan.rs`: `scanned` covers the whole folder, `Held` gains its line, and the scratch repository holds a generated `wiffletree-brain.json` naming only `allowed_email_domains`.
-- [ ] 2.5 Held entries: a state that survives restarts, and the card on the writing project or the Brains page, offering Edit it, Not sensitive and Discard, and never showing the matched text.
+- [ ] 2.4 `scan.rs`: `scanned` covers exactly `spaces/`, `issues/`, `wiffletree-issues.yaml`, `compilers/` and `second-brain/` in the folder, with no hidden part, `Held` gains its line, and the scratch repository holds a generated `wiffletree-brain.json` naming only `allowed_email_domains`.
+- [ ] 2.5 Held entries: a state that survives restarts, and the card on the writing project or the Brains page, offering Edit it and Discard, with Not sensitive for a `sensitive-info` finding only, and never showing the matched text.
 - [ ] 2.6 Rulings: `rule_conflict` writes an entry through the same path. Stop writing `ruling_triggers`, and remove `ruling_merged`.
 - [ ] 2.7 `brain_index`, the Status, Logs and Memory reads: read `<folder>/second-brain` from the repository's clone, and replace batch and PR stages with held and waiting.
 - [ ] 2.8 Compile landing: a run works in a worktree of the repository's clone, and the wiki rule set stages its exact files on the current head, scanned, retried with the pass, all or nothing, with `at_or_past` and `changed_meanwhile` kept. A landed run records its commit. Remove `open_compile_batch` and `compile_waits`' PR states (decision 2).
@@ -38,7 +38,7 @@ Log entries, compiles and rulings go through the sync engine. Batches, auto-merg
 - [ ] 2.13 Remove from `gate/`: `action.yml`, `checks/log_schema.py`, `checks/markdown_lint.py`, `checks/path_ownership.py`, `checks/wikilinks.py`, and the two markdownlint config files, with their tests. Keep what `scan.rs` bundles, its tests and `tests/fixtures/entries/`. Point `.github/workflows/brain-gate-tests.yml` at the tests directly.
 - [ ] 2.14 Move the contract's rules from `log_schema.py` into the writer's test in `memory.rs`, so every fixture is still checked.
 - [ ] 2.15 Landing tests: one entry lands in seconds; a burst is one commit; a push refused because `main` moved fetches and lands; offline waits and lands; a local Space commits and pushes nothing.
-- [ ] 2.16 **Held entry** tests: a phone number is held and never pushed, others keep landing, no text reaches a card or record, Not sensitive lands it with its marker, Edit rescans, Discard pushes nothing, and it survives a restart. A check that cannot run holds with what is missing.
+- [ ] 2.16 **Held entry** tests: a phone number is held and never pushed, others keep landing, no text reaches a card or record, Not sensitive lands a `sensitive-info` finding with its marker, a `secret-scan` finding's card has no Not sensitive, Edit rescans, Discard pushes nothing, and it survives a restart. A check that cannot run holds with what is missing.
 - [ ] 2.17 **A push refused during compile** tests: logs land during a run, the retry adds no model call, the commit lands on the new head with the cursor from the run's commit, and those logs are pending next run.
 - [ ] 2.18 Landing failures: a cursor already past lands nothing and each entry compiles once; a hand edit fails the run and stands; a scan failure lands nothing; the cursor is unchanged in each. A cursor from before the move makes only newer entries pending.
 - [ ] 2.19 Upgrade tests, on stores of every schema the repository's fixtures cover: a store opens; an earlier build's checks still accept its `user_version`; **a Space with a separate brain and storage** keeps its `brain` key, logs to its folder and never writes to the old brain; a queued batch lands; an open pull request is named once; a Space with no brain gains logs and a wiki; the upgrade writes nothing to `wiffletree-issues.yaml` or `compilers/`.
@@ -50,7 +50,7 @@ Claims, the on-this-Mac choice, checking claims through GitHub, product pages, a
 
 - [ ] 3.1 The on-this-Mac choice: `compilers/<host id>.yaml` written and removed by that Mac, and the compile time written to `wiffletree-issues.yaml`, both human-only commands. The compile job comes back, registered for each wiki this Mac compiles, keyed by repository, on the scheduler.
 - [ ] 3.2 `repos::read_tip`: `ls-remote`, then a fetch of that one branch into `refs/wiffletree/compile-claim` when the clone lacks the commit, then its state, including expiry. `repos::claim`: the empty-tree commit, one plain push, then the `ls-remote` read, with no fetch, merge or second push after a refusal. `pass` never touches the branch (decision 1).
-- [ ] 3.3 The run: a pass, then pending, then the model, then the tip; owed Macs read the tip after each pull; `landed` and `released` tried once; the tip read again before landing. Local repositories skip all of it.
+- [ ] 3.3 The run: a pass, then the tip, then pending, then the model, then the claim; owed Macs read the tip after each pull; `landed` and `released` tried once; the tip read again before landing. Local repositories skip all of it.
 - [ ] 3.4 `verify_refs`: `Clones` gains a GitHub-only entry from the Spaces' repository lists, asking `gh` for the default branch, commit and compare, with `pull_state` kept, a run's count of what could not be asked, and the same path for the index (decision 6).
 - [ ] 3.5 Compile procedure v2: products, `repos:`, keeping frontmatter, issue IDs, and `PROCEDURE_VERSION` 2 (decision 10).
 - [ ] 3.6 `check_changes`: a changed note keeps its `repos:` names, and only ULID-shaped sources are checked.
@@ -60,8 +60,8 @@ Claims, the on-this-Mac choice, checking claims through GitHub, product pages, a
 - [ ] 3.10 **Two Macs claiming at once** test, against a real bare repository: two distinct commits raced from one tip, and two first claims with no branch at one `main` commit. Exactly one wins, and the loser makes no second push and merges nothing. A clone that has only ever fetched `main` reads a tip and claims as its child.
 - [ ] 3.11 A test that a refused claim is never pushed again in that attempt, by counting pushes, and that a landed push with a lost answer reads as won.
 - [ ] 3.12 **A crashed claim** test: a claim 59 minutes old is live, and one 61 minutes old is taken over as its child with no force; two takeovers race to one winner; an owed Mac takes it at its next pull; a Mac that slept through its claim lands nothing.
-- [ ] 3.13 Quota tests: out of quota before the claim claims nothing; mid-run releases and the next owed Mac runs.
-- [ ] 3.14 Idle test: nothing pending pushes nothing, not even a claim, and makes no model call.
+- [ ] 3.13 Quota tests: out of quota, or no Brain compiler row, before the claim is recorded as waiting and claims nothing; mid-run releases and the next owed Mac runs.
+- [ ] 3.14 Idle tests: nothing pending pushes nothing, not even a claim, and makes no model call; with a tip landed for this due time, that run is recorded as compiled on that Mac, not as a skip.
 - [ ] 3.15 GitHub ref tests, with a fake `gh`: on the default branch, on a side branch, 404, a merged PR, an open PR, a 403 giving unverified and counted, two owners of one name, a short SHA, and a folder no Space lists asking nothing.
 - [ ] 3.16 Product tests: entries fold by `repos:`, a dropped `repos:` name fails the run, and an older note gains `title` and `kind` and keeps its keys. Issue link tests: a known ID links; another prefix, no such issue, code and an existing link do not.
 
@@ -69,13 +69,13 @@ Claims, the on-this-Mac choice, checking claims through GitHub, product pages, a
 
 Each Mac scans what it pulls, and raises the Inbox card.
 
-- [ ] 4.1 `scan_marks` and `scan_alerts`, created if missing. Marks start at the head at join and at upgrade, and restart at the merge base after a rewrite.
-- [ ] 4.2 The pull scan: off the pass, commit by commit against the first parent through `Scanner::scan`, inside the folder, skipping binary files and pure renames, with each check's mark moving as it goes (decision 5).
+- [ ] 4.1 `scan_marks` and `scan_alerts`, created if missing. Marks start at the head at join and at upgrade, and restart at the merge base after a rewrite. Moving a repository and adopting a move rewrite `scan_alerts` paths in one transaction with the record.
+- [ ] 4.2 The pull scan: off the pass, commit by commit against the first parent through `Scanner::scan`, over the scanned paths, skipping binary files and pure renames, with each check's mark moving as it goes (decision 5).
 - [ ] 4.3 The alert: one row per repository, path, check and rule; the workspace card in each project of the folder's Spaces and on the Brains page; who pushed it, with GitHub's web editor named; Open the file, Not sensitive and How to clean history.
 - [ ] 4.4 Clearing: a whole-file scan at the head after a pull changes the file, and Not sensitive recorded here with a reason, writing nothing to the repository.
 - [ ] 4.5 A check that cannot run: its mark stays, one workspace note, and it catches up.
-- [ ] 4.6 **A slipped scan** tests: an edit made outside Wiffletree raises one card, which names the rule and never the text; added and removed between two pulls still alerts; a pushed `.gitleaks.toml` does not silence it; a file outside the folder raises nothing.
-- [ ] 4.7 Once-per-Mac tests: three commits, one card; two Macs each raise their own; removal closes each at its own pull; Not sensitive closes here only and survives an unrelated edit; a new finding in the file raises anew.
+- [ ] 4.6 **A slipped scan** tests: an edit made outside Wiffletree raises one card, which names the rule and never the text; added and removed between two pulls still alerts; a file outside the folder raises nothing. In a repository with an empty root and in a moved one, a pushed `.gitleaks.toml`, a `.gitleaksignore`, and a root `wiffletree-brain.json` naming `gate.allowlist` each stay out of the scratch repository and silence nothing, before a push and after a pull.
+- [ ] 4.7 Once-per-Mac tests: three commits, one card; two Macs each raise their own; removal closes each at its own pull; Not sensitive closes here only and survives an unrelated edit; a new finding in the file raises anew; an open alert follows its file through Move into the folder, on the Mac that moved and the Mac that adopted, and stays open until the text is gone from `main`.
 - [ ] 4.8 Mark tests: a quit mid-range resumes; a joining Mac scans no old history; a rewrite restarts at the merge base; 900 commits do not delay a pass.
 - [ ] 4.9 gitleaks tests: missing, the pull completes, `sensitive-info` runs, one note; arriving, the note closes and `secret-scan` catches up.
 
@@ -103,11 +103,12 @@ The agents' instructions, README and specs.
 - [ ] 6.1 Fixed core: `implementer.md`, `coordinator.md` and `communication.md` lose the batch and pull request wording, with new versions.
 - [ ] 6.2 Stock skills and tool descriptions: `log_work`'s and `query_brain`'s text in `mcp.rs`, and any line naming a retired skill.
 - [ ] 6.3 Remove the "save this as a note" idea wherever Wiffletree's text carries it.
-- [ ] 6.4 `README.md`, `docs/FEATURES.md`, `docs/PRD.md`, `docs/DEVELOPMENT.md`, `docs/host-protocol.md`, the safety section's brain-branch line, and `gate/README.md`, cut to what remains. Say what the model's accepted risks are: anyone with write access can change anything, a slip stays in history, every issue change is a commit, no volunteer means no wiki updates, and Protect history needs an admin.
+- [ ] 6.4 `README.md`, `docs/FEATURES.md`, `docs/PRD.md`, `docs/DEVELOPMENT.md`, `docs/host-protocol.md`, the safety section's brain-branch line, and `gate/README.md`, cut to what remains. Say what the approved model's accepted risks are: anyone with write access can change anything, a slip stays in history, every issue change is a commit, no volunteer means no wiki updates, and Protect history needs an admin.
 - [ ] 6.5 Add "How to clean history", which the alert's button opens.
 - [ ] 6.6 Add a line to `docs/DEVELOPMENT.md` naming the tables a later release can drop.
-- [ ] 6.7 A test that no fixed core or stock text names a retired skill or says an entry reaches the brain in a pull request.
-- [ ] 6.8 Run `openspec validate --all --strict`, archive `choose-space-repositories` first, then this change, and update each changed spec's Purpose by hand.
+- [ ] 6.7 Each command `host-process` lists needs the credential: compile on or off, setting the compile time, Protect history, Bring in, Move into the folder, and held-entry and alert actions, with a test that a connection without it is refused for each. Add them to the human-only list as each group adds its command.
+- [ ] 6.8 A test that no fixed core or stock text names a retired skill or says an entry reaches the brain in a pull request.
+- [ ] 6.9 Run `openspec validate --all --strict`, archive `choose-space-repositories` first, then this change, and update each changed spec's Purpose by hand.
 
 ## Not in these tickets
 

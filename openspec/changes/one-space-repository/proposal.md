@@ -2,7 +2,7 @@
 
 A Space names a brain and a storage repository today, with two sets of rules and three places to look. A brain needs a gate, a compiler host and a pull request for every batch, and it only runs when a Space names one. The Vyttle Space names none, so its projects can neither log nor query. Linear still holds the issues, and four second-brain skills still sit beside the app.
 
-On November 1, 2026 Michael approved one model, in `model.md` and `ui/mockups.html`: a Space names one repository and one folder, and its issues, log entries and wiki live there and are all written the same way. Wiffletree does the logging, compiling and reconciling by itself.
+On November 1, 2026 Michael approved one model, with its setup screens in `ui/mockups.html`: a Space names one repository and one folder, and its issues, log entries and wiki live there and are all written the same way. Wiffletree does the logging, compiling and reconciling by itself.
 
 ## What Changes
 
@@ -39,6 +39,7 @@ None. Each change belongs to a capability that exists.
 - `assistant`: a thread's entries land straight in, and every Space keeps them.
 - `settings-cascade`: a Space's page no longer shows Brain compile and Brain gate rows.
 - `workspace-host`: a compile session is owned by its wiki and works in a worktree of the repository's clone.
+- `host-process`: the new human-only commands need the app's credential.
 
 ## Impact
 
