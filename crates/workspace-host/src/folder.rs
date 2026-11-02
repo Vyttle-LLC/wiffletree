@@ -91,7 +91,7 @@ pub(crate) fn saves(clone: &Path, root: &Root, path: &str) -> Result<u32> {
     let before = root.moved_from(path).map(count).transpose()?;
     Ok(match before {
         None | Some(0) => here,
-        Some(before) => here + before - 2,
+        Some(before) => (here + before).saturating_sub(2),
     })
 }
 
@@ -157,12 +157,16 @@ fn holder(path: &str) -> Option<&str> {
 }
 
 /// Every folder at `commit` holding a Space or a tracker, stubs skipped, sorted, with the root
-/// as the empty folder. A board output named like one of these files is not a folder of its own.
+/// as the empty folder. A board output named like one of these files is not a folder of its own,
+/// and neither is a symbolic link or a submodule, which can't be read as one.
 fn folders_at(clone: &Path, commit: &str) -> Result<Vec<String>> {
     let hidden = |path: &str| path.split('/').any(|part| part.starts_with('.'));
-    let files = repos::files_at(clone, commit, &|path| {
-        !hidden(path) && holder(path).is_some()
-    })?;
+    let plain = |kind: &str| kind.starts_with("100644 ") || kind.starts_with("100755 ");
+    let candidates: BTreeSet<String> = (tree(clone, commit)?.into_iter())
+        .filter(|(path, kind)| !hidden(path) && holder(path).is_some() && plain(kind))
+        .map(|(path, _)| path)
+        .collect();
+    let files = repos::files_at(clone, commit, &|path| candidates.contains(path))?;
     let found: BTreeSet<&str> = (files.iter())
         .filter(|(_, content)| stub_target(content).is_none())
         .filter_map(|(path, _)| holder(path))
@@ -439,6 +443,35 @@ mod tests {
     #[test]
     fn a_repository_of_other_documents_holds_no_folder() {
         assert_eq!(found(&[("docs/README.md", "Hello.\n")]).unwrap(), None);
+    }
+
+    #[test]
+    fn a_symbolic_link_or_a_submodule_named_like_a_tracker_is_no_folder_and_fails_nothing() {
+        let folder = tempfile::tempdir().unwrap();
+        let at_root = [("spaces/sage/space.yaml", SAGE), (TRACKER, TRACKER_FILE)];
+        let head = repository(folder.path(), &at_root);
+        fs::create_dir_all(folder.path().join("docs")).unwrap();
+        std::os::unix::fs::symlink(TRACKER, folder.path().join("docs").join(TRACKER)).unwrap();
+        git(folder.path(), &["add", "--all"]);
+        let submodule = format!("160000,{head},vendor/spaces/theirs/space.yaml");
+        git(
+            folder.path(),
+            &["update-index", "--add", "--cacheinfo", &submodule],
+        );
+        git(folder.path(), &["commit", "-qm", "Beside the layout"]);
+        let head = git(folder.path(), &["rev-parse", "HEAD"]);
+        assert_eq!(find(folder.path(), &head).unwrap(), Some(Root::default()));
+        assert_eq!(moved_to(folder.path(), &head).unwrap(), None);
+    }
+
+    #[test]
+    fn saves_never_underflow_on_a_mac_that_adopted_a_move_before_its_next_pass() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = "spaces/sage/boards/brief.json";
+        repository(folder.path(), &[(path, "{}\n")]);
+        let root = Root::default_folder();
+        let moved = root.join(path);
+        assert_eq!(saves(folder.path(), &root, &moved).unwrap(), 0);
     }
 
     #[test]
