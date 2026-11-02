@@ -24,6 +24,7 @@ fn space() -> Space {
         storage: SpaceStorage {
             repository: StorageRepository::Local { id: text() },
             folder: text(),
+            root: text(),
         },
         repositories: vec![],
         models: SpaceModels::default(),
@@ -427,6 +428,9 @@ fn space_commands_are_the_humans() {
         Command::SetUpIssues {
             space_id: space().id,
             prefix: text(),
+        },
+        Command::MoveIntoFolder {
+            space_id: space().id,
         },
         Command::SetSpaceBrain {
             space_id: space().id,

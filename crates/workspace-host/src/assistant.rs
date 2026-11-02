@@ -648,7 +648,11 @@ impl Host {
             return None;
         }
         let clone = self.storage_folder(&space.storage.repository);
-        let file = format!(":(literal)spaces/{}/space.yaml", space.storage.folder);
+        let file = format!("spaces/{}/space.yaml", space.storage.folder);
+        let file = format!(
+            ":(literal){}",
+            folder::Root::new(&space.storage.root).join(&file)
+        );
         let args = ["log", "-1", "--format=%an%x00%s", "--", file.as_str()];
         let line = runtime::git_output(&clone, &args).ok()?;
         let (author, subject) = line.trim_end().split_once('\0')?;
@@ -1292,6 +1296,7 @@ mod tests {
             owner: "Sage-Social".into(),
             name: "wiffletree-storage".into(),
         };
+        record.storage.root = String::new();
         host.db
             .execute(
                 "UPDATE spaces SET data=?2 WHERE id=?1",

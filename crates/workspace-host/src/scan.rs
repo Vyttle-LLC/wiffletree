@@ -39,9 +39,12 @@ const CHECKS: [(&str, &str); 2] = [
     ("secret-scan", "checks/secret_scan.py"),
 ];
 
-/// Whether a file at `path` is scanned before it is pushed.
+/// Whether a file at `path`, relative to a repository's folder, is scanned before it is pushed.
 pub(crate) fn scanned(path: &str) -> bool {
-    path == storage::TRACKER || path.starts_with("spaces/") || path.starts_with("issues/")
+    path == storage::TRACKER
+        || path.starts_with("spaces/")
+        || path.starts_with("issues/")
+        || path.starts_with("compilers/")
 }
 
 /// A file held back from a push: the check, and the rule it failed or why it could not run.

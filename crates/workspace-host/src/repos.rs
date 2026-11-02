@@ -3,6 +3,7 @@
 //! files. Each commit holds one rule set's changes, and a file under no rule set is pulled and
 //! never committed. The settings repository's rule set is `sync`.
 use crate::*;
+use folder::Root;
 use github_access::{remote_head, run, run_at};
 use publish::GitTool;
 use std::collections::BTreeMap;
@@ -269,6 +270,12 @@ pub(crate) type Content = Option<Vec<u8>>;
 pub(crate) trait RuleSet {
     /// Whether the file at `path`, relative to the clone, is this rule set's.
     fn claims(&self, path: &str) -> bool;
+    /// The folder GitHub's head `remote` moved this rule set's files into, when this Mac still
+    /// has them at the root: the pass stops, before any rule set reads the move as deletions,
+    /// for the host to adopt it.
+    fn moved_to(&self, _clone: &Path, _remote: &str) -> Result<Option<Root>> {
+        Ok(None)
+    }
     /// Compares this machine's files with GitHub's head `remote`, before the clone moves to it.
     fn compare(&mut self, clone: &Path, remote: &str) -> Result<()>;
     /// The files to commit on GitHub's head, as the pass read them, and the commit's message.
@@ -310,10 +317,12 @@ pub(crate) struct Remote<'a> {
 /// pushing failed.
 pub(crate) type Pushed = std::result::Result<Option<String>, String>;
 
-/// What a pass pushed, and the files a scan held back from its commits.
+/// What a pass pushed, the files a scan held back from its commits, and the folder GitHub's
+/// head moved into, which ended the pass before it compared anything.
 pub(crate) struct Outcome {
     pub(crate) pushed: Pushed,
     pub(crate) held: Vec<scan::Held>,
+    pub(crate) moved_to: Option<Root>,
 }
 
 /// Fetches the branch, lets each rule set compare its files, takes GitHub's version of the files
@@ -355,6 +364,7 @@ pub(crate) fn pass(
             return Ok(Outcome {
                 pushed: once.pushed.map_err(|error| format!("{error:#}")),
                 held,
+                moved_to: once.moved_to,
             });
         }
         tries += 1;
@@ -373,6 +383,7 @@ struct Once {
     pushed: Result<Option<String>>,
     held: Vec<scan::Held>,
     committed: Vec<usize>,
+    moved_to: Option<Root>,
 }
 
 /// One fetch, compare, commit and push of the rule sets `taking_part` marks; the others are
@@ -386,17 +397,17 @@ fn pass_once(
     scanner: Option<&scan::Scanner>,
     git: &GitTool,
 ) -> Result<Once> {
-    let branch = format!("refs/heads/{}", remote.branch);
-    let fetch = ["fetch", "--quiet", "--no-tags", "--recurse-submodules=no"];
-    run_at(
-        git,
-        clone,
-        remote.url,
-        &[&fetch[..], &[remote.url, &branch]].concat(),
-    )?;
-    let head = runtime::git_output(clone, &["rev-parse", "FETCH_HEAD"])?
-        .trim()
-        .to_owned();
+    let head = fetch(clone, remote, git)?;
+    for rule_set in rule_sets.iter() {
+        if let Some(root) = rule_set.moved_to(clone, &head)? {
+            return Ok(Once {
+                pushed: Ok(None),
+                held: vec![],
+                committed: vec![],
+                moved_to: Some(root),
+            });
+        }
+    }
     let mut compared = vec![];
     for (rule_set, &part) in rule_sets.iter_mut().zip(taking_part) {
         if !part {
@@ -437,7 +448,57 @@ fn pass_once(
         pushed,
         held,
         committed,
+        moved_to: None,
     })
+}
+
+/// Fetches the remote's branch; GitHub's head.
+fn fetch(clone: &Path, remote: &Remote, git: &GitTool) -> Result<String> {
+    let branch = format!("refs/heads/{}", remote.branch);
+    let fetch = ["fetch", "--quiet", "--no-tags", "--recurse-submodules=no"];
+    run_at(
+        git,
+        clone,
+        remote.url,
+        &[&fetch[..], &[remote.url, &branch]].concat(),
+    )?;
+    let head = runtime::git_output(clone, &["rev-parse", "FETCH_HEAD"])?;
+    Ok(head.trim().to_owned())
+}
+
+/// How many times a move is made and pushed before it gives up, as teammates keep pushing.
+const MOVE_TRIES: usize = 5;
+
+/// Moves the repository at `clone` into the folder `root`: one commit on GitHub's head, with its
+/// stubs, checked by `folder::check_move` and pushed unforced. A refused push fetches: when the
+/// root layout is gone, a teammate's move is done, and otherwise the move is made again on the
+/// new head. The folder the repository is in now, for the host to adopt.
+pub(crate) fn move_into_folder(
+    clone: &Path,
+    remote: &Remote,
+    root: &Root,
+    git: &GitTool,
+) -> Result<Root> {
+    for _ in 0..MOVE_TRIES {
+        let head = fetch(clone, remote, git)?;
+        if let Some(moved) = folder::moved_to(clone, &head)? {
+            return Ok(moved);
+        }
+        runtime::git_output(clone, &["reset", "--quiet", &head])?;
+        folder::stage_move(clone, &head, root)?;
+        let message = format!("Move into {}/ · {}", root.name(), sync::machine_name());
+        commit_staged(clone, &message, git)?;
+        let check = |commits: &str| {
+            ensure!(commits.lines().count() == 1, "A move is one commit");
+            folder::check_move(clone, &head, commits.trim(), root)
+        };
+        match push_checked(clone, remote, &check, git) {
+            Ok(()) => return Ok(root.clone()),
+            Err(error) if error.is::<Moved>() => {}
+            Err(error) => return Err(error),
+        }
+    }
+    bail!("{} kept moving on GitHub; try again", remote.branch)
 }
 
 /// One commit per rule set's changes, then one push of them all; the head pushed, if any.
@@ -581,6 +642,37 @@ pub(crate) fn push(
     owner: &dyn Fn(&str) -> Option<usize>,
     git: &GitTool,
 ) -> Result<()> {
+    let check = |commits: &str| {
+        for commit in commits.lines() {
+            let args = ["diff-tree", "--root", "-r", "-m", "--no-commit-id"];
+            let args = [&args[..], &["--name-only", "--no-renames", "-z", commit]].concat();
+            let changed = runtime::git_output(clone, &args)?;
+            let mut rule_set = None;
+            for path in changed.split('\0').filter(|path| !path.is_empty()) {
+                let Some(claimed) = owner(path) else {
+                    bail!(
+                        "Sync changes only the files its rule sets cover, and a commit changes {path}"
+                    );
+                };
+                ensure!(
+                    *rule_set.get_or_insert(claimed) == claimed,
+                    "A commit changes {path} beside files of another rule set, which sync commits apart"
+                );
+            }
+        }
+        Ok(())
+    };
+    push_checked(clone, remote, &check, git)
+}
+
+/// Pushes the clone's HEAD as `push` does, once `check` passed the commits GitHub lacks, listed
+/// one per line.
+fn push_checked(
+    clone: &Path,
+    remote: &Remote,
+    check: &dyn Fn(&str) -> Result<()>,
+    git: &GitTool,
+) -> Result<()> {
     let head = runtime::git_output(clone, &["rev-parse", "HEAD"])?
         .trim()
         .to_owned();
@@ -595,24 +687,7 @@ pub(crate) fn push(
         }
         None => head.clone(),
     };
-    let commits = runtime::git_output(clone, &["rev-list", &range])?;
-    for commit in commits.lines() {
-        let args = ["diff-tree", "--root", "-r", "-m", "--no-commit-id"];
-        let args = [&args[..], &["--name-only", "--no-renames", "-z", commit]].concat();
-        let changed = runtime::git_output(clone, &args)?;
-        let mut rule_set = None;
-        for path in changed.split('\0').filter(|path| !path.is_empty()) {
-            let Some(claimed) = owner(path) else {
-                bail!(
-                    "Sync changes only the files its rule sets cover, and a commit changes {path}"
-                );
-            };
-            ensure!(
-                *rule_set.get_or_insert(claimed) == claimed,
-                "A commit changes {path} beside files of another rule set, which sync commits apart"
-            );
-        }
-    }
+    check(&runtime::git_output(clone, &["rev-list", &range])?)?;
     let refspec = format!("{head}:refs/heads/{}", remote.branch);
     let args = ["push", "--no-follow-tags", "--recurse-submodules=no"];
     let pushed = run_at(

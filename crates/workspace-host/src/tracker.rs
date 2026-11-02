@@ -6,6 +6,7 @@
 //! untrusted and may hold personal data: nothing here logs it, and commit messages name issues
 //! by ID only.
 use crate::*;
+use folder::Root;
 use repos::{Content, Record};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -193,7 +194,7 @@ pub(crate) fn with_events(content: Option<Vec<u8>>, events: &[IssueEvent]) -> Re
     Ok(content)
 }
 
-/// An issue's folder, relative to the tracker's root.
+/// An issue's folder, relative to the repository's folder.
 pub(crate) fn issue_folder(id: &IssueId) -> String {
     format!("{ISSUES}/{id}")
 }
@@ -241,8 +242,8 @@ fn comment_file(folder: &Path, at: &str, login: &str, content: &[u8]) -> String 
         .expect("a free name")
 }
 
-/// A tracker's folder on this Mac, a storage repository's clone or local repository, read
-/// through its prefix.
+/// A tracker's folder on this Mac, the repository's folder in its clone or local repository,
+/// read through its prefix.
 pub(crate) struct Store {
     pub(crate) folder: PathBuf,
     pub(crate) prefix: String,
@@ -425,27 +426,38 @@ fn listing(record: &IssueRecord) -> IssueListing {
 
 /// The highest number with `prefix` that any `issues/<ID>/` path has had in the history up to
 /// `commit`, so an issue deleted by an ordinary commit never gives its number away; 0 for none.
-fn highest_number(folder: &Path, commit: &str, prefix: &str) -> Result<u64> {
-    Ok(used_numbers(folder, commit, prefix)?
+fn highest_number(clone: &Path, root: &Root, commit: &str, prefix: &str) -> Result<u64> {
+    Ok(used_numbers(clone, root, commit, prefix)?
         .last()
         .copied()
         .unwrap_or(0))
 }
 
 /// Every number with `prefix` that any `issues/<ID>/` path has had in the history up to
-/// `commit`.
+/// `commit`, in the folder or, from before the repository moved into it, at its root.
 pub(crate) fn used_numbers(
-    folder: &Path,
+    clone: &Path,
+    root: &Root,
     commit: &str,
     prefix: &str,
 ) -> Result<std::collections::BTreeSet<u64>> {
-    let names = runtime::git_output(
-        folder,
-        &["log", "--format=", "--name-only", commit, "--", ISSUES],
-    )?;
+    numbers_in_history(clone, root, &[commit], prefix)
+}
+
+/// `used_numbers` with `revisions` as `git log` takes them.
+pub(crate) fn numbers_in_history(
+    clone: &Path,
+    root: &Root,
+    revisions: &[&str],
+    prefix: &str,
+) -> Result<std::collections::BTreeSet<u64>> {
+    let moved = root.join(ISSUES);
+    let args = ["log", "--format=", "--name-only", "--no-renames"];
+    let paths = ["--", ISSUES, &moved];
+    let names = runtime::git_output(clone, &[&args[..], revisions, &paths[..]].concat())?;
     Ok(names
         .lines()
-        .filter_map(issue_of)
+        .filter_map(|path| issue_of(root.strip(path).unwrap_or(path)))
         .filter_map(|id| match id {
             IssueId::Numbered { prefix: p, number } if p == prefix => Some(number),
             _ => None,
@@ -608,7 +620,7 @@ impl Host {
     pub(crate) fn reindex_issue(&self, storage: &StorageRepository, id: &IssueId) -> Result<()> {
         let key = storage.key();
         let store = Store {
-            folder: self.storage_folder(storage),
+            folder: self.root_folder(storage)?,
             prefix: id.prefix().to_owned(),
         };
         match store.exists(id) {
@@ -752,7 +764,7 @@ impl Host {
         record.links = self.issue_links(&storage.key(), id)?;
         record.following = self.is_following(&storage.key(), &record)?;
         if let StorageRepository::GitHub { .. } = storage {
-            let under = format!("{}/%", issue_folder(id));
+            let under = format!("{}/%", self.root_of(storage)?.join(&issue_folder(id)));
             record.paused = (self.db.prepare(
                 "SELECT path,why FROM sync_paused WHERE repository=?1 AND path LIKE ?2",
             )?)
@@ -801,10 +813,11 @@ impl Host {
         let tracker = self.tracker(&space)?;
         let prefix = tracker.prefix;
         let folder = self.storage_folder(&space.storage.repository);
+        let root = Root::new(&space.storage.root);
         let id = match space.storage.repository {
             StorageRepository::Local { .. } => {
                 let store = self.store(&space, &prefix);
-                let committed = highest_number(&folder, "HEAD", &prefix)?;
+                let committed = highest_number(&folder, &root, "HEAD", &prefix)?;
                 let here = (store.ids().into_iter())
                     .filter_map(|id| match id {
                         IssueId::Numbered { number, .. } => Some(number),
@@ -865,7 +878,7 @@ impl Host {
         storage: &StorageRepository,
         prefix: &str,
     ) -> Result<IssueId> {
-        let folder = self.storage_folder(storage);
+        let folder = self.root_folder(storage)?;
         loop {
             let id = IssueId::Temporary {
                 prefix: prefix.to_owned(),
@@ -893,8 +906,9 @@ impl Host {
             .optional()?)
     }
     pub(crate) fn store(&self, space: &Space, prefix: &str) -> Store {
+        let clone = self.storage_folder(&space.storage.repository);
         Store {
-            folder: self.storage_folder(&space.storage.repository),
+            folder: Root::new(&space.storage.root).in_clone(&clone),
             prefix: prefix.to_owned(),
         }
     }
@@ -1036,19 +1050,21 @@ impl Host {
             );
         }
         let folder = self.storage_folder(storage);
+        let root = Root::new(&space.storage.root);
         let files = || writes.iter().flat_map(|write| &write.files);
         for (path, content) in files() {
-            shared::write_atomically(&folder.join(path), content)?;
+            shared::write_atomically(&folder.join(root.join(path)), content)?;
         }
         match storage {
             StorageRepository::Local { .. } => {
-                let paths: Vec<&str> = files().map(|(p, _)| p.as_str()).collect();
+                let paths: Vec<String> = files().map(|(p, _)| root.join(p)).collect();
+                let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
                 storage::commit_local(&folder, &paths, message)?;
             }
             StorageRepository::GitHub { .. } => {
                 let key = repos::key(&storage.key());
                 for (path, content) in files() {
-                    Record::wrote(&self.db, &key, path, Some(content))?;
+                    Record::wrote(&self.db, &key, &root.join(path), Some(content))?;
                 }
                 self.issues_written.borrow_mut().insert(key);
             }
@@ -1060,10 +1076,10 @@ impl Host {
         }
         Ok(())
     }
-    /// Whether any of these files of a GitHub tracker's clone holds neither what the host last
-    /// wrote nor what it last synced, which a pass pauses as changed outside Wiffletree. A file
-    /// paused because two Macs changed it still takes the human's edits. A local tracker, never
-    /// pushed, has no such files.
+    /// Whether any of these files of a GitHub tracker's clone, by their paths relative to its
+    /// folder, holds neither what the host last wrote nor what it last synced, which a pass
+    /// pauses as changed outside Wiffletree. A file paused because two Macs changed it still
+    /// takes the human's edits. A local tracker, never pushed, has no such files.
     pub(crate) fn changed_outside(
         &self,
         storage: &StorageRepository,
@@ -1074,7 +1090,9 @@ impl Host {
         }
         let key = repos::key(&storage.key());
         let folder = self.storage_folder(storage);
+        let root = self.root_of(storage)?;
         for path in paths {
+            let path = root.join(path);
             let (synced, written): (Content, Content) = self
                 .db
                 .query_row(
@@ -1102,10 +1120,12 @@ impl Host {
     ) -> Result<()> {
         let key = repos::key(&storage.key());
         let clone = self.storage_folder(storage);
+        let root = self.root_of(storage)?;
+        let tracker = root.in_clone(&clone);
         for (temporary, number) in numbered {
             let (from, to) = (
-                clone.join(issue_folder(temporary)),
-                clone.join(issue_folder(number)),
+                tracker.join(issue_folder(temporary)),
+                tracker.join(issue_folder(number)),
             );
             let relative = |file: &Path| -> Result<String> {
                 let path = file.strip_prefix(&clone)?.to_str();
@@ -1126,7 +1146,7 @@ impl Host {
                 fs::remove_dir_all(&from)?;
             }
             let (old, new) = (temporary.to_string(), number.to_string());
-            for file in storage::files_under(&clone.join(ISSUES))? {
+            for file in storage::files_under(&tracker.join(ISSUES))? {
                 let Ok(text) = fs::read_to_string(&file) else {
                     continue;
                 };
@@ -1141,7 +1161,7 @@ impl Host {
             // Each issue the renaming touched, as it was and is now, so one read stays read.
             let mut issues = vec![(temporary.clone(), number.clone())];
             for (was, _, now) in &touched {
-                let pair = (issue_of(was), issue_of(&relative(now)?));
+                let pair = (root.issue_of(was), root.issue_of(&relative(now)?));
                 if let (Some(was), Some(now)) = pair
                     && !issues.contains(&(was.clone(), now.clone()))
                 {
@@ -1166,7 +1186,7 @@ impl Host {
             }
             self.db.execute(
                 "DELETE FROM sync_record WHERE repository=?1 AND path LIKE ?2",
-                params![key, format!("{}/%", issue_folder(temporary))],
+                params![key, format!("{}/%", root.join(&issue_folder(temporary)))],
             )?;
             for table in [
                 "issue_links",
@@ -1214,11 +1234,14 @@ impl Host {
             let local = matches!(space.storage.repository, StorageRepository::Local { .. });
             let key = repos::key(&storage);
             // The tracker's files in a table of sync, which `also` narrows.
+            let root = Root::new(&space.storage.root);
+            let (config, issues_under) = (root.join(TRACKER), format!("{}/%", root.join(ISSUES)));
             let count = |table: &str, also: &str| -> Result<usize> {
                 let sql = format!(
-                    "SELECT count(*) FROM {table} WHERE repository=?1 AND (path='{TRACKER}' OR path LIKE '{ISSUES}/%'){also}"
+                    "SELECT count(*) FROM {table} WHERE repository=?1 AND (path=?2 OR path LIKE ?3){also}"
                 );
-                Ok(self.db.query_row(&sql, [&key], |r| r.get(0))?)
+                let found = params![key, config, issues_under];
+                Ok(self.db.query_row(&sql, found, |r| r.get(0))?)
             };
             let (waiting, paused) = match local {
                 true => (0, 0),

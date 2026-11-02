@@ -425,6 +425,7 @@ mod tests {
             storage: SpaceStorage {
                 repository: StorageRepository::Local { id: id.into() },
                 folder: id.into(),
+                root: String::new(),
             },
             repositories: repositories.iter().map(|r| r.to_string()).collect(),
             models: SpaceModels::default(),

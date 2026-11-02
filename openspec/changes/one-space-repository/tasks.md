@@ -4,20 +4,20 @@ Each group is one ticket, in this order, in `Vyttle-LLC/wiffletree`. The app sta
 
 A Space names a repository and a folder, the sync engine works inside the folder, and the one-role rule goes.
 
-- [ ] 1.1 `workspace-core`: `SpaceStorage.root` with a serde default, empty for a repository not yet moved, and the rule for a valid folder.
-- [ ] 1.2 `workspace-host`: one `Root` type that joins and strips the prefix. `space_file`, `TRACKER`, `ISSUES`, `scan::scanned`, `recipe_path`, `issue_of`, `has_issues`, and the storage rule sets' roots all go through it. An empty root gives today's paths exactly (decision 3).
-- [ ] 1.3 Rule sets: keep `spaces/`, boards and issues inside the folder, add `compilers/` to the Space rule set, and keep the settings rule set at the root. Fetch a repository holding a Space every minute, with or without a tracker.
-- [ ] 1.4 `issues_sync`: numbering reads history at the folder and, before the move, at the root.
-- [ ] 1.5 `storage::stage`: find the folder by listing the head's tree, skip stubs, and refuse two folders or a folder that is someone else's.
-- [ ] 1.6 The move, local: at first start, one commit, with no question, finished after an interrupted start.
-- [ ] 1.7 The move, GitHub: `repos::move_into_folder`, one commit with its stubs, its own check that every change is a 100% rename of a claimed path or a stub, and its own loop of up to 5 tries.
-- [ ] 1.8 Adopting a move in a pass: read the tree again, move record paths and unpushed files under the folder, and compare as usual.
-- [ ] 1.9 Drop `storage::Use` and every refusal between a brain, storage and settings, and the `A brain as storage` checks in the Space and settings flows.
-- [ ] 1.10 `wiffletree-issues.yaml`: read and write `compile` and `allowed_email_domains`, keeping unknown keys, and add `compilers/<host id>.yaml` as the one file each Mac writes.
-- [ ] 1.11 Space-side tests: two Spaces share one folder; a file outside the folder is pulled and never committed; a settings edit commits at the root beside an issue in the folder; a repository with an empty root behaves exactly as today.
-- [ ] 1.12 Finding tests: one folder, a custom nested folder, two folders refused, stubs skipped, a root layout joined as it stands.
-- [ ] 1.13 Move tests: local at first start and not again; an interrupted move finished; two Macs moving at once make one commit; an unpushed comment survives adoption; settings stay at the root; a deleted issue's number from before the move is not reused.
-- [ ] 1.14 Older host tests: against the release's previous `read_space` and `read_tracker` behaviour, a stub parses and pauses with "Update to use it", not "can't be read", and a `space.yaml` this release writes at the root keeps `instructions` and `format` 1.
+- [x] 1.1 `workspace-core`: `SpaceStorage.root` with a serde default, empty for a repository not yet moved, and the rule for a valid folder.
+- [x] 1.2 `workspace-host`: one `Root` type that joins and strips the prefix. `space_file`, `TRACKER`, `ISSUES`, `scan::scanned`, `recipe_path`, `issue_of`, `has_issues`, and the storage rule sets' roots all go through it. An empty root gives today's paths exactly (decision 3).
+- [x] 1.3 Rule sets: keep `spaces/`, boards and issues inside the folder, add `compilers/` to the Space rule set, and keep the settings rule set at the root. Fetch a repository holding a Space every minute, with or without a tracker.
+- [x] 1.4 `issues_sync`: numbering reads history at the folder and, before the move, at the root.
+- [x] 1.5 `storage::stage`: find the folder by listing the head's tree, skip stubs, and refuse two folders or a folder that is someone else's.
+- [x] 1.6 The move, local: at first start, one commit, with no question, finished after an interrupted start.
+- [x] 1.7 The move, GitHub: `repos::move_into_folder`, one commit with its stubs, its own check by content that each path in the folder holds the blob its old path held in the parent commit and every other path is a stub or unchanged, and its own loop of up to 5 tries.
+- [x] 1.8 Adopting a move in a pass: read the tree again, move record paths and unpushed files under the folder, and compare as usual.
+- [x] 1.9 Drop `storage::Use` and every refusal between a brain, storage and settings, and the `A brain as storage` checks in the Space and settings flows.
+- [x] 1.10 `wiffletree-issues.yaml`: read and write `compile` and `allowed_email_domains`, keeping unknown keys, and add `compilers/<host id>.yaml` as the one file each Mac writes.
+- [x] 1.11 Space-side tests: two Spaces share one folder; a file outside the folder is pulled and never committed; a settings edit commits at the root beside an issue in the folder; a repository with an empty root behaves exactly as today.
+- [x] 1.12 Finding tests: one folder, a custom nested folder, two folders refused, stubs skipped, a root layout joined as it stands.
+- [x] 1.13 Move tests: local at first start and not again; an interrupted move finished; two Macs moving at once make one commit; an unpushed comment survives adoption; settings stay at the root; a deleted issue's number from before the move is not reused.
+- [x] 1.14 Older host tests: against the release's previous `read_space` and `read_tracker` behaviour, a stub parses and pauses with "Update to use it", not "can't be read", and a `space.yaml` this release writes at the root keeps `instructions` and `format` 1.
 
 ## 2. Straight in
 
@@ -70,7 +70,7 @@ Claims, the on-this-Mac choice, checking claims through GitHub, product pages, a
 Each Mac scans what it pulls, and raises the Inbox card.
 
 - [ ] 4.1 `scan_marks` and `scan_alerts`, created if missing. Marks start at the head at join and at upgrade, and restart at the merge base after a rewrite. Moving a repository and adopting a move rewrite `scan_alerts` paths in one transaction with the record.
-- [ ] 4.2 The pull scan: off the pass, commit by commit against the first parent through `Scanner::scan`, over the scanned paths, skipping binary files and pure renames, with each check's mark moving as it goes (decision 5).
+- [ ] 4.2 The pull scan: off the pass, commit by commit against the first parent through `Scanner::scan`, over the scanned paths, skipping binary files, the move's stubs and any path that holds the blob its old path held in the parent commit, with each check's mark moving as it goes (decision 5).
 - [ ] 4.3 The alert: one row per repository, path, check and rule; the workspace card in each project of the folder's Spaces and on the Brains page; who pushed it, with GitHub's web editor named; Open the file, Not sensitive and How to clean history.
 - [ ] 4.4 Clearing: a whole-file scan at the head after a pull changes the file, and Not sensitive recorded here with a reason, writing nothing to the repository.
 - [ ] 4.5 A check that cannot run: its mark stays, one workspace note, and it catches up.

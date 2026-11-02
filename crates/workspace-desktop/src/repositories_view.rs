@@ -2352,6 +2352,7 @@ mod tests {
             storage: SpaceStorage {
                 repository: StorageRepository::Local { id: name.into() },
                 folder: name.to_lowercase(),
+                root: String::new(),
             },
             repositories: repositories.iter().map(|r| (*r).to_owned()).collect(),
             models: SpaceModels::default(),

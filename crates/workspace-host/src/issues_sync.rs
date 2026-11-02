@@ -10,10 +10,11 @@
 //! pass numbers them on top of GitHub's head, in the content it commits; the host renames them
 //! here once they are pushed.
 use crate::*;
+use folder::Root;
 use repos::{Content, RuleSet};
 use std::collections::BTreeMap;
 use storage::{Found, Input, TRACKER, WholeFiles};
-use tracker::{ISSUES, issue_folder, issue_of};
+use tracker::{ISSUES, issue_folder};
 
 /// How long after the human's last change to an issue its push waits.
 pub(crate) const PUSH_DELAY_MS: i64 = 2_000;
@@ -219,6 +220,8 @@ pub(crate) fn last_author(clone: &Path, remote: &str, path: &str) -> String {
 /// The issue rule set for one pass.
 pub(crate) struct IssueRules {
     pub(crate) files: WholeFiles,
+    /// The repository's folder.
+    root: Root,
     /// The tracker's prefix, `None` before the repository is a tracker here.
     prefix: Option<String>,
     /// The clone and GitHub's head, as `compare` saw them.
@@ -230,9 +233,11 @@ pub(crate) struct IssueRules {
 }
 impl IssueRules {
     pub(crate) fn new(input: &Input) -> Self {
-        let roots = vec![TRACKER.into(), ISSUES.into()];
+        let root = input.root.clone();
+        let roots = vec![root.join(TRACKER), root.join(ISSUES)];
         Self {
             files: WholeFiles::new(input, roots, vec![], "Issues".into()),
+            root,
             prefix: input.prefix.clone(),
             compared: None,
             references: vec![],
@@ -249,9 +254,10 @@ impl IssueRules {
         let (Some(prefix), Some((clone, remote))) = (&self.prefix, &self.compared) else {
             return Ok(());
         };
+        let root = &self.root;
         let committed = &mut self.files.found.committed;
         let mut temporary: Vec<IssueId> = (committed.iter())
-            .filter_map(|(path, _)| issue_of(path))
+            .filter_map(|(path, _)| root.issue_of(path))
             .filter(|id| id.is_temporary() && id.prefix() == prefix)
             .collect();
         temporary.sort();
@@ -263,7 +269,7 @@ impl IssueRules {
         let pushed: BTreeMap<String, Vec<u8>> = repos::files_at(clone, remote, &|path| {
             path.ends_with("/issue.md") && !synced.contains_key(path)
         })?;
-        let mut taken = tracker::used_numbers(clone, remote, prefix)?;
+        let mut taken = tracker::used_numbers(clone, root, remote, prefix)?;
         let mut next = taken.last().copied().unwrap_or(0);
         // Those whose preferred number is free first, in its order, so no other takes it.
         let preferred = &self.preferred;
@@ -274,10 +280,10 @@ impl IssueRules {
         let (mut numbered, mut adopted) = (vec![], vec![]);
         for id in temporary {
             let mine = (committed.iter())
-                .find(|(path, _)| *path == format!("{}/issue.md", issue_folder(&id)))
+                .find(|(path, _)| *path == root.join(&tracker::issue_file(&id)))
                 .and_then(|(_, content)| content.clone());
             let already = (pushed.iter()).find_map(|(path, theirs)| {
-                let there = issue_of(path)?;
+                let there = root.issue_of(path)?;
                 let renamed = replace_id(
                     &String::from_utf8_lossy(mine.as_deref()?),
                     &id.to_string(),
@@ -310,7 +316,7 @@ impl IssueRules {
         for (path, content) in committed.iter_mut() {
             let mut named = vec![];
             for (old, new) in numbered.iter().chain(&adopted) {
-                let own = path.starts_with(&format!("{}/", issue_folder(old)));
+                let own = path.starts_with(&format!("{}/", root.join(&issue_folder(old))));
                 let (old, new) = (old.to_string(), new.to_string());
                 *path = replace_id(path, &old, &new);
                 if let Some(bytes) = content
@@ -328,7 +334,8 @@ impl IssueRules {
             }
         }
         // A new issue GitHub already holds needs no commit of what is the same there.
-        let there = repos::files_at(clone, remote, &|path| path.starts_with("issues/"))?;
+        let issues = format!("{}/", root.join(ISSUES));
+        let there = repos::files_at(clone, remote, &|path| path.starts_with(&issues))?;
         committed.retain(|(path, content)| there.get(path) != content.as_ref());
         self.files.found.numbered = numbered;
         self.files.found.adopted = adopted;
@@ -339,7 +346,7 @@ impl IssueRules {
         let found = &self.files.found;
         let mut changes: BTreeMap<String, Vec<&str>> = BTreeMap::new();
         for (path, content) in &found.committed {
-            let (subject, change) = match issue_of(path) {
+            let (subject, change) = match self.root.issue_of(path) {
                 None => ("the tracker".to_owned(), "changed"),
                 Some(id) => {
                     let new = found.numbered.iter().any(|(_, number)| number == &id);
@@ -413,7 +420,7 @@ impl RuleSet for IssueRules {
         loop {
             let all = || held.iter().chain(&also);
             let next = found.numbered.iter().find_map(|(_, number)| {
-                let file = format!("{}/issue.md", issue_folder(number));
+                let file = self.root.join(&tracker::issue_file(number));
                 let cause = all().find(|h| h.path == file || names(&h.path, number))?;
                 (!kept.contains(&number)).then(|| (number, cause.check.clone()))
             });
@@ -421,7 +428,7 @@ impl RuleSet for IssueRules {
                 return also;
             };
             kept.push(number);
-            let folder = format!("{}/", issue_folder(number));
+            let folder = format!("{}/", self.root.join(&issue_folder(number)));
             for (path, _) in &found.committed {
                 let (own, naming) = (path.starts_with(&folder), names(path, number));
                 if (own || naming) && !held.iter().chain(&also).any(|h| &h.path == path) {
@@ -443,18 +450,18 @@ impl RuleSet for IssueRules {
 
 /// Puts the paths of `held` that a new issue's number names back under its temporary ID, as
 /// the issue stays here unnumbered, and forgets those numbers.
-pub(crate) fn keep_held_unnumbered(found: &mut Found, held: &mut [scan::Held]) {
+pub(crate) fn keep_held_unnumbered(found: &mut Found, held: &mut [scan::Held], root: &Root) {
     let mut kept = vec![];
     for (temporary, number) in &found.numbered {
-        let file = format!("{}/issue.md", issue_folder(number));
+        let file = root.join(&tracker::issue_file(number));
         if held.iter().any(|held| held.path == file) {
             kept.push((temporary.clone(), number.clone()));
         }
     }
     for (temporary, number) in &kept {
         let (from, to) = (
-            format!("{}/", issue_folder(number)),
-            format!("{}/", issue_folder(temporary)),
+            format!("{}/", root.join(&issue_folder(number))),
+            format!("{}/", root.join(&issue_folder(temporary))),
         );
         for held in held.iter_mut() {
             if let Some(rest) = held.path.strip_prefix(&from) {
@@ -949,7 +956,7 @@ mod tests {
         let personal = host.spaces().unwrap().remove(0).space;
         let prefix = host.tracker(&personal).unwrap().prefix;
         let filed = file(&mut host, &personal, "Renew the passport", "");
-        let folder = host.storage_folder(&personal.storage.repository);
+        let folder = host.root_folder(&personal.storage.repository).unwrap();
         let by_hand = format!("{prefix}-9");
         fs::create_dir_all(folder.join("issues").join(&by_hand)).unwrap();
         let text = String::from_utf8(issue_md(&blurry(&by_hand)).unwrap()).unwrap();

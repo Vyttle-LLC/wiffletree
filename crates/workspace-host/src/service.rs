@@ -661,6 +661,12 @@ enum Event {
     },
     /// A storage repository's pass finished on its own thread.
     StorageSynced(String, Result<storage::Passed>),
+    /// A repository's move into its folder ended, for this Mac to adopt it.
+    FolderMoved {
+        key: String,
+        moved: Result<folder::Root>,
+        reply: Reply,
+    },
     /// A brain's pass finished on its own thread; `None` when it panicked.
     BrainPassed(String, Option<brains::Passed>),
     /// Import legacy logs read the brain's legacy logs and their authors off the host thread.
@@ -1563,9 +1569,6 @@ impl Actor {
             }
             Command::SetUpSettingsRepository { repository }
             | Command::JoinSettingsRepository { repository, .. } => {
-                // Before anything is pushed: a brain here is never the settings repository.
-                self.host
-                    .refuse_second_use_of(repository, storage::Use::Settings)?;
                 let with = match command {
                     Command::JoinSettingsRepository { with, .. } => Some(*with),
                     _ => None,
@@ -1578,6 +1581,23 @@ impl Actor {
                     let _ =
                         sender.send_blocking(Event::SettingsRepositoryPrepared { prepared, reply });
                 });
+            }
+            // The move fetches and pushes, so it runs off the host thread; the reply answers
+            // once this Mac adopted it, or with why it failed.
+            Command::MoveIntoFolder { space_id } => {
+                let moving = self.host.start_move(space_id)?;
+                let tools = self.publish_tools.clone();
+                spawn_job(
+                    self.sender.clone(),
+                    (moving, reply.clone()),
+                    move |(moving, _)| moving.run(&tools),
+                    |_| Err(anyhow::anyhow!("The move stopped unexpectedly")),
+                    |(moving, reply), moved| Event::FolderMoved {
+                        key: moving.key,
+                        moved,
+                        reply,
+                    },
+                );
             }
             // The read makes one `gh api` call per commit, so it runs off the host thread; the
             // reply answers once its batches are queued, or with why it failed.
@@ -1805,6 +1825,7 @@ impl Actor {
             | Event::GitHub(_)
             | Event::SettingsRepositoryPrepared { .. }
             | Event::StorageSynced(..)
+            | Event::FolderMoved { .. }
             | Event::StorageStaged { .. } => true,
             Event::KeeperPolled(plan, ..) => self.host.tickets().is_ok_and(|tickets| {
                 tickets.iter().any(|ticket| {
@@ -1906,16 +1927,14 @@ impl Actor {
         started
     }
 
-    /// Checks and clones a storage repository off the host thread, once the repository is known
-    /// not to be a brain here, for the Space it is chosen for.
+    /// Checks and clones a storage repository off the host thread, for the Space it is chosen
+    /// for.
     fn stage_storage(
         &mut self,
         repository: &str,
         then: StorageChoice,
         reply: &Reply,
     ) -> Result<()> {
-        self.host
-            .refuse_second_use_of(repository, storage::Use::Storage)?;
         let added = self.host.space_ids()?;
         let (home, input, reply) = (self.host.home.clone(), repository.to_owned(), reply.clone());
         let (sender, tools) = (self.sender.clone(), self.publish_tools.clone());
@@ -1982,8 +2001,6 @@ impl Actor {
         for (key, cadence) in cadences {
             let pace = (self.storage_paces.entry(key.clone()))
                 .or_insert_with(|| repos::Pace::every(&[cadence]));
-            // A repository that has just become a tracker is fetched every minute from now on.
-            pace.set_every(cadence);
             if !pace.start(at) {
                 continue;
             }
@@ -2364,6 +2381,15 @@ impl Actor {
                     });
                 self.linear_pass_ended(&key);
                 true
+            }
+            Event::FolderMoved { key, moved, reply } => {
+                let result = moved
+                    .and_then(|root| self.host.finish_move(&key, &root))
+                    .map(|()| Value::Null)
+                    .map_err(|e| format!("{e:#}"));
+                let adopted = result.is_ok();
+                let _ = reply.try_send(result);
+                adopted
             }
             Event::StorageStaged {
                 staged,
@@ -5300,27 +5326,19 @@ mod tests {
     }
 
     #[test]
-    fn a_storage_repository_that_becomes_a_tracker_is_fetched_every_minute_at_once() {
+    fn a_repository_holding_a_space_is_fetched_every_minute_with_or_without_a_tracker() {
         let folder = tempfile::tempdir().unwrap();
         let github = storage::tests::shared_storage(folder.path(), None);
         let (_home, mut host) = storage::tests::host();
         storage::tests::join_sage(&mut host, &github).unwrap();
         let sage = storage::tests::space_named(&host, "Sage");
-        let (mut actor, _, _) = idle_actor(host);
         let key = repos::key(sync::tests::NAME);
-        let at = now();
-        let cadences = actor.host.storage_cadences().unwrap();
-        assert_eq!(cadences, [(key.clone(), 300_000)], "no tracker yet");
-        let mut pace = repos::Pace::every(&[cadences[0].1]);
-        assert!(pace.start(at));
-        pace.finish(at, true);
-        actor.storage_paces.insert(key.clone(), pace);
+        let cadences = host.storage_cadences().unwrap();
+        assert_eq!(cadences, [(key.clone(), 60_000)], "no tracker yet");
         let pulled = b"format: 1\nprefix: SAGE\n";
-        (actor.host)
-            .take_pulled(&sage.storage.repository, storage::TRACKER, Some(pulled))
+        host.take_pulled(&sage.storage.repository, storage::TRACKER, Some(pulled))
             .unwrap();
-        assert!(!actor.refresh_storage_sync(at), "no pass is due yet");
-        assert_eq!(actor.storage_paces[&key].next_due(), Some(at + 60_000));
+        assert_eq!(host.storage_cadences().unwrap(), [(key, 60_000)]);
     }
 
     /// A ticket whose tester is in its turn, run `run`, under its project coordinator.
@@ -12297,7 +12315,10 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': text,
         };
         command(&mut actor, list.clone()).unwrap();
         assert!(!actor.changes.state, "nothing changed on disk");
-        let folder = actor.host.storage_folder(&personal.storage.repository);
+        let folder = actor
+            .host
+            .root_folder(&personal.storage.repository)
+            .unwrap();
         let file = folder
             .join(tracker::issue_folder(&filed.id))
             .join("issue.md");

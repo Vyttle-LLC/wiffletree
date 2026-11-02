@@ -45,7 +45,7 @@ pub(crate) fn runs_here(recipe: &Recipe) -> bool {
         && (recipe.runner.as_ref()).is_some_and(|runner| runner.machine == sync::machine_name())
 }
 
-/// `spaces/<folder>/boards/<id>`: a job's outputs, relative to its storage repository.
+/// `spaces/<folder>/boards/<id>`: a job's outputs, relative to its repository's folder.
 pub(crate) fn board_folder(folder: &str, id: &str) -> String {
     format!("spaces/{folder}/boards/{id}")
 }
@@ -105,7 +105,7 @@ pub(crate) enum RunEnd {
     Stopped(String),
 }
 
-/// `spaces/<folder>/jobs/<id>.yaml`, relative to the storage repository.
+/// `spaces/<folder>/jobs/<id>.yaml`, relative to the repository's folder.
 pub(crate) fn recipe_file(folder: &str, id: &str) -> String {
     format!("spaces/{folder}/jobs/{id}.yaml")
 }
@@ -857,7 +857,7 @@ impl Host {
     }
     /// When the newest output of a job in its Space's storage was saved, as its metadata says.
     fn last_stored_output(&self, recipe: &Recipe, space: &Space) -> Option<i64> {
-        let storage = self.storage_folder(&space.storage.repository);
+        let storage = self.root_folder(&space.storage.repository).ok()?;
         let folder = storage.join(board_folder(&space.storage.folder, &recipe.id));
         (fs::read_dir(folder).ok()?.flatten())
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
@@ -1260,6 +1260,7 @@ impl Host {
         let output = if local {
             let storage = self.storage_folder(&space.storage.repository);
             let base = board_folder(&space.storage.folder, &recipe.id);
+            let base = folder::Root::new(&space.storage.root).join(&base);
             let (file, version) = assistant::store_output(&storage, &base, title, source, about)?;
             RunOutput {
                 title: title.into(),
@@ -1334,9 +1335,10 @@ impl Host {
         let base = board_folder(&space.storage.folder, &recipe.id);
         let storage = self.storage_folder(&space.storage.repository);
         let title = about["title"].as_str().context("An output has a title")?;
+        let in_repository = folder::Root::new(&space.storage.root).join(&base);
         let folder = format!(
-            "{base}/{}",
-            assistant::output_folder(&storage.join(&base), title)?
+            "{in_repository}/{}",
+            assistant::output_folder(&storage.join(&in_repository), title)?
         );
         let metadata = format!("{folder}.json");
         let key = repos::key(&space.storage.repository.key());
@@ -1697,7 +1699,8 @@ mod tests {
             fs::write(self.home.path().join("user/.claude.json"), config).unwrap();
         }
         fn storage(&self) -> PathBuf {
-            self.host.storage_folder(&self.personal.storage.repository)
+            let repository = &self.personal.storage.repository;
+            self.host.root_folder(repository).unwrap()
         }
         fn thread_of(&self, run: &JobRun) -> Thread {
             self.host.thread(run.thread_id.as_ref().unwrap()).unwrap()
@@ -2374,7 +2377,8 @@ mod tests {
         let file = recipe_file(&space.storage.folder, "release-dashboard");
         assert!(
             s.host
-                .storage_folder(&space.storage.repository)
+                .root_folder(&space.storage.repository)
+                .unwrap()
                 .join(&file)
                 .exists()
         );

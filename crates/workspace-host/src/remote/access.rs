@@ -147,6 +147,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::JoinSpaces { .. }
         | Command::SetTrackerPrefix { .. }
         | Command::SetUpIssues { .. }
+        | Command::MoveIntoFolder { .. }
         | Command::ConfirmBrain { .. }
         | Command::ForgetBrain { .. }
         | Command::SetUpBrain { .. }

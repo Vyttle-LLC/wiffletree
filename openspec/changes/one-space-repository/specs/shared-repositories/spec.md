@@ -55,7 +55,7 @@ A local repository with its Spaces' files at its root SHALL move them into `wiff
 
 #### Scenario: An unpushed comment on another Mac
 - **WHEN** a Mac has an unpushed comment on SAGE-151 when it pulls the move
-- **THEN** its comment moves under `wiffletree/issues/SAGE-151/`, and the same pass pushes it there
+- **THEN** its comment moves under `wiffletree/issues/SAGE-151/`, and the pass that follows at once pushes it there
 
 #### Scenario: A repository that is also the settings repository
 - **WHEN** the moved repository is also this Mac's settings repository

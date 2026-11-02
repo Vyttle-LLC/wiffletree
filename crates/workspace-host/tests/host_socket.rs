@@ -833,6 +833,7 @@ fn tracker_writes_need_the_apps_credential_and_reading_issues_does_not() {
         let id = IssueId::parse(&format!("{prefix}-1")).unwrap();
         let folder = (host.home.join("repos"))
             .join(personal.storage.repository.key())
+            .join(&personal.storage.root)
             .join("issues")
             .join(id.to_string());
         std::fs::create_dir_all(&folder).unwrap();

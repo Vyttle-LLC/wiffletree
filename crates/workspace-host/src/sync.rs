@@ -438,6 +438,8 @@ pub(crate) struct Passed {
     failed: Option<anyhow::Error>,
     /// What the storage rule sets found, when the repository is also storage.
     storage: Option<storage::Found>,
+    /// The folder GitHub's head moved into, which ended the pass before it compared anything.
+    moved_to: Option<folder::Root>,
     since: u64,
 }
 
@@ -789,6 +791,7 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
             error: None,
             failed: None,
             storage: None,
+            moved_to: None,
             since,
         },
         refused: None,
@@ -825,6 +828,7 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
     }
     passed.error = passed.error.or(refused);
     passed.storage = stored.map(|stored| stored.found(outcome.held));
+    passed.moved_to = outcome.moved_to;
     Ok(passed)
 }
 
@@ -890,7 +894,6 @@ impl Host {
         with: Option<JoinWith>,
         tools: &Tools,
     ) -> Result<HostSettings> {
-        self.refuse_second_use_of(input, storage::Use::Settings)?;
         let prepared = prepare(&self.home, input, with, tools)?;
         self.adopt_settings_repository(prepared)
     }
@@ -1105,6 +1108,11 @@ impl Host {
             return Ok(false);
         }
         let key = repos::key(&passed.repository.name);
+        if let Some(root) = passed.moved_to.take() {
+            self.finish_move(&key, &root)?;
+            self.merge_after_pass(&[]);
+            return Ok(true);
+        }
         if let Some(found) = passed.storage.take() {
             self.finish_storage(found, passed.pushed.is_some())?;
         }
@@ -1280,8 +1288,17 @@ impl Host {
         let settings = self.settings_key().unwrap_or_default();
         let mut notes = BTreeMap::new();
         // An issue's paused file is an issue note, under Issues.
-        let rows = (rows.into_iter()).filter(|(_, path, _)| !path.starts_with("issues/"));
-        for (key, path, why) in rows {
+        let mut outside_issues = vec![];
+        for row in rows {
+            let root = self.root_of_key(&row.0)?;
+            if !root
+                .strip(&row.1)
+                .is_some_and(|path| path.starts_with("issues/"))
+            {
+                outside_issues.push(row);
+            }
+        }
+        for (key, path, why) in outside_issues {
             let path = unit(&path).to_owned();
             let paused: Paused = serde_json::from_str(&why)?;
             let repository = match key == settings && is_shared(&path) {
@@ -1361,14 +1378,16 @@ impl Host {
     }
     /// A paused file of a storage repository as the app names it, such as "Sage · Space".
     fn stored_file_name(&self, key: &str, path: &str) -> Result<String> {
-        if path == storage::TRACKER {
+        let root = self.root_of_key(key)?;
+        let in_folder = root.strip(path).unwrap_or(path);
+        if in_folder == storage::TRACKER {
             return Ok("Issue prefix".into());
         }
         for record in self.spaces()? {
             let space = &record.space;
             let folder = format!("spaces/{}/", space.storage.folder);
             if repos::key(&space.storage.repository.key()) == key
-                && let Some(file) = path.strip_prefix(&folder)
+                && let Some(file) = in_folder.strip_prefix(&folder)
             {
                 return Ok(match file {
                     "space.yaml" => format!("{} · Space", space.name),
@@ -1470,7 +1489,10 @@ impl Host {
             for (file, ..) in &rows {
                 if let Some(content) = mine(file) {
                     let checked = match stored {
-                        true => storage::check(file, &content),
+                        true => {
+                            let root = self.root_of_key(&key)?;
+                            storage::check(root.strip(file).unwrap_or(file), &content)
+                        }
                         false => shared::check(file, &content),
                     };
                     checked.with_context(|| format!("{file} can't be synced"))?;

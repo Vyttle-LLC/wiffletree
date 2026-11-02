@@ -89,10 +89,11 @@ impl Fixture {
         self.home.path().join("repos").join(key)
     }
     fn space_file(&self, space: &SpaceId) -> PathBuf {
-        let folder = self.host.space(space).unwrap().space.storage.folder;
+        let storage = self.host.space(space).unwrap().space.storage;
         self.storage(space)
+            .join(storage.root)
             .join("spaces")
-            .join(folder)
+            .join(storage.folder)
             .join("space.yaml")
     }
 }

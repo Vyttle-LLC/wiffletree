@@ -120,7 +120,7 @@ fn short(machine: &str) -> &str {
 /// The choices a note offers, the main one last. An issue's file or part was changed by a
 /// teammate, not by another of the human's Macs.
 fn choices(note: &PausedSetting) -> Vec<(Settle, String, bool)> {
-    let issue = note.repository.is_some() && note.path.starts_with("issues/");
+    let issue = note.repository.is_some() && names_issue_file(&note.path);
     match &note.paused {
         Paused::TwoMachines { .. } if issue => vec![
             (Settle::UseTheOthers, "Use theirs".into(), false),
@@ -254,7 +254,7 @@ pub(crate) fn kept_note(note: &PausedSetting, compared: &Compared) -> Option<Str
         return None;
     }
     let history = match note.setting.split_once(" · ") {
-        Some((skill, _)) if !note.path.starts_with("issues/") => {
+        Some((skill, _)) if !names_issue_file(&note.path) => {
             format!(" and in {skill}’s history")
         }
         _ => String::new(),

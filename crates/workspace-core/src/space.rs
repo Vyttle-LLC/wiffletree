@@ -123,6 +123,29 @@ impl BrainRepository {
 pub struct SpaceStorage {
     pub repository: StorageRepository,
     pub folder: String,
+    /// The repository's Wiffletree folder, `DEFAULT_ROOT` by default, empty for a repository not
+    /// yet moved into one. Kept on this Mac with the Space, never in `space.yaml`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub root: String,
+}
+
+/// The Wiffletree folder a repository gets unless it holds another.
+pub const DEFAULT_ROOT: &str = "wiffletree";
+
+/// Refuses a Wiffletree folder that is not a relative path of plain names.
+pub fn validate_root(root: &str) -> Result<()> {
+    ensure!(
+        root.split('/')
+            .all(|part| !part.is_empty() && !part.starts_with('.') && !part.contains(['\\', '\0'])),
+        "A folder is a relative path of plain names, with no `.`, `..` or hidden part"
+    );
+    Ok(())
+}
+
+/// Whether `path`, relative to a repository, is under a tracker's `issues/`, wherever its folder
+/// is. Anything else named `issues` reads the same, which only asks for more care.
+pub fn names_issue_file(path: &str) -> bool {
+    path.split('/').any(|part| part == "issues")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -422,6 +445,12 @@ pub struct TrackerConfig {
     pub states: Vec<crate::IssueState>,
     #[serde(default)]
     pub labels: Vec<String>,
+    /// When the folder's wiki compiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compile: Option<crate::BrainCompile>,
+    /// The domains whose email addresses the folder's scans let through.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_email_domains: Vec<String>,
     /// Keys this release does not know.
     #[serde(flatten)]
     pub extra: Extra,
@@ -434,6 +463,8 @@ impl TrackerConfig {
             prefix,
             states: all_states(),
             labels: vec![],
+            compile: None,
+            allowed_email_domains: vec![],
             extra: Extra::new(),
         }
     }

@@ -283,6 +283,9 @@ pub fn set_tracker_prefix(space_id: SpaceId, prefix: String) -> Ask<TrackerConfi
 pub fn set_up_issues(space_id: SpaceId, prefix: String) -> Ask<TrackerConfig> {
     Ask::new(Command::SetUpIssues { space_id, prefix })
 }
+pub fn move_into_folder(space_id: SpaceId) -> Ask<()> {
+    Ask::new(Command::MoveIntoFolder { space_id })
+}
 pub fn sync_issues(space_id: Option<SpaceId>) -> Ask<()> {
     Ask::new(Command::SyncIssues { space_id })
 }

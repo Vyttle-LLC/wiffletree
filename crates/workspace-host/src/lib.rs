@@ -16,6 +16,7 @@ mod diffs;
 pub mod events;
 mod files;
 mod flatten;
+mod folder;
 mod github_access;
 pub mod host_files;
 mod issue_inbox;
@@ -429,6 +430,7 @@ impl Host {
         repos::migrate_clone_folders(&host.db, &host.home)?;
         host.move_settings_clone()?;
         host.ensure_local_storage()?;
+        host.move_local_repositories()?;
         // After local storage is in place, as turning a brain folder into its repository writes
         // the Space's file.
         brains::migrate(&mut host)?;
@@ -2204,7 +2206,6 @@ impl Host {
                 )?
             }
             Command::JoinSpaces { repository, spaces } => {
-                self.refuse_second_use_of(&repository, storage::Use::Storage)?;
                 let added = self.space_ids()?;
                 let tools = publish::Tools::default();
                 let staged = storage::stage(&self.home, &repository, &tools, &added)?;
@@ -2222,6 +2223,12 @@ impl Host {
             }
             Command::SetUpIssues { space_id, prefix } => {
                 serde_json::to_value(self.set_up_issues(&space_id, &prefix)?)?
+            }
+            Command::MoveIntoFolder { space_id } => {
+                let moving = self.start_move(&space_id)?;
+                let root = moving.run(&publish::Tools::default())?;
+                self.finish_move(&moving.key, &root)?;
+                Value::Null
             }
             Command::SyncIssues { space_id } => {
                 self.sync_issues(space_id.as_ref(), &publish::Tools::default())?;

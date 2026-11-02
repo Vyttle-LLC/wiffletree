@@ -3585,6 +3585,11 @@ pub enum Command {
         space_id: SpaceId,
         prefix: String,
     },
+    /// Moves a Space's GitHub repository, with its files at the root, into the folder
+    /// `wiffletree/`, in one pushed commit that stops older hosts until they update.
+    MoveIntoFolder {
+        space_id: SpaceId,
+    },
     /// Runs a pass of the Space's tracker now, or of every tracker without `space_id`.
     SyncIssues {
         #[serde(default)]
@@ -4311,6 +4316,7 @@ impl Command {
             | Self::JoinSpaces { .. }
             | Self::SetTrackerPrefix { .. }
             | Self::SetUpIssues { .. }
+            | Self::MoveIntoFolder { .. }
             | Self::ConfirmBrain { .. }
             | Self::ForgetBrain { .. }
             | Self::SetUpBrain { .. }
@@ -4450,6 +4456,7 @@ impl Command {
                 | Self::JoinSpaces { .. }
                 | Self::SetTrackerPrefix { .. }
                 | Self::SetUpIssues { .. }
+                | Self::MoveIntoFolder { .. }
                 | Self::CreateIssue { .. }
                 | Self::EditIssue { .. }
                 | Self::Comment { .. }
@@ -4488,7 +4495,7 @@ impl Command {
             self,
             // Settling a paused issue file writes to its tracker, whichever repository names it:
             // a tracker can be the settings repository too.
-            Self::SettlePausedFile { path, .. } if path.starts_with("issues/")
+            Self::SettlePausedFile { path, .. } if names_issue_file(path)
         )
     }
     /// Remote access, pairing and devices, which only the host itself may read or change.

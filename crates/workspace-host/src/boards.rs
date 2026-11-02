@@ -396,6 +396,7 @@ impl Host {
                 jobs: format!("{}/{}", space.id, assistant::JOB_OUTPUTS),
             });
             let boards = format!("spaces/{}/boards", space.storage.folder);
+            let boards = folder::Root::new(&space.storage.root).join(&boards);
             shelves.push(Shelf {
                 repository: self.storage_folder(&space.storage.repository),
                 space: space.id.clone(),
@@ -465,7 +466,7 @@ impl Host {
     /// Writes an output into `space`'s storage under `base`, at the folder of the title `about`
     /// names, as `file` with `about` beside it; a title written before is replaced, its old file
     /// included. Committed at once in local storage, and pushed by the next pass from GitHub.
-    /// Returns the output's folder, relative to the repository.
+    /// Returns the output's folder, relative to the repository's folder.
     pub(crate) fn write_output(
         &self,
         space: &Space,
@@ -475,7 +476,7 @@ impl Host {
         mut about: Value,
         message: &str,
     ) -> Result<String> {
-        let storage = self.storage_folder(&space.storage.repository);
+        let storage = self.root_folder(&space.storage.repository)?;
         let title = about["title"].as_str().context("An output has a title")?;
         let folder = format!(
             "{base}/{}",
@@ -547,10 +548,10 @@ mod tests {
         };
         host.save_job(recipe).unwrap();
         let storage = host.storage_folder(&personal.storage.repository);
-        let base = format!(
+        let base = folder::Root::new(&personal.storage.root).join(&format!(
             "spaces/{}/boards/release-dashboard",
             personal.storage.folder
-        );
+        ));
         let now = now();
         for (body, run, saved_at) in [
             ("<title>Week one</title>", "r1", now - 1000),
@@ -721,7 +722,7 @@ mod tests {
     #[test]
     fn a_dot_slug_or_a_linked_job_folder_never_widens_a_boards_root() {
         let (_home, host, personal) = host();
-        let storage = host.storage_folder(&personal.storage.repository);
+        let storage = host.root_folder(&personal.storage.repository).unwrap();
         let boards = storage.join(format!("spaces/{}/boards", personal.storage.folder));
         fs::create_dir_all(&boards).unwrap();
         std::os::unix::fs::symlink("../../..", boards.join("escape")).unwrap();

@@ -1599,6 +1599,7 @@ mod tests {
             storage: SpaceStorage {
                 repository: StorageRepository::Local { id: "l".into() },
                 folder: id.into(),
+                root: String::new(),
             },
             repositories: vec![],
             models: SpaceModels::default(),

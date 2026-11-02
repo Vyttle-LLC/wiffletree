@@ -1206,8 +1206,7 @@ impl Host {
             let Some(path) = local.brain_path.take() else {
                 continue;
             };
-            let named = origin_repository(Path::new(&path))
-                .filter(|named| self.refuse_second_use(named, storage::Use::Brain).is_ok());
+            let named = origin_repository(Path::new(&path));
             match named.as_deref().and_then(|named| named.split_once('/')) {
                 Some((owner, name)) => {
                     if let Some(brain) = &mut space.brain {
@@ -1402,7 +1401,6 @@ impl Host {
             !brain.spaces.is_empty(),
             "No Space names {repository}; name it in a Space's settings first"
         );
-        self.refuse_second_use(&brain.repository, storage::Use::Brain)?;
         brain.granted = true;
         self.save_brain(&brain)?;
         self.brains_now = true;
@@ -2688,13 +2686,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_brain_cannot_also_be_storage_or_settings_and_no_space_naming_it_cannot_be_granted() {
+    fn no_space_naming_a_brain_cannot_be_granted() {
         let home = tempfile::tempdir().unwrap();
         let (mut host, _) = host_with_brain(home.path());
         let error = host.confirm_brain("octo/unnamed").unwrap_err();
         assert!(format!("{error:#}").contains("No Space names"));
-        let error = (host.refuse_second_use(REPO, storage::Use::Storage)).unwrap_err();
-        assert!(format!("{error:#}").contains("pull requests"));
     }
 
     #[test]
@@ -2741,6 +2737,7 @@ pub(crate) mod tests {
                     storage: SpaceStorage {
                         repository: StorageRepository::Local { id: "l".into() },
                         folder: "s".into(),
+                        root: String::new(),
                     },
                     repositories: vec![],
                     models: SpaceModels::default(),

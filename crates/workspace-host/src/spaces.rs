@@ -171,6 +171,7 @@ fn new_space(name: &str, prefixes: &mut Vec<String>) -> (Space, TrackerConfig) {
         storage: SpaceStorage {
             repository: StorageRepository::Local { id: new_id() },
             folder: settings::slug(name, "space"),
+            root: DEFAULT_ROOT.into(),
         },
         repositories: vec![],
         models: SpaceModels::default(),
@@ -270,6 +271,9 @@ fn most(counts: impl Iterator<Item = (SpaceId, usize)>) -> Option<SpaceId> {
 
 pub(crate) fn validate(space: &Space) -> Result<()> {
     text(&space.name, 128)?;
+    if !space.storage.root.is_empty() {
+        validate_root(&space.storage.root)?;
+    }
     ensure!(
         space.description.len() <= 4096,
         "A Space's description is at most 4,096 bytes"
@@ -446,13 +450,6 @@ impl Host {
         self.check_space_behaviors(&current.space, &space)?;
         self.check_space_models(&current.space, &space)?;
         self.ensure_unused_name(&space.name, Some(&space.id))?;
-        if let Some(SpaceBrain {
-            repository: BrainRepository::GitHub { owner, name, .. },
-            ..
-        }) = &space.brain
-        {
-            self.refuse_second_use(&format!("{owner}/{name}"), storage::Use::Brain)?;
-        }
         let space = Space {
             name: space.name.trim().into(),
             ..space

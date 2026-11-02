@@ -1,11 +1,14 @@
 //! Storage repositories, where Spaces' definitions and their tracker live (OpenSpec change
 //! `spaces`, stage 3). Local storage is a Git repository at `repos/local-<id>/` with no remote,
 //! committed to on every change and never pushed. GitHub storage is a clone under `repos/` that
-//! its one sync engine runs with three rule sets: Spaces, over the folders of the Spaces this Mac
-//! added; boards, over their `boards/`, where the outputs of the jobs this Mac runs push without
-//! comparing; and issues (`issues_sync`), over `wiffletree-issues.yaml` and `issues/`. The store
-//! keeps each Space as the host uses it; the files are what travel.
+//! its one sync engine runs with three rule sets, inside the repository's folder (`folder`):
+//! Spaces, over the folders of the Spaces this Mac added and `compilers/`; boards, over their
+//! `boards/`, where the outputs of the jobs this Mac runs push without comparing; and issues
+//! (`issues_sync`), over `wiffletree-issues.yaml` and `issues/`. The store keeps each Space as
+//! the host uses it; the files are what travel. Sync's record names a file by its path in the
+//! repository; the paths here without a `Root` are relative to the folder.
 use crate::*;
+use folder::Root;
 use issues_sync::IssueRules;
 use publish::Tools;
 use repos::{Content, Record, Remote, RuleSet};
@@ -15,14 +18,15 @@ use tempfile::TempDir;
 use tracker::ISSUES;
 use workspace_core::cascade::{Choices, RepositorySettings, ReviewOverrides};
 
-/// The tracker's config at a storage repository's root.
+/// The tracker's config at the root of a repository's folder.
 pub(crate) const TRACKER: &str = "wiffletree-issues.yaml";
+/// The folder of the files each Mac that compiles writes for itself.
+pub(crate) const COMPILERS: &str = "compilers";
 const SPACE_FORMAT: u32 = 1;
-/// How often a storage repository is fetched, and once it holds a tracker.
-const CADENCE_MS: i64 = 300_000;
+/// How often a repository holding a Space is fetched, with or without a tracker.
 pub(crate) const TRACKER_CADENCE_MS: i64 = 60_000;
 
-/// A Space's definition file, relative to its storage repository.
+/// A Space's definition file, relative to its repository's folder.
 fn space_file(folder: &str) -> String {
     format!("spaces/{folder}/space.yaml")
 }
@@ -78,6 +82,13 @@ fn space_yaml(space: &Space) -> Result<Vec<u8>> {
         extra: space.extra.clone(),
     };
     Ok(serde_yaml::to_string(&file)?.into_bytes())
+}
+
+/// `compilers/<host id>.yaml`: a Mac that compiles its folder's wiki.
+#[derive(Serialize)]
+struct CompilerFile {
+    machine: String,
+    login: Option<String>,
 }
 
 /// The Space a `space.yaml` defines, stored in `storage`.
@@ -139,6 +150,7 @@ pub(crate) fn check(path: &str, content: &[u8]) -> Result<()> {
         let storage = SpaceStorage {
             repository: StorageRepository::Local { id: String::new() },
             folder: String::new(),
+            root: String::new(),
         };
         read_space(content, storage)?;
     } else if let Some((_, id)) = recipe_path(path) {
@@ -253,6 +265,11 @@ pub(crate) fn commit_local(folder: &Path, paths: &[&str], message: &str) -> Resu
         return Ok(());
     }
     runtime::git_output(folder, &[&["add", "--all", "--"][..], &present].concat())?;
+    commit_index(folder, message)
+}
+
+/// Commits what is staged in the local repository at `folder`, if anything.
+fn commit_index(folder: &Path, message: &str) -> Result<()> {
     if runtime::git_answer(folder, &["diff", "--cached", "--quiet"])?
         .status
         .success()
@@ -294,10 +311,11 @@ fn check_clone(space: &Space, clone: &str) -> Result<()> {
 
 /// Whether a tracker holds any issue: in its clone, or on GitHub as of `synced`, the commit last
 /// synced, which may hold one a pass has not brought into the clone yet.
-fn has_issues(folder: &Path, synced: &str) -> Result<bool> {
-    let listed = ["ls-tree", "-r", "--name-only", synced, "--", ISSUES];
-    let on_github = !runtime::git_output(folder, &listed)?.trim().is_empty();
-    Ok(on_github || !files_under(&folder.join(ISSUES))?.is_empty())
+fn has_issues(clone: &Path, root: &Root, synced: &str) -> Result<bool> {
+    let issues = root.join(ISSUES);
+    let listed = ["ls-tree", "-r", "--name-only", synced, "--", &issues];
+    let on_github = !runtime::git_output(clone, &listed)?.trim().is_empty();
+    Ok(on_github || !files_under(&clone.join(&issues))?.is_empty())
 }
 
 /// A GitHub repository checked as a Space's storage, with a clone of its branch in a staging
@@ -306,25 +324,52 @@ pub(crate) struct Staged {
     pub(crate) check: StorageCheck,
     /// Its tracker's config as read, with the keys this release does not know.
     tracker: Option<TrackerConfig>,
+    /// The folder its Spaces are in, or a new one's when it holds none.
+    root: Root,
     staging: TempDir,
+}
+
+/// The folder a joining Mac finds in the clone at `clone`, by reading the tree at its head:
+/// a repository with no Wiffletree files gets the default folder, unless something else is
+/// already there.
+fn folder_of(clone: &Path) -> Result<Root> {
+    let head = ["rev-parse", "--verify", "--quiet", "HEAD"];
+    let head = runtime::git_answer(clone, &head)?;
+    let found = match head.status.success() {
+        true => folder::find(clone, head.output.trim())?,
+        false => None,
+    };
+    if let Some(root) = found {
+        return Ok(root);
+    }
+    let root = Root::default_folder();
+    ensure!(
+        !root.in_clone(clone).exists(),
+        "{}/ holds other files, and the folder must be Wiffletree's",
+        root.name()
+    );
+    Ok(root)
 }
 
 /// Checks `input` as a storage repository and clones it, off the host thread. `added` names the
 /// Spaces already on this Mac. Writes nothing that outlasts the check.
 pub(crate) fn stage(home: &Path, input: &str, tools: &Tools, added: &[SpaceId]) -> Result<Staged> {
     let (repository, organization, staging) = repos::clone_to_staging(home, input, tools)?;
+    let root = folder_of(staging.path())?;
+    let in_staging = root.in_clone(staging.path());
     let mut spaces = vec![];
-    for entry in fs::read_dir(staging.path().join("spaces"))
+    for entry in fs::read_dir(in_staging.join("spaces"))
         .into_iter()
         .flatten()
     {
         let folder = entry?.file_name().to_string_lossy().into_owned();
-        let Ok(content) = fs::read(staging.path().join(space_file(&folder))) else {
+        let Ok(content) = fs::read(in_staging.join(space_file(&folder))) else {
             continue;
         };
         let storage = SpaceStorage {
             repository: github(&repository.name),
             folder: folder.clone(),
+            root: root.name().into(),
         };
         let space = read_space(&content, storage)
             .with_context(|| format!("The Space in spaces/{folder}/ can't be read"))?;
@@ -339,7 +384,7 @@ pub(crate) fn stage(home: &Path, input: &str, tools: &Tools, added: &[SpaceId]) 
         });
     }
     spaces.sort_by(|a, b| a.folder.cmp(&b.folder));
-    let tracker = match fs::read(staging.path().join(TRACKER)) {
+    let tracker = match fs::read(in_staging.join(TRACKER)) {
         Ok(content) => Some(read_tracker(&content)?),
         Err(_) => None,
     };
@@ -352,6 +397,7 @@ pub(crate) fn stage(home: &Path, input: &str, tools: &Tools, added: &[SpaceId]) 
     Ok(Staged {
         check,
         tracker,
+        root,
         staging,
     })
 }
@@ -409,19 +455,13 @@ pub(crate) struct NewSpace<'a> {
     pub(crate) prefix: Option<&'a str>,
 }
 
-/// A repository's use on this Mac, of which it has one: a brain, or storage and settings.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Use {
-    Brain,
-    Storage,
-    Settings,
-}
-
 /// What a storage repository's pass compares: the folders of the Spaces this Mac added, by
 /// folder with their names, its tracker's prefix, and the record.
 #[derive(Clone)]
 pub(crate) struct Input {
     key: String,
+    /// The repository's folder.
+    pub(crate) root: Root,
     names: BTreeMap<String, String>,
     pub(crate) prefix: Option<String>,
     synced: BTreeMap<String, Content>,
@@ -492,6 +532,10 @@ fn output_of(path: &str) -> &str {
 /// under `runs_here` is a runner's output only this Mac writes, so what Wiffletree wrote here is
 /// pushed without comparing it with GitHub's.
 pub(crate) struct WholeFiles {
+    /// The repository's folder.
+    root: Root,
+    /// Whether this rule set watches for the repository moving into a folder, as one does.
+    watches_move: bool,
     roots: Vec<String>,
     excluded: Vec<String>,
     runs_here: Vec<String>,
@@ -532,6 +576,8 @@ impl WholeFiles {
                 .filter(|folder| compares(folder))
                 .cloned()
                 .collect(),
+            root: input.root.clone(),
+            watches_move: false,
             roots,
             excluded,
             retries_alone: false,
@@ -568,6 +614,12 @@ impl WholeFiles {
 impl RuleSet for WholeFiles {
     fn claims(&self, path: &str) -> bool {
         self.compares(path)
+    }
+    fn moved_to(&self, clone: &Path, remote: &str) -> Result<Option<Root>> {
+        match self.watches_move && self.root.is_empty() {
+            true => folder::moved_to(clone, remote),
+            false => Ok(None),
+        }
     }
     fn compare(&mut self, clone: &Path, remote: &str) -> Result<()> {
         let here = self.here(clone)?;
@@ -620,8 +672,9 @@ impl RuleSet for WholeFiles {
                 }
                 continue;
             }
+            let in_folder = self.root.strip(path).unwrap_or(path);
             let refused = (theirs != base)
-                .then(|| theirs.as_deref().and_then(|c| check(path, c).err()))
+                .then(|| theirs.as_deref().and_then(|c| check(in_folder, c).err()))
                 .flatten();
             let machine = || "another machine".to_owned();
             let runs_here = under(&self.runs_here, path);
@@ -650,13 +703,14 @@ impl RuleSet for WholeFiles {
     /// A runner's output with a file paused this pass waits whole, so its metadata and its
     /// file are never pushed apart.
     fn commit(&mut self) -> Option<(Vec<(String, Content)>, String)> {
-        let paused: BTreeSet<&str> = (self.found.paused.iter())
+        let root = &self.root;
+        let output = |path: &'_ str| output_of(root.strip(path).unwrap_or(path)).to_owned();
+        let paused: BTreeSet<String> = (self.found.paused.iter())
             .filter(|(path, ..)| under(&self.runs_here, path))
-            .map(|(path, ..)| output_of(path))
+            .map(|(path, ..)| output(path))
             .collect();
-        (self.found.committed).retain(|(path, _)| {
-            !(under(&self.runs_here, path) && paused.contains(output_of(path)))
-        });
+        (self.found.committed)
+            .retain(|(path, _)| !(under(&self.runs_here, path) && paused.contains(&output(path))));
         let committed = &self.found.committed;
         (!committed.is_empty()).then(|| {
             let message = format!("{} · {}", self.subject, sync::machine_name());
@@ -691,6 +745,7 @@ fn under(roots: &[String], path: &str) -> bool {
 /// A storage repository's three rule sets for one pass: its Spaces' files, their boards and
 /// issues.
 pub(crate) struct RuleSets {
+    root: Root,
     spaces: WholeFiles,
     boards: WholeFiles,
     issues: IssueRules,
@@ -701,21 +756,26 @@ impl RuleSets {
     /// runs whole again, asks for it; a storage repository's own pass (`pass`) fetches,
     /// compares and pushes every rule set again instead, so issues renumber on the new head.
     pub(crate) fn new(input: Input, retries_alone: bool) -> Self {
+        let root = input.root.clone();
         let folders = |under: &str| -> Vec<String> {
             (input.names.keys())
-                .map(|folder| format!("spaces/{folder}{under}"))
+                .map(|folder| root.join(&format!("spaces/{folder}{under}")))
                 .collect()
         };
         let names: Vec<&str> = input.names.values().map(String::as_str).collect();
         let names = names.join(", ");
         let subject = format!("{names}: changed the Space");
-        let spaces = WholeFiles::new(&input, folders(""), folders("/boards"), subject);
+        let mut covered = folders("");
+        covered.push(root.join(COMPILERS));
+        let mut spaces = WholeFiles::new(&input, covered, folders("/boards"), subject);
+        spaces.watches_move = true;
         let subject = format!("{names}: saved outputs");
         let mut boards = WholeFiles::new(&input, folders("/boards"), vec![], subject);
         boards.retries_alone = retries_alone;
         let mut issues = IssueRules::new(&input);
         issues.files.parts = Some(input.parts.clone());
         let mut rule_sets = Self {
+            root,
             spaces,
             boards,
             issues,
@@ -731,7 +791,7 @@ impl RuleSets {
     pub(crate) fn found(self, mut held: Vec<scan::Held>) -> Found {
         let (mut found, mut boards) = (self.spaces.found, self.boards.found);
         let mut issues = self.issues.files.found;
-        issues_sync::keep_held_unnumbered(&mut issues, &mut held);
+        issues_sync::keep_held_unnumbered(&mut issues, &mut held, &self.root);
         for other in [&mut boards, &mut issues] {
             found.pulled.append(&mut other.pulled);
             found.alike.append(&mut other.alike);
@@ -772,6 +832,8 @@ pub(crate) struct Passed {
     pushed: Option<String>,
     error: Option<String>,
     found: Found,
+    /// The folder GitHub's head moved into, which ended the pass before it compared anything.
+    moved_to: Option<Root>,
 }
 
 /// What the latest pass of a storage repository that syncs on its own did.
@@ -837,11 +899,56 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
             pushed,
             error,
             found: rule_sets.found(outcome.held),
+            moved_to: outcome.moved_to,
         });
     }
 }
 
+/// A GitHub repository's move into its folder, to run off the host thread.
+pub(crate) struct Move {
+    pub(crate) key: String,
+    clone: PathBuf,
+    repository: SettingsRepository,
+    /// The host's one pass lock.
+    running: std::sync::Arc<std::sync::Mutex<()>>,
+}
+impl Move {
+    /// Pushes the move, or finds a teammate's; the folder the repository is in now.
+    pub(crate) fn run(&self, tools: &Tools) -> Result<Root> {
+        let _running = self
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let remote = Remote {
+            url: &self.repository.push_url,
+            branch: &self.repository.branch,
+        };
+        let root = Root::default_folder();
+        repos::move_into_folder(&self.clone, &remote, &root, &tools.git)
+    }
+}
+
 impl Host {
+    /// A Space's repository folder as this Mac records it.
+    pub(crate) fn root_of(&self, repository: &StorageRepository) -> Result<Root> {
+        let spaces = self.spaces()?;
+        let stored = spaces.iter().map(|record| &record.space.storage);
+        let root = stored.into_iter().find(|s| &s.repository == repository);
+        Ok(root.map_or_else(Root::default, |storage| Root::new(&storage.root)))
+    }
+    /// `root_of` by sync's record key, which an empty folder answers for any other repository.
+    pub(crate) fn root_of_key(&self, key: &str) -> Result<Root> {
+        let spaces = self.spaces()?;
+        let stored = spaces.iter().map(|record| &record.space.storage);
+        let root =
+            (stored.into_iter()).find(|s| Self::storage_key(&s.repository).as_deref() == Some(key));
+        Ok(root.map_or_else(Root::default, |storage| Root::new(&storage.root)))
+    }
+    /// Where a repository's folder is on this Mac.
+    pub(crate) fn root_folder(&self, repository: &StorageRepository) -> Result<PathBuf> {
+        let root = self.root_of(repository)?;
+        Ok(root.in_clone(&self.storage_folder(repository)))
+    }
     /// Where a storage repository is on this Mac.
     pub(crate) fn storage_folder(&self, repository: &StorageRepository) -> PathBuf {
         match repository {
@@ -868,12 +975,13 @@ impl Host {
                 continue;
             }
             let folder = self.storage_folder(&space.storage.repository);
+            let root = Root::new(&space.storage.root);
             let committed = runtime::git_answer(
                 &folder,
                 &[
                     "cat-file",
                     "-e",
-                    &format!("HEAD:{}", space_file(&space.storage.folder)),
+                    &format!("HEAD:{}", root.join(&space_file(&space.storage.folder))),
                 ],
             )
             .is_ok_and(|answer| answer.status.success());
@@ -883,21 +991,147 @@ impl Host {
         }
         Ok(())
     }
+    /// Moves each local repository with its Spaces' files at its root into the default folder,
+    /// at the first start of this release, in one commit with no question, and finishes a move
+    /// a start cut short. A repository that cannot move stays at its root, which still works.
+    pub(crate) fn move_local_repositories(&mut self) -> Result<()> {
+        let mut waiting: Vec<StorageRepository> = vec![];
+        for record in self.spaces()? {
+            let storage = record.space.storage;
+            if matches!(storage.repository, StorageRepository::Local { .. })
+                && storage.root.is_empty()
+                && !waiting.contains(&storage.repository)
+            {
+                waiting.push(storage.repository);
+            }
+        }
+        for repository in waiting {
+            if let Err(error) = self.move_local(&repository) {
+                let name = repository.key();
+                eprintln!("Not moving {name} into its folder: {error:#}");
+            }
+        }
+        Ok(())
+    }
+    fn move_local(&mut self, repository: &StorageRepository) -> Result<()> {
+        let clone = self.storage_folder(repository);
+        let root = Root::default_folder();
+        let head = runtime::git_output(&clone, &["rev-parse", "HEAD"])?;
+        let head = head.trim();
+        if folder::moved_to(&clone, head)?.is_none() {
+            runtime::git_output(&clone, &["reset", "--quiet", head])?;
+            folder::stage_move(&clone, head, &root)?;
+            commit_index(&clone, &format!("Move into {}/", root.name()))?;
+            folder::check_move(&clone, head, "HEAD", &root)?;
+        }
+        self.adopt_folder(repository, &root)?;
+        Ok(())
+    }
+    /// Takes a repository's move into `root`, on the Mac that made it and on every other: this
+    /// Mac's files move under the folder, unpushed ones with them, and then its Spaces and
+    /// record. In that order, so a start cut short only moves the rest: a record that named the
+    /// folder before its files were there would read each file as removed here. What a move
+    /// left at the root comes down with the next pass, or for a local repository from its head.
+    pub(crate) fn adopt_folder(&mut self, storage: &StorageRepository, root: &Root) -> Result<()> {
+        let unmoved: Vec<SpaceRecord> = (self.spaces()?.into_iter())
+            .filter(|r| &r.space.storage.repository == storage && r.space.storage.root.is_empty())
+            .collect();
+        if unmoved.is_empty() {
+            return Ok(());
+        }
+        let clone = self.storage_folder(storage);
+        folder::move_files(&clone, root)?;
+        if matches!(storage, StorageRepository::Local { .. }) {
+            folder::restore_stubs(&clone, "HEAD", root)?;
+        }
+        let key = Self::storage_key(storage);
+        let tx = self.db.unchecked_transaction()?;
+        for mut record in unmoved {
+            record.space.storage.root = root.name().into();
+            tx.execute(
+                "UPDATE spaces SET data=?2 WHERE id=?1",
+                params![record.space.id.as_str(), encode(&record.space)?],
+            )?;
+        }
+        for table in ["sync_record", "sync_paused", "sync_held", "issue_parts"] {
+            let paths: Vec<String> = (tx.prepare(&format!(
+                "SELECT DISTINCT path FROM {table} WHERE repository=?1"
+            ))?)
+            .query_map([&key], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+            for path in paths.iter().filter(|path| folder::moves(path)) {
+                tx.execute(
+                    &format!(
+                        "UPDATE OR REPLACE {table} SET path=?3 WHERE repository=?1 AND path=?2"
+                    ),
+                    params![key, path, root.join(path)],
+                )?;
+            }
+        }
+        tx.commit()?;
+        if let Some(key) = key {
+            self.storage_written.borrow_mut().insert(key);
+        }
+        Ok(())
+    }
+    /// Starts the human's Move into the folder for the Space's repository: refused for a local
+    /// one, which moved at start, and for one already in its folder.
+    pub(crate) fn start_move(&self, space_id: &SpaceId) -> Result<Move> {
+        let space = self.space(space_id)?.space;
+        let key = Self::storage_key(&space.storage.repository)
+            .context("A repository on this Mac alone moves into its folder at start")?;
+        ensure!(
+            space.storage.root.is_empty(),
+            "{} is already in {}/",
+            space.storage.repository.key(),
+            space.storage.root
+        );
+        let repository = self.stored_repository(&key)?;
+        Ok(Move {
+            clone: repos::clone_folder(&self.home, &repository.name),
+            repository,
+            key,
+            running: self.sync_passes.clone(),
+        })
+    }
+    /// Takes a finished move, by `key`.
+    pub(crate) fn finish_move(&mut self, key: &str, root: &Root) -> Result<()> {
+        let space = (self.spaces()?.into_iter())
+            .find(|r| Self::storage_key(&r.space.storage.repository).as_deref() == Some(key));
+        match space {
+            Some(record) => self.adopt_folder(&record.space.storage.repository, root),
+            None => Ok(()),
+        }
+    }
+    /// The GitHub storage repository `key` as this Mac recorded it.
+    fn stored_repository(&self, key: &str) -> Result<SettingsRepository> {
+        let data: String = self.db.query_row(
+            "SELECT data FROM storage_repositories WHERE key=?1",
+            [key],
+            |r| r.get(0),
+        )?;
+        Ok(serde_json::from_str(&data)?)
+    }
     /// Writes a Space with local storage to its repository, with the tracker's config when it
     /// has none, and commits them.
     fn write_local(&self, space: &Space, message: &str) -> Result<()> {
         let folder = self.storage_folder(&space.storage.repository);
-        let file = space_file(&space.storage.folder);
+        let root = Root::new(&space.storage.root);
+        let (file, tracker_file) = (
+            root.join(&space_file(&space.storage.folder)),
+            root.join(TRACKER),
+        );
         shared::write_atomically(&folder.join(&file), &space_yaml(space)?)?;
         let mut paths = vec![file.as_str()];
-        if !folder.join(TRACKER).exists() {
+        if !folder.join(&tracker_file).exists() {
             let tracker = self.tracker(space)?;
-            shared::write_atomically(&folder.join(TRACKER), &tracker_yaml(&tracker)?)?;
-            paths.push(TRACKER);
+            shared::write_atomically(&folder.join(&tracker_file), &tracker_yaml(&tracker)?)?;
+            paths.push(&tracker_file);
         }
         commit_local(&folder, &paths, message)
     }
-    /// Writes a file of a GitHub storage repository's clone and notes it for the next pass.
+    /// Writes a file of a GitHub storage repository's clone, by its path there, and notes it
+    /// for the next pass.
     fn write_stored(&self, key: &str, folder: &Path, path: &str, content: &[u8]) -> Result<()> {
         shared::write_atomically(&folder.join(path), content)?;
         Record::wrote(&self.db, key, path, Some(content))?;
@@ -911,8 +1145,24 @@ impl Host {
             return self.write_local(space, &format!("{}: changed the Space", space.name));
         };
         let folder = self.storage_folder(&space.storage.repository);
-        let file = space_file(&space.storage.folder);
+        let file = Root::new(&space.storage.root).join(&space_file(&space.storage.folder));
         self.write_stored(&key, &folder, &file, &space_yaml(space)?)
+    }
+    /// Writes this Mac's file saying it compiles the Space's wiki, or with `compiles` false
+    /// removes it. It is the one shared file only this Mac writes, so it never conflicts.
+    pub fn write_compiler_file(&self, space: &Space, compiles: bool) -> Result<()> {
+        let file = format!("{COMPILERS}/{}.yaml", self.host_id()?);
+        let content = compiles
+            .then(|| {
+                serde_yaml::to_string(&CompilerFile {
+                    machine: sync::machine_name(),
+                    login: self.gh_login.clone(),
+                })
+            })
+            .transpose()?;
+        let message = format!("{}: changed who compiles", space.name);
+        let files = [(file, content.as_deref().map(str::as_bytes))];
+        self.write_storage_files(space, &files, &message)
     }
     /// Writes a job's recipe file to its Space's storage, or with `None` removes it: committed
     /// at once in a local repository, and pushed by the next pass from a GitHub one.
@@ -926,9 +1176,9 @@ impl Host {
         let file = jobs::recipe_file(&space.storage.folder, id);
         self.write_storage_files(space, &[(file, content)], message)
     }
-    /// Writes files of a Space's storage, relative to the repository, or with `None` removes
-    /// them: committed at once in a local repository, and pushed by the next pass from a GitHub
-    /// one.
+    /// Writes files of a Space's storage, relative to the repository's folder, or with `None`
+    /// removes them: committed at once in a local repository, and pushed by the next pass from a
+    /// GitHub one.
     pub(crate) fn write_storage_files(
         &self,
         space: &Space,
@@ -936,7 +1186,11 @@ impl Host {
         message: &str,
     ) -> Result<()> {
         let folder = self.storage_folder(&space.storage.repository);
-        for (file, content) in files {
+        let root = Root::new(&space.storage.root);
+        let files: Vec<(String, Option<&[u8]>)> = (files.iter())
+            .map(|(file, content)| (root.join(file), *content))
+            .collect();
+        for (file, content) in &files {
             match content {
                 Some(content) => shared::write_atomically(&folder.join(file), content)?,
                 None => match fs::remove_file(folder.join(file)) {
@@ -951,7 +1205,7 @@ impl Host {
             let paths: Vec<&str> = files.iter().map(|(file, _)| file.as_str()).collect();
             return commit_local(&folder, &paths, message);
         };
-        for (file, content) in files {
+        for (file, content) in &files {
             Record::wrote(&self.db, &key, file, *content)?;
         }
         self.storage_written.borrow_mut().insert(key);
@@ -992,79 +1246,13 @@ impl Host {
             ),
         }
     }
-    /// Refuses a repository for `wanted` when it has a use on this Mac it cannot share: a brain
-    /// is never storage or settings, and storage may also be the settings repository.
-    pub(crate) fn refuse_second_use(&self, name: &str, wanted: Use) -> Result<()> {
-        for record in self.spaces()? {
-            let space = &record.space;
-            if wanted != Use::Brain
-                && let Some(SpaceBrain {
-                    repository:
-                        BrainRepository::GitHub {
-                            owner, name: brain, ..
-                        },
-                    ..
-                }) = &space.brain
-                && format!("{owner}/{brain}").eq_ignore_ascii_case(name)
-            {
-                bail!(
-                    "{name} is the {} Space's brain, which changes only through pull requests; choose another repository",
-                    space.name
-                );
-            }
-            if wanted == Use::Brain && space.storage.repository.key().eq_ignore_ascii_case(name) {
-                bail!(
-                    "{name} is the {} Space's storage; a brain needs a repository of its own",
-                    space.name
-                );
-            }
-        }
-        let settings = self.settings().settings_repository;
-        if wanted == Use::Brain && settings.is_some_and(|r| r.name.eq_ignore_ascii_case(name)) {
-            bail!(
-                "{name} is this Mac's settings repository; a brain needs a repository of its own"
-            );
-        }
-        Ok(())
-    }
-    /// Refuses a Space from another Mac whose GitHub brain is its own storage or has another use
-    /// here, as `UpdateSpace` refuses it from the human.
-    fn refuse_brain_of(&self, space: &Space) -> Result<()> {
-        let Some(SpaceBrain {
-            repository: BrainRepository::GitHub { owner, name, .. },
-            ..
-        }) = &space.brain
-        else {
-            return Ok(());
-        };
-        let brain = format!("{owner}/{name}");
-        ensure!(
-            !brain.eq_ignore_ascii_case(&space.storage.repository.key()),
-            "{brain} is the {} Space's storage; a brain needs a repository of its own",
-            space.name
-        );
-        self.refuse_second_use(&brain, Use::Brain)
-    }
     /// Refuses a file another Mac changed that this Mac cannot take: a tracker config whose
-    /// prefix another storage repository here uses, or a Space whose brain has another use here.
+    /// prefix another storage repository here uses.
     fn refuse_pulled(&self, storage: &StorageRepository, path: &str, content: &[u8]) -> Result<()> {
-        if path == TRACKER {
+        if self.root_of(storage)?.strip(path) == Some(TRACKER) {
             return self.refuse_used_prefix(&read_tracker(content)?.prefix, &storage.key());
         }
-        for record in self.spaces()? {
-            let stored = &record.space.storage;
-            if &stored.repository == storage && path == space_file(&stored.folder) {
-                self.refuse_brain_of(&read_space(content, stored.clone())?)?;
-            }
-        }
         Ok(())
-    }
-    /// `refuse_second_use` for a repository named as `owner/name` or by its URL.
-    pub(crate) fn refuse_second_use_of(&self, input: &str, wanted: Use) -> Result<()> {
-        match github_access::candidates(input, "https") {
-            Ok((owner, name, _)) => self.refuse_second_use(&format!("{owner}/{name}"), wanted),
-            Err(_) => Ok(()),
-        }
     }
     /// Changes the prefix of the tracker that is the Space's storage repository. A local
     /// tracker's issue folders, IDs and references are rewritten and committed; a GitHub
@@ -1083,6 +1271,8 @@ impl Host {
         let storage = space.storage.repository.key();
         self.refuse_used_prefix(prefix, &storage)?;
         let folder = self.storage_folder(&space.storage.repository);
+        let root = Root::new(&space.storage.root);
+        let file = root.join(TRACKER);
         let tracker = TrackerConfig {
             prefix: prefix.into(),
             ..current.clone()
@@ -1090,10 +1280,10 @@ impl Host {
         let content = tracker_yaml(&tracker)?;
         match Self::storage_key(&space.storage.repository) {
             None => {
-                rename_issues(&folder, &current.prefix, prefix)?;
-                shared::write_atomically(&folder.join(TRACKER), &content)?;
+                rename_issues(&root.in_clone(&folder), &current.prefix, prefix)?;
+                shared::write_atomically(&folder.join(&file), &content)?;
                 let message = format!("Renamed the issue prefix {} to {prefix}", current.prefix);
-                commit_local(&folder, &[TRACKER, ISSUES], &message)?;
+                commit_local(&folder, &[file.as_str(), &root.join(ISSUES)], &message)?;
                 // The issues' links, derived states and follows follow them to their new IDs.
                 for table in ["issue_links", "issue_derived", "issue_follows"] {
                     self.db.execute(
@@ -1107,10 +1297,10 @@ impl Host {
                     .context("The storage repository has no record")?
                     .commit;
                 ensure!(
-                    !has_issues(&folder, &synced)?,
+                    !has_issues(&folder, &root, &synced)?,
                     "{storage} has issues, and a shared tracker's prefix changes only while it has none"
                 );
-                self.write_stored(&key, &folder, TRACKER, &content)?;
+                self.write_stored(&key, &folder, &file, &content)?;
             }
         }
         self.db.execute(
@@ -1133,13 +1323,14 @@ impl Host {
         );
         let storage = space.storage.repository.key();
         let folder = self.storage_folder(&space.storage.repository);
+        let file = Root::new(&space.storage.root).join(TRACKER);
         ensure!(
-            !folder.join(TRACKER).exists(),
+            !folder.join(&file).exists(),
             "{storage} already has {TRACKER}; it is set up at the next sync"
         );
         self.refuse_used_prefix(prefix, &storage)?;
         let tracker = TrackerConfig::new(prefix.into());
-        self.write_stored(&key, &folder, TRACKER, &tracker_yaml(&tracker)?)?;
+        self.write_stored(&key, &folder, &file, &tracker_yaml(&tracker)?)?;
         self.db.execute(
             "INSERT INTO trackers VALUES (?1,?2)",
             params![storage, encode(&tracker)?],
@@ -1153,6 +1344,7 @@ impl Host {
         let repository = &staged.check.repository;
         let key = repos::key(&repository.name);
         let clone = repos::clone_folder(&self.home, &repository.name);
+        let root = staged.root.clone();
         if !clone.exists() {
             fs::create_dir_all(clone.parent().context("A clone is in a folder")?)?;
             fs::rename(staged.staging.keep(), &clone)?;
@@ -1166,7 +1358,7 @@ impl Host {
         } else {
             // The settings repository's clone: its Space and tracker files start their record
             // as its head holds them, and what the record has already stays.
-            for (path, content) in repos::files_at(&clone, head, &scan::scanned)? {
+            for (path, content) in repos::files_at(&clone, head, &|path| root.scanned(path))? {
                 self.db.execute(
                     "INSERT OR IGNORE INTO sync_record(repository,path,synced,written) VALUES (?1,?2,?3,?3)",
                     params![key, path, content],
@@ -1190,13 +1382,16 @@ impl Host {
     ) -> Result<SpaceRecord> {
         let repository = staged.check.repository.clone();
         repos::refuse_another(&self.home, &repository)?;
-        let spaces = staged.staging.path().join("spaces");
-        let (space, tracker) = self.check_new_stored_space(
+        let root = staged.root.clone();
+        let spaces = root.in_clone(staged.staging.path()).join("spaces");
+        let (mut space, tracker) = self.check_new_stored_space(
             new,
             &repository.name,
             staged.tracker.as_ref(),
             &|folder| spaces.join(folder).exists(),
         )?;
+        self.refuse_another_root(&space.storage.repository, &root)?;
+        space.storage.root = root.name().into();
         let new_tracker = staged.tracker.is_none();
         // No pass works in the clone while the Space's files and record are put in it.
         let passes = self.sync_passes.clone();
@@ -1212,13 +1407,28 @@ impl Host {
         self.atomically(|host| {
             spaces::insert_space(&host.db, &space, &local, (!recorded).then_some(&tracker))?;
             host.write_space_file(&space)?;
-            if new_tracker && !clone.join(TRACKER).exists() {
-                host.write_stored(&key, &clone, TRACKER, &tracker_yaml(&tracker)?)?;
+            let file = root.join(TRACKER);
+            if new_tracker && !clone.join(&file).exists() {
+                host.write_stored(&key, &clone, &file, &tracker_yaml(&tracker)?)?;
             }
             Ok(())
         })?;
         self.reindex_tracker(&space, &self.tracker(&space)?.prefix)?;
         Ok(SpaceRecord { space, local })
+    }
+    /// Refuses a Space in a repository whose head is in another folder than this Mac's other
+    /// Spaces there, which adopt it at the next pass, as Spaces in a repository share one.
+    fn refuse_another_root(&self, repository: &StorageRepository, root: &Root) -> Result<()> {
+        let here = self.spaces()?;
+        let here = here
+            .iter()
+            .find(|r| &r.space.storage.repository == repository);
+        ensure!(
+            here.is_none_or(|record| record.space.storage.root == root.name()),
+            "{} moved into its folder. Sync it, then try again.",
+            repository.key()
+        );
+        Ok(())
     }
     /// `check_new_stored_space` for the repository the human named, before it is read: the
     /// refusals that need nothing from GitHub, run before an empty repository is started. Answers
@@ -1231,9 +1441,9 @@ impl Host {
     }
     /// Every refusal of a new Space stored in the GitHub repository `repository`, which is a
     /// tracker as `theirs` when it has one, and the Space and tracker it would get: its name is
-    /// unused and valid, the repository has no other use here, and the prefix, the repository's
-    /// own or else `prefix` or one proposed from the name, is free here. Its folder is the first
-    /// one `taken` does not hold. Writes nothing, so it runs before anything is pushed.
+    /// unused and valid, and the prefix, the repository's own or else `prefix` or one proposed
+    /// from the name, is free here. Its folder is the first one `taken` does not hold. Writes
+    /// nothing, so it runs before anything is pushed.
     pub(crate) fn check_new_stored_space(
         &self,
         new: &NewSpace,
@@ -1248,7 +1458,6 @@ impl Host {
             prefix,
         } = *new;
         self.ensure_unused_name(name, None)?;
-        self.refuse_second_use(repository, Use::Storage)?;
         let storage = github(repository);
         let tracker = match (theirs, prefix) {
             (Some(theirs), Some(asked)) if theirs.prefix != asked => bail!(
@@ -1285,6 +1494,7 @@ impl Host {
             storage: SpaceStorage {
                 repository: storage,
                 folder,
+                root: DEFAULT_ROOT.into(),
             },
             repositories: vec![],
             models: SpaceModels::default(),
@@ -1306,12 +1516,13 @@ impl Host {
     ) -> Result<Vec<SpaceRecord>> {
         ensure!(!ticked.is_empty(), "Tick at least one Space to add");
         let repository = staged.check.repository.clone();
-        self.refuse_second_use(&repository.name, Use::Storage)?;
         repos::refuse_another(&self.home, &repository)?;
         let storage = github(&repository.name);
         if let Some(prefix) = &staged.check.prefix {
             self.refuse_used_prefix(prefix, &storage.key())?;
         }
+        self.refuse_another_root(&storage, &staged.root)?;
+        let in_staging = staged.root.in_clone(staged.staging.path());
         let mut joined = vec![];
         for tick in ticked {
             let listing = (staged.check.spaces.iter())
@@ -1328,15 +1539,15 @@ impl Host {
                 listing.name
             );
             self.ensure_unused_name(&listing.name, None)?;
-            let content = fs::read(staged.staging.path().join(space_file(&tick.folder)))?;
+            let content = fs::read(in_staging.join(space_file(&tick.folder)))?;
             let space = read_space(
                 &content,
                 SpaceStorage {
                     repository: storage.clone(),
                     folder: tick.folder.clone(),
+                    root: staged.root.name().into(),
                 },
             )?;
-            self.refuse_brain_of(&space)?;
             for clone in &tick.clones {
                 check_clone(&space, clone)?;
             }
@@ -1377,7 +1588,7 @@ impl Host {
     /// Takes the jobs a joined Space's clone already holds into the store; a recipe this Mac
     /// cannot read is left out, as a pulled one would be held.
     fn take_cloned_recipes(&mut self, space: &Space) -> Result<()> {
-        let clone = self.storage_folder(&space.storage.repository);
+        let clone = self.root_folder(&space.storage.repository)?;
         let folder = clone
             .join("spaces")
             .join(&space.storage.folder)
@@ -1429,11 +1640,12 @@ impl Host {
         };
         let prefix = self.tracker(first).ok().map(|tracker| tracker.prefix);
         let storage = first.storage.repository.key();
+        let root = Root::new(&first.storage.root);
         let mut runs_here = vec![];
         for recipe in self.recipes()? {
             let space = stored.iter().find(|space| space.id == recipe.space_id);
             if let Some(space) = space.filter(|_| jobs::runs_here(&recipe)) {
-                runs_here.push(jobs::board_folder(&space.storage.folder, &recipe.id));
+                runs_here.push(root.join(&jobs::board_folder(&space.storage.folder, &recipe.id)));
             }
         }
         let names: BTreeMap<String, String> = (stored.into_iter())
@@ -1462,6 +1674,7 @@ impl Host {
         }
         Ok(Some(Input {
             key: key.to_owned(),
+            root,
             names,
             prefix,
             synced: record.synced,
@@ -1484,20 +1697,16 @@ impl Host {
             if Some(&key) == settings.as_ref() || cadences.iter().any(|(k, _)| k == &key) {
                 continue;
             }
-            let cadence = match self.tracker(&record.space) {
-                Ok(_) => TRACKER_CADENCE_MS,
-                Err(_) => CADENCE_MS,
-            };
-            cadences.push((key, cadence));
+            cadences.push((key, TRACKER_CADENCE_MS));
         }
         Ok(cadences)
     }
-    /// How often the settings repository is fetched: every minute once it is also a tracker.
+    /// How often the settings repository is fetched: every minute once it also holds a Space.
     pub(crate) fn settings_cadence(&self) -> Result<i64> {
         let key = self.settings_key();
         for record in self.spaces()? {
             let stored = Self::storage_key(&record.space.storage.repository);
-            if stored.is_some() && stored == key && self.tracker(&record.space).is_ok() {
+            if stored.is_some() && stored == key {
                 return Ok(TRACKER_CADENCE_MS);
             }
         }
@@ -1508,12 +1717,7 @@ impl Host {
         let Some(input) = self.storage_input(key)? else {
             return Ok(None);
         };
-        let data: String = self.db.query_row(
-            "SELECT data FROM storage_repositories WHERE key=?1",
-            [key],
-            |r| r.get(0),
-        )?;
-        let repository: SettingsRepository = serde_json::from_str(&data)?;
+        let repository = self.stored_repository(key)?;
         let commit = Record::read(&self.db, key)?
             .context("The storage repository has no record")?
             .commit;
@@ -1541,6 +1745,9 @@ impl Host {
         if let Some(error) = &passed.error {
             eprintln!("Syncing {key}: {error}");
         }
+        if let Some(root) = &passed.moved_to {
+            return self.finish_move(key, root);
+        }
         let commit = passed.pushed.clone().unwrap_or(passed.remote);
         let pushed = passed.pushed.is_some();
         self.finish_storage(passed.found, pushed)?;
@@ -1565,6 +1772,7 @@ impl Host {
         };
         let storage = &record.space.storage.repository;
         let clone = self.storage_folder(storage);
+        let root = Root::new(&record.space.storage.root);
         let touched = (found.pulled.iter().map(|(path, ..)| path))
             .chain(found.merged.iter().map(|(path, ..)| path));
         let before = self.issues_before(storage, touched);
@@ -1602,7 +1810,10 @@ impl Host {
                 Some(content) => shared::write_atomically(&clone.join(&path), content)?,
                 None => {
                     drop(fs::remove_file(clone.join(&path)));
-                    tracker::remove_emptied(&clone, &path);
+                    tracker::remove_emptied(
+                        &root.in_clone(&clone),
+                        root.strip(&path).unwrap_or(&path),
+                    );
                 }
             }
             pulled.push((path, there));
@@ -1612,7 +1823,7 @@ impl Host {
             (found.committed.into_iter()).filter(|(path, _)| pushed && !skipped.contains(path)),
         );
         // A rule set whose compare failed keeps its notes until a pass compares it again.
-        let ours = |path: &str| scan::scanned(path) && !under(&found.failed_roots, path);
+        let ours = |path: &str| root.scanned(path) && !under(&found.failed_roots, path);
         let tx = self.db.unchecked_transaction()?;
         for (path, kept, there) in &merged {
             tx.execute(
@@ -1677,7 +1888,7 @@ impl Host {
             self.take_pulled(storage, &path, content.as_deref())?;
         }
         for (path, ..) in &merged {
-            if let Some(id) = tracker::issue_of(path) {
+            if let Some(id) = root.issue_of(path) {
                 self.reindex_issue(storage, &id)?;
             }
         }
@@ -1693,13 +1904,17 @@ impl Host {
         Ok(())
     }
     /// Takes a pulled `space.yaml` of a Space on this Mac, or the tracker's config, into the
-    /// store, and a pulled issue's file into the index.
+    /// store, and a pulled issue's file into the index, by its path in the repository.
     pub(crate) fn take_pulled(
         &mut self,
         storage: &StorageRepository,
         path: &str,
         content: Option<&[u8]>,
     ) -> Result<()> {
+        let root = self.root_of(storage)?;
+        let Some(path) = root.strip(path) else {
+            return Ok(());
+        };
         if let Some(id) = tracker::issue_of(path) {
             return self.reindex_issue(storage, &id);
         }
@@ -1768,12 +1983,7 @@ impl Host {
                 error: None,
             });
         };
-        let data: String = self.db.query_row(
-            "SELECT data FROM storage_repositories WHERE key=?1",
-            [&key],
-            |r| r.get(0),
-        )?;
-        let repository: SettingsRepository = serde_json::from_str(&data)?;
+        let repository = self.stored_repository(&key)?;
         let settings_repository = self.settings_key().as_ref() == Some(&key);
         let (synced_at, error) = self.storage_sync_state(&key)?;
         Ok(StorageStatus {
@@ -1890,6 +2100,7 @@ pub(crate) mod tests {
             storage: SpaceStorage {
                 repository: github(NAME),
                 folder: "sage".into(),
+                root: String::new(),
             },
             repositories: vec!["Sage-Social/api".into()],
             models: SpaceModels::default(),
@@ -1972,18 +2183,25 @@ pub(crate) mod tests {
         assert_eq!(git(&folder, &["remote"]), "", "no remote");
         assert_eq!(
             committed(&folder),
-            ["spaces/woodworking/space.yaml", TRACKER]
+            [
+                "wiffletree/spaces/woodworking/space.yaml",
+                "wiffletree/wiffletree-issues.yaml"
+            ]
         );
         assert_eq!(git(&folder, &["rev-list", "--count", "HEAD"]), "1");
-        let tracker = read_tracker(&fs::read(folder.join(TRACKER)).unwrap()).unwrap();
+        let in_folder = folder.join(DEFAULT_ROOT);
+        let tracker = read_tracker(&fs::read(in_folder.join(TRACKER)).unwrap()).unwrap();
         assert_eq!(tracker.prefix, "WOOD");
-        let file = fs::read(folder.join("spaces/woodworking/space.yaml")).unwrap();
+        let file = fs::read(in_folder.join("spaces/woodworking/space.yaml")).unwrap();
         assert_eq!(read_space(&file, space.storage.clone()).unwrap(), space);
         // Personal, from the store's upgrade, gets its repository at start, once.
         let personal = host.storage_folder(&personal(&host).storage.repository);
         assert_eq!(
             committed(&personal),
-            ["spaces/personal/space.yaml", TRACKER]
+            [
+                "wiffletree/spaces/personal/space.yaml",
+                "wiffletree/wiffletree-issues.yaml"
+            ]
         );
         let heads = |host: &Host| {
             (host.spaces().unwrap().iter())
@@ -2008,7 +2226,8 @@ pub(crate) mod tests {
         host.set_repository_spaces("Sage-Social/api", std::slice::from_ref(&space.id))
             .unwrap();
         let folder = host.storage_folder(&space.storage.repository);
-        let committed = git(&folder, &["show", "HEAD:spaces/personal/space.yaml"]);
+        let shown = "HEAD:wiffletree/spaces/personal/space.yaml";
+        let committed = git(&folder, &["show", shown]);
         assert!(committed.contains("- Sage-Social/api"), "{committed}");
         // A shared Space's membership is pushed by its pass.
         let github_folder = tempfile::tempdir().unwrap();
@@ -2073,6 +2292,7 @@ sources:
         let storage = SpaceStorage {
             repository: super::github(NAME),
             folder: "sage".into(),
+            root: String::new(),
         };
         read_space(FROM_A_NEWER_MAC.as_bytes(), storage).unwrap()
     }
@@ -2086,6 +2306,7 @@ sources:
         let storage = SpaceStorage {
             repository: super::github(NAME),
             folder: "sage".into(),
+            root: String::new(),
         };
         let old = "format: 1\nid: sage-id\nname: Sage\ninstructions: Never log names.\n";
         let space = read_space(old.as_bytes(), storage).unwrap();
@@ -2100,6 +2321,7 @@ sources:
         let storage = SpaceStorage {
             repository: super::github(NAME),
             folder: "sage".into(),
+            root: String::new(),
         };
         let newer = "\
 format: 1
@@ -2157,6 +2379,7 @@ repository_settings:
         let storage = SpaceStorage {
             repository: super::github(NAME),
             folder: "home".into(),
+            root: String::new(),
         };
         let space = Space {
             description: "Changed here".into(),
@@ -2175,6 +2398,7 @@ repository_settings:
         let storage = SpaceStorage {
             repository: super::github(NAME),
             folder: "sage".into(),
+            root: String::new(),
         };
         let named = sage("") + "storage: a teammate's note\n";
         let error = read_space(named.as_bytes(), storage).unwrap_err();
@@ -2267,7 +2491,7 @@ repository_settings:
     fn renaming_a_local_prefix_rewrites_its_issue_ids_folders_and_references() {
         let (_home, mut host) = host();
         let space = personal(&host);
-        let folder = host.storage_folder(&space.storage.repository);
+        let folder = host.root_folder(&space.storage.repository).unwrap();
         let old = host.tracker(&space).unwrap().prefix;
         let issue = |id: &str, body: String| {
             let file = folder.join(format!("issues/{id}/issue.md"));
@@ -2384,16 +2608,17 @@ repository_settings:
         assert_eq!(subjects.len(), 3, "{subjects:?}");
         assert!(subjects[..2].contains(&format!("Issues: changed the tracker · {machine}")));
         assert!(subjects[..2].contains(&format!("Sage: changed the Space · {machine}")));
+        let (tracker, file) = (
+            "wiffletree/wiffletree-issues.yaml",
+            "wiffletree/spaces/sage/space.yaml",
+        );
         for commit in ["main", "main~"] {
             let changed = git(&github.bare, &["show", "--format=", "--name-only", commit]);
-            assert!(
-                changed == TRACKER || changed == "spaces/sage/space.yaml",
-                "{changed}"
-            );
+            assert!(changed == tracker || changed == file, "{changed}");
         }
-        let pushed = github.show("spaces/sage/space.yaml").unwrap();
+        let pushed = github.show(file).unwrap();
         assert!(pushed.contains("instructions: Name the ticket."));
-        assert_eq!(github.show(TRACKER).unwrap(), tracker_file("SAGE"));
+        assert_eq!(github.show(tracker).unwrap(), tracker_file("SAGE"));
         assert!(repos::clone_folder(home.path(), NAME).join(".git").exists());
     }
 
@@ -2414,8 +2639,11 @@ repository_settings:
             3,
             "the start and one commit per rule set"
         );
-        assert!(github.show("spaces/sage/space.yaml").is_some());
-        assert_eq!(github.show(TRACKER).unwrap(), tracker_file("SAGE"));
+        assert!(github.show("wiffletree/spaces/sage/space.yaml").is_some());
+        assert_eq!(
+            github.show("wiffletree/wiffletree-issues.yaml").unwrap(),
+            tracker_file("SAGE")
+        );
     }
 
     #[test]
@@ -2573,7 +2801,7 @@ repository_settings:
     }
 
     #[test]
-    fn a_space_whose_brain_has_another_use_here_is_refused_on_join_and_held_when_pulled() {
+    fn a_space_whose_brain_is_its_own_storage_is_joined_and_taken_when_pulled() {
         let folder = tempfile::tempdir().unwrap();
         let github = shared_storage(folder.path(), Some("SAGE"));
         let (owner, name) = NAME.split_once('/').unwrap();
@@ -2583,19 +2811,14 @@ repository_settings:
         let own_brain = sage("Its storage as its brain") + &brain;
         github.commit("spaces/sage/space.yaml", &own_brain);
         let (_home, mut host) = host();
-        let error = format!("{:#}", join_sage(&mut host, &github).unwrap_err());
-        assert!(error.contains("is the Sage Space's storage"), "{error}");
-        github.commit("spaces/sage/space.yaml", sage("Fine"));
         join_sage(&mut host, &github).unwrap();
+        assert!(space_named(&host, "Sage").brain.is_some());
+        github.commit("spaces/sage/space.yaml", sage("Fine"));
+        sync(&mut host, &github);
         github.commit("spaces/sage/space.yaml", &own_brain);
         sync(&mut host, &github);
-        assert_eq!(space_named(&host, "Sage").brain, None);
-        let notes = host.workspace_notes(&[]).unwrap();
-        assert!(
-            matches!(notes.as_slice(), [WorkspaceNote::Paused(p)]
-            if matches!(p.paused, Paused::CannotBeRead { .. })),
-            "{notes:?}"
-        );
+        assert!(space_named(&host, "Sage").brain.is_some());
+        assert!(host.workspace_notes(&[]).unwrap().is_empty());
     }
 
     #[test]
@@ -2612,7 +2835,7 @@ repository_settings:
     }
 
     #[test]
-    fn a_brain_is_refused_as_storage_or_settings_and_storage_as_a_brain() {
+    fn a_repository_named_as_a_brain_may_also_be_storage_and_settings() {
         let folder = tempfile::tempdir().unwrap();
         let github = shared_storage(folder.path(), Some("SAGE"));
         let (_home, mut host) = host();
@@ -2628,24 +2851,16 @@ repository_settings:
         };
         let personal = personal(&host);
         host.update_space(Space {
-            brain: Some(brain.clone()),
-            ..personal.clone()
-        })
-        .unwrap();
-        let named = format!("{NAME} is the Personal Space's brain");
-        let error = host.refuse_second_use_of(NAME, Use::Storage).unwrap_err();
-        assert!(format!("{error:#}").contains(&named), "{error:#}");
-        let error = (host.choose_settings_repository(NAME, None, &github.tools())).unwrap_err();
-        assert!(format!("{error:#}").contains(&named), "{error:#}");
-        assert_eq!(github.log("%s").len(), 3, "nothing is pushed");
-        host.update_space(personal.clone()).unwrap();
-        join_sage(&mut host, &github).unwrap();
-        let error = host.update_space(Space {
             brain: Some(brain),
             ..personal
-        });
-        let error = format!("{:#}", error.unwrap_err());
-        assert!(error.contains("is the Sage Space's storage"), "{error}");
+        })
+        .unwrap();
+        (host.choose_settings_repository(NAME, None, &github.tools())).unwrap();
+        join_sage(&mut host, &github).unwrap();
+        assert_eq!(
+            space_named(&host, "Sage").storage.repository,
+            super::github(NAME)
+        );
     }
 
     #[test]
@@ -2799,6 +3014,7 @@ repository_settings:
             SpaceStorage {
                 repository: super::github(NAME),
                 folder: "sage".into(),
+                root: String::new(),
             },
         )
         .unwrap();
@@ -2876,7 +3092,8 @@ repository_settings:
         })
         .unwrap();
         let folder = host.storage_folder(&space.storage.repository);
-        let committed = git(&folder, &["show", "HEAD:spaces/personal/space.yaml"]);
+        let shown = "HEAD:wiffletree/spaces/personal/space.yaml";
+        let committed = git(&folder, &["show", shown]);
         assert!(committed.contains("555-0134"));
         assert!(host.workspace_notes(&[]).unwrap().is_empty());
     }
@@ -3032,6 +3249,7 @@ repository_settings:
             SpaceStorage {
                 repository: super::github(NAME),
                 folder: "sage".into(),
+                root: String::new(),
             },
         )
         .unwrap();
@@ -3064,5 +3282,611 @@ repository_settings:
             record.space.brain, sage.brain,
             "the brain stays the GitHub one"
         );
+    }
+
+    const SAGE_FILE: &str = "wiffletree/spaces/sage/space.yaml";
+
+    /// A repository on GitHub with Sage and a tracker already in `wiffletree/`.
+    fn in_a_folder(folder: &Path) -> Arc<GitHub> {
+        let github = Arc::new(GitHub::new(folder, true));
+        github.commit(SAGE_FILE, sage("Secure family messaging"));
+        github.commit(
+            "wiffletree/wiffletree-issues.yaml",
+            "format: 1\nprefix: SAGE\n",
+        );
+        github
+    }
+
+    /// The human's Move into the folder, on this Mac.
+    fn press_move(host: &mut Host, github: &Arc<GitHub>) {
+        let sage = space_named(host, "Sage");
+        let moving = host.start_move(&sage.id).unwrap();
+        let root = moving.run(&github.tools()).unwrap();
+        host.finish_move(&moving.key, &root).unwrap();
+    }
+
+    fn issue(id: &str) -> Vec<u8> {
+        tracker::issue_md(&tracker::tests::blurry(id)).unwrap()
+    }
+
+    fn moves_on(github: &GitHub) -> usize {
+        let subjects = github.log("%s");
+        (subjects.iter())
+            .filter(|subject| subject.starts_with("Move into wiffletree/"))
+            .count()
+    }
+
+    #[test]
+    fn a_repository_in_a_folder_joins_it_and_syncs_only_inside_it() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = in_a_folder(folder.path());
+        let (home, mut host) = host();
+        host.record_gh_login(Some("jlin".into()));
+        join_sage(&mut host, &github).unwrap();
+        let sage = space_named(&host, "Sage");
+        assert_eq!(sage.storage.root, "wiffletree");
+        github.commit("README.md", "Changed on GitHub.\n");
+        let filed = NewIssue {
+            title: "Watch app drops replies".into(),
+            ..NewIssue::default()
+        };
+        host.create_issue(&sage.id, filed).unwrap();
+        host.update_space(Space {
+            description: "Changed here".into(),
+            ..sage
+        })
+        .unwrap();
+        sync(&mut host, &github);
+        assert!(github.show("wiffletree/issues/SAGE-1/issue.md").is_some());
+        assert!(github.show(SAGE_FILE).unwrap().contains("Changed here"));
+        assert_eq!(github.show("issues/SAGE-1/issue.md"), None);
+        let clone = repos::clone_folder(home.path(), NAME);
+        let readme = fs::read_to_string(clone.join("README.md")).unwrap();
+        assert_eq!(readme, "Changed on GitHub.\n", "pulled");
+        let changed = git(
+            &github.bare,
+            &["log", "--format=", "--name-only", "main~2.."],
+        );
+        assert!(changed.lines().all(|path| path.starts_with("wiffletree/")));
+        let (ids, paused) = (
+            host.list_issues(None, None).unwrap(),
+            host.workspace_notes(&[]).unwrap(),
+        );
+        assert_eq!(ids[0].id.to_string(), "SAGE-1");
+        assert!(paused.is_empty(), "{paused:?}");
+    }
+
+    #[test]
+    fn two_spaces_share_one_folder_and_its_tracker() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = in_a_folder(folder.path());
+        let watch = sage("A second Space").replace("sage-id", "watch-id");
+        let watch = watch.replace("name: Sage", "name: Sage Watch");
+        github.commit("wiffletree/spaces/watch/space.yaml", watch);
+        let (_home, mut host) = host();
+        host.record_gh_login(Some("jlin".into()));
+        let staged = stage(&host.home, NAME, &github.tools(), &[]).unwrap();
+        assert_eq!(staged.check.spaces.len(), 2);
+        let tick = |folder: &str| JoinSpace {
+            folder: folder.into(),
+            brain_path: None,
+            clones: vec![],
+        };
+        (host.join_spaces(staged, &[tick("sage"), tick("watch")])).unwrap();
+        let (sage, watch) = (space_named(&host, "Sage"), space_named(&host, "Sage Watch"));
+        assert_eq!(sage.storage.root, watch.storage.root);
+        assert_eq!(host.tracker(&watch).unwrap().prefix, "SAGE");
+        host.update_space(Space {
+            description: "From the watch".into(),
+            ..watch.clone()
+        })
+        .unwrap();
+        let filed = NewIssue {
+            title: "Watch app drops replies".into(),
+            ..NewIssue::default()
+        };
+        host.create_issue(&watch.id, filed).unwrap();
+        sync(&mut host, &github);
+        let pushed = github.show("wiffletree/spaces/watch/space.yaml").unwrap();
+        assert!(pushed.contains("From the watch"));
+        assert!(github.show("wiffletree/issues/SAGE-1/issue.md").is_some());
+        assert_eq!(host.list_issues(Some(&sage.id), None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_settings_edit_commits_at_the_root_beside_an_issue_in_the_folder() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = in_a_folder(folder.path());
+        let (_home, mut host) = host();
+        host.record_gh_login(Some("jlin".into()));
+        let tools = github.tools();
+        host.choose_settings_repository(NAME, None, &tools).unwrap();
+        join_sage(&mut host, &github).unwrap();
+        let sage = space_named(&host, "Sage");
+        let filed = NewIssue {
+            title: "Watch app drops replies".into(),
+            ..NewIssue::default()
+        };
+        host.create_issue(&sage.id, filed).unwrap();
+        host.set_check_ins(20, 200).unwrap();
+        host.sync_now(&tools).unwrap();
+        assert!(github.show("wiffletree/issues/SAGE-1/issue.md").is_some());
+        for commit in ["main", "main~"] {
+            let changed = git(&github.bare, &["show", "--format=", "--name-only", commit]);
+            let inside = changed.lines().all(|path| path.starts_with("wiffletree/"));
+            let outside = !changed.lines().any(|path| path.starts_with("wiffletree/"));
+            assert!(inside || outside, "{changed}");
+        }
+        assert!(github.show("wiffletree.json").is_some());
+    }
+
+    #[test]
+    fn a_repository_with_an_empty_root_keeps_todays_paths() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let (_home, mut host) = host();
+        host.record_gh_login(Some("jlin".into()));
+        join_sage(&mut host, &github).unwrap();
+        let sage = space_named(&host, "Sage");
+        assert_eq!(sage.storage.root, "");
+        let filed = NewIssue {
+            title: "Watch app drops replies".into(),
+            ..NewIssue::default()
+        };
+        host.create_issue(&sage.id, filed).unwrap();
+        sync(&mut host, &github);
+        assert!(github.show("issues/SAGE-1/issue.md").is_some());
+        assert_eq!(moves_on(&github), 0, "a GitHub repository waits for Move");
+        assert_eq!(github.show(SAGE_FILE), None);
+    }
+
+    #[test]
+    fn a_repository_of_other_files_gets_the_folder_and_one_that_is_someone_elses_is_refused() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let (_home, host) = host();
+        let staged = stage(&host.home, NAME, &github.tools(), &[]).unwrap();
+        assert_eq!(staged.root, Root::default_folder());
+        github.commit("wiffletree/notes.md", "Someone's notes.\n");
+        let error = match stage(&host.home, NAME, &github.tools(), &[]) {
+            Err(error) => format!("{error:#}"),
+            Ok(_) => panic!("refused"),
+        };
+        assert!(error.contains("must be Wiffletree's"), "{error}");
+    }
+
+    #[test]
+    fn two_folders_in_a_repository_are_refused_with_nothing_written() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = in_a_folder(folder.path());
+        github.commit("other/spaces/watch/space.yaml", sage("Another"));
+        let (home, host) = host();
+        let error = match stage(&host.home, NAME, &github.tools(), &[]) {
+            Err(error) => format!("{error:#}"),
+            Ok(_) => panic!("refused"),
+        };
+        assert!(error.contains("other/ and wiffletree/"), "{error}");
+        assert!(!repos::clone_folder(home.path(), NAME).exists());
+    }
+
+    /// Puts a local repository back as an earlier release left it, with its Spaces' files at
+    /// its root and a Space that records no folder.
+    fn at_the_root_again(host: &Host) {
+        let mut space = personal(host);
+        let folder = host.storage_folder(&space.storage.repository);
+        git(&folder, &["mv", "wiffletree/spaces", "spaces"]);
+        git(
+            &folder,
+            &["mv", "wiffletree/wiffletree-issues.yaml", TRACKER],
+        );
+        if folder.join("wiffletree/issues").exists() {
+            git(&folder, &["mv", "wiffletree/issues", "issues"]);
+        }
+        git(&folder, &["commit", "-qm", "As an earlier release left it"]);
+        space.storage.root = String::new();
+        (host.db)
+            .execute(
+                "UPDATE spaces SET data=?2 WHERE id=?1",
+                params![space.id.as_str(), encode(&space).unwrap()],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_local_repository_moves_once_at_first_start() {
+        let (home, mut host) = host();
+        host.record_gh_login(Some("jlin".into()));
+        let space = personal(&host);
+        let filed = NewIssue {
+            title: "Renew the passport".into(),
+            ..NewIssue::default()
+        };
+        let filed = host.create_issue(&space.id, filed).unwrap();
+        at_the_root_again(&host);
+        drop(host);
+        let host = Host::open(home.path()).unwrap();
+        let space = personal(&host);
+        assert_eq!(space.storage.root, "wiffletree");
+        let folder = host.storage_folder(&space.storage.repository);
+        let files = committed(&folder);
+        assert!(files.contains(&"wiffletree/spaces/personal/space.yaml".to_owned()));
+        assert!(files.contains(&format!("wiffletree/issues/{}/issue.md", filed.id)));
+        let stub = fs::read_to_string(folder.join("spaces/personal/space.yaml")).unwrap();
+        assert!(stub.contains("moved_to: wiffletree"), "{stub}");
+        assert!(!folder.join("issues").exists());
+        assert_eq!(git(&folder, &["status", "--porcelain"]), "");
+        assert_eq!(host.read_issue(&filed.id).unwrap().id, filed.id);
+        let head = git(&folder, &["rev-parse", "HEAD"]);
+        let subject = git(&folder, &["log", "-1", "--format=%s"]);
+        assert_eq!(subject, "Move into wiffletree/");
+        drop(host);
+        let host = Host::open(home.path()).unwrap();
+        assert_eq!(
+            git(&folder, &["rev-parse", "HEAD"]),
+            head,
+            "a second start moves nothing"
+        );
+        assert_eq!(personal(&host).storage.root, "wiffletree");
+    }
+
+    #[test]
+    fn a_move_a_start_cut_short_is_finished_at_the_next_start() {
+        let (home, host) = host();
+        at_the_root_again(&host);
+        let space = personal(&host);
+        let folder = host.storage_folder(&space.storage.repository);
+        // The commit landed, and the start stopped before anything else.
+        let head = git(&folder, &["rev-parse", "HEAD"]);
+        folder::stage_move(&folder, &head, &Root::default_folder()).unwrap();
+        git(&folder, &["commit", "-qm", "Move into wiffletree/"]);
+        drop(host);
+        let host = Host::open(home.path()).unwrap();
+        assert_eq!(personal(&host).storage.root, "wiffletree");
+        assert_eq!(git(&folder, &["rev-list", "--count", "HEAD~.."]), "1");
+        assert_eq!(git(&folder, &["status", "--porcelain"]), "");
+        assert!(
+            folder
+                .join("wiffletree/spaces/personal/space.yaml")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn a_github_repository_moves_by_the_host_call_with_a_stub_for_each_space_and_the_tracker() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        github.commit("issues/SAGE-1/issue.md", issue("SAGE-1"));
+        let (home, mut host) = host();
+        join_sage(&mut host, &github).unwrap();
+        press_move(&mut host, &github);
+        assert_eq!(moves_on(&github), 1);
+        assert!(github.show(SAGE_FILE).unwrap().contains("Secure family"));
+        assert!(github.show("wiffletree/issues/SAGE-1/issue.md").is_some());
+        assert_eq!(github.show("issues/SAGE-1/issue.md"), None);
+        let stub = github.show("spaces/sage/space.yaml").unwrap();
+        assert!(stub.contains("format: 2") && stub.contains("moved_to: wiffletree"));
+        assert!(
+            github
+                .show(TRACKER)
+                .unwrap()
+                .contains("moved_to: wiffletree")
+        );
+        assert!(github.show("README.md").is_some());
+        assert_eq!(space_named(&host, "Sage").storage.root, "wiffletree");
+        sync(&mut host, &github);
+        assert_eq!(
+            github.log("%s").len(),
+            5,
+            "a pass after the move adds nothing"
+        );
+        assert!(host.workspace_notes(&[]).unwrap().is_empty());
+        let clone = repos::clone_folder(home.path(), NAME);
+        let stub = fs::read_to_string(clone.join("spaces/sage/space.yaml")).unwrap();
+        assert!(stub.contains("moved_to"), "{stub}");
+        assert!(!clone.join("issues").exists());
+        assert_eq!(host.list_issues(None, None).unwrap().len(), 1);
+        let sage = space_named(&host, "Sage");
+        let error = host.start_move(&sage.id).err().unwrap();
+        assert!(format!("{error:#}").contains("already in wiffletree/"));
+    }
+
+    #[test]
+    fn a_local_repository_has_no_move_to_ask_for() {
+        let (_home, host) = host();
+        let error = host.start_move(&personal(&host).id).err().unwrap();
+        assert!(format!("{error:#}").contains("at start"), "{error:#}");
+    }
+
+    #[test]
+    fn two_macs_moving_at_once_make_one_commit() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let (_first_home, mut first) = host();
+        let (_second_home, mut second) = host();
+        join_sage(&mut first, &github).unwrap();
+        join_sage(&mut second, &github).unwrap();
+        // The second Mac's move lands just before the first Mac's push.
+        let (bare, work) = (github.bare.clone(), tempfile::tempdir().unwrap());
+        *github.before.lock().unwrap() = Some((
+            "push",
+            Box::new(move || {
+                git(work.path(), &["clone", "-q", bare.to_str().unwrap(), "."]);
+                let head = git(work.path(), &["rev-parse", "HEAD"]);
+                folder::stage_move(work.path(), &head, &Root::default_folder()).unwrap();
+                git(
+                    work.path(),
+                    &["commit", "-qm", "Move into wiffletree/ · Other"],
+                );
+                git(work.path(), &["push", "-q", "origin", "main"]);
+            }),
+        ));
+        press_move(&mut first, &github);
+        assert_eq!(moves_on(&github), 1);
+        assert_eq!(space_named(&first, "Sage").storage.root, "wiffletree");
+        sync(&mut first, &github);
+        sync(&mut second, &github);
+        sync(&mut second, &github);
+        assert_eq!(space_named(&second, "Sage").storage.root, "wiffletree");
+        assert_eq!(moves_on(&github), 1);
+    }
+
+    #[test]
+    fn a_move_refused_because_a_teammate_pushed_is_made_again_on_the_new_head() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let (_home, mut host) = host();
+        join_sage(&mut host, &github).unwrap();
+        let teammate = github.clone();
+        *github.before.lock().unwrap() = Some((
+            "push",
+            Box::new(move || teammate.commit("issues/SAGE-1/issue.md", issue("SAGE-1"))),
+        ));
+        press_move(&mut host, &github);
+        assert_eq!(moves_on(&github), 1);
+        assert!(github.show("wiffletree/issues/SAGE-1/issue.md").is_some());
+        assert_eq!(github.show("issues/SAGE-1/issue.md"), None);
+    }
+
+    #[test]
+    fn an_unpushed_comment_survives_adopting_a_teammates_move_and_is_pushed_under_the_folder() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        github.commit("issues/SAGE-1/issue.md", issue("SAGE-1"));
+        let (home, mut host) = host();
+        let (_teammate_home, mut teammate) = self::host();
+        host.record_gh_login(Some("jlin".into()));
+        join_sage(&mut host, &github).unwrap();
+        join_sage(&mut teammate, &github).unwrap();
+        let id = tracker::tests::id("SAGE-1");
+        let comment = host.comment_on_issue(&id, "Seen on two watches.").unwrap();
+        press_move(&mut teammate, &github);
+        sync(&mut host, &github);
+        assert_eq!(space_named(&host, "Sage").storage.root, "wiffletree");
+        let clone = repos::clone_folder(home.path(), NAME);
+        let moved = format!("wiffletree/issues/SAGE-1/comments/{}", comment.file);
+        assert!(clone.join(&moved).exists(), "it moved with its issue");
+        assert!(!clone.join("issues").exists());
+        assert!(host.storage_written.borrow().contains(&repos::key(NAME)));
+        sync(&mut host, &github);
+        assert!(github.show(&moved).is_some());
+        assert_eq!(moves_on(&github), 1);
+        assert!(host.workspace_notes(&[]).unwrap().is_empty());
+        let stub = fs::read_to_string(clone.join(TRACKER)).unwrap();
+        assert!(stub.contains("moved_to"), "{stub}");
+        assert_eq!(host.read_issue(&id).unwrap().comments.len(), 1);
+    }
+
+    #[test]
+    fn a_pause_and_a_hold_follow_their_file_through_the_move() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        github.commit("issues/SAGE-1/issue.md", issue("SAGE-1"));
+        let (home, mut host) = host();
+        join_sage(&mut host, &github).unwrap();
+        let file = repos::clone_folder(home.path(), NAME).join("issues/SAGE-1/issue.md");
+        let edited = String::from_utf8(issue("SAGE-1")).unwrap() + "Edited by a shell.\n";
+        fs::write(&file, &edited).unwrap();
+        sync(&mut host, &github);
+        let paused = |host: &Host| {
+            host.read_issue(&tracker::tests::id("SAGE-1"))
+                .unwrap()
+                .paused
+        };
+        assert_eq!(paused(&host).len(), 1);
+        press_move(&mut host, &github);
+        sync(&mut host, &github);
+        let moved = paused(&host);
+        assert_eq!(moved[0].path, "wiffletree/issues/SAGE-1/issue.md");
+        assert!(moved[0].why == Paused::OutsideWiffletree);
+        let there = github.show("wiffletree/issues/SAGE-1/issue.md").unwrap();
+        assert!(!there.contains("Edited by a shell"), "still not pushed");
+    }
+
+    #[test]
+    fn settings_stay_at_the_root_through_the_move() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let (_home, mut host) = host();
+        let tools = github.tools();
+        host.choose_settings_repository(NAME, None, &tools).unwrap();
+        join_sage(&mut host, &github).unwrap();
+        let settings = github.show("wiffletree.json").unwrap();
+        press_move(&mut host, &github);
+        assert_eq!(github.show("wiffletree.json").as_deref(), Some(&*settings));
+        assert_eq!(github.show("wiffletree/wiffletree.json"), None);
+        host.sync_now(&tools).unwrap();
+        host.set_check_ins(20, 200).unwrap();
+        let sage = space_named(&host, "Sage");
+        host.update_space(Space {
+            description: "Changed here".into(),
+            ..sage
+        })
+        .unwrap();
+        host.sync_now(&tools).unwrap();
+        assert!(github.show(SAGE_FILE).unwrap().contains("Changed here"));
+        let args = [
+            "log",
+            "--grep=Check-ins",
+            "--format=",
+            "--name-only",
+            "main",
+        ];
+        let changed = git(&github.bare, &args);
+        assert!(changed.starts_with("settings/"), "{changed}");
+        let stub = github.show("spaces/sage/space.yaml").unwrap();
+        assert!(stub.contains("moved_to"), "the stub never changes: {stub}");
+    }
+
+    #[test]
+    fn a_settings_pass_stops_at_a_teammates_move_and_adopts_it() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let (_home, mut host) = host();
+        let (_teammate_home, mut teammate) = self::host();
+        let tools = github.tools();
+        host.choose_settings_repository(NAME, None, &tools).unwrap();
+        join_sage(&mut host, &github).unwrap();
+        join_sage(&mut teammate, &github).unwrap();
+        press_move(&mut teammate, &github);
+        host.sync_now(&tools).unwrap();
+        assert_eq!(space_named(&host, "Sage").storage.root, "wiffletree");
+        host.sync_now(&tools).unwrap();
+        assert!(host.workspace_notes(&[]).unwrap().is_empty());
+        assert_eq!(moves_on(&github), 1);
+    }
+
+    #[test]
+    fn a_number_deleted_before_the_move_is_not_reused() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        github.commit("issues/SAGE-1/issue.md", issue("SAGE-1"));
+        github.commit("issues/SAGE-2/issue.md", issue("SAGE-2"));
+        let work = tempfile::tempdir().unwrap();
+        let bare = github.bare.to_str().unwrap();
+        git(work.path(), &["clone", "-q", bare, "."]);
+        git(work.path(), &["rm", "-rq", "issues/SAGE-2"]);
+        git(work.path(), &["commit", "-qm", "Remove an issue"]);
+        git(work.path(), &["push", "-q", "origin", "main"]);
+        let (_home, mut host) = host();
+        host.record_gh_login(Some("jlin".into()));
+        join_sage(&mut host, &github).unwrap();
+        press_move(&mut host, &github);
+        sync(&mut host, &github);
+        let sage = space_named(&host, "Sage");
+        let filed = NewIssue {
+            title: "Watch app drops replies".into(),
+            ..NewIssue::default()
+        };
+        host.create_issue(&sage.id, filed).unwrap();
+        sync(&mut host, &github);
+        assert!(github.show("wiffletree/issues/SAGE-3/issue.md").is_some());
+        assert_eq!(github.show("wiffletree/issues/SAGE-2/issue.md"), None);
+    }
+
+    #[test]
+    fn a_trackers_compile_time_and_allowed_domains_are_kept_with_keys_this_release_does_not_know() {
+        let text = "format: 1
+prefix: SAGE
+compile:
+  at: 06:00
+  timezone: America/Chicago
+allowed_email_domains:
+- sagehaven.ai
+future_key: 3
+";
+        let tracker = read_tracker(text.as_bytes()).unwrap();
+        assert_eq!(tracker.compile.as_ref().unwrap().at, "06:00");
+        assert_eq!(tracker.allowed_email_domains, ["sagehaven.ai"]);
+        let written = String::from_utf8(tracker_yaml(&tracker).unwrap()).unwrap();
+        assert_eq!(read_tracker(written.as_bytes()).unwrap(), tracker);
+        assert!(written.contains("future_key: 3"), "{written}");
+        let plain = tracker_yaml(&TrackerConfig::new("SAGE".into())).unwrap();
+        let plain = String::from_utf8(plain).unwrap();
+        assert!(!plain.contains("compile") && !plain.contains("allowed_email_domains"));
+    }
+
+    #[test]
+    fn a_boards_file_in_a_folder_is_pushed_by_the_boards_rule_set() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = in_a_folder(folder.path());
+        let (_home, mut host) = host();
+        join_sage(&mut host, &github).unwrap();
+        let sage = space_named(&host, "Sage");
+        let file = "spaces/sage/boards/release/release.json".to_owned();
+        let files = [(file, Some(&b"{}\n"[..]))];
+        host.write_storage_files(&sage, &files, "Saved").unwrap();
+        sync(&mut host, &github);
+        let pushed = "wiffletree/spaces/sage/boards/release/release.json";
+        assert!(github.show(pushed).is_some());
+        let machine = sync::machine_name();
+        assert_eq!(
+            github.log("%s")[0],
+            format!("Sage: saved outputs · {machine}")
+        );
+    }
+
+    #[test]
+    fn each_mac_writes_its_own_compiler_file_and_the_space_rule_set_pushes_it() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = in_a_folder(folder.path());
+        let (_home, mut host) = host();
+        host.record_gh_login(Some("jlin".into()));
+        join_sage(&mut host, &github).unwrap();
+        let sage = space_named(&host, "Sage");
+        let file = format!("wiffletree/compilers/{}.yaml", host.host_id().unwrap());
+        host.write_compiler_file(&sage, true).unwrap();
+        sync(&mut host, &github);
+        let pushed = github.show(&file).unwrap();
+        assert!(pushed.contains("login: jlin"), "{pushed}");
+        host.write_compiler_file(&sage, false).unwrap();
+        sync(&mut host, &github);
+        assert_eq!(github.show(&file), None);
+    }
+
+    #[test]
+    fn a_stub_pauses_on_an_older_host_as_written_by_a_newer_wiffletree() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let (_home, mut host) = host();
+        join_sage(&mut host, &github).unwrap();
+        press_move(&mut host, &github);
+        let space = github.show("spaces/sage/space.yaml").unwrap();
+        let tracker = github.show(TRACKER).unwrap();
+        let storage = SpaceStorage {
+            repository: super::github(NAME),
+            folder: "sage".into(),
+            root: String::new(),
+        };
+        // `read_space` and `read_tracker` are what an older host runs on a pulled file.
+        let space = read_space(space.as_bytes(), storage)
+            .unwrap_err()
+            .to_string();
+        let tracker = read_tracker(tracker.as_bytes()).unwrap_err().to_string();
+        for (read, file) in [(space, "Space"), (tracker, "tracker")] {
+            assert_eq!(
+                read,
+                format!("This {file} was written by a newer Wiffletree. Update to use it.")
+            );
+        }
+    }
+
+    #[test]
+    fn a_space_yaml_at_a_repositorys_root_keeps_what_older_hosts_read() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let (_home, mut host) = host();
+        join_sage(&mut host, &github).unwrap();
+        let sage = space_named(&host, "Sage");
+        host.update_space(Space {
+            additions: "Name the issue.".into(),
+            ..sage
+        })
+        .unwrap();
+        sync(&mut host, &github);
+        let file = github.show("spaces/sage/space.yaml").unwrap();
+        let file: serde_yaml::Value = serde_yaml::from_str(&file).unwrap();
+        assert_eq!(file["format"], 1);
+        assert_eq!(file["instructions"], "Name the issue.");
+        assert_eq!(file.get("root"), None, "the folder stays on this Mac");
     }
 }

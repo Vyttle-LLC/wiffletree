@@ -322,6 +322,7 @@ mod tests {
             storage: SpaceStorage {
                 repository: storage,
                 folder: name.to_lowercase(),
+                root: String::new(),
             },
             repositories: vec![],
             models: SpaceModels::default(),
