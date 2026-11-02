@@ -237,7 +237,7 @@ fn error_banner(error: &str, status: &SyncStatus, p: Palette) -> Div {
             .child(reached)
             .child(
                 div()
-                    .font_family(".SystemMonoFont")
+                    .font_family(mono_font())
                     .text_size(px(font::CAPTION))
                     .child(error.to_owned()),
             ),

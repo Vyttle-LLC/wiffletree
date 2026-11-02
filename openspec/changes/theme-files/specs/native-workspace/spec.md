@@ -9,7 +9,7 @@ The desktop SHALL read themes from `.json` files directly in the `themes` folder
 
 #### Scenario: A bad colour
 - **WHEN** line 13 of `celadon-jade.json` reads `"accent": "#ffaee"`
-- **THEN** the file is an error at line 13 saying `"accent": "#ffaee"` is not a colour like `#1A262D`
+- **THEN** the file is an error at line 13 saying `"accent": "#ffaee"` is not a color like #1A262D
 
 ### Requirement: A light theme and a dark theme are chosen in Settings
 Settings › Appearance SHALL show Mode (System, Light, Dark), then a Light theme menu and a Dark theme menu. Each menu SHALL list Tidal, marked built in, first, then every readable theme file with that variant, sorted by its name, with its file name on the right, and SHALL check the current choice. Choosing SHALL apply at once in every window and save. Mode SHALL decide which side shows: System the side macOS is on, Light and Dark that side whatever macOS does. Open themes folder SHALL create the folder if it is missing and open it. New theme from Tidal SHALL write `my-theme.json`, or the first free `my-theme-N.json` from 2, with both of Tidal's variants, choose it on both sides and open the folder. The choices SHALL be saved per Mac as `light_theme` and `dark_theme` in `desktop-preferences.json`; a missing or unknown value SHALL read as Tidal without losing the file's other choices. The sidebar's Appearance menu SHALL keep only System, Light and Dark.

@@ -764,7 +764,7 @@ fn diff_block(p: Palette) -> Div {
         .border_color(p.edge.opacity(edge::BOX))
         .bg(p.base)
         .overflow_hidden()
-        .font_family(".SystemMonoFont")
+        .font_family(mono_font())
         .text_size(px(font::DETAIL))
         .line_height(relative(1.55))
 }

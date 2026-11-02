@@ -1,5 +1,6 @@
 //! View choices that belong to this client rather than the host; a remote client keeps its own.
 use crate::hosts::PairedHost;
+use crate::themes::Choice;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Path, PathBuf};
 use workspace_core::{Skill, cascade::Scope};
@@ -23,6 +24,12 @@ pub(crate) struct Preferences {
     pub collapse_ticket_table: bool,
     #[serde(default, deserialize_with = "appearance_or_system")]
     pub appearance: Appearance,
+    /// The theme light mode shows: Tidal or a file in the themes folder.
+    #[serde(default)]
+    pub light_theme: Choice,
+    /// The theme dark mode shows.
+    #[serde(default)]
+    pub dark_theme: Choice,
     /// Show projects whose names share a first word under one group row.
     #[serde(default = "on")]
     pub group_projects: bool,
@@ -57,6 +64,8 @@ impl Default for Preferences {
             minimize_activity: false,
             collapse_ticket_table: false,
             appearance: Appearance::default(),
+            light_theme: Choice::Tidal,
+            dark_theme: Choice::Tidal,
             group_projects: true,
             paired_hosts: vec![],
             find_on_network: false,
@@ -190,6 +199,38 @@ mod tests {
             preferences.appearance = appearance;
             preferences.save().unwrap();
             assert_eq!(Preferences::load(home.path()).appearance, appearance);
+        }
+    }
+
+    #[test]
+    fn theme_choices_survive_a_relaunch_and_unknown_ones_read_as_tidal() {
+        let home = tempfile::tempdir().unwrap();
+        let file = home.path().join("desktop-preferences.json");
+        let fresh = Preferences::load(home.path());
+        assert_eq!(
+            (fresh.light_theme, fresh.dark_theme),
+            (Choice::Tidal, Choice::Tidal)
+        );
+
+        let mut preferences = Preferences::load(home.path());
+        preferences.light_theme = Choice::File("celadon-sky.json".into());
+        preferences.dark_theme = Choice::File("celadon-jade.json".into());
+        preferences.save().unwrap();
+        let loaded = Preferences::load(home.path());
+        assert_eq!(loaded.light_theme, Choice::File("celadon-sky.json".into()));
+        assert_eq!(loaded.dark_theme, Choice::File("celadon-jade.json".into()));
+
+        // An older file, and values this version cannot read.
+        for saved in [
+            r#"{ "appearance": "dark", "minimize_activity": true }"#,
+            r#"{ "appearance": "dark", "minimize_activity": true, "light_theme": 7, "dark_theme": "../x.json" }"#,
+        ] {
+            std::fs::write(&file, saved).unwrap();
+            let preferences = Preferences::load(home.path());
+            assert_eq!(preferences.appearance, Appearance::Dark, "{saved}");
+            assert!(preferences.minimize_activity, "{saved}");
+            assert_eq!(preferences.light_theme, Choice::Tidal, "{saved}");
+            assert_eq!(preferences.dark_theme, Choice::Tidal, "{saved}");
         }
     }
 

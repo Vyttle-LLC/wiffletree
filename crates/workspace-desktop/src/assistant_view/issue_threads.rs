@@ -552,7 +552,7 @@ fn diff_lines(lines: &[DiffLine], p: Palette) -> Div {
         shown = shown.child(
             div()
                 .min_w_0()
-                .font_family(".SystemMonoFont")
+                .font_family(mono_font())
                 .text_size(px(font::CAPTION))
                 .whitespace_normal()
                 .text_color(color)

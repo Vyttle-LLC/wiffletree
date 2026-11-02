@@ -488,7 +488,7 @@ impl RenderOnce for Pulse {
 fn file_name(name: impl Into<SharedString>, color: Hsla) -> Div {
     div()
         .min_w_0()
-        .font_family(".SystemMonoFont")
+        .font_family(mono_font())
         .text_size(px(font::SMALL))
         .text_color(color)
         .text_ellipsis()
@@ -675,7 +675,7 @@ impl Inspector {
                 depth,
                 open,
             } => folder(id, name.clone().into(), *depth, *open)
-                .font_family(".SystemMonoFont")
+                .font_family(mono_font())
                 .into_any_element(),
             Shown::File { name, mark, depth } => {
                 Self::file_row(name, mark, *depth, p).into_any_element()

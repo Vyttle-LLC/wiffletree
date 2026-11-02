@@ -1471,7 +1471,7 @@ impl Sidebar {
             .child(
                 div()
                     .flex_none()
-                    .font_family(".SystemMonoFont")
+                    .font_family(mono_font())
                     .text_size(px(font::META))
                     .child(count.to_string()),
             )
