@@ -1639,6 +1639,11 @@ impl Host {
         if !clone.exists() {
             fs::create_dir_all(clone.parent().context("A clone is in a folder")?)?;
             fs::rename(staged.staging.keep(), &clone)?;
+        } else if joined_at.is_some() {
+            // A kept clone takes the head it joined at, where its pull scan starts.
+            let staging = (staged.staging.path().to_str()).context("A staging path is UTF-8")?;
+            let fetch = ["fetch", "--quiet", "--no-tags", "--recurse-submodules=no"];
+            runtime::git_output(&clone, &[&fetch[..], &[staging, "HEAD"]].concat())?;
         }
         let head = runtime::git_output(&clone, &["rev-parse", "HEAD"])?;
         let head = head.trim();
