@@ -358,7 +358,7 @@ fn stays_behind(plan: &StorageMove) -> Option<String> {
     let old = plan
         .leaves
         .as_deref()
-        .unwrap_or("the local repository on this Mac");
+        .unwrap_or("the old local repository, which goes to the backups folder");
     Some(format!("Its logs and wiki stay in {old}."))
 }
 
@@ -503,7 +503,7 @@ mod tests {
         };
         assert_eq!(
             stays_behind(&from_this_mac).unwrap(),
-            "Its logs and wiki stay in the local repository on this Mac."
+            "Its logs and wiki stay in the old local repository, which goes to the backups folder."
         );
     }
 
