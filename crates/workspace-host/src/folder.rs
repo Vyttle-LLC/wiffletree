@@ -81,7 +81,8 @@ impl Root {
 }
 
 /// How many commits up to the clone's head wrote the file at `path` of the repository, in the
-/// folder or before the move. The move's own commit touches both paths and writes nothing new.
+/// folder or before the move. The move's own commit touches both paths and writes nothing new; a
+/// Mac that adopted the move has it at its head only after its next pass.
 pub(crate) fn saves(clone: &Path, root: &Root, path: &str) -> Result<u32> {
     let count = |path: &str| -> Result<u32> {
         let args = ["rev-list", "--count", "HEAD", "--", path];
@@ -89,9 +90,10 @@ pub(crate) fn saves(clone: &Path, root: &Root, path: &str) -> Result<u32> {
     };
     let here = count(path)?;
     let before = root.moved_from(path).map(count).transpose()?;
-    Ok(match before {
-        None | Some(0) => here,
-        Some(before) => (here + before).saturating_sub(2),
+    Ok(match (here, before) {
+        (0, Some(before)) => before,
+        (_, None | Some(0)) => here,
+        (_, Some(before)) => here + before - 2,
     })
 }
 
@@ -156,17 +158,26 @@ fn holder(path: &str) -> Option<&str> {
     }
 }
 
-/// Every folder at `commit` holding a Space or a tracker, stubs skipped, sorted, with the root
-/// as the empty folder. A board output named like one of these files is not a folder of its own,
-/// and neither is a symbolic link or a submodule, which can't be read as one.
-fn folders_at(clone: &Path, commit: &str) -> Result<Vec<String>> {
+/// The plain files at `commit` that `wanted` takes, hidden ones aside. A symbolic link or a
+/// submodule is left out, as it can't be read as a Space, a tracker or a stub.
+fn plain_files(
+    clone: &Path,
+    commit: &str,
+    wanted: &dyn Fn(&str) -> bool,
+) -> Result<BTreeMap<String, Vec<u8>>> {
     let hidden = |path: &str| path.split('/').any(|part| part.starts_with('.'));
     let plain = |kind: &str| kind.starts_with("100644 ") || kind.starts_with("100755 ");
     let candidates: BTreeSet<String> = (tree(clone, commit)?.into_iter())
-        .filter(|(path, kind)| !hidden(path) && holder(path).is_some() && plain(kind))
+        .filter(|(path, kind)| !hidden(path) && wanted(path) && plain(kind))
         .map(|(path, _)| path)
         .collect();
-    let files = repos::files_at(clone, commit, &|path| candidates.contains(path))?;
+    repos::files_at(clone, commit, &|path| candidates.contains(path))
+}
+
+/// Every folder at `commit` holding a Space or a tracker, stubs skipped, sorted, with the root
+/// as the empty folder. A board output named like one of these files is not a folder of its own.
+fn folders_at(clone: &Path, commit: &str) -> Result<Vec<String>> {
+    let files = plain_files(clone, commit, &|path| holder(path).is_some())?;
     let found: BTreeSet<&str> = (files.iter())
         .filter(|(_, content)| stub_target(content).is_none())
         .filter_map(|(path, _)| holder(path))
@@ -202,14 +213,16 @@ pub(crate) fn find(clone: &Path, commit: &str) -> Result<Option<Root>> {
     Ok(folders.first().map(|folder| Root::new(folder)))
 }
 
-/// The folder a repository's files moved into by `commit`, for a Mac that has them at the root;
-/// `None` while its one layout is still at the root.
+/// The folder a repository's files moved into by `commit`, for a Mac that has them at the root:
+/// the one a stub at the root names, whatever else the tree holds, when that folder holds the
+/// layout. `None` while the layout is still at the root.
 pub(crate) fn moved_to(clone: &Path, commit: &str) -> Result<Option<Root>> {
-    let folders = folders_at(clone, commit)?;
-    Ok(match folders.as_slice() {
-        [one] if !one.is_empty() => Some(Root::new(one)),
-        _ => None,
-    })
+    let stubs = plain_files(clone, commit, &stubbed)?;
+    let Some(target) = stubs.values().find_map(|stub| stub_target(stub)) else {
+        return Ok(None);
+    };
+    let holds_it = folders_at(clone, commit)?.contains(&target);
+    Ok(holds_it.then(|| Root::new(&target)))
 }
 
 /// Each path at `commit`, with its mode and blob.
@@ -465,13 +478,35 @@ mod tests {
     }
 
     #[test]
-    fn saves_never_underflow_on_a_mac_that_adopted_a_move_before_its_next_pass() {
+    fn saves_count_on_a_mac_that_adopted_a_move_before_its_next_pass() {
         let folder = tempfile::tempdir().unwrap();
         let path = "spaces/sage/boards/brief.json";
         repository(folder.path(), &[(path, "{}\n")]);
         let root = Root::default_folder();
         let moved = root.join(path);
-        assert_eq!(saves(folder.path(), &root, &moved).unwrap(), 0);
+        assert_eq!(saves(folder.path(), &root, &moved).unwrap(), 1);
+        for body in ["{\"saved\":2}\n", "{\"saved\":3}\n"] {
+            fs::write(folder.path().join(path), body).unwrap();
+            git(folder.path(), &["commit", "-qam", "Saved"]);
+        }
+        assert_eq!(saves(folder.path(), &root, &moved).unwrap(), 3);
+    }
+
+    #[test]
+    fn a_stub_names_the_folder_whatever_else_the_tree_holds_and_only_when_it_holds_the_layout() {
+        let stub = "format: 2\nprefix: SAGE\nmoved_to: wiffletree\n";
+        let stray = ("archive/wiffletree-issues.yaml", TRACKER_FILE);
+        let moved = |files: &[(&str, &str)]| {
+            let folder = tempfile::tempdir().unwrap();
+            let head = repository(folder.path(), files);
+            moved_to(folder.path(), &head).unwrap()
+        };
+        let in_folder = ("wiffletree/spaces/sage/space.yaml", SAGE);
+        let both = moved(&[(TRACKER, stub), in_folder, stray]);
+        assert_eq!(both, Some(Root::default_folder()));
+        assert_eq!(moved(&[(TRACKER, stub), stray]), None, "nothing is there");
+        let at_root = ("spaces/sage/space.yaml", SAGE);
+        assert_eq!(moved(&[(TRACKER, TRACKER_FILE), at_root, stray]), None);
     }
 
     #[test]

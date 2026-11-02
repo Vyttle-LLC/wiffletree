@@ -988,8 +988,8 @@ struct Actor {
     gh_account_seen: Option<std::time::SystemTime>,
     /// `gh` as every GitHub read runs it, and Git as publish steps run it.
     publish_tools: publish::Tools,
-    /// The settings repository's pace, at `settings_cadence`: every minute while it is also a
-    /// Space's tracker, else the settings cadence.
+    /// The settings repository's pace, at `settings_cadence`: every minute while it also holds a
+    /// Space, else the settings cadence.
     sync_pace: repos::Pace,
     /// By `repos::key`, the pace of each GitHub storage repository that is not the settings
     /// repository, whose pass runs with the settings rule set.

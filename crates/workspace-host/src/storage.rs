@@ -3649,6 +3649,32 @@ repository_settings:
     }
 
     #[test]
+    fn a_stray_tracker_beside_the_layout_does_not_stop_a_mac_adopting_a_teammates_move() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        github.commit("issues/SAGE-1/issue.md", issue("SAGE-1"));
+        let (home, mut host) = host();
+        let (_teammate_home, mut teammate) = self::host();
+        join_sage(&mut host, &github).unwrap();
+        join_sage(&mut teammate, &github).unwrap();
+        let stray = "archive/wiffletree-issues.yaml";
+        github.commit(stray, "format: 1\nprefix: OLD\n");
+        press_move(&mut teammate, &github);
+        assert_eq!(moves_on(&github), 1);
+        let commits = github.log("%s").len();
+        sync(&mut host, &github);
+        assert_eq!(space_named(&host, "Sage").storage.root, "wiffletree");
+        sync(&mut host, &github);
+        assert_eq!(github.log("%s").len(), commits, "this Mac pushes nothing");
+        assert!(github.show("wiffletree/issues/SAGE-1/issue.md").is_some());
+        assert!(github.show(stray).is_some());
+        let clone = repos::clone_folder(home.path(), NAME);
+        assert!(clone.join("wiffletree/issues/SAGE-1/issue.md").exists());
+        assert_eq!(host.list_issues(None, None).unwrap().len(), 1);
+        assert!(host.workspace_notes(&[]).unwrap().is_empty());
+    }
+
+    #[test]
     fn an_unpushed_comment_survives_adopting_a_teammates_move_and_is_pushed_under_the_folder() {
         let folder = tempfile::tempdir().unwrap();
         let github = shared_storage(folder.path(), Some("SAGE"));
