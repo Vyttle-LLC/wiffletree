@@ -334,7 +334,7 @@ impl SpacesPage {
         cx.notify();
     }
 
-    /// Asks the host what the shown Space's storage holds, for its Storage and issues box.
+    /// Asks the host what the shown Space's repository holds, for its Repository box.
     fn read_storage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.shown_space().map(|s| s.id.clone()) else {
             return;

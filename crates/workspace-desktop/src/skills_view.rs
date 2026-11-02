@@ -2485,8 +2485,8 @@ mod tests {
             tabs,
             [
                 "Contract v12",
-                "Coordinator v14",
-                "Implementer v4",
+                "Coordinator v15",
+                "Implementer v5",
                 "Verifier v2",
                 "PR keeper v1",
                 "Thread contract v2",

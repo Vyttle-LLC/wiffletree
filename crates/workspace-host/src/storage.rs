@@ -2316,7 +2316,7 @@ impl Host {
         }
         Ok(())
     }
-    /// What the Space page's Storage and issues box shows about the Space's storage repository.
+    /// What the Space page's Repository box shows about the Space's repository.
     pub fn storage_status(&self, space_id: &SpaceId) -> Result<StorageStatus> {
         let space = self.space(space_id)?.space;
         let folder = self.storage_folder(&space.storage.repository);

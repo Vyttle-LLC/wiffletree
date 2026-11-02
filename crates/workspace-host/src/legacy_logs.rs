@@ -1,6 +1,6 @@
 //! Reading a legacy log (OpenSpec change `one-space-repository`, decision 7): each `## YYYY-MM-DD
 //! — Title` entry of a brain's legacy `logs/<repo>.md` file parses into one entry in the contract,
-//! with `source: skill`, for Bring in a brain, which arrives with the setup screens. An entry's id
+//! with `source: skill`, for Bring in a brain, which reads a brain folder on this Mac. An entry's id
 //! comes from its repository, date, title and text, so bringing it in again adds nothing. Nothing
 //! here logs an entry's text.
 use super::*;
@@ -256,9 +256,10 @@ fn fitted(repository: &str, entry: &LegacyEntry, version: &str) -> (LogInput, St
 fn blame(checkout: &Path, path: &str) -> Result<HashMap<usize, String>> {
     let file = checkout.join(path);
     let file = file.to_str().context("The file's path is not UTF-8")?;
-    let porcelain = read_git(
+    let porcelain = runtime::git_bytes_large(
         checkout,
         &["blame", "--porcelain", "--contents", file, "--", path],
+        &[],
     )?;
     let porcelain = String::from_utf8_lossy(&porcelain);
     let mut lines = HashMap::new();
@@ -294,23 +295,6 @@ const BRAIN_CONFIG: &str = "wiffletree-brain.json";
 /// How a legacy entry's pointer names a file Git does not hold as it stands here.
 const UNCOMMITTED: &str = "in this Mac's uncommitted copy";
 
-/// Runs `git` in the original read-only: with optional locks off, so not even its index is
-/// refreshed.
-fn read_git(at: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let output = std::process::Command::new("git")
-        .current_dir(at)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .args(args)
-        .output()?;
-    ensure!(
-        output.status.success(),
-        "git {} failed: {}",
-        args.first().unwrap_or(&""),
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    Ok(output.stdout)
-}
-
 /// What a file Bring in would write is, by its path under the brain folder.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum BroughtKind {
@@ -344,7 +328,7 @@ pub(crate) struct LegacyRead {
 /// Each path of the original Git reports as changed or untracked, relative to its root, and
 /// whether it was never committed.
 fn uncommitted(clone: &Path, folder: &str) -> Result<HashMap<String, bool>> {
-    let listed = read_git(
+    let listed = runtime::git_bytes_large(
         clone,
         &[
             "status",
@@ -354,6 +338,7 @@ fn uncommitted(clone: &Path, folder: &str) -> Result<HashMap<String, bool>> {
             "--",
             folder,
         ],
+        &[],
     )?;
     let listed = String::from_utf8_lossy(&listed);
     let mut paths = HashMap::new();
@@ -409,7 +394,7 @@ fn compiled_ids(clone: &Path, index: &str, git: bool) -> HashSet<String> {
     let Some(through) = cursor.through.filter(|_| git) else {
         return ids;
     };
-    let listed = read_git(clone, &["ls-tree", "-r", "--name-only", &through]);
+    let listed = runtime::git_bytes_large(clone, &["ls-tree", "-r", "--name-only", &through], &[]);
     for path in String::from_utf8_lossy(&listed.unwrap_or_default()).lines() {
         let parts: Vec<&str> = path.split('/').collect();
         if parts.len() >= 5 && compile::is_entry_path(&parts[parts.len() - 5..].join("/")) {
@@ -454,7 +439,7 @@ impl LegacyRead {
             }
         };
         let origin = git
-            .then(|| read_git(from, &["remote", "get-url", "origin"]).ok())
+            .then(|| runtime::git_bytes_large(from, &["remote", "get-url", "origin"], &[]).ok())
             .flatten()
             .and_then(|url| pr_watch::github_repository(String::from_utf8_lossy(&url).trim()))
             .map(|(owner, name)| format!("{owner}/{name}"));
@@ -504,7 +489,7 @@ impl LegacyRead {
                 let log = parse(&text);
                 let version = match (not_on_github, git) {
                     (false, true) => {
-                        let at = read_git(
+                        let at = runtime::git_bytes_large(
                             from,
                             &[
                                 "log",
@@ -513,6 +498,7 @@ impl LegacyRead {
                                 "--",
                                 &format!("{folder}/{path}"),
                             ],
+                            &[],
                         )?;
                         String::from_utf8_lossy(&at).trim().to_owned()
                     }
@@ -1010,8 +996,10 @@ mod tests {
 
         /// `git status` as the human would see it, read without touching the index.
         fn status(folder: &Path) -> String {
-            String::from_utf8(read_git(folder, &["status", "--porcelain=v1", "-z"]).unwrap())
-                .unwrap()
+            String::from_utf8(
+                runtime::git_bytes_large(folder, &["status", "--porcelain=v1", "-z"], &[]).unwrap(),
+            )
+            .unwrap()
         }
 
         fn write(folder: &Path, path: &str, text: &str) {

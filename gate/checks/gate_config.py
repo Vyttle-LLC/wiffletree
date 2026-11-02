@@ -1,7 +1,5 @@
-"""The brain's gate settings, read from `wiffletree-brain.json` at the repository root.
-
-The brain folder is the file's `brain_dir`; everything else is its `gate` object.
-A missing file, object or key takes the gate's default.
+"""The brain's gate settings, read from the `gate` object of `wiffletree-brain.json` at the
+repository root. A missing file, object or key takes the gate's default.
 """
 
 import json
@@ -36,24 +34,6 @@ def _setting(table: dict[str, Any], name: str, kind: type, default: Any, descrip
 
 _file = _load()
 _gate: dict[str, Any] = _setting(_file, "gate", dict, {}, "an object")
-
-def _brain_dir(value: str) -> str:
-    """The brain folder as a plain relative path: no `./`, `//` or trailing `/`."""
-    parts = [part for part in value.split("/") if part not in ("", ".")]
-    if value.startswith("/") or not parts or ".." in parts:
-        config_error(f"{CONFIG_FILE}: `brain_dir` must be a folder inside the repository")
-    return "/".join(parts)
-
-
-BRAIN_DIR: str = _brain_dir(_setting(_file, "brain_dir", str, "second-brain", "a string"))
-
-# A new-layout log entry's body (everything after its frontmatter) may hold at
-# most this many characters.
-MAX_ENTRY_BODY_CHARS: int = _setting(_gate, "gate.max_entry_body_chars", int, 2000, "a whole number")
-
-# Transition rule: while true, edits to legacy `<brain>/logs/<repo>.md` files
-# warn instead of failing.
-LEGACY_LOG_EDITS_ALLOWED: bool = _setting(_gate, "gate.legacy_log_edits_allowed", bool, False, "true or false")
 
 _domains = _setting(_gate, "gate.allowed_email_domains", list, [], "a list of domains")
 if not all(isinstance(domain, str) for domain in _domains):

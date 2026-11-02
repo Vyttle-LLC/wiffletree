@@ -25,7 +25,7 @@ pub(crate) fn migrate(host: &mut Host) -> Result<()> {
 }
 
 /// A lowercase ULID: 48 bits of `at` in milliseconds, then 80 random bits, in Crockford's base
-/// 32. Batch ids and log entry ids both use it.
+/// 32. Log entry ids and compile run ids use it.
 pub(crate) fn new_ulid(at: i64) -> String {
     ulid(at, u128::from_be_bytes(*uuid::Uuid::new_v4().as_bytes()))
 }

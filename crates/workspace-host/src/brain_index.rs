@@ -3330,6 +3330,34 @@ pub(crate) mod tests {
         }
 
         #[test]
+        fn a_wiki_names_only_the_issues_its_trackers_index_holds() {
+            let b = brained();
+            let host = &b.f.host;
+            let storage = &b.sage.storage;
+            let prefix = host.tracker(&b.sage).unwrap().prefix;
+            let filed = format!("{prefix}-1");
+            let folder = (host.storage_folder(&storage.repository))
+                .join(&storage.root)
+                .join("issues")
+                .join(&filed);
+            fs::create_dir_all(&folder).unwrap();
+            let issue = format!(
+                "---\nid: {filed}\ntitle: Retry webhooks\nstate: triage\nauthor: jlin\ncreated: 2026-10-29T14:02:11Z\n---\n"
+            );
+            fs::write(folder.join("issue.md"), issue).unwrap();
+            let key = storage.repository.key();
+            host.refresh_issue_index(Some(&key)).unwrap();
+            let body = format!("{filed} is done; {prefix}-9 and CEL-1 are not ours.");
+            let named = host.issues_named(&key, &body).unwrap();
+            assert_eq!(
+                (named.prefix.as_str(), named.ids),
+                (prefix.as_str(), vec![filed])
+            );
+            let elsewhere = host.issues_named("someone/else", &body).unwrap();
+            assert_eq!(elsewhere, BrainIssues::default());
+        }
+
+        #[test]
         fn a_pass_builds_the_index_and_rebuilds_a_deleted_one() {
             let mut b = brained();
             b.merge(&with_app_entry());

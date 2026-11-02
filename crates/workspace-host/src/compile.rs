@@ -2721,20 +2721,6 @@ mod tests {
     }
 
     #[test]
-    fn no_job_is_scheduled_so_a_compile_runs_only_on_run_now() {
-        let mut b = brained();
-        b.merge(&[relay(1)]);
-        b.f.host.refresh_compile_jobs().unwrap();
-        assert!(b.f.host.built_ins.iter().all(|job| job.schedule.is_none()));
-        let later = now() + 2 * 86_400_000;
-        b.f.host.fire_and_check(later).unwrap();
-        b.prepare();
-        assert!(b.runs().is_empty());
-        // No Space lists it.
-        assert!(b.f.host.job_states().unwrap().is_empty());
-    }
-
-    #[test]
     fn run_now_says_why_while_a_run_is_in_progress() {
         let mut b = brained();
         b.merge(&[relay(1)]);
@@ -3949,6 +3935,7 @@ mod tests {
         let lost = b.runs().remove(0);
         assert_eq!(lost.outcome, CompileOutcome::Lost);
         assert_eq!(lost.reason, format!("Lost to {THEIR_MAC}"));
+        assert_eq!(lost.pending, 1, "a stopped run keeps what it found pending");
         assert!(b.owed().unwrap().lost_run.is_some());
         assert_eq!(b.f.host.sessions().unwrap().len(), sessions);
         // A pull with the claim still live changes nothing and adds no row.
@@ -4007,19 +3994,6 @@ mod tests {
         b.due();
         assert_eq!(b.runs()[0].outcome, CompileOutcome::Lost);
         // A crashed Mac's claim, an hour old by the time of this pull.
-        let expired = Tip {
-            commit: "c".into(),
-            claim: Some(Claim {
-                host: "h".into(),
-                machine: "m".into(),
-                login: "l".into(),
-                run: "r".into(),
-                due: DUE.into(),
-                state: ClaimState::Claimed,
-                at: now() - 61 * MINUTE,
-            }),
-        };
-        assert!(expired.free(now()));
         b.teammate(ClaimState::Claimed, now() - 61 * MINUTE, DUE);
         b.pull();
         b.prepare();

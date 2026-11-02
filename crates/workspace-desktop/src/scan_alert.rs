@@ -7,8 +7,9 @@ use gpui_component::button::ButtonVariants;
 use gpui_component::input::{Input, InputState};
 use ui::{card, hint, pill};
 
-/// GitHub's guide, until Wiffletree's own page arrives with the docs.
-const CLEAN_HISTORY: &str = "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository";
+/// Wiffletree's page on cleaning a slip out of Git history.
+const CLEAN_HISTORY: &str =
+    "https://github.com/Vyttle-LLC/wiffletree/blob/main/docs/clean-history.md";
 
 /// What the human did on a card.
 pub(super) enum AlertAction {

@@ -351,7 +351,7 @@ pub enum Source {
 pub struct SpaceLocal {
     /// Whether the Space is on here.
     pub enabled: bool,
-    /// Where the brain is on this Mac: a local brain's folder or a GitHub brain's clone.
+    /// Where the brain an earlier release named is on this Mac, which Bring in a brain reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brain_path: Option<String>,
     /// Retired: the models this person could use in the Space. Kept so a downgrade keeps the
