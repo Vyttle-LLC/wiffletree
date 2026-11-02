@@ -350,13 +350,7 @@ class ConfigTest(GateTestCase):
     def test_unusable_config_is_refused(self):
         for text, expected in (
             ("{", "is not valid JSON"),
-            ('{"gate": {"max_entry_body_chars": true}}', "`gate.max_entry_body_chars` must be a whole number"),
             ('{"gate": {"allowed_email_domains": "example.org"}}', "`gate.allowed_email_domains` must be a list"),
-            ('{"brain_dir": "/second-brain"}', "`brain_dir` must be a folder inside the repository"),
-            ('{"brain_dir": "../second-brain"}', "`brain_dir` must be a folder inside the repository"),
-            ('{"brain_dir": "docs/../../x"}', "`brain_dir` must be a folder inside the repository"),
-            ('{"brain_dir": ""}', "`brain_dir` must be a folder inside the repository"),
-            ('{"brain_dir": "./"}', "`brain_dir` must be a folder inside the repository"),
         ):
             with self.subTest(text=text):
                 self.setUp()

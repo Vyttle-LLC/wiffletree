@@ -1,19 +1,24 @@
-//! Settings › Spaces (OpenSpec change `spaces`, screens 1 and 2 of its mockup): the Spaces down
-//! the left, and the shown Space's page with its Storage and issues box, or the forms that add a
-//! Space, new or from a repository. Only the human edits a Space; no agent tool can.
+//! Settings › Spaces (OpenSpec changes `spaces` and `one-space-repository`): the Spaces down the
+//! left, and the shown Space's page with its Repository box, or the forms that add a Space, new
+//! or from a repository. Only the human edits a Space; no agent tool can.
 use super::*;
 use gpui_component::{
     Disableable, Sizable,
     button::ButtonVariants,
     checkbox::Checkbox,
-    input::{Input, Textarea, TextareaState},
+    input::{Input, InputEvent, Textarea, TextareaState},
     menu::{DropdownMenu, PopupMenuItem},
 };
 use linear_import_view::LinearImportPanel;
+use repository_box::BringingIn;
 use repository_tree::{Choice, Tree, merged_list, shown_path};
+use setup::{RepositoryChoice, shown_folder};
 use std::collections::BTreeMap;
 use ui::{banner, card, hint, icon, mono, section};
-use wording::{age, counted};
+use wording::{age, counted, counted_as};
+
+mod repository_box;
+mod setup;
 
 const SCANS: &str = "Before pushing, Wiffletree runs its personal-data and secret scans on this Mac and holds a file that fails, instead of pushing it.";
 const ROUTER: &str = "The router reads this to decide where a message goes.";
@@ -40,10 +45,10 @@ struct Joining {
     check: StorageCheck,
     /// Ticked Spaces, by folder.
     ticked: BTreeSet<String>,
-    /// By folder, where each Space's brain is on this Mac.
-    brains: BTreeMap<String, String>,
     /// By folder and `owner/name`, where each of a Space's code repositories is cloned here.
     clones: BTreeMap<(String, String), String>,
+    /// Also on this Mac: this Mac compiles the wiki too.
+    compile_here: bool,
 }
 
 pub(super) struct SpacesPage {
@@ -54,11 +59,25 @@ pub(super) struct SpacesPage {
     loaded: Option<(Space, Space)>,
     name: Entity<InputState>,
     description: Entity<TextareaState>,
-    instructions: Entity<TextareaState>,
     sources: Entity<TextareaState>,
-    /// The storage repository for New, or the repository to add Spaces from.
+    /// The repository New chose, or the repository to add Spaces from.
     storage_input: Entity<InputState>,
     prefix_input: Entity<InputState>,
+    /// New Space's folder, compile time and timezone, and Bring in's brain folder.
+    folder_input: Entity<InputState>,
+    time_input: Entity<InputState>,
+    timezone_input: Entity<InputState>,
+    brain_folder_input: Entity<InputState>,
+    /// New Space's repository: one to create, or one the human has.
+    choice: RepositoryChoice,
+    /// New Space compiles the wiki on this Mac.
+    compile_here: bool,
+    /// The prefix New proposed from the name, which follows the name until the human types.
+    prefix_proposed: Option<String>,
+    defaults: Option<SpaceFormDefaults>,
+    /// Why GitHub turned Protect history down.
+    protect_refused: Option<String>,
+    bringing_in: Option<BringingIn>,
     /// The form's code repositories, saved with Save.
     repositories: Vec<String>,
     /// The root folders the form follows, saved with Save, and as they read when it was filled.
@@ -72,9 +91,9 @@ pub(super) struct SpacesPage {
     /// The Space whose storage was last asked about, and when.
     storage_asked: Option<(SpaceId, i64)>,
     joining: Option<Joining>,
-    /// The repository New was asked to store the Space in, as named, and who can read it,
-    /// shown before anything is written.
-    checked: Option<(String, StorageCheck)>,
+    /// The repository last checked, as named, and what the check found, shown before anything
+    /// is written.
+    checked: Option<(String, Result<StorageCheck, String>)>,
     /// A request is waiting for the host.
     busy: bool,
     error: Option<String>,
@@ -93,19 +112,37 @@ impl SpacesPage {
                     .placeholder(placeholder)
             })
         };
+        let input = |placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>| {
+            cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
+        };
+        let name = input("Sage", window, cx);
+        // New Space proposes the prefix and repository from the name as it is typed.
+        cx.subscribe_in(&name, window, |view, _, event: &InputEvent, window, cx| {
+            if matches!(event, InputEvent::Change) {
+                view.name_changed(window, cx);
+            }
+        })
+        .detach();
         Self {
             bridge,
             shared: Shared::default(),
             shown: None,
             loaded: None,
-            name: cx.new(|cx| InputState::new(window, cx).placeholder("Sage")),
+            name,
             description: textarea("What belongs in this Space, and what doesn’t", window, cx),
-            instructions: textarea("Rules for every agent in this Space", window, cx),
             sources: textarea("mcp linear: list_issues, get_issue", window, cx),
-            storage_input: cx
-                .new(|cx| InputState::new(window, cx).placeholder("owner/name or a GitHub URL")),
-            prefix_input: cx
-                .new(|cx| InputState::new(window, cx).placeholder("2 to 5 capitals, such as SAGE")),
+            storage_input: input("owner/name or a GitHub URL", window, cx),
+            prefix_input: input("2 to 5 capitals, such as SAGE", window, cx),
+            folder_input: input("wiffletree/", window, cx),
+            time_input: input("06:00", window, cx),
+            timezone_input: input("America/Chicago", window, cx),
+            brain_folder_input: input(SpaceBrain::DEFAULT_FOLDER, window, cx),
+            choice: RepositoryChoice::Create,
+            compile_here: true,
+            prefix_proposed: None,
+            defaults: None,
+            protect_refused: None,
+            bringing_in: None,
             repositories: vec![],
             followed: vec![],
             followed_read: vec![],
@@ -274,6 +311,8 @@ impl SpacesPage {
         self.error = None;
         self.refused_by = None;
         self.editing_prefix = false;
+        self.bringing_in = None;
+        self.protect_refused = None;
         if matches!(shown, Shown::New | Shown::FromRepository) {
             self.loaded = None;
             self.joining = None;
@@ -282,17 +321,20 @@ impl SpacesPage {
             for input in [&self.name, &self.storage_input, &self.prefix_input] {
                 input.update(cx, |input, cx| input.set_value("", window, cx));
             }
-            for state in [&self.description, &self.instructions] {
-                state.update(cx, |input, cx| input.set_value("", window, cx));
-            }
+            self.description
+                .update(cx, |input, cx| input.set_value("", window, cx));
         }
+        let new = shown == Shown::New;
         self.shown = Some(shown);
+        if new {
+            self.open_new(window, cx);
+        }
         self.load_shown(window, cx);
         self.read_storage(window, cx);
         cx.notify();
     }
 
-    /// Asks the host what the shown Space's storage holds, for its Storage and issues box.
+    /// Asks the host what the shown Space's repository holds, for its Repository box.
     fn read_storage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.shown_space().map(|s| s.id.clone()) else {
             return;
@@ -507,175 +549,6 @@ impl SpacesPage {
         });
     }
 
-    fn create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name = self.name.read(cx).value().trim().to_owned();
-        if name.is_empty() {
-            self.error = Some("Give the Space a name".into());
-            return cx.notify();
-        }
-        let storage = self.storage_input.read(cx).value().trim().to_owned();
-        if self.on_github && storage.is_empty() {
-            self.error = Some("Name the GitHub repository to store the Space in".into());
-            return cx.notify();
-        }
-        if self.on_github && self.checked_for(&storage).is_none() {
-            self.error = Some("Check the repository first, to see who can read it".into());
-            return cx.notify();
-        }
-        let prefix = self.prefix_input.read(cx).value().trim().to_owned();
-        let ask = ask::create_space(
-            name,
-            self.description.read(cx).value().trim().to_owned(),
-            self.instructions.read(cx).value().trim().to_owned(),
-            (!prefix.is_empty()).then_some(prefix),
-            self.on_github.then_some(storage),
-        );
-        self.busy = true;
-        self.error = None;
-        self.ask(ask, window, cx, |view, created, window, cx| {
-            view.busy = false;
-            match created {
-                Ok(record) => view.show(Shown::Space(record.space.id), window, cx),
-                Err(error) => view.error = Some(error),
-            }
-        });
-        cx.notify();
-    }
-
-    /// What checking `repository`, as named, found, once New has checked it.
-    fn checked_for(&self, repository: &str) -> Option<&StorageCheck> {
-        (self.checked.as_ref())
-            .filter(|(named, _)| named == repository)
-            .map(|(_, check)| check)
-    }
-
-    /// Checks New's GitHub repository, writing nothing, so the form says who can read it
-    /// before Create Space writes anything.
-    fn check_new_storage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let repository = self.storage_input.read(cx).value().trim().to_owned();
-        if repository.is_empty() {
-            return;
-        }
-        self.busy = true;
-        self.error = None;
-        let asked = repository.clone();
-        self.ask(
-            ask::check_storage_repository(repository),
-            window,
-            cx,
-            move |view, check, _, _| {
-                view.busy = false;
-                match check {
-                    Ok(check) => view.checked = Some((asked, check)),
-                    Err(error) => view.error = Some(error),
-                }
-            },
-        );
-        cx.notify();
-    }
-
-    fn check_repository(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let repository = self.storage_input.read(cx).value().trim().to_owned();
-        if repository.is_empty() {
-            return;
-        }
-        self.busy = true;
-        self.error = None;
-        self.refused_by = None;
-        self.joining = None;
-        let asked = repository.clone();
-        self.ask(
-            ask::check_storage_repository(repository),
-            window,
-            cx,
-            move |view, check, _, _| {
-                view.busy = false;
-                match check {
-                    Ok(check) => {
-                        let ticked = (check.spaces.iter())
-                            .filter(|listing| !listing.added)
-                            .map(|listing| listing.folder.clone())
-                            .collect();
-                        view.joining = Some(Joining {
-                            repository: asked,
-                            check,
-                            ticked,
-                            brains: BTreeMap::new(),
-                            clones: BTreeMap::new(),
-                        });
-                    }
-                    Err(error) => view.error = Some(error),
-                }
-            },
-        );
-        cx.notify();
-    }
-
-    /// Asks where a ticked Space's brain, or one of its code repositories, is on this Mac.
-    fn choose_place(
-        &mut self,
-        folder: String,
-        repository: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let prompt = match &repository {
-            Some(identity) => format!("Where is {identity} cloned?"),
-            None => "Where is the brain on this Mac?".into(),
-        };
-        let paths = folders::choose(&self.bridge, &prompt, false, window, cx);
-        cx.spawn_in(window, async move |this, cx| {
-            let chosen = paths.recv().await.ok().and_then(|p| p.into_iter().next());
-            let _ = this.update(cx, |view, cx| {
-                let (Some(path), Some(joining)) = (chosen, view.joining.as_mut()) else {
-                    return;
-                };
-                let path = path.to_string_lossy().into_owned();
-                match repository {
-                    Some(identity) => drop(joining.clones.insert((folder, identity), path)),
-                    None => drop(joining.brains.insert(folder, path)),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn join(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(joining) = &self.joining else {
-            return;
-        };
-        let spaces = join_choices(joining);
-        if spaces.is_empty() {
-            self.error = Some("Tick at least one Space to add".into());
-            return cx.notify();
-        }
-        self.busy = true;
-        self.error = None;
-        self.refused_by = None;
-        let repository = joining.repository.clone();
-        self.ask(
-            ask::join_spaces(repository, spaces),
-            window,
-            cx,
-            |view, joined, window, cx| {
-                view.busy = false;
-                match joined {
-                    Ok(records) => {
-                        if let Some(first) = records.into_iter().next() {
-                            view.show(Shown::Space(first.space.id), window, cx);
-                        }
-                    }
-                    Err(error) => {
-                        view.refused_by = join_refused_by(view.spaces(), &error);
-                        view.error = Some(error);
-                    }
-                }
-            },
-        );
-        cx.notify();
-    }
-
     fn list(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let shown = self.shown_space().map(|s| s.id.clone());
         let mut list = div()
@@ -781,7 +654,6 @@ impl SpacesPage {
                 Some(ROUTER.into()),
                 p,
             ))
-            .child(row("Brain", brain_field(space, p), None, p))
             .child(row(
                 "Code repositories",
                 self.repositories_field(space, p, cx),
@@ -799,7 +671,7 @@ impl SpacesPage {
             ))
             .child(self.cascade_links(space, local, p, cx))
             .children(self.moved_banner(space, p, cx))
-            .child(self.storage_box(space, status, p, cx));
+            .child(self.repository_box(space, status, p, cx));
         if let Some(error) = &self.error {
             page = page.child(self.error_line(error, p, cx));
         }
@@ -1045,109 +917,6 @@ impl SpacesPage {
         )
     }
 
-    fn storage_box(
-        &self,
-        space: &Space,
-        status: Option<&Result<StorageStatus, String>>,
-        p: Palette,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let mut head = div().flex().items_center().gap_2().child(
-            div()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child("Storage and issues"),
-        );
-        let status = match status {
-            Some(Ok(status)) => status,
-            Some(Err(error)) => {
-                return card(p)
-                    .child(head)
-                    .child(hint(error.clone(), p).text_color(p.red));
-            }
-            None => return card(p).child(head).child(hint("Reading…", p)),
-        };
-        if let Some((line, failed)) = sync_line(status) {
-            head = head
-                .child(div().flex_1())
-                .child(hint(line, p).text_color(if failed { p.red } else { p.green }));
-        }
-        let others: Vec<&str> = (self.spaces().iter())
-            .filter(|s| s.id != space.id && s.storage.repository == space.storage.repository)
-            .map(|s| s.name.as_str())
-            .collect();
-        let mut facts = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(fact("Repository", repository_line(space), p))
-            .child(fact("Issues", self.issues_field(space, status, p, cx), p))
-            .child(fact(
-                "Who can read them",
-                hint(readers_line(space, status.readers), p).text_color(
-                    if status.readers.is_some_and(|r| r != Readers::Invited) {
-                        p.yellow
-                    } else {
-                        p.text
-                    },
-                ),
-                p,
-            ));
-        if let Some(line) = shared_with(&others, status.prefix.as_deref()) {
-            facts = facts.child(fact("Shared with", line, p));
-        }
-        if status.settings_repository {
-            facts = facts.child(fact("Also used for", ALSO_SETTINGS, p));
-        }
-        facts = facts.child(fact("On this Mac", mono(status.path.clone(), p), p));
-        let mut box_ = card(p).child(head).child(facts);
-        if is_shared(space) {
-            box_ = box_.child(hint(SCANS, p));
-        }
-        let open_issues = status.prefix.is_some().then(|| {
-            let space_id = space.id.clone();
-            button("space-open-issues")
-                .ghost()
-                .label("Open Issues")
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    cx.emit(Intent::OpenIssues(Some(space_id.clone())))
-                }))
-        });
-        let sync_now = is_shared(space).then(|| {
-            ui::gated(
-                button("space-sync-now").label("Sync now"),
-                &self.shared.host,
-            )
-            .on_click(cx.listener(|view, _, window, cx| view.request(Command::SyncNow, window, cx)))
-        });
-        let panel = (self.linear.as_ref())
-            .filter(|(shown, _)| shown == &space.id)
-            .map(|(_, panel)| panel.clone());
-        let import = (status.prefix.is_some() && panel.is_none()).then(|| {
-            let space_id = space.id.clone();
-            ui::gated(
-                button("space-import-linear")
-                    .ghost()
-                    .label("Import from Linear…"),
-                &self.shared.host,
-            )
-            .on_click(cx.listener(move |view, _, window, cx| {
-                view.open_linear_import(space_id.clone(), window, cx)
-            }))
-        });
-        if open_issues.is_some() || sync_now.is_some() || import.is_some() {
-            box_ = box_.child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap_2()
-                    .children(import)
-                    .children(open_issues)
-                    .children(sync_now),
-            );
-        }
-        box_.children(panel)
-    }
-
     fn issues_field(
         &self,
         space: &Space,
@@ -1166,7 +935,7 @@ impl SpacesPage {
             .flex_wrap()
             .items_center()
             .gap_2()
-            .child(issues_line(space, status))
+            .child(issues_line(status))
             .when(!self.editing_prefix, |d| {
                 d.children(action.map(|label| {
                     ui::gated(
@@ -1213,293 +982,10 @@ impl SpacesPage {
                 .child(hint(PREFIX_RULE, p)),
         )
     }
-
-    fn new_page(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let mut page = div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("New Space"))
-            .child(row("Name", Input::new(&self.name).small(), None, p))
-            .child(row(
-                "What belongs here",
-                Textarea::new(&self.description).w_full(),
-                Some(ROUTER.into()),
-                p,
-            ))
-            .child(row(
-                "Additions",
-                Textarea::new(&self.instructions).w_full(),
-                Some("Added for every agent in this Space. Change them later on Behaviors.".into()),
-                p,
-            ))
-            .child(row(
-                "Storage",
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .flex()
-                            .gap_1()
-                            .child(
-                                ui::segment("storage-local", "Only on this Mac", !self.on_github)
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.on_github = false;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                ui::segment("storage-github", "A GitHub repository", self.on_github)
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.on_github = true;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .when(self.on_github, |d| {
-                        let named = self.storage_input.read(cx).value().trim().to_owned();
-                        d.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(Input::new(&self.storage_input).small().flex_1().min_w_0())
-                                .child(
-                                    ui::gated(
-                                        button("check-new-storage").label("Check").disabled(self.busy),
-                                        &self.shared.host,
-                                    )
-                                    .on_click(cx.listener(|view, _, window, cx| {
-                                        view.check_new_storage(window, cx)
-                                    })),
-                                ),
-                        )
-                        .children(self.checked_for(&named).map(|check| {
-                            hint(new_storage_line(check), p).text_color(p.yellow)
-                        }))
-                    }),
-                Some(
-                    if self.on_github {
-                        "A private repository. Its issues and its Spaces’ additions are shared with everyone who can read it."
-                    } else {
-                        "A local Git repository with no remote. Nothing in it is pushed anywhere."
-                    }
-                    .into(),
-                ),
-                p,
-            ))
-            .child(row(
-                "Issue prefix",
-                Input::new(&self.prefix_input).small().w(px(160.)),
-                Some(format!("{PREFIX_RULE} Left empty, it is proposed from the name; a repository that is already a tracker keeps its own.")),
-                p,
-            ));
-        if let Some(error) = &self.error {
-            page = page.child(self.error_line(error, p, cx));
-        }
-        page.child(
-            div().flex().justify_end().child(
-                ui::gated(
-                    button("create-space")
-                        .primary()
-                        .label("Create Space")
-                        .disabled(self.busy),
-                    &self.shared.host,
-                )
-                .on_click(cx.listener(|view, _, window, cx| view.create(window, cx))),
-            ),
-        )
-    }
-
-    fn join_page(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let mut page = div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("Add Space from a repository"))
-            .child(hint(
-                "A private GitHub repository whose spaces/ folder holds Spaces your team shares. Nothing is written until you add them.",
-                p,
-            ))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(Input::new(&self.storage_input).small().flex_1().min_w_0())
-                    .child(
-                        ui::gated(
-                            button("check-storage").label("Check").disabled(self.busy),
-                            &self.shared.host,
-                        )
-                        .on_click(cx.listener(|view, _, window, cx| view.check_repository(window, cx))),
-                    ),
-            );
-        if let Some(joining) = &self.joining {
-            page = page.child(self.join_choices(joining, p, cx));
-        }
-        if let Some(error) = &self.error {
-            page = page.child(self.error_line(error, p, cx));
-        }
-        if self.joining.is_some() {
-            page = page.child(
-                div().flex().justify_end().child(
-                    ui::gated(
-                        button("join-spaces")
-                            .primary()
-                            .label("Add Spaces")
-                            .disabled(self.busy),
-                        &self.shared.host,
-                    )
-                    .on_click(cx.listener(|view, _, window, cx| view.join(window, cx))),
-                ),
-            );
-        }
-        page
-    }
-
-    fn join_choices(&self, joining: &Joining, p: Palette, cx: &mut Context<Self>) -> Div {
-        let check = &joining.check;
-        let here = self.shared.snapshot().map_or(&[][..], |s| &s.repositories);
-        let mut list = div().flex().flex_col().gap_3().child(hint(
-            format!(
-                "{} · {} · {}",
-                check.repository.name,
-                readers_sentence(check.repository.readers, &check.repository.name),
-                match &check.prefix {
-                    Some(prefix) => format!("issues use the prefix {prefix}"),
-                    None => "no tracker yet; its Space pages offer Set up issues".into(),
-                }
-            ),
-            p,
-        ));
-        if check.spaces.is_empty() {
-            return list.child(hint("It holds no Space yet.", p));
-        }
-        for listing in &check.spaces {
-            let folder = listing.folder.clone();
-            let ticked = joining.ticked.contains(&listing.folder);
-            let mut entry = div().flex().flex_col().gap_1().child(
-                Checkbox::new(SharedString::from(format!("join-{}", listing.folder)))
-                    .label(if listing.added {
-                        format!("{} · already on this Mac", listing.name)
-                    } else {
-                        listing.name.clone()
-                    })
-                    .checked(ticked)
-                    .disabled(listing.added)
-                    .on_click(cx.listener(move |view, checked: &bool, _, cx| {
-                        if let Some(joining) = &mut view.joining {
-                            match checked {
-                                true => joining.ticked.insert(folder.clone()),
-                                false => joining.ticked.remove(&folder),
-                            };
-                        }
-                        cx.notify();
-                    })),
-            );
-            if !listing.description.is_empty() {
-                entry = entry.child(hint(listing.description.clone(), p).pl_6());
-            }
-            if ticked {
-                entry = entry.child(self.places(joining, listing, here, p, cx).pl_6());
-            }
-            list = list.child(entry);
-        }
-        list
-    }
-
-    /// Where a ticked Space's brain and code repositories are on this Mac, each with Choose…;
-    /// a repository already in the workspace needs nothing, and one left alone stays missing.
-    fn places(
-        &self,
-        joining: &Joining,
-        listing: &SpaceListing,
-        here: &[Repository],
-        p: Palette,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let choose =
-            |id: String, folder: String, repository: Option<String>, cx: &mut Context<Self>| {
-                button(SharedString::from(id))
-                    .xsmall()
-                    .ghost()
-                    .label("Choose…")
-                    .on_click(cx.listener(move |view, _, window, cx| {
-                        view.choose_place(folder.clone(), repository.clone(), window, cx)
-                    }))
-            };
-        let mut places = div().flex().flex_col().gap_1();
-        if let Some(brain) = &listing.brain {
-            let named = match &brain.repository {
-                BrainRepository::GitHub { owner, name, .. } => format!("Brain {owner}/{name}"),
-                BrainRepository::Local { .. } => "Brain, a folder".into(),
-            };
-            let at = joining.brains.get(&listing.folder);
-            places = places.child(place(
-                named,
-                at.map_or("missing on this Mac".into(), Clone::clone),
-                choose(
-                    format!("brain-{}", listing.folder),
-                    listing.folder.clone(),
-                    None,
-                    cx,
-                ),
-                p,
-            ));
-        }
-        for (at, identity) in listing.repositories.iter().enumerate() {
-            if let Some(cloned) = here.iter().find(|r| r.is_github(identity)) {
-                places = places.child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(div().flex_1().child(identity.clone()))
-                        .child(hint(format!("cloned at {}", cloned.path), p)),
-                );
-                continue;
-            }
-            let chosen = joining
-                .clones
-                .get(&(listing.folder.clone(), identity.clone()));
-            places = places.child(place(
-                identity.clone(),
-                chosen.map_or("missing on this Mac".into(), Clone::clone),
-                choose(
-                    format!("clone-{}-{at}", listing.folder),
-                    listing.folder.clone(),
-                    Some(identity.clone()),
-                    cx,
-                ),
-                p,
-            ));
-        }
-        places
-    }
 }
 
-const REMOVE_SPACE: &str = "Its storage and brain repositories stay as they are. Its archived projects move to Personal. A Space with an open project, or the last Space, can’t be removed.";
-const PREFIX_RULE: &str = "2 to 5 capitals, used by no other storage repository on this Mac.";
-
-/// Who can read the repository New will store the Space in, and its tracker, said before
-/// anything is written.
-fn new_storage_line(check: &StorageCheck) -> String {
-    let repository = &check.repository.name;
-    let tracker = match &check.prefix {
-        Some(prefix) => format!(" It is already a tracker; the Space shares its prefix {prefix}."),
-        None => String::new(),
-    };
-    format!(
-        "{} They can read this Space and its issues, and anyone who can push to it can change its instructions.{tracker}",
-        readers_sentence(check.repository.readers, repository)
-    )
-}
+const REMOVE_SPACE: &str = "Its repository stays as it is. Its archived projects move to Personal. A Space with an open project, the last Space, or the last Space in a repository with entries waiting or held here can’t be removed.";
+const PREFIX_RULE: &str = "2 to 5 capitals, used by no other repository on this Mac.";
 
 fn reads_storage_again(
     asked: Option<&(SpaceId, i64)>,
@@ -1594,7 +1080,7 @@ fn row(label: &'static str, field: impl IntoElement, caption: Option<String>, p:
         )
 }
 
-/// One line of the Storage and issues box.
+/// One line of the Repository box.
 fn fact(label: &'static str, value: impl IntoElement, p: Palette) -> Div {
     div()
         .flex()
@@ -1609,39 +1095,6 @@ fn fact(label: &'static str, value: impl IntoElement, p: Palette) -> Div {
                 .child(label),
         )
         .child(div().flex_1().min_w_0().child(value))
-}
-
-/// Where a joined Space's brain or repository is on this Mac, with Choose….
-fn place(named: String, at: String, choose: Button, p: Palette) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(div().flex_1().min_w_0().child(named))
-        .child(hint(at, p))
-        .child(choose)
-}
-
-/// The Brain row: where the Space's brain is, and read-only the old brain an earlier release
-/// named, which Bring in a brain will read.
-fn brain_field(space: &Space, p: Palette) -> Div {
-    let folder = match space.storage.root.as_str() {
-        "" => SpaceBrain::DEFAULT_FOLDER.to_owned(),
-        root => format!("{root}/{}", SpaceBrain::DEFAULT_FOLDER),
-    };
-    let here = format!("{} · {folder}/", space.storage.repository.key());
-    let field = div().flex().flex_col().gap_1().child(mono(here, p));
-    let Some(SpaceBrain { repository, .. }) = &space.brain else {
-        return field;
-    };
-    let named = match repository {
-        BrainRepository::GitHub { owner, name, .. } => format!("{owner}/{name}"),
-        BrainRepository::Local { .. } => "a folder on this Mac".into(),
-    };
-    field.child(hint(
-        format!("An earlier release named {named} as its brain. It takes no new entries."),
-        p,
-    ))
 }
 
 /// How many Behavior choices the Space makes, for itself and for its repositories.
@@ -1712,40 +1165,33 @@ fn storage_banner(space: &Space, readers: Option<Readers>) -> (&'static str, Str
     )
 }
 
-fn repository_line(space: &Space) -> String {
-    match &space.storage.repository {
-        StorageRepository::Local { .. } => "Local, no remote".into(),
-        repository => format!(
-            "{} · this Space’s folder spaces/{}/",
-            repository.key(),
-            space.storage.folder
-        ),
-    }
-}
-
-fn issues_line(space: &Space, status: &StorageStatus) -> String {
+fn issues_line(status: &StorageStatus) -> String {
     let Some(prefix) = &status.prefix else {
         return "No tracker yet. Set up issues chooses its prefix and commits wiffletree-issues.yaml."
             .into();
     };
-    let count = counted(status.issues, "issue");
-    match is_shared(space) {
-        true => format!(
-            "Prefix {prefix} · {count} · issues/ and wiffletree-issues.yaml at the repository’s root"
-        ),
-        false => format!("Prefix {prefix} · {count}"),
-    }
+    format!("Prefix {prefix} · {}", counted(status.issues, "issue"))
 }
 
-/// Who can read the Space's storage, and so its issues.
-pub(super) fn readers_line(space: &Space, readers: Option<Readers>) -> String {
+/// Who can read the Space's repository, and so its issues, logs and wiki: as many as GitHub
+/// counted, when it let this Mac count them.
+pub(super) fn readers_line(
+    space: &Space,
+    readers: Option<Readers>,
+    count: Option<usize>,
+) -> String {
     let owner = repository_owner(&space.storage.repository.key()).to_owned();
-    match readers {
-        None => "Only you, on this Mac".into(),
-        Some(Readers::Invited) => "Only you and people you invite".into(),
-        Some(Readers::EveryMember) => format!("Every member of {owner}"),
-        Some(Readers::EnterpriseMembers) => format!("Every member of {owner}’s enterprise"),
-        Some(Readers::MaybeMembers) => format!("Maybe every member of {owner}"),
+    match (readers, count) {
+        (None, _) => "Only you, on this Mac".into(),
+        (Some(Readers::EveryMember), Some(count)) => {
+            format!("{} of {owner}", counted(count, "member"))
+        }
+        (Some(Readers::Invited), Some(1)) => "Only you".into(),
+        (Some(Readers::Invited), Some(count)) => format!("{count} people you invited"),
+        (Some(Readers::Invited), None) => "Only you and people you invite".into(),
+        (Some(Readers::EveryMember), None) => format!("Every member of {owner}"),
+        (Some(Readers::EnterpriseMembers), _) => format!("Every member of {owner}’s enterprise"),
+        (Some(Readers::MaybeMembers), _) => format!("Maybe every member of {owner}"),
     }
 }
 
@@ -1815,21 +1261,6 @@ fn prefix_question(
             "Rename prefix",
         ),
     }
-}
-
-/// The ticked Spaces with where their brain and repositories are on this Mac.
-fn join_choices(joining: &Joining) -> Vec<JoinSpace> {
-    (joining.check.spaces.iter())
-        .filter(|listing| joining.ticked.contains(&listing.folder))
-        .map(|listing| JoinSpace {
-            folder: listing.folder.clone(),
-            brain_path: joining.brains.get(&listing.folder).cloned(),
-            clones: (joining.clones.iter())
-                .filter(|((folder, _), _)| folder == &listing.folder)
-                .map(|(_, path)| path.clone())
-                .collect(),
-        })
-        .collect()
 }
 
 /// The local Space a join was refused for, its tracker using the repository's prefix, so the
@@ -1960,11 +1391,15 @@ impl Render for SpacesPage {
 
 #[cfg(test)]
 mod tests {
+    use super::repository_box::{
+        brings_lines, compile_words, leaves_line, logs_line, not_on_github_line, plan_notes,
+        where_line, wiki_line,
+    };
+    use super::setup::{Mark, check_lines, compiles_now, join_choices, proposed_repository};
     use super::{
         Joining, STORAGE_FRESH_MS, behaviors_changed, brain_label, format_sources, holds_draft,
-        issues_line, join_choices, join_refused_by, merged, models_changed, new_storage_line,
-        parse_sources, pass_finished, prefix_question, readers_line, reads_storage_again,
-        repository_line, shared_with, storage_banner, sync_line,
+        issues_line, join_refused_by, merged, models_changed, parse_sources, pass_finished,
+        prefix_question, readers_line, reads_storage_again, shared_with, storage_banner, sync_line,
     };
     use crate::wording::counted;
     use workspace_core::*;
@@ -2002,6 +1437,14 @@ mod tests {
     }
     fn status(prefix: Option<&str>, issues: usize, readers: Option<Readers>) -> StorageStatus {
         StorageStatus {
+            entries: 0,
+            waiting: 0,
+            wiki_pages: 0,
+            compiled: None,
+            compile: None,
+            compilers: 0,
+            compiles_here: false,
+            reader_count: None,
             prefix: prefix.map(Into::into),
             issues,
             readers,
@@ -2064,18 +1507,170 @@ mod tests {
             "Anyone who can push to Sage-Social/wiffletree-storage can change this Space’s Behaviors, additions and models for everyone in it"
         ));
         let status = status(Some("SAGE"), 148, Some(Readers::EveryMember));
+        assert_eq!(issues_line(&status), "Prefix SAGE · 148 issues");
         assert_eq!(
-            issues_line(&sage, &status),
-            "Prefix SAGE · 148 issues · issues/ and wiffletree-issues.yaml at the repository’s root"
-        );
-        assert_eq!(
-            readers_line(&sage, status.readers),
+            readers_line(&sage, status.readers, None),
             "Every member of Sage-Social"
         );
         assert_eq!(
-            repository_line(&sage),
-            "Sage-Social/wiffletree-storage · this Space’s folder spaces/sage/"
+            where_line(&sage),
+            "Sage-Social/wiffletree-storage · the repository’s root"
         );
+    }
+
+    #[test]
+    fn the_repository_box_says_where_who_reads_and_how_the_wiki_compiles() {
+        let mut vyttle = space(
+            "Vyttle",
+            StorageRepository::GitHub {
+                owner: "Vyttle-LLC".into(),
+                name: "vyttle-wiffletree-storage".into(),
+            },
+        );
+        vyttle.storage.root = "wiffletree".into();
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 2).unwrap();
+        let six = today.and_hms_opt(6, 4, 0).unwrap();
+        let six = six
+            .and_local_timezone(chrono::Local)
+            .unwrap()
+            .timestamp_millis();
+        let status = StorageStatus {
+            entries: 214,
+            waiting: 9,
+            wiki_pages: 10,
+            compiled: Some((six, "Michael's Mac".into())),
+            compile: Some(BrainCompile {
+                at: "06:00".into(),
+                timezone: "America/Chicago".into(),
+                extra: Extra::new(),
+            }),
+            compilers: 2,
+            compiles_here: true,
+            reader_count: Some(3),
+            ..status(Some("VYT"), 48, Some(Readers::EveryMember))
+        };
+        assert_eq!(
+            where_line(&vyttle),
+            "Vyttle-LLC/vyttle-wiffletree-storage · wiffletree/"
+        );
+        assert_eq!(
+            readers_line(&vyttle, status.readers, status.reader_count),
+            "3 members of Vyttle-LLC"
+        );
+        assert_eq!(issues_line(&status), "Prefix VYT · 48 issues");
+        assert_eq!(
+            logs_line(&status),
+            "214 entries · 9 waiting for the next compile"
+        );
+        assert_eq!(
+            wiki_line(&status, today),
+            "10 pages · compiled today at 06:04 on Michael's Mac"
+        );
+        assert_eq!(
+            compile_words(&status),
+            "Daily at 06:00 · on this Mac and 1 other"
+        );
+        let nobody = StorageStatus {
+            compilers: 0,
+            compiles_here: false,
+            ..status
+        };
+        assert_eq!(compile_words(&nobody), "Daily at 06:00 · on no Mac");
+    }
+
+    #[test]
+    fn a_checked_repository_says_whether_it_can_be_used_in_the_mockups_words() {
+        let usable = StorageCheck {
+            repository: SettingsRepository {
+                name: "Vyttle-LLC/vyttle-wiffletree-storage".into(),
+                push_url: "u".into(),
+                branch: "main".into(),
+                readers: Readers::EveryMember,
+            },
+            organization: true,
+            reader_count: Some(3),
+            history_protected: false,
+            folder: None,
+            spaces: vec![],
+            prefix: None,
+            compile: None,
+            issues: 0,
+            wiki_pages: 0,
+            compilers: 0,
+        };
+        assert_eq!(
+            check_lines(&Ok(usable.clone())),
+            [
+                (
+                    Mark::Passed,
+                    "Private. 3 members of Vyttle-LLC can read it.".to_owned()
+                ),
+                (Mark::Passed, "Wiffletree can write to main.".to_owned()),
+                (
+                    Mark::Warning,
+                    "History isn’t protected. Anyone with access could force-push over it."
+                        .to_owned()
+                ),
+            ]
+        );
+        let protected = StorageCheck {
+            history_protected: true,
+            ..usable
+        };
+        assert_eq!(check_lines(&Ok(protected)).len(), 2, "no warning");
+        let public = "Public. Issues and logs need a private repository.";
+        assert_eq!(
+            check_lines(&Err(public.into())),
+            [(Mark::Refused, public.to_owned())]
+        );
+        assert_eq!(
+            proposed_repository("Vyttle-LLC", "Vyttle"),
+            "Vyttle-LLC/vyttle-wiffletree-storage"
+        );
+        assert_eq!(
+            proposed_repository("Sage-Social", "Sage Watch"),
+            "Sage-Social/sage-watch-wiffletree-storage"
+        );
+        assert_eq!(
+            compiles_now(1),
+            "1 Mac compiles this wiki now. Turning this on would use your model subscription."
+        );
+    }
+
+    #[test]
+    fn bring_in_says_what_it_brings_what_it_leaves_and_what_only_this_mac_has() {
+        let plan = BringInPlan {
+            pages: 10,
+            status: true,
+            entries: 191,
+            entry_files: 17,
+            shortened: 2,
+            not_on_github: 17,
+            never_committed: 11,
+            left_behind: vec!["archive/".into(), "automation/".into(), "raw/".into()],
+            ..BringInPlan::default()
+        };
+        assert_eq!(
+            brings_lines(&plan),
+            [
+                "10 wiki pages and STATUS.md",
+                "191 log entries from 17 files, each with its date and repository"
+            ]
+        );
+        assert_eq!(
+            leaves_line(&plan),
+            "The original folder is left as it is, along with archive/, automation/ and raw/. You can delete it once you’re happy."
+        );
+        assert_eq!(
+            not_on_github_line(&plan).unwrap(),
+            "17 of these files aren’t on GitHub yet. They exist only in this Mac’s clone, and 11 have never been committed. Bringing in reads this Mac’s copy, so none of them are lost."
+        );
+        assert!(plan_notes(&plan)[0].starts_with("2 entries are shortened"));
+        let pushed = BringInPlan {
+            not_on_github: 0,
+            ..plan
+        };
+        assert_eq!(not_on_github_line(&pushed), None);
     }
 
     #[test]
@@ -2084,10 +1679,20 @@ mod tests {
         let (lead, text) = storage_banner(&personal, None);
         assert_eq!(lead, "Only on this Mac.");
         assert!(text.contains("Personal’s storage is a local Git repository with no remote."));
-        assert_eq!(repository_line(&personal), "Local, no remote");
-        assert_eq!(readers_line(&personal, None), "Only you, on this Mac");
+        let moved = Space {
+            storage: SpaceStorage {
+                root: "wiffletree".into(),
+                ..personal.storage.clone()
+            },
+            ..personal.clone()
+        };
         assert_eq!(
-            issues_line(&personal, &status(Some("ME"), 12, None)),
+            where_line(&moved),
+            "Only on this Mac · wiffletree/ · no remote"
+        );
+        assert_eq!(readers_line(&personal, None, None), "Only you, on this Mac");
+        assert_eq!(
+            issues_line(&status(Some("ME"), 12, None)),
             "Prefix ME · 12 issues"
         );
         assert_eq!(
@@ -2114,8 +1719,7 @@ mod tests {
     fn storage_without_a_tracker_offers_set_up_issues_and_asks_before_writing() {
         let sage = sage();
         assert!(
-            issues_line(&sage, &status(None, 0, Some(Readers::Invited)))
-                .starts_with("No tracker yet.")
+            issues_line(&status(None, 0, Some(Readers::Invited))).starts_with("No tracker yet.")
         );
         let (title, line, ok) = prefix_question(&sage, None, "SAGE");
         assert_eq!(title, "Set up issues with the prefix SAGE?");
@@ -2140,13 +1744,12 @@ mod tests {
     }
 
     #[test]
-    fn joining_sends_each_ticked_space_with_its_brain_and_clones_here() {
+    fn joining_sends_each_ticked_space_with_its_clones_here() {
         let listing = |folder: &str| SpaceListing {
             folder: folder.into(),
             id: SpaceId(folder.into()),
             name: folder.into(),
             description: String::new(),
-            brain: None,
             repositories: vec!["Sage-Social/api".into(), "Sage-Social/web".into()],
             added: false,
         };
@@ -2158,14 +1761,21 @@ mod tests {
                 readers: Readers::EveryMember,
             },
             organization: true,
+            reader_count: None,
+            history_protected: true,
+            folder: Some("wiffletree".into()),
             spaces: vec![listing("sage"), listing("watch")],
             prefix: Some("SAGE".into()),
+            compile: None,
+            issues: 0,
+            wiki_pages: 0,
+            compilers: 1,
         };
         let joining = Joining {
             repository: "Sage-Social/wiffletree-storage".into(),
             check,
             ticked: ["sage".to_owned()].into(),
-            brains: [("sage".to_owned(), "/dev/brain".to_owned())].into(),
+            compile_here: false,
             clones: [
                 (
                     ("sage".to_owned(), "Sage-Social/api".to_owned()),
@@ -2182,7 +1792,6 @@ mod tests {
             join_choices(&joining),
             [JoinSpace {
                 folder: "sage".into(),
-                brain_path: Some("/dev/brain".into()),
                 clones: vec!["/dev/api".into()],
             }],
             "web is left missing, and watch is not ticked"
@@ -2239,29 +1848,6 @@ mod tests {
             ["Sage-Social/web"],
             "what the form took out goes, and what joined meanwhile stays"
         );
-    }
-
-    #[test]
-    fn a_new_shared_space_says_who_can_read_its_repository_before_it_is_written() {
-        let check = StorageCheck {
-            repository: SettingsRepository {
-                name: "Sage-Social/wiffletree-storage".into(),
-                push_url: "u".into(),
-                branch: "main".into(),
-                readers: Readers::EveryMember,
-            },
-            organization: true,
-            spaces: vec![],
-            prefix: Some("SAGE".into()),
-        };
-        let line = new_storage_line(&check);
-        assert!(
-            line.starts_with(
-                "Every member of Sage-Social can read Sage-Social/wiffletree-storage."
-            )
-        );
-        assert!(line.contains("anyone who can push to it can change its instructions"));
-        assert!(line.ends_with("shares its prefix SAGE."));
     }
 
     #[test]

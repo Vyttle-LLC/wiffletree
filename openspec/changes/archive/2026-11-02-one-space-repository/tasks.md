@@ -83,32 +83,32 @@ Each Mac scans what it pulls, and raises the Inbox card.
 
 New Space, repository checks, the Space page, Bring in a brain, joining, and the Brains page, as `ui/mockups.html` draws them.
 
-- [ ] 5.1 New Space: the one form, Create with `gh` as private, a repository that already holds a folder fixing its folder, prefix and time, and compile on this Mac by default.
-- [ ] 5.2 Repository checks: private and who can read it, direct push read from rulesets and branch protection, and the warning for history.
-- [ ] 5.3 Protect history: the ruleset through `gh`, GitHub's refusal shown, and the warning kept.
-- [ ] 5.4 The Space page: one Repository box, the four Brain rows gone, and Sync now, Import from Linear…, Bring in a brain…, Move… and Move into `wiffletree/`.
-- [ ] 5.5 Bring in a brain, reader: `legacy_logs.rs` reads a folder on this Mac, `blame --contents` with `GIT_OPTIONAL_LOCKS=0`, the pointer for an uncommitted copy, and no write there (decision 7).
-- [ ] 5.6 Bring in a brain, landing: entries byte for byte or derived, pages byte for byte, skipped pages listed, compiled ids added to `compiled-after` with any cursor kept, commits of at most 200 files, scanned, `compile`, `allowed_email_domains` and the compiler carried from `wiffletree-brain.json`, and the `brain` key and old checkout dropped at the end.
-- [ ] 5.7 Bring in a brain, form: what it brings, what it leaves, shortened entries, and the warning for files not on GitHub, filled in from a Space's `brain` key.
-- [ ] 5.8 Joining: one repository, the folder found, Spaces with counts, code repositories only, and Also on this Mac off by default.
-- [ ] 5.9 The Brains page: groups by wiki, Macs with this Mac's tick, Change, Run now, the no-volunteer banner, and what has no project to go to, drawn in the space 2.12 left.
-- [ ] 5.10 Check tests: a public repository, a repository requiring pull requests, a usable one with history unprotected, and a repository of other documents.
-- [ ] 5.11 Bring in tests, on a repository with changed, untracked and never-committed files: all land; `git status`, the index and every file in the original are byte-identical after; again adds nothing; `repos:` survives; a held entry lands nothing twice; already-compiled entries read as compiled on a second Mac; uncompiled entries already in the folder stay pending, and an existing cursor is unchanged, on a first and a second Bring in.
-- [ ] 5.12 Run the app on a seeded store, dark and light, and compare each screen with `ui/mockups.html`.
+- [x] 5.1 New Space: the one form, Create with `gh` as private, a repository that already holds a folder fixing its folder, prefix and time, and compile on this Mac by default.
+- [x] 5.2 Repository checks: private and who can read it, direct push read from rulesets and branch protection, and the warning for history.
+- [x] 5.3 Protect history: the ruleset through `gh`, GitHub's refusal shown, and the warning kept.
+- [x] 5.4 The Space page: one Repository box, the four Brain rows gone, and Sync now, Import from Linear…, Bring in a brain…, Move… and Move into `wiffletree/`.
+- [x] 5.5 Bring in a brain, reader: `legacy_logs.rs` reads a folder on this Mac, `blame --contents` with `GIT_OPTIONAL_LOCKS=0`, the pointer for an uncommitted copy, and no write there (decision 7).
+- [x] 5.6 Bring in a brain, landing: entries byte for byte or derived, pages byte for byte, skipped pages listed, compiled ids added to `compiled-after` with any cursor kept, commits of at most 200 files, scanned, `compile`, `allowed_email_domains` and the compiler carried from `wiffletree-brain.json`, and the `brain` key and old checkout dropped at the end.
+- [x] 5.7 Bring in a brain, form: what it brings, what it leaves, shortened entries, and the warning for files not on GitHub, filled in from a Space's `brain` key.
+- [x] 5.8 Joining: one repository, the folder found, Spaces with counts, code repositories only, and Also on this Mac off by default.
+- [x] 5.9 The Brains page: groups by wiki, Macs with this Mac's tick, Change, Run now, the no-volunteer banner, and what has no project to go to, drawn in the space 2.12 left.
+- [x] 5.10 Check tests: a public repository, a repository requiring pull requests, a usable one with history unprotected, and a repository of other documents.
+- [x] 5.11 Bring in tests, on a repository with changed, untracked and never-committed files: all land; `git status`, the index and every file in the original are byte-identical after; again adds nothing; `repos:` survives; a held entry lands nothing twice; already-compiled entries read as compiled on a second Mac; uncompiled entries already in the folder stay pending, and an existing cursor is unchanged, on a first and a second Bring in.
+- [x] 5.12 Run the app on a seeded store, dark and light, and compare each screen with `ui/mockups.html`.
 
 ## 6. Words and docs
 
 The agents' instructions, README and specs.
 
-- [ ] 6.1 Fixed core: `implementer.md`, `coordinator.md` and `communication.md` lose the batch and pull request wording, with new versions.
-- [ ] 6.2 Stock skills and tool descriptions: `log_work`'s and `query_brain`'s text in `mcp.rs`, and any line naming a retired skill.
-- [ ] 6.3 Remove the "save this as a note" idea wherever Wiffletree's text carries it.
-- [ ] 6.4 `README.md`, `docs/FEATURES.md`, `docs/PRD.md`, `docs/DEVELOPMENT.md`, `docs/host-protocol.md`, the safety section's brain-branch line, and `gate/README.md`, cut to what remains. Say what the approved model's accepted risks are: anyone with write access can change anything, a slip stays in history, every issue change is a commit, no volunteer means no wiki updates, and Protect history needs an admin.
-- [ ] 6.5 Add "How to clean history", which the alert's button opens.
-- [ ] 6.6 Add a line to `docs/DEVELOPMENT.md` naming the tables a later release can drop.
-- [ ] 6.7 Each command `host-process` lists needs the credential: compile on or off, setting the compile time, Protect history, Bring in, Move into the folder, and held-entry and alert actions, with a test that a connection without it is refused for each. Add them to the human-only list as each group adds its command.
-- [ ] 6.8 A test that no fixed core or stock text names a retired skill or says an entry reaches the brain in a pull request.
-- [ ] 6.9 Run `openspec validate --all --strict`, archive `choose-space-repositories` first, then this change, and update each changed spec's Purpose by hand.
+- [x] 6.1 Fixed core: `implementer.md`, `coordinator.md` and `communication.md` lose the batch and pull request wording, with new versions.
+- [x] 6.2 Stock skills and tool descriptions: `log_work`'s and `query_brain`'s text in `mcp.rs`, and any line naming a retired skill.
+- [x] 6.3 Remove the "save this as a note" idea wherever Wiffletree's text carries it.
+- [x] 6.4 `README.md`, `docs/FEATURES.md`, `docs/PRD.md`, `docs/DEVELOPMENT.md`, `docs/host-protocol.md`, the safety section's brain-branch line, and `gate/README.md`, cut to what remains. Say what the approved model's accepted risks are: anyone with write access can change anything, a slip stays in history, every issue change is a commit, no volunteer means no wiki updates, and Protect history needs an admin.
+- [x] 6.5 Add "How to clean history", which the alert's button opens.
+- [x] 6.6 Add a line to `docs/DEVELOPMENT.md` naming the tables a later release can drop.
+- [x] 6.7 Each command `host-process` lists needs the credential: compile on or off, setting the compile time, Protect history, Bring in, Move into the folder, and held-entry and alert actions, with a test that a connection without it is refused for each. Add them to the human-only list as each group adds its command.
+- [x] 6.8 A test that no fixed core or stock text names a retired skill or says an entry reaches the brain in a pull request.
+- [x] 6.9 Run `openspec validate --all --strict`, archive `choose-space-repositories` first, then this change, and update each changed spec's Purpose by hand.
 
 ## Not in these tickets
 

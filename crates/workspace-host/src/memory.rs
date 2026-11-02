@@ -948,6 +948,7 @@ impl Host {
         let folder = brain_sync::brain_dir(&Root::new(&space.storage.root));
         let path = entry_path(&folder, &log.repository, &log.date, &log.id);
         log.path = Some(path.clone());
+        log.brain = Some(space.storage.repository.key());
         log.held = None;
         log.written = true;
         let author = match log.author.clone() {
@@ -2154,11 +2155,18 @@ mod tests {
             to_fix,
             "nothing changed"
         );
+        // Held under the brain the entry was written for, it lands in the Space's folder now.
+        (host.db.execute(
+            "UPDATE work_logs SET data=json_set(data,'$.brain','Sage-Social/sagehaven-docs') WHERE id=?1",
+            [&to_fix.id],
+        ))
+        .unwrap();
         let fixed = host.fix_held_log(&to_fix.id, fix(NO_REF)).unwrap();
         assert_eq!(
             (fixed.held.as_deref(), fixed.reference.as_str()),
             (None, NO_REF)
         );
+        assert_eq!(fixed.brain, Some(sage.storage.repository.key()));
         assert!(item_open(&host), "another entry is still held");
 
         let released = host.release_held_log(&to_release.id).unwrap();

@@ -267,6 +267,12 @@ pub(crate) fn names_time(schedule: &Schedule, at: i64) -> Result<bool> {
     Ok(next_after(&cron, zone, at - 1) == Some(at))
 }
 
+/// The first time after `after` that `schedule` names.
+pub(crate) fn next_time(schedule: &Schedule, after: i64) -> Result<Option<i64>> {
+    let (cron, zone) = (Cron::parse(&schedule.cron)?, timezone(&schedule.timezone)?);
+    Ok(next_after(&cron, zone, after))
+}
+
 /// How many times `schedule` named after `from`, up to `to`.
 pub(crate) fn times_since(schedule: &Schedule, from: i64, to: i64) -> Result<u32> {
     let (cron, zone) = (Cron::parse(&schedule.cron)?, timezone(&schedule.timezone)?);

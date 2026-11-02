@@ -691,14 +691,45 @@ impl BrainBrowser {
             );
         }
         let repository = self.repository.as_deref().unwrap_or_default();
-        let held = (self.shared.workspace_notes().iter())
-            .filter(|note| {
-                matches!(note, WorkspaceNote::HeldEntry(e) if e.repository.eq_ignore_ascii_case(repository))
+        let held: Vec<HeldEntry> = (self.shared.workspace_notes().iter())
+            .filter_map(|note| match note {
+                WorkspaceNote::HeldEntry(entry)
+                    if entry.repository.eq_ignore_ascii_case(repository) =>
+                {
+                    Some(entry.clone())
+                }
+                _ => None,
             })
-            .count();
-        let waits = card(p)
+            .collect();
+        let mut waits = card(p)
             .child(eyebrow("ON THIS MAC", p))
-            .child(fact("Held entries", held.to_string()));
+            .child(fact("Held entries", held.len().to_string()));
+        // Each held entry links to its card: its project's Inbox, or the Brains page.
+        for (at, entry) in held.into_iter().enumerate() {
+            let name = entry
+                .path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&entry.path)
+                .to_owned();
+            let open = match entry.project_id.clone() {
+                Some(project) => Intent::Select(project),
+                None => Intent::OpenPage(Page::Brains),
+            };
+            waits = waits.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        button(SharedString::from(format!("held-entry-{at}")))
+                            .link()
+                            .xsmall()
+                            .label(name)
+                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(open.clone()))),
+                    )
+                    .child(hint(held_entry::found_line(&entry), p)),
+            );
+        }
         div().flex().items_start().gap_4().child(article).child(
             div()
                 .w(px(260.))

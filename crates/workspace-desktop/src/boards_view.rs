@@ -594,7 +594,7 @@ impl BoardsPage {
         let ask = ask::space_storage(space.id.clone());
         self.ask(ask, window, cx, move |view, status, window, cx| {
             let readers = status.ok().and_then(|status| status.readers);
-            let who = spaces_view::readers_line(&space, readers);
+            let who = spaces_view::readers_line(&space, readers, None);
             view.before_overlay(window, cx, move |view, window, cx| {
                 view.confirm_share(output, space, spaces, who, window, cx)
             });

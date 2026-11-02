@@ -758,6 +758,7 @@ fn space_commands_need_the_apps_credential_and_reads_do_not() {
             additions: String::new(),
             prefix: None,
             storage: None,
+            setup: Default::default(),
         },
         Command::UpdateSpace {
             space: Box::new(instructed.clone()),
@@ -837,6 +838,73 @@ fn space_commands_need_the_apps_credential_and_reads_do_not() {
     assert_eq!(snapshot(&mut agent).spaces[0], instructed);
     // The app reads them.
     assert!(snapshot(&mut app).space_locals.contains_key(&personal.id));
+}
+
+#[test]
+fn compile_and_repository_commands_need_the_apps_credential() {
+    let stored = std::cell::OnceCell::new();
+    let fixture = Fixture::new(|host| {
+        let personal = host.spaces().unwrap().remove(0).space;
+        let folder = (host.home.join("repos"))
+            .join(personal.storage.repository.key())
+            .join(&personal.storage.root);
+        stored.set((personal, folder)).unwrap();
+    });
+    let (personal, folder) = stored.get().unwrap();
+    let tracker = std::fs::read(folder.join("wiffletree-issues.yaml")).unwrap();
+    let original = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(original.path().join("second-brain/logs")).unwrap();
+    let mut agent = fixture.welcomed(None);
+    let space_id = personal.id.clone();
+    let from = original.path().to_string_lossy().into_owned();
+    let writes = [
+        Command::SetCompileHere {
+            space_id: space_id.clone(),
+            compiles: true,
+        },
+        Command::SetCompileHere {
+            space_id: space_id.clone(),
+            compiles: false,
+        },
+        Command::SetCompileTime {
+            space_id: space_id.clone(),
+            compile: Some(BrainCompile {
+                at: "02:00".into(),
+                timezone: "America/Chicago".into(),
+                extra: Extra::new(),
+            }),
+        },
+        Command::ProtectHistory {
+            repository: "Sage-Social/sage-docs".into(),
+        },
+        Command::PreviewBringIn {
+            space_id: space_id.clone(),
+            from: from.clone(),
+            folder: "second-brain".into(),
+        },
+        Command::BringIn {
+            space_id: space_id.clone(),
+            from,
+            folder: "second-brain".into(),
+        },
+        Command::MoveIntoFolder { space_id },
+    ];
+    for command in writes {
+        let refused = agent.request(PROTOCOL_VERSION, command.clone());
+        assert!(
+            refused.error.unwrap().contains("client credential"),
+            "{command:?}"
+        );
+    }
+    assert!(!folder.join("compilers").exists(), "no compiler file");
+    assert_eq!(
+        std::fs::read(folder.join("wiffletree-issues.yaml")).unwrap(),
+        tracker
+    );
+    assert!(
+        !folder.join("second-brain/logs").exists(),
+        "nothing brought in"
+    );
 }
 
 #[test]

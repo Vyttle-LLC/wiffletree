@@ -110,6 +110,12 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
         Command::Settings,
         Command::CheckSettingsRepository { repository: text() },
         Command::CheckStorageRepository { repository: text() },
+        Command::SpaceFormDefaults,
+        Command::PreviewBringIn {
+            space_id: space().id,
+            from: text(),
+            folder: text(),
+        },
         Command::ComparePausedFile {
             path: text(),
             repository: None,
@@ -255,6 +261,13 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
             additions: text(),
             prefix: None,
             storage: None,
+            setup: SpaceSetup::default(),
+        },
+        Command::ProtectHistory { repository: text() },
+        Command::BringIn {
+            space_id: space().id,
+            from: text(),
+            folder: text(),
         },
         Command::UpdateSpace {
             space: Box::new(space()),
@@ -399,6 +412,7 @@ fn create_space_sends_its_additions_as_a_previous_host_reads_them() {
         additions: "Never log child PII.".into(),
         prefix: None,
         storage: None,
+        setup: SpaceSetup::default(),
     };
     let sent = serde_json::to_value(&create).unwrap();
     assert_eq!(sent["instructions"], "Never log child PII.");
@@ -425,6 +439,7 @@ fn space_commands_are_the_humans() {
             additions: text(),
             prefix: None,
             storage: Some(text()),
+            setup: SpaceSetup::default(),
         },
         Command::UpdateSpace {
             space: Box::new(space()),
@@ -440,9 +455,15 @@ fn space_commands_are_the_humans() {
             repository: text(),
             spaces: vec![JoinSpace {
                 folder: text(),
-                brain_path: None,
                 clones: vec![],
             }],
+            compile_here: true,
+        },
+        Command::ProtectHistory { repository: text() },
+        Command::BringIn {
+            space_id: space().id,
+            from: text(),
+            folder: text(),
         },
         Command::SetTrackerPrefix {
             space_id: space().id,
@@ -470,6 +491,15 @@ fn space_commands_are_the_humans() {
     assert!(
         storage.is_human_only() && storage.is_read(),
         "it reads where the storage is on this Mac"
+    );
+    let preview = Command::PreviewBringIn {
+        space_id: space().id,
+        from: text(),
+        folder: text(),
+    };
+    assert!(
+        preview.is_human_only() && preview.is_read(),
+        "it reads a folder on this Mac"
     );
     assert!(!Command::Snapshot.is_human_only());
     // Reading a layer, the catalog or what agents get is not the human's alone.

@@ -404,7 +404,25 @@ impl Host {
         additions: &str,
         prefix: Option<&str>,
     ) -> Result<SpaceRecord> {
+        self.create_local_space(name, description, additions, prefix, &SpaceSetup::default())
+    }
+    /// `create_space` with New Space's folder and compile time. The time is the folder's from
+    /// the first commit, as a local repository's one Mac always compiles it.
+    pub fn create_local_space(
+        &mut self,
+        name: &str,
+        description: &str,
+        additions: &str,
+        prefix: Option<&str>,
+        setup: &SpaceSetup,
+    ) -> Result<SpaceRecord> {
         self.ensure_unused_name(name, None)?;
+        let root = setup.folder.as_deref().unwrap_or(DEFAULT_ROOT);
+        let root = root.trim().trim_end_matches('/');
+        validate_root(root)?;
+        if let Some(compile) = &setup.compile {
+            compile::schedule(compile)?;
+        }
         let mut prefixes = prefixes(&self.db)?;
         if let Some(prefix) = prefix {
             validate_prefix(prefix)?;
@@ -419,6 +437,8 @@ impl Host {
         if let Some(prefix) = prefix {
             tracker.prefix = prefix.into();
         }
+        space.storage.root = root.into();
+        tracker.compile = setup.compile.clone();
         validate(&space)?;
         let local = SpaceLocal::default();
         // A savepoint, so removing a Space can recreate Personal within its own change.
@@ -429,6 +449,23 @@ impl Host {
             })
         })?;
         Ok(SpaceRecord { space, local })
+    }
+    /// What New Space proposes: the most common owner of the workspace's GitHub repositories,
+    /// or else the `gh` login, for the repository it offers to create, and this Mac's timezone.
+    pub fn space_form_defaults(&self) -> Result<SpaceFormDefaults> {
+        let mut owners: BTreeMap<String, usize> = BTreeMap::new();
+        for repository in self.repositories()? {
+            if let Some(github) = repository.github {
+                *owners.entry(github.owner).or_default() += 1;
+            }
+        }
+        let most = owners.into_iter().max_by_key(|(_, count)| *count);
+        Ok(SpaceFormDefaults {
+            owner: most
+                .map(|(owner, _)| owner)
+                .or_else(|| self.gh_login.clone()),
+            timezone: jobs::local_timezone(),
+        })
     }
     /// Replaces a Space's definition. Its storage stays where it is.
     pub fn update_space(&mut self, space: Space) -> Result<SpaceRecord> {
@@ -489,6 +526,11 @@ impl Host {
             projects.is_empty() || !is_personal(&removed),
             "Personal holds archived projects, which have nowhere else to go"
         );
+        let last_in_repository = !(spaces.iter())
+            .any(|r| r.space.id != *id && r.space.storage.repository == removed.storage.repository);
+        if last_in_repository {
+            self.refuse_unlanded_entries(&removed)?;
+        }
         self.atomically(|host| {
             if !projects.is_empty() {
                 let personal = match spaces.iter().find(|r| is_personal(&r.space)) {

@@ -458,6 +458,74 @@ fn store(
     Ok(())
 }
 
+/// The last commit by `commit` that changed the wiki's `paths`, with its time in seconds,
+/// passing over a move into the folder: it renames the wiki's files and changes none, so the
+/// last change before it, at the paths it moved them from, is still the last.
+fn last_wiki_change(
+    checkout: &Path,
+    commit: &str,
+    paths: &[String],
+) -> Result<Option<(String, String)>> {
+    let mut args = vec!["log", "--format=%H %ct", commit, "--"];
+    args.extend(paths.iter().map(String::as_str));
+    let log = String::from_utf8(runtime::git_bytes_large(checkout, &args, b"")?)?;
+    for line in log.lines() {
+        let Some((sha, time)) = line.split_once(' ') else {
+            continue;
+        };
+        let Some(folder) = moved_into(checkout, sha, paths)? else {
+            return Ok(Some((sha.to_owned(), time.to_owned())));
+        };
+        let before: Vec<String> = (paths.iter())
+            .filter_map(|path| path.strip_prefix(&folder).map(str::to_owned))
+            .collect();
+        let parent = format!("{sha}^");
+        return match before.is_empty() {
+            true => Ok(None),
+            false => last_wiki_change(checkout, &parent, &before),
+        };
+    }
+    Ok(None)
+}
+
+/// The folder, as `<folder>/`, that `commit` moved files into when all it did to `paths` was
+/// rename files into them, each holding the blob it held before, as Move into the folder does.
+fn moved_into(checkout: &Path, commit: &str, paths: &[String]) -> Result<Option<String>> {
+    let args = [
+        "diff-tree",
+        "-r",
+        "--no-commit-id",
+        "--name-status",
+        "--find-renames=100%",
+        "--root",
+        commit,
+    ];
+    let changed = runtime::git_output(checkout, &args)?;
+    let under =
+        |path: &str| (paths.iter()).any(|p| path == p || path.starts_with(&format!("{p}/")));
+    let mut folder = None;
+    for line in changed.lines() {
+        let fields: Vec<&str> = line.split('\t').collect();
+        let (Some(status), Some(path)) = (fields.first(), fields.last()) else {
+            continue;
+        };
+        if !under(path) {
+            continue;
+        }
+        let [_, from, to] = fields[..] else {
+            return Ok(None);
+        };
+        let Some(into) = to.strip_suffix(from).filter(|f| f.ends_with('/')) else {
+            return Ok(None);
+        };
+        if *status != "R100" || folder.as_ref().is_some_and(|f| f != into) {
+            return Ok(None);
+        }
+        folder = Some(into.to_owned());
+    }
+    Ok(folder)
+}
+
 /// Marks pending the entries a compile would take, by the cursor in `notes/INDEX.md` at
 /// `commit` (see `compile.rs`): those whose ids its `compiled-through` commit does not hold, in
 /// that commit's layout, less its `compiled-after` ids. With no such commit every entry is
@@ -603,20 +671,8 @@ pub(crate) fn refresh(refresh: Refresh) -> Result<usize> {
         }
         false => HashMap::new(),
     };
-    let last_compile = String::from_utf8(runtime::git_bytes(
-        checkout,
-        &[
-            "log",
-            "-1",
-            "--format=%H %ct",
-            commit,
-            "--",
-            &format!("{prefix}notes"),
-            &format!("{prefix}{STATUS}"),
-        ],
-        b"",
-    )?)?;
-    let (compile_commit, compile_time) = last_compile.trim().split_once(' ').unzip();
+    let wiki = [format!("{prefix}notes"), format!("{prefix}{STATUS}")];
+    let (compile_commit, compile_time) = last_wiki_change(checkout, commit, &wiki)?.unzip();
     let transaction = db.transaction()?;
     for path in &deleted {
         transaction.execute("DELETE FROM files WHERE path=?1", [path])?;
@@ -633,8 +689,12 @@ pub(crate) fn refresh(refresh: Refresh) -> Result<usize> {
     if gh.is_some() {
         verify_entries(&transaction, clones, gh, true)?;
     }
-    set_state(&transaction, "last_compile", compile_time)?;
-    set_state(&transaction, "last_compile_commit", compile_commit)?;
+    set_state(&transaction, "last_compile", compile_time.as_deref())?;
+    set_state(
+        &transaction,
+        "last_compile_commit",
+        compile_commit.as_deref(),
+    )?;
     set_state(&transaction, "commit", Some(&at))?;
     transaction.commit()?;
     Ok(changed.len())
@@ -1608,6 +1668,38 @@ fn source_json(source: &ClaimSource) -> Value {
 }
 
 /// An entry this machine wrote, as Logs shows it.
+/// An entry file at `path`, relative to the brain folder, read as the index reads one.
+fn file_entry(path: &str, text: &str) -> BrainEntry {
+    let indexed = parse(Class::Entry, path, text);
+    let fields = entry_fields(&indexed.body);
+    let field = |key: &str| fields.get(key).cloned().unwrap_or_default();
+    let reference = indexed.reference.unwrap_or_default();
+    BrainEntry {
+        id: indexed.entry_id.unwrap_or_default(),
+        path: path.to_owned(),
+        repository: indexed.repository.unwrap_or_default(),
+        author: indexed.author.unwrap_or_default(),
+        source: indexed.source.unwrap_or_default(),
+        date: indexed.date.unwrap_or_default(),
+        title: indexed.title,
+        kind: (indexed.kind.as_deref())
+            .and_then(BrainKind::parse)
+            .unwrap_or(BrainKind::Observation),
+        anchors: verify_refs::anchors(&reference),
+        reference,
+        changed: field("changed"),
+        why: field("why"),
+        state: field("state"),
+        verification: RefVerification {
+            state: RefState::Unverified,
+            reason: None,
+        },
+        pull_request: EntryPullRequest::Waiting,
+        origin: None,
+        pending: true,
+    }
+}
+
 fn local_entry(log: &WorkLog) -> BrainEntry {
     let brain = format!("{}/", SpaceBrain::DEFAULT_FOLDER);
     let path = (log.path.as_deref())
@@ -1728,12 +1820,34 @@ impl Host {
         let logs = self.unlanded_logs(repository)?;
         let mut on_main =
             db.prepare_cached("SELECT 1 FROM files WHERE class='entry' AND entry_id=?1")?;
-        let mut pending = vec![];
+        let mut unlanded = vec![];
         for log in logs {
             if on_main.exists([&log.id])? {
                 continue;
             }
-            let mut entry = self.with_state(repository, local_entry(&log), &log)?;
+            unlanded.push(self.with_state(repository, local_entry(&log), &log)?);
+        }
+        // An entry no log row names, such as a held ruling, as its file stands in the clone.
+        let clone = self.brain_clone(&self.brain(repository)?)?;
+        let brain = format!("{}/", SpaceBrain::DEFAULT_FOLDER);
+        for path in self.unlanded_files(repository)? {
+            let Some((_, in_brain)) = path.split_once(&brain) else {
+                continue;
+            };
+            let Ok(text) = fs::read_to_string(clone.join(&path)) else {
+                continue;
+            };
+            if !compile::is_entry_path(in_brain) {
+                continue;
+            }
+            let mut entry = file_entry(in_brain, &text);
+            entry.pull_request =
+                (self.entry_state(repository, &path)?).unwrap_or(EntryPullRequest::None);
+            unlanded.push(entry);
+        }
+        unlanded.sort_by(|a, b| b.id.cmp(&a.id));
+        let mut pending = vec![];
+        for mut entry in unlanded {
             entry.pending = true;
             let folder = entry.repository.to_lowercase();
             let shown = scope.is_none_or(|scope| scope.folders.contains(&folder))
@@ -1826,6 +1940,16 @@ impl Host {
     ) -> Result<Vec<BrainConflict>> {
         let (brain, db) = self.brain_reader(repository)?;
         conflicts(&db, self.brain_scope(&brain, project)?.as_ref())
+    }
+
+    /// How many log entries and wiki pages the brain's index holds.
+    pub(crate) fn brain_counts(&self, repository: &str) -> Result<(usize, usize)> {
+        let (_, db) = self.brain_reader(repository)?;
+        let count = |class: &str| -> Result<usize> {
+            let sql = "SELECT count(*) FROM files WHERE class=?1";
+            Ok(db.query_row(sql, [class], |r| r.get(0))?)
+        };
+        Ok((count("entry")?, count("note")?))
     }
 
     pub fn brain_status(&self, repository: &str) -> Result<BrainStatus> {
@@ -3203,6 +3327,34 @@ pub(crate) mod tests {
             (answer["results"].as_array().unwrap().iter())
                 .map(|r| r["step"].as_str().unwrap().to_owned())
                 .collect()
+        }
+
+        #[test]
+        fn a_wiki_names_only_the_issues_its_trackers_index_holds() {
+            let b = brained();
+            let host = &b.f.host;
+            let storage = &b.sage.storage;
+            let prefix = host.tracker(&b.sage).unwrap().prefix;
+            let filed = format!("{prefix}-1");
+            let folder = (host.storage_folder(&storage.repository))
+                .join(&storage.root)
+                .join("issues")
+                .join(&filed);
+            fs::create_dir_all(&folder).unwrap();
+            let issue = format!(
+                "---\nid: {filed}\ntitle: Retry webhooks\nstate: triage\nauthor: jlin\ncreated: 2026-10-29T14:02:11Z\n---\n"
+            );
+            fs::write(folder.join("issue.md"), issue).unwrap();
+            let key = storage.repository.key();
+            host.refresh_issue_index(Some(&key)).unwrap();
+            let body = format!("{filed} is done; {prefix}-9 and CEL-1 are not ours.");
+            let named = host.issues_named(&key, &body).unwrap();
+            assert_eq!(
+                (named.prefix.as_str(), named.ids),
+                (prefix.as_str(), vec![filed])
+            );
+            let elsewhere = host.issues_named("someone/else", &body).unwrap();
+            assert_eq!(elsewhere, BrainIssues::default());
         }
 
         #[test]

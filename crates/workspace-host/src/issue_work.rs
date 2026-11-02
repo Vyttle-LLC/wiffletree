@@ -771,10 +771,9 @@ pub(crate) mod tests {
         let staged = storage::stage(&host.home, NAME, &github.tools(), &[]).unwrap();
         let ticked = ["sage", "watch"].map(|folder| JoinSpace {
             folder: folder.into(),
-            brain_path: None,
             clones: vec![],
         });
-        host.join_spaces(staged, &ticked).unwrap();
+        host.join_spaces(staged, &ticked, false).unwrap();
         let (sage, watch) = (space_named(&host, "Sage"), space_named(&host, "Sage Watch"));
         let issue = file(&mut host, &sage, &[], "");
         let chosen = |host: &Host, filtered: Option<&SpaceId>| {

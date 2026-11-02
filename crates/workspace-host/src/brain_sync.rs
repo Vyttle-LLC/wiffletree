@@ -25,6 +25,9 @@ const DISCARDED: &str = "discarded";
 
 /// A reason the human gives for Not sensitive, as long as the marker's line can carry.
 pub(crate) const MAX_REASON_CHARS: usize = 200;
+/// The most files one commit of the logs rule set holds, so a Bring in of hundreds of files
+/// lands in commits a reviewer can read; the rest wait for the next pass.
+pub(crate) const MAX_FILES_PER_COMMIT: usize = 200;
 
 /// Adds the table of unlanded entries, and the line a held file's card names.
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
@@ -80,31 +83,71 @@ pub(crate) struct Entries {
     held: Vec<scan::Held>,
     /// Every path the pass was given.
     given: Vec<String>,
+    /// Files left for the next pass, past the commit's cap.
+    more: bool,
+    /// The brought-in ids it put in `compiled-after`, or found there already.
+    compiled: Vec<String>,
 }
 
 /// `<folder>/second-brain/logs/`: entries this Mac wrote are pushed without comparing, in
-/// commits that only add entry files. The engine gets the other Macs' from Git.
+/// commits that only add files, as are the pages a Bring in wrote. The engine gets the other
+/// Macs' from Git. The ids of brought-in entries the original had compiled are added to
+/// `notes/INDEX.md`'s `compiled-after` on the head it lands on, with its cursor kept.
 pub(crate) struct LogRules {
     logs: String,
-    /// The entries waiting or held, by their paths in the repository. A held one is scanned
+    index: String,
+    /// The files waiting or held, by their paths in the repository. A held one is scanned
     /// again each pass, as a held issue file is, so a check that could not run catches up.
     entries: Vec<String>,
+    /// The brought-in ids for `compiled-after`, left for a pass with no compile landing.
+    compiled: Vec<String>,
     retries_alone: bool,
     files: Vec<(String, Content)>,
     found: Entries,
 }
 impl LogRules {
     pub(crate) fn new(input: &Input, retries_alone: bool) -> Self {
+        let brain = brain_dir(&input.root);
+        let logs = format!("{brain}/logs");
+        // A compile landing in this pass owns the wiki's paths, so the brought-in pages and the
+        // cursor wait for a pass without one.
+        let (entries, compiled) = match input.landing {
+            Some(_) => {
+                let in_logs = |path: &&String| path.starts_with(&format!("{logs}/"));
+                (
+                    input.entries.iter().filter(in_logs).cloned().collect(),
+                    vec![],
+                )
+            }
+            None => (input.entries.clone(), input.compiled.clone()),
+        };
         Self {
-            logs: format!("{}/logs", brain_dir(&input.root)),
-            entries: input.entries.clone(),
-            retries_alone,
-            files: vec![],
+            logs,
+            index: format!("{brain}/{}", compile::INDEX),
             found: Entries {
-                given: input.entries.clone(),
+                given: entries.clone(),
                 ..Entries::default()
             },
+            entries,
+            compiled,
+            retries_alone,
+            files: vec![],
         }
+    }
+    /// `compiled-after` on `remote` with the brought-in ids added: from GitHub's INDEX, else the
+    /// one Bring in copied, else a new one. `None` when it already holds them all.
+    fn index_with_compiled(&mut self, clone: &Path, remote: &str) -> Option<Vec<u8>> {
+        let on_main = file_at(clone, remote, &self.index);
+        let brought = (self.files.iter().position(|(path, _)| *path == self.index))
+            .map(|at| self.files.remove(at).1.unwrap_or_default());
+        let base = match (on_main.is_empty(), &brought) {
+            (false, _) => Some(on_main.clone()),
+            (true, Some(brought)) => Some(String::from_utf8_lossy(brought).into_owned()),
+            (true, None) => None,
+        };
+        let text = legacy_logs::add_compiled(base.as_deref(), &self.compiled);
+        self.found.compiled = self.compiled.clone();
+        (text != on_main).then(|| text.into_bytes())
     }
     /// What it found, with the files `held` back from the push.
     pub(crate) fn found(self, held: Vec<scan::Held>) -> Entries {
@@ -121,13 +164,15 @@ impl LogRules {
 impl RuleSet for LogRules {
     fn claims(&self, path: &str) -> bool {
         (path.strip_prefix(self.logs.as_str())).is_some_and(|rest| rest.starts_with('/'))
+            || self.entries.iter().any(|entry| entry == path)
+            || (!self.compiled.is_empty() && path == self.index)
     }
     fn pulled_by_git(&self) -> bool {
         true
     }
     fn compare(&mut self, clone: &Path, remote: &str) -> Result<()> {
         self.found.compared = true;
-        if self.entries.is_empty() {
+        if self.entries.is_empty() && self.compiled.is_empty() {
             return Ok(());
         }
         let wanted = |path: &str| self.entries.iter().any(|entry| entry == path);
@@ -145,15 +190,32 @@ impl RuleSet for LogRules {
                 Err(error) => return Err(error.into()),
             }
         }
+        if !self.compiled.is_empty()
+            && let Some(index) = self.index_with_compiled(clone, remote)
+        {
+            self.files.push((self.index.clone(), Some(index)));
+        }
+        if self.files.len() > MAX_FILES_PER_COMMIT {
+            // The cursor goes with the first commit, as an id there before its entry is harmless.
+            let index = (self.files.iter().position(|(path, _)| *path == self.index))
+                .map(|at| self.files.remove(at));
+            self.files
+                .truncate(MAX_FILES_PER_COMMIT - usize::from(index.is_some()));
+            self.files.extend(index);
+            self.found.more = true;
+        }
         Ok(())
     }
     fn commit(&mut self) -> Option<(Vec<(String, Content)>, String)> {
+        let entry_file = |path: &String| path.starts_with(&format!("{}/", self.logs));
+        let only_entries = self.files.iter().all(|(path, _)| entry_file(path));
         (!self.files.is_empty()).then(|| {
-            let entries = match self.files.len() {
-                1 => "1 entry".to_owned(),
-                count => format!("{count} entries"),
+            let message = match (only_entries, self.files.len()) {
+                (true, 1) => "Logged 1 entry".to_owned(),
+                (true, count) => format!("Logged {count} entries"),
+                (false, count) => format!("Brought in {count} files"),
             };
-            let message = format!("Logged {entries} · {}", sync::machine_name());
+            let message = format!("{message} · {}", sync::machine_name());
             (self.files.clone(), message)
         })
     }
@@ -185,8 +247,8 @@ pub(crate) enum Landed {
     AlreadyOnMain(String),
     /// `main` holds a cursor at or past the run's, which that Mac's commit wrote.
     CompiledElsewhere(Option<String>),
-    /// Another Mac took the run's claim over.
-    Outrun,
+    /// Another Mac took the run's claim over: that Mac, when its claim could be read.
+    Outrun(Option<String>),
     /// A file failed the scan, which ends the run with nothing landed.
     Refused(scan::Held),
     Failed(String),
@@ -278,7 +340,8 @@ fn cursor_machine(clone: &Path, remote: &str, index: &str) -> Option<String> {
 pub(crate) struct WikiRules {
     brain: String,
     landing: Option<Landing>,
-    outrun: bool,
+    /// Another Mac took the run over, and that Mac when known.
+    outrun: Option<Option<String>>,
     retries_alone: bool,
     files: Vec<(String, Content)>,
     ended: Option<Landed>,
@@ -288,7 +351,7 @@ impl WikiRules {
         Self {
             brain: brain_dir(&input.root),
             landing: input.landing.clone(),
-            outrun: input.outrun,
+            outrun: input.outrun.then(|| input.outrun_by.clone()),
             retries_alone,
             files: vec![],
             ended: None,
@@ -324,8 +387,8 @@ impl RuleSet for WikiRules {
         let Some(landing) = &self.landing else {
             return Ok(());
         };
-        if self.outrun {
-            self.ended = Some(Landed::Outrun);
+        if let Some(by) = &self.outrun {
+            self.ended = Some(Landed::Outrun(by.clone()));
             return Ok(());
         }
         ensure!(
@@ -414,6 +477,66 @@ impl Host {
         self.issues_written.borrow_mut().insert(key);
         Ok(())
     }
+    /// Hands a file Bring in wrote into the clone of the repository `key` to the next pass, as
+    /// an entry is.
+    pub(crate) fn wait_to_land(&self, key: &str, path: &str) -> Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO entry_files(repository,path,state) VALUES (?1,?2,?3)",
+            params![key, path, WAITING],
+        )?;
+        Ok(())
+    }
+    /// Refuses removing the last Space of a repository while entries there wait to land or are
+    /// held, as nothing would push or settle them afterwards, naming them.
+    pub(crate) fn refuse_unlanded_entries(&self, space: &Space) -> Result<()> {
+        let Some(key) = Self::storage_key(&space.storage.repository) else {
+            return Ok(());
+        };
+        let rows: Vec<(String, String)> = (self.db.prepare(
+            "SELECT path,state FROM entry_files WHERE repository=?1 AND state<>?2 ORDER BY path",
+        )?)
+        .query_map(params![key, DISCARDED], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+        let named = |state: &str| -> Vec<&str> {
+            (rows.iter())
+                .filter(|(_, s)| s == state)
+                .map(|(path, _)| path.rsplit('/').next().unwrap_or(path))
+                .collect()
+        };
+        let files = |paths: &[&str]| match paths.len() {
+            1 => format!("1 file ({})", paths[0]),
+            n => format!("{n} files ({})", paths.join(", ")),
+        };
+        let (waiting, held) = (named(WAITING), named(HELD));
+        let mut why = vec![];
+        if !waiting.is_empty() {
+            why.push(format!(
+                "{} waiting to land: Sync now and let them land",
+                files(&waiting)
+            ));
+        }
+        if !held.is_empty() {
+            why.push(format!(
+                "{} held on this Mac: edit, mark or discard them on the Brains page",
+                files(&held)
+            ));
+        }
+        ensure!(
+            why.is_empty(),
+            "{} is the last Space here in {key}, which still has {}. Then remove it.",
+            space.name,
+            why.join("; and ")
+        );
+        Ok(())
+    }
+    /// The brought-in ids waiting to join the repository's `compiled-after`.
+    pub(crate) fn brought_compiled(&self, key: &str) -> Result<Vec<String>> {
+        Ok((self.db.prepare_cached(
+            "SELECT entry_id FROM brought_compiled WHERE repository=?1 ORDER BY entry_id",
+        )?)
+        .query_map([key], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
+    }
     /// The entries of the repository `key` for a pass to take: every one waiting or held.
     pub(crate) fn unlanded_entries(&self, key: &str) -> Result<Vec<String>> {
         Ok((self.db.prepare_cached(
@@ -440,6 +563,8 @@ impl Host {
             gone,
             held,
             given,
+            more,
+            compiled,
             ..
         } = entries;
         let tx = self.db.unchecked_transaction()?;
@@ -447,6 +572,21 @@ impl Host {
         let pushed_ones = committed.iter().filter(|_| pushed);
         for path in landed.iter().chain(&gone).chain(pushed_ones) {
             tx.execute(forget, params![key, path, DISCARDED])?;
+        }
+        // The ids are in `compiled-after` once its commit reached GitHub, or it held them.
+        let index = |path: &String| path.ends_with(compile::INDEX);
+        let index_waits =
+            held.iter().any(|h| index(&h.path)) || (!pushed && committed.iter().any(index));
+        if !index_waits {
+            for id in &compiled {
+                tx.execute(
+                    "DELETE FROM brought_compiled WHERE repository=?1 AND entry_id=?2",
+                    params![key, id],
+                )?;
+            }
+        }
+        if more && pushed {
+            self.issues_written.borrow_mut().insert(key.to_owned());
         }
         for path in &given {
             if !held.iter().any(|h| &h.path == path) {
@@ -511,14 +651,13 @@ impl Host {
         Ok(())
     }
     /// Why `text` may not stand as the entry at `path` of the repository, by the entry contract.
+    /// A wiki page Bring in wrote has no contract to keep.
     fn entry_problem(&self, repository: &str, path: &str, text: &str) -> Result<Option<String>> {
-        let logs = format!(
-            "{}/logs/",
-            brain_dir(&self.root_of_key(&repos::key(repository))?)
-        );
-        let in_logs = (path.strip_prefix(logs.as_str()))
-            .with_context(|| format!("{path} is not a log entry"))?;
-        Ok(memory::contract_problem(in_logs, text))
+        let brain = brain_dir(&self.root_of_key(&repos::key(repository))?);
+        let in_brain = (path.strip_prefix(&format!("{brain}/")))
+            .with_context(|| format!("{path} is not in the brain"))?;
+        Ok((in_brain.strip_prefix("logs/"))
+            .and_then(|in_logs| memory::contract_problem(in_logs, text)))
     }
     /// Edit it: the entry takes the human's text, refused while it breaks the contract, and is
     /// scanned again by the next pass.
@@ -605,6 +744,15 @@ impl Host {
             _ => None,
         }))
     }
+    /// This Mac's unlanded files of the repository no log row names, such as a ruling or what a
+    /// Bring in wrote, by their paths in the repository.
+    pub(crate) fn unlanded_files(&self, repository: &str) -> Result<Vec<String>> {
+        Ok((self.db.prepare_cached(
+            "SELECT path FROM entry_files WHERE repository=?1 AND log_id IS NULL AND state<>?2 ORDER BY path",
+        )?)
+        .query_map(params![repos::key(repository), DISCARDED], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
+    }
     /// This Mac's unlanded entries of the repository, as the Logs page lists them.
     pub(crate) fn unlanded_logs(&self, repository: &str) -> Result<Vec<WorkLog>> {
         Ok((self.db.prepare_cached(
@@ -647,8 +795,9 @@ impl Host {
                 let outcome = CompileOutcome::CompiledElsewhere;
                 self.end_landing(&landing, outcome, Some(reason), None)
             }
-            Landed::Outrun => {
-                let reason = "Another Mac took this run over, so nothing landed".to_owned();
+            Landed::Outrun(by) => {
+                let who = by.unwrap_or_else(|| "Another Mac".to_owned());
+                let reason = format!("{who} took this run over, so nothing landed");
                 self.end_landing(&landing, CompileOutcome::Lost, Some(reason), None)
             }
             Landed::Refused(held) => {
@@ -1032,6 +1181,66 @@ pub(crate) mod tests {
         s.sync();
         assert!(s.github.show(&held).is_none());
         assert_eq!(s.held().len(), 1);
+    }
+
+    #[test]
+    fn the_last_space_in_a_repository_is_kept_while_its_entries_wait_or_are_held() {
+        let mut s = stored();
+        let held = Stored::path_of(&s.log(&format!("Call {PHONE}.")));
+        s.sync();
+        let waiting = Stored::path_of(&s.log("Retry once."));
+        let project = s.f.coordinator.project_id.clone();
+        let personal = (s.f.host.spaces().unwrap().into_iter())
+            .find(|r| r.space.name == PERSONAL)
+            .unwrap()
+            .space
+            .id;
+        s.f.host.move_project_to_space(&project, &personal).unwrap();
+        let refused = s.f.host.remove_space(&s.sage.id).unwrap_err();
+        let refused = format!("{refused:#}");
+        let name = |path: &str| path.rsplit('/').next().unwrap().to_owned();
+        assert!(
+            refused.contains(&name(&held)) && refused.contains("Brains page"),
+            "{refused}"
+        );
+        assert!(
+            refused.contains(&name(&waiting)) && refused.contains("Sync now"),
+            "{refused}"
+        );
+        assert!(s.f.host.space(&s.sage.id).is_ok());
+        s.sync();
+        let card = s.held().remove(0);
+        s.f.host.discard_held_entry(REPO, &card.path).unwrap();
+        s.f.host.remove_space(&s.sage.id).unwrap();
+    }
+
+    #[test]
+    fn a_held_entry_no_log_row_names_is_listed_in_logs_as_held() {
+        let mut s = stored();
+        let (path, text) = brain_index::tests::entry(
+            "app",
+            &brain_index::tests::id(3),
+            ("mhohlios", "decision", "Ruling"),
+            "—",
+        );
+        let path = format!("{FOLDER}/second-brain/{path}");
+        let text = text.replace("- why: Because.", &format!("- why: Call {PHONE}."));
+        let sage = s.sage.clone();
+        s.f.host.land_entry(&sage, &path, &text, None).unwrap();
+        s.sync();
+        assert_eq!(s.held().len(), 1);
+        let page = (s.f.host)
+            .brain_logs(REPO, None, &Default::default(), &Default::default())
+            .unwrap();
+        let listed = page
+            .pending
+            .iter()
+            .find(|e| e.id == brain_index::tests::id(3));
+        let listed = listed.expect("the held ruling is listed");
+        assert_eq!(
+            (listed.title.as_str(), &listed.pull_request),
+            ("Ruling", &EntryPullRequest::Held)
+        );
     }
 
     #[test]

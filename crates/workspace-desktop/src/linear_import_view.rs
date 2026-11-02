@@ -1,4 +1,4 @@
-//! Import from Linear… in a Space's Storage and issues box (OpenSpec change `shared-issues`,
+//! Import from Linear… in a Space's Repository box (OpenSpec change `shared-issues`,
 //! task 6.2): the human's Linear key, the team, the summary of what would be written with how
 //! Linear's states map and the GitHub login confirmed for each Linear user, then the import's
 //! progress from the snapshot. Every step is the human's; the host keeps the key only in the

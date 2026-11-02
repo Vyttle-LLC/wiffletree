@@ -113,6 +113,24 @@ pub(super) fn when(at: DateTime<Local>, today: NaiveDate) -> String {
     }
 }
 
+/// "Today at 06:04", "Tomorrow at 06:00", "Tuesday at 09:00" within a week either way, or
+/// "13 Oct at 10:15".
+pub(super) fn day_at(at: DateTime<Local>, today: NaiveDate) -> String {
+    format!("{} at {}", day(at, today), time_of_day(at))
+}
+
+/// "Today", "Yesterday", "Tomorrow", "Tuesday" within a week either way, or "13 Oct".
+pub(super) fn day(at: DateTime<Local>, today: NaiveDate) -> String {
+    let date = at.date_naive();
+    match (date - today).num_days() {
+        0 => "Today".into(),
+        -1 => "Yesterday".into(),
+        1 => "Tomorrow".into(),
+        -6..=6 => at.format("%A").to_string(),
+        _ => at.format("%-d %b").to_string(),
+    }
+}
+
 /// A moment in `timezone`, as "Oct 17, 9:30 AM EDT".
 pub(super) fn local_time(at: i64, timezone: &str) -> Option<String> {
     let zone: Tz = timezone.parse().ok()?;
@@ -128,6 +146,11 @@ pub(super) fn local_time(at: i64, timezone: &str) -> Option<String> {
 /// `one` for a count of one, otherwise `many`.
 pub(super) fn plural<'a>(count: usize, one: &'a str, many: &'a str) -> &'a str {
     if count == 1 { one } else { many }
+}
+
+/// "1 entry", "3 entries", for a noun whose plural is not its singular and an s.
+pub(super) fn counted_as(count: usize, one: &str, many: &str) -> String {
+    format!("{count} {}", plural(count, one, many))
 }
 
 /// "1 change", "3 changes".

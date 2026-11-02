@@ -44,23 +44,6 @@ def pr_range() -> str:
     return f"{base_ref()}...HEAD"
 
 
-@dataclass(frozen=True)
-class Change:
-    status: str  # A (added), M (modified) or D (deleted)
-    path: str
-
-
-def changed_files() -> list[Change]:
-    # Without rename detection a rename shows as a delete plus an add, so a
-    # moved log entry counts as a deletion.
-    output = git("diff", "--name-status", "--no-renames", "-z", pr_range())
-    fields = output.split("\0")
-    changes = []
-    for status, path in zip(fields[0::2], fields[1::2]):
-        changes.append(Change("M" if status == "T" else status, path))
-    return changes
-
-
 # The repository the gate itself lives in: Wiffletree, or wherever it moves.
 GATE_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 # Its fixtures plant fake values on purpose, so they are exempt there, and only there.

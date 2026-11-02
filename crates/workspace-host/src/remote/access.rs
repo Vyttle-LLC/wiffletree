@@ -146,6 +146,10 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::SetTrackerPrefix { .. }
         | Command::SetUpIssues { .. }
         | Command::MoveIntoFolder { .. }
+        | Command::SpaceFormDefaults
+        | Command::ProtectHistory { .. }
+        | Command::PreviewBringIn { .. }
+        | Command::BringIn { .. }
         | Command::RunBrainCompile { .. }
         | Command::SetCompileHere { .. }
         | Command::SetCompileTime { .. }

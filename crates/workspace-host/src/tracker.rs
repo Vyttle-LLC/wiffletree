@@ -1,5 +1,5 @@
 //! The tracker's files (OpenSpec change `shared-issues`, phase 1): one folder per issue under
-//! `issues/` of a Space's storage repository, with `issue.md`, `comments/` and `events.jsonl`,
+//! `issues/` in the Wiffletree folder of a Space's repository, with `issue.md`, `comments/` and `events.jsonl`,
 //! and an index of them in `issues.sql`. The files are the source of truth; the index is rebuilt
 //! from them when it is missing or its format changes, and an issue is read into it again when
 //! its folder changed on disk, by anyone. Every write here is the human's. Issue text is

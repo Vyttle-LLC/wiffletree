@@ -1,181 +1,152 @@
 # brain-registry Specification
 
 ## Purpose
-The brain registry is how Wiffletree knows and writes the brains its Spaces name: each Mac registers every brain once, reads its shared settings from `wiffletree-brain.json` on `main`, keeps its own checkout as the only writer, and sends every change as a batch branch whose pull request auto-merges once the brain gate's required checks pass, with problems shown on the writing project's Inbox or the Brains page.
+Says what a Space's brain is and how Wiffletree writes it: the `second-brain/` folder of the Space's repository, written through that repository's sync engine with each change scanned and landed straight on `main`, with held entries, the Macs that compile each wiki, Bring in a brain and the Brains page.
 
 ## Requirements
 
-### Requirement: A Space registers its brain
-A brain SHALL be registered on a machine when one of that machine's Spaces names it (see `spaces`, "A Space"). Each brain SHALL be one GitHub repository named `owner/name`, with its push URL, its default branch `main`, the path of the host's checkout and its sync state. Several Spaces MAY name one brain, which is registered once. A brain no Space names any longer SHALL leave the registry, after confirmation, and the host's checkout SHALL be deleted; GitHub SHALL be untouched. Only the human, by editing a Space, SHALL add or remove a brain. Agents SHALL NOT. When the human creates a Space or sets its brain, Wiffletree SHALL suggest a brain from the GitHub owner of the Space's code repositories: the brain another Space already names for that owner, or none. The suggestion SHALL be only pre-filled and never applied without the human's confirmation. Personal and unowned repositories SHALL suggest no brain. The push URL SHALL be found and used as the settings repository's is: the protocol gh is configured with is tried first, with gh's login through a credential helper given for each command only, and no token is stored, logged or put on a command line.
-
-#### Scenario: A Space names a brain
-- **WHEN** the human sets the Sage Space's brain to `Sage-Social/sagehaven-docs` and confirms
-- **THEN** the host clones it into its own checkout, the Brains page lists it as the Sage Space's brain with its remote and sync state, and it survives a restart
-
-#### Scenario: The owner suggests a brain
-- **WHEN** the Vyttle Space names `vyttle-docs`, and the human creates a second Space whose code repositories belong to `Vyttle-LLC`
-- **THEN** the new Space's brain is pre-filled with `vyttle-docs`, and nothing is registered until the human confirms
-
-#### Scenario: A personal Space
-- **WHEN** the human creates a Space whose only repositories belong to `MHohlios`
-- **THEN** no brain is suggested
-
-#### Scenario: An agent cannot add a brain
-- **WHEN** an agent's tool call or message asks the host to add or remove a brain
-- **THEN** no tool does this, and the registry is unchanged
-
-### Requirement: Naming a brain grants only its batch pushes
-Confirming a brain for a Space SHALL be what allows the host to push to that repository, and the confirmation SHALL say so, naming the repository. The grant SHALL allow exactly these operations on that repository: pushing branches named `wiffletree/brain/<login>/<batch-id>`, opening pull requests from them into `main`, turning on auto-merge for those pull requests, closing a batch pull request the human discards, and deleting a branch the host pushed. The allowed owners for ticket PRs SHALL NOT grant this, and adding a brain SHALL NOT allow ticket PRs or settings sync to that repository or its owner. The host SHALL NOT approve, comment on, label or directly merge any pull request.
-
-#### Scenario: An allowed owner without a brain
-- **WHEN** `Sage-Social` is allowed for ticket PRs and no Sage brain is registered
-- **THEN** the host pushes nothing to `Sage-Social/sagehaven-docs`
-
-#### Scenario: A brain does not allow ticket PRs
-- **WHEN** `sagehaven-docs` is a registered brain and a ticket in `sagehaven-docs` is published
-- **THEN** the publish follows `ticket-publishing`'s rules for its owner, unchanged by the brain
-
-### Requirement: The host owns a separate checkout of each brain
-The host SHALL keep its own clone of each brain at `<data folder>/repos/github.com/<owner>/<name>/`, under the one root of `shared-repositories`, and SHALL NOT use a folder the human chose as that checkout. A brain SHALL NOT also be a storage or settings repository on this Mac, and the checkout SHALL NOT be synced by that module's engine. In that checkout the host SHALL only fetch and fast-forward `main`, and SHALL make every change on a batch branch in a worktree of it. It SHALL write a `.git/wiffletree-managed` marker in the checkout. One host process SHALL write to a checkout at a time. When the checkout's `main` cannot be fast-forwarded, or a file in it differs from what the host last wrote or fetched, the host SHALL stop writing to that brain, keep the change, and raise one item on the Brains page. It SHALL NOT reset, stash or overwrite.
-
-#### Scenario: Fetch after a merge
-- **WHEN** a batch PR merges on GitHub
-- **THEN** the host fetches and fast-forwards its checkout's `main`, and its next batch starts from that commit
-
-#### Scenario: An edit in the host's checkout
-- **WHEN** a file in the host's checkout of `sagehaven-docs` is changed outside Wiffletree
-- **THEN** the host stops writing to that brain, leaves the file as it is, and the Brains page names the file and says writing is held
-
-#### Scenario: Where the checkout lives
-- **WHEN** the Sage Space's brain `Sage-Social/sagehaven-docs` is registered
-- **THEN** the host's checkout is `<data folder>/repos/github.com/Sage-Social/sagehaven-docs/`, beside the storage clones
-
-#### Scenario: The human's own clone
-- **WHEN** the human edits `~/dev/sagehaven/sagehaven-docs` in Obsidian
-- **THEN** the host's checkout and its batches are unaffected, and the human's edit reaches the host only after it merges on `main`
-
 ### Requirement: A project's brain comes from its Space
-A project SHALL store no brain of its own. A project's brain SHALL be its Space's brain, or none when its Space names none. A project a coordinator creates with `create_project` SHALL belong to the creating project's Space and SHALL use that Space's brain. Assistant threads and job runs SHALL use their own Space's brain. Capture, compile, search and `query_brain` SHALL resolve the brain this way and in no other way. A project whose Space has no brain SHALL have none, and its Memory panel SHALL say so with a link to Settings › Spaces.
+A project SHALL store no brain of its own. A project's brain SHALL be its Space's brain. A project a coordinator creates with `create_project` SHALL belong to the creating project's Space and SHALL use that Space's brain. Assistant threads and job runs SHALL use their own Space's brain. Capture, compile, search and `query_brain` SHALL resolve the brain this way and in no other way.
 
 #### Scenario: A project in the Sage Space
 - **WHEN** a project in the Sage Space works in repositories owned by `Sage-Social` and by `Vyttle-LLC`
-- **THEN** its only brain is the Sage Space's brain, `sagehaven-docs`
+- **THEN** its only brain is the Sage Space's brain
 
 #### Scenario: A project created by a coordinator
 - **WHEN** a coordinator in the Vyttle Space creates a project with `create_project` that adds a repository outside Vyttle
-- **THEN** the new project is in the Vyttle Space and logs only to `vyttle-docs`
+- **THEN** the new project is in the Vyttle Space and logs only to Vyttle's folder
 
 #### Scenario: A Space on this Mac alone
-- **WHEN** a project's Space names no brain
-- **THEN** the project has no brain and its Memory panel says so, with a link to Settings › Spaces
+- **WHEN** a project's Space is Personal, which named no brain in an earlier release
+- **THEN** the project logs to Personal's own brain, on this Mac alone, and nothing is pushed
 
-### Requirement: The brain config file lives in the brain repository
-Each brain's settings that every install must agree on SHALL be read from `wiffletree-brain.json` at the root of the brain repository's `main`: its version, the brain folder (default `second-brain`), the compiler's host id and display name, the compile time and timezone, and the `gate` object that `brain-gate` defines. The host SHALL read only the version merged on `main`, never one on an open branch. A brain without the file SHALL accept log batches, have no compiler, and offer Set up. Set up SHALL be a short form on the Brains page with 06:00 in the host's timezone filled in and both editable, and SHALL open one PR adding the file with this host as compiler and that compile time, together with the gate's caller, config and `CODEOWNERS` lines as `brain-gate` specifies; that PR waits for the code owner's review. The host SHALL refuse a time or timezone the compile schedule could not read, opening no PR. The host SHALL refuse a file that is not valid JSON or names a brain folder outside the repository, and its page SHALL say why. A version newer than the host understands SHALL allow log batches and SHALL NOT compile.
+### Requirement: A Space's brain is its folder's second-brain
+A Space's brain SHALL be `second-brain/` in its repository's folder, holding its logs, its wiki and its reconcile queue. Every Space SHALL have one, nothing SHALL register it, and no Space SHALL name a brain. Spaces in one folder SHALL share one brain. These specifications' "a Space's brain" SHALL mean this folder, and "wiki" SHALL mean its `notes/` and `STATUS.md`. A brain SHALL be read and written only through the repository's one clone and sync engine (see `shared-repositories`). No agent SHALL add, remove or move a brain.
 
-#### Scenario: Reading the compiler
-- **WHEN** `main` of `sagehaven-docs` has `wiffletree-brain.json` naming Michael's Mac as compiler
-- **THEN** every install that registers `sagehaven-docs` shows "Compiles on: Michael's Mac"
+#### Scenario: A new Space's brain
+- **WHEN** the human creates Vyttle in `Vyttle-LLC/vyttle-wiffletree-storage`
+- **THEN** its brain is `wiffletree/second-brain/` there, with no field to fill in and no separate clone
 
-#### Scenario: No config file
-- **WHEN** `vyttle-docs` has no `wiffletree-brain.json`
-- **THEN** batches still open PRs, the page shows "No compiler" with Set up, and accepting Set up's form opens one PR adding the file with the compile time and the gate's caller and config
+#### Scenario: An agent cannot add a brain
+- **WHEN** an agent's tool call or message asks the host to add or remove a brain
+- **THEN** no tool does this
 
-#### Scenario: A brain set up through the app is scheduled
-- **WHEN** the human accepts Set up's 06:00 America/Chicago and its PR merges
-- **THEN** the brain has a compile due daily at 06:00 America/Chicago on this host
+### Requirement: Choosing the repository grants its pushes
+Choosing a Space's repository SHALL be what allows the host to push to it, and the confirmation SHALL say so. The grant SHALL allow pushing the default branch, inside the folder, and pushing the claim branch `wiffletree-compile-claim` (see `brain-compile`), and nothing else. The allowed owners for ticket PRs SHALL NOT grant this, and choosing a repository SHALL NOT allow ticket PRs to it or its owner. The host SHALL open no pull request on it.
 
-#### Scenario: A time the schedule cannot read
-- **WHEN** the human enters 25:00, or a timezone that does not exist, in Set up's form
-- **THEN** the host refuses it, saying why, and no PR opens
+#### Scenario: An allowed owner
+- **WHEN** `Sage-Social` is allowed for ticket PRs and no Space here uses `Sage-Social/sagehaven-docs`
+- **THEN** the host pushes nothing to `Sage-Social/sagehaven-docs`
 
-### Requirement: Changing the compiler host goes through a PR
-The Brains page SHALL let the human choose this machine, or another host by id, as a brain's compiler. The choice SHALL open a batch PR that changes only `wiffletree-brain.json`, keeping keys the host does not know. The page SHALL show the change as pending until the PR merges, and the compiler SHALL be the one on `main` until then.
+#### Scenario: A Space's repository does not allow ticket PRs
+- **WHEN** `Vyttle-LLC/vyttle-docs` is a Space's repository and a ticket in it is published
+- **THEN** the publish follows `ticket-publishing`'s rules for its owner, unchanged
 
-#### Scenario: Moving the compiler
-- **WHEN** the human makes this machine the compiler of `sagehaven-docs`
-- **THEN** a PR changing only `wiffletree-brain.json` opens and auto-merges, the old compiler keeps compiling until it merges, and afterwards every install shows this machine
+### Requirement: Every change to a brain lands through the sync engine
+Every change the host makes to a brain SHALL go through the repository's sync engine and land straight on `main`: log entries within seconds, compile results when they pass their checks, and rulings as log entries. The host SHALL open no branch or pull request for a brain, turn on no auto-merge and watch no pull request. In a local repository each change SHALL be committed at once. A push refused because `main` moved SHALL fetch and go again, as for issues.
 
-### Requirement: Every change reaches main through a batch PR that auto-merges
-Every change the host makes to a brain SHALL be committed on its own batch branch from the current `main`, pushed to that branch, opened as one PR into `main`, and set to auto-merge with squash. Commits SHALL use the human's Git identity. The host SHALL NOT push `main`, push tags or force a push, and SHALL push only commits that contain the branch's remote head. When GitHub refuses auto-merge, the PR SHALL stay open and the host SHALL raise one item naming the repository settings to apply. The host SHALL record each batch's stage (queued, PR open, checks, auto-merging, merged, failed, discarded) and keep it across restarts.
-
-#### Scenario: A batch merges
-- **WHEN** a batch is pushed and all required checks pass
-- **THEN** its PR auto-merges, its stage becomes merged, and the host fetches `main`
-
-#### Scenario: Auto-merge is off
-- **WHEN** `vyttle-docs` has auto-merge disabled and a batch PR opens
-- **THEN** the PR stays open, its stage stays PR open, and one Inbox item says to enable auto-merge and protect `main` with the gate's checks
+#### Scenario: An entry lands
+- **WHEN** an agent logs a decision in the Vyttle Space
+- **THEN** within seconds one commit on `main` adds the entry's file, and every other Mac has it within a minute
 
 #### Scenario: Offline
-- **WHEN** GitHub cannot be reached while a batch is ready
-- **THEN** the batch stays queued, passes back off up to 30 minutes, and Sync now tries at once
+- **WHEN** GitHub cannot be reached while an entry waits
+- **THEN** it stays on this Mac, passes back off up to 30 minutes, Sync now tries at once, and it lands at the first pass that reaches GitHub
 
-### Requirement: Brain PRs are watched without a model
-The host SHALL watch each open batch PR with read-only `gh` requests and no model, about every 60 seconds while any batch PR of that brain is open and about every 5 minutes otherwise, backing off after failures as `pr-watch` does. It SHALL read each required check's name, conclusion, and the file and line of its annotations. It SHALL NOT copy check output, titles or annotation messages into the store, a message or the UI.
+### Requirement: A held entry can be edited, marked or discarded
+A log entry that fails the scan SHALL stay on this Mac, in a held state that survives restarts, and its card (see `shared-repositories`, "Files are scanned before they are pushed") SHALL offer:
+- Edit it, which changes the entry here, scans it again and lands it once it passes;
+- for a finding of `sensitive-info` only, Not sensitive, with a reason, which appends the inline marker `<!-- gate:allow <rule> <reason> -->` to that line and lands it;
+- Discard, which removes the entry from this Mac's clone, keeps its row as discarded in the store, and pushes nothing.
 
-#### Scenario: A failed sensitive scan
-- **WHEN** `sensitive-info` fails with an annotation at line 9 of an added entry
-- **THEN** the host records the check as failed with that file and line, and stores no text from the check's output
-
-### Requirement: A failed check or conflict raises an Inbox item
-When a batch PR's required check fails, its push is refused, it conflicts with `main`, or GitHub refuses auto-merge, the host SHALL raise one Inbox item on the project that wrote the batch, or on the Brains page when no project did. The item SHALL name the brain, the PR, the failed check or reason, and each reported file and line, SHALL say that auto-merge waits, and SHALL list what the human can do. It SHALL never show a matched value. A batch SHALL have at most one open item at a time. The item SHALL be replaced when the batch's state changes, and cleared when the batch merges or is discarded.
-
-#### Scenario: The sensitive scan fails
-- **WHEN** batch PR #214 from the ticket "Call relay: retry on Telnyx timeout" fails `sensitive-info` on line 9 of one entry
-- **THEN** that project's Inbox shows one item naming PR #214, the check, the file and line 9, with Redact the line, Not sensitive and Discard the batch, and no matched text
-
-#### Scenario: Checks pass after a fix
-- **WHEN** the human redacts the line and every check then passes
-- **THEN** the item is cleared and the batch auto-merges
-
-### Requirement: An unmerged batch can be amended
-For a batch whose PR is open and unmerged, the human SHALL be able to:
-- redact a reported line, which replaces that field's value with `[removed: <rule>]`;
-- mark it not sensitive with a reason, which appends the gate's inline marker `<!-- gate:allow <rule> <reason> -->` to that line;
-- discard the batch, which closes its PR and deletes the branch the host pushed.
-
-A redaction or marker SHALL be one new commit on the batch branch, pushed without force, after which the checks run again. Agents SHALL NOT amend or discard a batch. The host SHALL NOT change a file once its batch has merged.
+The card SHALL close when the entry lands or is discarded. Only the human SHALL do these, and no agent tool SHALL. The host SHALL NOT change an entry once it has landed.
 
 #### Scenario: Not sensitive
 - **WHEN** the human marks line 9 not sensitive with the reason "fixture call ID"
-- **THEN** one commit appends `<!-- gate:allow phone fixture call ID -->` to line 9, and the checks run again
+- **THEN** `<!-- gate:allow phone fixture call ID -->` is appended to line 9, the next scan passes, the entry lands, and the card closes
 
-#### Scenario: After the merge
-- **WHEN** a batch has merged and the human opens one of its entries
-- **THEN** no redact or discard action is offered for it
+#### Scenario: Held by secret-scan
+- **WHEN** an entry is held by a gitleaks rule, or because a check could not run
+- **THEN** the card offers Edit it and Discard, and no Not sensitive
 
-### Requirement: The legacy safety-net never writes a managed brain
-The host SHALL mark its checkout as managed with `.git/wiffletree-managed`, and SHALL NOT register a folder that the legacy pointer `~/.config/claude-second-brain` names as its checkout. The Brains page SHALL warn when the legacy pointer names the human's clone of a registered brain, saying that the safety-net must open PRs instead of pushing to `main` for that brain.
+#### Scenario: Discard
+- **WHEN** the human discards a held entry
+- **THEN** it is never pushed, nothing about it reaches GitHub, and the card closes
 
-#### Scenario: Pointer to the human's clone
-- **WHEN** the legacy pointer names `~/dev/sagehaven/sagehaven-docs` and `sagehaven-docs` is registered
-- **THEN** the Brains page shows the warning, and the host's checkout under `<data folder>/repos/` is unaffected
+#### Scenario: After landing
+- **WHEN** an entry has landed and the human opens it
+- **THEN** no edit or discard action is offered
 
-### Requirement: Earlier brain attachments are migrated
-At the first start of this release, each Space whose brain is a local folder, as the `spaces` change's upgrade left an earlier `Project.brain`, SHALL be resolved: a folder whose `origin` names a GitHub repository SHALL become that Space's brain repository. The host SHALL NOT push to it until the human confirms the grant on the Brains page. A folder without a GitHub `origin` SHALL leave its Space with no brain, and the Brains page SHALL say why. `attach_brain` SHALL be removed from the host's commands.
+### Requirement: Who compiles a wiki
+Compiling SHALL be a choice each Mac makes for a wiki: on, a Mac SHALL publish `compilers/<host id>.yaml` in the folder, holding its machine name and login, and off, it SHALL remove that file. Only that Mac SHALL write its file, so two Macs choosing at once never conflict. Any Mac that can push to the repository MAY turn compiling on, and no Mac SHALL be chosen for another. The compile time SHALL be `compile` in `wiffletree-issues.yaml`, an hour and minute with an IANA timezone, shared by the folder's Spaces; the human SHALL set it on the Brains page, it SHALL land as an ordinary Space-side commit, and the host SHALL refuse a time or timezone the schedule could not read. Only the human's client SHALL give either command, and no agent tool SHALL reach them.
 
-#### Scenario: An attached project
-- **WHEN** a stored project has the brain `~/dev/vyttle/vyttle-docs`, whose origin is `Vyttle-LLC/vyttle-docs`
-- **THEN** after the upgrade its Space names `Vyttle-LLC/vyttle-docs`, and the Brains page asks the human to confirm the grant before any batch is pushed
-
-### Requirement: The Brains page lists the Spaces' brains
-The sidebar's Workspace section SHALL list Brains beside Repositories. The Brains page SHALL show:
-- each brain named by a Space on this machine, with the Spaces that name it, its remote, its checkout path, its sync state, its last PR, the compiler from its config file, and the next and last compile run;
-- the PR gate: each batch that is not yet merged or was merged in the last day, with its kind, source and author, and its stage from queued through PR open and checks to auto-merged or failed.
-
-Selecting a batch SHALL show its required checks. A failed batch SHALL link to its Inbox item. The page SHALL offer Sync now, Set up, changing the compiler, changing the compile time, and a link to each Space's settings, where a brain is added or removed. The page SHALL NOT offer a repository-to-brain mapping.
-
-#### Scenario: The gate on the page
-- **WHEN** one batch is queued, one has checks running, one failed `sensitive-info` and a compile run merged this morning
-- **THEN** the page lists all four with their stages, and the failed one links to its Inbox item
-
-### Requirement: Changing the compile time goes through a PR
-The Brains page SHALL let the human set a compile time and timezone for a brain with a config, whatever host compiles it. The choice SHALL open a batch PR that changes only `compile` in `wiffletree-brain.json`, keeping every key the host does not know, in `compile` too. The host SHALL refuse a time or timezone the compile schedule could not read, and the time already on `main`. The compile time SHALL be the one on `main` until the PR merges. Only the human's client SHALL give this command, and no agent tool SHALL reach it. A brain with a config and no time SHALL show the banner "No compile time. This brain compiles only on Run now or a merged ruling." with Set compile time…; a brain with a time SHALL offer Change compile time, and the form SHALL say "The new time applies once the config PR merges."
-
-#### Scenario: A brain set up before compile times
-- **WHEN** `sagehaven-docs` has a config naming a compiler and no `compile`
-- **THEN** Next compile reads Not scheduled in the warning colour, and the banner offers Set compile time…
+#### Scenario: Turning compiling on
+- **WHEN** a teammate ticks Also on this Mac while joining Vyttle
+- **THEN** a commit adds one file to `wiffletree/compilers/`, and every Mac's Brains page lists that Mac
 
 #### Scenario: Changing the time
 - **WHEN** the human changes 06:00 to 02:00 America/Chicago
-- **THEN** a PR changing only `compile` opens, keys the host does not know stay, and 06:00 stands until it merges
+- **THEN** one commit changes only `compile` in `wiffletree-issues.yaml`, keys the host does not know stay, and every volunteer is due at the new time once it pulls
+
+#### Scenario: A time the schedule cannot read
+- **WHEN** the human enters 25:00, or a timezone that does not exist
+- **THEN** the host refuses it, saying why, and nothing is written
+
+### Requirement: Bring in a brain
+The Repository box SHALL offer Bring in a brain…, which SHALL take a folder on this Mac, a clone of a brain, and the brain folder in it, `second-brain` by default, and for a Space from an earlier release SHALL be filled in from its `brain` key. It SHALL read that folder's files as they are on this disk, committed or not, and never GitHub. The form SHALL show what it brings in, the wiki pages with `STATUS.md`, and the log entries with how many files they come from, each with its date and repository; what it leaves behind, the original folder as it is along with anything else in it, such as `archive/`, `automation/` and `raw/`, saying it can be deleted once the human is happy; how many entries are shortened to fit the cap, whose full text stays in the original; and a warning naming how many files are not on GitHub and how many were never committed.
+
+It SHALL NOT change the original: it SHALL write nothing there, and its only Git commands there SHALL be reads that take no lock. Entry files that meet the contract SHALL be copied byte for byte. Each legacy `logs/<repo>.md` SHALL become one entry file per entry, with `source: skill` and an id derived from its repository, date, title and body, so that bringing in again adds no file. Its author SHALL be the GitHub login of the commit that added its heading, or the importing human's login when none is known, as for a file never committed. An entry over the cap SHALL keep its heading and fields, with `changed` shortened to fit and ending with a pointer to the legacy file. A `ref` that does not fit the contract SHALL become `—`, with its text moved into `state`.
+
+Wiki pages, `STATUS.md` and `reconcile-queue.md` SHALL be copied byte for byte, keeping `repos:` and every other frontmatter key, except that the old cursor lines leave a copied `notes/INDEX.md`. A page that already exists with other text SHALL be left and listed as skipped. Entries the original had compiled, by its cursor or its `compiled-through` markers, SHALL be added to `compiled-after` in the folder's `notes/INDEX.md`, so that every Mac reads them as compiled, and the rest SHALL be pending. Bring in SHALL NOT set `compiled-through` or change a cursor the folder already has, so an entry already in the folder stays pending until a compile folds it. Bring in SHALL be the one time its `wiffletree-brain.json` is read: `compile` and `allowed_email_domains` SHALL be carried from it when the folder's file has none, and a Mac it names as compiler that is doing the Bring in SHALL become a volunteer. Everything SHALL land through the sync engine, scanned, in commits of at most 200 files, and a file that fails SHALL be held with its card. When it finishes, the Space's `brain` key SHALL leave `space.yaml`, and the host's own checkout of that brain SHALL be deleted unless another Space here still names it. Only the human SHALL start it.
+
+#### Scenario: Files that are not on GitHub
+- **WHEN** the human brings in `~/dev/vyttle/vyttle-docs`, whose `second-brain/` holds 17 changed or untracked files, 11 of them never committed
+- **THEN** the form says so, shows 10 wiki pages and 191 log entries from 17 files, and every entry lands, including those in the 11 files
+
+#### Scenario: The original is left alone
+- **WHEN** the bring-in finishes
+- **THEN** `git status` in `~/dev/vyttle/vyttle-docs` shows exactly what it showed before, its index and every file are unchanged, and `archive/`, `automation/` and `raw/` were not read
+
+#### Scenario: Bringing in again
+- **WHEN** an older host logged two more entries to the old brain and the human brings it in again
+- **THEN** only those two files land, and no page is overwritten
+
+#### Scenario: A held entry during bring-in
+- **WHEN** one of 191 entries fails `sensitive-info`
+- **THEN** 190 land, the one stays on this Mac with its card, and bringing in again does not raise it twice
+
+#### Scenario: A transcript over the cap
+- **WHEN** a legacy `pica-api` entry holds 18,000 characters
+- **THEN** its entry file fits the cap, keeps its heading and fields, points to the legacy file, and the form counted it as shortened
+
+#### Scenario: Product pages survive
+- **WHEN** `notes/Pica.md` has `repos: [pica-ios, pica-api]` and sources that are file paths
+- **THEN** it arrives byte for byte, and the next compile keeps its `repos:`
+
+### Requirement: Waiting work carries over from an older brain
+At the first start of this release, entries of a brain batch that was queued and not pushed SHALL land through the logs rule set in the Space's folder. A batch with a pull request open SHALL be left on GitHub and no longer watched, and the Brains page SHALL name each such pull request once. The host's records of batches and brains SHALL stay in the store, unwritten, so an earlier build still opens it. A pull request that merges later SHALL reach the wiki through Bring in a brain, where ids stop any double.
+
+#### Scenario: A queued batch
+- **WHEN** Sage has a batch of two entries queued for `sagehaven-docs` when the update lands
+- **THEN** both entries land in Sage's folder, and nothing is pushed to `sagehaven-docs`
+
+#### Scenario: An open pull request
+- **WHEN** batch PR #214 is open at the upgrade
+- **THEN** the Brains page names #214 once, and it stays on GitHub for the human to merge or close
+
+### Requirement: The Brains page shows each wiki
+The sidebar's Workspace section SHALL list Brains beside Repositories. The Brains page SHALL show one group per wiki on this Mac, named after its Space, or its Spaces when several share it, with Run now and:
+- the compile time, with Change;
+- the last run, with when, on which Mac, how many entries and how many conflicts;
+- the next run, "on the first of these Macs awake";
+- each Mac that compiles it, with this Mac's tick to turn compiling on or off and, for another Mac, when it last ran.
+
+When no Mac compiles a wiki and entries wait, the page SHALL say so with how many, offering Compile on this Mac, and SHALL say the same in the Space's Repository box. The page SHALL also show the alerts, held entries and pull requests left at upgrade that have no project to go to. It SHALL open the brain browser for each wiki and keep the conflict cards. It SHALL NOT show a pull request gate list, Set up, Update gate or a repository-to-brain mapping, and it SHALL NOT warn about the second-brain skills.
+
+#### Scenario: Two Macs
+- **WHEN** Michael's Mac and a teammate's Mac compile Vyttle's wiki, and the last run landed at 06:04 on Michael's Mac
+- **THEN** the group reads "Today at 06:04 on Michael's Mac · 9 entries · 1 conflict", "Tomorrow at 06:00, on the first of these Macs awake", and lists both Macs, the teammate's with "Last ran Tuesday"
+
+#### Scenario: No volunteer
+- **WHEN** no Mac compiles Sage's wiki and 31 entries wait
+- **THEN** the page says "No Mac compiles Sage's wiki. 31 entries are waiting." with Compile on this Mac, and logs keep landing

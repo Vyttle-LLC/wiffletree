@@ -220,18 +220,29 @@ pub(crate) fn refuse_another(home: &Path, repository: &SettingsRepository) -> Re
     Ok(())
 }
 
+/// A repository `clone_to_staging` checked and cloned.
+pub(crate) struct Staging {
+    /// The repository as this Mac will record it.
+    pub(crate) repository: SettingsRepository,
+    /// Its owner is an organization.
+    pub(crate) organization: bool,
+    /// GitHub lets this Mac's login push to it.
+    pub(crate) push: bool,
+    pub(crate) clone: tempfile::TempDir,
+}
+
 /// Checks a private GitHub repository named as `owner/name` or by its URL, as `gh` reaches it,
-/// and clones its default branch into a `shared-staging-*` folder of the data folder, removed
-/// when dropped or at the next start: the repository as this Mac will record it, whether its
-/// owner is an organization, and the clone.
+/// refusing a public one with `public`, and clones its default branch into a `shared-staging-*`
+/// folder of the data folder, removed when dropped or at the next start.
 pub(crate) fn clone_to_staging(
     home: &Path,
     input: &str,
+    public: &str,
     tools: &publish::Tools,
-) -> Result<(SettingsRepository, bool, tempfile::TempDir)> {
+) -> Result<Staging> {
     use github_access::{candidates, first_readable, gh_protocol, private_repository};
     let (owner, name, urls) = candidates(input, &gh_protocol(tools, home))?;
-    let private = private_repository(tools, home, &owner, &name)?;
+    let private = private_repository(tools, home, &owner, &name, public)?;
     let (push_url, head) = first_readable(home, urls, &private.default_branch, &tools.git)?;
     let repository = SettingsRepository {
         name: private.name,
@@ -261,7 +272,12 @@ pub(crate) fn clone_to_staging(
             &["symbolic-ref", "HEAD", &branch],
         )?;
     }
-    Ok((repository, private.organization, staging))
+    Ok(Staging {
+        repository,
+        organization: private.organization,
+        push: private.push,
+        clone: staging,
+    })
 }
 
 /// A file's content, `None` for no file.
@@ -936,6 +952,33 @@ pub(crate) fn claim(
     }
 }
 
+/// When each Mac, by host id, last landed a run, from the claim branch as this clone last
+/// fetched it. Reads nothing from GitHub; a clone that never read the branch knows none.
+pub(crate) fn last_landed(clone: &Path) -> std::collections::HashMap<String, i64> {
+    let mut landed = std::collections::HashMap::new();
+    let args = ["log", "--format=%B%x00", "-n", "200", CLAIM_REF, "--"];
+    let Ok(log) = runtime::git_output(clone, &args) else {
+        return landed;
+    };
+    for message in log.split('\0') {
+        let Ok(claim) = serde_json::from_str::<Claim>(message.trim()) else {
+            continue;
+        };
+        if claim.state == ClaimState::Landed {
+            let at = landed.entry(claim.host).or_insert(claim.at);
+            *at = (*at).max(claim.at);
+        }
+    }
+    landed
+}
+
+/// The Mac whose claim is the tip at `url`, when this Mac can read it: a read, as `read_tip`
+/// is, for naming the Mac a run lost to once its attempt has ended.
+pub(crate) fn claimed_by(clone: &Path, url: &str, git: &GitTool) -> Option<String> {
+    let tip = read_tip(clone, url, git).ok().flatten()?;
+    tip.claim.map(|claim| claim.machine)
+}
+
 /// Pushes this run's `claim` as a child of its own commit `parent`, tried once: a push that fails
 /// needs nothing more, as the hour covers it.
 pub(crate) fn end_claim(
@@ -1488,6 +1531,10 @@ mod tests {
             &git_tool,
         );
         assert_eq!(lost.unwrap(), Claiming::Lost);
+        assert_eq!(
+            claimed_by(&two, URL, &git_tool).as_deref(),
+            Some("one's Mac")
+        );
         assert_eq!(github.pushes(), before + 1, "one attempt, one push");
         assert_eq!(claim_branch_log(&github), std::slice::from_ref(&commit));
         // A pass over the same clone leaves the branch and the tracking ref alone.
@@ -1589,6 +1636,45 @@ mod tests {
         let released = stamped("one", ClaimState::Released, at + 62 * MINUTE);
         assert!(end_claim(&one, URL, &tip.commit, &released, &git_tool).is_err());
         assert_eq!(claim_branch_log(&github).len(), 2);
+    }
+
+    #[test]
+    fn two_takeovers_of_an_expired_claim_have_one_winner() {
+        for _ in 0..5 {
+            let folder = tempfile::tempdir().unwrap();
+            let github = Arc::new(GitHub::new(folder.path(), true));
+            let (crashed, one, two) = (
+                mac(&github, folder.path(), "crashed"),
+                mac(&github, folder.path(), "one"),
+                mac(&github, folder.path(), "two"),
+            );
+            let git_tool = github.tools().git;
+            const MINUTE: i64 = 60_000;
+            let at = 1_000 * MINUTE;
+            let stale = stamped("crashed", ClaimState::Claimed, at);
+            claim(&crashed, URL, None, &stale, &git_tool).unwrap();
+            let tip = read_tip(&one, URL, &git_tool).unwrap().unwrap();
+            read_tip(&two, URL, &git_tool).unwrap();
+            assert!(tip.free(at + 61 * MINUTE));
+            let macs = [
+                (
+                    one.as_path(),
+                    stamped("one", ClaimState::Claimed, at + 61 * MINUTE),
+                ),
+                (
+                    two.as_path(),
+                    stamped("two", ClaimState::Claimed, at + 61 * MINUTE),
+                ),
+            ];
+            let before = github.pushes();
+            let won = race(&github, &macs, Some(&tip));
+            assert_eq!(won.len(), 1, "exactly one takes it over");
+            assert_eq!(
+                claim_branch_log(&github),
+                [won[0].clone(), tip.commit.clone()]
+            );
+            assert_eq!(github.pushes(), before + 2, "one push each");
+        }
     }
 
     #[test]
