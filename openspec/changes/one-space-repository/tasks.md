@@ -30,40 +30,40 @@ Log entries, compiles and rulings go through the sync engine. Batches, auto-merg
 - [ ] 2.5 Held entries: a state that survives restarts, and the card on the writing project or the Brains page, offering Edit it, Not sensitive and Discard, and never showing the matched text.
 - [ ] 2.6 Rulings: `rule_conflict` writes an entry through the same path. Stop writing `ruling_triggers`, and remove `ruling_merged`.
 - [ ] 2.7 `brain_index`, the Status, Logs and Memory reads: read `<folder>/second-brain` from the repository's clone, and replace batch and PR stages with held and waiting.
-- [ ] 2.8 Compile stays on its one host for now, reading the folder's `second-brain` from the clone. Replace its batch with the wiki rule set's landing in 3.4.
-- [ ] 2.9 Upgrade: a Space naming a brain keeps its `brain` key as read, no screen edits it, and nothing resolves through it. Queued batches land in the folder. Pull requests left open are named once on the Brains page. `compile`, `allowed_email_domains` and the compiler carry over once from `wiffletree-brain.json` when its clone is here. `work_logs` rows land. Every table stays, unwritten, and `user_version` does not change (decision 4).
-- [ ] 2.10 Remove from `brains.rs`: batches, publishing, PR watching, batch Inbox items, amending, Set up, Update gate, the compiler and compile-time PRs, the separate checkout and its marker, the legacy pointer, and `suggest_space_brain`, with their commands and `workspace-core` types (decision 9).
-- [ ] 2.11 Remove from `gate/`: `action.yml`, `checks/log_schema.py`, `checks/markdown_lint.py`, `checks/path_ownership.py`, `checks/wikilinks.py`, and the two markdownlint config files, with their tests. Keep what `scan.rs` bundles, its tests and `tests/fixtures/entries/`. Point `.github/workflows/brain-gate-tests.yml` at the tests directly.
-- [ ] 2.12 Move the contract's rules from `log_schema.py` into the writer's test in `memory.rs`, so every fixture is still checked.
-- [ ] 2.13 Landing tests: one entry lands in seconds; a burst is one commit; a push refused because `main` moved fetches and lands; offline waits and lands; a local Space commits and pushes nothing.
-- [ ] 2.14 Held entry tests: a phone number is held and never pushed, others keep landing, no text reaches a card or record, Not sensitive lands it with its marker, Edit rescans, Discard pushes nothing, and it survives a restart. A check that cannot run holds with what is missing.
-- [ ] 2.15 Upgrade tests, on stores of every schema the repository's fixtures cover: a store opens; an earlier build's checks still accept its `user_version`; **a Space with a separate brain and storage** keeps its `brain` key, logs to its folder and never writes to the old brain; a queued batch lands; an open pull request is named once; a Space with no brain gains logs and a wiki.
-- [ ] 2.16 Run `python3 gate/tests/test_gate.py` for what stays.
+- [ ] 2.8 Compile landing: a run works in a worktree of the repository's clone, and the wiki rule set stages its exact files on the current head, scanned, retried with the pass, all or nothing, with `at_or_past` and `changed_meanwhile` kept. A landed run records its commit. Remove `open_compile_batch` and `compile_waits`' PR states (decision 2).
+- [ ] 2.9 `entry_paths`: pending by id across layouts, with no `compiled-through` reading every entry but `compiled-after`.
+- [ ] 2.10 Until group 3, compile runs on Run now, on any Mac with a Brain compiler row. Remove `compiles_here` and the job's schedule; `at_or_past` stops double processing if two Macs press it (see `design.md`, Migration Plan).
+- [ ] 2.11 Upgrade: a Space naming a brain keeps its `brain` key as read, nothing resolves through it, and the Space page shows it read-only. Queued batches land in the folder. Pull requests left open are named once on the Brains page. `work_logs` rows land. Nothing else is pushed. Every table stays, unwritten, and `user_version` does not change (decision 4).
+- [ ] 2.12 Remove from `brains.rs`: batches, publishing, PR watching, batch Inbox items, amending, Set up, Update gate, the compiler and compile-time PRs, the separate checkout and its marker, the legacy pointer, and `suggest_space_brain`. Remove `import_legacy_logs`, `offers_legacy_import` and `Command::ImportLegacyLogs`; `legacy_logs.rs` keeps `parse`, `fitted`, `legacy_id`, `blame` and `commit_login`, with their tests, for 5.5. Remove the `workspace-core` types and commands, and every desktop control that uses them, in `brains_view.rs`, `memory_view.rs`, `brain_browser_view.rs` and the Space page, so the build stays whole (decision 9).
+- [ ] 2.13 Remove from `gate/`: `action.yml`, `checks/log_schema.py`, `checks/markdown_lint.py`, `checks/path_ownership.py`, `checks/wikilinks.py`, and the two markdownlint config files, with their tests. Keep what `scan.rs` bundles, its tests and `tests/fixtures/entries/`. Point `.github/workflows/brain-gate-tests.yml` at the tests directly.
+- [ ] 2.14 Move the contract's rules from `log_schema.py` into the writer's test in `memory.rs`, so every fixture is still checked.
+- [ ] 2.15 Landing tests: one entry lands in seconds; a burst is one commit; a push refused because `main` moved fetches and lands; offline waits and lands; a local Space commits and pushes nothing.
+- [ ] 2.16 **Held entry** tests: a phone number is held and never pushed, others keep landing, no text reaches a card or record, Not sensitive lands it with its marker, Edit rescans, Discard pushes nothing, and it survives a restart. A check that cannot run holds with what is missing.
+- [ ] 2.17 **A push refused during compile** tests: logs land during a run, the retry adds no model call, the commit lands on the new head with the cursor from the run's commit, and those logs are pending next run.
+- [ ] 2.18 Landing failures: a cursor already past lands nothing and each entry compiles once; a hand edit fails the run and stands; a scan failure lands nothing; the cursor is unchanged in each. A cursor from before the move makes only newer entries pending.
+- [ ] 2.19 Upgrade tests, on stores of every schema the repository's fixtures cover: a store opens; an earlier build's checks still accept its `user_version`; **a Space with a separate brain and storage** keeps its `brain` key, logs to its folder and never writes to the old brain; a queued batch lands; an open pull request is named once; a Space with no brain gains logs and a wiki; the upgrade writes nothing to `wiffletree-issues.yaml` or `compilers/`.
+- [ ] 2.20 Run `python3 gate/tests/test_gate.py` for what stays.
 
 ## 3. Volunteer compile
 
 Claims, the on-this-Mac choice, checking claims through GitHub, product pages, and links to tickets.
 
-- [ ] 3.1 The on-this-Mac choice: `compilers/<host id>.yaml` written and removed by that Mac, as human-only commands, and the compile job registered for each wiki this Mac compiles, keyed by repository, on the scheduler.
-- [ ] 3.2 `repos::claim`: the empty-tree commit, one plain push, the `ls-remote` read, no fetch, merge or retry. `read_tip` for its state, including expiry. `pass` never touches the branch (decision 1).
+- [ ] 3.1 The on-this-Mac choice: `compilers/<host id>.yaml` written and removed by that Mac, and the compile time written to `wiffletree-issues.yaml`, both human-only commands. The compile job comes back, registered for each wiki this Mac compiles, keyed by repository, on the scheduler.
+- [ ] 3.2 `repos::read_tip`: `ls-remote`, then a fetch of that one branch into `refs/wiffletree/compile-claim` when the clone lacks the commit, then its state, including expiry. `repos::claim`: the empty-tree commit, one plain push, then the `ls-remote` read, with no fetch, merge or second push after a refusal. `pass` never touches the branch (decision 1).
 - [ ] 3.3 The run: a pass, then pending, then the model, then the tip; owed Macs read the tip after each pull; `landed` and `released` tried once; the tip read again before landing. Local repositories skip all of it.
-- [ ] 3.4 Wiki rule set and landing: exact files staged on the current head, scanned, retried with the pass, all or nothing, with `at_or_past` and `changed_meanwhile` kept. Remove `open_compile_batch` and `compile_waits`' PR states (decision 2).
-- [ ] 3.5 `entry_paths`: pending by id across layouts.
-- [ ] 3.6 `verify_refs`: `Clones` gains a GitHub-only entry from the Spaces' repository lists, asking `gh` for the default branch, commit and compare, with `pull_state` kept, a run's count of what could not be asked, and the same path for the index (decision 6).
-- [ ] 3.7 Compile procedure v2: products, `repos:`, keeping frontmatter, issue IDs, and `PROCEDURE_VERSION` 2 (decision 10).
-- [ ] 3.8 `check_changes`: a changed note keeps its `repos:` names, and only ULID-shaped sources are checked.
-- [ ] 3.9 `brain_markdown`: issue links by the tracker's prefix and known IDs, with `link_target` opening the issue. The local prefix rename rewrites `notes/` and `STATUS.md`.
-- [ ] 3.10 Run records: lost to another Mac, compiled elsewhere, landed with its commit, and usage shown by Space.
-- [ ] 3.11 Falling behind: no volunteer with entries waiting, or two scheduled times with no landed run.
-- [ ] 3.12 **Two Macs claiming at once** test, against a real bare repository: two distinct commits raced from one tip, and two first claims with no branch at one `main` commit. Exactly one wins, and the loser makes no second push, fetch or merge.
-- [ ] 3.13 A test that a refused claim is never retried, by counting pushes, and that a landed push with a lost answer reads as won.
-- [ ] 3.14 **A crashed claim** test: a claim 59 minutes old is live, and one 61 minutes old is taken over as its child with no force; two takeovers race to one winner; an owed Mac takes it at its next pull; a Mac that slept through its claim lands nothing.
-- [ ] 3.15 Quota tests: out of quota before the claim claims nothing; mid-run releases and the next owed Mac runs.
-- [ ] 3.16 Idle test: nothing pending pushes nothing, not even a claim, and makes no model call.
-- [ ] 3.17 **A push refused during compile** tests: logs land during a run, the retry adds no model call, the commit lands on the new head with the cursor from the run's commit, and those logs are pending next run.
-- [ ] 3.18 Landing failures: a cursor already past lands nothing and each entry compiles once; a hand edit fails the run and stands; a scan failure lands nothing; the cursor is unchanged in each.
-- [ ] 3.19 GitHub ref tests, with a fake `gh`: on the default branch, on a side branch, 404, a merged PR, an open PR, a 403 giving unverified and counted, two owners of one name, a short SHA, and a folder no Space lists asking nothing.
-- [ ] 3.20 Product tests: entries fold by `repos:`, a dropped `repos:` name fails the run, and an older note gains `title` and `kind` and keeps its keys. Issue link tests: a known ID links; another prefix, no such issue, code and an existing link do not.
+- [ ] 3.4 `verify_refs`: `Clones` gains a GitHub-only entry from the Spaces' repository lists, asking `gh` for the default branch, commit and compare, with `pull_state` kept, a run's count of what could not be asked, and the same path for the index (decision 6).
+- [ ] 3.5 Compile procedure v2: products, `repos:`, keeping frontmatter, issue IDs, and `PROCEDURE_VERSION` 2 (decision 10).
+- [ ] 3.6 `check_changes`: a changed note keeps its `repos:` names, and only ULID-shaped sources are checked.
+- [ ] 3.7 `brain_markdown`: issue links by the tracker's prefix and known IDs, with `link_target` opening the issue. The local prefix rename rewrites `notes/` and `STATUS.md`.
+- [ ] 3.8 Run records: lost to another Mac and compiled elsewhere, and usage shown by Space.
+- [ ] 3.9 Falling behind: no volunteer with entries waiting, or two scheduled times with no landed run.
+- [ ] 3.10 **Two Macs claiming at once** test, against a real bare repository: two distinct commits raced from one tip, and two first claims with no branch at one `main` commit. Exactly one wins, and the loser makes no second push and merges nothing. A clone that has only ever fetched `main` reads a tip and claims as its child.
+- [ ] 3.11 A test that a refused claim is never pushed again in that attempt, by counting pushes, and that a landed push with a lost answer reads as won.
+- [ ] 3.12 **A crashed claim** test: a claim 59 minutes old is live, and one 61 minutes old is taken over as its child with no force; two takeovers race to one winner; an owed Mac takes it at its next pull; a Mac that slept through its claim lands nothing.
+- [ ] 3.13 Quota tests: out of quota before the claim claims nothing; mid-run releases and the next owed Mac runs.
+- [ ] 3.14 Idle test: nothing pending pushes nothing, not even a claim, and makes no model call.
+- [ ] 3.15 GitHub ref tests, with a fake `gh`: on the default branch, on a side branch, 404, a merged PR, an open PR, a 403 giving unverified and counted, two owners of one name, a short SHA, and a folder no Space lists asking nothing.
+- [ ] 3.16 Product tests: entries fold by `repos:`, a dropped `repos:` name fails the run, and an older note gains `title` and `kind` and keeps its keys. Issue link tests: a known ID links; another prefix, no such issue, code and an existing link do not.
 
 ## 4. Alerts
 
@@ -88,12 +88,12 @@ New Space, repository checks, the Space page, Bring in a brain, joining, and the
 - [ ] 5.3 Protect history: the ruleset through `gh`, GitHub's refusal shown, and the warning kept.
 - [ ] 5.4 The Space page: one Repository box, the four Brain rows gone, and Sync now, Import from Linear…, Bring in a brain…, Move… and Move into `wiffletree/`.
 - [ ] 5.5 Bring in a brain, reader: `legacy_logs.rs` reads a folder on this Mac, `blame --contents` with `GIT_OPTIONAL_LOCKS=0`, the pointer for an uncommitted copy, and no write there (decision 7).
-- [ ] 5.6 Bring in a brain, landing: entries byte for byte or derived, pages byte for byte, skipped pages listed, the cursor in `compiled-after`, commits of at most 200 files, scanned, and the `brain` key and old checkout dropped at the end.
+- [ ] 5.6 Bring in a brain, landing: entries byte for byte or derived, pages byte for byte, skipped pages listed, compiled ids added to `compiled-after` with any cursor kept, commits of at most 200 files, scanned, `compile`, `allowed_email_domains` and the compiler carried from `wiffletree-brain.json`, and the `brain` key and old checkout dropped at the end.
 - [ ] 5.7 Bring in a brain, form: what it brings, what it leaves, shortened entries, and the warning for files not on GitHub, filled in from a Space's `brain` key.
 - [ ] 5.8 Joining: one repository, the folder found, Spaces with counts, code repositories only, and Also on this Mac off by default.
-- [ ] 5.9 The Brains page: groups by wiki, Macs with this Mac's tick, Change, Run now, the no-volunteer banner, and what has no project to go to. Remove the PR gate list, Set up, Update gate and the warnings for the old skills.
+- [ ] 5.9 The Brains page: groups by wiki, Macs with this Mac's tick, Change, Run now, the no-volunteer banner, and what has no project to go to, drawn in the space 2.12 left.
 - [ ] 5.10 Check tests: a public repository, a repository requiring pull requests, a usable one with history unprotected, and a repository of other documents.
-- [ ] 5.11 Bring in tests, on a repository with changed, untracked and never-committed files: all land; `git status`, the index and every file in the original are byte-identical after; again adds nothing; `repos:` survives; a held entry lands nothing twice; already-compiled entries read as compiled on a second Mac.
+- [ ] 5.11 Bring in tests, on a repository with changed, untracked and never-committed files: all land; `git status`, the index and every file in the original are byte-identical after; again adds nothing; `repos:` survives; a held entry lands nothing twice; already-compiled entries read as compiled on a second Mac; uncompiled entries already in the folder stay pending, and an existing cursor is unchanged, on a first and a second Bring in.
 - [ ] 5.12 Run the app on a seeded store, dark and light, and compare each screen with `ui/mockups.html`.
 
 ## 6. Words and docs

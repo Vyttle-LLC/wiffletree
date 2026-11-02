@@ -23,7 +23,7 @@ Brain compile SHALL be a built-in host job of the scheduler (see `scheduled-jobs
 - **THEN** no run starts, and the page says the wiki is compiling on that Mac
 
 ### Requirement: The first Mac awake claims the run
-A run on GitHub SHALL be claimed on the branch `wiffletree-compile-claim`, which SHALL hold a chain of commits. A claim SHALL be a commit with an empty tree, whose parent is the branch's tip, or none for the first, and whose message holds its host id, machine name, login, run id, the due time it is for, its state and when it was written; its state SHALL be `claimed`, `landed` or `released`. Because a claim holds its run's id, no two Macs SHALL ever push the same commit. A Mac SHALL claim with one plain push of that commit to that branch, never forced and never through a sync pass: a refused claim SHALL NOT be fetched, merged or pushed again. After the push the Mac SHALL read the tip with `git ls-remote`, whatever the push answered: its own commit SHALL mean the claim was won, another commit SHALL mean it was lost, and no answer SHALL mean it claimed nothing. The sync engine SHALL NOT fetch or push that branch.
+A run on GitHub SHALL be claimed on the branch `wiffletree-compile-claim`, which SHALL hold a chain of commits. A claim SHALL be a commit with an empty tree, whose parent is the branch's tip, or none for the first, and whose message holds its host id, machine name, login, run id, the due time it is for, its state and when it was written; its state SHALL be `claimed`, `landed` or `released`. Because a claim holds its run's id, no two Macs SHALL ever push the same commit. A Mac SHALL claim with one plain push of that commit to that branch, never forced and never through a sync pass: a refused claim SHALL NOT be fetched, merged or pushed again. After the push the Mac SHALL read the tip with `git ls-remote`, whatever the push answered: its own commit SHALL mean the claim was won, another commit SHALL mean it was lost, and no answer SHALL mean it claimed nothing. To read the tip, a Mac SHALL take its SHA from `git ls-remote` and, when its clone lacks that commit, fetch that one branch into a ref outside `refs/heads/`, because a claim's state is in its message and a child needs its parent; that read SHALL come before a claim, and SHALL NOT make a refused claim go again. The sync engine SHALL NOT fetch or push that branch.
 
 Before claiming, a Mac SHALL run a pass and find what is pending, then resolve its model, then read the tip. The tip SHALL be free when its state is `released` or `landed`, or when it is `claimed` and over an hour old. A tip of `landed` for this due time SHALL mean the work is done, and the Mac SHALL record the run as compiled on that Mac and claim nothing.
 
@@ -34,6 +34,10 @@ Before claiming, a Mac SHALL run a pass and find what is pending, then resolve i
 #### Scenario: The first claim ever
 - **WHEN** two Macs make a wiki's first claims, with no branch on GitHub, at the same commit of `main`
 - **THEN** their commits differ, because each holds its own run's id, so exactly one creates the branch
+
+#### Scenario: A claim made on another Mac
+- **WHEN** a Mac whose clone has only ever fetched `main` finds a released claim at the tip
+- **THEN** it fetches that one branch, reads the claim's state, and claims with a commit whose parent is that tip
 
 #### Scenario: A lost answer
 - **WHEN** a claim's push lands on GitHub but its answer is lost
@@ -145,7 +149,7 @@ Each entry's author SHALL be the human, its repository the claim's, and its `sta
 - **THEN** no entry is written, the card disappears, and the next compile raises it again if the claim still contradicts the decision
 
 ### Requirement: Pending entries are found by a cursor of entry ids
-The cursor SHALL be stored in `notes/INDEX.md`'s frontmatter as `compiled-through` (a commit on `main`) and `compiled-after` (the ids of entries added after that commit that are already compiled). Pending entries SHALL be the ids of entry files under `logs/<repo>/` at `main`'s head that are not at `compiled-through`, reading each commit's tree in its own layout, so that the move into the folder makes nothing pending, minus the ids in `compiled-after`. On a brain with no cursor, every entry file SHALL be pending. A run SHALL process at most 200 pending entries, oldest id first. Its commit SHALL set the cursor, written by the host from the commit it read: when no pending entry remains up to that commit, `compiled-through` becomes that commit and `compiled-after` is emptied; otherwise the processed ids are added to `compiled-after`. The cursor SHALL change only when the run lands.
+The cursor SHALL be stored in `notes/INDEX.md`'s frontmatter as `compiled-through` (a commit on `main`) and `compiled-after` (the ids of entries added after that commit that are already compiled). Pending entries SHALL be the ids of entry files under `logs/<repo>/` at `main`'s head that are not at `compiled-through`, reading each commit's tree in its own layout, so that the move into the folder makes nothing pending, minus the ids in `compiled-after`. On a brain with no `compiled-through`, every entry file SHALL be pending, minus the ids in `compiled-after`. A run SHALL process at most 200 pending entries, oldest id first. Its commit SHALL set the cursor, written by the host from the commit it read: when no pending entry remains up to that commit, `compiled-through` becomes that commit and `compiled-after` is emptied; otherwise the processed ids are added to `compiled-after`. The cursor SHALL change only when the run lands.
 
 #### Scenario: Same-day entries
 - **WHEN** two entries dated October 29 land, one before and one after a run began
@@ -162,6 +166,10 @@ The cursor SHALL be stored in `notes/INDEX.md`'s frontmatter as `compiled-throug
 #### Scenario: Entries brought in
 - **WHEN** Bring in a brain brings 191 entries, of which 180 the original had compiled
 - **THEN** 11 are pending, on every Mac
+
+#### Scenario: Entries already in the folder at Bring in
+- **WHEN** a Space's folder holds 12 uncompiled entries, and Bring in a brain then brings 180 entries the original had compiled
+- **THEN** those 12 stay pending, and only the 180 are read as compiled
 
 ## MODIFIED Requirements
 
@@ -250,7 +258,7 @@ The host SHALL record each run with its id, trigger, start and end, pending coun
 
 ### Requirement: One compiler per brain
 **Reason**: Volunteer Macs replace the one named compiler, and a claim replaces the rule of one open compile PR.
-**Migration**: See "Volunteer Macs compile" and "The first Mac awake claims the run". A Mac an old config named as compiler becomes a volunteer.
+**Migration**: See "Volunteer Macs compile" and "The first Mac awake claims the run". A Mac an old config names as compiler becomes a volunteer when it does the Bring in, and any other ticks compiling on.
 
 ### Requirement: Compile runs start on schedule, on demand and after a ruling
 **Reason**: The model says the next compile picks a ruling up, so a ruling no longer starts a run.

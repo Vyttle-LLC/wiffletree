@@ -33,6 +33,8 @@ How the two traps are avoided:
 
 After the push, `git ls-remote` reads the tip whatever Git answered. The tip being this commit means the claim was won, which also covers a push that landed when its answer was lost. Any other tip means it was lost. No answer at all means this Mac could not reach GitHub, and it claims nothing.
 
+**Reading the tip needs the commit, not only its SHA.** `ls-remote` gives a SHA, but a claim's state, `at` and `due` are in its message, and a child needs its parent in the clone. So `repos::read_tip` runs `ls-remote` and, when the SHA is one this clone lacks, fetches that one ref, `+refs/heads/wiffletree-compile-claim:refs/wiffletree/compile-claim`, before reading the commit. The tracking ref sits outside `refs/heads/`, and `repos::pass` never touches it. This fetch is a read that comes before a claim, and it is not the engine's retry: a refused claim ends that attempt, with no fetch, merge or second push. A Mac that stays owed reads the tip afresh after its next pull, as any read does. The commit's empty tree is written to the clone with `git hash-object -w -t tree`, because a clone need not hold one.
+
 **Expiry needs no deletion or force.** The tip is free when its state is `released` or `landed`, or when it is `claimed` and its `at` is more than an hour old. Taking over an expired claim is an ordinary child of that claim, so two Macs taking over at once race the same way. The branch only grows, by about two tiny commits a day, and needs no permission beyond pushing. Expiry compares the claim's `at` with this Mac's clock. Macs keep good time, and a few minutes either way does not matter against an hour.
 
 **How a due run goes, and who it stays owed to.**
@@ -40,7 +42,7 @@ After the push, `git ls-remote` reads the tip whatever Git answered. The tip bei
 1. At the due time a volunteer runs a pass, so `main` is fresh, then works out what is pending. Nothing pending ends the run with no claim, commit or model call.
 2. It resolves the Brain compiler row. A Mac whose row waits, out of quota, ends the run as skipped and claims nothing.
 3. It reads the tip. `landed` with this `due` means another Mac did the work. A live claim means it stays owed. Otherwise it claims.
-4. A Mac that lost, or found a live claim, stays owed for that `due`. It reads the tip after each one-minute pull until the tip says `landed` for that `due`, the claim frees, or nothing is pending. That is how the next Mac takes a run a crashed Mac or an empty quota left, and it is one `ls-remote` a minute only while a run is owed.
+4. A Mac that lost, or found a live claim, stays owed for that `due`. It reads the tip after each one-minute pull until the tip says `landed` for that `due`, the claim frees, or nothing is pending. That is how the next Mac takes a run a crashed Mac or an empty quota left, and it is one `ls-remote` a minute, plus one fetch when the tip moved, only while a run is owed.
 5. A run that ends without landing pushes `released`, so the next Mac need not wait out the hour. One that lands pushes `landed`. Either push is tried once: if it fails, the hour covers it.
 
 **A Mac that wakes after losing its claim.** A compile session stops at 30 minutes, so a live run ends well inside the hour. A Mac that slept through the hour may wake holding an expired claim. Before landing it reads the tip, and a tip that is not its own claim ends the run with nothing pushed. If a takeover slips between that read and the push, the bookmark stops double processing (see 2).
@@ -105,11 +107,11 @@ Every other Mac on this release adopts the move in its next pass: a recorded emp
 
 `id`, `name` and `prefix` are there because an older host parses a file before it checks `format`, and a stub without them would read as damaged and not as newer. An older host pauses both, keeps its last good copies and tells its human to update. Its local issue files are removed by the pull, but they are all safe in the folder. It may still file an issue at the root until it updates. That issue stays on GitHub outside the folder, and this release leaves it alone. The stubs stay, because a teammate may update months later. They are outside the folder, and this one commit is the only write that ever touches them. The folder finder skips any file with `moved_to`.
 
-**`wiffletree-brain.json`.** It is read once, from the brain's clone, at upgrade or Bring in, and never written or deleted, because it stays with the old brain. Three things carry over:
+**`wiffletree-brain.json`.** It is read once, from the brain's clone, at Bring in, and never written or deleted, because it stays with the old brain. Not at upgrade: carrying it means commits to `wiffletree-issues.yaml` and `compilers/`, and an upgrade pushes nothing but entries already waiting. So until Bring in, an upgraded Space has no volunteer, and a log entry naming a staff address is held on the Mac, which fails safe. Three things carry over:
 
 - `compile` becomes `compile` in `wiffletree-issues.yaml`.
 - `gate.allowed_email_domains` becomes `allowed_email_domains` there.
-- A Mac named as `compiler` becomes a volunteer.
+- The Mac doing the Bring in becomes a volunteer when the file names it as `compiler`.
 
 The rest ends with it: the other `gate` keys, the compiler's name and `version`.
 
@@ -156,8 +158,8 @@ Each commit is asked about once per call, and a run holds at most 200 entries, s
 - **Authors.** A tracked file uses `git blame --porcelain --contents <file>`, so a changed line is attributed to no commit. Any entry with no commit behind it takes the importing human's login, as today.
 - **The pointer.** `fitted` names the commit, or "this Mac's uncommitted copy", and the form says how many entries were shortened and that their full text stays in the original.
 - **Per-entry files** under `logs/<repo>/YYYY/MM/` that meet the contract are copied byte for byte with their ids. A legacy `logs/<repo>.md` becomes entry files with its derived ids, as today.
-- **Wiki pages** under `notes/`, `STATUS.md` and `reconcile-queue.md` are copied byte for byte, so `repos:` and every other key survive. A page that already exists with other text is left and listed as skipped. The old cursor lines are removed from `notes/INDEX.md`, because their commits do not exist here.
-- **The cursor.** Entries the source had compiled, by its cursor or legacy `compiled-through` marker, go in `compiled-after` in the folder's `notes/INDEX.md`, with `compiled-through` set to the head before the first bring-in commit. The rest are pending. Keeping this in the file, not in `legacy_compiled`, means every Mac reads the same bookmark. The next compile that empties pending empties the list.
+- **Wiki pages** under `notes/`, `STATUS.md` and `reconcile-queue.md` are copied byte for byte, so `repos:` and every other key survive. A page that already exists with other text is left and listed as skipped. The old cursor lines are removed from a copied `notes/INDEX.md`, because their commits do not exist here, and a folder that already has an INDEX keeps it.
+- **The cursor.** Entries the source had compiled, by its cursor or legacy `compiled-through` marker, are added to `compiled-after` in the folder's `notes/INDEX.md`, and any cursor already there stays as it is. Bring in never sets `compiled-through`: entries already in the folder may not be compiled, and setting it to the head would mark them compiled and lose them from the wiki. A folder with no `compiled-through` reads every entry but those in `compiled-after` as pending. The rest of what is brought in is pending. Keeping this in the file, not in `legacy_compiled`, means every Mac reads the same bookmark. The next compile that empties pending empties the list.
 - **Landing.** Files go through the logs and wiki rule sets, in commits of at most 200 files, each scanned. A file that fails is held with an Inbox card. Running it again adds nothing, since ids and page checks make it idempotent, so it also picks up entries an older host logged to the old brain afterwards.
 
 `import_legacy_logs`, `offers_legacy_import` and the Brains page offer go, replaced by the Space page's button. `LegacyImport` batches go with the batch flow.
@@ -239,8 +241,8 @@ Each was read on `origin/main`.
 Each group in `tasks.md` ships as one ticket, in order, and the app stays usable between them.
 
 1. **The folder** ships with brains still working, and an unmoved repository behaves as it does today.
-2. **Straight in** is the switch: from it on, a Space's writes go to its folder. It carries the upgrade of a Space naming a separate brain.
-3. **Volunteer compile**, then **alerts**, then **setup screens**, then **words and docs**.
+2. **Straight in** is the switch: from it on, a Space's writes go to its folder, compiles land through the wiki rule set, and the batch path, the named compiler and legacy import go, with their desktop controls. It carries the upgrade of a Space naming a separate brain. Until the next ticket a compile runs only on Run now, on any Mac with a Brain compiler row. No schedule runs and no claim exists, so two Macs could both press it, and `at_or_past` stops double processing. Only a teammate or Michael pressing Run now spends a model in that gap, and old brains take no new entries from this ticket on.
+3. **Volunteer compile**, then **alerts**, then **setup screens**, then **words and docs**. Bring in's reader and landing are built in setup screens, on the parts of `legacy_logs.rs` that group 2 kept.
 
 Rollback: an older build still opens the store. A repository already moved stays moved, and the older build sees the stubs and says to update, so rolling back a moved repository means updating again. Nothing that moved is deleted.
 
