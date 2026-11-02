@@ -52,11 +52,11 @@ When storage with no issues adopts the target's tracker, the issue tables' rows 
 
 ### Worked out when read, so nothing to rewrite
 
-`storage_folder` and every caller of it: `tracker.rs`, `issue_inbox.rs`, `issue_work.rs`, `issues_sync.rs`, `jobs.rs` (`last_stored_output`, `save_output`, `push_job_output`), `boards.rs` (`Shelf.repository`, `Shelf.keeping`), `proposals.rs`, `assistant.rs`, `linear_import.rs`. `IssueLink.tracker`, `IssueRecord.tracker`, `IssueTracker.tracker` and `StorageStatus` are built from the tables above or the Space. `workspace_notes` and `held_notes` read the sync tables. `storage_input`, `storage_cadences` and `issue_sync_keys` read the Spaces.
+`storage_folder` and every caller of it: `tracker.rs`, `issue_inbox.rs`, `issue_work.rs`, `issues_sync.rs`, `jobs.rs` (`last_stored_output`, `save_output`, `push_job_output`), `boards.rs` (`Shelf.repository`, `Shelf.keeping`), `proposals.rs`, `assistant.rs`, `linear_import.rs`. `IssueLink.tracker`, `IssueRecord.tracker`, `IssueTracker.tracker` and `StorageStatus` are built from the tables above or the Space. `workspace_notes` and `held_notes` read the sync tables. `storage_input`, `storage_cadences` and `issue_sync_keys` read the Spaces. `BoardOutput.id` is a digest of the output's path, read afresh with every list and stored nowhere but in `assistant/versions/`, a cache of copies for the viewer.
 
 ### Reads as a reference, and is not one
 
-`issue_last_filed` names a Space. `issue_profiles` names a login. `jobs`, `job_due`, `job_runs` and `job_approvals` are keyed by Space and job, and `threads` and `projects` by Space. The private board store is under the Space's ID. `space.yaml` refuses a `storage` key. `Recipe.runner` is not a reference to storage, but see "Jobs" below.
+`SpaceLocal`, the `spaces.local` column, holds no storage: the switch rewrites only `spaces.data`, so `followed_roots` and the brain's place on this Mac carry over untouched, and a Space keeps following its roots. `issue_last_filed` names a Space. `issue_profiles` names a login. `jobs`, `job_due`, `job_runs` and `job_approvals` are keyed by Space and job, and `threads` and `projects` by Space. The private board store is under the Space's ID. `space.yaml` refuses a `storage` key. `Recipe.runner` is not a reference to storage, but see "Jobs" below.
 
 ## Decisions
 
@@ -77,7 +77,7 @@ A stop after the push leaves GitHub holding the moved files while the Space stay
 
 ### Holding everything else off
 
-No sync pass runs during a move: `begin` refuses while a pass runs and sets a gate that `storage_pass` and `sync_pass` respect until the move ends. `Pace::running` covers a pass started but not yet at its lock. Other writes are not blocked, as copying and pushing run off the host thread and agents keep filing issues. They are caught at the switch instead: the source is compared with the staging clone's head, on the host thread with no pass running, and a difference ends the move with "changed while it was moving". The same step repeats the refusals, so a job started meanwhile refuses the switch. The retry pushes only the difference.
+No sync pass runs during a move: `begin` refuses while a pass runs and sets a gate that `storage_pass` and `sync_pass` respect until the move ends. `Pace::running` covers a pass started but not yet at its lock. Other writes are not blocked, a root check's join through `update_space` among them, as copying and pushing run off the host thread and agents keep filing issues. They are caught at the switch instead: the source is compared with the staging clone's head, on the host thread with no pass running, and a difference ends the move with "changed while it was moving". The same step repeats the refusals, so a job started meanwhile refuses the switch. A join is the one write no person makes, and it is kept like the rest: `update_space` commits it to the source, so the Space lists the repository where it was, and the retry carries it, even though only a first find joins. The retry pushes only the difference.
 
 ### Empty repositories
 

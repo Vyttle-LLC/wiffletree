@@ -130,11 +130,12 @@ pub(crate) fn private_repository(
     home: &Path,
     owner: &str,
     name: &str,
+    kept: &str,
 ) -> Result<Private> {
     let facts = gh_json(tools, home, &format!("repos/{owner}/{name}"))?;
     ensure!(
         facts["private"] == true,
-        "Choose a private repository. Your skills and settings would be public."
+        "Choose a private repository. {kept} would be public."
     );
     let organization = facts["owner"]["type"] == "Organization";
     let readers = match organization {

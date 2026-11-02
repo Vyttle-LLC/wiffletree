@@ -193,6 +193,18 @@ pub fn check_storage_repository(repository: String) -> Ask<StorageCheck> {
 pub fn join_spaces(repository: String, spaces: Vec<JoinSpace>) -> Ask<Vec<SpaceRecord>> {
     Ask::new(Command::JoinSpaces { repository, spaces })
 }
+pub fn check_storage_move(space_id: SpaceId, repository: Option<String>) -> Ask<StorageMove> {
+    Ask::new(Command::CheckStorageMove {
+        space_id,
+        repository,
+    })
+}
+pub fn move_storage(space_id: SpaceId, repository: Option<String>) -> Ask<SpaceRecord> {
+    Ask::new(Command::MoveStorage {
+        space_id,
+        repository,
+    })
+}
 pub fn space_storage(space_id: SpaceId) -> Ask<StorageStatus> {
     Ask::new(Command::SpaceStorage { space_id })
 }

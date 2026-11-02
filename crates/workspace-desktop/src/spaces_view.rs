@@ -144,6 +144,18 @@ impl SpacesPage {
         cx.notify();
     }
 
+    /// Opens Move storage… for the Space, and reads its storage again once it moved.
+    fn open_move_storage(&mut self, space: Space, window: &mut Window, cx: &mut Context<Self>) {
+        let (bridge, shared) = (self.bridge.clone(), self.shared.clone());
+        let sheet = storage_move_view::open(bridge, shared, space, window, cx);
+        cx.subscribe_in(
+            &sheet,
+            window,
+            |view, _, _: &storage_move_view::Moved, window, cx| view.read_storage(window, cx),
+        )
+        .detach();
+    }
+
     /// Redraws while shown, loads the shown Space into the form, and reads its storage again
     /// once the reading is old or is another Space's, as after the shown one is removed, or once
     /// a storage pass for it finished.
@@ -1352,6 +1364,15 @@ impl SpacesPage {
             )
             .on_click(cx.listener(|view, _, window, cx| view.request(Command::SyncNow, window, cx)))
         });
+        let moved = space.clone();
+        let move_storage =
+            ui::gated(
+                button("space-move-storage").label("Move storage…"),
+                &self.shared.host,
+            )
+            .on_click(cx.listener(move |view, _, window, cx| {
+                view.open_move_storage(moved.clone(), window, cx)
+            }));
         let panel = (self.linear.as_ref())
             .filter(|(shown, _)| shown == &space.id)
             .map(|(_, panel)| panel.clone());
@@ -1367,18 +1388,17 @@ impl SpacesPage {
                 view.open_linear_import(space_id.clone(), window, cx)
             }))
         });
-        if open_issues.is_some() || sync_now.is_some() || import.is_some() {
-            box_ = box_.child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap_2()
-                    .children(import)
-                    .children(open_issues)
-                    .children(sync_now),
-            );
-        }
-        box_.children(panel)
+        box_.child(
+            div()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .children(import)
+                .children(open_issues)
+                .children(sync_now)
+                .child(move_storage),
+        )
+        .children(panel)
     }
 
     fn issues_field(
@@ -1933,7 +1953,7 @@ pub(super) fn is_shared(space: &Space) -> bool {
 }
 
 /// Who `readers` are, as a sentence about `repository`.
-fn readers_sentence(readers: Readers, repository: &str) -> String {
+pub(super) fn readers_sentence(readers: Readers, repository: &str) -> String {
     let owner = repository_owner(repository);
     match readers {
         Readers::Invited => format!("Only you and people you invite can read {repository}."),

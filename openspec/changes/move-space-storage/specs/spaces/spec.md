@@ -37,6 +37,14 @@ A move SHALL copy the files, run the `sensitive-info` and `secret-scan` checks o
 - **WHEN** the scan finds a possible token in an issue during a move
 - **THEN** nothing is pushed, the Space stays where it was, and the dialog names the file and the rule, never the match
 
+#### Scenario: A root check during a move
+- **WHEN** a root check adds a repository to a Space that follows the root while that Space's storage moves
+- **THEN** the move ends at the switch with the Space where it was and listing the repository, and moving it again carries the repository to the new storage
+
+#### Scenario: Following after a move
+- **WHEN** a Space that follows a root folder moves
+- **THEN** it keeps following that root, and a repository first found there joins it in its new storage
+
 #### Scenario: A stop at the switch
 - **WHEN** the host stops after the switch's transaction and before its renames
 - **THEN** the next start makes the renames and the Space is fully moved

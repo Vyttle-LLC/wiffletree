@@ -61,6 +61,7 @@ mod spaces;
 mod stacks;
 mod steps;
 mod storage;
+mod storage_move;
 mod stream;
 mod sync;
 mod telemetry;
@@ -168,6 +169,8 @@ pub struct Host {
     pub(crate) sync_passes: std::sync::Arc<std::sync::Mutex<()>>,
     /// What the latest sync pass did; see `sync`.
     pub(crate) sync: sync::Synced,
+    /// A storage move is running, so no sync pass starts; see `storage_move`.
+    pub(crate) storage_moving: bool,
     /// The GitHub storage repositories, by `repos::key`, the host wrote to since their sync took
     /// this; see `storage`.
     pub(crate) storage_written: std::cell::RefCell<std::collections::BTreeSet<String>>,
@@ -404,6 +407,7 @@ impl Host {
             shared_written: Default::default(),
             shared_writes: Default::default(),
             sync_passes: Default::default(),
+            storage_moving: false,
             sync: Default::default(),
             storage_written: Default::default(),
             issues_written: Default::default(),
@@ -2230,6 +2234,26 @@ impl Host {
                 serde_json::to_value(
                     storage::stage(&self.home, &repository, &tools, &added)?.check,
                 )?
+            }
+            Command::CheckStorageMove {
+                space_id,
+                repository,
+            } => {
+                self.precheck_storage_move(&space_id, repository.as_deref())?;
+                let added = self.space_ids()?;
+                let tools = publish::Tools::default();
+                let staged = repository
+                    .map(|input| storage::stage(&self.home, &input, &tools, &added))
+                    .transpose()?;
+                serde_json::to_value(self.check_storage_move(&space_id, staged.as_ref())?)?
+            }
+            Command::MoveStorage {
+                space_id,
+                repository,
+            } => {
+                let tools = publish::Tools::default();
+                let moved = self.move_storage(&space_id, repository.as_deref(), &tools)?;
+                serde_json::to_value(moved)?
             }
             Command::JoinSpaces { repository, spaces } => {
                 self.refuse_second_use_of(&repository, storage::Use::Storage)?;

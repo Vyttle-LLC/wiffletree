@@ -3602,6 +3602,21 @@ pub enum Command {
         repository: String,
         spaces: Vec<JoinSpace>,
     },
+    /// Read-only, the human's: what moving every Space stored with this one to the private
+    /// GitHub repository `repository` (`owner/name` or its URL), or with none to a new local
+    /// repository, would do; answers with `StorageMove`, or why it is refused.
+    CheckStorageMove {
+        space_id: SpaceId,
+        #[serde(default)]
+        repository: Option<String>,
+    },
+    /// Moves every Space stored with this one, checked again first; answers once the Spaces
+    /// switched, with the asked Space as a `SpaceRecord`, or why they stayed where they were.
+    MoveStorage {
+        space_id: SpaceId,
+        #[serde(default)]
+        repository: Option<String>,
+    },
     /// Read-only, the human's: what the Space page shows about the Space's storage repository;
     /// answered with `StorageStatus`.
     SpaceStorage {
@@ -4245,6 +4260,7 @@ impl Command {
             | Self::Settings
             | Self::CheckSettingsRepository { .. }
             | Self::CheckStorageRepository { .. }
+            | Self::CheckStorageMove { .. }
             | Self::ComparePausedFile { .. }
             | Self::SkillHistory { .. }
             | Self::BehaviorCatalog
@@ -4348,6 +4364,7 @@ impl Command {
             | Self::SetFollowedRoots { .. }
             | Self::ConfirmRepositorySuggestions { .. }
             | Self::JoinSpaces { .. }
+            | Self::MoveStorage { .. }
             | Self::SetTrackerPrefix { .. }
             | Self::SetUpIssues { .. }
             | Self::ConfirmBrain { .. }
@@ -4487,6 +4504,8 @@ impl Command {
                 | Self::SetFollowedRoots { .. }
                 | Self::ConfirmRepositorySuggestions { .. }
                 | Self::JoinSpaces { .. }
+                | Self::CheckStorageMove { .. }
+                | Self::MoveStorage { .. }
                 | Self::SetTrackerPrefix { .. }
                 | Self::SetUpIssues { .. }
                 | Self::CreateIssue { .. }

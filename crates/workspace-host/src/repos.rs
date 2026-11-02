@@ -41,12 +41,7 @@ pub(crate) fn key(name: &str) -> String {
 /// log line.
 pub(crate) fn migrate_clone_folders(db: &Connection, home: &Path) -> Result<()> {
     let root = home.join(FOLDER);
-    let moves: Vec<(String, String)> = (db.prepare("SELECT from_path,to_path FROM repo_moves")?)
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    for (from, to) in moves {
-        finish_move(db, &root, &from, &to)?;
-    }
+    finish_moves(db, home)?;
     let recorded = recorded_repositories(db, home)?;
     let Ok(entries) = fs::read_dir(&root) else {
         return Ok(());
@@ -140,6 +135,18 @@ pub(crate) fn migrate_records(db: &Connection, home: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Makes every rename `repo_moves` records.
+pub(crate) fn finish_moves(db: &Connection, home: &Path) -> Result<()> {
+    let root = home.join(FOLDER);
+    let moves: Vec<(String, String)> = (db.prepare("SELECT from_path,to_path FROM repo_moves")?)
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (from, to) in moves {
+        finish_move(db, &root, &from, &to)?;
+    }
+    Ok(())
+}
+
 /// Renames `repos/<from>` to `repos/<to>` unless that happened already, then forgets the move.
 fn finish_move(db: &Connection, root: &Path, from: &str, to: &str) -> Result<()> {
     let (source, target) = (root.join(from), root.join(to));
@@ -221,15 +228,16 @@ pub(crate) fn refuse_another(home: &Path, repository: &SettingsRepository) -> Re
 /// Checks a private GitHub repository named as `owner/name` or by its URL, as `gh` reaches it,
 /// and clones its default branch into a `shared-staging-*` folder of the data folder, removed
 /// when dropped or at the next start: the repository as this Mac will record it, whether its
-/// owner is an organization, and the clone.
+/// owner is an organization, and the clone. `kept` says what a public repository would expose.
 pub(crate) fn clone_to_staging(
     home: &Path,
     input: &str,
     tools: &publish::Tools,
+    kept: &str,
 ) -> Result<(SettingsRepository, bool, tempfile::TempDir)> {
     use github_access::{candidates, first_readable, gh_protocol, private_repository};
     let (owner, name, urls) = candidates(input, &gh_protocol(tools, home))?;
-    let private = private_repository(tools, home, &owner, &name)?;
+    let private = private_repository(tools, home, &owner, &name, kept)?;
     let (push_url, head) = first_readable(home, urls, &private.default_branch, &tools.git)?;
     let repository = SettingsRepository {
         name: private.name,
@@ -537,7 +545,7 @@ pub(crate) fn files_at(
 }
 
 /// Stages exactly the content a pass read, so no file written since reaches the commit.
-fn stage(clone: &Path, files: &[(String, Content)]) -> Result<()> {
+pub(crate) fn stage(clone: &Path, files: &[(String, Content)]) -> Result<()> {
     let mut index = vec![];
     for (path, content) in files {
         let entry = match content {
@@ -684,9 +692,22 @@ impl Record {
         written: &BTreeMap<String, Vec<u8>>,
         owns: &dyn Fn(&str) -> bool,
     ) -> Result<()> {
+        let tx = db.unchecked_transaction()?;
+        Self::restart_within(&tx, repository, head, synced, written, owns)?;
+        tx.commit()?;
+        Ok(())
+    }
+    /// `restart`, within a transaction the caller holds.
+    pub(crate) fn restart_within(
+        tx: &Connection,
+        repository: &str,
+        head: &str,
+        synced: &BTreeMap<String, Vec<u8>>,
+        written: &BTreeMap<String, Vec<u8>>,
+        owns: &dyn Fn(&str) -> bool,
+    ) -> Result<()> {
         let paths: std::collections::BTreeSet<&String> =
             synced.keys().chain(written.keys()).collect();
-        let tx = db.unchecked_transaction()?;
         for table in ["sync_record", "sync_paused", "sync_held"] {
             let listed: Vec<String> = (tx
                 .prepare(&format!("SELECT path FROM {table} WHERE repository=?1"))?)
@@ -709,7 +730,6 @@ impl Record {
                 params![repository, path, synced.get(path), written.get(path)],
             )?;
         }
-        tx.commit()?;
         Ok(())
     }
     /// Notes that the host wrote `content` to `path` of the repository's clone, `None` for a file

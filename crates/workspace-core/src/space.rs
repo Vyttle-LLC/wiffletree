@@ -480,6 +480,22 @@ pub struct JoinSpace {
     pub clones: Vec<String>,
 }
 
+/// What moving a Space's storage would do, answering `CheckStorageMove`. Nothing was written.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageMove {
+    /// The Spaces on this Mac stored with it, which move together, the asked one first.
+    pub spaces: Vec<String>,
+    /// The GitHub repository it would move to; `None` for a new local repository on this Mac.
+    pub repository: Option<crate::SettingsRepository>,
+    /// Its tracker's prefix and issues, which move with it; `None` for storage with no tracker.
+    pub prefix: Option<String>,
+    pub issues: usize,
+    /// The target's prefix, when the storage has no issues and takes on the target's tracker.
+    pub adopts: Option<String>,
+    /// The GitHub repository it would leave; `None` for local storage.
+    pub leaves: Option<String>,
+}
+
 /// What the Space page's Storage and issues box shows about a Space's storage repository.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageStatus {

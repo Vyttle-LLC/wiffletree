@@ -53,6 +53,20 @@ pub(crate) struct Held {
     pub(crate) reason: Option<String>,
 }
 
+impl Held {
+    /// Why it was held, naming the check and rule and never what matched.
+    pub(crate) fn why(&self) -> String {
+        let check = &self.check;
+        match (&self.rule, &self.reason) {
+            (Some(rule), _) => {
+                format!("the {check} check found a possible match of its {rule} rule")
+            }
+            (None, Some(reason)) => format!("the {check} check could not run: {reason}"),
+            (None, None) => format!("the {check} check could not run"),
+        }
+    }
+}
+
 /// Runs the bundled checks with Python from `PATH`.
 pub(crate) struct Scanner {
     gate: PathBuf,

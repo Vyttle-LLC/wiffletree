@@ -57,7 +57,8 @@ fn read_machine_name() -> String {
 /// What GitHub and Git say about the repository, with a clone of its branch in a new folder of
 /// the data folder that is removed when dropped.
 fn read(home: &Path, input: &str, tools: &Tools) -> Result<(SettingsRepositoryCheck, TempDir)> {
-    let (repository, organization, staging) = repos::clone_to_staging(home, input, tools)?;
+    let (repository, organization, staging) =
+        repos::clone_to_staging(home, input, tools, "Your skills and settings")?;
     for path in SHARED_PATHS {
         refuse_links(staging.path(), Path::new(path))?;
     }
@@ -1041,6 +1042,9 @@ impl Host {
     }
     /// The pass sync runs next, or `None` while no settings repository is chosen.
     pub(crate) fn sync_pass(&mut self) -> Result<Option<Pass>> {
+        if self.storage_moving {
+            return Ok(None);
+        }
         let Some(repository) = self.settings().settings_repository else {
             return Ok(None);
         };
