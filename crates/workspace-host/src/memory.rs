@@ -781,13 +781,13 @@ impl Host {
     }
 
     /// Whether the batch an earlier release put `entry` in is past landing here: it opened a pull
-    /// request, or it merged or was discarded. One that stopped before any pull request still
-    /// waits.
+    /// request, or it merged or was discarded, or forgetting its brain deleted it after it was
+    /// handed over. One that stopped before any pull request still waits.
     fn batch_settled(&self, entry: &WorkLog) -> Result<bool> {
         let settled: Option<bool> = self
             .db
             .query_row(
-                &format!("SELECT NOT ({NEVER_OPENED}) FROM log_batches l JOIN brain_batches b ON b.id=l.brain_batch_id WHERE l.id=?1"),
+                &format!("SELECT l.brain_batch_id IS NOT NULL AND (b.id IS NULL OR NOT ({NEVER_OPENED})) FROM log_batches l LEFT JOIN brain_batches b ON b.id=l.brain_batch_id WHERE l.id=?1"),
                 [&entry.batch_id],
                 |r| r.get(0),
             )
@@ -2011,6 +2011,46 @@ mod tests {
                 .show(&format!("{FOLDER}/compilers/x.yaml"))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_row_of_a_forgotten_brain_stays_there_and_one_never_handed_over_lands() {
+        let mut s = tests::stored();
+        let (forgotten, unsent) = ("01jbx4m2k8q6v9z3n5r7t0w2yj", "01jbx4m2k8q6v9z3n5r7t0w2yk");
+        in_a_batch(&s, forgotten, "merged", Some(213));
+        in_a_batch(&s, unsent, "queued", None);
+        let db = &s.f.host.db;
+        // Forget deleted the brain's batches, and left the log batches naming them.
+        db.execute(
+            "DELETE FROM brain_batches WHERE id=?1",
+            [format!("batch-{forgotten}")],
+        )
+        .unwrap();
+        db.execute(
+            "DELETE FROM brain_batches WHERE id=?1",
+            [format!("batch-{unsent}")],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE log_batches SET brain_batch_id=NULL WHERE id=?1",
+            [format!("logs-{unsent}")],
+        )
+        .unwrap();
+        s.f.host.land_what_waits().unwrap();
+        s.sync();
+        let landed =
+            |id: &str| format!("{FOLDER}/second-brain/logs/app/2026/10/2026-10-20-{id}.md");
+        assert!(
+            s.github.show(&landed(forgotten)).is_none(),
+            "already on its brain"
+        );
+        assert!(
+            s.github.show(&landed(unsent)).is_some(),
+            "it never left this Mac"
+        );
+        let project = s.f.coordinator.project_id.clone();
+        let rows = s.f.host.logs(&project, None, 10).unwrap();
+        assert!(rows.iter().all(|row| !row.is_unsent()));
     }
 
     #[test]
