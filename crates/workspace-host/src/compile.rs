@@ -3887,6 +3887,35 @@ mod tests {
     }
 
     #[test]
+    fn a_held_brought_in_page_leaves_its_path_to_a_compile_landing() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        let page = format!("{BRAIN}/notes/Call Relay.md");
+        let clone = b.clone_folder();
+        fs::create_dir_all(clone.join(BRAIN).join("notes")).unwrap();
+        fs::write(
+            clone.join(&page),
+            format!("# Call Relay\n\nCall {PHONE}.\n"),
+        )
+        .unwrap();
+        b.f.host.wait_to_land(&repos::key(REPO), &page).unwrap();
+        b.sync();
+        assert_eq!(
+            b.f.host.held_entries().unwrap().len(),
+            1,
+            "the scan holds it"
+        );
+        let (run, _) = b.finished(&relay_note(&id(1)));
+        b.pull();
+        let run = b.run_named(&run);
+        assert_eq!(run.outcome, CompileOutcome::Landed, "{}", run.reason);
+        assert_eq!(
+            b.github.show(&page).as_deref(),
+            Some(relay_note(&id(1)).as_str())
+        );
+    }
+
+    #[test]
     fn a_failed_run_releases_its_claim_for_the_next_mac_and_leaves_the_cursor() {
         let mut b = brained();
         b.merge(&[relay(1)]);

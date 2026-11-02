@@ -108,21 +108,30 @@ pub(crate) struct LogRules {
 impl LogRules {
     pub(crate) fn new(input: &Input, retries_alone: bool) -> Self {
         let brain = brain_dir(&input.root);
-        let compiled = match input.landing {
-            Some(_) => vec![],
-            None => input.compiled.clone(),
+        let logs = format!("{brain}/logs");
+        // A compile landing in this pass owns the wiki's paths, so the brought-in pages and the
+        // cursor wait for a pass without one.
+        let (entries, compiled) = match input.landing {
+            Some(_) => {
+                let in_logs = |path: &&String| path.starts_with(&format!("{logs}/"));
+                (
+                    input.entries.iter().filter(in_logs).cloned().collect(),
+                    vec![],
+                )
+            }
+            None => (input.entries.clone(), input.compiled.clone()),
         };
         Self {
-            logs: format!("{brain}/logs"),
+            logs,
             index: format!("{brain}/{}", compile::INDEX),
-            entries: input.entries.clone(),
+            found: Entries {
+                given: entries.clone(),
+                ..Entries::default()
+            },
+            entries,
             compiled,
             retries_alone,
             files: vec![],
-            found: Entries {
-                given: input.entries.clone(),
-                ..Entries::default()
-            },
         }
     }
     /// `compiled-after` on `remote` with the brought-in ids added: from GitHub's INDEX, else the
@@ -642,14 +651,13 @@ impl Host {
         Ok(())
     }
     /// Why `text` may not stand as the entry at `path` of the repository, by the entry contract.
+    /// A wiki page Bring in wrote has no contract to keep.
     fn entry_problem(&self, repository: &str, path: &str, text: &str) -> Result<Option<String>> {
-        let logs = format!(
-            "{}/logs/",
-            brain_dir(&self.root_of_key(&repos::key(repository))?)
-        );
-        let in_logs = (path.strip_prefix(logs.as_str()))
-            .with_context(|| format!("{path} is not a log entry"))?;
-        Ok(memory::contract_problem(in_logs, text))
+        let brain = brain_dir(&self.root_of_key(&repos::key(repository))?);
+        let in_brain = (path.strip_prefix(&format!("{brain}/")))
+            .with_context(|| format!("{path} is not in the brain"))?;
+        Ok((in_brain.strip_prefix("logs/"))
+            .and_then(|in_logs| memory::contract_problem(in_logs, text)))
     }
     /// Edit it: the entry takes the human's text, refused while it breaks the contract, and is
     /// scanned again by the next pass.

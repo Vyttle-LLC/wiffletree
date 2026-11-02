@@ -1237,6 +1237,46 @@ mod tests {
         }
 
         #[test]
+        fn a_held_page_can_be_marked_not_sensitive_or_edited_and_then_lands() {
+            let mut s = stored_with("");
+            let docs = tempfile::tempdir().unwrap();
+            write(
+                docs.path(),
+                "second-brain/notes/Pica.md",
+                &format!("# Pica\n\nCall {PHONE}.\n"),
+            );
+            write(
+                docs.path(),
+                "second-brain/STATUS.md",
+                &format!("# Status\n\nCall {PHONE}.\n"),
+            );
+            bring(&mut s, docs.path());
+            let held = s.f.host.held_entries().unwrap();
+            assert_eq!(held.len(), 2);
+            let path = |name: &str| format!("{FOLDER}/second-brain/{name}");
+            let pica = held
+                .iter()
+                .find(|h| h.path == path("notes/Pica.md"))
+                .unwrap();
+            assert!(pica.offers_not_sensitive());
+            (s.f.host)
+                .mark_entry_not_sensitive(REPO, &pica.path, "fixture number")
+                .unwrap();
+            let edited = "# Status\n\nAll well.\n";
+            (s.f.host)
+                .edit_held_entry(REPO, &path("STATUS.md"), edited)
+                .unwrap();
+            s.sync();
+            assert!(s.f.host.held_entries().unwrap().is_empty());
+            let marked = on_main(&s, "notes/Pica.md").unwrap();
+            assert!(
+                marked.contains("<!-- gate:allow phone fixture number -->"),
+                "{marked}"
+            );
+            assert_eq!(on_main(&s, "STATUS.md").as_deref(), Some(edited));
+        }
+
+        #[test]
         fn a_page_the_folder_has_with_other_text_is_left_and_listed() {
             let (mut s, _, _) = sage_with_a_cursor();
             s.merge(&[("notes/Pica.md".into(), "# Pica\n\nOurs.\n".into())]);
