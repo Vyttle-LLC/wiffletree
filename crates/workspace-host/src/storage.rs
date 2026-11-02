@@ -4405,6 +4405,39 @@ repository_settings:
     }
 
     #[test]
+    fn a_pause_an_older_host_kept_through_a_teammates_move_follows_its_file_after_the_update() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        github.commit("issues/SAGE-1/issue.md", issue("SAGE-1"));
+        let (home, mut host) = host();
+        let (_teammate_home, mut teammate) = self::host();
+        join_sage(&mut host, &github).unwrap();
+        join_sage(&mut teammate, &github).unwrap();
+        let clone = repos::clone_folder(home.path(), NAME);
+        let edited = String::from_utf8(issue("SAGE-1")).unwrap() + "Edited by a shell.\n";
+        fs::write(clone.join("issues/SAGE-1/issue.md"), &edited).unwrap();
+        sync(&mut host, &github);
+        press_move(&mut teammate, &github);
+        // An older host's pass takes the folder as files no rule set claims, keeps the paused
+        // edit at its old path and moves to GitHub's head.
+        let bare = github.bare.to_str().unwrap();
+        git(&clone, &["fetch", "-q", bare, "main"]);
+        git(&clone, &["checkout", "FETCH_HEAD", "--", "wiffletree"]);
+        git(&clone, &["reset", "-q", "FETCH_HEAD"]);
+        sync(&mut host, &github);
+        sync(&mut host, &github);
+        let moved = "wiffletree/issues/SAGE-1/issue.md";
+        let paused = (host.read_issue(&tracker::tests::id("SAGE-1")).unwrap()).paused;
+        assert_eq!(paused.len(), 1, "{paused:?}");
+        assert_eq!(paused[0].path, moved);
+        assert!(paused[0].why == Paused::OutsideWiffletree);
+        assert_eq!(fs::read_to_string(clone.join(moved)).unwrap(), edited);
+        assert!(!clone.join("issues").exists());
+        let there = github.show(moved).unwrap();
+        assert!(!there.contains("Edited by a shell"), "still not pushed");
+    }
+
+    #[test]
     fn settings_stay_at_the_root_through_the_move() {
         let folder = tempfile::tempdir().unwrap();
         let github = shared_storage(folder.path(), Some("SAGE"));
