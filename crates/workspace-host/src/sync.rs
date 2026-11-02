@@ -827,7 +827,7 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
         Err(error) => passed.error = Some(error),
     }
     passed.error = passed.error.or(refused);
-    passed.storage = stored.map(|stored| stored.found(outcome.held));
+    passed.storage = stored.map(|stored| stored.found(outcome.held, outcome.refused));
     passed.moved_to = outcome.moved_to;
     Ok(passed)
 }

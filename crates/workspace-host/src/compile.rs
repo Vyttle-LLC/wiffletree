@@ -612,6 +612,11 @@ fn check_changes(worktree: &Path, brain_dir: &str) -> Result<Vec<String>> {
         let wiki =
             relative.is_some_and(|p| (p.starts_with(NOTES) && p.ends_with(".md")) || p == STATUS);
         ensure!(wiki, "The compile changed {path}, outside the wiki");
+        // A scan skips a hidden path, and nothing lands unscanned.
+        ensure!(
+            !path.split('/').any(|part| part.starts_with('.')),
+            "The compile wrote {path}, a hidden path the scan does not read"
+        );
         ensure!(
             !code.contains('D'),
             "The compile deleted {path}; notes are never deleted"
@@ -1636,6 +1641,7 @@ mod tests {
     use super::*;
     use crate::brain_index::tests::{entry as entry_file, id, note};
     use crate::brain_sync::tests::{PHONE, REPO, Stored, stored};
+    use std::sync::atomic::Ordering;
     use workspace_core::{Line, ModelProfile, Then};
 
     /// The brain folder as a path of the repository.
@@ -1643,6 +1649,20 @@ mod tests {
 
     fn brained() -> Stored {
         stored()
+    }
+
+    /// Makes GitHub refuse every push, with the branch left where it is; the hook that does.
+    fn refusing_pushes(b: &Stored) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let hook = b.github.bare.join("hooks/pre-receive");
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(
+            &hook,
+            "#!/bin/sh\necho main needs a pull request >&2\nexit 1\n",
+        )
+        .unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        hook
     }
 
     impl Stored {
@@ -2141,6 +2161,41 @@ mod tests {
     }
 
     #[test]
+    fn a_landing_github_refuses_for_good_ends_its_run_and_run_now_works_again() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        let (run, _) = b.finished(&relay_note(&id(1)));
+        let hook = refusing_pushes(&b);
+        b.sync();
+        let run = b.run_named(&run);
+        assert_eq!(run.outcome, CompileOutcome::Failed);
+        assert!(run.reason.contains("nothing landed"), "{}", run.reason);
+        assert_eq!(b.cursor_on_main(), Cursor::default());
+        fs::remove_file(&hook).unwrap();
+        b.started();
+    }
+
+    #[test]
+    fn a_landing_whose_push_cannot_reach_github_waits_and_lands_when_it_can() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        let (run, _) = b.finished(&relay_note(&id(1)));
+        // The push fails, and GitHub is out of reach by the time the pass looks at why.
+        let hook = refusing_pushes(&b);
+        let github = b.github.clone();
+        *b.github.before.lock().unwrap() = Some((
+            "push",
+            Box::new(move || github.offline.store(true, Ordering::SeqCst)),
+        ));
+        let _ = b.sync_answering();
+        assert_eq!(b.run_named(&run).outcome, CompileOutcome::Running);
+        fs::remove_file(&hook).unwrap();
+        b.github.offline.store(false, Ordering::SeqCst);
+        b.sync();
+        assert_eq!(b.run_named(&run).outcome, CompileOutcome::Landed);
+    }
+
+    #[test]
     fn a_cursor_already_past_lands_nothing_and_each_entry_compiles_once() {
         let mut b = brained();
         let head = b.merge(&[relay(1)]);
@@ -2235,7 +2290,7 @@ mod tests {
     #[test]
     fn a_change_outside_the_wiki_or_a_broken_link_fails_the_run_and_leaves_the_cursor() {
         type Change = fn(&Path);
-        let cases: [(&str, Change); 5] = [
+        let cases: [(&str, Change); 6] = [
             // A footnote out of `logs/` to a Markdown file that is no entry.
             ("which is no entry file", |brain| {
                 fs::create_dir_all(brain.join("notes")).unwrap();
@@ -2252,6 +2307,10 @@ mod tests {
             }),
             ("outside the wiki", |brain| {
                 fs::write(brain.join("logs/app/2026/10/extra.md"), "x\n").unwrap()
+            }),
+            ("a hidden path", |brain| {
+                fs::create_dir_all(brain.join("notes")).unwrap();
+                fs::write(brain.join("notes/.draft.md"), relay_note(&id(1))).unwrap()
             }),
             ("which is no note", |brain| {
                 fs::write(brain.join("STATUS.md"), "See [[Nowhere]].\n").unwrap()

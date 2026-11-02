@@ -937,16 +937,14 @@ impl Host {
         if let Some(rule) = unfit(&log) {
             bail!("This entry still cannot be sent: {rule}. Nothing was changed.");
         }
-        let folder = (log.path.as_deref())
-            .and_then(|path| path.split_once("/logs/"))
-            .map(|(folder, _)| folder.to_owned())
-            .context("A held entry has a path")?;
+        let space = (log.space_id.clone()).context("A held entry has a Space")?;
+        let space = self.space(&space)?.space;
+        // From the Space's folder as it is now, which a move may have changed since it was held.
+        let folder = brain_sync::brain_dir(&Root::new(&space.storage.root));
         let path = entry_path(&folder, &log.repository, &log.date, &log.id);
         log.path = Some(path.clone());
         log.held = None;
         log.written = true;
-        let space = (log.space_id.clone()).context("A held entry has a Space")?;
-        let space = self.space(&space)?.space;
         let author = match log.author.clone() {
             Some(author) => author,
             None => self.entry_author(&space.storage.repository)?,

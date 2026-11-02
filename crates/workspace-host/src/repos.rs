@@ -323,11 +323,13 @@ pub(crate) struct Remote<'a> {
 pub(crate) type Pushed = std::result::Result<Option<String>, String>;
 
 /// What a pass pushed, the files a scan held back from its commits, and the folder GitHub's
-/// head moved into, which ended the pass before it compared anything.
+/// head moved into, which ended the pass before it compared anything. `refused`: why its push
+/// failed with GitHub in reach and the branch where it was, which another pass will not change.
 pub(crate) struct Outcome {
     pub(crate) pushed: Pushed,
     pub(crate) held: Vec<scan::Held>,
     pub(crate) moved_to: Option<Root>,
+    pub(crate) refused: Option<String>,
 }
 
 /// Fetches the branch, lets each rule set compare its files, takes GitHub's version of the files
@@ -366,8 +368,12 @@ pub(crate) fn pass(
         let moved = (once.pushed.as_ref()).is_err_and(|error| error.is::<Moved>());
         let again = (once.committed.iter()).any(|&at| rule_sets[at].pushes_again());
         if !moved || !again || tries == PUSH_TRIES {
+            let pushed = once.pushed.map_err(|error| format!("{error:#}"));
+            let in_reach = || remote_head(clone, remote.url, remote.branch, git).is_ok();
+            let refused = pushed.as_ref().err().filter(|_| !moved && in_reach());
             return Ok(Outcome {
-                pushed: once.pushed.map_err(|error| format!("{error:#}")),
+                refused: refused.cloned(),
+                pushed,
                 held,
                 moved_to: once.moved_to,
             });

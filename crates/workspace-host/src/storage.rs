@@ -809,8 +809,9 @@ impl RuleSets {
         ]
     }
     /// What all found, with the files `held` back from the push left out of what was
-    /// committed, and a new issue held whole kept under its temporary ID.
-    pub(crate) fn found(self, held: Vec<scan::Held>) -> Found {
+    /// committed, and a new issue held whole kept under its temporary ID. A push GitHub `refused`
+    /// ends a landing that was waiting on it, as the next pass would only be refused again.
+    pub(crate) fn found(self, held: Vec<scan::Held>, refused: Option<String>) -> Found {
         let (entries_held, held): (Vec<_>, Vec<_>) =
             held.into_iter().partition(|h| self.logs.claims(&h.path));
         let (wiki_held, mut held): (Vec<_>, Vec<_>) =
@@ -832,7 +833,14 @@ impl RuleSets {
         found.numbered = issues.numbered;
         found.adopted = issues.adopted;
         found.entries = self.logs.found(entries_held);
-        found.landing = self.wiki.found(wiki_held);
+        found.landing =
+            (self.wiki.found(wiki_held)).map(|(landing, landed)| match (landed, refused) {
+                (brain_sync::Landed::Committed, Some(why)) => {
+                    let why = format!("GitHub refused the push, so nothing landed: {why}");
+                    (landing, brain_sync::Landed::Failed(why))
+                }
+                (landed, _) => (landing, landed),
+            });
         found
             .committed
             .retain(|(path, _)| !held.iter().any(|h| &h.path == path));
@@ -926,7 +934,7 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
             remote: head,
             pushed,
             error,
-            found: rule_sets.found(outcome.held),
+            found: rule_sets.found(outcome.held, outcome.refused),
             moved_to: outcome.moved_to,
         });
     }

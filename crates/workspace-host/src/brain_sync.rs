@@ -1111,6 +1111,54 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_row_held_at_the_root_lands_in_the_folder_when_it_is_fixed_after_the_move() {
+        let mut f = publish::tests::fixture();
+        let bin = scan_tools(true);
+        f.host.scan_path = Some(bin.path().into());
+        f.host.record_gh_login(Some("mhohlios".into()));
+        let folder = tempfile::tempdir().unwrap();
+        let github = crate::storage::tests::shared_storage(folder.path(), Some("SAGE"));
+        let sage = join_sage(&mut f.host, &github).unwrap().remove(0).space;
+        (f.host
+            .move_project_to_space(&f.coordinator.project_id, &sage.id))
+        .unwrap();
+        let args = json!({"type": "decision", "title": "Held", "changed": "One.", "why": "Two.",
+            "state": "Three."});
+        let implementer = f.implementer.id.clone();
+        let logged = f.host.agent_tool(&implementer, "log_work", args).unwrap();
+        let (id, path) = (
+            logged["id"].as_str().unwrap(),
+            logged["path"].as_str().unwrap(),
+        );
+        // As the upgrade holds a row that breaks the contract: no file, no row of `entry_files`.
+        let held =
+            "UPDATE work_logs SET data=json_remove(json_set(data,'$.held','Its ref'),'$.written')";
+        f.host
+            .db
+            .execute_batch(&format!("{held}; DELETE FROM entry_files;"))
+            .unwrap();
+        let clone = repos::clone_folder(&f.host.home, REPO);
+        fs::remove_file(clone.join(path)).unwrap();
+        let moving = f.host.start_move(&sage.id).unwrap();
+        let root = moving.run(&github.tools()).unwrap();
+        f.host.finish_move(&moving.key, &root).unwrap();
+        let fix = LogFix {
+            kind: LogKind::Decision,
+            title: "Held".into(),
+            repository: "app".into(),
+            reference: memory::NO_REF.into(),
+            changed: "One.".into(),
+            why: "Two.".into(),
+            state: "Three.".into(),
+        };
+        let fixed = f.host.fix_held_log(id, fix).unwrap();
+        let landed = format!("{FOLDER}/{path}");
+        assert_eq!(fixed.path.as_deref(), Some(landed.as_str()));
+        sync(&mut f.host, &github);
+        assert!(github.show(&landed).is_some(), "the push went through");
+    }
+
+    #[test]
     fn an_entry_is_never_written_through_a_symbolic_link() {
         let mut s = stored();
         let clone = s.clone_folder();
