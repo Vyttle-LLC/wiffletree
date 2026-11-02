@@ -451,7 +451,7 @@ pub(crate) enum Stopped {
     /// GitHub could not be reached, so it claimed nothing.
     Unreachable,
     /// The tip says that Mac landed this due time.
-    CompiledOn(String),
+    CompiledElsewhere(String),
     /// Its Brain compiler row waits, or it has none.
     Waits(String),
     /// That Mac holds a live claim.
@@ -521,7 +521,7 @@ impl Prepare {
                 let tip = tip.map_err(|_| Stopped::Unreachable)?;
                 let landed = tip.as_ref().and_then(|tip| tip.landed(&claimer.due));
                 if let Some(machine) = landed {
-                    return Err(Stopped::CompiledOn(machine.to_owned()));
+                    return Err(Stopped::CompiledElsewhere(machine.to_owned()));
                 }
                 tip
             }
@@ -1496,9 +1496,9 @@ impl Host {
                 let reason = "Another Mac claimed this run first".to_owned();
                 self.end_compile(run, CompileOutcome::Lost, reason)
             }
-            Stopped::CompiledOn(machine) => {
+            Stopped::CompiledElsewhere(machine) => {
                 self.clear_owed(&repository)?;
-                let reason = format!("Compiled on {machine}");
+                let reason = compiled_elsewhere(Some(&machine));
                 self.end_compile(run, CompileOutcome::CompiledElsewhere, reason)
             }
             Stopped::Waits(reason) => {
@@ -3650,7 +3650,7 @@ mod tests {
             b.due();
             let run = b.runs().remove(0);
             assert_eq!(run.outcome, CompileOutcome::CompiledElsewhere);
-            assert_eq!(run.reason, format!("Compiled on {THEIR_MAC}"));
+            assert_eq!(run.reason, compiled_elsewhere(Some(THEIR_MAC)));
             assert_eq!((run.model_calls, run.tokens), (0, 0));
             assert_eq!(b.claims(), claims, "it claims nothing");
             assert_eq!(b.f.host.sessions().unwrap().len(), sessions);

@@ -198,14 +198,18 @@ fn rename_issues(folder: &Path, old: &str, new: &str) -> Result<()> {
 }
 
 /// Rewrites a local tracker's issue IDs in the wiki, `notes/` and `STATUS.md`, as a log entry is
-/// never changed. Answers the files it rewrote, by their paths in the repository.
+/// never changed, passing over a file that is not text. Answers the files it rewrote, by their
+/// paths in the repository.
 fn rename_in_wiki(clone: &Path, root: &Root, old: &str, new: &str) -> Result<Vec<String>> {
     let brain = brain_sync::brain_dir(root);
     let mut wiki = files_under(&clone.join(&brain).join(compile::NOTES))?;
     wiki.push(clone.join(&brain).join(compile::STATUS));
     let mut rewritten = vec![];
     for file in wiki.into_iter().filter(|file| file.is_file()) {
-        let text = fs::read_to_string(&file)?;
+        let Ok(text) = fs::read_to_string(&file) else {
+            eprintln!("Renaming issue IDs: left {}, not text", file.display());
+            continue;
+        };
         let renamed = rename_ids(&text, old, new);
         if renamed != text {
             shared::write_atomically(&file, renamed.as_bytes())?;
@@ -1452,6 +1456,7 @@ impl Host {
                 let paths = [file.as_str(), issues.as_str()];
                 let paths = paths.into_iter().chain(wiki.iter().map(String::as_str));
                 commit_local(&folder, &paths.collect::<Vec<_>>(), &message)?;
+                self.brains_now = true;
                 // The issues' links, derived states and follows follow them to their new IDs.
                 for table in ["issue_links", "issue_derived", "issue_follows"] {
                     self.db.execute(
@@ -2758,9 +2763,16 @@ repository_settings:
         for path in [note, status, entry] {
             written(path);
         }
+        let image = "second-brain/notes/a-diagram.png";
+        let bytes = [0xff, 0xfe, 0x00, 0x80];
+        fs::write(folder.join(image), bytes).unwrap();
         git(&folder, &["add", "--all"]);
         git(&folder, &["commit", "-q", "-m", "A wiki"]);
+        host.brains_now = false;
         host.set_tracker_prefix(&space.id, "ME").unwrap();
+        assert_eq!(fs::read(folder.join(image)).unwrap(), bytes);
+        assert_eq!(host.tracker(&space).unwrap().prefix, "ME");
+        assert!(host.brains_now, "the browser reads the new IDs at once");
         let read = |path: &str| fs::read_to_string(folder.join(path)).unwrap();
         for path in [note, status] {
             assert_eq!(read(path), format!("See ME-1, not X{old}-1.\n"), "{path}");
