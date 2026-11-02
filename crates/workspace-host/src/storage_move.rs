@@ -331,30 +331,32 @@ impl Host {
             }
         }
     }
-    /// Whether the target holds, under the moved paths, only what this Mac pushed in an earlier
-    /// move of the same storage that never switched.
-    fn left_by_earlier_move(
-        &self,
-        from: &StorageRepository,
-        staged: &Staged,
-        roots: &[String],
-    ) -> Result<bool> {
+    /// Whether the target holds, under the paths it moved, only what this Mac pushed in an
+    /// earlier move of the same storage that never switched: `None` when it does not, and else
+    /// whether that move carried the tracker. One that did not took on the target's tracker,
+    /// whose files are the target's own and never this Mac's to replace.
+    fn left_by_earlier_move(&self, moved: &[Space], staged: &Staged) -> Result<Option<bool>> {
         let at = staged.staging.path();
+        let from = moved[0].storage.repository.key();
         let target = storage::github(&staged.check.repository.name).key();
-        let commits: Vec<String> = (self
-            .db
-            .prepare("SELECT commit_id FROM storage_moves WHERE source=?1 AND target=?2")?)
-        .query_map(params![from.key(), target], |r| r.get(0))?
+        let pushed: Vec<(String, bool)> = (self.db.prepare(
+            "SELECT commit_id,with_tracker FROM storage_moves WHERE source=?1 AND target=?2",
+        )?)
+        .query_map(params![from, target], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
-        let unchanged = |commit: &str| {
+        let unchanged = |commit: &str, with_tracker: bool| {
             let diff = ["diff", "--quiet", commit, "HEAD", "--"];
+            let roots = moved_roots(moved, with_tracker);
             let paths: Vec<&str> = roots.iter().map(String::as_str).collect();
             runtime::git_answer(at, &[&diff[..], &paths].concat())
                 .is_ok_and(|answer| answer.status.success())
         };
-        Ok(commits
-            .iter()
-            .any(|commit| publish::is_ancestor(at, commit, "HEAD") && unchanged(commit)))
+        Ok(pushed
+            .into_iter()
+            .find(|(commit, with_tracker)| {
+                publish::is_ancestor(at, commit, "HEAD") && unchanged(commit, *with_tracker)
+            })
+            .map(|(_, with_tracker)| with_tracker))
     }
     /// Every refusal of moving `moved` to the GitHub repository `staged`, or with none to this
     /// Mac, and what the move would do. Writes nothing.
@@ -403,7 +405,8 @@ impl Host {
         repos::refuse_another(&self.home, repository)?;
         let to = storage::github(name);
         let at = staged.staging.path();
-        let left = self.left_by_earlier_move(from, staged, &moved_roots(moved, true))?;
+        let left = self.left_by_earlier_move(moved, staged)?;
+        let tracker_left = left == Some(true);
         // A tracker set up here and not pushed yet counts as much as one on GitHub.
         let recorded: Option<TrackerConfig> = (self.db)
             .query_row(
@@ -412,8 +415,8 @@ impl Host {
                 |r| decode(r, 0),
             )
             .optional()?;
-        let theirs = staged.tracker.clone().or(recorded).filter(|_| !left);
-        if theirs.is_none() && !left {
+        let theirs = (staged.tracker.clone().or(recorded)).filter(|_| !tracker_left);
+        if theirs.is_none() && !tracker_left {
             ensure!(
                 storage::files_under(&at.join(ISSUES))?.is_empty(),
                 "{name} holds issues but no tracker. Choose another repository."
@@ -433,7 +436,7 @@ impl Host {
             let folder = &space.storage.folder;
             let on_github = at.join("spaces").join(folder).exists();
             ensure!(
-                !(on_github && !left) && !here.iter().any(|s| &s.storage.folder == folder),
+                !(on_github && left.is_none()) && !here.iter().any(|s| &s.storage.folder == folder),
                 "{name} already holds a Space in spaces/{folder}/. Choose another repository."
             );
         }
@@ -578,8 +581,13 @@ impl Host {
     pub(crate) fn note_push(&self, run: &Move) -> Result<()> {
         let commit = head(run.staging.path())?.context("The staging clone has a commit")?;
         self.db.execute(
-            "INSERT OR IGNORE INTO storage_moves(source,target,commit_id) VALUES (?1,?2,?3)",
-            params![run.spaces[0].storage.repository.key(), run.to.key(), commit],
+            "INSERT OR IGNORE INTO storage_moves(source,target,commit_id,with_tracker) VALUES (?1,?2,?3,?4)",
+            params![
+                run.spaces[0].storage.repository.key(),
+                run.to.key(),
+                commit,
+                run.new_tracker.is_none()
+            ],
         )?;
         Ok(())
     }

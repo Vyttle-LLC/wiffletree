@@ -797,6 +797,59 @@ fn a_stop_after_the_push_leaves_the_space_where_it_was_and_the_retry_finishes_it
 }
 
 #[test]
+fn a_retry_after_a_stopped_adoption_leaves_the_targets_tracker_and_issues_alone() {
+    let folder = tempfile::tempdir().unwrap();
+    let github = shared_storage(folder.path(), Some("SAGE"));
+    let issue = "---\nid: SAGE-1\ntitle: Theirs\n---\n";
+    github.commit("issues/SAGE-1/issue.md", issue);
+    let (home, mut host) = host();
+    let space = personal(&host);
+    let tools = github.tools();
+    let tracker = github.show(TRACKER);
+    let staged = storage::stage(&host.home, NAME, &tools, &[]).unwrap();
+    let run = host.begin_storage_move(&space.id, Some(staged)).unwrap();
+    copy(&run, &tools).unwrap();
+    host.note_push(&run).unwrap();
+    push(&run, &tools).unwrap();
+    std::mem::forget(run);
+    let mut host = restart(home.path(), host);
+
+    let pushed = github.log("%H");
+    let moved = host.move_storage(&space.id, Some(NAME), &tools).unwrap();
+
+    assert_eq!(github.log("%H"), pushed, "nothing more to push");
+    assert_eq!(github.show(TRACKER), tracker);
+    assert_eq!(
+        github.show("issues/SAGE-1/issue.md").as_deref(),
+        Some(issue)
+    );
+    assert_eq!(host.tracker(&moved.space).unwrap().prefix, "SAGE");
+    is_on_github(home.path(), &host, &space.id);
+}
+
+#[test]
+fn a_stopped_adoption_still_refuses_storage_that_has_since_gained_issues() {
+    let folder = tempfile::tempdir().unwrap();
+    let github = shared_storage(folder.path(), Some("SAGE"));
+    let (home, mut host) = host();
+    let space = personal(&host);
+    let tools = github.tools();
+    let staged = storage::stage(&host.home, NAME, &tools, &[]).unwrap();
+    let run = host.begin_storage_move(&space.id, Some(staged)).unwrap();
+    copy(&run, &tools).unwrap();
+    host.note_push(&run).unwrap();
+    push(&run, &tools).unwrap();
+    std::mem::forget(run);
+    let mut host = restart(home.path(), host);
+    file(&mut host, &space, "Filed since", "");
+    let pushed = github.log("%H");
+    let said = refusal(&mut host, &space.id, Some(NAME), &tools);
+    assert!(said.contains("is already a tracker"), "{said}");
+    assert_eq!(github.log("%H"), pushed);
+    is_local(&host, &space);
+}
+
+#[test]
 fn a_teammates_change_to_what_a_stopped_move_pushed_puts_the_refusal_back() {
     let folder = tempfile::tempdir().unwrap();
     let github = empty_github(folder.path());
