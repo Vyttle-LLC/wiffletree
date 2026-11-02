@@ -23,10 +23,12 @@ pub(super) enum Mark {
 }
 
 impl SpacesPage {
-    /// Fills New Space as it opens: the owner to propose and this Mac's timezone.
+    /// Fills New Space as it opens: the owner to propose, this Mac's timezone and the first
+    /// color no Space shows.
     pub(super) fn open_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.choice = RepositoryChoice::Create;
         self.compile_here = true;
+        self.new_color = SpaceColor::first_unused(self.spaces());
         self.prefix_proposed = None;
         self.folder_input.update(cx, |input, cx| {
             input.set_value(format!("{DEFAULT_ROOT}/"), window, cx)
@@ -143,6 +145,7 @@ impl SpacesPage {
                 .then_some(folder),
             create_repository: self.on_github && self.choice == RepositoryChoice::Create,
             compile,
+            color: Some(self.new_color),
         };
         let prefix = (!fixed(check.as_ref().and_then(|c| c.prefix.as_ref())) && !prefix.is_empty())
             .then_some(prefix);
@@ -312,6 +315,12 @@ impl SpacesPage {
             .flex_col()
             .gap_3()
             .child(row("Name", Input::new(&self.name).small(), None, p))
+            .child(row(
+                "Color",
+                self.new_color_field(p, cx),
+                Some(COLOR_CAPTION.into()),
+                p,
+            ))
             .child(row("Where it lives", where_it_lives, None, p));
         if self.on_github {
             form = form.child(row("Repository", self.repository_field(p, cx), None, p));
@@ -405,6 +414,16 @@ impl SpacesPage {
                     .on_click(cx.listener(|view, _, window, cx| view.create(window, cx))),
                 ),
         )
+    }
+
+    fn new_color_field(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        let weak = cx.weak_entity();
+        swatches("new-space-color", self.new_color, p, move |color, _, cx| {
+            let _ = weak.update(cx, |view, cx| {
+                view.new_color = color;
+                cx.notify();
+            });
+        })
     }
 
     /// The repository: Create `owner/name-wiffletree-storage`, or one the human has, checked.

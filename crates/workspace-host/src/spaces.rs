@@ -163,6 +163,7 @@ fn new_space(name: &str, prefixes: &mut Vec<String>) -> (Space, TrackerConfig) {
     let space = Space {
         id: SpaceId(new_id()),
         name: name.into(),
+        color: None,
         description: String::new(),
         additions: String::new(),
         behaviors: Default::default(),
@@ -434,6 +435,7 @@ impl Host {
         let (mut space, mut tracker) = new_space(name.trim(), &mut prefixes);
         space.description = description.into();
         space.additions = additions.into();
+        space.color = setup.color;
         if let Some(prefix) = prefix {
             tracker.prefix = prefix.into();
         }
