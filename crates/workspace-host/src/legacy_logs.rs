@@ -1,6 +1,6 @@
 //! Reading a legacy log (OpenSpec change `one-space-repository`, decision 7): each `## YYYY-MM-DD
 //! — Title` entry of a brain's legacy `logs/<repo>.md` file parses into one entry in the contract,
-//! with `source: skill`, for Bring in a brain, which arrives with the setup screens. An entry's id
+//! with `source: skill`, for Bring in a brain, which reads a brain folder on this Mac. An entry's id
 //! comes from its repository, date, title and text, so bringing it in again adds nothing. Nothing
 //! here logs an entry's text.
 use super::*;
