@@ -40,6 +40,12 @@ pub fn tools() -> Value {
             vec!["name", "brief"]
         ),
         tool(
+            "request_repository",
+            "Coordinator: ask the human to add a repository this project does not use, when workspace_context does not list it. Give repository as owner/name or an absolute folder path, and reason, one short line the human reads. It raises an Approval card in their Inbox and returns waiting_for_human, so finish your turn: their answer arrives as a message from Wiffletree, and once approved the repository is usable at once. Approving adds it to this project only, and a folder to the workspace as well; no Space's list changes and this project stays in its Space. A repository the project already uses returns already_used, and one still waiting returns waiting_for_human; neither raises a card. An owner/name the workspace does not have is refused: clone it, then ask again with the folder path, which must be a repository root with a commit and not a linked worktree; for one of those, ask for its main clone. After a denial, ask again only for a good reason.",
+            json!({"repository":string,"reason":string}),
+            vec!["repository", "reason"]
+        ),
+        tool(
             "assign_ticket",
             "Coordinator: assign a dedicated agent. You never choose its model: Wiffletree starts it on its job's row in Who runs what, moving to the next choice when a subscription is past the switch threshold, or pinning the earliest reset and holding it when every choice is. A focus that names a configured verifier uses that verifier's row; for any other reviewer, give like: a configured verifier's focus to use its row, or leave it out for the first reviewer's. Pass small: true for small, contained work. A row whose then is skip skips only in verify_ticket reviews; an agent assigned here on such a row waits for the reset. The result names the model and the reason. Existing assignments with the same role and focus are returned unchanged; use send_message for follow-up fixes. To add another agent in a role, such as a second reviewer, give each a distinct short focus.",
             json!({"ticket_id":string,"focus":string,"role":{"type":"string","enum":["implementer","tester","reviewer"]},"instruction":string,"small":small,"like":string}),

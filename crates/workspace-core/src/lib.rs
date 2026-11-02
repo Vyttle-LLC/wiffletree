@@ -717,12 +717,43 @@ pub struct Attention {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<String>,
     pub answer: Option<String>,
+    /// What a coordinator's repository request asks for; see `is_repository_request`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_request: Option<RepositoryRequest>,
+}
+/// A repository a coordinator asked to add to its project, fixed when it was asked for: the Inbox
+/// card shows this and approving acts on it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryRequest {
+    /// The workspace repository; `None` for a folder the workspace does not have.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_id: Option<String>,
+    pub name: String,
+    /// The repository's canonical folder.
+    pub path: String,
+    /// Its `owner/name`, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    /// The agent's words: plain text, never an action.
+    pub reason: String,
+}
+impl RepositoryRequest {
+    pub fn title(&self) -> String {
+        match self.repository_id {
+            Some(_) => format!("Add {} to this project?", self.name),
+            None => format!("Add {} to the workspace and this project?", self.name),
+        }
+    }
 }
 impl Attention {
     /// A parked provider operation waiting for Approve or Deny, rather than a question.
-    /// Or a publish step or a merge waiting for the human, approved or denied in the same way.
+    /// Or a publish step, a merge or a repository request waiting for the human, approved or
+    /// denied in the same way.
     pub fn is_permission(&self) -> bool {
-        self.operation_id.starts_with(PERMISSION_PREFIX) || self.is_publish() || self.is_merge()
+        self.operation_id.starts_with(PERMISSION_PREFIX)
+            || self.is_publish()
+            || self.is_merge()
+            || self.is_repository_request()
     }
     /// A step of a ticket's publish request waiting for the human's approval.
     pub fn is_publish(&self) -> bool {
@@ -731,6 +762,10 @@ impl Attention {
     /// A ticket's merge request waiting for the human's approval.
     pub fn is_merge(&self) -> bool {
         self.operation_id.starts_with(MERGE_PREFIX)
+    }
+    /// A coordinator's request for a repository, waiting for the human's approval.
+    pub fn is_repository_request(&self) -> bool {
+        self.operation_id.starts_with(REPOSITORY_REQUEST_PREFIX)
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2626,6 +2661,9 @@ pub const PUBLISH_PREFIX: &str = "publish:";
 /// The id prefix of a merge request's result message and of its Inbox item. Only the host
 /// creates either.
 pub const MERGE_PREFIX: &str = "merge:";
+/// The id prefix of a repository request's Inbox item and of its result message. Only the host
+/// creates either.
+pub const REPOSITORY_REQUEST_PREFIX: &str = "repository:";
 /// The id prefix of the Inbox item for a parked provider permission.
 pub const PERMISSION_PREFIX: &str = "permission:";
 /// The id prefix of the notices about the processes an agent left running and the ones the
@@ -2638,14 +2676,15 @@ const MIGRATION_PREFIX: &str = "migration:";
 /// carries another coordinator's words, never the human's.
 pub const PROJECT_BRIEF_PREFIX: &str = "project-brief:";
 /// The id prefixes of the host's other messages without a sender: verification results, kept
-/// worktrees, migration notices, publish and merge results, process notices and project briefs.
-/// Inbox answers (`answer:`) carry the human's words.
-const HOST_NOTICE_PREFIXES: [&str; 7] = [
+/// worktrees, migration notices, publish, merge and repository request results, process notices
+/// and project briefs. Inbox answers (`answer:`) carry the human's words.
+const HOST_NOTICE_PREFIXES: [&str; 8] = [
     VERIFICATION_NOTICE_PREFIX,
     WORKTREE_KEPT_PREFIX,
     MIGRATION_PREFIX,
     PUBLISH_PREFIX,
     MERGE_PREFIX,
+    REPOSITORY_REQUEST_PREFIX,
     PROCESS_NOTICE_PREFIX,
     PROJECT_BRIEF_PREFIX,
 ];

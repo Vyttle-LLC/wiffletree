@@ -2762,6 +2762,12 @@ impl Actor {
                                 json!({"behavior":"deny","message":answer})
                             };
                             let _ = permission.reply.try_send(Ok(decision));
+                        } else if attention.is_repository_request() {
+                            // Answered in `execute`, with its own result. A new repository has
+                            // no GitHub facts yet.
+                            if answer == "approved" {
+                                self.refresh_github();
+                            }
                         } else if attention.is_merge() {
                             // As for a publish, the request's own result is its one message.
                             if let Some(job) = self.host.answer_merge(id, answer == "approved")? {
@@ -6343,6 +6349,44 @@ mod tests {
             .host
             .create_project_from(&briefed, "Chained", "Do", None)
             .unwrap();
+    }
+
+    #[test]
+    fn answering_a_repository_request_resumes_the_coordinator_with_its_one_result() {
+        for answer in ["approved", "denied"] {
+            let home = tempfile::tempdir().unwrap();
+            let repository = tempfile::tempdir().unwrap();
+            crate::test_support::git(repository.path(), &["init", "-q", "-b", "main"]);
+            crate::test_support::git(
+                repository.path(),
+                &["commit", "--allow-empty", "-m", "Initial"],
+            );
+            let mut host = Host::open_set_up(home.path()).unwrap();
+            let project = host.create_project("Mudling").unwrap();
+            let coordinator = host.sessions().unwrap().remove(0);
+            let folder = repository.path().to_str().unwrap();
+            let args = json!({"repository": folder, "reason": "The registry lives there"});
+            host.agent_tool(&coordinator.id, "request_repository", args)
+                .unwrap();
+            let item = host.open_attention(&project.id).unwrap().remove(0);
+            let (mut actor, ..) = idle_actor(host);
+            assert!(!actor.host.live_projects().unwrap().contains(&project.id));
+            command(
+                &mut actor,
+                Command::ResolveAttention {
+                    id: item.id.clone(),
+                    answer: answer.into(),
+                },
+            )
+            .unwrap();
+            let live = actor.host.live_projects().unwrap();
+            assert!(live.contains(&project.id), "the answer starts its turn");
+            let messages = actor.host.messages(&coordinator.id, None, 10).unwrap();
+            let [result] = &messages[..] else {
+                panic!("{messages:?}");
+            };
+            assert_eq!(result.id, item.operation_id);
+        }
     }
 
     #[test]

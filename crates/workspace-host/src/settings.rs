@@ -501,9 +501,11 @@ mod tests {
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
         assert!(names.contains(&"publish_ticket"), "{names:?}");
+        // `request_repository` saves no setting: it asks the human for a repository.
         assert!(
             names
                 .iter()
+                .filter(|name| **name != "request_repository")
                 .all(|name| !["keeper", "setting", "check", "repositor"]
                     .iter()
                     .any(|word| name.contains(word))),

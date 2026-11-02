@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · A coordinator requests a repository</title>
+<!--
+  Static study for a coordinator asking the human for a repository its project does not use.
+  No script, no network. Styles copied from openspec/changes/choose-space-repositories/ui/mockups.html.
+  The card follows attention_card in crates/workspace-desktop/src/inbox.rs: the asker and an
+  Approval pill, the body, then Deny and the primary button.
+  Projects, Spaces and repositories are the real ones on this Mac, read 2026-11-01.
+  Coordinator reasons are sample text.
+  APPROVED by Michael on 2026-11-01. Approving a request adds the repository to that one project
+  only: no Space list changes and nothing moves between Spaces.
+-->
+<style>
+.light,:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}}
+body:has(#force-light:checked){--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+body:has(#force-dark:checked){--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.intro{max-width:880px;margin-bottom:22px}
+.intro p{color:var(--subtle);font-size:12px;margin-top:4px}
+.pending{display:inline-block;margin:6px 0 4px;padding:3px 10px;border-radius:9px;font-size:11.5px;font-weight:600;color:var(--yellow);background:color-mix(in srgb,var(--yellow) 16%,transparent)}
+.switch{display:flex;gap:6px;margin:10px 0 0;font-size:12px;color:var(--subtle)}
+.switch input{display:none}
+.switch label{padding:3px 10px;border:1px solid var(--edge);border-radius:7px;cursor:pointer}
+.switch input:checked+label{background:var(--overlay);color:var(--text)}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:26px;align-items:start;max-width:980px}
+.study>.eyebrow{margin-bottom:6px}
+.caption{margin:10px 2px 0;font-size:11.5px;color:var(--subtle)}
+.caption b{color:var(--text);font-weight:600}
+.frame{background:var(--surface);border:1px solid var(--edge);border-radius:12px;overflow:hidden;color:var(--text)}
+.card{display:flex;flex-direction:column;gap:10px;padding:12px 14px}
+.head{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11.5px;color:var(--subtle)}
+.pill{padding:1px 8px;border-radius:9px;font-size:11px;font-weight:600;color:var(--yellow);background:color-mix(in srgb,var(--yellow) 16%,transparent)}
+.title{font-size:13.5px;font-weight:600}
+.why{font-size:13px;line-height:1.5}
+.kv{display:grid;grid-template-columns:108px 1fr;gap:4px 12px;font-size:12px;margin:0}
+.kv dt{color:var(--subtle)}
+.kv dd{margin:0;display:flex;align-items:center;gap:6px;min-width:0}
+.sp{width:8px;height:8px;border-radius:2px;flex:none}
+.personal{background:var(--magenta)}.vyttle{background:var(--blue)}
+.actions{display:flex;gap:8px;justify-content:flex-end}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--edge);border-radius:7px;padding:4px 11px;font-size:12px;background:var(--surface);color:var(--text)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.btn.quiet{border-color:transparent;color:var(--subtle)}
+code{font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--overlay);padding:0 4px;border-radius:4px;overflow-wrap:anywhere}
+.note{font-size:11.5px;color:var(--subtle)}
+.chat{padding:12px 14px;display:flex;flex-direction:column;gap:8px;font-size:13px}
+.ok{color:var(--green);font-weight:600}.no{color:var(--red);font-weight:600}
+</style>
+</head>
+<body>
+<input type="radio" name="theme" id="force-auto" checked hidden>
+<div class="intro">
+  <div class="eyebrow">Study · Repositories</div>
+  <h1>A coordinator requests a repository</h1>
+  <p>Today a project that needs a repository outside its Space stalls until you find the setting yourself. With this change, the coordinator asks by name and you answer in one click, from the Inbox. Nothing is added without your approval, and your Space's list does not change.</p>
+  <span class="pending">Approved by Michael, 2026-11-01</span>
+  <div class="switch"><input type="radio" name="theme" id="force-light"><label for="force-light">Light</label><input type="radio" name="theme" id="force-dark"><label for="force-dark">Dark</label></div>
+</div>
+
+<div class="grid">
+  <section class="study">
+    <div class="eyebrow">1 · Listed by another Space</div>
+    <div class="frame">
+      <div class="card">
+        <div class="head"><span>Mudling: Initialization</span><span class="pill">Approval</span></div>
+        <div class="title">Add mudling-plugins to this project?</div>
+        <div class="why">VYT-233 builds the plugin registry, which lives in this repository.</div>
+        <dl class="kv">
+          <dt>Repository</dt><dd><code>Vyttle-LLC/mudling-plugins</code></dd>
+          <dt>Listed by</dt><dd><span class="sp vyttle"></span>Vyttle</dd>
+          <dt>This project</dt><dd><span class="sp personal"></span>Personal</dd>
+        </dl>
+        <div class="actions"><span class="btn quiet">Deny</span><span class="btn primary">Add to this project</span></div>
+      </div>
+    </div>
+    <p class="caption"><b>The case that stalled Mudling.</b> The card says why it is needed and shows the Space mismatch, so nothing has to be guessed. Approving changes this project only.</p>
+  </section>
+
+  <section class="study">
+    <div class="eyebrow">2 · On this Mac, not yet in the workspace</div>
+    <div class="frame">
+      <div class="card">
+        <div class="head"><span>Mudling: Initialization</span><span class="pill">Approval</span></div>
+        <div class="title">Add mudling-plugins to the workspace and this project?</div>
+        <div class="why">I just cloned this repository for VYT-233.</div>
+        <dl class="kv">
+          <dt>Folder</dt><dd><code>~/dev/vyttle/mudling-plugins</code></dd>
+          <dt>Listed by</dt><dd>No Space</dd>
+          <dt>This project</dt><dd><span class="sp personal"></span>Personal</dd>
+        </dl>
+        <div class="actions"><span class="btn quiet">Deny</span><span class="btn primary">Add to this project</span></div>
+      </div>
+    </div>
+    <p class="caption"><b>A repository the coordinator just created or cloned.</b> One click adds it to the workspace as well, so you no longer visit Repositories first. No Space's list changes.</p>
+  </section>
+
+  <section class="study">
+    <div class="eyebrow">3 · What the coordinator tells you afterwards</div>
+    <div class="frame">
+      <div class="chat">
+        <div><span class="ok">Added.</span> <code>mudling-plugins</code> is in this project, so I've started VYT-233.</div>
+        <div><span class="no">Denied.</span> You said no to <code>mudling-plugins</code>, so VYT-233 stays on hold.</div>
+      </div>
+    </div>
+    <p class="caption">The answer resumes the coordinator straight away, and the repository is usable at once. No restart and no relaying.</p>
+  </section>
+
+  <section class="study">
+    <div class="eyebrow">4 · What stays out of the Inbox</div>
+    <div class="frame">
+      <div class="chat note">
+        <div><b>Already in the project:</b> the coordinator is told so, and you see nothing.</div>
+        <div><b>Already requested:</b> asking again does not raise a second card.</div>
+        <div><b>Not on this Mac:</b> the coordinator is told it must be cloned first, then asks again.</div>
+      </div>
+    </div>
+    <p class="caption">Only coordinators can ask. Moving a project to another Space stays in Overview, because it changes every repository the project uses and should not be a side effect of this card.</p>
+  </section>
+</div>
+</body>
+</html>
