@@ -3262,7 +3262,7 @@ repository_settings:
     }
 
     #[test]
-    fn a_repository_whose_main_requires_pull_requests_or_checks_is_refused_naming_the_rule() {
+    fn a_repository_whose_main_takes_no_plain_push_is_refused_naming_the_rule() {
         let folder = tempfile::tempdir().unwrap();
         let github = Arc::new(GitHub::new(folder.path(), true));
         let (home, host) = host();
@@ -3277,12 +3277,31 @@ repository_settings:
         );
         *github.rules.lock().unwrap() = json!([{"type": "required_status_checks"}]);
         assert!(refused(&github).starts_with("main requires status checks"));
+        for (kind, reason) in [
+            ("required_signatures", "requires signed commits"),
+            ("merge_queue", "requires a merge queue"),
+            ("required_deployments", "requires a deployment to succeed"),
+            ("workflows", "requires workflows to pass"),
+            ("update", "takes no push"),
+        ] {
+            *github.rules.lock().unwrap() = json!([{"type": kind}]);
+            assert!(
+                refused(&github).starts_with(&format!("main {reason}")),
+                "{kind}"
+            );
+        }
         // Classic branch protection, read whole by an admin, refuses the same way.
         *github.rules.lock().unwrap() = json!([]);
         *github.protection.lock().unwrap() =
             Some(json!({"required_pull_request_reviews": {"required_approving_review_count": 1}}));
         assert!(refused(&github).starts_with("main requires pull requests"));
+        *github.protection.lock().unwrap() =
+            Some(json!({"required_signatures": {"enabled": true}}));
+        assert!(refused(&github).starts_with("main requires signed commits"));
         assert!(!home.path().join("repos/github.com").exists());
+        *github.protection.lock().unwrap() =
+            Some(json!({"required_signatures": {"enabled": false}}));
+        assert!(stage(&host.home, NAME, &github.tools(), &[]).is_ok());
     }
 
     #[test]
