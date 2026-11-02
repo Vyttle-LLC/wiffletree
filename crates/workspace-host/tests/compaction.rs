@@ -504,6 +504,13 @@ impl World {
         });
         headless.kill().unwrap();
         headless.wait().unwrap();
+        // A child the host was starting holds a copy of the store's lock until its exec, past
+        // the host's own exit, and the next host would find the store owned.
+        let lock = std::fs::File::open(self.home.path().join("host.lock")).unwrap();
+        until("the killed host's lock to be released", || {
+            lock.try_lock().is_ok()
+        });
+        lock.unlock().unwrap();
         let group = group.unwrap();
         assert_eq!(unsafe { libc::killpg(group, 0) }, 0, "it outlived the host");
         group
