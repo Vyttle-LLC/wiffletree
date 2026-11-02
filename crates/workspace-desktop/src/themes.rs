@@ -9,7 +9,7 @@ use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{self, IgnoredAny, MapAccess, Visitor},
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -174,7 +174,7 @@ fn size_in_range<'de, D: Deserializer<'de>>(input: D) -> Result<Option<f32>, D::
 
 /// Why a chosen file shows Tidal instead.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Fault {
+enum Fault {
     Gone,
     Unreadable(String),
     Invalid { line: Option<usize>, reason: String },
@@ -403,13 +403,13 @@ fn show(
 }
 
 /// The two looks and the banners that explain them.
-pub(crate) struct Chosen {
-    pub light: Look,
-    pub dark: Look,
-    pub notices: Vec<Notice>,
+struct Chosen {
+    light: Look,
+    dark: Look,
+    notices: Vec<Notice>,
 }
 
-pub(crate) fn choose(
+fn choose(
     folder: &Path,
     light: &Choice,
     dark: &Choice,
@@ -437,12 +437,14 @@ pub(crate) fn choose(
         let other = (!both).then(|| other_name(*side).as_str());
         notices.push(broken(file, fault, *side, other));
     }
-    // Two themes lacking the same fonts share one warning, as the study's Celadon pair does.
+    // Two themes naming the same fonts share one warning, as the study's Celadon pair does.
     let [(_, light), (_, dark)] = shown;
     let own = |shown: &Shown| missing_fonts(shown, &format!("{}'s", shown.name));
+    let same_fonts = light.named_fonts.ui == dark.named_fonts.ui
+        && light.named_fonts.mono == dark.named_fonts.mono;
     match (own(&light), own(&dark)) {
         (Some(a), Some(b)) if a == b => notices.push(a),
-        (Some(a), Some(b)) if a.head == b.head => notices.extend(missing_fonts(
+        (Some(_), Some(_)) if same_fonts => notices.extend(missing_fonts(
             &light,
             &format!("{}'s and {}'s", light.name, dark.name),
         )),
@@ -589,6 +591,8 @@ pub(crate) struct Themes {
     pub failure: Option<String>,
     /// Font families on this Mac, listed when a theme first names one it might lack.
     installed_fonts: Vec<String>,
+    /// Missing fonts the families were listed again for since a theme was last chosen.
+    sought_fonts: BTreeSet<String>,
 }
 impl Global for Themes {}
 
@@ -600,6 +604,7 @@ impl Themes {
             notices: vec![],
             failure: None,
             installed_fonts: vec![],
+            sought_fonts: BTreeSet::new(),
         }
     }
     /// The name a menu shows for `choice`: the file's own, or its file name while unreadable.
@@ -622,20 +627,21 @@ pub(crate) fn reload(cx: &mut App) {
     );
     let folder = cx.global::<Themes>().folder.clone();
     let listed = list(&folder);
-    // Listing fonts costs about 100 ms, so it happens again only when a name is not found,
-    // which also picks up a font installed since.
-    let mut fonts = std::mem::take(&mut cx.global_mut::<Themes>().installed_fonts);
-    let mut relisted = false;
+    // Listing fonts costs about 100 ms, so a missing name is listed again once, not on every
+    // window activation; choosing a theme again picks up a font installed since.
+    let themes = cx.global_mut::<Themes>();
+    let mut fonts = std::mem::take(&mut themes.installed_fonts);
+    let mut sought = std::mem::take(&mut themes.sought_fonts);
     let chosen = choose(&folder, &light, &dark, &mut |name| {
-        if !fonts.iter().any(|font| font == name) && !relisted {
+        if !fonts.iter().any(|font| font == name) && sought.insert(name.to_string()) {
             fonts = cx.text_system().all_font_names();
-            relisted = true;
         }
         fonts.iter().any(|font| font == name)
     });
     let looks_changed = palette::show(chosen.light, chosen.dark);
     let themes = cx.global_mut::<Themes>();
     themes.installed_fonts = fonts;
+    themes.sought_fonts = sought;
     let page_changed = themes.listed != listed || themes.notices != chosen.notices;
     themes.listed = listed;
     themes.notices = chosen.notices;
@@ -652,6 +658,7 @@ pub(crate) fn set(side: Side, choice: Choice, cx: &mut App) {
         Side::Light => preferences.light_theme = choice,
         Side::Dark => preferences.dark_theme = choice,
     });
+    cx.global_mut::<Themes>().sought_fonts.clear();
     reload(cx);
 }
 
@@ -659,7 +666,11 @@ pub(crate) fn set(side: Side, choice: Choice, cx: &mut App) {
 pub(crate) fn open_folder(cx: &mut App) {
     let folder = cx.global::<Themes>().folder.clone();
     match std::fs::create_dir_all(&folder) {
-        Ok(()) => cx.open_with_system(&folder),
+        Ok(()) => {
+            cx.global_mut::<Themes>().failure = None;
+            cx.refresh_windows();
+            cx.open_with_system(&folder);
+        }
         Err(error) => fail(format!("The themes folder can't be created: {error}."), cx),
     }
 }
@@ -1005,6 +1016,30 @@ mod tests {
             chosen.notices[0].body,
             "Celadon Sky's and Celadon Jade's colors are in use; the UI text and code use the \
              system fonts."
+        );
+
+        // The same missing UI font beside different installed mono fonts: each names its own.
+        let sky = SKY.replace(
+            "\"variants\"",
+            "\"fonts\": { \"ui\": \"Figtree\", \"mono\": \"Courier\" }, \"variants\"",
+        );
+        let themes = folder(&[("celadon-jade.json", JADE), ("celadon-sky.json", &sky)]);
+        let chosen = choose(
+            themes.path(),
+            &file("celadon-sky.json"),
+            &file("celadon-jade.json"),
+            &mut |name| name != "Figtree",
+        );
+        let bodies: Vec<&str> = (chosen.notices.iter())
+            .map(|notice| notice.body.as_str())
+            .collect();
+        assert_eq!(
+            bodies,
+            [
+                "Celadon Sky's colors and Courier are in use; the UI text uses the system font.",
+                "Celadon Jade's colors and JetBrains Mono are in use; the UI text uses the \
+                 system font."
+            ]
         );
     }
 

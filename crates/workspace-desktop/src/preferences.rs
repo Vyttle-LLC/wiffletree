@@ -24,10 +24,8 @@ pub(crate) struct Preferences {
     pub collapse_ticket_table: bool,
     #[serde(default, deserialize_with = "appearance_or_system")]
     pub appearance: Appearance,
-    /// The theme light mode shows: Tidal or a file in the themes folder.
     #[serde(default)]
     pub light_theme: Choice,
-    /// The theme dark mode shows.
     #[serde(default)]
     pub dark_theme: Choice,
     /// Show projects whose names share a first word under one group row.
