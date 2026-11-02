@@ -3,6 +3,7 @@
 //! the conversation when a new snapshot arrives and fetches nothing itself.
 use super::*;
 use conversation::{COLUMN, Conversation};
+use gpui_component::ActiveTheme;
 use ui::{hint, icon, ticket_state_color};
 use wording::humanize;
 
@@ -93,6 +94,7 @@ impl Conversation {
         if table.is_empty() {
             return None;
         }
+        let link = cx.theme().link;
         let collapsed = cx.global::<Preferences>().collapse_ticket_table;
         let summary = match (table.in_progress.len(), table.done_count) {
             (0, done) => format!("{done} done"),
@@ -136,7 +138,7 @@ impl Conversation {
             .text_size(px(font::MESSAGE))
             .child(head);
         if !collapsed {
-            body = body.children(table.in_progress.iter().map(|t| ticket_row(t, p)));
+            body = body.children(table.in_progress.iter().map(|t| ticket_row(t, p, link)));
             if table.done_count > 0 {
                 let open = self.done_tickets_open;
                 body = body.child(
@@ -167,7 +169,7 @@ impl Conversation {
                         })),
                 );
                 if open {
-                    body = body.children(table.done.iter().map(|t| ticket_row(t, p)));
+                    body = body.children(table.done.iter().map(|t| ticket_row(t, p, link)));
                 }
             }
         }
@@ -184,27 +186,44 @@ impl Conversation {
 }
 
 /// One ticket: its title, its status in its state's color and its PR, linked when it has one.
-fn ticket_row(ticket: &Ticket, p: Palette) -> Div {
-    let pr = div()
-        .w(px(110.))
-        .flex_none()
-        .text_ellipsis()
-        .child(pr_label(ticket));
+/// The arrow after a PR link marks that it leaves the app.
+fn ticket_row(ticket: &Ticket, p: Palette, link: Hsla) -> Div {
+    let pr = div().w(px(110.)).flex_none();
     let pr = match &ticket.pull_request {
         Some(pull_request) => {
             let url = pull_request.url.clone();
-            pr.child(
-                div()
-                    .id(SharedString::from(format!("ticket-table-pr-{}", ticket.id)))
-                    .absolute()
-                    .size_full()
-                    .cursor_pointer()
-                    .on_click(move |_, _, cx| cx.open_url(&url)),
-            )
-            .relative()
-            .text_color(p.focus)
+            pr.relative()
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .text_color(link)
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .underline()
+                        .child(pr_label(ticket)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(font::CAPTION))
+                        .opacity(0.7)
+                        .child("↗"),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("ticket-table-pr-{}", ticket.id)))
+                        .absolute()
+                        .size_full()
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| cx.open_url(&url)),
+                )
         }
-        None => pr.text_color(p.subtle),
+        None => pr
+            .text_ellipsis()
+            .text_color(p.subtle)
+            .child(pr_label(ticket)),
     };
     div()
         .flex()
