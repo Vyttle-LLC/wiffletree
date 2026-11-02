@@ -34,6 +34,8 @@ const SCROLL_TICK: std::time::Duration = std::time::Duration::from_millis(16);
 pub(super) struct ProjectDrag {
     moving: tree::Movable,
     target: Option<tree::Drop>,
+    /// The other Space whose row the pointer is over, where the dragged row may not land.
+    refused_space: Option<SpaceId>,
     /// The pointer has been off the dragged row, so a release back on it is not a click.
     left_row: bool,
     glyph: &'static str,
@@ -90,9 +92,12 @@ impl Reorder<'_> {
         let moving = self.moving.as_ref()?;
         Some(tree::drops(self.sections, moving, over))
     }
-    /// For a Space's row, where nothing lands.
-    fn refused(&self) -> Option<Halves> {
-        self.moving.as_ref().map(|_| None)
+    /// For the row of `space`, where nothing lands: the Space, when it is not the dragged row's
+    /// own; nothing while no row is dragged.
+    fn refused(&self, space: &SpaceId) -> Option<Option<SpaceId>> {
+        let moving = self.moving.as_ref()?;
+        let own = tree::space_of(self.sections, moving) == Some(space);
+        Some((!own).then(|| space.clone()))
     }
     /// For the space under the row of `over`, such as the spacer and New ticket button under a
     /// project or the spacer under a collapsed group: it aims where the lower half of that row
@@ -113,6 +118,22 @@ fn repeat_pointer(window: &mut Window, cx: &mut App) {
         };
         window.dispatch_event(PlatformInput::MouseMove(moved), cx);
     }
+}
+
+/// While a project or group is dragged over a Space's row `element`, hides the insertion line,
+/// and shows why when `refused` names that Space because the dragged row belongs to another.
+fn refusing(element: Div, refused: Option<Option<SpaceId>>, cx: &mut Context<Sidebar>) -> Div {
+    let Some(refused) = refused else {
+        return element;
+    };
+    element.on_drag_move(
+        cx.listener(move |v, event: &DragMoveEvent<tree::Movable>, _, c| {
+            let pointer = event.event.position;
+            if event.bounds.contains(&pointer) && v.tree_scroll.bounds().contains(&pointer) {
+                v.aim_at_space_row(refused.clone(), c);
+            }
+        }),
+    )
 }
 
 /// While a project or group is dragged over `element`, aims the drop, or hides the insertion
@@ -1068,13 +1089,14 @@ impl Sidebar {
         let grouping = cx.global::<Preferences>().group_projects;
         let sections = tree::sections(index, self.shared.show_archived, grouping);
         let drag = self.project_drag.as_ref().and_then(|drag| drag.upgrade());
-        let (moving, target) = drag
-            .map(|drag| {
+        let (moving, target, refused_space) = match drag {
+            Some(drag) => {
                 let drag = drag.read(cx);
-                (drag.moving.clone(), drag.target.clone())
-            })
-            .unzip();
-        let target = target.flatten();
+                let (moving, target) = (drag.moving.clone(), drag.target.clone());
+                (Some(moving), target, drag.refused_space.clone())
+            }
+            None => (None, None, None),
+        };
         let reorder = Reorder {
             sections: &sections,
             moving,
@@ -1120,9 +1142,23 @@ impl Sidebar {
                     let previous = space.replace(listed.clone());
                     let first = previous.is_none();
                     let end = previous.and_then(|previous| line(tree::Drop::End(previous), false));
+                    let refused = reorder.refused(&listed);
+                    let hint = (refused_space.as_ref() == Some(&listed)).then(|| {
+                        hint("Projects move between Spaces from their Overview.", p)
+                            .text_size(px(font::META))
+                            .mt(px(4.))
+                            .ml(inset(0, false) + px(20.))
+                            .mr(px(6.))
+                            .px_2()
+                            .py(px(4.))
+                            .rounded_md()
+                            .bg(p.overlay)
+                    });
                     let row = self.space_row(listed, &name, &projects, first, p, cx);
-                    // Nothing dragged lands on a Space's row.
-                    tree = tree.children(end).child(aiming(row, reorder.refused(), cx));
+                    tree = tree
+                        .children(end)
+                        .child(refusing(row, refused, cx))
+                        .children(hint);
                 }
                 tree::Row::Group(listed) => {
                     let movable = tree::Movable::Group(listed.key.clone());
@@ -1191,6 +1227,7 @@ impl Sidebar {
                 let drag = cx.new(|_| ProjectDrag {
                     moving: moving.clone(),
                     target: None,
+                    refused_space: None,
                     left_row: false,
                     glyph,
                     label: label.clone(),
@@ -1327,11 +1364,29 @@ impl Sidebar {
 
     /// Moves the insertion line; `None` hides it, and a drop then moves nothing.
     fn aim_project_drag(&mut self, target: Option<tree::Drop>, cx: &mut Context<Self>) {
+        self.aim(target, None, cx);
+    }
+
+    /// Hides the insertion line over a Space's row, and over another Space's row explains why.
+    fn aim_at_space_row(&mut self, refused: Option<SpaceId>, cx: &mut Context<Self>) {
+        self.aim(None, refused, cx);
+    }
+
+    fn aim(
+        &mut self,
+        target: Option<tree::Drop>,
+        refused: Option<SpaceId>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(drag) = self.project_drag.as_ref().and_then(|drag| drag.upgrade()) else {
             return;
         };
-        if drag.read(cx).target != target {
-            drag.update(cx, |drag, _| drag.target = target);
+        let aimed = drag.read(cx);
+        if aimed.target != target || aimed.refused_space != refused {
+            drag.update(cx, |drag, _| {
+                drag.target = target;
+                drag.refused_space = refused;
+            });
             cx.notify();
         }
     }

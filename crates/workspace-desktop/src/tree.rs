@@ -301,6 +301,11 @@ impl<'a> Siblings<'a> {
     }
 }
 
+/// The Space whose section lists `row`.
+pub(crate) fn space_of<'a>(sections: &'a [Section], row: &Movable) -> Option<&'a SpaceId> {
+    Some(&Siblings::find(sections, row)?.0.space)
+}
+
 /// Where a drop below `row` lands: before the row after it, or at the end of the rows it is
 /// reordered among.
 fn after(section: &Section, row: &Movable) -> Option<Drop> {
