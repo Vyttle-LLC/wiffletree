@@ -345,13 +345,15 @@ impl Host {
     /// Starts the marks of a repository this Mac joins with no Space there yet at `head`, the
     /// head it joined at, as it scanned nothing while it was away: a clone kept from an earlier
     /// Space may have last synced long before.
-    pub(crate) fn restart_scan_marks(&self, key: &str, head: &str) -> Result<()> {
+    pub(crate) fn restart_scan_marks(&self, key: &str, head: Option<&str>) -> Result<()> {
         let stored = (self.spaces()?.iter())
             .any(|r| Self::storage_key(&r.space.storage.repository).as_deref() == Some(key));
         if !stored {
             self.db
                 .execute("DELETE FROM scan_marks WHERE repository=?1", [key])?;
-            self.start_scan_marks(key, head)?;
+            if let Some(head) = head {
+                self.start_scan_marks(key, head)?;
+            }
         }
         Ok(())
     }
@@ -1016,20 +1018,36 @@ mod tests {
         assert_eq!(mac.alerts().len(), 2, "each commit was scanned once");
     }
 
-    #[test]
-    fn a_mac_that_rejoins_scans_nothing_pushed_while_it_was_away() {
+    /// A Mac removes Sage, a teammate pushes a phone number, and the Mac comes back with `back`.
+    fn back_after_a_removed_space(back: fn(&mut Host, &Arc<GitHub>)) {
         let (_folder, github) = fixture();
         let mut mac = Mac::join(&github);
         let sage = crate::storage::tests::space_named(&mac.host, "Sage");
         mac.host.remove_space(&sage.id).unwrap();
         github.commit(&in_folder(NOTE), PHONE);
-        join_sage(&mut mac.host, &github).unwrap();
+        back(&mut mac.host, &github);
         mac.pull(&github);
         assert_eq!(mac.alerts(), [], "what it missed is old history");
         assert_eq!(mac.mark(SENSITIVE_INFO), head(&github));
         github.commit(&in_folder("second-brain/notes/New.md"), PHONE);
         mac.pull(&github);
         assert_eq!(mac.alerts().len(), 1, "what comes next is scanned");
+    }
+
+    #[test]
+    fn a_mac_that_rejoins_scans_nothing_pushed_while_it_was_away() {
+        back_after_a_removed_space(|host, github| {
+            join_sage(host, github).unwrap();
+        });
+    }
+
+    #[test]
+    fn a_new_space_in_a_kept_clone_scans_nothing_pushed_while_it_was_away() {
+        back_after_a_removed_space(|host, github| {
+            let staged = crate::storage::stage(&host.home, NAME, &github.tools(), &[]).unwrap();
+            let new = crate::storage::tests::form("Sage Watch", None);
+            host.create_stored_space(&new, staged).unwrap();
+        });
     }
 
     #[test]

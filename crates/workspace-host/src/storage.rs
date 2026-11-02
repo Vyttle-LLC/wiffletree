@@ -1619,6 +1619,9 @@ impl Host {
         let key = repos::key(&repository.name);
         let clone = repos::clone_folder(&self.home, &repository.name);
         let root = staged.root.clone();
+        let staged_head = ["rev-parse", "--verify", "--quiet", "HEAD"];
+        let joined_at = runtime::git_output(staged.staging.path(), &staged_head).ok();
+        self.restart_scan_marks(&key, joined_at.as_deref().map(str::trim))?;
         if !clone.exists() {
             fs::create_dir_all(clone.parent().context("A clone is in a folder")?)?;
             fs::rename(staged.staging.keep(), &clone)?;
@@ -1866,9 +1869,7 @@ impl Host {
         let has_tracker = self.tracker(&joined[0].space).is_ok();
         let passes = self.sync_passes.clone();
         let _no_pass = sync::no_pass_running(&passes)?;
-        let head = runtime::git_output(staged.staging.path(), &["rev-parse", "HEAD"])?;
-        let (key, _) = self.place_storage(staged)?;
-        self.restart_scan_marks(&key, head.trim())?;
+        self.place_storage(staged)?;
         self.atomically(|host| {
             for (at, record) in joined.iter().enumerate() {
                 let tracker = tracker.as_ref().filter(|_| at == 0 && !has_tracker);
@@ -2488,7 +2489,7 @@ pub(crate) mod tests {
     }
 
     /// The human's form for a new Space named `name`.
-    fn form<'a>(name: &'a str, prefix: Option<&'a str>) -> NewSpace<'a> {
+    pub(crate) fn form<'a>(name: &'a str, prefix: Option<&'a str>) -> NewSpace<'a> {
         static NO_SETUP: SpaceSetup = SpaceSetup {
             folder: None,
             create_repository: false,
