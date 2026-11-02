@@ -32,7 +32,9 @@ const KEYS: [&str; 14] = [
     "magenta",
 ];
 const SYSTEM_UI_FONT: &str = ".SystemUIFont";
-const SYSTEM_MONO_FONT: &str = ".SystemMonoFont";
+/// GPUI resolves no `.SystemMonoFont` and would draw code in Helvetica; Menlo ships with macOS
+/// and is gpui-component's own default.
+const SYSTEM_MONO_FONT: &str = "Menlo";
 const TIDAL_SIZE: f32 = 14.;
 const SIZES: std::ops::RangeInclusive<f32> = 11.0..=20.0;
 
