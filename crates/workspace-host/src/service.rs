@@ -6143,7 +6143,8 @@ mod tests {
             crate::sync::tests::NAME
         );
         assert!(!actor.host.storage_moving);
-        assert!(github.show(storage::TRACKER).is_some());
+        let tracker = format!("{DEFAULT_ROOT}/{}", storage::TRACKER);
+        assert!(github.show(&tracker).is_some(), "the folder moved with it");
     }
 
     #[test]
