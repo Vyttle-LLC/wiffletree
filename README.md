@@ -59,8 +59,8 @@ The full explanation of everything below is in **[docs/FEATURES.md](docs/FEATURE
     <td align="center"><sub>Reviews keep each round and finding.</sub></td>
   </tr>
   <tr>
-    <td><img src="docs/images/spaces.png" alt="The Spaces page for the Tidepool Space, with its description, brain, compile time, brain gate, code repositories and sources"></td>
-    <td><img src="docs/images/brain.png" alt="The brain browser's Status view for a demo brain, with its status note, compile times and five pending entries"></td>
+    <td><img src="docs/images/spaces.png" alt="The Spaces page for the Tidepool Space, with its description, code repositories and sources above a Repository box that shows where the Space's storage is, who can read it, its issue, log and wiki counts and its compile time"></td>
+    <td><img src="docs/images/brain.png" alt="The brain browser's Status view for a demo wiki, with its status note, last compile time and two pending entries"></td>
   </tr>
   <tr>
     <td align="center"><sub>A Space holds a brain, repositories and rules.</sub></td>
