@@ -5,6 +5,7 @@ pub mod attachments;
 pub mod behaviors;
 mod boards;
 mod brain_index;
+mod brain_sync;
 mod brains;
 pub mod build_gate;
 mod checkout;
@@ -25,6 +26,8 @@ mod issues_sync;
 mod jobs;
 mod keeper;
 pub mod keychain;
+// What Bring in a brain will read with; only its tests call it until then.
+#[cfg_attr(not(test), expect(dead_code))]
 mod legacy_logs;
 mod linear_import;
 pub mod live;
@@ -171,7 +174,8 @@ pub struct Host {
     /// The GitHub storage repositories, by `repos::key`, the host wrote to since their sync took
     /// this; see `storage`.
     pub(crate) storage_written: std::cell::RefCell<std::collections::BTreeSet<String>>,
-    /// Likewise for writes to their issues, whose push is due sooner; see `tracker`.
+    /// Likewise for writes to their issues and brains, whose push is due sooner; see `tracker`
+    /// and `brain_sync`.
     pub(crate) issues_written: std::cell::RefCell<std::collections::BTreeSet<String>>,
     /// By `repos::key`, what the latest pass of each storage repository that syncs on its own
     /// did; see `storage`.
@@ -192,12 +196,10 @@ pub struct Host {
     router_runs: Vec<router::RouterRun>,
     /// By provider, whether detection last found its CLI installed and signed in.
     pub(crate) detected: std::collections::BTreeMap<Provider, bool>,
-    /// The legacy pointer file `~/.config/claude-second-brain`; tests name another.
-    pub(crate) legacy_pointer: PathBuf,
-    /// The gate releases and entry contract this Wiffletree ships; tests name others.
-    pub(crate) gate: brains::Shipped,
-    /// A brain command queued, amended or granted something, so every brain's pass is due now.
+    /// A pass or a commit moved a repository, so every brain's index refresh is due now.
     pub(crate) brains_now: bool,
+    /// What an earlier release left waiting has all landed.
+    pub(crate) carried_over: bool,
     /// The import from Linear on this Mac; see `linear_import`.
     pub(crate) linear: linear_import::Linear,
     /// The built-in host jobs the scheduler runs. Only the host's code adds one.
@@ -413,12 +415,8 @@ impl Host {
             detected: Default::default(),
             uploads: Default::default(),
             gh_login: None,
-            legacy_pointer: std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_default()
-                .join(brains::LEGACY_POINTER),
-            gate: brains::SHIPPED,
             brains_now: false,
+            carried_over: false,
             linear: linear_import::Linear::new(linear_import::Tools::real(&home)),
             built_ins: vec![],
             source_env: None,
@@ -431,10 +429,8 @@ impl Host {
         host.move_settings_clone()?;
         host.ensure_local_storage()?;
         host.move_local_repositories()?;
-        // After local storage is in place, as turning a brain folder into its repository writes
-        // the Space's file.
         brains::migrate(&mut host)?;
-        // After the brains, as an unexported entry is queued for its Space's brain.
+        brain_sync::migrate(&host.db)?;
         memory::migrate(&mut host)?;
         host.rebuild_issue_index()?;
         host.clear_uploads()?;
@@ -609,7 +605,7 @@ impl Host {
                 record.space
             })
             .collect();
-        Ok(Snapshot { projects: self.projects()?, spaces, space_locals, issue_trackers: self.issue_trackers()?, last_filed_space: self.last_filed_space()?, linear_import: self.linear.status.clone(), repositories: self.repositories()?, open_ticket_repositories: repositories::open_ticket_repositories(&self.db)?, sessions: self.live_sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} OR id IN (SELECT json_extract(data,'$.ticket_id') FROM runtimes WHERE session_id IN ({in_turn})) ORDER BY rowid", tickets_listed(true)), [&turning])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id IN (SELECT id FROM sessions WHERE {}) OR session_id IN ({in_turn}) ORDER BY rowid", sessions_where(true)), [&turning])?, archive_stamp: self.archive_stamp()?, message_revisions: self.message_revisions()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, core_instructions: provider::core_instructions(), still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held(), assistant_name: self.assistant_name(), threads: self.thread_tabs(now())?, held: self.held_messages()?, jobs: self.job_states()?, brains_logs_held: self.brains_logs_held()? })
+        Ok(Snapshot { projects: self.projects()?, spaces, space_locals, issue_trackers: self.issue_trackers()?, last_filed_space: self.last_filed_space()?, linear_import: self.linear.status.clone(), repositories: self.repositories()?, open_ticket_repositories: repositories::open_ticket_repositories(&self.db)?, sessions: self.live_sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} OR id IN (SELECT json_extract(data,'$.ticket_id') FROM runtimes WHERE session_id IN ({in_turn})) ORDER BY rowid", tickets_listed(true)), [&turning])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id IN (SELECT id FROM sessions WHERE {}) OR session_id IN ({in_turn}) ORDER BY rowid", sessions_where(true)), [&turning])?, archive_stamp: self.archive_stamp()?, message_revisions: self.message_revisions()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, core_instructions: provider::core_instructions(), still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held(), assistant_name: self.assistant_name(), threads: self.thread_tabs(now())?, held: self.held_messages()?, jobs: self.job_states()? })
     }
     /// The snapshot's sessions: the live ones, then archived ones still in a turn, which show as
     /// working until it ends.
@@ -1029,11 +1025,6 @@ impl Host {
         let save = move |host: &mut Self| -> Result<Vec<Session>> {
             let project = affected[0].project_id.clone();
             let stops_project = archived && affected[0].role == Role::ProjectOrchestrator;
-            // An implementer's log entries collect per ticket, not per session.
-            let implemented: Vec<String> = (affected.iter())
-                .filter(|s| s.role == Role::Implementer)
-                .filter_map(|s| host.session_runtime(&s.id).ok()?.ticket_id)
-                .collect();
             // A savepoint, so a ticket close or accept can include this in its own change.
             let tx = host.db.savepoint()?;
             for session in &mut affected {
@@ -1059,18 +1050,9 @@ impl Host {
                     Self::event(&tx, &project, Some(id), kind, &session.name)?;
                 }
             }
-            let mut closed_logs = 0;
             if archived {
                 let sessions = affected.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
                 Self::stop_schedules_in(&tx, &sessions, None, "archived")?;
-                for session in &sessions {
-                    let closing = memory::Closing::Session(session);
-                    closed_logs += memory::close_log_batches(&tx, closing, now())?;
-                }
-                for ticket in &implemented {
-                    let closing = memory::Closing::Ticket(ticket);
-                    closed_logs += memory::close_log_batches(&tx, closing, now())?;
-                }
             }
             if stops_project {
                 tx.execute(
@@ -1086,7 +1068,6 @@ impl Host {
                 )?;
             }
             tx.commit()?;
-            host.brains_now |= closed_logs > 0;
             Ok(affected)
         };
         if !archived {
@@ -2051,57 +2032,6 @@ impl Host {
                 project_id.as_deref(),
                 &query,
             )?)?,
-            Command::SuggestSpaceBrain { repositories } => {
-                serde_json::to_value(self.suggest_space_brain(&repositories)?)?
-            }
-            Command::ConfirmBrain { repository } => {
-                serde_json::to_value(self.confirm_brain(&repository)?)?
-            }
-            Command::ForgetBrain { repository } => {
-                self.forget_brain(&repository)?;
-                json!({"forgotten":true})
-            }
-            Command::SetUpBrain {
-                repository,
-                compile,
-            } => serde_json::to_value(self.set_up_brain(
-                &repository,
-                &compile,
-                &publish::Tools::default().git,
-            )?)?,
-            Command::UpdateBrainGate { repository } => serde_json::to_value(
-                self.update_brain_gate(&repository, &publish::Tools::default().git)?,
-            )?,
-            Command::SetBrainCompiler {
-                repository,
-                compiler,
-            } => serde_json::to_value(self.set_brain_compiler(
-                &repository,
-                &compiler,
-                &publish::Tools::default().git,
-            )?)?,
-            Command::SetBrainCompileTime {
-                repository,
-                compile,
-            } => serde_json::to_value(self.set_brain_compile_time(
-                &repository,
-                &compile,
-                &publish::Tools::default().git,
-            )?)?,
-            Command::AmendBrainBatch {
-                batch_id,
-                amendment,
-            } => serde_json::to_value(self.amend_brain_batch(
-                &batch_id,
-                &amendment,
-                &publish::Tools::default().git,
-            )?)?,
-            Command::SendLogsNow { repository } => {
-                json!({"closed": self.send_logs_now(repository.as_deref())?})
-            }
-            Command::ImportLegacyLogs { repository } => serde_json::to_value(
-                self.import_legacy_logs(&repository, &publish::Tools::default())?,
-            )?,
             Command::RunBrainCompile { repository } => {
                 serde_json::to_value(self.run_brain_compile(&repository)?)?
             }
@@ -2114,12 +2044,30 @@ impl Host {
                 repository,
                 conflict_id,
                 ruling,
-            } => serde_json::to_value(self.rule_conflict(
-                &repository,
-                &conflict_id,
-                ruling,
-                &publish::Tools::default().git,
-            )?)?,
+            } => serde_json::to_value(self.rule_conflict(&repository, &conflict_id, ruling)?)?,
+            Command::HeldEntryText { repository, path } => {
+                serde_json::to_value(self.held_entry_text(&repository, &path)?)?
+            }
+            Command::EditHeldEntry {
+                repository,
+                path,
+                text,
+            } => {
+                self.edit_held_entry(&repository, &path, &text)?;
+                json!({"scanned_again": true})
+            }
+            Command::MarkEntryNotSensitive {
+                repository,
+                path,
+                reason,
+            } => {
+                self.mark_entry_not_sensitive(&repository, &path, &reason)?;
+                json!({"scanned_again": true})
+            }
+            Command::DiscardHeldEntry { repository, path } => {
+                self.discard_held_entry(&repository, &path)?;
+                json!({"discarded": true})
+            }
             Command::FixHeldLog { log_id, fix } => {
                 serde_json::to_value(self.fix_held_log(&log_id, fix)?)?
             }
@@ -2213,10 +2161,6 @@ impl Host {
             }
             Command::SpaceStorage { space_id } => {
                 serde_json::to_value(self.storage_status(&space_id)?)?
-            }
-            Command::SetSpaceBrain { space_id, path } => {
-                self.set_space_brain(&space_id, &path)?;
-                Value::Null
             }
             Command::SetTrackerPrefix { space_id, prefix } => {
                 serde_json::to_value(self.set_tracker_prefix(&space_id, &prefix)?)?

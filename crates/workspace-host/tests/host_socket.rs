@@ -734,11 +734,8 @@ fn removing_a_protected_branch_needs_the_apps_credential() {
 #[test]
 fn space_commands_need_the_apps_credential_and_reads_do_not() {
     let project = std::cell::OnceCell::new();
-    let brain = tempfile::tempdir().unwrap();
     let fixture = Fixture::new(|host| {
         let calls = host.create_project("Calls").unwrap();
-        host.set_space_brain(&calls.space, brain.path().to_str().unwrap())
-            .unwrap();
         project.set(calls).unwrap();
     });
     let project = project.get().unwrap();
@@ -748,8 +745,6 @@ fn space_commands_need_the_apps_credential_and_reads_do_not() {
     for human_only in ["space_locals", "threads", "held", "jobs"] {
         assert!(read.get(human_only).is_none(), "{human_only}");
     }
-    let brain_path = std::fs::canonicalize(brain.path()).unwrap();
-    assert!(!read.to_string().contains(brain_path.to_str().unwrap()));
     let spaces = snapshot(&mut agent).spaces;
     let personal = spaces[0].clone();
     let instructed = Space {
@@ -774,9 +769,23 @@ fn space_commands_need_the_apps_credential_and_reads_do_not() {
             project_id: project.id.clone(),
             space_id: personal.id.clone(),
         },
-        Command::SetSpaceBrain {
-            space_id: personal.id.clone(),
-            path: fixture.data.path().to_string_lossy().into_owned(),
+        Command::HeldEntryText {
+            repository: "Sage-Social/api".into(),
+            path: "a.md".into(),
+        },
+        Command::EditHeldEntry {
+            repository: "Sage-Social/api".into(),
+            path: "a.md".into(),
+            text: "Text.".into(),
+        },
+        Command::MarkEntryNotSensitive {
+            repository: "Sage-Social/api".into(),
+            path: "a.md".into(),
+            reason: "A fixture".into(),
+        },
+        Command::DiscardHeldEntry {
+            repository: "Sage-Social/api".into(),
+            path: "a.md".into(),
         },
         Command::SetRepositorySpaces {
             repository: "Sage-Social/api".into(),
@@ -820,8 +829,7 @@ fn space_commands_need_the_apps_credential_and_reads_do_not() {
     assert_eq!(edited.error, None);
     assert_eq!(snapshot(&mut agent).spaces[0], instructed);
     // The app reads them.
-    let local = &snapshot(&mut app).space_locals[&personal.id];
-    assert_eq!(local.brain_path.as_deref(), brain_path.to_str());
+    assert!(snapshot(&mut app).space_locals.contains_key(&personal.id));
 }
 
 #[test]

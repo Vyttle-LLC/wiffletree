@@ -1,19 +1,17 @@
-//! The one-time legacy log import (OpenSpec change `brain-log-capture`): each `## YYYY-MM-DD —
-//! Title` entry of a brain's legacy `logs/<repo>.md` files on `main` becomes one entry file in
-//! the gate's contract, with `source: skill`, in log-only batches of at most 200 files. An
-//! entry's id comes from its repository, date, title and text, so importing again adds nothing.
-//! Legacy files are only read, and nothing here logs an entry's text.
+//! Reading a legacy log (OpenSpec change `one-space-repository`, decision 7): each `## YYYY-MM-DD
+//! — Title` entry of a brain's legacy `logs/<repo>.md` file parses into one entry in the contract,
+//! with `source: skill`, for Bring in a brain, which arrives with the setup screens. An entry's id
+//! comes from its repository, date, title and text, so bringing it in again adds nothing. Nothing
+//! here logs an entry's text.
 use super::*;
 use memory::{
-    MAX_BODY_CHARS, MAX_TITLE_CHARS, NO_REF, body_chars, entry_body, entry_text, one_line,
-    valid_folder, valid_login, valid_ref,
+    MAX_BODY_CHARS, MAX_TITLE_CHARS, NO_REF, body_chars, entry_body, one_line, valid_login,
+    valid_ref,
 };
-use publish::{GitTool, Tools};
+use publish::Tools;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
-/// The most files one import batch adds.
-const MAX_IMPORT_FILES: usize = 200;
 /// The longest `ref` an imported entry keeps as its `ref`.
 const MAX_REF_CHARS: usize = 255;
 /// The entry contract's fields.
@@ -266,250 +264,6 @@ fn blame(checkout: &Path, head: &str, path: &str) -> Result<HashMap<usize, Strin
     Ok(lines)
 }
 
-impl Host {
-    /// The brain's folder, as its config on `main` or the first Space naming it says.
-    fn import_folder(&self, brain: &Brain) -> Result<String> {
-        if let Some(config) = brain.config.config() {
-            return Ok(config.brain_dir.clone());
-        }
-        let space_brain = self.owner_brain(&SessionOwner::Brain(brain.repository.clone()))?;
-        Ok(space_brain.map_or_else(|| "second-brain".into(), |b| b.folder))
-    }
-
-    /// Whether the Brains page offers Import legacy logs: `main` holds a legacy log and the
-    /// import is not recorded as done.
-    pub(crate) fn offers_legacy_import(&self, brain: &Brain) -> Result<bool> {
-        let Some(head) = &brain.head else {
-            return Ok(false);
-        };
-        let done: bool = self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM legacy_imports WHERE brain=?1)",
-            [&brain.repository],
-            |r| r.get(0),
-        )?;
-        let checkout = Path::new(&brain.checkout);
-        Ok(!done && !legacy_logs(checkout, &self.import_folder(brain)?, head)?.is_empty())
-    }
-
-    /// Import legacy logs on this thread; the service runs `LegacyRead::run` off it.
-    pub(crate) fn import_legacy_logs(
-        &mut self,
-        repository: &str,
-        tools: &Tools,
-    ) -> Result<LegacyImport> {
-        let found = self.begin_legacy_import(repository)?.run(tools)?;
-        self.finish_legacy_import(found, &tools.git)
-    }
-
-    /// What Import legacy logs reads, or why it cannot start.
-    pub(crate) fn begin_legacy_import(&self, repository: &str) -> Result<LegacyRead> {
-        let brain = self.brain(repository)?;
-        let head = (brain.head.clone()).with_context(|| {
-            format!("{repository} has not been fetched yet; Sync now, then try again")
-        })?;
-        let importer = (self.gh_login.clone()).filter(|l| valid_login(l)).context(
-            "Wiffletree has not read your GitHub login yet. Sign gh in, Sync now, then try again.",
-        )?;
-        let folder = self.import_folder(&brain)?;
-        let imported = self.imported(&brain, &head, &folder)?;
-        Ok(LegacyRead {
-            checkout: PathBuf::from(&brain.checkout),
-            repository: brain.repository,
-            head,
-            folder,
-            importer,
-            imported,
-        })
-    }
-
-    /// Queues each entry file the read found that is not yet on `main` or in an unfinished
-    /// batch, in batches of at most 200 files, and records the entries at or before a file's
-    /// `compiled-through` marker as already compiled. With nothing left to add, the import is
-    /// recorded as done.
-    pub(crate) fn finish_legacy_import(
-        &mut self,
-        found: LegacyFound,
-        git: &GitTool,
-    ) -> Result<LegacyImport> {
-        let mut compiled = 0;
-        for id in &found.compiled {
-            compiled += self.db.execute(
-                "INSERT OR IGNORE INTO legacy_compiled VALUES (?1,?2)",
-                params![found.repository, id],
-            )?;
-        }
-        // Read again: `main` may have moved, or another import queued files, since the read.
-        let brain = self.brain(&found.repository)?;
-        let head = brain
-            .head
-            .clone()
-            .context("The brain has no fetched head")?;
-        let imported = self.imported(&brain, &head, &found.folder)?;
-        let mut waiting = found.waiting;
-        let mut files = vec![];
-        for (path, text) in found.files {
-            if imported.pending.contains(&path) {
-                waiting += 1;
-            } else if !imported.present.contains(&path) {
-                files.push((path, text));
-            }
-        }
-        let added = files.len();
-        let chunks: Vec<&[(String, Vec<u8>)]> = files.chunks(MAX_IMPORT_FILES).collect();
-        for (index, chunk) in chunks.iter().enumerate() {
-            let title = format!(
-                "Legacy log import ({} of {}): {} entries",
-                index + 1,
-                chunks.len(),
-                chunk.len()
-            );
-            self.queue_brain_batch(
-                &brain.repository,
-                BrainBatchKind::Log,
-                BrainSource::BrainsPage,
-                &title,
-                chunk,
-                git,
-            )?;
-        }
-        // Done once every legacy entry is on `main`.
-        let done = added == 0 && waiting == 0;
-        if done {
-            self.db.execute(
-                "INSERT OR IGNORE INTO legacy_imports VALUES (?1,?2)",
-                params![brain.repository, now()],
-            )?;
-        }
-        Ok(LegacyImport {
-            added,
-            batches: chunks.len(),
-            compiled,
-            done,
-        })
-    }
-
-    /// The brain's entry files under `folder` on `head`, and those in its unfinished batches.
-    fn imported(&self, brain: &Brain, head: &str, folder: &str) -> Result<Imported> {
-        let logs = format!("{folder}/logs/");
-        let present = runtime::git_output(
-            Path::new(&brain.checkout),
-            &["ls-tree", "-r", "--name-only", head, "--", &logs],
-        )?
-        .lines()
-        .map(str::to_owned)
-        .collect();
-        let pending = (self.brain_batches(Some(&brain.repository))?.into_iter())
-            .filter(|batch| !batch.is_finished())
-            .flat_map(|batch| batch.files)
-            .collect();
-        Ok(Imported { present, pending })
-    }
-}
-
-/// A brain's entry files already imported: on `main`, or queued in a batch not yet merged.
-struct Imported {
-    present: HashSet<String>,
-    pending: HashSet<String>,
-}
-
-/// What Import legacy logs reads from the brain's checkout and GitHub, one `gh api` call per
-/// commit, so the service runs it off the host thread.
-pub(crate) struct LegacyRead {
-    repository: String,
-    checkout: PathBuf,
-    head: String,
-    folder: String,
-    /// The author of an entry whose commit names no GitHub login.
-    importer: String,
-    imported: Imported,
-}
-
-/// The entry files a `LegacyRead` found, for `finish_legacy_import` to queue.
-pub(crate) struct LegacyFound {
-    repository: String,
-    folder: String,
-    /// The ids of entries at or before their file's `compiled-through` marker.
-    compiled: Vec<String>,
-    /// Entry files neither on `main` nor queued at the read, by path.
-    files: Vec<(String, Vec<u8>)>,
-    /// Entries already queued by an earlier import whose pull request has not merged yet.
-    waiting: usize,
-}
-
-impl LegacyRead {
-    /// Fits each legacy entry to the contract as one entry file, authored by its commit's
-    /// GitHub login, skipping those already imported.
-    pub(crate) fn run(&self, tools: &Tools) -> Result<LegacyFound> {
-        let (checkout, head, folder) = (&self.checkout, &self.head, &self.folder);
-        let sha = &head[..7];
-        let mut logins: HashMap<String, Option<String>> = HashMap::new();
-        let mut files: Vec<(String, Vec<u8>)> = vec![];
-        let (mut compiled, mut waiting) = (vec![], 0);
-        for (path, name) in legacy_logs(checkout, folder, head)? {
-            let text = runtime::git_output(checkout, &["show", &format!("{head}:{path}")])?;
-            let log = parse(&text);
-            let mut lines = None;
-            for entry in &log.entries {
-                let id = legacy_id(&name, entry);
-                if log
-                    .compiled_through
-                    .as_ref()
-                    .is_some_and(|d| entry.date <= *d)
-                {
-                    compiled.push(id.clone());
-                }
-                let (year, month) = (&entry.date[..4], &entry.date[5..7]);
-                let file = format!("{folder}/logs/{name}/{year}/{month}/{}-{id}.md", entry.date);
-                if self.imported.present.contains(&file) {
-                    continue;
-                }
-                if self.imported.pending.contains(&file) {
-                    waiting += 1;
-                    continue;
-                }
-                if lines.is_none() {
-                    lines = Some(blame(checkout, head, &path)?);
-                }
-                let commit = lines.as_ref().and_then(|l| l.get(&entry.line));
-                let author = match commit {
-                    Some(commit) => logins
-                        .entry(commit.clone())
-                        .or_insert_with(|| commit_login(&self.repository, commit, checkout, tools))
-                        .clone(),
-                    None => None,
-                };
-                let (input, reference) = fitted(&name, entry, sha);
-                let body = entry_body(&entry.date, &input, &reference);
-                let author = author.as_deref().unwrap_or(&self.importer);
-                let text = entry_text(&id, &name, author, "skill", &body);
-                files.push((file, text.into_bytes()));
-            }
-        }
-        files.sort_by(|a, b| a.0.cmp(&b.0));
-        files.dedup_by(|a, b| a.0 == b.0);
-        Ok(LegacyFound {
-            repository: self.repository.clone(),
-            folder: self.folder.clone(),
-            compiled,
-            files,
-            waiting,
-        })
-    }
-}
-
-/// The legacy `logs/<repo>.md` files under `folder` on `head`, with each one's repository.
-fn legacy_logs(checkout: &Path, folder: &str, head: &str) -> Result<Vec<(String, String)>> {
-    let logs = format!("{folder}/logs/");
-    let listed = runtime::git_output(checkout, &["ls-tree", "--name-only", head, "--", &logs])?;
-    Ok(listed
-        .lines()
-        .filter_map(|path| {
-            let repository = path.strip_prefix(&logs)?.strip_suffix(".md")?;
-            valid_folder(repository).then(|| (path.to_owned(), repository.to_owned()))
-        })
-        .collect())
-}
-
 /// The GitHub login of the commit's author, or `None` when GitHub knows none.
 fn commit_login(brain: &str, commit: &str, checkout: &Path, tools: &Tools) -> Option<String> {
     let endpoint = format!("repos/{brain}/commits/{commit}");
@@ -521,10 +275,6 @@ fn commit_login(brain: &str, commit: &str, checkout: &Path, tools: &Tools) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::brains::tests::{GitHub, REPO, name_brain, passing_checks, run};
-    use crate::test_support::git;
-
-    const LEGACY: &str = "second-brain/logs/calls.md";
 
     fn entry(date: &str, title: &str, fields: &str) -> String {
         format!("## {date} — {title}\n{fields}\n")
@@ -534,45 +284,58 @@ mod tests {
         parse(text).entries.remove(0)
     }
 
-    /// Checks `text` at `path` against the gate's entry contract (`gate/README.md`), as its
-    /// `log-schema` check reads it; answers the author.
-    fn assert_contract(path: &str, text: &str) -> String {
-        let (folder, file) = path.rsplit_once('/').unwrap();
-        let (date, id) = (&file[..10], &file[11..file.len() - 3]);
-        let repo = folder.split('/').nth(2).unwrap();
-        assert_eq!(
-            folder,
-            format!("second-brain/logs/{repo}/{}/{}", &date[..4], &date[5..7])
-        );
-        let (frontmatter, body) = text
-            .strip_prefix("---\n")
-            .unwrap()
-            .split_once("\n---\n")
-            .unwrap();
-        let keys: Vec<(&str, &str)> = (frontmatter.lines())
-            .map(|line| line.split_once(": ").unwrap())
-            .collect();
-        let [
-            ("id", got),
-            ("repo", got_repo),
-            ("author", author),
-            ("source", "skill"),
-        ] = keys[..]
-        else {
-            panic!("frontmatter {keys:?}");
+    #[test]
+    fn a_fitted_entry_keeps_to_the_contract_under_its_derived_id() {
+        let legacy = only(&entry(
+            "2026-09-02",
+            "Retry once",
+            "- type: decision\n- ref: main @ 3c1e9a0\n- changed: retry\n- why: transient\n- state: shipped",
+        ));
+        let (input, reference) = fitted("calls", &legacy, "3c1e9a0");
+        let id = legacy_id("calls", &legacy);
+        let body = entry_body(&legacy.date, &input, &reference);
+        let text = memory::entry_text(&id, "calls", "rb", "skill", &body);
+        let path = format!("calls/2026/09/2026-09-02-{id}.md");
+        assert_eq!(memory::contract_problem(&path, &text), None);
+    }
+
+    #[test]
+    fn blame_names_the_commit_of_each_line() {
+        let repository = tempfile::tempdir().unwrap();
+        let at = repository.path();
+        crate::test_support::git(at, &["init", "-q", "-b", "main"]);
+        fs::write(at.join("calls.md"), "one\n").unwrap();
+        crate::test_support::git(at, &["add", "--all"]);
+        crate::test_support::git(at, &["commit", "-q", "-m", "First"]);
+        let first = crate::test_support::git(at, &["rev-parse", "HEAD"]);
+        fs::write(at.join("calls.md"), "one\ntwo\n").unwrap();
+        crate::test_support::git(at, &["add", "--all"]);
+        crate::test_support::git(at, &["commit", "-q", "-m", "Second"]);
+        let second = crate::test_support::git(at, &["rev-parse", "HEAD"]);
+        let lines = blame(at, "HEAD", "calls.md").unwrap();
+        assert_eq!((&lines[&1], &lines[&2]), (&first, &second));
+    }
+
+    #[test]
+    fn a_commit_login_is_github_s_and_only_a_valid_one_is_taken() {
+        let answering = |output: &'static str| Tools {
+            gh: std::sync::Arc::new(move |_, _| {
+                Ok(runtime::GhAnswer {
+                    status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                    output: output.into(),
+                    error: String::new(),
+                })
+            }),
+            ..Tools::default()
         };
-        assert_eq!((got, got_repo), (id, repo));
-        assert!(valid_login(author));
-        assert!(body_chars(body) <= MAX_BODY_CHARS, "{path}");
-        let mut lines = body.lines();
-        assert!(lines.next().unwrap().starts_with(&format!("## {date} — ")));
-        let fields: Vec<(&str, &str)> = lines.map(|l| l[2..].split_once(": ").unwrap()).collect();
-        let names: Vec<&str> = fields.iter().map(|(name, _)| *name).collect();
-        assert_eq!(names, FIELDS);
-        assert!(["decision", "observation"].contains(&fields[0].1));
-        assert!(valid_ref(fields[1].1), "{}", fields[1].1);
-        assert!(fields.iter().all(|(_, value)| !value.trim().is_empty()));
-        author.to_owned()
+        let login =
+            |output| commit_login("Sage/brain", "3c1e9a0", Path::new("."), &answering(output));
+        assert_eq!(
+            login(r#"{"author": {"login": "rb"}}"#).as_deref(),
+            Some("rb")
+        );
+        assert_eq!(login(r#"{"author": {"login": "not a login"}}"#), None);
+        assert_eq!(login(r#"{"author": null}"#), None);
     }
 
     #[test]
@@ -711,148 +474,5 @@ mod tests {
         // The marker is part of neither entry, so moving it changes no id.
         assert_eq!(log.entries[0].text, "- changed: x\n");
         assert_eq!(log.entries[1].text, "- changed: y\n");
-    }
-
-    #[test]
-    fn the_import_writes_log_only_batches_of_at_most_200_files_once() {
-        let home = tempfile::tempdir().unwrap();
-        let mut host = Host::open_set_up(home.path()).unwrap();
-        host.legacy_pointer = home.path().join("no-pointer");
-        let sage = host.create_space("Sage", "", "", None).unwrap().space;
-        name_brain(&mut host, &sage.id, REPO);
-        host.record_gh_login(Some("mhohlios".into()));
-        let folder = tempfile::tempdir().unwrap();
-        let github = GitHub::new(folder.path());
-        let tools = github.tools();
-
-        // A teammate GitHub knows wrote 200 entries, the newest of them above the compiled
-        // marker; one entry is too long and one has a ref the contract does not allow.
-        let mut legacy = String::from("# calls — working log\n\n");
-        for day in 0..200 {
-            let date =
-                chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap() + chrono::Days::new(day);
-            legacy.push_str(&entry(
-                &date.to_string(),
-                &format!("Entry {day}"),
-                "- type: decision\n- ref: —\n- changed: c\n- why: w\n- state: s",
-            ));
-            if day == 0 {
-                legacy.push_str("<!-- compiled-through: 2026-01-10 -->\n");
-            }
-        }
-        let known = github.commit_file_on_main(LEGACY, &legacy);
-        github
-            .commit_authors
-            .lock()
-            .unwrap()
-            .insert(known, "rb-boyce".into());
-        // Someone GitHub knows no login for added two more at the top.
-        let added = format!(
-            "{}{}{legacy}",
-            entry(
-                "2026-10-01",
-                "Transcript",
-                &format!("- changed: {}", "x".repeat(18_000))
-            ),
-            entry("2026-10-02", "Bad ref", "- ref: see PR 92\n- changed: c"),
-        );
-        github.commit_file_on_main(LEGACY, &added);
-        assert!(run(&mut host, &tools));
-        assert!(host.brains_page().unwrap().brains[0].legacy_import);
-
-        let first = host.import_legacy_logs(REPO, &tools).unwrap();
-        assert_eq!((first.added, first.batches, first.done), (202, 2, false));
-        assert_eq!(
-            first.compiled, 10,
-            "January 1 to 10 are at or before the marker"
-        );
-        let batches = host.brain_batches(Some(REPO)).unwrap();
-        assert_eq!(
-            batches.iter().map(|b| b.files.len()).collect::<Vec<_>>(),
-            [200, 2]
-        );
-        let mut authors = std::collections::BTreeMap::<String, usize>::new();
-        for batch in &batches {
-            assert_eq!(batch.kind, BrainBatchKind::Log);
-            let worktree = host.home.join("brain-batches").join(&batch.id);
-            for path in &batch.files {
-                assert!(path.starts_with("second-brain/logs/calls/2026/"), "{path}");
-                let text = fs::read_to_string(worktree.join(path)).unwrap();
-                *authors.entry(assert_contract(path, &text)).or_default() += 1;
-            }
-            let changed = git(&worktree, &["diff", "--name-status", "HEAD~1", "HEAD"]);
-            assert!(
-                changed.lines().all(|l| l.starts_with("A\t")),
-                "only adds: {changed}"
-            );
-        }
-        assert_eq!(
-            authors,
-            [("mhohlios".into(), 2), ("rb-boyce".into(), 200)].into()
-        );
-        let commit_reads = (github.gh_calls("api").iter())
-            .filter(|call| {
-                let endpoint = call.last().unwrap();
-                endpoint.contains("/commits/") && !endpoint.contains("check-runs")
-            })
-            .count();
-        assert_eq!(commit_reads, 2, "one read per commit");
-
-        // While its pull requests are open, a second import adds nothing.
-        let again = host.import_legacy_logs(REPO, &tools).unwrap();
-        assert_eq!(
-            (again.added, again.batches, again.done, again.compiled),
-            (0, 0, false, 0)
-        );
-        assert!(host.brains_page().unwrap().brains[0].legacy_import);
-
-        host.confirm_brain(REPO).unwrap();
-        run(&mut host, &tools);
-        run(&mut host, &tools);
-        passing_checks(&github);
-        run(&mut host, &tools);
-        github.merge(214);
-        github.merge(215);
-        run(&mut host, &tools);
-        run(&mut host, &tools);
-        let legacy_now = git(
-            Path::new(&host.brain(REPO).unwrap().checkout),
-            &["show", &format!("HEAD:{LEGACY}")],
-        );
-        assert_eq!(legacy_now, added.trim_end(), "the legacy file is untouched");
-        let done = host.import_legacy_logs(REPO, &tools).unwrap();
-        assert_eq!((done.added, done.batches, done.done), (0, 0, true));
-        assert!(!host.brains_page().unwrap().brains[0].legacy_import);
-        assert_eq!(host.brain_batches(Some(REPO)).unwrap().len(), 2);
-    }
-
-    #[test]
-    fn imports_whose_reads_overlap_queue_each_entry_once() {
-        let home = tempfile::tempdir().unwrap();
-        let mut host = Host::open_set_up(home.path()).unwrap();
-        host.legacy_pointer = home.path().join("no-pointer");
-        let sage = host.create_space("Sage", "", "", None).unwrap().space;
-        name_brain(&mut host, &sage.id, REPO);
-        host.record_gh_login(Some("mhohlios".into()));
-        let folder = tempfile::tempdir().unwrap();
-        let github = GitHub::new(folder.path());
-        let tools = github.tools();
-        let legacy = entry("2026-09-02", "Retry once", "- changed: retry")
-            + &entry("2026-09-01", "Time out", "- changed: thirty seconds");
-        github.commit_file_on_main(LEGACY, &legacy);
-        assert!(run(&mut host, &tools));
-
-        // Both read before either queues, as two presses of Import legacy logs can.
-        let first = host.begin_legacy_import(REPO).unwrap().run(&tools).unwrap();
-        let second = host.begin_legacy_import(REPO).unwrap().run(&tools).unwrap();
-        let queued = host.finish_legacy_import(first, &tools.git).unwrap();
-        assert_eq!((queued.added, queued.batches), (2, 1));
-        let again = host.finish_legacy_import(second, &tools.git).unwrap();
-        assert_eq!(
-            (again.added, again.batches, again.done),
-            (0, 0, false),
-            "both entries wait in the first batch"
-        );
-        assert_eq!(host.brain_batches(Some(REPO)).unwrap().len(), 1);
     }
 }

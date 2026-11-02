@@ -6,7 +6,7 @@
 //! reconcile queue. Nothing here edits the brain, and brain text is drawn by `brain_markdown`.
 use super::*;
 use brain_markdown::{LinkTarget, link_target};
-use brains_view::{Tone, compiler_line, next_compile, stage_label};
+use brains_view::Tone;
 use gpui_component::{
     Disableable,
     button::ButtonVariants,
@@ -66,19 +66,16 @@ pub(super) struct BrainOpening {
 }
 
 /// The GitHub brain a Space names, as `owner/name`; a local brain has no index to browse.
-pub(super) fn github_brain(space: &Space) -> Option<String> {
-    match &space.brain.as_ref()?.repository {
-        BrainRepository::GitHub { owner, name, .. } => Some(format!("{owner}/{name}")),
-        BrainRepository::Local { .. } => None,
-    }
+pub(super) fn space_brain(space: &Space) -> String {
+    space.storage.repository.key()
 }
 
-/// The projects whose Space names `repository` as its brain: the browser's scope chips.
+/// The projects whose Space's brain is in `repository`: the browser's scope chips.
 pub(super) fn projects_of_brain<'a>(snapshot: &'a Snapshot, repository: &str) -> Vec<&'a Project> {
     let names = |project: &&Project| {
         (snapshot.spaces.iter())
             .find(|s| s.id == project.space)
-            .and_then(github_brain)
+            .map(space_brain)
             .is_some_and(|brain| brain.eq_ignore_ascii_case(repository))
     };
     snapshot.projects.iter().filter(names).collect()
@@ -509,8 +506,7 @@ impl BrainBrowser {
                 }
                 menu
             });
-        let batches = self.listing().map_or(&[][..], |l| &l.batches);
-        let synced = self.brain().map(|b| brains_view::sync_state(b, batches));
+        let synced = self.brain().map(brains_view::sync_state);
         let mut top = div()
             .flex()
             .items_center()
@@ -648,8 +644,6 @@ impl BrainBrowser {
                 p,
             )),
         };
-        let config = self.brain().map(|b| &b.config);
-        let here = self.listing().and_then(|l| l.this_host.as_ref());
         let fact = |label: &'static str, value: String| ui::property(label, value, p);
         let mut compile = card(p)
             .child(eyebrow("COMPILE", p))
@@ -657,13 +651,8 @@ impl BrainBrowser {
                 "Last",
                 status.last_compile.map_or(NO_COMPILE.into(), age),
             ))
-            .child(fact("Next", config.map_or("—".into(), next_compile)))
-            .child(fact(
-                "Runs on",
-                config.map_or("—".into(), |c| compiler_line(c, here)),
-            ))
             .child(fact("Pending entries", status.pending_entries.to_string()));
-        // Run now, on the Mac that compiles this brain, or why it waits.
+        // Run now, or why it waits.
         let compiled_here = (self.listing().into_iter())
             .flat_map(|l| l.compiles.iter())
             .find(|c| Some(c.repository.as_str()) == self.repository.as_deref());
@@ -695,51 +684,15 @@ impl BrainBrowser {
                     .children(compiled.run_now_waits.clone().map(|why| hint(why, p))),
             );
         }
-        let mut prs = card(p).child(eyebrow("OPEN PRS", p));
         let repository = self.repository.as_deref().unwrap_or_default();
-        let open: Vec<&BrainBatch> = (self.listing().into_iter())
-            .flat_map(|l| l.batches.iter())
-            .filter(|b| b.repository.eq_ignore_ascii_case(repository) && !b.is_finished())
-            .collect();
-        if open.is_empty() {
-            prs = prs.child(hint("None", p));
-        }
-        for batch in open {
-            let id = batch.id.clone();
-            let failed = batch.stage == BrainStage::Failed;
-            let number = batch
-                .pull_request
-                .as_ref()
-                .map_or("queued".into(), |pr| format!("#{}", pr.number));
-            prs = prs.child(
-                div()
-                    .id(SharedString::from(format!("status-pr-{id}")))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .cursor_pointer()
-                    .text_size(px(font::SMALL))
-                    .hover(|d| d.bg(p.overlay))
-                    .rounded_md()
-                    .px_1()
-                    .on_click(
-                        cx.listener(move |_, _, _, cx| cx.emit(Intent::OpenBatch(id.clone()))),
-                    )
-                    .child(icon("git-pull-request").size(px(13.)).text_color(p.subtle))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_ellipsis()
-                            .child(format!("{number} · {}", batch.title)),
-                    )
-                    .child(
-                        div()
-                            .text_color(if failed { p.red } else { p.subtle })
-                            .child(stage_name(batch.stage)),
-                    ),
-            );
-        }
+        let held = (self.shared.workspace_notes().iter())
+            .filter(|note| {
+                matches!(note, WorkspaceNote::HeldEntry(e) if e.repository.eq_ignore_ascii_case(repository))
+            })
+            .count();
+        let waits = card(p)
+            .child(eyebrow("ON THIS MAC", p))
+            .child(fact("Held entries", held.to_string()));
         div().flex().items_start().gap_4().child(article).child(
             div()
                 .w(px(260.))
@@ -748,7 +701,7 @@ impl BrainBrowser {
                 .flex_col()
                 .gap_3()
                 .child(compile)
-                .child(prs),
+                .child(waits),
         )
     }
 
@@ -1475,32 +1428,13 @@ fn verification_pill(verification: &RefVerification, p: Palette) -> Div {
     pill(text, color)
 }
 
-/// An entry's PR as its pill says it: the batch's live stage, merged, or no PR.
+/// An entry's PR as its pill says it: held or waiting here, merged, or no PR.
 pub(super) fn pull_request_label(pr: &EntryPullRequest) -> (String, Tone) {
     match pr {
-        EntryPullRequest::Batch { number, stage } => {
-            let tone = match stage {
-                BrainStage::Failed => Tone::Bad,
-                BrainStage::Merged => Tone::Good,
-                BrainStage::AutoMerging | BrainStage::Checks | BrainStage::PrOpen => Tone::Warn,
-                BrainStage::Queued | BrainStage::Discarded => Tone::Quiet,
-            };
-            let name = stage_name(*stage);
-            match number {
-                Some(number) => (format!("PR #{number} · {name}"), tone),
-                None => (format!("Batch · {name}"), tone),
-            }
-        }
+        EntryPullRequest::Held => ("Held on this Mac".into(), Tone::Warn),
+        EntryPullRequest::Waiting => ("Waiting to land".into(), Tone::Quiet),
         EntryPullRequest::Merged { number } => (format!("PR #{number} · merged"), Tone::Good),
         EntryPullRequest::None => ("no PR".into(), Tone::Quiet),
-    }
-}
-
-/// A batch's stage as an entry's PR shows it, with a failed check named as one.
-fn stage_name(stage: BrainStage) -> &'static str {
-    match stage {
-        BrainStage::Failed => "failed check",
-        stage => stage_label(stage),
     }
 }
 
@@ -1537,25 +1471,15 @@ mod tests {
     use workspace_core::*;
 
     #[test]
-    fn an_entrys_pr_shows_the_batch_stage_merged_or_no_pr() {
-        let failed = EntryPullRequest::Batch {
-            number: Some(214),
-            stage: BrainStage::Failed,
-        };
+    fn an_entrys_pill_says_held_waiting_merged_or_no_pr() {
         assert_eq!(
-            pull_request_label(&failed),
-            ("PR #214 · failed check".into(), Tone::Bad)
+            pull_request_label(&EntryPullRequest::Held),
+            ("Held on this Mac".into(), Tone::Warn)
         );
-        let merging = EntryPullRequest::Batch {
-            number: Some(213),
-            stage: BrainStage::AutoMerging,
-        };
-        assert_eq!(pull_request_label(&merging).0, "PR #213 · auto-merging");
-        let queued = EntryPullRequest::Batch {
-            number: None,
-            stage: BrainStage::Queued,
-        };
-        assert_eq!(pull_request_label(&queued).0, "Batch · queued");
+        assert_eq!(
+            pull_request_label(&EntryPullRequest::Waiting).0,
+            "Waiting to land"
+        );
         assert_eq!(
             pull_request_label(&EntryPullRequest::Merged { number: 81 }),
             ("PR #81 · merged".into(), Tone::Good)
@@ -1579,7 +1503,7 @@ mod tests {
     }
 
     #[test]
-    fn the_scope_chips_are_the_projects_of_spaces_that_name_the_brain() {
+    fn the_scope_chips_are_the_projects_of_the_spaces_in_the_repository() {
         let space = |id: &str, owner: &str, name: &str| Space {
             id: SpaceId(id.into()),
             name: id.into(),
@@ -1587,17 +1511,12 @@ mod tests {
             additions: String::new(),
             behaviors: Default::default(),
             repository_settings: Default::default(),
-            brain: Some(SpaceBrain {
-                repository: BrainRepository::GitHub {
+            brain: None,
+            storage: SpaceStorage {
+                repository: StorageRepository::GitHub {
                     owner: owner.into(),
                     name: name.into(),
-                    extra: Extra::new(),
                 },
-                folder: "second-brain".into(),
-                extra: Extra::new(),
-            }),
-            storage: SpaceStorage {
-                repository: StorageRepository::Local { id: "l".into() },
                 folder: id.into(),
                 root: String::new(),
             },

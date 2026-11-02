@@ -372,26 +372,21 @@ mod tests {
     use super::*;
     use workspace_core::assistant::router::{Choice, ThreadPick};
 
-    /// A store with the Personal Space every store has and a Sage Space whose brain is a
-    /// folder, so a test can see nothing was written to it.
+    /// A store with the Personal Space every store has and a Sage Space.
     struct Store {
         _home: tempfile::TempDir,
-        brain: tempfile::TempDir,
         host: Host,
         sage: SpaceId,
         personal: SpaceId,
     }
     fn store() -> Store {
         let home = tempfile::tempdir().unwrap();
-        let brain = tempfile::tempdir().unwrap();
         let mut host = Host::open_set_up(home.path()).unwrap();
         let sage = (host
             .create_space("Sage", "Sage work", "", None)
             .unwrap()
             .space)
             .id;
-        host.set_space_brain(&sage, &brain.path().to_string_lossy())
-            .unwrap();
         let personal = (host.spaces().unwrap().into_iter())
             .find(|s| s.space.id != sage)
             .unwrap()
@@ -399,7 +394,6 @@ mod tests {
             .id;
         Store {
             _home: home,
-            brain,
             host,
             sage,
             personal,
@@ -503,9 +497,8 @@ mod tests {
         assert!(question.choices.contains(&Destination::Thread {
             thread_id: notes.clone()
         }));
-        // Nothing reached a thread, or the Space's brain, before the click.
+        // Nothing reached a thread before the click.
         assert_eq!(thread_messages(&s.host), before);
-        assert_eq!(fs::read_dir(s.brain.path()).unwrap().count(), 0);
 
         let personal = Destination::NewThread {
             space_id: s.personal.clone(),

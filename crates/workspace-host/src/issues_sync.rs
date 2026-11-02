@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use storage::{Found, Input, TRACKER, WholeFiles};
 use tracker::{ISSUES, issue_folder};
 
-/// How long after the human's last change to an issue its push waits.
+/// How long after the last change to an issue or a log entry its push waits.
 pub(crate) const PUSH_DELAY_MS: i64 = 2_000;
 /// How many times a storage repository's own pass runs whole again after GitHub refused its
 /// push because the branch moved: higher than `repos::pass`'s boards-only tries, as teammates
@@ -440,6 +440,7 @@ impl RuleSet for IssueRules {
                         path: path.clone(),
                         check: check.clone(),
                         rule: None,
+                        line: None,
                         reason: Some(reason.into()),
                     });
                 }

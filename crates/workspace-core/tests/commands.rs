@@ -47,6 +47,10 @@ fn set_layer_values() -> Command {
 #[test]
 fn reads_are_exactly_the_commands_that_change_nothing() {
     let reads = [
+        Command::HeldEntryText {
+            repository: text(),
+            path: text(),
+        },
         Command::Snapshot,
         Command::Archive,
         Command::DiscoverRepositories { folders: vec![] },
@@ -262,8 +266,20 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
             project_id: text(),
             space_id: space().id,
         },
-        Command::SendLogsNow { repository: None },
-        Command::ImportLegacyLogs { repository: text() },
+        Command::EditHeldEntry {
+            repository: text(),
+            path: text(),
+            text: text(),
+        },
+        Command::MarkEntryNotSensitive {
+            repository: text(),
+            path: text(),
+            reason: text(),
+        },
+        Command::DiscardHeldEntry {
+            repository: text(),
+            path: text(),
+        },
         Command::FixHeldLog {
             log_id: text(),
             fix: LogFix {
@@ -431,10 +447,6 @@ fn space_commands_are_the_humans() {
         },
         Command::MoveIntoFolder {
             space_id: space().id,
-        },
-        Command::SetSpaceBrain {
-            space_id: space().id,
-            path: text(),
         },
         Command::SetFollowedRoots {
             space_id: space().id,

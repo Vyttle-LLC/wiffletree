@@ -669,11 +669,6 @@ enum Event {
     },
     /// A brain's pass finished on its own thread; `None` when it panicked.
     BrainPassed(String, Option<brains::Passed>),
-    /// Import legacy logs read the brain's legacy logs and their authors off the host thread.
-    LegacyLogsRead {
-        found: Result<legacy_logs::LegacyFound>,
-        reply: Reply,
-    },
     /// A storage repository was checked and cloned off the host thread, for a new Space or the
     /// Spaces to join.
     StorageStaged {
@@ -1599,23 +1594,6 @@ impl Actor {
                     },
                 );
             }
-            // The read makes one `gh api` call per commit, so it runs off the host thread; the
-            // reply answers once its batches are queued, or with why it failed.
-            Command::ImportLegacyLogs { repository } => {
-                let read = self.host.begin_legacy_import(repository)?;
-                let tools = self.publish_tools.clone();
-                spawn_job(
-                    self.sender.clone(),
-                    (read, reply.clone()),
-                    move |(read, _)| read.run(&tools),
-                    |_| {
-                        Err(anyhow::anyhow!(
-                            "The legacy log import stopped unexpectedly"
-                        ))
-                    },
-                    |(_, reply), found| Event::LegacyLogsRead { found, reply },
-                );
-            }
             Command::SyncNow => {
                 self.sync_pace.sync_now();
                 self.storage_paces
@@ -1974,8 +1952,8 @@ impl Actor {
 
     /// Starts a pass of each GitHub storage repository that syncs on its own when one is due,
     /// and arms a wake-up for the next; `true` when a pass started. A write to the settings
-    /// repository's clone makes its own pass due instead. An issue's change is pushed sooner
-    /// than a Space's, as issues are a conversation.
+    /// repository's clone makes its own pass due instead. An issue's change and a log entry are
+    /// pushed sooner than a Space's, as issues are a conversation and an entry lands in seconds.
     fn refresh_storage_sync(&mut self, at: i64) -> bool {
         let settings = self.host.settings_key();
         let written = [
@@ -2028,14 +2006,13 @@ impl Actor {
         started
     }
 
-    /// Starts a pass of each brain a Space names when one is due, off the host thread, and arms a
-    /// wake-up for the next: every minute while it has a batch in flight, every five otherwise,
-    /// backing off to thirty minutes while GitHub cannot be reached. A brain command makes every
-    /// pass due at once.
+    /// Starts an index refresh of each brain when one is due, off the host thread, and arms a
+    /// wake-up for the next. A pass or a commit that moved a repository makes every refresh due
+    /// at once.
     fn refresh_brains(&mut self, at: i64) {
-        // First, so a log batch closed since the last call is queued for this pass.
-        if let Err(e) = self.host.send_log_batches(at, &self.publish_tools.git) {
-            eprintln!("Log batches: {e:#}");
+        // First, as what an earlier release left waiting lands through the sync engine.
+        if let Err(e) = self.host.land_what_waits() {
+            eprintln!("Log entries left waiting: {e:#}");
         }
         let now_due = std::mem::take(&mut self.host.brains_now);
         let cadences = self.host.brain_cadences().unwrap_or_else(|e| {
@@ -2344,31 +2321,11 @@ impl Actor {
                 adopted
             }
             Event::BrainPassed(repository, passed) => {
-                let reached = passed.as_ref().is_some_and(|p| p.reached);
-                let merged = match passed {
-                    Some(passed) => self.host.finish_brain_pass(passed).unwrap_or_else(|e| {
-                        eprintln!("Brain {repository}: {e:#}");
-                        false
-                    }),
-                    None => false,
-                };
+                let reached = passed.is_some_and(|p| p.reached);
                 if let Some(pace) = self.brain_paces.get_mut(&repository) {
                     pace.finish(now(), reached);
-                    // The next batch starts from the merged commit.
-                    if merged {
-                        pace.sync_now();
-                    }
                 }
                 true
-            }
-            Event::LegacyLogsRead { found, reply } => {
-                let git = &self.publish_tools.git;
-                let result = (found.and_then(|found| self.host.finish_legacy_import(found, git)))
-                    .and_then(|import| Ok(serde_json::to_value(import)?))
-                    .map_err(|e| format!("{e:#}"));
-                let imported = result.is_ok();
-                let _ = reply.try_send(result);
-                imported
             }
             Event::StorageSynced(key, passed) => {
                 if let Some(pace) = self.storage_paces.get_mut(&key) {
@@ -2846,10 +2803,7 @@ impl Actor {
                     // A thread is offered its own tools, and only those; so is a compile.
                     let session = self.host.session(&id)?;
                     if session.role == Role::Compiler {
-                        let git = self.publish_tools.git.clone();
-                        return (self.host)
-                            .compile_tool(&session, &name, &args, &git)
-                            .map(Some);
+                        return self.host.compile_tool(&session, &name, &args).map(Some);
                     }
                     if session.role.is_thread() {
                         if name == "propose_job" {
@@ -8424,7 +8378,7 @@ mod tests {
         // The actor answers another command while the server's handshake hangs.
         ask_now(&mut actor, Command::SeeJobRuns { job: key });
         assert!(started.elapsed() < HANG_LIMIT, "{:?}", started.elapsed());
-        let checked = events.recv_blocking().unwrap();
+        let checked = not_a_brain_refresh(&events);
         assert!(matches!(checked, Event::SourcesChecked(..)));
         actor.process(checked);
         let ended = actor.host.job_run(&run.id).unwrap();
@@ -8475,7 +8429,7 @@ mod tests {
         assert!(proposed.try_recv().is_err());
         ask_now(&mut actor, Command::SeeJobRuns { job: recipe.key() });
         assert!(started.elapsed() < HANG_LIMIT, "{:?}", started.elapsed());
-        let checked = events.recv_blocking().unwrap();
+        let checked = not_a_brain_refresh(&events);
         assert!(matches!(checked, Event::JobProposed { .. }));
         actor.process(checked);
         proposed.try_recv().unwrap().unwrap();
@@ -8505,7 +8459,7 @@ mod tests {
         assert_eq!((run.outcome, &run.thread_id), (RunOutcome::Running, &None));
         ask_now(&mut actor, Command::SeeJobRuns { job: key });
         assert!(started.elapsed() < HANG_LIMIT, "{:?}", started.elapsed());
-        let checked = events.recv_blocking().unwrap();
+        let checked = not_a_brain_refresh(&events);
         assert!(matches!(checked, Event::SourcesChecked(..)));
         actor.process(checked);
         let ended = actor.host.job_run(&run.id).unwrap();
@@ -9477,49 +9431,14 @@ mod tests {
         assert_eq!(report[0].agents[0].session_id, tester.id);
     }
 
-    #[test]
-    fn import_legacy_logs_reads_off_the_host_thread_and_replies_once_its_batch_is_queued() {
-        use crate::brains::tests::{GitHub, REPO, name_brain, run};
-        let home = tempfile::tempdir().unwrap();
-        let mut host = Host::open_set_up(home.path()).unwrap();
-        host.legacy_pointer = home.path().join("no-pointer");
-        let sage = host.create_space("Sage", "", "", None).unwrap().space;
-        name_brain(&mut host, &sage.id, REPO);
-        host.record_gh_login(Some("mhohlios".into()));
-        let folder = tempfile::tempdir().unwrap();
-        let github = GitHub::new(folder.path());
-        let tools = github.tools();
-        github.commit_file_on_main(
-            "second-brain/logs/calls.md",
-            "## 2026-09-02 — Retry once\n- type: decision\n- changed: retry\n",
-        );
-        assert!(run(&mut host, &tools));
-        let (mut actor, _, _) = idle_actor(host);
-        actor.publish_tools = tools;
-        let (sender, events) = async_channel::bounded(8);
-        actor.sender = sender;
-        let command = Command::ImportLegacyLogs {
-            repository: REPO.into(),
-        };
-        let (reply, replies) = async_channel::bounded(1);
-
-        assert!(actor.scan_in_background(&command, &reply).unwrap());
-        let read = events.recv_blocking().unwrap();
-        assert!(matches!(read, Event::LegacyLogsRead { .. }));
-        assert!(replies.try_recv().is_err(), "answered once queued");
-        assert!(actor.host.brain_batches(Some(REPO)).unwrap().is_empty());
-
-        assert!(actor.handle(read), "the Brains page reads its batch");
-        let import: LegacyImport =
-            serde_json::from_value(replies.recv_blocking().unwrap().unwrap()).unwrap();
-        assert_eq!((import.added, import.batches, import.done), (1, 1, false));
-        assert_eq!(actor.host.brain_batches(Some(REPO)).unwrap().len(), 1);
-
-        // A brain that cannot import is refused at once, with nothing left running.
-        actor.host.record_gh_login(None);
-        let error = actor.scan_in_background(&command, &reply).unwrap_err();
-        assert!(format!("{error:#}").contains("GitHub login"), "{error:#}");
-        assert!(events.try_recv().is_err());
+    /// The next event, past the index refreshes every Space's brain starts.
+    fn not_a_brain_refresh(events: &async_channel::Receiver<Event>) -> Event {
+        loop {
+            match events.recv_blocking().unwrap() {
+                Event::BrainPassed(..) => {}
+                event => return event,
+            }
+        }
     }
 
     #[test]

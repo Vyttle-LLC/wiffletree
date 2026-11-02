@@ -1,13 +1,15 @@
-//! Storage repositories, where Spaces' definitions and their tracker live (OpenSpec change
-//! `spaces`, stage 3). Local storage is a Git repository at `repos/local-<id>/` with no remote,
-//! committed to on every change and never pushed. GitHub storage is a clone under `repos/` that
-//! its one sync engine runs with three rule sets, inside the repository's folder (`folder`):
+//! Storage repositories, where Spaces' definitions, their tracker and their brain live (OpenSpec
+//! change `spaces`, stage 3). Local storage is a Git repository at `repos/local-<id>/` with no
+//! remote, committed to on every change and never pushed. GitHub storage is a clone under `repos/`
+//! that its one sync engine runs with five rule sets, inside the repository's folder (`folder`):
 //! Spaces, over the folders of the Spaces this Mac added and `compilers/`; boards, over their
-//! `boards/`, where the outputs of the jobs this Mac runs push without comparing; and issues
-//! (`issues_sync`), over `wiffletree-issues.yaml` and `issues/`. The store keeps each Space as
+//! `boards/`, where the outputs of the jobs this Mac runs push without comparing; issues
+//! (`issues_sync`), over `wiffletree-issues.yaml` and `issues/`; and logs and the wiki
+//! (`brain_sync`), over `second-brain/`. The store keeps each Space as
 //! the host uses it; the files are what travel. Sync's record names a file by its path in the
 //! repository; the paths here without a `Root` are relative to the folder.
 use crate::*;
+use brain_sync::{LogRules, WikiRules};
 use folder::Root;
 use issues_sync::IssueRules;
 use publish::Tools;
@@ -473,6 +475,10 @@ pub(crate) struct Input {
     pub(crate) preferred: BTreeMap<IssueId, u64>,
     /// The board folders of the jobs this Mac is the runner of.
     runs_here: Vec<String>,
+    /// The log entries waiting or held here, by their paths in the repository.
+    pub(crate) entries: Vec<String>,
+    /// A compile run's files waiting to land.
+    pub(crate) landing: Option<compile::Landing>,
 }
 
 /// A part of an `issue.md` both sides changed to different values, which this Mac keeps and
@@ -512,6 +518,10 @@ pub(crate) struct Found {
     /// The `issue.md` files whose parts were merged, and the parts that paused.
     parts_compared: Vec<String>,
     parts: Vec<PausedPart>,
+    /// What the logs rule set did with this Mac's entries.
+    entries: brain_sync::Entries,
+    /// How a compile run's landing stands.
+    landing: Option<(compile::Landing, brain_sync::Landed)>,
 }
 
 /// The output a file of a job's board folder belongs to, by its place there: its metadata
@@ -742,17 +752,19 @@ fn under(roots: &[String], path: &str) -> bool {
         && (roots.iter()).any(|root| path == root || path.starts_with(&format!("{root}/")))
 }
 
-/// A storage repository's three rule sets for one pass: its Spaces' files, their boards and
-/// issues.
+/// A storage repository's five rule sets for one pass: its Spaces' files, their boards, issues,
+/// log entries and the wiki, last, so a landing's commit is the head a pass pushes.
 pub(crate) struct RuleSets {
     root: Root,
     spaces: WholeFiles,
     boards: WholeFiles,
     issues: IssueRules,
+    logs: LogRules,
+    wiki: WikiRules,
 }
 impl RuleSets {
-    /// `retries_alone`: a runner's boards fetch and push again on their own when GitHub moves
-    /// under the push, while the others sit that try out. Only the settings pass, which never
+    /// `retries_alone`: a runner's boards, log entries and a wiki landing fetch and push again on
+    /// their own when GitHub moves under the push, while the others sit that try out. Only the settings pass, which never
     /// runs whole again, asks for it; a storage repository's own pass (`pass`) fetches,
     /// compares and pushes every rule set again instead, so issues renumber on the new head.
     pub(crate) fn new(input: Input, retries_alone: bool) -> Self {
@@ -774,21 +786,35 @@ impl RuleSets {
         boards.retries_alone = retries_alone;
         let mut issues = IssueRules::new(&input);
         issues.files.parts = Some(input.parts.clone());
+        let logs = LogRules::new(&input, retries_alone);
+        let wiki = WikiRules::new(&input, retries_alone);
         let mut rule_sets = Self {
             root,
             spaces,
             boards,
             issues,
+            logs,
+            wiki,
         };
         rule_sets.spaces.found.key = input.key;
         rule_sets
     }
-    pub(crate) fn as_mut(&mut self) -> [&mut dyn RuleSet; 3] {
-        [&mut self.spaces, &mut self.boards, &mut self.issues]
+    pub(crate) fn as_mut(&mut self) -> [&mut dyn RuleSet; 5] {
+        [
+            &mut self.spaces,
+            &mut self.boards,
+            &mut self.issues,
+            &mut self.logs,
+            &mut self.wiki,
+        ]
     }
     /// What all found, with the files `held` back from the push left out of what was
     /// committed, and a new issue held whole kept under its temporary ID.
-    pub(crate) fn found(self, mut held: Vec<scan::Held>) -> Found {
+    pub(crate) fn found(self, held: Vec<scan::Held>) -> Found {
+        let (entries_held, held): (Vec<_>, Vec<_>) =
+            held.into_iter().partition(|h| self.logs.claims(&h.path));
+        let (wiki_held, mut held): (Vec<_>, Vec<_>) =
+            held.into_iter().partition(|h| self.wiki.claims(&h.path));
         let (mut found, mut boards) = (self.spaces.found, self.boards.found);
         let mut issues = self.issues.files.found;
         issues_sync::keep_held_unnumbered(&mut issues, &mut held, &self.root);
@@ -805,6 +831,8 @@ impl RuleSets {
         found.parts = issues.parts;
         found.numbered = issues.numbered;
         found.adopted = issues.adopted;
+        found.entries = self.logs.found(entries_held);
+        found.landing = self.wiki.found(wiki_held);
         found
             .committed
             .retain(|(path, _)| !held.iter().any(|h| &h.path == path));
@@ -959,7 +987,7 @@ impl Host {
         }
     }
     /// The record key of a GitHub storage repository, or `None` for local storage.
-    fn storage_key(repository: &StorageRepository) -> Option<String> {
+    pub(crate) fn storage_key(repository: &StorageRepository) -> Option<String> {
         match repository {
             StorageRepository::Local { .. } => None,
             StorageRepository::GitHub { .. } => Some(repos::key(&repository.key())),
@@ -1046,6 +1074,11 @@ impl Host {
         }
         let key = Self::storage_key(storage);
         let tx = self.db.unchecked_transaction()?;
+        // A log row keeps naming its unlanded entry, which the Logs page finds it by.
+        tx.execute(
+            "UPDATE work_logs SET data=json_set(data,'$.path',?2||'/'||json_extract(data,'$.path')) WHERE id IN (SELECT log_id FROM entry_files WHERE repository=?1)",
+            params![key, root.name()],
+        )?;
         for mut record in unmoved {
             record.space.storage.root = root.name().into();
             tx.execute(
@@ -1053,7 +1086,13 @@ impl Host {
                 params![record.space.id.as_str(), encode(&record.space)?],
             )?;
         }
-        for table in ["sync_record", "sync_paused", "sync_held", "issue_parts"] {
+        for table in [
+            "sync_record",
+            "sync_paused",
+            "sync_held",
+            "issue_parts",
+            "entry_files",
+        ] {
             let paths: Vec<String> = (tx.prepare(&format!(
                 "SELECT DISTINCT path FROM {table} WHERE repository=?1"
             ))?)
@@ -1352,13 +1391,14 @@ impl Host {
         let head = runtime::git_output(&clone, &["rev-parse", "HEAD"])?;
         let head = head.trim();
         if Record::read(&self.db, &key)?.is_none() {
-            let all = |_: &str| true;
-            let committed = repos::files_at(&clone, head, &all)?;
-            Record::restart(&self.db, &key, head, &committed, &committed, &all)?;
+            let recorded = |path: &str| !brain_sync::in_brain(&root, path);
+            let committed = repos::files_at(&clone, head, &recorded)?;
+            Record::restart(&self.db, &key, head, &committed, &committed, &recorded)?;
         } else {
             // The settings repository's clone: its Space and tracker files start their record
             // as its head holds them, and what the record has already stays.
-            for (path, content) in repos::files_at(&clone, head, &|path| root.scanned(path))? {
+            let recorded = |path: &str| root.scanned(path) && !brain_sync::in_brain(&root, path);
+            for (path, content) in repos::files_at(&clone, head, &recorded)? {
                 self.db.execute(
                     "INSERT OR IGNORE INTO sync_record(repository,path,synced,written) VALUES (?1,?2,?3,?3)",
                     params![key, path, content],
@@ -1641,6 +1681,7 @@ impl Host {
         let prefix = self.tracker(first).ok().map(|tracker| tracker.prefix);
         let storage = first.storage.repository.key();
         let root = Root::new(&first.storage.root);
+        let landing = self.landing_of(&storage)?;
         let mut runs_here = vec![];
         for recipe in self.recipes()? {
             let space = stored.iter().find(|space| space.id == recipe.space_id);
@@ -1672,9 +1713,12 @@ impl Host {
             let (temporary, number): (String, u64) = row?;
             preferred.insert(IssueId::parse(&temporary)?, number);
         }
+        let entries = self.unlanded_entries(key)?;
         Ok(Some(Input {
             key: key.to_owned(),
             root,
+            entries,
+            landing,
             names,
             prefix,
             synced: record.synced,
@@ -1712,6 +1756,13 @@ impl Host {
         }
         Ok(sync::CADENCE_MS)
     }
+    /// The domains whose email addresses the scans of the repository `key` let through.
+    pub(crate) fn scan_domains(&self, key: &str) -> Vec<String> {
+        let space = (self.spaces().into_iter().flatten())
+            .find(|r| Self::storage_key(&r.space.storage.repository).as_deref() == Some(key));
+        (space.and_then(|record| self.tracker(&record.space).ok()))
+            .map_or_else(Vec::new, |tracker| tracker.allowed_email_domains)
+    }
     /// The pass a storage repository that syncs on its own runs next.
     pub(crate) fn storage_pass(&self, key: &str) -> Result<Option<Pass>> {
         let Some(input) = self.storage_input(key)? else {
@@ -1726,7 +1777,7 @@ impl Host {
             clone: repos::clone_folder(&self.home, &repository.name),
             repository,
             commit,
-            scanner: scanner.in_folder(input.root.clone()),
+            scanner: scanner.in_folder(input.root.clone(), self.scan_domains(key)),
             input,
             running: self.sync_passes.clone(),
         }))
@@ -1750,18 +1801,19 @@ impl Host {
             return self.finish_move(key, root);
         }
         let commit = passed.pushed.clone().unwrap_or(passed.remote);
-        let pushed = passed.pushed.is_some();
-        self.finish_storage(passed.found, pushed)?;
+        self.finish_storage(passed.found, passed.pushed.as_deref())?;
         self.db.execute(
             "UPDATE sync_record SET synced=?2 WHERE repository=?1 AND path=''",
             params![key, commit.as_bytes()],
         )?;
+        self.brains_now = true;
         Ok(())
     }
     /// Writes what a storage repository's rule sets pulled, unless the host wrote it meanwhile,
     /// records what they synced, paused and held, and takes pulled Space definitions and tracker
-    /// configs into the store. `pushed`: their commits reached GitHub.
-    pub(crate) fn finish_storage(&mut self, found: Found, pushed: bool) -> Result<()> {
+    /// configs into the store. `head`: the commit their push left on GitHub.
+    pub(crate) fn finish_storage(&mut self, found: Found, head: Option<&str>) -> Result<()> {
+        let pushed = head.is_some();
         let key = found.key.clone();
         for error in &found.failed {
             eprintln!("Syncing {key}: {error}");
@@ -1880,11 +1932,15 @@ impl Host {
         }
         for held in &found.held {
             tx.execute(
-                "INSERT INTO sync_held(repository,path,check_name,rule,reason) VALUES (?1,?2,?3,?4,?5)",
-                params![key, held.path, held.check, held.rule, held.reason],
+                "INSERT INTO sync_held(repository,path,check_name,rule,reason,line) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![key, held.path, held.check, held.rule, held.reason, held.line],
             )?;
         }
         tx.commit()?;
+        self.finish_entries(&key, found.entries, pushed)?;
+        if let Some((landing, landed)) = found.landing {
+            self.finish_landing(landing, landed, head, &clone)?;
+        }
         for (path, content) in pulled {
             self.take_pulled(storage, &path, content.as_deref())?;
         }
@@ -2013,7 +2069,7 @@ impl Host {
     /// One note per file a scan held back from a push.
     pub(crate) fn held_notes(&self) -> Result<Vec<WorkspaceNote>> {
         let rows: Vec<(String, scan::Held)> = (self.db.prepare(
-            "SELECT repository,path,check_name,rule,reason FROM sync_held ORDER BY repository,path",
+            "SELECT repository,path,check_name,rule,reason,line FROM sync_held ORDER BY repository,path",
         )?)
         .query_map([], |r| {
             let held = scan::Held {
@@ -2021,6 +2077,7 @@ impl Host {
                 check: r.get(2)?,
                 rule: r.get(3)?,
                 reason: r.get(4)?,
+                line: r.get(5)?,
             };
             Ok((r.get(0)?, held))
         })?
@@ -2038,12 +2095,14 @@ impl Host {
                     check,
                     rule,
                     reason,
+                    line,
                 } = held;
                 let repository = (storage.iter())
                     .find(|r| repos::key(&r.name) == key)
                     .map_or(key, |r| r.name.clone());
+                let at = line.map_or(String::new(), |line| format!(" on line {line}"));
                 let why = match (&rule, &reason) {
-                    (Some(rule), _) => format!("the {check} check found a possible match of its {rule} rule"),
+                    (Some(rule), _) => format!("the {check} check found a possible match of its {rule} rule{at}"),
                     (None, Some(reason)) => format!("the {check} check could not run: {reason}"),
                     (None, None) => format!("the {check} check could not run"),
                 };
@@ -2055,6 +2114,7 @@ impl Host {
                     path,
                     check,
                     rule,
+                    line,
                     text,
                 })
             })
@@ -3200,22 +3260,6 @@ repository_settings:
     }
 
     #[test]
-    fn a_spaces_brain_is_set_from_its_page_for_every_project_in_it() {
-        let (_home, mut host) = host();
-        let personal = personal(&host);
-        let brain = tempfile::tempdir().unwrap();
-        host.set_space_brain(&personal.id, brain.path().to_str().unwrap())
-            .unwrap();
-        let record = host.space(&personal.id).unwrap();
-        let path = fs::canonicalize(brain.path()).unwrap();
-        assert_eq!(record.local.brain_path.as_deref(), path.to_str());
-        assert!(matches!(
-            record.space.brain.unwrap().repository,
-            BrainRepository::Local { .. }
-        ));
-    }
-
-    #[test]
     fn a_clone_the_workspace_would_refuse_fails_the_join_before_anything_is_written() {
         let folder = tempfile::tempdir().unwrap();
         let github = shared_storage(folder.path(), Some("SAGE"));
@@ -3238,50 +3282,6 @@ repository_settings:
         assert!(
             !repos::clone_folder(home.path(), NAME).exists(),
             "the storage clone is not placed"
-        );
-    }
-
-    #[test]
-    fn a_github_brain_left_missing_at_join_is_given_its_clone_on_the_space_page() {
-        let folder = tempfile::tempdir().unwrap();
-        let github = shared_storage(folder.path(), Some("SAGE"));
-        let mut sage = read_space(
-            sage("").as_bytes(),
-            SpaceStorage {
-                repository: super::github(NAME),
-                folder: "sage".into(),
-                root: String::new(),
-            },
-        )
-        .unwrap();
-        sage.brain = Some(SpaceBrain {
-            repository: BrainRepository::GitHub {
-                owner: "Sage-Social".into(),
-                name: "sagehaven-docs".into(),
-                extra: Extra::new(),
-            },
-            folder: "second-brain".into(),
-            extra: Extra::new(),
-        });
-        github.commit("spaces/sage/space.yaml", space_yaml(&sage).unwrap());
-        let (_home, mut host) = host();
-        let id = join_sage(&mut host, &github).unwrap()[0].space.id.clone();
-        assert_eq!(
-            host.space(&id).unwrap().local.brain_path,
-            None,
-            "left missing"
-        );
-        let other = clone_of(&folder.path().join("other"), "Sage-Social/api");
-        let error = host.set_space_brain(&id, &other).unwrap_err();
-        assert!(format!("{error:#}").contains("is not a clone of Sage-Social/sagehaven-docs"));
-        let docs = clone_of(&folder.path().join("docs"), "Sage-Social/sagehaven-docs");
-        host.set_space_brain(&id, &docs).unwrap();
-        let record = host.space(&id).unwrap();
-        let path = fs::canonicalize(&docs).unwrap();
-        assert_eq!(record.local.brain_path.as_deref(), path.to_str());
-        assert_eq!(
-            record.space.brain, sage.brain,
-            "the brain stays the GitHub one"
         );
     }
 

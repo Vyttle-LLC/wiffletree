@@ -1,10 +1,11 @@
-//! Brain compile (OpenSpec change `brain-compile`): one built-in job per brain this host
-//! compiles, on the scheduler of `jobs.rs`. A run finds the entries pending since the cursor in
-//! `notes/INDEX.md`, verifies their refs off the host thread, and with any pending starts one
-//! session owned by the brain, on the Brain compiler row, in a worktree of the brain checkout.
-//! The session edits only the wiki and has only `queue_conflict` and `finish_compile`. The host
-//! checks its changes, writes the cursor and `reconcile-queue.md`, and hands them to the brain's
-//! batch flow as a compile batch: nothing reaches `main` but through its PR and the brain gate.
+//! Brain compile (OpenSpec change `one-space-repository`, decision 2): one built-in job per wiki
+//! on this Mac, on the scheduler of `jobs.rs`, which until claims arrive runs only on Run now. A
+//! run finds the entries pending by the cursor in `notes/INDEX.md`, verifies their refs off the
+//! host thread, and with any pending starts one session owned by the wiki, on the Brain compiler
+//! row, in a worktree of the repository's clone at the commit it read. The session edits only the
+//! wiki and has only `queue_conflict` and `finish_compile`. The host checks its changes, writes
+//! the cursor and `reconcile-queue.md`, and hands the run's exact files to the wiki rule set
+//! (`brain_sync`), which lands them on the current head, scanned, all or nothing.
 //! Nothing here logs an entry's or a note's text; records and errors name ids and paths only.
 use crate::*;
 use brain_index::{
@@ -14,7 +15,7 @@ use brain_index::{
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use verify_refs::{Checked, Clones};
-use workspace_core::job::{JobKey, Schedule};
+use workspace_core::job::JobKey;
 use workspace_core::{
     BrainCompileState, BrainConflict, CompileOutcome, CompileRun, CompileRunPage, CompileTrigger,
     ConflictCard, ConflictState, Ruling,
@@ -34,9 +35,9 @@ pub(crate) const TIMED_OUT: &str = "The compile ran for 30 minutes and was stopp
 /// A built-in compile job's name before its brain.
 const JOB: &str = "brain-compile:";
 const INDEX: &str = "notes/INDEX.md";
-const STATUS: &str = "STATUS.md";
-const QUEUE: &str = "reconcile-queue.md";
-const NOTES: &str = "notes/";
+pub(crate) const STATUS: &str = "STATUS.md";
+pub(crate) const QUEUE: &str = "reconcile-queue.md";
+pub(crate) const NOTES: &str = "notes/";
 const CONFLICT_MARKER: &str = "<!-- conflict:";
 /// Under the data folder: compile worktrees and the input file of each run.
 const WORKTREES: &str = "compile-worktrees";
@@ -127,9 +128,9 @@ pub(crate) fn write_cursor(index: &str, cursor: &Cursor) -> String {
 }
 
 /// Whether `main`'s cursor has compiled everything `run`'s did: the same `compiled-through`
-/// with at least its `compiled-after` ids, or a later one, as another compiler may have moved
-/// it on since.
-fn at_or_past(checkout: &Path, main: &Cursor, run: &Cursor) -> bool {
+/// with at least its `compiled-after` ids, or a later one, as another Mac may have moved it on
+/// since.
+pub(crate) fn at_or_past(checkout: &Path, main: &Cursor, run: &Cursor) -> bool {
     match (&run.through, &main.through) {
         (Some(run_through), Some(main_through)) if run_through == main_through => {
             run.after.iter().all(|id| main.after.contains(id))
@@ -164,6 +165,40 @@ fn is_entry_path(path: &str) -> bool {
     matches!(parts.as_slice(), ["logs", _, year, month, file]
         if year.len() == 4 && month.len() == 2 && file.ends_with(".md")
             && year.bytes().chain(month.bytes()).all(|b| b.is_ascii_digit()))
+}
+
+/// The id in an entry file's name, `<date>-<id>.md`.
+fn id_in_name(path: &str) -> Option<&str> {
+    let name = path.rsplit('/').next()?.strip_suffix(".md")?;
+    name.get(11..).filter(|id| !id.is_empty())
+}
+
+/// The ids of the entries `commit`'s tree holds, in whatever layout it holds them, so a cursor
+/// from before a move into the folder finds its entries by id.
+pub(crate) fn entry_ids_at(checkout: &Path, commit: &str) -> Result<HashSet<String>> {
+    let listed = runtime::git_bytes_large(
+        checkout,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "ls-tree",
+            "-r",
+            "--name-only",
+            commit,
+        ],
+        b"",
+    )?;
+    let listed = String::from_utf8_lossy(&listed);
+    // `<layout>/logs/<repo>/YYYY/MM/<file>.md`: the last five parts, in any layout.
+    let in_logs = |path: &&str| {
+        let parts: Vec<&str> = path.split('/').collect();
+        parts.len() >= 5 && is_entry_path(&parts[parts.len() - 5..].join("/"))
+    };
+    Ok((listed.lines())
+        .filter(in_logs)
+        .filter_map(id_in_name)
+        .map(str::to_owned)
+        .collect())
 }
 
 fn entry(path: &str, text: &str) -> PendingEntry {
@@ -219,60 +254,46 @@ pub(crate) fn file_at(checkout: &Path, commit: &str, path: &str) -> String {
     .unwrap_or_default()
 }
 
-/// The entry files added between the cursor's commit and `head`, or every entry file at
-/// `head` without one, relative to the brain folder.
+/// The entry files at `head` not at the cursor's commit, by id, or every entry file at `head`
+/// without one, relative to the brain folder.
 fn entry_paths(
     checkout: &Path,
     head: &str,
     prefix: &str,
     through: Option<&str>,
 ) -> Result<Vec<String>> {
-    let listed = match through {
+    let compiled = match through {
         Some(through) => {
             ensure!(
                 publish::is_ancestor(checkout, through, head),
                 "The cursor's commit {through} is not on main"
             );
-            runtime::git_bytes_large(
-                checkout,
-                &[
-                    "-c",
-                    "core.quotePath=false",
-                    "log",
-                    "--diff-filter=A",
-                    "--no-renames",
-                    "--name-only",
-                    "--format=",
-                    &format!("{through}..{head}"),
-                    "--",
-                    &format!("{prefix}logs"),
-                ],
-                b"",
-            )?
+            entry_ids_at(checkout, through)?
         }
-        None => runtime::git_bytes_large(
-            checkout,
-            &[
-                "-c",
-                "core.quotePath=false",
-                "ls-tree",
-                "-r",
-                "--name-only",
-                head,
-                "--",
-                &format!("{prefix}logs"),
-            ],
-            b"",
-        )?,
+        None => HashSet::new(),
     };
+    let listed = runtime::git_bytes_large(
+        checkout,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "ls-tree",
+            "-r",
+            "--name-only",
+            head,
+            "--",
+            &format!("{prefix}logs"),
+        ],
+        b"",
+    )?;
     let listed = String::from_utf8_lossy(&listed);
     let mut paths: Vec<String> = (listed.lines())
         .filter_map(|line| line.strip_prefix(prefix))
         .filter(|path| is_entry_path(path))
+        .filter(|path| !id_in_name(path).is_some_and(|id| compiled.contains(id)))
         .map(str::to_owned)
         .collect();
     paths.sort();
-    paths.dedup();
     Ok(paths)
 }
 
@@ -282,8 +303,6 @@ pub(crate) struct Prepare {
     pub(crate) checkout: PathBuf,
     pub(crate) head: String,
     pub(crate) brain_dir: String,
-    /// The entries the legacy import recorded as compiled, for a brain with no cursor yet.
-    pub(crate) legacy_compiled: HashSet<String>,
     pub(crate) clones: Clones,
 }
 
@@ -299,7 +318,7 @@ pub(crate) struct Gathered {
     pub(crate) pending: usize,
     pub(crate) entries: Vec<PendingEntry>,
     pub(crate) checked: Vec<Checked>,
-    /// The cursor the run's compile PR writes.
+    /// The cursor the run's commit writes.
     pub(crate) cursor: Cursor,
     pub(crate) status: String,
     pub(crate) index: String,
@@ -322,13 +341,9 @@ impl Prepare {
         let cursor = read_cursor(&index);
         let paths = entry_paths(checkout, head, &prefix, cursor.through.as_deref())?;
         let texts = read_at(checkout, head, &prefix, &paths)?;
-        let compiled: HashSet<&String> = match &cursor.through {
-            Some(_) => cursor.after.iter().collect(),
-            None => cursor.after.iter().chain(&self.legacy_compiled).collect(),
-        };
         let mut pending: Vec<PendingEntry> = (paths.iter().zip(&texts))
             .map(|(path, text)| entry(path, text))
-            .filter(|entry| !compiled.contains(&entry.id))
+            .filter(|entry| !cursor.after.contains(&entry.id))
             .collect();
         pending.sort_by(|a, b| a.id.cmp(&b.id));
         let total = pending.len();
@@ -476,6 +491,25 @@ struct Work {
     /// Each entry's verification state's name, in `entries`' order.
     verification: Vec<String>,
     cursor: Cursor,
+    /// The files its session finished, waiting to land.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    landing: Option<Landing>,
+}
+
+/// A finished run's exact files, which wait in its worktree for the wiki rule set to land them.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct Landing {
+    pub(crate) run: String,
+    pub(crate) worktree: PathBuf,
+    /// The commit it read, which its cursor is computed from.
+    pub(crate) head: String,
+    pub(crate) cursor: Cursor,
+    /// Its files' paths in the repository.
+    pub(crate) files: Vec<String>,
+    /// `notes/INDEX.md`'s path in the repository.
+    pub(crate) index: String,
+    /// How many entries it compiled.
+    pub(crate) entries: usize,
 }
 
 /// A conflict the session queued.
@@ -715,112 +749,37 @@ fn compile_key(repository: &str) -> JobKey {
     JobKey::built_in(&format!("{JOB}{}", repository.to_ascii_lowercase()))
 }
 
-/// The scheduler's `run` for a brain's compile job.
+/// The scheduler's `run` for a wiki's compile job.
 fn run_built_in(host: &mut Host, repository: &str, start: jobs::BuiltInStart) -> Result<String> {
     let trigger = match start {
         jobs::BuiltInStart::Due { catch_up: 0 } => CompileTrigger::Scheduled,
         jobs::BuiltInStart::Due { .. } => CompileTrigger::CatchUp,
         jobs::BuiltInStart::RunNow => CompileTrigger::RunNow,
-        jobs::BuiltInStart::Triggered => CompileTrigger::Ruling,
     };
-    let rulings = host.new_rulings(repository)?;
     let Some(run) = host.start_compile(repository, trigger)? else {
         return Ok("a compile run is in progress".into());
     };
-    // A run that starts compiles every ruling pending now, whatever started it; one that
-    // waits leaves them to trigger the next run that can start.
-    if run.outcome == CompileOutcome::Running {
-        for ruling in rulings {
-            host.db.execute(
-                "INSERT OR IGNORE INTO ruling_triggers VALUES (?1,?2)",
-                params![repository, ruling],
-            )?;
-        }
-    }
     Ok(match run.reason.is_empty() {
         true => format!("compile run {} started", run.id),
         false => run.reason,
     })
 }
 
-/// The scheduler's trigger: a fetched `main` added a ruling entry no run has yet started for,
-/// and a run can start now. While one runs or a compile PR is open it waits, unconsumed.
-fn ruling_merged(host: &Host, repository: &str) -> bool {
-    host.new_rulings(repository)
-        .is_ok_and(|rulings| !rulings.is_empty())
-        && host
-            .compile_waits(repository)
-            .is_ok_and(|waits| waits.is_none())
-}
-
-/// The daily schedule a brain's `compile` asks for, or why it can't be scheduled.
-pub(crate) fn compile_schedule(compile: &BrainCompile) -> Result<Schedule> {
-    let at = compile.at.split_once(':').and_then(|(hour, minute)| {
-        let (hour, minute): (u32, u32) = (hour.parse().ok()?, minute.parse().ok()?);
-        (hour < 24 && minute < 60).then_some((hour, minute))
-    });
-    let (hour, minute) =
-        at.with_context(|| format!("{:?} is not a time; use HH:MM, such as 06:00", compile.at))?;
-    jobs::timezone(&compile.timezone)?;
-    Ok(Schedule {
-        cron: format!("{minute} {hour} * * *"),
-        timezone: compile.timezone.clone(),
-    })
-}
-
 impl Host {
-    /// Registers one built-in compile job per brain whose config names this host as compiler,
-    /// due at the config's time in its timezone, and drops the others'. A changed time starts
-    /// its due times afresh.
+    /// Registers one built-in compile job per wiki on this Mac, which only Run now starts.
     pub(crate) fn refresh_compile_jobs(&mut self) -> Result<()> {
-        let mut wanted: Vec<jobs::BuiltIn> = vec![];
-        for brain in self.brains()? {
-            if !self.compiles_here(&brain)? {
-                continue;
-            }
-            let schedule = (brain.config.config().and_then(|c| c.compile.as_ref()))
-                .and_then(|compile| compile_schedule(compile).ok());
-            wanted.push(jobs::BuiltIn {
+        let wanted: Vec<jobs::BuiltIn> = (self.brains()?.into_iter())
+            .map(|brain| jobs::BuiltIn {
                 name: format!("{JOB}{}", brain.repository.to_ascii_lowercase()),
-                subject: brain.repository.clone(),
-                owner: format!("the {} brain", brain.repository),
-                schedule,
-                triggered: ruling_merged,
+                owner: format!("the wiki in {}", brain.repository),
+                subject: brain.repository,
+                schedule: None,
                 run: run_built_in,
-            });
-        }
-        let compile_job = |b: &jobs::BuiltIn| b.name.starts_with(JOB);
-        for old in self.built_ins.iter().filter(|b| compile_job(b)) {
-            let kept = wanted.iter().find(|w| w.name == old.name);
-            if kept.is_none_or(|w| w.schedule != old.schedule) {
-                self.db
-                    .execute("DELETE FROM job_due WHERE key=?1", [old.key().as_str()])?;
-            }
-        }
-        self.built_ins.retain(|b| !compile_job(b));
+            })
+            .collect();
+        self.built_ins.retain(|b| !b.name.starts_with(JOB));
         self.built_ins.extend(wanted);
         Ok(())
-    }
-
-    /// Whether this host is the brain's compiler: its config on `main` names this host's id.
-    pub(crate) fn compiles_here(&self, brain: &Brain) -> Result<bool> {
-        let named = (brain.config.config())
-            .and_then(|config| config.compiler.as_ref())
-            .map(|compiler| compiler.host_id.clone());
-        Ok(!brain.spaces.is_empty() && named == Some(self.host_id()?))
-    }
-
-    /// The ruling entries pending on `main` that no run has started for.
-    fn new_rulings(&self, repository: &str) -> Result<Vec<String>> {
-        let started: HashSet<String> = (self
-            .db
-            .prepare("SELECT entry_id FROM ruling_triggers WHERE repository=?1")?)
-        .query_map([repository], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-        Ok((self.brain_rulings(repository)?.into_iter())
-            .filter(|ruling| ruling.pending && !started.contains(&ruling.entry_id))
-            .map(|ruling| ruling.entry_id)
-            .collect())
     }
 
     fn compile_run(&self, id: &str) -> Result<CompileRun> {
@@ -862,102 +821,22 @@ impl Host {
         )?)
     }
 
-    /// The open compile batch of the brain, which holds every new run back until it merges or
-    /// the human discards it.
-    fn open_compile_batch(&self, repository: &str) -> Result<Option<BrainBatch>> {
-        Ok((self.brain_batches(Some(repository))?.into_iter())
-            .find(|b| b.kind == BrainBatchKind::Compile && !b.is_finished()))
+    /// The files of the repository's run waiting to land.
+    pub(crate) fn landing_of(&self, repository: &str) -> Result<Option<Landing>> {
+        Ok(match self.running_compile(repository)? {
+            Some(run) => self.compile_work(&run.id).ok().and_then(|w| w.landing),
+            None => None,
+        })
     }
 
-    /// The entries the legacy import recorded as compiled in the brain.
-    pub(crate) fn legacy_compiled(&self, repository: &str) -> Result<HashSet<String>> {
-        Ok((self
-            .db
-            .prepare("SELECT entry_id FROM legacy_compiled WHERE brain=?1")?)
-        .query_map([repository], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?)
-    }
-
-    /// Why a run cannot start now: one is running, a compile PR is open, or the last compile PR
-    /// merged but `main` here does not hold its cursor yet, so a run would compile its entries
-    /// again.
-    fn compile_waits(&self, repository: &str) -> Result<Option<String>> {
-        if self.running_compile(repository)?.is_some() {
-            return Ok(Some("A compile run is in progress".into()));
-        }
-        if let Some(batch) = self.open_compile_batch(repository)? {
-            return Ok(Some(match &batch.pull_request {
-                Some(pr) => format!("Waiting for PR #{}", pr.number),
-                None => "Waiting for the compile batch to open its PR".into(),
-            }));
-        }
-        let last: Option<(String, Option<String>)> = self
-            .db
-            .query_row(
-                "SELECT json_extract(data,'$.batch_id'),work FROM compile_runs WHERE repository=?1 AND json_extract(data,'$.batch_id') IS NOT NULL ORDER BY started_at DESC LIMIT 1",
-                [repository],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let Some((batch, Some(work))) = last else {
-            return Ok(None);
-        };
-        let batch = self.brain_batch(&batch)?;
-        let work: Work = serde_json::from_str(&work)?;
-        let brain = self.brain(repository)?;
-        if batch.stage != BrainStage::Merged {
-            return Ok(None);
-        }
-        let index = format!("{}/{INDEX}", work.brain_dir);
-        let checkout = Path::new(&brain.checkout);
-        let fetched = (brain.head.as_deref()).is_some_and(|head| {
-            let on_main = read_cursor(&file_at(checkout, head, &index));
-            at_or_past(checkout, &on_main, &work.cursor)
-        });
-        Ok((!fetched).then(|| {
-            let number = batch
-                .pull_request
-                .map_or(String::new(), |pr| format!(" #{}", pr.number));
-            format!("Waiting for main to be fetched after compile PR{number} merged")
-        }))
-    }
-
-    /// The wiki files `main` changed since `from` that a run would write, which it may not
-    /// overwrite with what it compiled from `from`.
-    fn changed_meanwhile(
-        &self,
-        repository: &str,
-        from: &str,
-        files: &[String],
-    ) -> Result<Vec<String>> {
-        let brain = self.brain(repository)?;
-        let Some(head) = brain.head.filter(|head| head != from) else {
-            return Ok(vec![]);
-        };
-        let mut args = vec![
-            "diff",
-            "--name-only",
-            "--no-renames",
-            from,
-            head.as_str(),
-            "--",
-        ];
-        args.extend(files.iter().map(String::as_str));
-        let changed = runtime::git_output(Path::new(&brain.checkout), &args)?;
-        Ok(changed.lines().map(str::to_owned).collect())
-    }
-
-    /// Run now: starts a run through the scheduler, or says why it waits.
+    /// Run now: starts a run through the scheduler, or says why it waits. Two Macs may both
+    /// press it, and the cursor on `main` stops the second landing.
     pub fn run_brain_compile(&mut self, repository: &str) -> Result<CompileRun> {
         let brain = self.brain(repository)?;
         ensure!(
-            self.compiles_here(&brain)?,
-            "This Mac does not compile {}: its config names another compiler",
-            brain.repository
+            self.running_compile(&brain.repository)?.is_none(),
+            "A compile run is in progress"
         );
-        if let Some(why) = self.compile_waits(&brain.repository)? {
-            bail!("{why}");
-        }
         self.refresh_compile_jobs()?;
         self.run_job_now(&compile_key(&brain.repository))?;
         (self
@@ -968,18 +847,14 @@ impl Host {
         .context("The compile run was not recorded")
     }
 
-    /// Records a run of the brain started by `trigger`: waiting while a compile PR is open,
-    /// else running while its preparation is queued. `None` while another run is in progress.
+    /// Records a run of the wiki started by `trigger`, running while its preparation is queued.
+    /// `None` while another run is in progress.
     pub(crate) fn start_compile(
         &mut self,
         repository: &str,
         trigger: CompileTrigger,
     ) -> Result<Option<CompileRun>> {
         let brain = self.brain(repository)?;
-        ensure!(
-            self.compiles_here(&brain)?,
-            "This Mac does not compile {repository}"
-        );
         if self.running_compile(&brain.repository)?.is_some() {
             return Ok(None);
         }
@@ -998,38 +873,24 @@ impl Host {
             outcome: CompileOutcome::Running,
             reason: String::new(),
             conflicts: 0,
-            batch_id: None,
-            pull_request: None,
-            merged: false,
+            commit: None,
             tokens: 0,
             cost: None,
         };
-        let waits = self.compile_waits(&brain.repository)?;
-        let head = brain.head.clone();
-        match (waits, head) {
-            (Some(why), _) => {
-                run.outcome = CompileOutcome::Waiting;
-                run.reason = why;
-                run.ended_at = Some(at);
-            }
-            (None, None) => {
+        let (storage, root) = self.brain_home(&brain)?;
+        match self.brain_head(&storage)? {
+            None => {
                 run.outcome = CompileOutcome::Failed;
-                run.reason = "The brain has not been fetched yet".into();
+                run.reason = "The repository has not been synced yet".into();
                 run.ended_at = Some(at);
             }
-            (None, Some(head)) => {
-                let brain_dir = (brain.config.config().map(|c| c.brain_dir.clone()))
-                    .unwrap_or_else(|| SpaceBrain::DEFAULT_FOLDER.into());
-                let legacy_compiled = self.legacy_compiled(&brain.repository)?;
-                self.compile_preparations.push(Prepare {
-                    run_id: run.id.clone(),
-                    checkout: PathBuf::from(&brain.checkout),
-                    head,
-                    brain_dir,
-                    legacy_compiled,
-                    clones: Clones::of(&self.repositories()?),
-                });
-            }
+            Some(head) => self.compile_preparations.push(Prepare {
+                run_id: run.id.clone(),
+                checkout: self.storage_folder(&storage),
+                head,
+                brain_dir: brain_sync::brain_dir(&root),
+                clones: Clones::of(&self.repositories()?),
+            }),
         }
         self.save_compile_run(&run)?;
         Ok(Some(run))
@@ -1050,9 +911,10 @@ impl Host {
         run.ended_at = Some(now());
         self.save_compile_run(run)?;
         if let Ok(work) = self.compile_work(&run.id) {
-            let checkout = PathBuf::from(self.brain(&run.repository)?.checkout);
             let _ = fs::remove_dir_all(&work.worktree);
-            let _ = runtime::git_output(&checkout, &["worktree", "prune"]);
+            if let Ok(clone) = (self.brain(&run.repository)).and_then(|b| self.brain_clone(&b)) {
+                let _ = runtime::git_output(&clone, &["worktree", "prune"]);
+            }
         }
         let _ = fs::remove_file(self.home.join(INPUTS).join(format!("{}.md", run.id)));
         Ok(())
@@ -1086,7 +948,8 @@ impl Host {
             }
         };
         let brain = self.brain(&run.repository)?;
-        let checkout = PathBuf::from(&brain.checkout);
+        let (storage, root) = self.brain_home(&brain)?;
+        let checkout = self.storage_folder(&storage);
         let worktree = self.home.join(WORKTREES).join(&run.id);
         fs::create_dir_all(self.home.join(WORKTREES))?;
         let head = gathered.head.clone();
@@ -1099,8 +962,7 @@ impl Host {
         ) {
             return self.end_compile(&mut run, CompileOutcome::Failed, format!("{error:#}"));
         }
-        let brain_dir = (brain.config.config().map(|c| c.brain_dir.clone()))
-            .unwrap_or_else(|| SpaceBrain::DEFAULT_FOLDER.into());
+        let brain_dir = brain_sync::brain_dir(&root);
         let input = self.home.join(INPUTS).join(format!("{}.md", run.id));
         fs::create_dir_all(self.home.join(INPUTS))?;
         fs::write(&input, input_text(&run.repository, &gathered))?;
@@ -1113,6 +975,7 @@ impl Host {
                 .collect(),
             entries: gathered.entries,
             cursor: gathered.cursor,
+            landing: None,
         };
         let session = Session {
             id: new_id(),
@@ -1127,7 +990,7 @@ impl Host {
             owner: Some(SessionOwner::Brain(run.repository.clone())),
         };
         let first = format!(
-            "Compile run {} of the brain {}. Your working folder is a worktree of the brain at {head}, and the brain folder is `{brain_dir}/`. First read your input, {}, whole: it holds the {} pending entries with their verification, STATUS, INDEX and the notes they name. Then follow the compile procedure and end with finish_compile.",
+            "Compile run {} of the wiki in {}. Your working folder is a worktree of the repository at {head}, and the brain folder is `{brain_dir}/`. First read your input, {}, whole: it holds the {} pending entries with their verification, STATUS, INDEX and the notes they name. Then follow the compile procedure and end with finish_compile.",
             run.id,
             run.repository,
             input.display(),
@@ -1199,7 +1062,6 @@ impl Host {
         session: &Session,
         name: &str,
         args: &Value,
-        git: &publish::GitTool,
     ) -> Result<Value> {
         ensure!(
             session.role == Role::Compiler,
@@ -1277,12 +1139,16 @@ impl Host {
             "finish_compile" => {
                 service::only_arguments(name, args, &["summary"])?;
                 string("summary", 1000)?;
-                match self.finish_compile(&mut run, &work, git) {
+                // A run that already finished waits to land, and stays as it is.
+                if work.landing.is_some() {
+                    return Ok(json!({"finished": true, "conflicts": run.conflicts}));
+                }
+                match self.finish_compile(&mut run, work) {
                     Ok(()) => Ok(json!({"finished": true, "conflicts": run.conflicts})),
                     Err(error) => {
                         let reason = format!("{error:#}");
                         self.end_compile(&mut run, CompileOutcome::Failed, reason.clone())?;
-                        bail!("The run failed and nothing was pushed: {reason}")
+                        bail!("The run failed and nothing landed: {reason}")
                     }
                 }
             }
@@ -1290,14 +1156,10 @@ impl Host {
         }
     }
 
-    /// Checks the session's changes, writes the cursor and the conflict queue, and queues the
-    /// compile batch, which the brain's batch flow pushes and opens a PR for.
-    fn finish_compile(
-        &mut self,
-        run: &mut CompileRun,
-        work: &Work,
-        git: &publish::GitTool,
-    ) -> Result<()> {
+    /// Checks the session's changes, writes the cursor and the conflict queue into its worktree,
+    /// and hands the run's exact files to the wiki rule set; a local repository commits them at
+    /// once.
+    fn finish_compile(&mut self, run: &mut CompileRun, mut work: Work) -> Result<()> {
         let changed = check_changes(&work.worktree, &work.brain_dir)?;
         let brain = work.worktree.join(&work.brain_dir);
         let queued: Vec<Queued> = (self
@@ -1322,44 +1184,85 @@ impl Host {
         let queue = queue_text(&existing, &ruled, &blocks);
         let index = fs::read_to_string(brain.join(INDEX)).unwrap_or_default();
         let index = write_cursor(&index, &work.cursor);
-        let mut files: Vec<(String, Vec<u8>)> = (changed.iter())
+        shared::write_atomically(&brain.join(INDEX), index.as_bytes())?;
+        let in_repository = |path: &str| format!("{}/{path}", work.brain_dir);
+        let mut files: Vec<String> = (changed.iter())
             .filter(|path| path.as_str() != INDEX)
-            .map(|path| {
-                Ok((
-                    format!("{}/{path}", work.brain_dir),
-                    fs::read(brain.join(path))?,
-                ))
-            })
-            .collect::<Result<_>>()?;
-        files.push((format!("{}/{INDEX}", work.brain_dir), index.into_bytes()));
+            .map(|path| in_repository(path))
+            .collect();
+        files.push(in_repository(INDEX));
         if queue != existing {
-            files.push((format!("{}/{QUEUE}", work.brain_dir), queue.into_bytes()));
+            shared::write_atomically(&brain.join(QUEUE), queue.as_bytes())?;
+            files.push(in_repository(QUEUE));
         }
-        // Whole files compiled from the run's head would undo what `main` changed in them since.
-        let paths: Vec<String> = files.iter().map(|(path, _)| path.clone()).collect();
-        let moved = self.changed_meanwhile(&run.repository, &work.head, &paths)?;
-        ensure!(
-            moved.is_empty(),
-            "main changed {} while the run worked, so nothing was pushed; the next run compiles again",
-            moved.join(", ")
-        );
-        let title = format!("Compile: {} entries", work.entries.len());
-        let batch = self.queue_brain_batch(
-            &run.repository,
-            BrainBatchKind::Compile,
-            BrainSource::BrainsPage,
-            &title,
-            &files,
-            git,
-        )?;
+        let landing = Landing {
+            run: run.id.clone(),
+            worktree: work.worktree.clone(),
+            head: work.head.clone(),
+            cursor: work.cursor.clone(),
+            index: in_repository(INDEX),
+            entries: work.entries.len(),
+            files,
+        };
+        work.landing = Some(landing.clone());
         run.conflicts = queued.len();
-        run.batch_id = Some(batch.id);
-        let reason = format!(
+        run.reason = format!(
             "{} entries compiled · {} conflicts queued",
             work.entries.len(),
             queued.len()
         );
-        self.end_compile(run, CompileOutcome::PrOpened, reason)
+        self.db.execute(
+            "UPDATE compile_runs SET work=?2,data=?3 WHERE id=?1",
+            params![run.id, serde_json::to_string(&work)?, encode(&*run)?],
+        )?;
+        let brain = self.brain(&run.repository)?;
+        let (storage, _) = self.brain_home(&brain)?;
+        if let Some(key) = Self::storage_key(&storage) {
+            self.issues_written.borrow_mut().insert(key);
+            return Ok(());
+        }
+        self.land_locally(&landing, &self.storage_folder(&storage))
+    }
+
+    /// Lands a run in a local repository, which has no pass to go through.
+    fn land_locally(&mut self, landing: &Landing, clone: &Path) -> Result<()> {
+        let head = runtime::git_output(clone, &["rev-parse", "HEAD"])?;
+        match landing.verdict(clone, head.trim())? {
+            brain_sync::Verdict::Elsewhere => {
+                let reason = "Another run compiled these entries first, so nothing landed";
+                let outcome = CompileOutcome::CompiledElsewhere;
+                self.end_landing(landing, outcome, Some(reason.into()), None)
+            }
+            brain_sync::Verdict::Land(files) => {
+                for (path, content) in &files {
+                    shared::write_atomically(&clone.join(path), content)?;
+                }
+                let paths: Vec<&str> = files.iter().map(|(path, _)| path.as_str()).collect();
+                let message = format!("Compiled {} entries", landing.entries);
+                storage::commit_local(clone, &paths, &message)?;
+                let commit = runtime::git_output(clone, &["rev-parse", "HEAD"])?;
+                self.brains_now = true;
+                let outcome = CompileOutcome::Landed;
+                self.end_landing(landing, outcome, None, Some(commit.trim()))
+            }
+        }
+    }
+
+    /// Ends a run whose files reached their landing, naming its commit when it made one.
+    pub(crate) fn end_landing(
+        &mut self,
+        landing: &Landing,
+        outcome: CompileOutcome,
+        reason: Option<String>,
+        commit: Option<&str>,
+    ) -> Result<()> {
+        let mut run = self.compile_run(&landing.run)?;
+        if run.outcome != CompileOutcome::Running {
+            return Ok(());
+        }
+        run.commit = commit.map(str::to_owned);
+        let reason = reason.unwrap_or_else(|| run.reason.clone());
+        self.end_compile(&mut run, outcome, reason)
     }
 
     /// A compile session's turn ended: a run it did not finish fails, or times out when its
@@ -1373,6 +1276,13 @@ impl Host {
         let Ok(mut run) = self.session_compile(session) else {
             return Ok(());
         };
+        // A finished run's turn ends before its files land.
+        if self
+            .compile_work(&run.id)
+            .is_ok_and(|w| w.landing.is_some())
+        {
+            return Ok(());
+        }
         let (outcome, reason) = match (stopped, error) {
             (Some(TIMED_OUT), _) => (CompileOutcome::TimedOut, TIMED_OUT.to_owned()),
             (Some(reason), _) => (CompileOutcome::Failed, reason.to_owned()),
@@ -1400,7 +1310,7 @@ impl Host {
         Ok(())
     }
 
-    /// A page of the brain's runs, newest first, each with its PR and its session's usage.
+    /// A page of the wiki's runs, newest first, each with its session's usage.
     pub fn brain_compile_runs(
         &self,
         repository: &str,
@@ -1420,14 +1330,6 @@ impl Host {
         .collect::<rusqlite::Result<_>>()?;
         let mut runs = vec![];
         for (mut run, session) in rows {
-            if let Some(batch) = run
-                .batch_id
-                .as_deref()
-                .and_then(|id| self.brain_batch(id).ok())
-            {
-                run.pull_request = batch.pull_request.map(|pr| pr.number);
-                run.merged = batch.stage == BrainStage::Merged;
-            }
             if let Some(session) = session {
                 (run.tokens, run.cost) = self.session_usage(&session)?;
             }
@@ -1469,26 +1371,14 @@ impl Host {
         Ok((tokens, cost))
     }
 
-    /// The compile of each brain this host compiles, for the Brains page.
+    /// The compile of each wiki on this Mac, for the Brains page.
     pub(crate) fn brain_compile_states(&self) -> Result<Vec<BrainCompileState>> {
         let needs_model = self.model_selection()?.row(&Job::Compiler).is_none();
         let mut states = vec![];
         for brain in self.brains()? {
-            if !self.compiles_here(&brain)? {
-                continue;
-            }
-            let key = compile_key(&brain.repository);
-            let next_at: Option<i64> = self
-                .db
-                .query_row(
-                    "SELECT next_at FROM job_due WHERE key=?1",
-                    [key.as_str()],
-                    |r| r.get(0),
-                )
-                .optional()?;
             let pending = (self.brain_status(&brain.repository).ok())
                 .map_or(0, |status| status.pending_entries);
-            let waits = self.compile_waits(&brain.repository)?;
+            let running = self.running_compile(&brain.repository)?.is_some();
             states.push(BrainCompileState {
                 last_run: self
                     .brain_compile_runs(&brain.repository, 0, 1)?
@@ -1496,25 +1386,21 @@ impl Host {
                     .into_iter()
                     .next(),
                 repository: brain.repository,
-                next_at,
                 pending,
-                run_now_waits: waits,
+                run_now_waits: running.then(|| "A compile run is in progress".into()),
                 needs_model,
             });
         }
         Ok(states)
     }
 
-    /// Every open conflict of the brains this Mac's Spaces name, as cards for the Inbox of each
-    /// project whose Space names the brain and whose repositories include the claim's, or for
-    /// the Brains page when none does. A deferred card hides until the next compile.
+    /// Every open conflict of this Mac's wikis, as cards for the Inbox of each project in a Space
+    /// using the folder whose repositories include the claim's, or for the Brains page when none
+    /// does. A deferred card hides until the next compile.
     pub(crate) fn conflict_cards(&self) -> Result<Vec<ConflictCard>> {
         let mut cards = vec![];
         let projects = self.projects()?;
         for brain in self.brains()? {
-            if brain.spaces.is_empty() {
-                continue;
-            }
             let Ok(conflicts) = self.brain_conflicts(&brain.repository, None) else {
                 continue;
             };
@@ -1547,24 +1433,13 @@ impl Host {
                             .as_ref()
                             .map_or("Ruled".into(), |l| l.ruling.label().into()),
                         by: entry.author.clone(),
-                        pull_request: None,
-                        merged: true,
+                        landed: true,
                     },
-                    (Some(local), None) => {
-                        let batch = local
-                            .batch_id
-                            .as_deref()
-                            .and_then(|id| self.brain_batch(id).ok());
-                        ConflictState::Ruled {
-                            ruling: local.ruling.label().into(),
-                            by: local.by.clone(),
-                            pull_request: batch
-                                .as_ref()
-                                .and_then(|b| b.pull_request.as_ref())
-                                .map(|pr| pr.number),
-                            merged: batch.is_some_and(|b| b.stage == BrainStage::Merged),
-                        }
-                    }
+                    (Some(local), None) => ConflictState::Ruled {
+                        ruling: local.ruling.label().into(),
+                        by: local.by.clone(),
+                        landed: false,
+                    },
                     (None, None) => ConflictState::Open,
                 };
                 let repository = conflict.repository.as_deref().map(str::to_lowercase);
@@ -1587,7 +1462,7 @@ impl Host {
         Ok(cards)
     }
 
-    /// The ruling made here on a conflict, unless its batch was discarded before it reached
+    /// The ruling made here on a conflict, unless its entry was discarded before it reached
     /// `main`, which leaves the conflict open to rule on again.
     fn local_ruling(&self, repository: &str, conflict: &str) -> Result<Option<LocalRuling>> {
         let local: Option<LocalRuling> = self
@@ -1598,23 +1473,20 @@ impl Host {
                 |r| decode(r, 0),
             )
             .optional()?;
-        let discarded = |batch: &str| {
-            self.brain_batch(batch)
-                .is_ok_and(|b| b.stage == BrainStage::Discarded)
-        };
-        Ok(local.filter(|l| !l.batch_id.as_deref().is_some_and(discarded)))
+        let discarded = |entry: &str| self.entry_discarded(repository, entry).unwrap_or(false);
+        Ok(local.filter(|l| !l.entry.as_deref().is_some_and(discarded)))
     }
 
     /// The human's ruling on a conflict. Uphold existing, Keep new and Keep both write one
     /// `decision` entry by the human, in the claim's repository folder, whose `state` begins
-    /// `Ruling on conflict <id>:`, in a batch queued at once; Defer writes nothing and hides
-    /// the card until the next compile. Only the human's client sends this command.
+    /// `Ruling on conflict <id>:`, which lands as any log entry does; Defer writes nothing and
+    /// hides the card until the next compile, and the next compile picks a ruling up. Only the
+    /// human's client sends this command.
     pub fn rule_conflict(
         &mut self,
         repository: &str,
         conflict_id: &str,
         ruling: Ruling,
-        git: &publish::GitTool,
     ) -> Result<Option<ConflictCard>> {
         let brain = self.brain(repository)?;
         let conflict = (self.brain_conflicts(&brain.repository, None)?.into_iter())
@@ -1638,15 +1510,14 @@ impl Host {
             let local = LocalRuling {
                 ruling,
                 by: self.gh_login.clone().unwrap_or_default(),
-                batch_id: None,
+                entry: None,
                 last_compile: self.last_compile_commit(&brain.repository)?,
             };
             self.save_local_ruling(&brain.repository, conflict_id, &local)?;
             return Ok(None);
         }
-        let author = (self.gh_login.clone())
-            .filter(|login| memory::valid_login(login))
-            .context("Wiffletree has not read your GitHub login. Sign gh in, then Sync now on the Brains page.")?;
+        let (storage, root) = self.brain_home(&brain)?;
+        let author = self.entry_author(&storage)?;
         let folder = (conflict.repository.clone())
             .filter(|folder| memory::valid_folder(folder))
             .context(
@@ -1677,22 +1548,17 @@ impl Host {
             "The ruling is {length} characters and the cap is {}; shorten Keep both's line",
             memory::MAX_BODY_CHARS
         );
-        let brain_dir = (brain.config.config().map(|c| c.brain_dir.clone()))
-            .unwrap_or_else(|| SpaceBrain::DEFAULT_FOLDER.into());
-        let path = memory::entry_path(&brain_dir, &folder, &date, &id);
+        let path = memory::entry_path(&brain_sync::brain_dir(&root), &folder, &date, &id);
         let file = memory::entry_text(&id, &folder, &author, "wiffletree", &body);
-        let batch = self.queue_brain_batch(
-            &brain.repository,
-            BrainBatchKind::Log,
-            BrainSource::BrainsPage,
-            &format!("Ruling on conflict {conflict_id}"),
-            &[(path, file.into_bytes())],
-            git,
-        )?;
+        let space = (self.spaces()?.into_iter())
+            .find(|record| record.space.storage.repository == storage)
+            .context("No Space here is in this repository")?
+            .space;
+        self.land_entry(&space, &path, &file, None)?;
         let local = LocalRuling {
             ruling,
             by: author,
-            batch_id: Some(batch.id),
+            entry: Some(path),
             last_compile: None,
         };
         self.save_local_ruling(&brain.repository, conflict_id, &local)?;
@@ -1718,12 +1584,13 @@ impl Host {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct LocalRuling {
     ruling: Ruling,
-    /// The human's GitHub login.
+    /// Who ruled, as the entry's author.
     by: String,
+    /// The ruling entry's file in the repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    batch_id: Option<String>,
-    /// For Defer: the commit of the brain's last compile when the human deferred; the card
-    /// shows again once another compile merges.
+    entry: Option<String>,
+    /// For Defer: the commit of the wiki's last compile when the human deferred; the card
+    /// shows again once another compile lands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_compile: Option<String>,
 }
@@ -1768,75 +1635,32 @@ fn ruling_text(conflict: &BrainConflict, ruling: &Ruling) -> Result<(String, Str
 mod tests {
     use super::*;
     use crate::brain_index::tests::{entry as entry_file, id, note};
-    use crate::brains::tests::{GitHub, REPO, name_brain, passing_checks, run};
-    use crate::publish::tests::Fixture;
-    use std::sync::Arc;
+    use crate::brain_sync::tests::{PHONE, REPO, Stored, stored};
     use workspace_core::{Line, ModelProfile, Then};
 
-    /// The publish fixture's project, whose repository is `app`, in a Sage Space whose brain is
-    /// `REPO` on a fake GitHub, with a config naming this host as compiler at 02:00 in New York.
-    struct Brained {
-        f: Fixture,
-        github: Arc<GitHub>,
-        tools: publish::Tools,
-        _github_folder: tempfile::TempDir,
+    /// The brain folder as a path of the repository.
+    const BRAIN: &str = "wiffletree/second-brain";
+
+    fn brained() -> Stored {
+        stored()
     }
 
-    fn brained() -> Brained {
-        brained_on("02:00", None)
-    }
-
-    /// `brained`, compiling at `at`, on another host when `compiler` names one.
-    fn brained_on(at: &str, compiler: Option<&str>) -> Brained {
-        let mut f = publish::tests::fixture();
-        f.host.legacy_pointer = f.home.path().join("no-pointer");
-        let sage = f.host.create_space("Sage", "", "", None).unwrap().space;
-        let sage = name_brain(&mut f.host, &sage.id, REPO);
-        (f.host
-            .move_project_to_space(&f.coordinator.project_id, &sage))
-        .unwrap();
-        f.host.record_gh_login(Some("mhohlios".into()));
-        let folder = tempfile::tempdir().unwrap();
-        let github = GitHub::new(folder.path());
-        let tools = github.tools();
-        let host_id = compiler.map_or_else(|| f.host.host_id().unwrap(), str::to_owned);
-        let config = json!({"version": 1, "brain_dir": "second-brain",
-            "compiler": {"host_id": host_id, "name": "Michael's Mac"},
-            "compile": {"at": at, "timezone": "America/New_York"}});
-        github.commit_file_on_main(BrainConfig::FILE, &config.to_string());
-        assert!(run(&mut f.host, &tools));
-        f.host.confirm_brain(REPO).unwrap();
-        Brained {
-            f,
-            github,
-            tools,
-            _github_folder: folder,
-        }
-    }
-
-    impl Brained {
-        /// Commits files of the brain folder to `main` and runs the brain's pass.
-        fn merge(&mut self, files: &[(String, String)]) -> String {
-            let files: Vec<(String, &str)> = (files.iter())
-                .map(|(path, text)| (format!("second-brain/{path}"), text.as_str()))
-                .collect();
-            let files: Vec<(&str, &str)> = files.iter().map(|(p, t)| (p.as_str(), *t)).collect();
-            let commit = self.github.commit_files_on_main(&files, "A batch (#7)");
-            assert!(run(&mut self.f.host, &self.tools));
-            commit
-        }
+    impl Stored {
         /// What a run's preparation finds now, as the service gathers it.
         fn gather(&self) -> Gathered {
-            let brain = self.f.host.brain(REPO).unwrap();
             let prepare = Prepare {
                 run_id: "r".into(),
-                checkout: PathBuf::from(&brain.checkout),
-                head: brain.head.unwrap(),
-                brain_dir: "second-brain".into(),
-                legacy_compiled: HashSet::new(),
+                checkout: self.clone_folder(),
+                head: self.head(),
+                brain_dir: BRAIN.into(),
                 clones: Clones::default(),
             };
             prepare.run(&self.tools).gathered.unwrap()
+        }
+        fn head(&self) -> String {
+            let brain = self.f.host.brain(REPO).unwrap();
+            let (storage, _) = self.f.host.brain_home(&brain).unwrap();
+            self.f.host.brain_head(&storage).unwrap().unwrap()
         }
         /// Prepares every queued run and hands each to the host, as the service does.
         fn prepare(&mut self) {
@@ -1878,33 +1702,25 @@ mod tests {
             (run, self.f.host.session(&session).unwrap(), work)
         }
         fn tool(&mut self, session: &Session, name: &str, args: Value) -> Result<Value> {
-            let git = self.tools.git.clone();
-            self.f.host.compile_tool(session, name, &args, &git)
+            self.f.host.compile_tool(session, name, &args)
         }
-        fn compile_batches(&self) -> Vec<BrainBatch> {
-            (self.f.host.brain_batches(Some(REPO)).unwrap().into_iter())
-                .filter(|b| b.kind == BrainBatchKind::Compile)
-                .collect()
+        /// A run that wrote `note` and finished, whose files wait to land.
+        fn finished(&mut self, note: &str) -> (CompileRun, Work) {
+            let (run, session, work) = self.started();
+            let brain = work.worktree.join(BRAIN);
+            fs::create_dir_all(brain.join("notes")).unwrap();
+            fs::write(brain.join("notes/Call Relay.md"), note).unwrap();
+            self.tool(&session, "finish_compile", json!({"summary": "Done"}))
+                .unwrap();
+            (run, work)
         }
         fn cursor_on_main(&self) -> Cursor {
-            let brain = self.f.host.brain(REPO).unwrap();
-            let head = brain.head.unwrap();
-            read_cursor(&file_at(
-                Path::new(&brain.checkout),
-                &head,
-                "second-brain/notes/INDEX.md",
-            ))
+            let index = self.github.show(&format!("{BRAIN}/notes/INDEX.md"));
+            read_cursor(&index.unwrap_or_default())
         }
-    }
-
-    fn ny(text: &str) -> i64 {
-        let zone: chrono_tz::Tz = "America/New_York".parse().unwrap();
-        let at = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap();
-        use chrono::TimeZone;
-        zone.from_local_datetime(&at)
-            .earliest()
-            .unwrap()
-            .timestamp_millis()
+        fn run_named(&self, run: &CompileRun) -> CompileRun {
+            self.f.host.compile_run(&run.id).unwrap()
+        }
     }
 
     fn relay(n: u128) -> (String, String) {
@@ -1981,21 +1797,47 @@ mod tests {
     }
 
     #[test]
-    fn the_first_compile_leaves_out_what_the_legacy_import_recorded_as_compiled() {
+    fn with_no_compiled_through_every_entry_is_pending_but_those_in_compiled_after() {
         let mut b = brained();
-        b.merge(&[relay(1), relay(2)]);
-        let brain = b.f.host.brain(REPO).unwrap();
-        let prepare = Prepare {
-            run_id: "r".into(),
-            checkout: PathBuf::from(&brain.checkout),
-            head: brain.head.unwrap(),
-            brain_dir: "second-brain".into(),
-            legacy_compiled: HashSet::from([id(1)]),
-            clones: Clones::default(),
-        };
-        let gathered = prepare.run(&b.tools).gathered.unwrap();
-        let ids: Vec<String> = gathered.entries.into_iter().map(|e| e.id).collect();
+        let index = write_cursor(
+            "",
+            &Cursor {
+                through: None,
+                after: vec![id(1)],
+            },
+        );
+        b.merge(&[relay(1), relay(2), ("notes/INDEX.md".into(), index)]);
+        let ids: Vec<String> = b.gather().entries.into_iter().map(|e| e.id).collect();
         assert_eq!(ids, [id(2)]);
+    }
+
+    #[test]
+    fn a_cursor_from_before_the_move_makes_only_newer_entries_pending() {
+        // The repository as it stood before the move: entries at its root.
+        let clone = tempfile::tempdir().unwrap();
+        let at = clone.path();
+        let commit = |path: &str, text: &str| {
+            let file = at.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, text).unwrap();
+            crate::test_support::git(at, &["add", "--all"]);
+            crate::test_support::git(at, &["commit", "-q", "-m", path]);
+            crate::test_support::git(at, &["rev-parse", "HEAD"])
+        };
+        crate::test_support::git(at, &["init", "-q", "-b", "main"]);
+        let (before, text) = relay(1);
+        let through = commit(&format!("second-brain/{before}"), &text);
+        // The move renames the entry.
+        crate::test_support::git(at, &["mv", "second-brain", "wiffletree"]);
+        fs::create_dir(at.join("moved")).unwrap();
+        fs::rename(at.join("wiffletree"), at.join("moved/second-brain")).unwrap();
+        fs::rename(at.join("moved"), at.join("wiffletree")).unwrap();
+        crate::test_support::git(at, &["add", "--all"]);
+        crate::test_support::git(at, &["commit", "-q", "-m", "Move into wiffletree/"]);
+        let (after, text) = relay(2);
+        let head = commit(&format!("wiffletree/second-brain/{after}"), &text);
+        let paths = entry_paths(at, &head, "wiffletree/second-brain/", Some(&through)).unwrap();
+        assert_eq!(paths, [after]);
     }
 
     #[test]
@@ -2033,7 +1875,6 @@ mod tests {
             )
         );
         assert_eq!(b.f.host.sessions().unwrap().len(), sessions);
-        assert!(b.compile_batches().is_empty());
         assert!(!b.f.host.home.join(WORKTREES).join(&run.id).exists());
     }
 
@@ -2051,85 +1892,35 @@ mod tests {
             run.reason
         );
         let page = b.f.host.brains_page().unwrap();
-        assert!(page.compiles[0].needs_model);
+        assert!(page.compiles.iter().all(|compile| compile.needs_model));
     }
 
     #[test]
-    fn asleep_over_two_oclock_runs_once_on_wake_as_a_catch_up() {
+    fn no_job_is_scheduled_so_a_compile_runs_only_on_run_now() {
         let mut b = brained();
-        b.f.host.fire_and_check(ny("2026-10-30 01:00")).unwrap();
+        b.merge(&[relay(1)]);
+        b.f.host.refresh_compile_jobs().unwrap();
+        assert!(b.f.host.built_ins.iter().all(|job| job.schedule.is_none()));
+        let later = now() + 2 * 86_400_000;
+        b.f.host.fire_and_check(later).unwrap();
+        b.prepare();
         assert!(b.runs().is_empty());
-        let pass = b.f.host.fire_and_check(ny("2026-10-30 07:00")).unwrap();
-        assert_eq!(pass.next, Some(ny("2026-10-31 02:00")));
-        b.f.host.fire_and_check(ny("2026-10-30 07:05")).unwrap();
-        let runs = b.runs();
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].trigger, CompileTrigger::CatchUp);
         // No Space lists it.
         assert!(b.f.host.job_states().unwrap().is_empty());
     }
 
     #[test]
-    fn a_time_repeated_by_daylight_saving_runs_once() {
-        // 01:30 happens twice in New York on November 1, 2026.
-        let mut b = brained_on("01:30", None);
-        b.f.host.fire_and_check(ny("2026-11-01 00:00")).unwrap();
-        let fall_back = ny("2026-11-01 00:00") + 3 * 3_600_000;
-        for minutes in [91, 95, 151, 155] {
-            b.f.host
-                .fire_and_check(ny("2026-11-01 00:00") + minutes * 60_000)
-                .unwrap();
-            b.prepare();
-        }
-        b.f.host.fire_and_check(fall_back).unwrap();
-        b.prepare();
-        assert_eq!(b.runs().len(), 1);
-    }
-
-    #[test]
-    fn another_hosts_brain_is_never_compiled_here() {
-        let mut b = brained_on("02:00", Some("another-host"));
-        b.merge(&[relay(1)]);
-        b.f.host.fire_and_check(ny("2026-10-30 01:00")).unwrap();
-        b.f.host.fire_and_check(ny("2026-10-30 03:00")).unwrap();
-        assert!(b.runs().is_empty());
-        let refused = b.f.host.run_brain_compile(REPO).unwrap_err();
-        assert!(
-            refused.to_string().contains("does not compile"),
-            "{refused:#}"
-        );
-        assert!(b.f.host.brains_page().unwrap().compiles.is_empty());
-    }
-
-    #[test]
-    fn an_open_compile_pr_holds_every_run_and_run_now_says_why() {
+    fn run_now_says_why_while_a_run_is_in_progress() {
         let mut b = brained();
-        let files = [("second-brain/STATUS.md".to_owned(), b"# Status\n".to_vec())];
-        let git = b.tools.git.clone();
-        (b.f.host.queue_brain_batch(
-            REPO,
-            BrainBatchKind::Compile,
-            BrainSource::BrainsPage,
-            "Compile: 1 entries",
-            &files,
-            &git,
-        ))
-        .unwrap();
-        passing_checks(&b.github);
-        assert!(run(&mut b.f.host, &b.tools));
+        b.merge(&[relay(1)]);
+        b.started();
         let refused = b.f.host.run_brain_compile(REPO).unwrap_err();
-        assert_eq!(refused.to_string(), "Waiting for PR #214");
-        b.f.host.fire_and_check(ny("2026-10-30 01:00")).unwrap();
-        b.f.host.fire_and_check(ny("2026-10-30 02:00")).unwrap();
-        let run = b.runs().remove(0);
-        assert_eq!(
-            (run.outcome, run.reason.as_str()),
-            (CompileOutcome::Waiting, "Waiting for PR #214")
-        );
+        assert_eq!(refused.to_string(), "A compile run is in progress");
         let page = b.f.host.brains_page().unwrap();
+        let compile = page.compiles.iter().find(|c| c.repository == REPO);
         assert_eq!(
-            page.compiles[0].run_now_waits.as_deref(),
-            Some("Waiting for PR #214")
+            compile.unwrap().run_now_waits.as_deref(),
+            Some("A compile run is in progress")
         );
     }
 
@@ -2152,9 +1943,9 @@ mod tests {
             runtime.workdir.map(PathBuf::from),
             Some(work.worktree.clone())
         );
-        assert!(work.worktree.join("second-brain/logs").is_dir());
+        assert!(work.worktree.join(BRAIN).join("logs").is_dir());
         let launch = b.f.host.compile_launch(&session).unwrap();
-        assert!(launch.compile.unwrap().ends_with("second-brain"));
+        assert!(launch.compile.unwrap().ends_with(BRAIN));
         // The project's agents are not offered either tool, and the compile no other.
         assert!(b.tool(&session, "log_work", json!({})).is_err());
         let implementer = b.f.implementer.id.clone();
@@ -2180,11 +1971,11 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_compile_queues_one_compile_batch_with_the_cursor_and_the_conflict_queue() {
+    fn a_finished_compile_lands_its_files_the_cursor_and_the_conflict_queue_in_one_commit() {
         let mut b = brained();
         let head = b.merge(&[relay(1)]);
         let (run, session, work) = b.started();
-        let brain = work.worktree.join("second-brain");
+        let brain = work.worktree.join(BRAIN);
         fs::create_dir_all(brain.join("notes")).unwrap();
         fs::write(brain.join("notes/Call Relay.md"), relay_note(&id(1))).unwrap();
         fs::write(brain.join("STATUS.md"), "# Status\n\nSee [[Call Relay]].\n").unwrap();
@@ -2205,53 +1996,240 @@ mod tests {
             json!({"summary": "Folded one entry"}),
         )
         .unwrap();
-        let run = b.f.host.compile_run(&run.id).unwrap();
-        assert_eq!((run.outcome, run.conflicts), (CompileOutcome::PrOpened, 1));
-        let batch = b.compile_batches().remove(0);
-        assert_eq!(batch.title, "Compile: 1 entries");
-        let mut files = batch.files.clone();
+        // Nothing has landed until the pass, and the turn ending changes nothing.
+        assert_eq!(b.run_named(&run).outcome, CompileOutcome::Running);
+        b.f.host
+            .compile_turn_ended(&session.id, None, None)
+            .unwrap();
+        assert_eq!(b.run_named(&run).outcome, CompileOutcome::Running);
+        assert_eq!(b.cursor_on_main(), Cursor::default());
+        b.tool(&session, "finish_compile", json!({"summary": "Again"}))
+            .unwrap();
+        assert_eq!(
+            b.run_named(&run).outcome,
+            CompileOutcome::Running,
+            "it finishes once"
+        );
+        b.sync();
+        let run = b.run_named(&run);
+        assert_eq!(run.outcome, CompileOutcome::Landed, "{}", run.reason);
+        assert_eq!(run.conflicts, 1);
+        assert_eq!(run.commit.as_deref(), Some(b.github.log("%H")[0].as_str()));
+        assert_eq!(
+            b.github.log("%s")[0],
+            format!("Compiled 1 entries · {}", sync::machine_name())
+        );
+        let shown = crate::test_support::git(
+            &b.github.bare,
+            &["show", "--format=", "--name-only", "main"],
+        );
+        let mut files: Vec<&str> = shown.lines().collect();
         files.sort();
         assert_eq!(
             files,
             [
-                "second-brain/STATUS.md",
-                "second-brain/notes/Call Relay.md",
-                "second-brain/notes/INDEX.md",
-                "second-brain/reconcile-queue.md",
+                "wiffletree/second-brain/STATUS.md",
+                "wiffletree/second-brain/notes/Call Relay.md",
+                "wiffletree/second-brain/notes/INDEX.md",
+                "wiffletree/second-brain/reconcile-queue.md",
             ]
         );
-        // The batch's commit holds the cursor and the conflict's block.
-        let written = b.f.host.home.join("brain-batches").join(&batch.id);
-        let index = fs::read_to_string(written.join("second-brain/notes/INDEX.md")).unwrap();
-        assert_eq!(read_cursor(&index).through.as_deref(), Some(head.as_str()));
-        let queue = fs::read_to_string(written.join("second-brain/reconcile-queue.md")).unwrap();
+        assert_eq!(b.cursor_on_main().through.as_deref(), Some(head.as_str()));
+        let queue = b
+            .github
+            .show(&format!("{BRAIN}/reconcile-queue.md"))
+            .unwrap();
         assert!(queue.contains(&format!("<!-- conflict:{conflict} -->")));
         assert!(queue.contains("## Retry cap · decision-contradiction"));
         assert!(queue.contains("- recommend: Uphold existing: PR #92 is still open"));
-        // The worktree is gone, and the turn ending changes nothing more.
+        // The clone holds what landed, and the worktree is gone.
+        let written = b.clone_folder().join(BRAIN).join("notes/Call Relay.md");
+        assert_eq!(fs::read_to_string(written).unwrap(), relay_note(&id(1)));
         assert!(!work.worktree.exists());
-        b.f.host
-            .compile_turn_ended(&session.id, None, None)
-            .unwrap();
-        assert_eq!(
-            b.f.host.compile_run(&run.id).unwrap().outcome,
-            CompileOutcome::PrOpened
-        );
-        // Main is pushed only as the batch's branch; it merges only through its PR.
-        passing_checks(&b.github);
-        assert!(run_pass(&mut b));
-        assert_eq!(b.cursor_on_main(), Cursor::default());
-        assert!(
-            b.f.host
-                .run_brain_compile(REPO)
-                .unwrap_err()
-                .to_string()
-                .starts_with("Waiting for PR #")
-        );
     }
 
-    fn run_pass(b: &mut Brained) -> bool {
-        run(&mut b.f.host, &b.tools)
+    #[test]
+    fn a_local_repository_commits_a_finished_compile_at_once() {
+        let mut f = publish::tests::fixture();
+        let home = f.host.create_space("Home", "", "", None).unwrap().space;
+        (f.host
+            .move_project_to_space(&f.coordinator.project_id, &home.id))
+        .unwrap();
+        let repository = home.storage.repository.key();
+        let clone = f.host.storage_folder(&home.storage.repository);
+        let (path, text) = relay(1);
+        let file = clone.join(BRAIN).join(&path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, text).unwrap();
+        storage::commit_local(&clone, &[&format!("{BRAIN}/{path}")], "An entry").unwrap();
+        let mut selection = f.host.model_selection().unwrap();
+        selection.set_compiler_row(Some(Line {
+            first: ModelProfile {
+                provider: Provider::Claude,
+                model: "sonnet".into(),
+                effort: "medium".into(),
+            },
+            then: Then::Wait,
+        }));
+        f.host.set_model_selection(&selection).unwrap();
+        f.host.run_brain_compile(&repository).unwrap();
+        for prepare in f.host.take_compile_preparations() {
+            let prepared = prepare.run(&publish::Tools::default());
+            f.host.compile_prepared(prepared).unwrap();
+        }
+        let run = (f.host.brain_compile_runs(&repository, 0, 1).unwrap().runs).remove(0);
+        assert_eq!(run.outcome, CompileOutcome::Running, "{}", run.reason);
+        let session: String = (f.host.db)
+            .query_row(
+                "SELECT session_id FROM compile_runs WHERE id=?1",
+                [&run.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let session = f.host.session(&session).unwrap();
+        let work = f.host.compile_work(&run.id).unwrap();
+        let notes = work.worktree.join(BRAIN).join("notes");
+        fs::create_dir_all(&notes).unwrap();
+        fs::write(notes.join("Call Relay.md"), relay_note(&id(1))).unwrap();
+        let args = json!({"summary": "Done"});
+        f.host
+            .compile_tool(&session, "finish_compile", &args)
+            .unwrap();
+        let run = f.host.compile_run(&run.id).unwrap();
+        assert_eq!(run.outcome, CompileOutcome::Landed, "{}", run.reason);
+        let head = crate::test_support::git(&clone, &["rev-parse", "HEAD"]);
+        assert_eq!(run.commit, Some(head));
+        assert!(clone.join(BRAIN).join("notes/Call Relay.md").is_file());
+    }
+
+    #[test]
+    fn a_push_refused_because_logs_landed_goes_again_with_no_model_call_on_the_new_head() {
+        let mut b = brained();
+        let head = b.merge(&[relay(1)]);
+        let (run, work) = b.finished(&relay_note(&id(1)));
+        let sessions = b.f.host.sessions().unwrap().len();
+        // Three entries land after the run read main, and one just before its push.
+        let later: Vec<(String, String)> = vec![relay(2), relay(3)];
+        b.commit(&later);
+        let (path, text) = relay(4);
+        let github = b.github.clone();
+        let file = format!("{BRAIN}/{path}");
+        *b.github.before.lock().unwrap() = Some((
+            "push",
+            Box::new(move || github.commit(&file, text.as_str())),
+        ));
+        b.sync();
+        let run = b.run_named(&run);
+        assert_eq!(run.outcome, CompileOutcome::Landed, "{}", run.reason);
+        assert_eq!(run.model_calls, 1, "no model is involved");
+        assert_eq!(b.f.host.sessions().unwrap().len(), sessions);
+        // The commit is on the new head, and its cursor still names the run's commit.
+        let parent = b.github.log("%H")[1].clone();
+        assert_eq!(run.commit.as_deref(), Some(b.github.log("%H")[0].as_str()));
+        assert_ne!(parent, head);
+        assert!(
+            b.github.log("%s")[1].ends_with(".md"),
+            "{:?}",
+            b.github.log("%s")
+        );
+        assert_eq!(b.cursor_on_main().through.as_deref(), Some(head.as_str()));
+        assert_eq!(work.cursor.through.as_deref(), Some(head.as_str()));
+        // Those logs are pending in the next run.
+        b.index();
+        let ids: Vec<String> = b.gather().entries.into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, [id(2), id(3), id(4)]);
+    }
+
+    #[test]
+    fn a_cursor_already_past_lands_nothing_and_each_entry_compiles_once() {
+        let mut b = brained();
+        let head = b.merge(&[relay(1)]);
+        let (run, _) = b.finished(&relay_note(&id(1)));
+        // A takeover's run landed the same cursor first.
+        let landed = write_cursor(
+            "",
+            &Cursor {
+                through: Some(head.clone()),
+                after: vec![],
+            },
+        );
+        b.commit(&[("notes/INDEX.md".into(), landed)]);
+        let commits = b.github.log("%s").len();
+        b.sync();
+        let run = b.run_named(&run);
+        assert_eq!(run.outcome, CompileOutcome::CompiledElsewhere);
+        assert_eq!(run.outcome.label(), "Compiled elsewhere");
+        assert_eq!(run.commit, None);
+        assert_eq!(b.github.log("%s").len(), commits, "nothing landed");
+        assert_eq!(b.cursor_on_main().through, Some(head));
+    }
+
+    #[test]
+    fn a_hand_edit_fails_the_run_and_stands_with_the_cursor_unchanged() {
+        let mut b = brained();
+        b.merge(&[
+            relay(1),
+            note("Call Relay", "observation", &[id(1)], "Health is /status."),
+        ]);
+        let (run, work) = b.finished(&relay_note(&id(1)));
+        assert!(work.worktree.exists());
+        let edited = note("Call Relay", "observation", &[id(1)], "Health is /live.");
+        b.commit(std::slice::from_ref(&edited));
+        b.sync();
+        let run = b.run_named(&run);
+        assert_eq!(run.outcome, CompileOutcome::Failed);
+        assert!(
+            run.reason
+                .contains("main changed wiffletree/second-brain/notes/Call Relay.md"),
+            "{}",
+            run.reason
+        );
+        assert_eq!(
+            b.github.show(&format!("{BRAIN}/{}", edited.0)),
+            Some(edited.1)
+        );
+        assert_eq!(b.cursor_on_main(), Cursor::default());
+        assert!(!work.worktree.exists());
+    }
+
+    #[test]
+    fn a_wiki_file_that_fails_the_scan_lands_nothing_and_names_the_file_and_rule() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        let (run, _) = b.finished(&format!("{}Call {PHONE}.\n", relay_note(&id(1))));
+        let commits = b.github.log("%s").len();
+        b.sync();
+        let run = b.run_named(&run);
+        assert_eq!(run.outcome, CompileOutcome::Failed);
+        assert!(run.reason.contains("notes/Call Relay.md"), "{}", run.reason);
+        assert!(
+            run.reason.contains("sensitive-info rule phone"),
+            "{}",
+            run.reason
+        );
+        assert!(!run.reason.contains("555"), "{}", run.reason);
+        assert_eq!(
+            b.github.log("%s").len(),
+            commits,
+            "nothing of the run lands"
+        );
+        assert_eq!(
+            b.cursor_on_main(),
+            Cursor::default(),
+            "the cursor is unchanged"
+        );
+        // Nothing of the run lingers as a held file, and the next run finds the same entries.
+        assert!(b.f.host.held_notes().unwrap().is_empty());
+        assert_eq!(b.gather().entries.len(), 1);
+    }
+
+    #[test]
+    fn an_older_run_record_with_a_pull_request_still_reads() {
+        let old = json!({"id": "r", "repository": "Sage/brain", "trigger": "ruling",
+            "started_at": 1, "pending": 1, "processed": 1, "model_calls": 1,
+            "outcome": "pr_opened", "batch_id": "b", "pull_request": 214, "merged": true});
+        let run: CompileRun = serde_json::from_value(old).unwrap();
+        assert_eq!(run.outcome, CompileOutcome::Landed);
     }
 
     #[test]
@@ -2291,7 +2269,7 @@ mod tests {
             let mut b = brained();
             b.merge(&[relay(1)]);
             let (run, session, work) = b.started();
-            change(&work.worktree.join("second-brain"));
+            change(&work.worktree.join(BRAIN));
             let failed = b
                 .tool(&session, "finish_compile", json!({"summary": "Done"}))
                 .unwrap_err();
@@ -2299,13 +2277,12 @@ mod tests {
             let run = b.f.host.compile_run(&run.id).unwrap();
             assert_eq!(run.outcome, CompileOutcome::Failed, "{why}");
             assert!(run.reason.contains(why), "{why}: {}", run.reason);
-            assert!(b.compile_batches().is_empty(), "{why}");
             assert_eq!(b.cursor_on_main(), Cursor::default(), "{why}");
         }
     }
 
     #[test]
-    fn a_session_stopped_at_30_minutes_times_its_run_out_with_no_pr() {
+    fn a_session_stopped_at_30_minutes_times_its_run_out_and_lands_nothing() {
         let mut b = brained();
         b.merge(&[relay(1)]);
         let (run, session, _) = b.started();
@@ -2317,7 +2294,6 @@ mod tests {
             (run.outcome, run.reason.as_str()),
             (CompileOutcome::TimedOut, TIMED_OUT)
         );
-        assert!(b.compile_batches().is_empty());
         // A restart ends a run its host cut off.
         b.merge(&[relay(2)]);
         let (cut, _, _) = b.started();
@@ -2329,7 +2305,7 @@ mod tests {
     }
 
     /// The brain with an entry of `app` that a queued conflict claims.
-    fn with_conflict(b: &mut Brained) -> String {
+    fn with_conflict(b: &mut Stored) -> String {
         let (path, _) = relay(1);
         let queue = format!(
             "# Reconcile queue\n\n<!-- conflict:c-1 -->\n## Retry cap · decision-contradiction\n- claim: [{}]({path}), claimed\n- conflicts-with: [[Call Relay]]\n- evidence: PR #92 is open\n- recommend: Uphold existing: PR #92 is still open\n",
@@ -2340,7 +2316,7 @@ mod tests {
         "c-1".into()
     }
 
-    fn conflict_notes(b: &Brained, project: &str) -> Vec<ConflictCard> {
+    fn conflict_notes(b: &Stored, project: &str) -> Vec<ConflictCard> {
         (b.f.host.workspace_notes(&[]).unwrap().into_iter())
             .filter(|note| note.is_for(project))
             .filter_map(|note| match note {
@@ -2391,39 +2367,32 @@ mod tests {
             .unwrap();
         b.f.host.set_repository_spaces(&app, &[sage]).unwrap();
         assert_eq!(conflict_notes(&b, &other.id).len(), 1);
-        let git = b.tools.git.clone();
-        let card =
-            (b.f.host
-                .rule_conflict(REPO, &conflict, Ruling::KeepNew, &git))
+        let card = (b.f.host.rule_conflict(REPO, &conflict, Ruling::KeepNew))
             .unwrap()
             .unwrap();
         assert!(
-            matches!(&card.state, ConflictState::Ruled { ruling, by, merged: false, .. }
+            matches!(&card.state, ConflictState::Ruled { ruling, by, landed: false }
             if ruling == "Keep new" && by == "mhohlios")
         );
-        // The decision entry is the human's, in the claim's folder, and its batch opens at once.
-        let batch = (b.f.host.brain_batches(Some(REPO)).unwrap().into_iter())
-            .find(|batch| batch.title == format!("Ruling on conflict {conflict}"))
-            .unwrap();
-        assert_eq!(batch.kind, BrainBatchKind::Log);
-        let path = &batch.files[0];
-        assert!(path.starts_with("second-brain/logs/app/"), "{path}");
-        let text = fs::read_to_string(
-            b.f.host
-                .home
-                .join("brain-batches")
-                .join(&batch.id)
-                .join(path),
-        )
-        .unwrap();
+        // The decision entry is the human's, in the claim's folder, and lands as any entry.
+        b.sync();
+        let shown = crate::test_support::git(
+            &b.github.bare,
+            &["show", "--format=", "--name-only", "main"],
+        );
+        let path = shown.trim();
+        assert!(path.starts_with(&format!("{BRAIN}/logs/app/")), "{path}");
+        let text = b.github.show(path).unwrap();
         assert!(text.contains("author: mhohlios"));
         assert!(text.contains("- type: decision"));
         assert!(text.contains(&format!(
             "- state: Ruling on conflict {conflict}: Keep new."
         )));
+        // A ruling starts no run: the next compile picks it up.
+        assert!(b.runs().is_empty());
         let again =
             b.f.host
-                .rule_conflict(REPO, &conflict, Ruling::UpholdExisting, &git);
+                .rule_conflict(REPO, &conflict, Ruling::UpholdExisting);
         assert!(again.unwrap_err().to_string().contains("already ruled"));
         // Only the human's client rules: no agent tool does, and the command needs the client.
         let ruling = Command::RuleConflict {
@@ -2440,7 +2409,7 @@ mod tests {
         );
         assert!(!mcp::tools().to_string().contains("rule_conflict"));
         // Nor is a ruled conflict deferred.
-        let deferred = b.f.host.rule_conflict(REPO, &conflict, Ruling::Defer, &git);
+        let deferred = b.f.host.rule_conflict(REPO, &conflict, Ruling::Defer);
         assert!(deferred.unwrap_err().to_string().contains("already ruled"));
         // A ruled card no longer counts as needing the human.
         assert!(
@@ -2450,26 +2419,26 @@ mod tests {
     }
 
     #[test]
-    fn a_ruling_whose_batch_is_discarded_leaves_the_conflict_open_to_rule_again() {
+    fn a_ruling_whose_entry_is_discarded_leaves_the_conflict_open_to_rule_again() {
         let mut b = brained();
         let conflict = with_conflict(&mut b);
         let project = b.f.coordinator.project_id.clone();
-        let git = b.tools.git.clone();
-        (b.f.host
-            .rule_conflict(REPO, &conflict, Ruling::KeepNew, &git))
-        .unwrap();
-        let batch = (b.f.host.brain_batches(Some(REPO)).unwrap().into_iter())
-            .find(|batch| batch.title == format!("Ruling on conflict {conflict}"))
-            .unwrap();
-        (b.f.host
-            .amend_brain_batch(&batch.id, &workspace_core::BrainAmendment::Discard, &git))
-        .unwrap();
+        let phone = Ruling::KeepBoth {
+            scope: format!("Call {PHONE} first."),
+        };
+        (b.f.host.rule_conflict(REPO, &conflict, phone)).unwrap();
+        b.sync();
+        let held = b.f.host.held_entries().unwrap().remove(0);
+        assert_eq!(held.project_id, None, "its card is on the Brains page");
+        let page = b.f.host.brains_page().unwrap();
+        assert_eq!(page.held, std::slice::from_ref(&held));
+        b.f.host.discard_held_entry(REPO, &held.path).unwrap();
         let cards = conflict_notes(&b, &project);
         assert_eq!(cards[0].state, ConflictState::Open);
         assert!(WorkspaceNote::Conflict(Box::new(cards[0].clone())).needs_you());
         let card =
             (b.f.host
-                .rule_conflict(REPO, &conflict, Ruling::UpholdExisting, &git))
+                .rule_conflict(REPO, &conflict, Ruling::UpholdExisting))
             .unwrap()
             .unwrap();
         assert!(
@@ -2491,21 +2460,13 @@ mod tests {
         for (ruling, state) in rulings {
             let mut b = brained();
             let conflict = with_conflict(&mut b);
-            let git = b.tools.git.clone();
-            b.f.host
-                .rule_conflict(REPO, &conflict, ruling, &git)
-                .unwrap();
-            let batch = (b.f.host.brain_batches(Some(REPO)).unwrap().into_iter())
-                .find(|batch| batch.kind == BrainBatchKind::Log)
-                .unwrap();
-            let text = fs::read_to_string(
-                b.f.host
-                    .home
-                    .join("brain-batches")
-                    .join(&batch.id)
-                    .join(&batch.files[0]),
-            )
-            .unwrap();
+            b.f.host.rule_conflict(REPO, &conflict, ruling).unwrap();
+            b.sync();
+            let shown = crate::test_support::git(
+                &b.github.bare,
+                &["show", "--format=", "--name-only", "main"],
+            );
+            let text = b.github.show(shown.trim()).unwrap();
             assert!(
                 text.contains(&format!("- state: Ruling on conflict {conflict}: {state}")),
                 "{text}"
@@ -2514,15 +2475,18 @@ mod tests {
         let mut b = brained();
         let conflict = with_conflict(&mut b);
         let project = b.f.coordinator.project_id.clone();
-        let git = b.tools.git.clone();
-        let batches = b.f.host.brain_batches(Some(REPO)).unwrap().len();
         assert_eq!(
             b.f.host
-                .rule_conflict(REPO, &conflict, Ruling::Defer, &git)
+                .rule_conflict(REPO, &conflict, Ruling::Defer)
                 .unwrap(),
             None
         );
-        assert_eq!(b.f.host.brain_batches(Some(REPO)).unwrap().len(), batches);
+        assert!(
+            b.f.host
+                .unlanded_entries(&repos::key(REPO))
+                .unwrap()
+                .is_empty()
+        );
         assert!(conflict_notes(&b, &project).is_empty());
         // The next compile raises it again while it still holds.
         b.merge(&[("STATUS.md".into(), "# Status\n".into())]);
@@ -2530,39 +2494,19 @@ mod tests {
     }
 
     #[test]
-    fn a_ruling_merged_from_any_install_starts_a_compile_once() {
+    fn a_ruling_on_main_from_any_install_shows_the_card_as_ruled_and_starts_no_run() {
         let mut b = brained();
         let conflict = with_conflict(&mut b);
-        b.f.host.fire_and_check(ny("2026-10-30 09:00")).unwrap();
-        // The legacy-free first pass: compile everything there, then mark it compiled.
-        let head = b.f.host.brain(REPO).unwrap().head.unwrap();
-        let index = write_cursor(
-            "",
-            &Cursor {
-                through: Some(head),
-                after: vec![],
-            },
-        );
-        b.merge(&[
-            ("notes/INDEX.md".into(), index),
-            ("STATUS.md".into(), "# Status\n".into()),
-        ]);
-        let before = b.runs().len();
-        // Tomás's ruling merges on main.
         let ruling = format!(
             "---\nid: {}\nrepo: app\nauthor: tomas\nsource: wiffletree\n---\n## 2026-10-31 — Ruling\n- type: decision\n- ref: —\n- changed: Kept new.\n- why: Ruled.\n- state: Ruling on conflict {conflict}: Keep new.\n",
             id(40)
         );
         b.merge(&[(format!("logs/app/2026/10/2026-10-31-{}.md", id(40)), ruling)]);
-        b.f.host.fire_and_check(ny("2026-10-30 09:01")).unwrap();
-        b.f.host.fire_and_check(ny("2026-10-30 09:02")).unwrap();
-        let runs = b.runs();
-        assert_eq!(runs.len(), before + 1);
-        assert_eq!(runs[0].trigger, CompileTrigger::Ruling);
-        // Every install shows the card as ruled once the ruling is on main.
+        b.f.host.fire_and_check(now()).unwrap();
+        assert!(b.runs().is_empty());
         let project = b.f.coordinator.project_id.clone();
         assert!(matches!(&conflict_notes(&b, &project)[0].state,
-            ConflictState::Ruled { by, merged: true, .. } if by == "tomas"));
+            ConflictState::Ruled { by, landed: true, .. } if by == "tomas"));
     }
 
     #[test]
@@ -2579,9 +2523,11 @@ mod tests {
         let (_, session, _) = b.started();
         b.tool(&session, "finish_compile", json!({"summary": "Done"}))
             .unwrap();
-        let batch = b.compile_batches().remove(0);
-        let written = b.f.host.home.join("brain-batches").join(&batch.id);
-        let queue = fs::read_to_string(written.join("second-brain/reconcile-queue.md")).unwrap();
+        b.sync();
+        let queue = b
+            .github
+            .show(&format!("{BRAIN}/reconcile-queue.md"))
+            .unwrap();
         assert!(
             queue.contains(&format!("<!-- conflict:{conflict} -->")),
             "{queue}"
@@ -2618,132 +2564,6 @@ mod tests {
         );
         b.merge(&[(path, text)]);
         assert!(b.f.host.brain_rulings(REPO).unwrap().is_empty());
-    }
-
-    #[test]
-    fn a_ruling_that_merges_while_a_compile_pr_is_open_starts_a_run_once_it_can() {
-        let mut b = brained();
-        let conflict = with_conflict(&mut b);
-        let files = [("second-brain/STATUS.md".to_owned(), b"# Status\n".to_vec())];
-        let git = b.tools.git.clone();
-        (b.f.host.queue_brain_batch(
-            REPO,
-            BrainBatchKind::Compile,
-            BrainSource::BrainsPage,
-            "Compile: 1 entries",
-            &files,
-            &git,
-        ))
-        .unwrap();
-        passing_checks(&b.github);
-        assert!(run(&mut b.f.host, &b.tools));
-        let ruling = format!(
-            "---\nid: {}\nrepo: app\nauthor: tomas\nsource: wiffletree\n---\n## 2026-10-31 — Ruling\n- type: decision\n- ref: —\n- changed: Kept new.\n- why: Ruled.\n- state: Ruling on conflict {conflict}: Keep new.\n",
-            id(40)
-        );
-        b.merge(&[(format!("logs/app/2026/10/2026-10-31-{}.md", id(40)), ruling)]);
-        for minute in 1..4 {
-            b.f.host
-                .fire_and_check(ny("2026-10-30 09:00") + minute * 60_000)
-                .unwrap();
-        }
-        assert!(
-            b.runs().is_empty(),
-            "the ruling waits for the open PR, unconsumed"
-        );
-        b.github.merge(214);
-        assert!(run(&mut b.f.host, &b.tools));
-        b.f.host.fire_and_check(ny("2026-10-30 09:10")).unwrap();
-        b.f.host.fire_and_check(ny("2026-10-30 09:11")).unwrap();
-        let runs = b.runs();
-        assert_eq!(runs.len(), 1);
-        assert_eq!(
-            (runs[0].trigger, runs[0].outcome),
-            (CompileTrigger::Ruling, CompileOutcome::Running)
-        );
-    }
-
-    #[test]
-    fn a_note_main_changed_while_the_run_worked_is_never_overwritten() {
-        let mut b = brained();
-        b.merge(&[
-            relay(1),
-            note("Call Relay", "observation", &[id(1)], "Health is /status."),
-        ]);
-        let (run, session, work) = b.started();
-        // A teammate's change to the same note merges and is fetched meanwhile.
-        b.merge(&[note(
-            "Call Relay",
-            "observation",
-            &[id(1)],
-            "Health is /live.",
-        )]);
-        let brain = work.worktree.join("second-brain");
-        fs::write(brain.join("notes/Call Relay.md"), relay_note(&id(1))).unwrap();
-        let failed = b
-            .tool(&session, "finish_compile", json!({"summary": "Done"}))
-            .unwrap_err();
-        assert!(
-            failed
-                .to_string()
-                .contains("main changed second-brain/notes/Call Relay.md"),
-            "{failed:#}"
-        );
-        assert_eq!(
-            b.f.host.compile_run(&run.id).unwrap().outcome,
-            CompileOutcome::Failed
-        );
-        assert!(b.compile_batches().is_empty());
-    }
-
-    #[test]
-    fn run_now_waits_until_main_holds_the_merged_compile_prs_cursor() {
-        let mut b = brained();
-        b.merge(&[relay(1)]);
-        let (_, session, work) = b.started();
-        let brain = work.worktree.join("second-brain");
-        fs::create_dir_all(brain.join("notes")).unwrap();
-        fs::write(brain.join("notes/Call Relay.md"), relay_note(&id(1))).unwrap();
-        b.tool(&session, "finish_compile", json!({"summary": "Done"}))
-            .unwrap();
-        passing_checks(&b.github);
-        assert!(run(&mut b.f.host, &b.tools));
-        let number = b.compile_batches()[0].pull_request.as_ref().unwrap().number;
-        let before = b.f.host.brain(REPO).unwrap().head.unwrap();
-        b.github.merge(number);
-        assert!(run(&mut b.f.host, &b.tools));
-        assert_eq!(b.compile_batches()[0].stage, BrainStage::Merged);
-        // As when the pass fetched main just before GitHub merged the PR.
-        (b.f.host.db.execute(
-            "UPDATE brains SET data=json_set(data,'$.head',?2) WHERE repository=?1",
-            params![REPO, before],
-        ))
-        .unwrap();
-        let waits = b.f.host.run_brain_compile(REPO).unwrap_err();
-        assert!(
-            waits
-                .to_string()
-                .starts_with("Waiting for main to be fetched"),
-            "{waits:#}"
-        );
-        assert!(run(&mut b.f.host, &b.tools));
-        assert_eq!(b.cursor_on_main(), work.cursor);
-        // The compiler moves to another host, which compiles past this host's cursor, and
-        // back: this host's last cursor is behind main's, which it never waits for.
-        let later = b.merge(&[relay(2)]);
-        let moved_on = Cursor {
-            through: Some(later),
-            after: vec![],
-        };
-        b.merge(&[("notes/INDEX.md".into(), write_cursor("", &moved_on))]);
-        assert_ne!(b.cursor_on_main(), work.cursor);
-        b.f.host.run_brain_compile(REPO).unwrap();
-        b.prepare();
-        assert_eq!(
-            b.runs()[0].outcome,
-            CompileOutcome::Skipped,
-            "nothing is compiled twice"
-        );
     }
 
     #[test]

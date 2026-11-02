@@ -35,9 +35,13 @@ pub(crate) struct RulingEntry {
     pub(crate) pending: bool,
 }
 
-/// Where the index of the brain `owner/name` lives: `brain-index/github.com/<owner>/<name>.sqlite`.
+/// Where the index of the brain in `repository` lives:
+/// `brain-index/github.com/<owner>/<name>.sqlite`, or for a local one
+/// `brain-index/local-<id>.sqlite`.
 pub(crate) fn index_file(home: &Path, repository: &str) -> PathBuf {
-    let (owner, name) = repository.split_once('/').unwrap_or((repository, ""));
+    let Some((owner, name)) = repository.split_once('/') else {
+        return home.join(FOLDER).join(format!("{repository}.sqlite"));
+    };
     home.join(FOLDER)
         .join("github.com")
         .join(owner.to_ascii_lowercase())
@@ -86,7 +90,8 @@ fn remove(path: &Path) {
 
 /// Whether the index holds a completed build: its schema is current and a refresh committed
 /// the commit it indexed. Anything else, a file a stopped build left included, is missing.
-pub(crate) fn is_built(path: &Path) -> bool {
+#[cfg(test)]
+fn is_built(path: &Path) -> bool {
     open_read(path).is_ok_and(|db| db.is_some())
 }
 
@@ -448,41 +453,27 @@ fn store(
 }
 
 /// Marks pending the entries a compile would take, by the cursor in `notes/INDEX.md` at
-/// `commit` (see `compile.rs`): those added after its `compiled-through` commit, by the commit
-/// graph, less its `compiled-after` ids. With no cursor every entry is pending but those the
-/// legacy import recorded as `compiled`.
-fn mark_pending(
-    db: &Connection,
-    checkout: &Path,
-    commit: &str,
-    prefix: &str,
-    compiled: &HashSet<String>,
-) -> Result<()> {
+/// `commit` (see `compile.rs`): those whose ids its `compiled-through` commit does not hold, in
+/// that commit's layout, less its `compiled-after` ids. With no such commit every entry is
+/// pending but those ids.
+fn mark_pending(db: &Connection, checkout: &Path, commit: &str, prefix: &str) -> Result<()> {
     let index = compile::file_at(checkout, commit, &format!("{prefix}{INDEX}"));
     let cursor = compile::read_cursor(&index);
     let through = (cursor.through.as_deref()).filter(|t| publish::is_ancestor(checkout, t, commit));
-    match through {
-        Some(through) => {
-            let since = added_entries(checkout, &format!("{through}..{commit}"), prefix)?;
-            db.execute("UPDATE files SET pending=0 WHERE pending=1", [])?;
-            let mut mark =
-                db.prepare("UPDATE files SET pending=1 WHERE class='entry' AND path=?1")?;
-            for path in since.keys() {
-                mark.execute([path])?;
-            }
-        }
-        None => {
-            db.execute("UPDATE files SET pending=(class='entry')", [])?;
-        }
+    let mut done: HashSet<String> = cursor.after.into_iter().collect();
+    if let Some(through) = through {
+        done.extend(compile::entry_ids_at(checkout, through)?);
     }
-    let done = match through {
-        Some(_) => cursor.after.iter().collect::<Vec<_>>(),
-        None => cursor.after.iter().chain(compiled).collect(),
-    };
-    let mut unmark =
-        db.prepare("UPDATE files SET pending=0 WHERE class='entry' AND entry_id=?1")?;
-    for id in done {
-        unmark.execute([id])?;
+    let entries: Vec<(String, Option<String>)> = (db
+        .prepare("SELECT path,entry_id FROM files WHERE class='entry'")?)
+    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+    .collect::<rusqlite::Result<_>>()?;
+    db.execute("UPDATE files SET pending=0 WHERE pending=1", [])?;
+    let mut mark = db.prepare("UPDATE files SET pending=1 WHERE path=?1")?;
+    for (path, id) in entries {
+        if !id.is_some_and(|id| done.contains(&id)) {
+            mark.execute([path])?;
+        }
     }
     Ok(())
 }
@@ -498,9 +489,9 @@ fn resolve_sources(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// What a refresh reads: the brain's checkout, the commit of `main` to index and the brain
-/// folder there, with this machine's clones to verify entries' refs against, `gh` to read the
-/// PRs they name, and the entries the legacy import recorded as compiled.
+/// What a refresh reads: the repository's clone, the commit of `main` to index and the brain
+/// folder there, with this machine's clones to verify entries' refs against and `gh` to read the
+/// PRs they name.
 pub(crate) struct Refresh<'a> {
     pub(crate) index: &'a Path,
     pub(crate) checkout: &'a Path,
@@ -508,7 +499,6 @@ pub(crate) struct Refresh<'a> {
     pub(crate) brain_dir: &'a str,
     pub(crate) clones: &'a Clones,
     pub(crate) gh: Option<&'a publish::Tool<runtime::GhAnswer>>,
-    pub(crate) compiled: &'a HashSet<String>,
 }
 
 /// Brings the index to `commit`: reads and stores only the files whose blob changed, removes
@@ -523,7 +513,6 @@ pub(crate) fn refresh(refresh: Refresh) -> Result<usize> {
         brain_dir,
         clones,
         gh,
-        compiled,
     } = refresh;
     let mut db = open(index)?;
     let at = format!("{brain_dir}\0{commit}");
@@ -632,7 +621,7 @@ pub(crate) fn refresh(refresh: Refresh) -> Result<usize> {
         store(&transaction, path, blob, *class, &text, pull_request)?;
     }
     resolve_sources(&transaction)?;
-    mark_pending(&transaction, checkout, commit, &prefix, compiled)?;
+    mark_pending(&transaction, checkout, commit, &prefix)?;
     verify_entries(&transaction, clones, gh, false)?;
     // GitHub is asked about the next named PRs only, as on a pass with no new commit.
     if gh.is_some() {
@@ -782,7 +771,7 @@ fn verify_entries(
 }
 
 /// A project's scope in its brain: its repositories' log folders, in lower case, and the
-/// brain's own folder, whose planning entries are no one repository's.
+/// `planning` folder, whose entries are no one repository's.
 #[derive(Clone, Debug)]
 pub(crate) struct Scope {
     folders: Vec<String>,
@@ -1601,8 +1590,9 @@ fn source_json(source: &ClaimSource) -> Value {
 
 /// An entry this machine wrote, as Logs shows it.
 fn local_entry(log: &WorkLog) -> BrainEntry {
+    let brain = format!("{}/", SpaceBrain::DEFAULT_FOLDER);
     let path = (log.path.as_deref())
-        .and_then(|path| path.split_once('/').map(|(_, rest)| rest.to_owned()))
+        .and_then(|path| path.split_once(&brain).map(|(_, rest)| rest.to_owned()))
         .unwrap_or_default();
     BrainEntry {
         id: log.id.clone(),
@@ -1625,10 +1615,7 @@ fn local_entry(log: &WorkLog) -> BrainEntry {
             state: RefState::Unverified,
             reason: None,
         },
-        pull_request: EntryPullRequest::Batch {
-            number: None,
-            stage: BrainStage::Queued,
-        },
+        pull_request: EntryPullRequest::Waiting,
         origin: Some(EntryOrigin {
             project_id: log.project_id.clone(),
             ticket_id: log.task_id.clone(),
@@ -1639,50 +1626,41 @@ fn local_entry(log: &WorkLog) -> BrainEntry {
 }
 
 impl Host {
-    /// The brain a read names, with its index; refused for a brain no Space names, and before
-    /// its first index build.
+    /// The brain a read names, with its index; refused for a repository no Space here is in,
+    /// and before its first index build.
     fn brain_reader(&self, repository: &str) -> Result<(Brain, Connection)> {
         let brain = self.brain(repository)?;
-        ensure!(
-            !brain.spaces.is_empty(),
-            "No Space names the brain {repository}"
-        );
         let db = open_read(&index_file(&self.home, &brain.repository))?.with_context(|| {
             format!(
-                "{} is not indexed yet: its first sync on the Brains page builds the index",
+                "{} is not indexed yet: its first sync builds the index",
                 brain.repository
             )
         })?;
         Ok((brain, db))
     }
 
-    /// The project's scope in `brain`, refused unless the project's Space names that brain, so
-    /// a project's scope never reads another brain.
+    /// The project's scope in `brain`, refused unless the project's Space is in that brain's
+    /// repository, so a project's scope never reads another brain.
     fn brain_scope(&self, brain: &Brain, project: Option<&str>) -> Result<Option<Scope>> {
         let Some(project) = project else {
             return Ok(None);
         };
         let named = self.owner_brain(&SessionOwner::Project(project.to_owned()))?;
-        let names = matches!(
-            named.map(|b| b.repository),
-            Some(BrainRepository::GitHub { owner, name, .. })
-                if format!("{owner}/{name}").eq_ignore_ascii_case(&brain.repository)
-        );
         ensure!(
-            names,
-            "This project's Space does not name the brain {}",
+            named.eq_ignore_ascii_case(&brain.repository),
+            "This project's Space is not in {}",
             brain.repository
         );
         let folders = (self.project_repositories(project)?.iter())
             .map(|repository| memory::repository_log_name(repository).to_lowercase())
             .collect();
-        let planning = (brain.repository.split_once('/'))
-            .map(|(_, name)| name.to_lowercase())
-            .unwrap_or_default();
-        Ok(Some(Scope { folders, planning }))
+        Ok(Some(Scope {
+            folders,
+            planning: memory::PLANNING_FOLDER.into(),
+        }))
     }
 
-    /// This machine's entries for the brain, by id: their project, ticket, session and batch.
+    /// This machine's entries for the brain, by id: their project, ticket and session.
     fn local_entries(&self, repository: &str, ids: &[&str]) -> Result<HashMap<String, BrainEntry>> {
         let mut local = HashMap::new();
         let mut statement = self.db.prepare_cached(
@@ -1697,32 +1675,25 @@ impl Host {
                 })
                 .optional()?
             {
-                local.insert(log.id.clone(), self.with_batch(local_entry(&log), &log)?);
+                local.insert(
+                    log.id.clone(),
+                    self.with_state(repository, local_entry(&log), &log)?,
+                );
             }
         }
         Ok(local)
     }
 
-    /// The entry with its batch's PR and live stage.
-    fn with_batch(&self, mut entry: BrainEntry, log: &WorkLog) -> Result<BrainEntry> {
-        let batch: Option<String> = match &log.batch_id {
-            Some(batch) => self
-                .db
-                .query_row(
-                    "SELECT brain_batch_id FROM log_batches WHERE id=?1",
-                    [batch],
-                    |r| r.get(0),
-                )
-                .optional()?
-                .flatten(),
-            None => None,
-        };
-        if let Some(batch) = batch.and_then(|id| self.brain_batch(&id).ok()) {
-            entry.pull_request = EntryPullRequest::Batch {
-                number: batch.pull_request.map(|pr| pr.number),
-                stage: batch.stage,
-            };
-        }
+    /// The entry with whether it waits or is held here.
+    fn with_state(
+        &self,
+        repository: &str,
+        mut entry: BrainEntry,
+        log: &WorkLog,
+    ) -> Result<BrainEntry> {
+        let path = log.path.as_deref().unwrap_or_default();
+        entry.pull_request =
+            (self.entry_state(repository, path)?).unwrap_or(EntryPullRequest::None);
         Ok(entry)
     }
 
@@ -1735,20 +1706,7 @@ impl Host {
         scope: Option<&Scope>,
         filter: &BrainLogFilter,
     ) -> Result<Vec<BrainEntry>> {
-        let logs: Vec<WorkLog> = self
-            .db
-            .prepare_cached(
-                "SELECT l.sequence,l.data FROM work_logs l LEFT JOIN log_batches b ON b.id=l.batch_id LEFT JOIN brain_batches bb ON bb.id=b.brain_batch_id
-                 WHERE json_extract(l.data,'$.brain')=?1 COLLATE NOCASE AND json_extract(l.data,'$.released') IS NOT 1
-                   AND coalesce(json_extract(bb.data,'$.stage'),'queued') NOT IN ('merged','discarded')
-                 ORDER BY l.id DESC",
-            )?
-            .query_map([repository], |r| {
-                let mut log: WorkLog = decode(r, 1)?;
-                log.sequence = r.get(0)?;
-                Ok(log)
-            })?
-            .collect::<rusqlite::Result<_>>()?;
+        let logs = self.unlanded_logs(repository)?;
         let mut on_main =
             db.prepare_cached("SELECT 1 FROM files WHERE class='entry' AND entry_id=?1")?;
         let mut pending = vec![];
@@ -1756,7 +1714,8 @@ impl Host {
             if on_main.exists([&log.id])? {
                 continue;
             }
-            let entry = self.with_batch(local_entry(&log), &log)?;
+            let mut entry = self.with_state(repository, local_entry(&log), &log)?;
+            entry.pending = true;
             let folder = entry.repository.to_lowercase();
             let shown = scope.is_none_or(|scope| scope.folders.contains(&folder))
                 && (filter.repository.as_ref()).is_none_or(|r| r.eq_ignore_ascii_case(&folder))
@@ -1786,8 +1745,7 @@ impl Host {
         Ok(pending)
     }
 
-    /// A page of Logs. Entries this machine wrote carry their ticket, session and batch; the
-    /// newest page also lists this machine's entries not yet on `main`.
+    /// A page of Logs. Entries this machine wrote carry their ticket and session; the newest page also lists this machine's entries not yet on `main`.
     pub fn brain_logs(
         &self,
         repository: &str,
@@ -1950,7 +1908,7 @@ impl Host {
 
     /// `query_brain`: the cheapest-first ladder over the caller's project's Space's brain, in
     /// the project's scope unless `scope` is `brain`. The agent never names the brain. Refused
-    /// for other roles, without a brain, and before the brain's first index build.
+    /// for other roles, and before the brain's first index build.
     pub(crate) fn query_brain(&self, session: &Session, args: &Value) -> Result<Value> {
         service::only_arguments("query_brain", args, &QUERY_BRAIN_ARGUMENTS)?;
         ensure!(
@@ -1982,15 +1940,7 @@ impl Host {
                 asked_whole,
             ),
         };
-        let space_brain = self.owner_brain(&owner)?.context(
-            "This Space has no brain to query. The human can name one in Settings › Spaces.",
-        )?;
-        let BrainRepository::GitHub { owner, name, .. } = &space_brain.repository else {
-            bail!(
-                "This Space's brain is not a GitHub repository yet, so it has no index. See the Brains page."
-            );
-        };
-        let (brain, db) = self.brain_reader(&format!("{owner}/{name}"))?;
+        let (brain, db) = self.brain_reader(&self.owner_brain(&owner)?)?;
         let scope = match whole {
             true => None,
             false => self.brain_scope(&brain, Some(&session.project_id))?,
@@ -2072,13 +2022,13 @@ pub(crate) mod tests {
         let e1_path = format!("logs/{RELAY}/2026/10/2026-10-20-{e1}.md");
         let e2_path = format!("logs/{RELAY}/2026/10/2026-10-20-{e2}.md");
         let e3_path = format!("logs/{APP}/2026/10/2026-10-20-{e3}.md");
-        let e4_path = format!("logs/sagehaven-docs/2026/10/2026-10-20-{e4}.md");
+        let e4_path = format!("logs/planning/2026/10/2026-10-20-{e4}.md");
         let missing = id(99);
         vec![
             entry(RELAY, &e1, ("oscar", "decision", "Retry Telnyx calls once"), "main @ a41f2c0 · PR #81"),
             entry(RELAY, &e2, ("mhohlios", "observation", "Telnyx retry storms seen"), "—"),
             entry(APP, &e3, ("rb", "decision", "Kids list uses pagination"), "main @ —"),
-            entry("sagehaven-docs", &e4, ("mhohlios", "observation", "Quarterly roadmap"), "—"),
+            entry("planning", &e4, ("mhohlios", "observation", "Quarterly roadmap"), "—"),
             note(
                 "Call Relay Architecture",
                 "decision",
@@ -2175,7 +2125,6 @@ pub(crate) mod tests {
                 brain_dir: "second-brain",
                 clones: &self.clones,
                 gh: None,
-                compiled: &HashSet::new(),
             })
             .unwrap()
         }
@@ -2187,7 +2136,7 @@ pub(crate) mod tests {
     fn relay_scope() -> Scope {
         Scope {
             folders: vec![RELAY.into()],
-            planning: "sagehaven-docs".into(),
+            planning: "planning".into(),
         }
     }
 
@@ -2554,7 +2503,6 @@ pub(crate) mod tests {
             brain_dir: "second-brain",
             clones: &clones,
             gh: Some(&gh),
-            compiled: &HashSet::new(),
         })
         .unwrap();
         let stored: String = brain
@@ -2606,7 +2554,6 @@ pub(crate) mod tests {
                 brain_dir: "second-brain",
                 clones: &clones,
                 gh: Some(&gh),
-                compiled: &HashSet::new(),
             })
             .unwrap();
         };
@@ -2687,7 +2634,6 @@ pub(crate) mod tests {
                 brain_dir: "second-brain",
                 clones: &clones,
                 gh: Some(&gh),
-                compiled: &HashSet::new(),
             })
             .unwrap()
         };
@@ -2746,20 +2692,18 @@ pub(crate) mod tests {
         let head = brain.commit(&[index], "Compile (#81)");
         brain.refresh(&head);
         assert_eq!(status(&brain.db()).unwrap().pending_entries, 1);
-        // With no cursor, what the legacy import recorded as compiled is not pending.
+        // With no `compiled-through`, every entry is pending but those in `compiled-after`.
         let fresh = Checkout::new();
-        fresh.commit(&sample()[..2], "Two entries (#80)");
-        let head = fresh.commit(&sample()[2..3], "One more (#82)");
-        refresh(Refresh {
-            index: &fresh.index(),
-            checkout: &fresh.path(),
-            commit: &head,
-            brain_dir: "second-brain",
-            clones: &Clones::default(),
-            gh: None,
-            compiled: &HashSet::from([id(1), id(2)]),
-        })
-        .unwrap();
+        let bookmark = compile::Cursor {
+            through: None,
+            after: vec![id(1), id(2)],
+        };
+        let index = (
+            INDEX.to_owned(),
+            compile::write_cursor("[[Alpha]]\n", &bookmark),
+        );
+        let head = fresh.commit(&[sample()[..3].to_vec(), vec![index]].concat(), "Bring in");
+        fresh.refresh(&head);
         assert_eq!(status(&fresh.db()).unwrap().pending_entries, 1);
     }
 
@@ -3103,52 +3047,13 @@ pub(crate) mod tests {
 
     mod host {
         use super::*;
-        use crate::brains::tests::{GitHub, REPO, name_brain, run};
-        use crate::publish::tests::Fixture;
-        use std::sync::Arc;
+        use crate::brain_sync::tests::{REPO, Stored, stored};
 
-        /// The publish fixture's project, whose repository is `app`, in a Sage Space whose brain
-        /// is `REPO` on a fake GitHub, which holds the sample brain plus an `app` entry.
-        struct Brained {
-            f: Fixture,
-            github: Arc<GitHub>,
-            tools: publish::Tools,
-            _github_folder: tempfile::TempDir,
-            sage: SpaceId,
+        fn brained() -> Stored {
+            stored()
         }
 
-        fn brained() -> Brained {
-            let mut f = publish::tests::fixture();
-            f.host.legacy_pointer = f.home.path().join("no-pointer");
-            let sage = f.host.create_space("Sage", "", "", None).unwrap().space;
-            let sage = name_brain(&mut f.host, &sage.id, REPO);
-            f.host
-                .move_project_to_space(&f.coordinator.project_id, &sage)
-                .unwrap();
-            f.host.record_gh_login(Some("mhohlios".into()));
-            let folder = tempfile::tempdir().unwrap();
-            let github = GitHub::new(folder.path());
-            let tools = github.tools();
-            Brained {
-                f,
-                github,
-                tools,
-                _github_folder: folder,
-                sage,
-            }
-        }
-
-        impl Brained {
-            /// Commits files of the brain folder to `main` and runs the brain's pass.
-            fn merge(&mut self, files: &[(String, String)], message: &str) {
-                let files: Vec<(String, &str)> = (files.iter())
-                    .map(|(path, text)| (format!("second-brain/{path}"), text.as_str()))
-                    .collect();
-                let files: Vec<(&str, &str)> =
-                    files.iter().map(|(p, t)| (p.as_str(), *t)).collect();
-                self.github.commit_files_on_main(&files, message);
-                assert!(run(&mut self.f.host, &self.tools));
-            }
+        impl Stored {
             fn query(&mut self, session: &str, args: Value) -> Result<Value> {
                 self.f.host.agent_tool(session, "query_brain", args)
             }
@@ -3168,32 +3073,6 @@ pub(crate) mod tests {
             files
         }
 
-        #[test]
-        fn a_brain_without_a_config_is_indexed_in_its_spaces_folder() {
-            let mut b = brained();
-            let mut space = b.f.host.space(&b.sage).unwrap().space;
-            space.brain.as_mut().unwrap().folder = "brain".into();
-            b.f.host.update_space(space).unwrap();
-            let (path, text) = entry(
-                "app",
-                &id(5),
-                ("mhohlios", "decision", "Kept in brain"),
-                "—",
-            );
-            let files = [(format!("brain/{path}"), text)];
-            let files: Vec<(&str, &str)> = files
-                .iter()
-                .map(|(p, t)| (p.as_str(), t.as_str()))
-                .collect();
-            b.github.commit_files_on_main(&files, "Log batch (#7)");
-            assert!(run(&mut b.f.host, &b.tools));
-            let brain = b.f.host.brain(REPO).unwrap();
-            assert_eq!(brain.config, BrainConfigReading::Missing);
-            let hits = b.f.host.search_brain(REPO, None, "kept").unwrap();
-            assert_eq!(titles_of(&hits), ["Kept in brain"]);
-            assert_eq!(hits[0].path, path);
-        }
-
         fn steps(answer: &Value) -> Vec<String> {
             (answer["results"].as_array().unwrap().iter())
                 .map(|r| r["step"].as_str().unwrap().to_owned())
@@ -3203,28 +3082,28 @@ pub(crate) mod tests {
         #[test]
         fn a_pass_builds_the_index_and_rebuilds_a_deleted_one() {
             let mut b = brained();
-            b.merge(&with_app_entry(), "Compile (#81)");
+            b.merge(&with_app_entry());
             let index = index_file(&b.f.host.home, REPO);
             assert!(index.exists());
             let hits = b.f.host.search_brain(REPO, None, "telnyx").unwrap();
             assert_eq!(hits.len(), 4);
             fs::remove_file(&index).unwrap();
             assert!(b.f.host.brain_status(REPO).is_err(), "not indexed yet");
-            assert!(run(&mut b.f.host, &b.tools));
+            b.index();
             assert_eq!(b.f.host.search_brain(REPO, None, "telnyx").unwrap(), hits);
-            // A build stopped after the schema, with nothing new to fetch: the pass still
-            // completes it from the checkout's main.
+            // A build stopped after the schema, with nothing new to fetch: the refresh still
+            // completes it from the clone.
             fs::remove_file(&index).unwrap();
             drop(open(&index).unwrap());
             assert!(b.f.host.brain_status(REPO).is_err(), "not indexed yet");
-            assert!(run(&mut b.f.host, &b.tools));
+            b.index();
             assert_eq!(b.f.host.search_brain(REPO, None, "telnyx").unwrap(), hits);
         }
 
         #[test]
         fn the_read_api_scopes_to_the_projects_repositories() {
             let mut b = brained();
-            b.merge(&with_app_entry(), "Compile (#81)");
+            b.merge(&with_app_entry());
             let project = b.f.coordinator.project_id.clone();
             let logs = (b.f.host)
                 .brain_logs(
@@ -3259,7 +3138,7 @@ pub(crate) mod tests {
             assert_eq!(titles_of(&hits), ["App retries Telnyx webhooks"]);
             let other = b.f.host.create_project("Elsewhere").unwrap();
             let refused = b.f.host.search_brain(REPO, Some(&other.id), "telnyx");
-            assert!(format!("{:#}", refused.unwrap_err()).contains("does not name the brain"));
+            assert!(format!("{:#}", refused.unwrap_err()).contains("is not in"));
         }
 
         fn titles_of(hits: &[BrainHit]) -> Vec<&str> {
@@ -3269,7 +3148,7 @@ pub(crate) mod tests {
         #[test]
         fn this_machines_unmerged_entry_is_pending_with_its_ticket_and_session() {
             let mut b = brained();
-            b.merge(&sample(), "Compile (#81)");
+            b.merge(&sample());
             let implementer = b.implementer();
             let logged = (b.f.host)
                 .agent_tool(
@@ -3296,13 +3175,7 @@ pub(crate) mod tests {
             let origin = pending.origin.as_ref().unwrap();
             assert_eq!(origin.ticket_id.as_deref(), Some(b.f.ticket.as_str()));
             assert_eq!(origin.session_id, implementer);
-            assert!(matches!(
-                pending.pull_request,
-                EntryPullRequest::Batch {
-                    stage: BrainStage::Queued,
-                    ..
-                }
-            ));
+            assert_eq!(pending.pull_request, EntryPullRequest::Waiting);
             let older = BrainLogsFrom::Before(id(1000));
             let paged = (b.f.host)
                 .brain_logs(REPO, Some(&project), &BrainLogFilter::default(), &older)
@@ -3316,7 +3189,7 @@ pub(crate) mod tests {
         #[test]
         fn query_brain_walks_the_ladder_in_order_with_freshness() {
             let mut b = brained();
-            b.merge(&with_app_entry(), "Compile (#81)");
+            b.merge(&with_app_entry());
             let implementer = b.implementer();
             let answer = b
                 .query(&implementer, json!({"question": "What did we decide about Telnyx retries?", "scope": "brain"}))
@@ -3358,7 +3231,7 @@ pub(crate) mod tests {
                 STATUS.into(),
                 format!("# Status\n\n{long}\n\nWatch calling: the relay retries Telnyx.\n"),
             ));
-            b.merge(&files, "Compile (#82)");
+            b.merge(&files);
             let coordinator = b.f.coordinator.id.clone();
             let answer = b
                 .query(
@@ -3377,7 +3250,7 @@ pub(crate) mod tests {
         #[test]
         fn query_brain_says_when_the_brain_has_nothing() {
             let mut b = brained();
-            b.merge(&sample(), "Compile (#81)");
+            b.merge(&sample());
             let implementer = b.implementer();
             for question in ["How do zebras migrate?", "What is the?"] {
                 let answer = b
@@ -3396,12 +3269,14 @@ pub(crate) mod tests {
         fn query_brain_refuses_as_specified() {
             let mut b = brained();
             let implementer = b.implementer();
-            let refused = |b: &mut Brained, args: Value, reason: &str| {
+            let refused = |b: &mut Stored, args: Value, reason: &str| {
                 let error = format!("{:#}", b.query(&implementer, args).unwrap_err());
                 assert!(error.contains(reason), "{error}");
             };
+            let index = index_file(&b.f.host.home, REPO);
+            fs::remove_file(&index).unwrap();
             refused(&mut b, json!({"question": "x"}), "not indexed yet");
-            b.merge(&sample(), "Compile (#81)");
+            b.merge(&sample());
             refused(
                 &mut b,
                 json!({"question": "x", "brain": "Vyttle-LLC/vyttle-docs"}),
@@ -3433,14 +3308,13 @@ pub(crate) mod tests {
             (b.f.host)
                 .move_project_to_space(&b.f.coordinator.project_id, &lone.id)
                 .unwrap();
-            refused(&mut b, json!({"question": "x"}), "has no brain");
         }
 
         #[test]
         fn a_thread_reads_its_own_spaces_whole_brain_and_never_another_spaces() {
             let mut b = brained();
-            b.merge(&with_app_entry(), "Compile (#81)");
-            let sage = b.sage.clone();
+            b.merge(&with_app_entry());
+            let sage = b.sage.id.clone();
             let host = &mut b.f.host;
             host.start_thread("t1", &sage, "Hi", &[], None).unwrap();
             let thread = host.session("t1").unwrap();
@@ -3456,12 +3330,6 @@ pub(crate) mod tests {
             host.start_thread("t2", &vyttle.id, "Hi", &[], None)
                 .unwrap();
             let elsewhere = host.session("t2").unwrap();
-            let refused = host
-                .thread_tool(&elsewhere, "query_brain", &question)
-                .unwrap_err();
-            assert!(refused.to_string().contains("no brain"), "{refused}");
-            let vyttle = name_brain(host, &vyttle.id, "Vyttle-LLC/vyttle-docs");
-            assert!(vyttle.as_str() != sage.as_str());
             let unread = host.thread_tool(&elsewhere, "query_brain", &question);
             assert!(unread.is_err_and(|e| !e.to_string().contains("Telnyx")));
         }
@@ -3469,10 +3337,9 @@ pub(crate) mod tests {
         #[test]
         fn query_brain_never_reads_another_organizations_brain() {
             let mut b = brained();
-            b.merge(&with_app_entry(), "Compile (#81)");
-            let vyttle_repo = "Vyttle-LLC/vyttle-docs";
+            b.merge(&with_app_entry());
             let vyttle = b.f.host.create_space("Vyttle", "", "", None).unwrap().space;
-            let vyttle = name_brain(&mut b.f.host, &vyttle.id, vyttle_repo);
+            let vyttle_repo = vyttle.storage.repository.key();
             let checkout = Checkout::new();
             let head = checkout.commit(
                 &[
@@ -3490,17 +3357,16 @@ pub(crate) mod tests {
                 "Compile (#3)",
             );
             refresh(Refresh {
-                index: &index_file(&b.f.host.home, vyttle_repo),
+                index: &index_file(&b.f.host.home, &vyttle_repo),
                 checkout: &checkout.path(),
                 commit: &head,
                 brain_dir: "second-brain",
                 clones: &Clones::default(),
                 gh: None,
-                compiled: &HashSet::new(),
             })
             .unwrap();
             (b.f.host)
-                .move_project_to_space(&b.f.coordinator.project_id, &vyttle)
+                .move_project_to_space(&b.f.coordinator.project_id, &vyttle.id)
                 .unwrap();
             let implementer = b.implementer();
             let relay = b
@@ -3510,7 +3376,7 @@ pub(crate) mod tests {
                 )
                 .unwrap();
             assert_eq!(relay["brain"], vyttle_repo);
-            assert_eq!(relay["answer"], NOTHING, "no sagehaven-docs content");
+            assert_eq!(relay["answer"], NOTHING, "nothing of Sage's");
             let own = b
                 .query(&implementer, json!({"question": "brain browser index"}))
                 .unwrap();
@@ -3518,10 +3384,6 @@ pub(crate) mod tests {
             assert_eq!(steps, ["status", "entry"]);
             assert!(own.to_string().contains("Vyttle ships"));
             assert!(!own.to_string().contains("Telnyx"));
-            let sage = (b.f.host.space(&b.sage).unwrap().space.brain).unwrap();
-            assert!(
-                matches!(sage.repository, BrainRepository::GitHub { name, .. } if name == "sagehaven-docs")
-            );
         }
 
         #[test]

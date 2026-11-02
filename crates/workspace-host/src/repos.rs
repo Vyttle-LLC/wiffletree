@@ -270,6 +270,11 @@ pub(crate) type Content = Option<Vec<u8>>;
 pub(crate) trait RuleSet {
     /// Whether the file at `path`, relative to the clone, is this rule set's.
     fn claims(&self, path: &str) -> bool;
+    /// Whether the engine brings this rule set's files down from GitHub as it does a file no
+    /// rule set claims, as the rule set commits only what it is given and compares nothing.
+    fn pulled_by_git(&self) -> bool {
+        false
+    }
     /// The folder GitHub's head `remote` moved this rule set's files into, when this Mac still
     /// has them at the root: the pass stops, before any rule set reads the move as deletions,
     /// for the host to adopt it.
@@ -301,8 +306,8 @@ pub(crate) trait RuleSet {
 }
 
 /// How many times a pass fetches and pushes in all when GitHub's branch moves under the push of
-/// a rule set that `pushes_again`. Only the settings pass's runner boards do, which only this
-/// Mac writes, so a few tries are enough. A storage repository's own pass retries whole instead,
+/// a rule set that `pushes_again`. Only the settings pass's runner boards, log entries and wiki
+/// landing do, which no other Mac's commit conflicts with, so a few tries are enough. A storage repository's own pass retries whole instead,
 /// up to `issues_sync::PUSH_TRIES`, which is higher because teammates filing at once each take
 /// the next number.
 const PUSH_TRIES: usize = 3;
@@ -420,8 +425,10 @@ fn pass_once(
             rule_set.failed(error);
         }
     }
-    let owner = |path: &str| rule_sets.iter().position(|rule_set| rule_set.claims(path));
-    take_other_files(clone, previous, &head, &|path| owner(path).is_some())?;
+    let its_own = |path: &str| {
+        (rule_sets.iter()).any(|rule_set| rule_set.claims(path) && !rule_set.pulled_by_git())
+    };
+    take_other_files(clone, previous, &head, &its_own)?;
     runtime::git_output(clone, &["reset", "--quiet", &head])?;
     let commits: Vec<_> = (rule_sets.iter_mut().zip(compared).enumerate())
         .filter(|(_, (_, compared))| *compared)

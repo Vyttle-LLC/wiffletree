@@ -30,7 +30,7 @@ The tool SHALL refuse, storing nothing, when the caller's Space has no brain or 
 - **WHEN** the implementer of a `sagechat-call-watch-relay` ticket calls `log_work` with a decision, title and the three fields
 - **THEN** the host stores one entry for `sagechat-call-watch-relay` in `sagehaven-docs`'s open batch for that ticket, and returns its id and file path
 
-#### Scenario: No brain
+#### Scenario: A Space on this Mac alone
 - **WHEN** an implementer in a project whose Space names no brain calls `log_work`
 - **THEN** the call is refused, saying the project's Space has no brain, and nothing is stored
 

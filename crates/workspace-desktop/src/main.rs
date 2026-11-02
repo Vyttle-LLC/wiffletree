@@ -25,6 +25,7 @@ mod events_view;
 mod file_links;
 mod files_view;
 mod folders;
+mod held_entry;
 mod history_sheet;
 mod hosts;
 mod inbox;
@@ -526,10 +527,6 @@ impl Workspace {
                 self.open_page(Page::BrainBrowser, window, cx);
                 self.brain_browser
                     .update(cx, |browser, cx| browser.open(opening.clone(), window, cx));
-            }
-            Intent::OpenBatch(batch) => {
-                self.open_page(Page::Brains, window, cx);
-                (self.brains).update(cx, |brains, cx| brains.open_batch(batch.clone(), cx));
             }
             Intent::SearchBrain {
                 repository,
@@ -1124,7 +1121,7 @@ impl Workspace {
                     brain_search::Searched::Brain { project, .. } => {
                         project.as_ref().map(|(id, _)| id.clone())
                     }
-                    brain_search::Searched::NoBrain { .. } => None,
+                    brain_search::Searched::NoBrain => None,
                 };
                 (selected, scope)
             }

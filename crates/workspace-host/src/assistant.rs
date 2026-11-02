@@ -493,10 +493,9 @@ impl Host {
             .prepare("SELECT id FROM messages WHERE recipient=?1")?
             .query_map([id], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        // Its brain entries stay and are sent: its batch closes now, and a session with entries
-        // keeps its bare row, which they name, and loses everything else.
-        let closed = self.atomically(|host| {
-            let closed = memory::close_log_batches(&host.db, memory::Closing::Session(id), now())?;
+        // Its brain entries stay: a session with entries keeps its bare row, which they name, and
+        // loses everything else.
+        self.atomically(|host| {
             let logged: bool = host.db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM work_logs WHERE session_id=?1)",
                 [id],
@@ -506,9 +505,8 @@ impl Host {
                 true => delete_dependents(&host.db, "sessions", "id=?1", id, &["work_logs"])?,
                 false => delete_with_dependents(&host.db, "sessions", "id=?1", id)?,
             }
-            Ok(closed)
+            Ok(())
         })?;
-        self.brains_now |= closed > 0;
         for message in messages {
             if let Ok(folder) = attachments_folder(&self.home, &message) {
                 let _ = fs::remove_dir_all(folder);

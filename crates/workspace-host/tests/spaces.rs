@@ -60,13 +60,6 @@ fn spaces_with_projects(host: &Host) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
-fn canonical(path: &Path) -> String {
-    std::fs::canonicalize(path)
-        .unwrap()
-        .to_string_lossy()
-        .into_owned()
-}
-
 #[test]
 fn a_fresh_store_has_only_personal() {
     let home = tempfile::tempdir().unwrap();
@@ -242,35 +235,13 @@ fn a_start_with_no_space_creates_personal() {
 }
 
 #[test]
-fn a_space_without_a_brain_logs_nothing() {
+fn every_space_logs_with_no_brain_named() {
     let home = tempfile::tempdir().unwrap();
     let mut host = Host::open_set_up(home.path()).unwrap();
     let project = host.create_project("Quiet").unwrap();
     let session = coordinator(&host, &project.id);
-    let error = host.append_log(log(&session.id, "one")).unwrap_err();
-    assert!(format!("{error:#}").contains("Space has no brain"));
-    assert!(host.logs(&project.id, None, 100).unwrap().is_empty());
-}
-
-#[test]
-fn attaching_a_brain_sets_it_for_every_project_in_the_space() {
-    let home = tempfile::tempdir().unwrap();
-    let brain = tempfile::tempdir().unwrap();
-    let mut host = Host::open_set_up(home.path()).unwrap();
-    let one = host.create_project("One").unwrap();
-    let two = host.create_project("Two").unwrap();
-    assert_eq!(one.space, two.space);
-    host.set_space_brain(&one.space, brain.path().to_str().unwrap())
-        .unwrap();
-    let record = host.space(&two.space).unwrap();
-    assert_eq!(
-        record.local.brain_path.as_deref(),
-        Some(canonical(brain.path()).as_str())
-    );
-    assert!(record.space.brain.is_some());
-    // The path stays on this Mac: the shared definition names only a local brain.
-    let definition = serde_json::to_string(&record.space).unwrap();
-    assert!(!definition.contains(&canonical(brain.path())));
+    host.append_log(log(&session.id, "one")).unwrap();
+    assert_eq!(host.logs(&project.id, None, 100).unwrap().len(), 1);
 }
 
 #[test]

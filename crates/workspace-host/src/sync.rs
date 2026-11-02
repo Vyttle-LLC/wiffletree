@@ -1067,7 +1067,7 @@ impl Host {
         let storage = match self.storage_input(&key)? {
             Some(input) => {
                 let scanner = scan::Scanner::bundled(&self.home, self.scan_path.clone())?;
-                let scanner = scanner.in_folder(input.root.clone());
+                let scanner = scanner.in_folder(input.root.clone(), self.scan_domains(&key));
                 Some((input, scanner))
             }
             None => None,
@@ -1115,7 +1115,8 @@ impl Host {
             return Ok(true);
         }
         if let Some(found) = passed.storage.take() {
-            self.finish_storage(found, passed.pushed.is_some())?;
+            self.finish_storage(found, passed.pushed.as_deref())?;
+            self.brains_now = true;
         }
         if let Some(error) = passed.failed.take() {
             // The other rule sets' commits were pushed; only settings waits.
@@ -1348,6 +1349,10 @@ impl Host {
         let notes = notes.into_iter().map(WorkspaceNote::Paused);
         // A brain that cannot be read shows no cards; its problem is on the Brains page. A card
         // naming no project is in no Inbox, only on the Brains page and in the brain browser.
+        let held_entries = self
+            .held_entries()?
+            .into_iter()
+            .map(WorkspaceNote::HeldEntry);
         let conflicts = (self.conflict_cards()).unwrap_or_else(|error| {
             eprintln!("Brain conflicts: {error:#}");
             vec![]
@@ -1355,6 +1360,7 @@ impl Host {
         Ok((self.issue_notes()?.into_iter())
             .chain(notes)
             .chain(self.held_notes()?)
+            .chain(held_entries)
             .chain(questions.map(WorkspaceNote::SkillQuestion))
             .chain(
                 conflicts
@@ -1754,6 +1760,21 @@ pub(crate) mod tests {
         pub(crate) fn commit(&self, file: &str, content: impl AsRef<[u8]>) {
             commit_on(&self.bare, file, content);
         }
+        /// One commit of `files` on GitHub's `main`, with `message`; its SHA.
+        pub(crate) fn commit_files(&self, files: &[(String, String)], message: &str) -> String {
+            let work = tempfile::tempdir().unwrap();
+            let bare = self.bare.to_str().unwrap();
+            git(work.path(), &["clone", "-q", bare, "."]);
+            for (file, content) in files {
+                let path = work.path().join(file);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, content).unwrap();
+            }
+            git(work.path(), &["add", "--all"]);
+            git(work.path(), &["commit", "-q", "-m", message]);
+            git(work.path(), &["push", "-q", "origin", "HEAD:main"]);
+            git(work.path(), &["rev-parse", "HEAD"])
+        }
         /// Every Git command of that name sent, with the options before it.
         fn calls(&self, command: &str) -> Vec<Vec<String>> {
             let named = |args: &&Vec<String>| {
@@ -1768,7 +1789,7 @@ pub(crate) mod tests {
                 .cloned()
                 .collect()
         }
-        fn pushes(&self) -> usize {
+        pub(crate) fn pushes(&self) -> usize {
             self.calls("push").len()
         }
     }

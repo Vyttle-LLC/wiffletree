@@ -790,8 +790,8 @@ pub struct LogFix {
     pub state: String,
 }
 /// A stored log entry. An entry captured before `brain-log-capture` keeps its old id and has no
-/// brain fields while it is in a legacy `logs/<repo>.md` file or waits for a brain; once queued
-/// into a batch it gains an entry id, its brain and its path like any other.
+/// brain fields while it is in a legacy `logs/<repo>.md` file or waits to land; once written to
+/// its Space's folder it gains an entry id, its brain and its path like any other.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkLog {
     pub sequence: i64,
@@ -811,14 +811,19 @@ pub struct WorkLog {
     pub reference: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space_id: Option<SpaceId>,
-    /// The brain repository, `owner/name`.
+    /// The repository of its Space's brain, as `StorageRepository::key` names it. An entry
+    /// from before folders names its old brain's `owner/name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brain: Option<String>,
-    /// The entry's file in the brain repository.
+    /// The entry's file in that repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// The batch an earlier release put it in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_id: Option<String>,
+    /// Its file is written to its Space's folder, or an earlier release sent it to its brain.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub written: bool,
     /// The human's GitHub login.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
@@ -832,9 +837,9 @@ pub struct WorkLog {
     /// brings it over, so it is never written again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_legacy_file: bool,
-    /// Why an entry captured before per-entry files is held in its batch and not sent: as it
-    /// stands it breaks the entry contract or the cap. Its text is never changed; it waits for
-    /// the human, who fixes or releases it.
+    /// Why an entry captured before per-entry files is held and not sent: as it stands it
+    /// breaks the entry contract or the cap. Its text is never changed; it waits for the human,
+    /// who fixes or releases it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held: Option<String>,
     /// The human released this held entry: it stays here and is never sent.
@@ -842,9 +847,9 @@ pub struct WorkLog {
     pub released: bool,
 }
 impl WorkLog {
-    /// Neither in a batch nor in a legacy file: it waits for its project's Space to have a brain.
+    /// Neither written to its Space's folder nor in a legacy file.
     pub fn is_unsent(&self) -> bool {
-        self.batch_id.is_none() && !self.in_legacy_file
+        !self.written && !self.in_legacy_file
     }
 }
 /// The live workspace. Archived sessions, accepted and closed tickets and those sessions'
@@ -975,10 +980,6 @@ pub struct Snapshot {
     /// no Space and not listed.
     #[serde(default)]
     pub jobs: Vec<job::JobState>,
-    /// The brains whose log batches are held because their pinned gate does not accept the
-    /// entry contract this Wiffletree writes, which the sidebar's Brains row counts.
-    #[serde(default)]
-    pub brains_logs_held: Vec<String>,
 }
 fn assistant_name() -> String {
     assistant::DEFAULT_NAME.into()
@@ -1134,6 +1135,7 @@ impl Snapshot {
             WorkspaceNote::Issue(note) => note.paused.as_ref(),
             WorkspaceNote::SkillQuestion(_)
             | WorkspaceNote::Held(_)
+            | WorkspaceNote::HeldEntry(_)
             | WorkspaceNote::Conflict(_) => None,
         })
     }
@@ -1326,25 +1328,29 @@ pub enum WorkspaceNote {
     SkillQuestion(SkillQuestion),
     /// A file held back from a push because a scan failed or could not run.
     Held(HeldFile),
+    /// A log entry a scan held, listed in the Inbox of the project that wrote it.
+    HeldEntry(HeldEntry),
     /// An issue the human should look at, listed under Issues at the top of every Inbox.
     Issue(IssueNote),
     /// A brain conflict, listed only in the Inbox of each project the card names.
     Conflict(Box<ConflictCard>),
 }
 impl WorkspaceNote {
-    /// Whether `project`'s Inbox lists it: a conflict only in its projects', the rest in every
-    /// one.
+    /// Whether `project`'s Inbox lists it: a conflict only in its projects', a held entry only
+    /// in the project's that wrote it, the rest in every one.
     pub fn is_for(&self, project: &str) -> bool {
         match self {
             Self::Conflict(card) => card.projects.iter().any(|p| p == project),
+            Self::HeldEntry(entry) => entry.project_id.as_deref() == Some(project),
             _ => true,
         }
     }
     /// Whether it counts among what needs the human: not a conflict already ruled, nor one in
-    /// no project's Inbox, which only the Brains page shows.
+    /// no project's Inbox, which only the Brains page shows, as a held entry no project wrote is.
     pub fn needs_you(&self) -> bool {
         match self {
             Self::Conflict(card) => card.state == ConflictState::Open && !card.projects.is_empty(),
+            Self::HeldEntry(entry) => entry.project_id.is_some(),
             _ => true,
         }
     }
@@ -1358,6 +1364,9 @@ pub struct HeldFile {
     pub path: String,
     /// `sensitive-info` or `secret-scan`.
     pub check: String,
+    /// The first line a finding names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u64>,
     /// The rule that failed, such as `phone`; `None` when the check could not run.
     pub rule: Option<String>,
     pub text: String,
@@ -3568,12 +3577,6 @@ pub enum Command {
     SpaceStorage {
         space_id: SpaceId,
     },
-    /// From the Space's page: where its GitHub brain is cloned on this Mac, or else its brain as
-    /// the local folder `path`, for every project in it.
-    SetSpaceBrain {
-        space_id: SpaceId,
-        path: String,
-    },
     /// Changes the prefix of the tracker a Space's storage repository is: a local tracker's at
     /// any time, rewriting its issue IDs, and a GitHub tracker's only while it has no issue.
     SetTrackerPrefix {
@@ -3743,65 +3746,10 @@ pub enum Command {
     ConfirmRepositorySuggestions {
         choices: Vec<RepositorySpaces>,
     },
-    /// The brains this Mac's Spaces name and their batches; answered with `BrainsPage`.
+    /// The wikis of this Mac's Spaces; answered with `BrainsPage`.
     Brains,
-    /// The brain to pre-fill for a Space with these code repositories (`owner/name`): the one
-    /// another Space names for their GitHub owner, or none. Answered with an `Option<String>`.
-    SuggestSpaceBrain {
-        repositories: Vec<String>,
-    },
-    /// Allows the host to push batch branches to the brain `owner/name`, open pull requests from
-    /// them into `main` and turn on auto-merge for them.
-    ConfirmBrain {
-        repository: String,
-    },
-    /// Forgets a brain no Space names any longer and deletes the host's checkout of it. GitHub
-    /// is untouched.
-    ForgetBrain {
-        repository: String,
-    },
-    /// Queues the batch that adds `wiffletree-brain.json`, with this host as compiler and
-    /// `compile` as its compile time, and the gate's caller, config, allow-list and `CODEOWNERS`
-    /// lines; answered with the `BrainBatch`.
-    SetUpBrain {
-        repository: String,
-        compile: BrainCompile,
-    },
-    /// Queues the batch that moves the caller's gate pins and `gate.version` to the newest
-    /// release this Wiffletree ships; answered with the `BrainBatch`.
-    UpdateBrainGate {
-        repository: String,
-    },
-    /// Queues a batch that changes only the compiler in `wiffletree-brain.json`, keeping the
-    /// keys this host does not know; answered with the `BrainBatch`.
-    SetBrainCompiler {
-        repository: String,
-        compiler: BrainCompiler,
-    },
-    /// Queues a batch that changes only the compile time in `wiffletree-brain.json`, keeping the
-    /// keys this host does not know; answered with the `BrainBatch`.
-    SetBrainCompileTime {
-        repository: String,
-        compile: BrainCompile,
-    },
-    /// Amends or discards a batch whose pull request is open and unmerged; answered with the
-    /// `BrainBatch`.
-    AmendBrainBatch {
-        batch_id: String,
-        amendment: BrainAmendment,
-    },
-    /// Send now: closes every open log batch of the brain `owner/name`, or of every brain, so
-    /// each opens its pull request on the brain's next pass; answered with how many closed.
-    SendLogsNow {
-        repository: Option<String>,
-    },
-    /// Import legacy logs: queues the brain's legacy `logs/<repo>.md` entries as entry files in
-    /// log-only batches; answered with the `LegacyImport`.
-    ImportLegacyLogs {
-        repository: String,
-    },
-    /// Run now: starts a compile run of the brain `owner/name` on this compiler host, or says
-    /// why it waits; answered with the `CompileRun`.
+    /// Run now: starts a compile run of the wiki in the repository `repository`, or says why it
+    /// waits; answered with the `CompileRun`.
     RunBrainCompile {
         repository: String,
     },
@@ -3812,13 +3760,37 @@ pub enum Command {
         offset: usize,
         limit: usize,
     },
-    /// The human's ruling on a conflict of the brain: a decision entry in a batch opened at once,
+    /// The human's ruling on a conflict of the brain: a decision entry that lands straight in,
     /// or for Defer nothing but hiding the card until the next compile; answered with the
     /// `ConflictCard` or, for Defer, `null`.
     RuleConflict {
         repository: String,
         conflict_id: String,
         ruling: Ruling,
+    },
+    /// The text of a log entry a scan held, for Edit it; answered with a string.
+    HeldEntryText {
+        repository: String,
+        path: String,
+    },
+    /// Edit it: replaces a log entry a scan held with the human's text, which must keep to the
+    /// entry contract, and scans it again at the next pass.
+    EditHeldEntry {
+        repository: String,
+        path: String,
+        text: String,
+    },
+    /// Not sensitive: appends the inline marker to the line a `sensitive-info` finding names,
+    /// and scans the entry again at the next pass.
+    MarkEntryNotSensitive {
+        repository: String,
+        path: String,
+        reason: String,
+    },
+    /// Discard: removes a held entry from this Mac's clone and pushes nothing.
+    DiscardHeldEntry {
+        repository: String,
+        path: String,
     },
     /// Replaces a held entry's text with the human's fix, which must then fit the entry
     /// contract and the cap; answered with the `WorkLog`.
@@ -4239,7 +4211,6 @@ impl Command {
             | Self::BrainStatus { .. }
             | Self::BrainCompileRuns { .. }
             | Self::SearchBrain { .. }
-            | Self::SuggestSpaceBrain { .. }
             | Self::OriginBranches { .. }
             | Self::Issues { .. }
             | Self::Issue { .. }
@@ -4252,6 +4223,7 @@ impl Command {
             | Self::Boards
             | Self::BoardVersions { .. }
             | Self::BoardVersionFolder { .. }
+            | Self::HeldEntryText { .. }
             | Self::RemoteAccess => true,
             Self::ImportRepositories { .. }
             | Self::RefreshRepositories
@@ -4305,7 +4277,6 @@ impl Command {
             | Self::TakeOverJob { .. }
             | Self::ApproveJobOutput { .. }
             | Self::ShareBoard { .. }
-            | Self::SetSpaceBrain { .. }
             | Self::CreateSpace { .. }
             | Self::UpdateSpace { .. }
             | Self::RemoveSpace { .. }
@@ -4317,19 +4288,13 @@ impl Command {
             | Self::SetTrackerPrefix { .. }
             | Self::SetUpIssues { .. }
             | Self::MoveIntoFolder { .. }
-            | Self::ConfirmBrain { .. }
-            | Self::ForgetBrain { .. }
-            | Self::SetUpBrain { .. }
-            | Self::UpdateBrainGate { .. }
-            | Self::SetBrainCompiler { .. }
-            | Self::SetBrainCompileTime { .. }
-            | Self::AmendBrainBatch { .. }
-            | Self::SendLogsNow { .. }
-            | Self::ImportLegacyLogs { .. }
             | Self::RunBrainCompile { .. }
             | Self::RuleConflict { .. }
             | Self::FixHeldLog { .. }
             | Self::ReleaseHeldLog { .. }
+            | Self::EditHeldEntry { .. }
+            | Self::MarkEntryNotSensitive { .. }
+            | Self::DiscardHeldEntry { .. }
             | Self::SyncIssues { .. }
             | Self::CreateIssue { .. }
             | Self::EditIssue { .. }
@@ -4389,11 +4354,11 @@ impl Command {
     /// the host may merge into, and a settings repository the host pushes to.
     /// So are the settings each layer sets: a Space's Behaviors and additions shape every agent
     /// in it, and the Workspace's every agent the human runs.
-    /// Spaces are the human's: creating, editing or removing one, setting its brain, moving a
-    /// project into one and choosing which repositories it lists, and reading where its storage
-    /// is on this Mac. So are a project's added repositories. So are brains: the push grant,
-    /// forgetting one, Set up, the compiler, amending a batch, Send now and the legacy import, a
-    /// compile's Run now, ruling on a conflict, and fixing or releasing a held entry.
+    /// Spaces are the human's: creating, editing or removing one, moving a project into one and
+    /// choosing which repositories it lists, and reading where its storage is on this Mac. So
+    /// are a project's added repositories. So are brains: a compile's Run now, ruling on a
+    /// conflict, fixing or releasing a held entry, and reading, editing, marking or discarding
+    /// one a scan held.
     /// Every write to a tracker is the human's, settling a paused issue file, following an issue
     /// and every step of a Linear import too; reading issues is not. Remote access is the human's
     /// too: its state carries the pairing code. The assistant is the human's: its threads, their
@@ -4470,21 +4435,15 @@ impl Command {
                 | Self::PreviewLinearImport { .. }
                 | Self::ImportFromLinear { .. }
                 | Self::CancelLinearImport { .. }
-                | Self::SetSpaceBrain { .. }
                 | Self::SpaceStorage { .. }
-                | Self::ConfirmBrain { .. }
-                | Self::ForgetBrain { .. }
-                | Self::SetUpBrain { .. }
-                | Self::UpdateBrainGate { .. }
-                | Self::SetBrainCompiler { .. }
-                | Self::SetBrainCompileTime { .. }
-                | Self::AmendBrainBatch { .. }
-                | Self::SendLogsNow { .. }
-                | Self::ImportLegacyLogs { .. }
                 | Self::RunBrainCompile { .. }
                 | Self::RuleConflict { .. }
                 | Self::FixHeldLog { .. }
                 | Self::ReleaseHeldLog { .. }
+                | Self::HeldEntryText { .. }
+                | Self::EditHeldEntry { .. }
+                | Self::MarkEntryNotSensitive { .. }
+                | Self::DiscardHeldEntry { .. }
                 | Self::RemoteAccess
                 | Self::SetRemoteAccess { .. }
                 | Self::OpenPairing

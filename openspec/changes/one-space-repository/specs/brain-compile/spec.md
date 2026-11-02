@@ -79,7 +79,7 @@ A Mac whose Brain compiler row waits, or has no row, SHALL NOT claim. It SHALL r
 
 ### Requirement: A compile lands straight on main
 After its checks pass, a run's wiki files, cursor and `reconcile-queue.md` SHALL land through the wiki rule set of the repository's sync engine, as one commit on the current head, scanned like any other. A push refused because `main` moved, as when logs landed during the run, SHALL fetch and go again with the same files, with no model call and no change to the cursor. A landing SHALL be all or nothing. It SHALL land nothing and end the run when:
-- `main` already holds a cursor at or past the run's, recorded as already compiled;
+- `main` already holds a cursor at or past the run's, recorded as compiled elsewhere;
 - a wiki file the run changed also changed on `main` since the run began, which fails the run and overwrites no one's edit;
 - a file fails the scan, which fails the run, naming the file and rule and never the text.
 

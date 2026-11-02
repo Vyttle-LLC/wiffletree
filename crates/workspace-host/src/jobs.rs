@@ -58,7 +58,7 @@ fn approval(recipe: &Recipe) -> String {
 }
 
 /// A job Wiffletree defines, such as a brain's compile: it takes due times, catch-up, Run now
-/// and run records from the scheduler, and keeps its own owner, trigger and run. It is no
+/// and run records from the scheduler, and keeps its own owner and run. It is no
 /// recipe and in no Space; only the host's code registers one.
 pub(crate) struct BuiltIn {
     /// Unique among built-in jobs, such as `brain-compile:<brain>`.
@@ -67,10 +67,8 @@ pub(crate) struct BuiltIn {
     pub(crate) subject: String,
     /// Who it belongs to, such as "the Sage brain".
     pub(crate) owner: String,
-    /// Its due times; with none, only Run now and its trigger start it.
+    /// Its due times; with none, only Run now starts it.
     pub(crate) schedule: Option<Schedule>,
-    /// Its own trigger beside its due times: a run starts when this says so.
-    pub(crate) triggered: fn(&Host, &str) -> bool,
     /// Runs it on its subject by its own rules for sessions and models, and says what it did.
     pub(crate) run: fn(&mut Host, &str, BuiltInStart) -> Result<String>,
 }
@@ -88,8 +86,6 @@ pub(crate) enum BuiltInStart {
         catch_up: u32,
     },
     RunNow,
-    /// Its own trigger.
-    Triggered,
 }
 
 /// What one pass of the scheduler did.
@@ -924,14 +920,6 @@ impl Host {
                 Err(error) => eprintln!("Job {}: {error:#}", key.as_str()),
             }
         }
-        let triggered: Vec<JobKey> = (self.built_ins.iter())
-            .filter(|b| (b.triggered)(self, &b.subject))
-            .map(BuiltIn::key)
-            .collect();
-        for key in triggered {
-            self.run_job(&key, None, BuiltInStart::Triggered, now)?;
-            pass.changed = true;
-        }
         Ok(pass)
     }
     /// Fires `key` when its time has come and returns its next time and whether it fired.
@@ -1011,7 +999,7 @@ impl Host {
     ) -> Result<JobRun> {
         let catch_up = match start {
             BuiltInStart::Due { catch_up } => catch_up,
-            BuiltInStart::RunNow | BuiltInStart::Triggered => 0,
+            BuiltInStart::RunNow => 0,
         };
         let mut run = JobRun {
             id: new_id(),
@@ -2307,7 +2295,6 @@ mod tests {
                 cron: "0 2 * * *".into(),
                 timezone: "America/New_York".into(),
             }),
-            triggered: |_, _| false,
             run: |_, subject, _| {
                 assert_eq!(subject, "Personal");
                 COMPILES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2350,7 +2337,7 @@ mod tests {
             .save_job(recipe(&s.personal, "Brain compile", "0 2 * * *"))
             .unwrap();
         assert_ne!(saved.recipe.key(), key);
-        assert_eq!(s.host.built_ins.len(), 1);
+        assert!(s.host.built_in(&key).is_some());
     }
 
     #[test]

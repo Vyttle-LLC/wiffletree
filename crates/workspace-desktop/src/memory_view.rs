@@ -1,11 +1,11 @@
 //! Project memory: the summary of the project's brain (OpenSpec change `brain-browser`), with
-//! its sync, the project's batches, the open conflicts and the newest entries in the project's
-//! scope, which open the brain browser; the project's rows that are unsent or held, with Fix and
-//! Release; and the capture form, which logs as the coordinator's `log_work` does.
+//! its sync, the project's held entries, the open conflicts and the newest entries in the
+//! project's scope, which open the brain browser; the project's rows that are unsent or held,
+//! with Fix and Release; and the capture form, which logs as the coordinator's `log_work` does.
 use super::*;
 use brain_browser_view::{BrainOpening, BrainTarget, BrainView};
 use gpui_component::button::ButtonVariants;
-use ui::{card, empty_state, hint, icon, pill, section, segment};
+use ui::{card, empty_state, hint, icon, mono, pill, section, segment};
 use wording::age;
 
 impl Inspector {
@@ -15,18 +15,6 @@ impl Inspector {
         let index = self.shared.index.as_ref()?;
         let space = &index.project(&project)?.space;
         index.snapshot().spaces.iter().find(|s| &s.id == space)
-    }
-
-    /// Where the project's Space keeps its brain on this Mac, a local folder or a GitHub brain's
-    /// clone.
-    fn local_brain_path(&self, space: &Space) -> Option<String> {
-        let index = self.shared.index.as_ref()?;
-        index
-            .snapshot()
-            .space_locals
-            .get(&space.id)?
-            .brain_path
-            .clone()
     }
 
     fn capture_form(&self, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -125,13 +113,13 @@ impl Inspector {
             )
     }
 
-    /// The project's GitHub brain, which the host indexes, as `owner/name`.
+    /// The repository of the project's brain, its Space's.
     fn project_brain(&self) -> Option<String> {
-        brain_browser_view::github_brain(self.project_space()?)
+        Some(brain_browser_view::space_brain(self.project_space()?))
     }
 
-    /// Reads what the summary shows of the project's brain: its sync and batches, the open
-    /// conflicts and the newest entries in the project's scope.
+    /// Reads what the summary shows of the project's brain: its sync, the open conflicts and the
+    /// newest entries in the project's scope.
     pub(super) fn load_memory_summary(
         &mut self,
         project_id: String,
@@ -186,53 +174,6 @@ impl Inspector {
         }
     }
 
-    /// "No brain", or a brain the host does not index, with where to name one.
-    fn no_brain_card(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let space = self.project_space();
-        let brain = space.and_then(|s| s.brain.as_ref());
-        let local = space
-            .filter(|_| brain.is_some())
-            .and_then(|s| self.local_brain_path(s));
-        let mut links = div().flex().flex_wrap().gap_2().child(
-            button("open-brains")
-                .outline()
-                .icon(icon("brain"))
-                .label("Open Brains")
-                .on_click(cx.listener(|_, _, _, c| c.emit(Intent::OpenPage(Page::Brains)))),
-        );
-        if let Some(space) = space.filter(|_| brain.is_none()) {
-            let id = space.id.clone();
-            links = links.child(
-                button("open-space-settings")
-                    .ghost()
-                    .label("Space settings")
-                    .on_click(cx.listener(move |_, _, _, c| c.emit(Intent::OpenSpace(id.clone())))),
-            );
-        }
-        let (title, line) = match brain {
-            None => (
-                "No brain".to_owned(),
-                no_brain_line(space.map(|s| s.name.as_str())),
-            ),
-            Some(brain) => (
-                brain_name(brain, local.as_deref()),
-                "A folder on this Mac: the brain browser and search read GitHub brains only."
-                    .into(),
-            ),
-        };
-        card(p)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(icon("brain").text_color(p.subtle))
-                    .child(div().font_weight(FontWeight::MEDIUM).child(title)),
-            )
-            .child(hint(line, p))
-            .child(links)
-    }
-
     /// The brain card: its name and sync, Open brain browser and Search.
     fn brain_card(&self, repository: &str, p: Palette, cx: &mut Context<Self>) -> Div {
         let listing = self.memory_summary.listing();
@@ -251,8 +192,7 @@ impl Inspector {
                     .font_weight(FontWeight::MEDIUM)
                     .child(repository.to_owned()),
             );
-        let batches = listing.map_or(&[][..], |l| &l.batches);
-        if let Some((sync, tone)) = brain.map(|b| brains_view::sync_state(b, batches)) {
+        if let Some((sync, tone)) = brain.map(brains_view::sync_state) {
             title = title.child(pill(sync, tone.color(p)));
         }
         let space = self.project_space().map_or("", |s| s.name.as_str());
@@ -291,50 +231,39 @@ impl Inspector {
             )
     }
 
-    /// The project's batches on their way to `main`.
-    fn batches(&self, p: Palette) -> Option<Div> {
+    /// The project's entries a scan held on this Mac, whose cards are in its Inbox.
+    fn held_entries(&self, p: Palette, cx: &mut Context<Self>) -> Option<Div> {
         let project = self.shared.project_id()?;
-        let listing = self.memory_summary.listing()?;
-        let batches: Vec<&BrainBatch> = (listing.batches.iter())
-            .filter(|b| b.source == BrainSource::Project(project.clone()) && !b.is_finished())
+        let notes = self.shared.workspace_notes().iter();
+        let held: Vec<&HeldEntry> = notes
+            .filter_map(|note| match note {
+                WorkspaceNote::HeldEntry(entry) => Some(entry),
+                _ => None,
+            })
+            .filter(|entry| entry.project_id.as_deref() == Some(project.as_str()))
             .collect();
-        if batches.is_empty() {
+        if held.is_empty() {
             return None;
         }
-        let held_for = |batch: &BrainBatch| {
-            (listing.brains.iter())
-                .find(|b| b.repository.eq_ignore_ascii_case(&batch.repository))
-                .and_then(|brain| brains_view::held_for(brain, batch))
-        };
         let mut list = div()
             .flex()
             .flex_col()
             .gap_2()
-            .child(section("THIS PROJECT'S BATCHES", p));
-        for batch in batches {
-            let failed = batch.stage == BrainStage::Failed;
-            let (stage, tone) = brain_browser_view::pull_request_label(&EntryPullRequest::Batch {
-                number: batch.pull_request.as_ref().map(|pr| pr.number),
-                stage: batch.stage,
-            });
+            .child(section("HELD ON THIS MAC", p));
+        for (at, entry) in held.into_iter().enumerate() {
             list = list.child(
                 card(p)
-                    .when(failed, |d| d.border_color(p.red.opacity(0.5)))
+                    .border_color(p.yellow.opacity(0.55))
+                    .child(hint(held_entry::found_line(entry), p))
+                    .child(mono(entry.path.clone(), p))
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_ellipsis()
-                                    .child(batch.title.clone()),
-                            )
-                            .child(pill(stage, tone.color(p))),
-                    )
-                    .child(brains_view::stepper(batch, held_for(batch), p)),
+                        button(SharedString::from(format!("held-card-{at}")))
+                            .link()
+                            .label("Open its card")
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(Intent::ShowPanel(Panel::Attention))
+                            })),
+                    ),
             );
         }
         Some(list)
@@ -470,7 +399,6 @@ impl Inspector {
         let panel = div().flex().flex_col().gap_5();
         let Some(repository) = self.project_brain() else {
             return panel
-                .child(self.no_brain_card(p, cx))
                 .children(self.log_rows(false, p, cx))
                 .child(self.capture_form(p, cx));
         };
@@ -491,7 +419,7 @@ impl Inspector {
             });
         panel
             .child(self.brain_card(&repository, p, cx))
-            .children(self.batches(p))
+            .children(self.held_entries(p, cx))
             .children(conflicts)
             .child(self.recent_entries(p, cx))
             .children(self.log_rows(true, p, cx))
@@ -544,12 +472,8 @@ fn log_status(log: &WorkLog) -> Option<(String, bool)> {
             false,
         ));
     }
-    log.is_unsent().then(|| {
-        (
-            "Unsent: it waits for this project's Space to name a brain.".into(),
-            true,
-        )
-    })
+    log.is_unsent()
+        .then(|| ("Unsent: it lands with the next sync.".into(), false))
 }
 
 /// What the fix form says about the held entry it is fixing.
@@ -563,27 +487,9 @@ fn held_line(held: &WorkLog) -> String {
     )
 }
 
-/// Why a project has no brain, and where one is named.
-fn no_brain_line(space: Option<&str>) -> String {
-    match space {
-        Some(space) => format!(
-            "The {space} Space names no brain, so this project has none. Name one in the Space's settings; the Brains page lists the brains your Spaces name."
-        ),
-        None => "This project is in no Space, so it has no brain.".into(),
-    }
-}
-
-/// The brain as the panel names it: its repository, or where a local brain is on this Mac.
-fn brain_name(brain: &SpaceBrain, local: Option<&str>) -> String {
-    match &brain.repository {
-        BrainRepository::GitHub { owner, name, .. } => format!("{owner}/{name}"),
-        BrainRepository::Local { .. } => local.unwrap_or("A folder not found on this Mac").into(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{RECENT, brain_name, log_status, newest_entries, no_brain_line};
+    use super::{RECENT, log_status, newest_entries};
     use workspace_core::*;
 
     #[test]
@@ -623,7 +529,7 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_says_when_it_is_held_released_or_waiting_for_a_brain() {
+    fn an_entry_says_when_it_is_held_released_or_waiting_to_land() {
         let mut log: WorkLog = serde_json::from_value(serde_json::json!({
             "sequence": 1, "id": "01j", "project_id": "p", "task_id": null, "repository": "app",
             "created_at": 0, "input": {"session_id": "s", "kind": "decision", "title": "T",
@@ -631,42 +537,14 @@ mod tests {
         }))
         .unwrap();
         let (line, warn) = log_status(&log).unwrap();
-        assert!(line.starts_with("Unsent") && warn);
-        log.batch_id = Some("b".into());
-        assert_eq!(log_status(&log), None, "on its way to the brain");
+        assert!(line.starts_with("Unsent") && !warn);
+        log.written = true;
+        assert_eq!(log_status(&log), None, "in its Space's folder");
         log.held = Some("its ref is not one the entry contract allows".into());
         let (line, warn) = log_status(&log).unwrap();
         assert!(line.contains("its ref is not one") && line.contains("release") && warn);
         log.held = None;
         log.released = true;
         assert!(!log_status(&log).unwrap().1);
-    }
-
-    #[test]
-    fn a_project_without_a_brain_says_so_and_where_one_is_named() {
-        let line = no_brain_line(Some("Vyttle"));
-        assert!(line.contains("Vyttle Space names no brain") && line.contains("Space's settings"));
-        assert!(line.contains("Brains page"));
-        assert!(no_brain_line(None).contains("no brain"));
-    }
-
-    #[test]
-    fn a_github_brain_is_named_by_its_repository_and_a_local_one_by_its_folder() {
-        let brain = |repository| SpaceBrain {
-            repository,
-            folder: "second-brain".into(),
-            extra: Extra::new(),
-        };
-        let github = brain(BrainRepository::GitHub {
-            owner: "Sage-Social".into(),
-            name: "sagehaven-docs".into(),
-            extra: Extra::new(),
-        });
-        assert_eq!(
-            brain_name(&github, Some("/elsewhere")),
-            "Sage-Social/sagehaven-docs"
-        );
-        let local = brain(BrainRepository::local());
-        assert_eq!(brain_name(&local, Some("/Users/m/notes")), "/Users/m/notes");
     }
 }

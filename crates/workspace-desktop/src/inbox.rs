@@ -23,6 +23,8 @@ pub(super) struct Inbox {
     /// The brain conflict whose Keep both line is open, by its card's key, and that line.
     keeping_both: Option<String>,
     scope: Entity<InputState>,
+    /// The form of the held entry being edited or marked.
+    held: held_entry::HeldForm,
 }
 impl Inbox {
     pub(super) fn new(bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -40,7 +42,24 @@ impl Inbox {
             keeping_both: None,
             scope: cx
                 .new(|cx| InputState::new(window, cx).placeholder("One line that scopes both")),
+            held: held_entry::HeldForm::new(window, cx),
         }
+    }
+    /// A held log entry's card.
+    pub(super) fn held_entry_card(
+        &mut self,
+        entry: &HeldEntry,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let (view, kept) = (cx.entity().downgrade(), entry.clone());
+        let on: held_entry::OnHeld = Rc::new(move |action, window, cx| {
+            let entry = kept.clone();
+            let _ = view.update(cx, |view: &mut Self, cx| {
+                held_entry::act(view, |v| &mut v.held, entry, action, window, cx)
+            });
+        });
+        held_entry::held_entry_card(entry, &self.held, on, p)
     }
     /// A brain conflict's card; `evidence` opens the brain browser's Conflicts view.
     pub(super) fn conflict_card(
@@ -544,6 +563,7 @@ impl Requests for Inbox {
             }
             Command::SettlePausedFile { .. } => self.compared = None,
             Command::RuleConflict { .. } => self.keeping_both = None,
+            command if held_entry::settles(&command) => self.held.close(),
             _ => {}
         }
     }

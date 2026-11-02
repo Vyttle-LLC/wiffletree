@@ -1,7 +1,6 @@
 //! What the brain browser reads (OpenSpec change `brain-browser`): pages of log entries, the note
 //! tree, one note with its sources and backlinks, the conflicts, STATUS and search results, all
 //! from the host's index of one brain's `main`. Paths are relative to the brain folder.
-use crate::BrainStage;
 use serde::{Deserialize, Serialize};
 
 /// A note's `kind` or an entry's `type`.
@@ -79,12 +78,10 @@ pub struct RefAnchors {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EntryPullRequest {
-    /// This machine's entry: its batch's PR, when opened, and the batch's live stage.
-    Batch {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        number: Option<u64>,
-        stage: BrainStage,
-    },
+    /// This machine's entry, waiting for the next pass to land it.
+    Waiting,
+    /// This machine's entry, which a scan held here.
+    Held,
     /// The PR of the squash commit that added the file.
     Merged { number: u64 },
     /// Added by a direct push.

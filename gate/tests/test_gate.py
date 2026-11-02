@@ -1,11 +1,11 @@
-"""Fixture tests for the brain gate.
+"""Fixture tests for the checks the app's scan bundles.
 
 Each test builds a throwaway Git repository from `fixtures/brain/`, commits it
-as the PR base, applies the PR's changes on top, then runs the real check
-script against it exactly as CI does.
+as the base, applies the change on top, then runs the real check script against
+it exactly as the scan on a Mac does.
 
-Run: python3 -m unittest discover --start-directory gate/tests --verbose
-Needs gitleaks and markdownlint-cli2 on PATH.
+Run: python3 gate/tests/test_gate.py
+Needs gitleaks on PATH.
 """
 
 import json
@@ -28,7 +28,6 @@ FINDINGS, CONFIG_ERROR = 1, 2
 
 ULID = "01jbx4m2k8q6v9z3n5r7t0w2yb"
 OTHER_ULID = "01jbx4m2k8q6v9z3n5r7t0w2yc"
-LEGACY_LOG = "second-brain/logs/sms-service.md"
 EXISTING_ENTRY = f"second-brain/logs/sms-service/2026/10/2026-10-01-{OTHER_ULID}.md"
 
 
@@ -54,10 +53,6 @@ def entry_text(
         "- why: Carrier errors are often transient.\n"
         "- state: Merged; no deploy yet.\n"
     )
-
-
-def fixture_entries(kind: str) -> list[Path]:
-    return sorted((FIXTURES / "entries" / kind).glob("*.md"))
 
 
 class GateRepo:
@@ -306,177 +301,6 @@ class SensitiveScanTest(GateTestCase):
         self.assertPasses(self.pr({"README.md": "# Docs\n\nCall 801-555-0123.\n\nMore docs.\n"}))
 
 
-class MarkdownLintTest(GateTestCase):
-    script = "markdown_lint.py"
-
-    def test_brain_style_passes(self):
-        self.assertPasses(self.pr({entry_path(): entry_text()}))
-
-    def test_lint_error_fails(self):
-        self.assertFails(self.pr({"README.md": "# Docs\n\n\n\nToo many blanks.\n"}), "ERROR: README.md:3: markdownlint [rule: MD012/")
-
-    def test_findings_never_quote_the_file(self):
-        result = self.pr({"README.md": "# Docs\n\n#Planted heading\n"})
-        self.assertFails(result, "README.md:3: markdownlint at column 1 [rule: MD018/")
-        self.assertNotIn("Planted", result.stdout + result.stderr)
-
-    def test_reference_details_are_not_echoed(self):
-        text = "# Docs\n\nSee [the report][Planted 801-555-0123].\n\n[unused planted ref]: https://example.org\n"
-        result = self.pr({"README.md": text})
-        self.assertFails(result, "README.md:3: markdownlint at column 5 [rule: MD052/", "README.md:5: markdownlint at column 1 [rule: MD053/")
-        self.assertNotIn("planted", (result.stdout + result.stderr).lower())
-        self.assertNotIn("801-555-0123", result.stdout + result.stderr)
-
-    def test_paths_with_spaces_are_reported(self):
-        result = self.pr({"second-brain/notes/topic/Beta Note.md": "# Beta Note\n\n\n\nText.\n"})
-        self.assertFails(result, "ERROR: second-brain/notes/topic/Beta Note.md:3: markdownlint [rule: MD012/")
-
-    def test_brain_markdownlint_configs_are_ignored(self):
-        self.repo.write(".markdownlint.json", '{"default": false}\n')
-        self.repo.write(".markdownlint-cli2.jsonc", '{"config": {"default": false}, "ignores": ["**"]}\n')
-        self.repo.write("second-brain/.markdownlint.json", '{"default": false}\n')
-        self.repo.rebase_here("base with brain markdownlint configs")
-        self.assertFails(self.pr({"second-brain/notes/Gamma.md": "# Gamma\n\n\n\nText.\n"}), "[rule: MD012/")
-
-
-class WikilinksTest(GateTestCase):
-    script = "wikilinks.py"
-
-    def test_resolving_links_pass(self):
-        self.assertPasses(self.pr({"second-brain/notes/Gamma.md": "See [[Alpha]] and [[topic/Beta Note|beta]].\n"}))
-
-    def test_broken_link_in_note_fails(self):
-        result = self.pr({"second-brain/notes/Gamma.md": "See [[Missing Note]].\n"})
-        self.assertFails(result, "second-brain/notes/Gamma.md:1: wikilink at column 5")
-        self.assertNotIn("Missing Note", result.stdout + result.stderr)
-
-    def test_broken_link_in_status_fails(self):
-        self.assertFails(self.pr({"second-brain/STATUS.md": "# Status\n\n[[Nope]]\n"}), "second-brain/STATUS.md:3:")
-
-    def test_links_inside_code_are_ignored(self):
-        text = "Write `[[Like This]]`.\n\n```md\n[[Also Not A Link]]\n```\n"
-        self.assertPasses(self.pr({"second-brain/notes/Gamma.md": text}))
-
-    def test_fence_closes_only_on_its_own_delimiter(self):
-        text = "~~~markdown\n```\n~~~\n\nSee [[Missing Note]].\n"
-        self.assertFails(self.pr({"second-brain/notes/Gamma.md": text}), "Gamma.md:5: wikilink")
-
-
-class LogSchemaTest(GateTestCase):
-    script = "log_schema.py"
-
-    def test_good_fixture_entries_pass(self):
-        for fixture in fixture_entries("good"):
-            with self.subTest(fixture=fixture.name):
-                self.setUp()
-                self.assertPasses(self.pr({entry_path(): fixture.read_text()}))
-
-    def test_bad_fixture_entries_fail(self):
-        problems = json.loads((FIXTURES / "entries" / "bad" / "problems.json").read_text())
-        self.assertEqual(sorted(problems), [fixture.name for fixture in fixture_entries("bad")])
-        for fixture in fixture_entries("bad"):
-            with self.subTest(fixture=fixture.name):
-                self.setUp()
-                self.assertFails(self.pr({entry_path(): fixture.read_text()}), *problems[fixture.name])
-
-    def test_template_matches_the_good_fixture(self):
-        self.assertEqual(entry_text(), (FIXTURES / "entries" / "good" / "decision.md").read_text())
-
-    def test_errors_never_echo_entry_text(self):
-        phone = "+18015550123"
-        text = entry_text().replace("source: wiffletree\n", f"source: wiffletree\nCall {phone}: now\n")
-        text = text.replace("- why:", f"Call {phone}\n- why:")
-        result = self.pr({entry_path(): text})
-        self.assertFails(result, ":6: frontmatter line", ":12: unexpected line")
-        self.assertNotIn(phone, result.stdout + result.stderr)
-
-    def test_body_at_cap_passes_and_over_cap_fails(self):
-        filler_at_cap = "x" * (2000 - len(self.body(entry_text(changed=""))))
-        self.assertPasses(self.pr({entry_path(): entry_text(changed=filler_at_cap)}))
-        result = self.pr({entry_path(): entry_text(changed=filler_at_cap + "x")})
-        self.assertFails(result, "2001 characters; the cap is 2000")
-
-    def test_brain_sets_the_cap(self):
-        self.repo.write_gate_config(max_entry_body_chars=100)
-        self.repo.rebase_here("base with a smaller cap")
-        self.assertFails(self.pr({entry_path(): entry_text()}), "the cap is 100")
-
-    def test_bad_paths_fail(self):
-        for path in (
-            "second-brain/logs/sms-service/2026/10/2026-10-29-NOT-A-ULID.md",
-            "second-brain/logs/sms-service/2026/09/2026-10-29-" + ULID + ".md",
-            "second-brain/logs/sms-service/2026/02/2026-02-30-" + ULID + ".md",
-            "second-brain/logs/sms-service/notes.txt",
-        ):
-            with self.subTest(path=path):
-                self.setUp()
-                self.assertFails(self.pr({path: entry_text()}), "not a legacy log")
-
-    @staticmethod
-    def body(text: str) -> str:
-        return text.split("---\n", 2)[2].strip()
-
-
-class PathOwnershipTest(GateTestCase):
-    script = "path_ownership.py"
-
-    def test_log_pr_passes(self):
-        result = self.pr({entry_path(): entry_text(), entry_path(repo="cortex-service"): entry_text(repo="cortex-service")})
-        self.assertPasses(result)
-        self.assertIn("PR class: log", result.stdout)
-
-    def test_compile_pr_passes(self):
-        result = self.pr(
-            {
-                "second-brain/notes/Alpha.md": "Rewritten.\n",
-                "second-brain/STATUS.md": "# Status\n",
-                "second-brain/reconcile-queue.md": "# Queue\n",
-            },
-            deleted=("second-brain/notes/INDEX.md",),
-        )
-        self.assertPasses(result)
-        self.assertIn("PR class: compile", result.stdout)
-
-    def test_other_docs_pr_passes(self):
-        self.assertPasses(self.pr({"README.md": "# Docs\n\nMore.\n", "docs/guide.md": "# Guide\n"}))
-
-    def test_mixed_log_and_compile_pr_fails(self):
-        result = self.pr({entry_path(): entry_text(), "second-brain/STATUS.md": "# Status\n"})
-        self.assertFails(result, "mixes log files and compile files")
-
-    def test_mixed_compile_and_docs_pr_fails(self):
-        result = self.pr({"second-brain/STATUS.md": "# Status\n", "README.md": "# Changed\n"})
-        self.assertFails(result, "mixes compile files and other docs files")
-
-    def test_log_pr_modifying_an_entry_fails(self):
-        result = self.pr({EXISTING_ENTRY: entry_text(ulid=OTHER_ULID, date="2026-10-01", changed="Edited.")})
-        self.assertFails(result, "append-only, but this PR modifies one")
-
-    def test_log_pr_deleting_an_entry_fails(self):
-        self.assertFails(self.pr(deleted=(EXISTING_ENTRY,)), "append-only, but this PR deletes one")
-
-    def test_moving_an_entry_fails(self):
-        self.repo.git("mv", EXISTING_ENTRY, entry_path(ulid=OTHER_ULID, date="2026-10-02"))
-        self.assertFails(self.pr(), "deletes one")
-
-    def test_unowned_brain_path_fails(self):
-        self.assertFails(self.pr({"second-brain/scratch.md": "x\n"}), "no PR class may change")
-
-    def test_legacy_log_edit_only_warns(self):
-        result = self.pr({LEGACY_LOG: (BRAIN_FIXTURE / LEGACY_LOG).read_text() + "\nMore.\n"})
-        self.assertPasses(result)
-        self.assertIn(f"WARNING: {LEGACY_LOG}: legacy log edited", result.stdout)
-
-    def test_legacy_log_edit_alongside_compile_still_passes(self):
-        result = self.pr({LEGACY_LOG: "# changed\n", "second-brain/notes/Alpha.md": "Rewritten.\n"})
-        self.assertPasses(result)
-
-    def test_legacy_log_edit_fails_once_the_flag_flips(self):
-        self.repo.write_gate_config(legacy_log_edits_allowed=False)
-        self.repo.rebase_here("base with the legacy flag off")
-        self.assertFails(self.pr({LEGACY_LOG: "# changed\n"}), "legacy logs are frozen")
-
-
 class DefaultsTest(GateTestCase):
     """A brain without `wiffletree-brain.json` gets the gate's defaults."""
 
@@ -491,21 +315,11 @@ class DefaultsTest(GateTestCase):
         self.script = "sensitive_scan.py"
         self.assertFails(self.pr({entry_path(): entry_text(changed="Emailed support@vendor.example.")}), "[rule: email]")
 
-    def test_brain_folder_and_cap_default(self):
-        self.script = "log_schema.py"
-        self.assertPasses(self.pr({entry_path(): entry_text()}))
-        filler = "x" * (2001 - len(LogSchemaTest.body(entry_text(changed=""))))
-        self.assertFails(self.pr({entry_path(): entry_text(changed=filler)}), "the cap is 2000")
-
-    def test_legacy_log_edits_fail(self):
-        self.script = "path_ownership.py"
-        self.assertFails(self.pr({LEGACY_LOG: "# changed\n"}), "legacy logs are frozen")
-
 
 class RunnerTest(GateTestCase):
     """How the checks behave on the runner: annotations and missing tools."""
 
-    CHECKS = ("secret_scan.py", "sensitive_scan.py", "markdown_lint.py", "wikilinks.py", "log_schema.py", "path_ownership.py")
+    CHECKS = ("secret_scan.py", "sensitive_scan.py")
 
     def test_annotation_properties_are_escaped(self):
         path = "docs/a,b:c%.md"
@@ -525,15 +339,13 @@ class RunnerTest(GateTestCase):
         only_git = Path(tempfile.mkdtemp(prefix="brain-gate-path-"))
         self.addCleanup(shutil.rmtree, only_git)
         (only_git / "git").symlink_to(shutil.which("git"))
-        for script, tool in (("secret_scan.py", "gitleaks"), ("markdown_lint.py", "markdownlint-cli2")):
-            with self.subTest(script=script):
-                result = self.repo.check(script, PATH=str(only_git))
-                self.assertConfigError(result, f"{tool} is not installed or not on PATH")
-                self.assertNotIn("Traceback", result.stderr)
+        result = self.repo.check("secret_scan.py", PATH=str(only_git))
+        self.assertConfigError(result, "gitleaks is not installed or not on PATH")
+        self.assertNotIn("Traceback", result.stderr)
 
 
 class ConfigTest(GateTestCase):
-    script = "log_schema.py"
+    script = "sensitive_scan.py"
 
     def test_unusable_config_is_refused(self):
         for text, expected in (
@@ -550,16 +362,6 @@ class ConfigTest(GateTestCase):
                 self.setUp()
                 self.repo.write(CONFIG_FILE, text)
                 self.assertConfigError(self.pr(), expected)
-
-    def test_brain_dir_is_normalized(self):
-        for brain_dir in ("./second-brain", "second-brain/", "./second-brain//"):
-            with self.subTest(brain_dir=brain_dir):
-                self.setUp()
-                self.repo.write(CONFIG_FILE, json.dumps({"brain_dir": brain_dir}))
-                self.repo.rebase_here("base with brain_dir")
-                self.assertPasses(self.pr({entry_path(): entry_text()}))
-                result = self.pr({"second-brain/logs/sms-service/notes.txt": "x\n"})
-                self.assertFails(result, "second-brain/logs/sms-service/notes.txt: not a legacy log")
 
 
 if __name__ == "__main__":

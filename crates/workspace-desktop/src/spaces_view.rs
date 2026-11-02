@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use ui::{banner, card, hint, icon, mono, section};
 use wording::{age, counted};
 
-const SCANS: &str = "Before pushing issues/ or spaces/, Wiffletree runs the brain gate’s personal-data and secret scans on this Mac and holds a file that fails, instead of pushing it.";
+const SCANS: &str = "Before pushing, Wiffletree runs its personal-data and secret scans on this Mac and holds a file that fails, instead of pushing it.";
 const ROUTER: &str = "The router reads this to decide where a message goes.";
 const ALSO_SETTINGS: &str =
     "Your settings repository. Settings, the Space and issues each sync only their own folders.";
@@ -59,10 +59,7 @@ pub(super) struct SpacesPage {
     /// The storage repository for New, or the repository to add Spaces from.
     storage_input: Entity<InputState>,
     prefix_input: Entity<InputState>,
-    /// The folder in the brain that entries are written to.
-    brain_folder: Entity<InputState>,
-    /// The form's brain and code repositories, saved with Save.
-    brain: Option<SpaceBrain>,
+    /// The form's code repositories, saved with Save.
     repositories: Vec<String>,
     /// The root folders the form follows, saved with Save, and as they read when it was filled.
     followed: Vec<String>,
@@ -74,8 +71,6 @@ pub(super) struct SpacesPage {
     storage: Option<(SpaceId, Result<StorageStatus, String>)>,
     /// The Space whose storage was last asked about, and when.
     storage_asked: Option<(SpaceId, i64)>,
-    /// The brains as the host last read them, for the shown Space's brain compile and gate.
-    brains: Option<BrainsPage>,
     joining: Option<Joining>,
     /// The repository New was asked to store the Space in, as named, and who can read it,
     /// shown before anything is written.
@@ -111,8 +106,6 @@ impl SpacesPage {
                 .new(|cx| InputState::new(window, cx).placeholder("owner/name or a GitHub URL")),
             prefix_input: cx
                 .new(|cx| InputState::new(window, cx).placeholder("2 to 5 capitals, such as SAGE")),
-            brain_folder: cx.new(|cx| InputState::new(window, cx).placeholder("second-brain")),
-            brain: None,
             repositories: vec![],
             followed: vec![],
             followed_read: vec![],
@@ -120,7 +113,6 @@ impl SpacesPage {
             editing_prefix: false,
             storage: None,
             storage_asked: None,
-            brains: None,
             joining: None,
             checked: None,
             busy: false,
@@ -192,9 +184,8 @@ impl SpacesPage {
     }
 
     /// Fills the form from the shown Space when it is another than the form holds, or when its
-    /// definition changed, by a chip or another Mac, and the form holds no edit. A form with
-    /// edits still takes a brain chosen meanwhile, unless its own brain is one of them. A root
-    /// removed meanwhile leaves the form in any case, as there is nothing left to follow.
+    /// definition changed, by a chip or another Mac, and the form holds no edit. A root removed
+    /// meanwhile leaves the form in any case, as there is nothing left to follow.
     fn load_shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(space) = self.shown_space().cloned() else {
             return;
@@ -212,7 +203,7 @@ impl SpacesPage {
                 return;
             }
             if self.edits(cx) {
-                return self.follow_brain(&space, window, cx);
+                return;
             }
         }
         self.load(&space, window, cx);
@@ -220,30 +211,6 @@ impl SpacesPage {
     fn followed_here(&self, space: &SpaceId) -> Vec<String> {
         self.local(space)
             .map_or(vec![], |l| l.followed_roots.clone())
-    }
-    fn follow_brain(&mut self, space: &Space, window: &mut Window, cx: &mut Context<Self>) {
-        let follows = self.loaded.as_ref().is_some_and(|(from, read)| {
-            from.id == space.id && follows_brain(&self.form_brain(cx), &read.brain, &space.brain)
-        });
-        if follows {
-            self.adopt_brain(space.brain.clone(), window, cx);
-        }
-    }
-    /// Sets the form's brain to `brain`, as if the form had been filled with it.
-    fn adopt_brain(
-        &mut self,
-        brain: Option<SpaceBrain>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some((from, read)) = &mut self.loaded {
-            from.brain = brain.clone();
-            read.brain = brain.clone();
-        }
-        let folder = (brain.as_ref()).map_or(String::new(), |b| b.folder.clone());
-        self.brain_folder
-            .update(cx, |input, cx| input.set_value(folder, window, cx));
-        self.brain = brain;
     }
     /// The form holds an edit the human has not saved.
     fn edits(&self, cx: &App) -> bool {
@@ -258,7 +225,6 @@ impl SpacesPage {
                 .is_some_and(|(_, read)| self.repositories != read.repositories)
     }
     fn load(&mut self, space: &Space, window: &mut Window, cx: &mut Context<Self>) {
-        self.brain = space.brain.clone();
         self.repositories = space.repositories.clone();
         self.followed = self.followed_here(&space.id);
         self.followed_read = self.followed.clone();
@@ -269,9 +235,6 @@ impl SpacesPage {
         self.name.update(cx, |input, cx| {
             input.set_value(space.name.clone(), window, cx)
         });
-        let folder = (space.brain.as_ref()).map_or(String::new(), |b| b.folder.clone());
-        self.brain_folder
-            .update(cx, |input, cx| input.set_value(folder, window, cx));
         for (state, value) in [
             (&self.description, space.description.clone()),
             (&self.sources, sources),
@@ -329,8 +292,7 @@ impl SpacesPage {
         cx.notify();
     }
 
-    /// Asks the host what the shown Space's storage holds, for its Storage and issues box, and
-    /// what its brain's `wiffletree-brain.json` says, for the brain's compile and gate.
+    /// Asks the host what the shown Space's storage holds, for its Storage and issues box.
     fn read_storage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.shown_space().map(|s| s.id.clone()) else {
             return;
@@ -346,11 +308,6 @@ impl SpacesPage {
                 cx.notify();
             },
         );
-        self.ask(ask::brains(), window, cx, |view, brains, _, cx| {
-            // Without them the page shows no compile or gate, as for a local brain.
-            view.brains = brains.ok();
-            cx.notify();
-        });
     }
     fn storage_of(&self, id: &SpaceId) -> Option<&Result<StorageStatus, String>> {
         (self.storage.as_ref())
@@ -365,25 +322,13 @@ impl SpacesPage {
             return Err("Give the Space a name".into());
         }
         let sources = parse_sources(&self.sources.read(cx).value(), &space.sources)?;
-        let brain = self.form_brain(cx);
-        if brain.as_ref().is_some_and(|b| b.folder.is_empty()) {
-            return Err("Name the brain’s folder, such as second-brain".into());
-        }
         Ok(Space {
             name,
-            brain,
             description: self.description.read(cx).value().trim().to_owned(),
             repositories: self.repositories.clone(),
             sources,
             ..space.clone()
         })
-    }
-
-    fn form_brain(&self, cx: &App) -> Option<SpaceBrain> {
-        let folder = self.brain_folder.read(cx).value().trim().to_owned();
-        self.brain
-            .clone()
-            .map(|brain| SpaceBrain { folder, ..brain })
     }
 
     /// Saves the form's edits over the Space as it is now, so a field the form did not change
@@ -484,63 +429,6 @@ impl SpacesPage {
         self.repositories = choice.repositories;
         self.followed = choice.followed;
         cx.notify();
-    }
-
-    fn choose_brain(&mut self, space: SpaceId, window: &mut Window, cx: &mut Context<Self>) {
-        let paths = folders::choose(&self.bridge, "Choose the brain’s folder", false, window, cx);
-        cx.spawn_in(window, async move |this, cx| {
-            let chosen = paths.recv().await.ok().and_then(|p| p.into_iter().next());
-            let _ = cx.update(|window, cx| {
-                let _ = this.update(cx, |view, cx| {
-                    if let Some(path) = chosen {
-                        let path = path.to_string_lossy().into_owned();
-                        view.set_brain(space, path, window, cx);
-                    }
-                });
-            });
-        })
-        .detach();
-    }
-    /// Makes `path` the Space's brain, or where its GitHub brain is cloned. After No brain on
-    /// a GitHub brain the folder is a new local brain, so No brain is saved first; the host
-    /// would otherwise take the folder for the clone.
-    fn set_brain(
-        &mut self,
-        space: SpaceId,
-        path: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let command = Command::SetSpaceBrain {
-            space_id: space.clone(),
-            path,
-        };
-        let latest = self.shown_space().filter(|s| s.id == space).cloned();
-        let Some(latest) = latest.filter(|s| replaces_github_brain(&self.brain, &s.brain)) else {
-            return self.request(command, window, cx);
-        };
-        let unbrained = Space {
-            brain: None,
-            ..latest
-        };
-        self.ask(
-            ask::update_space(unbrained),
-            window,
-            cx,
-            move |view, saved, window, cx| match saved {
-                Ok(_) => {
-                    if view
-                        .loaded
-                        .as_ref()
-                        .is_some_and(|(from, _)| from.id == space)
-                    {
-                        view.adopt_brain(None, window, cx);
-                    }
-                    view.request(command, window, cx);
-                }
-                Err(error) => view.error = Some(error),
-            },
-        );
     }
 
     /// Asks first, then removes the Space; the host refuses the last one and one with an open
@@ -893,8 +781,7 @@ impl SpacesPage {
                 Some(ROUTER.into()),
                 p,
             ))
-            .child(row("Brain", self.brain_field(space, local, p, cx), None, p))
-            .children(self.brain_facts(space, p, cx))
+            .child(row("Brain", brain_field(space, p), None, p))
             .child(row(
                 "Code repositories",
                 self.repositories_field(space, p, cx),
@@ -962,80 +849,6 @@ impl SpacesPage {
             .gap_2()
             .child(hint(error.to_owned(), p).text_color(p.red))
             .children(open)
-    }
-
-    fn brain_field(
-        &self,
-        space: &Space,
-        local: Option<&SpaceLocal>,
-        p: Palette,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let id = space.id.clone();
-        let choose = ui::gated(
-            button("choose-brain")
-                .xsmall()
-                .ghost()
-                .label("Choose a brain…"),
-            &self.shared.host,
-        )
-        .on_click(
-            cx.listener(move |view, _, window, cx| view.choose_brain(id.clone(), window, cx)),
-        );
-        let field = div().flex().flex_col().gap_1();
-        let Some(brain) = &self.brain else {
-            return field.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(hint("None", p))
-                    .child(choose),
-            );
-        };
-        let (named, caption) = match &brain.repository {
-            BrainRepository::GitHub { owner, name, .. } => {
-                let at = local
-                    .and_then(|l| l.brain_path.clone())
-                    .unwrap_or_else(|| "not cloned on this Mac".into());
-                let caption = "Changes reach main through gated pull requests.";
-                (format!("{owner}/{name} · {at}"), caption)
-            }
-            BrainRepository::Local { .. } => (brain_label(space, local), "A folder on this Mac."),
-        };
-        let choose = match &brain.repository {
-            BrainRepository::GitHub { .. } => choose.label("Choose where it’s cloned…"),
-            BrainRepository::Local { .. } => choose,
-        };
-        field
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(mono(named, p))
-                    .child(choose)
-                    .child(
-                        button("no-brain")
-                            .xsmall()
-                            .ghost()
-                            .label("No brain")
-                            .tooltip("Projects in this Space log nowhere; saved with Save")
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.brain = None;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(hint("Folder", p))
-                    .child(Input::new(&self.brain_folder).small().w(px(200.))),
-            )
-            .child(hint(caption, p))
     }
 
     fn repositories_field(&self, space: &Space, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -1123,52 +936,6 @@ impl SpacesPage {
                         })),
                 ),
             )
-    }
-
-    /// The brain's compile time and gate, read-only here: its `wiffletree-brain.json` says them,
-    /// and each links to the Brains page, which changes them.
-    fn brain_facts(&self, space: &Space, p: Palette, cx: &mut Context<Self>) -> Option<Div> {
-        let BrainRepository::GitHub { owner, name, .. } = &space.brain.as_ref()?.repository else {
-            return None;
-        };
-        let page = self.brains.as_ref()?;
-        let identity = format!("{owner}/{name}");
-        let brain = (page.brains.iter()).find(|b| b.repository.eq_ignore_ascii_case(&identity))?;
-        let (compile, gate) = brain_lines(brain, page.this_host.as_ref());
-        let change_on_brains = |id: &'static str, line: Div, cx: &mut Context<Self>| {
-            line.child(hint("·", p)).child(
-                button(id)
-                    .link()
-                    .xsmall()
-                    .label("Change on Brains →")
-                    .on_click(cx.listener(|_, _, _, c| c.emit(Intent::OpenPage(Page::Brains)))),
-            )
-        };
-        let line = || div().flex().flex_wrap().items_center().gap_1();
-        let compile = match compile.strip_prefix(brains_view::NOT_SCHEDULED) {
-            Some(rest) => line()
-                .child(div().text_color(p.yellow).child(brains_view::NOT_SCHEDULED))
-                .child(rest.trim_start().to_owned()),
-            None => line().child(compile),
-        };
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .gap_3()
-                .child(row(
-                    "Brain compile",
-                    change_on_brains("brain-compile-link", compile, cx),
-                    None,
-                    p,
-                ))
-                .child(row(
-                    "Brain gate",
-                    change_on_brains("brain-gate-link", line().child(div().child(gate)), cx),
-                    None,
-                    p,
-                )),
-        )
     }
 
     /// Behaviors for ‹Space› → and Models for ‹Space› →, each with what the Space changes, then
@@ -1757,28 +1524,6 @@ fn pass_finished(before: &[IssueTracker], now: &[IssueTracker], shown: &SpaceId)
     pass(before) != pass(now)
 }
 
-fn replaces_github_brain(form: &Option<SpaceBrain>, space: &Option<SpaceBrain>) -> bool {
-    let github = |b: &SpaceBrain| matches!(b.repository, BrainRepository::GitHub { .. });
-    form.is_none() && space.as_ref().is_some_and(github)
-}
-
-/// Whether the form takes the Space's brain: it changed since the form was filled, and the form
-/// left its own brain as filled.
-fn follows_brain(
-    form: &Option<SpaceBrain>,
-    read: &Option<SpaceBrain>,
-    space: &Option<SpaceBrain>,
-) -> bool {
-    form == read && space != read
-}
-
-/// The form's brain once a brain was chosen, which changes only where it is on this Mac or,
-/// for a Space with none, gives it one: an edited brain stays as the form has it, and No brain
-/// gives way to the brain the Space had, so Save keeps the one just chosen.
-fn brain_after_choosing(form: &Option<SpaceBrain>, loaded: &Space) -> Option<SpaceBrain> {
-    form.clone().or_else(|| loaded.brain.clone())
-}
-
 /// Whether the form, showing `shown` and reading `now`, still holds `saved`, the draft Save sent
 /// for `from`.
 fn holds_draft(shown: &Space, now: &Result<Space, String>, from: &Space, saved: &Space) -> bool {
@@ -1798,7 +1543,6 @@ fn merged(read: &Space, form: &Space, latest: &Space) -> Space {
         name: pick(&read.name, &form.name, &latest.name),
         description: pick(&read.description, &form.description, &latest.description),
         repositories: merged_list(&read.repositories, &form.repositories, &latest.repositories),
-        brain: pick(&read.brain, &form.brain, &latest.brain),
         sources: pick(&read.sources, &form.sources, &latest.sources),
         ..latest.clone()
     }
@@ -1878,26 +1622,26 @@ fn place(named: String, at: String, choose: Button, p: Palette) -> Div {
         .child(choose)
 }
 
-/// The brain's compile, "Daily at 06:00 America/Chicago on Mike's MacBook", and its gate, the
-/// checks `main` requires, as the Space page shows them.
-fn brain_lines(brain: &Brain, this_host: Option<&BrainCompiler>) -> (String, String) {
-    let compiler = brains_view::compiler_line(&brain.config, this_host);
-    let compile = match brain.config.config() {
-        Some(_) => format!("{} on {compiler}", brains_view::next_compile(&brain.config)),
-        // Why there is no compiler says it all.
-        None => compiler,
+/// The Brain row: where the Space's brain is, and read-only the old brain an earlier release
+/// named, which Bring in a brain will read.
+fn brain_field(space: &Space, p: Palette) -> Div {
+    let folder = match space.storage.root.as_str() {
+        "" => SpaceBrain::DEFAULT_FOLDER.to_owned(),
+        root => format!("{root}/{}", SpaceBrain::DEFAULT_FOLDER),
     };
-    let mut gate = match brain.required_checks.as_slice() {
-        [] => "main requires no gate checks".to_owned(),
-        checks => format!("main requires {}", checks.join(", ")),
+    let here = format!("{} · {folder}/", space.storage.repository.key());
+    let field = div().flex().flex_col().gap_1().child(mono(here, p));
+    let Some(SpaceBrain { repository, .. }) = &space.brain else {
+        return field;
     };
-    if !brain.missing_checks.is_empty() {
-        gate.push_str(&format!(
-            "; not yet {}, so batches wait",
-            brain.missing_checks.join(", ")
-        ));
-    }
-    (compile, gate)
+    let named = match repository {
+        BrainRepository::GitHub { owner, name, .. } => format!("{owner}/{name}"),
+        BrainRepository::Local { .. } => "a folder on this Mac".into(),
+    };
+    field.child(hint(
+        format!("An earlier release named {named} as its brain. It takes no new entries."),
+        p,
+    ))
 }
 
 /// How many Behavior choices the Space makes, for itself and for its repositories.
@@ -2033,17 +1777,9 @@ fn sync_line(status: &StorageStatus) -> Option<(String, bool)> {
     Some((format!("● synced {}", age(at).to_lowercase()), false))
 }
 
-/// The Space's brain as New project and the Space page name it.
-pub(super) fn brain_label(space: &Space, local: Option<&SpaceLocal>) -> String {
-    match &space.brain {
-        None => "no brain".into(),
-        Some(SpaceBrain {
-            repository: BrainRepository::GitHub { owner, name, .. },
-            ..
-        }) => format!("{owner}/{name}"),
-        Some(_) => (local.and_then(|l| l.brain_path.clone()))
-            .unwrap_or_else(|| "a folder not chosen on this Mac".into()),
-    }
+/// The Space's brain as New project names it: its repository.
+pub(super) fn brain_label(space: &Space) -> String {
+    space.storage.repository.key()
 }
 
 /// The question before a prefix changes: its title, what happens and the button.
@@ -2192,20 +1928,9 @@ impl Requests for SpacesPage {
                 self.loaded = None;
                 self.error = None;
             }
-            Ok(_) if matches!(command, Command::SetSpaceBrain { .. }) => {
-                self.error = None;
-                if self.brain.is_none()
-                    && let Some((from, _)) = &self.loaded
-                {
-                    self.brain = brain_after_choosing(&self.brain, from);
-                    let folder = (from.brain.as_ref()).map_or(String::new(), |b| b.folder.clone());
-                    self.brain_folder
-                        .update(cx, |input, cx| input.set_value(folder, window, cx));
-                }
-            }
             Ok(_) => self.error = None,
         }
-        if matches!(command, Command::SyncNow | Command::SetSpaceBrain { .. }) {
+        if matches!(command, Command::SyncNow) {
             self.read_storage(window, cx);
         }
     }
@@ -2236,11 +1961,10 @@ impl Render for SpacesPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        Joining, STORAGE_FRESH_MS, behaviors_changed, brain_after_choosing, brain_label,
-        brain_lines, follows_brain, format_sources, holds_draft, issues_line, join_choices,
-        join_refused_by, merged, models_changed, new_storage_line, parse_sources, pass_finished,
-        prefix_question, readers_line, reads_storage_again, replaces_github_brain, repository_line,
-        shared_with, storage_banner, sync_line,
+        Joining, STORAGE_FRESH_MS, behaviors_changed, brain_label, format_sources, holds_draft,
+        issues_line, join_choices, join_refused_by, merged, models_changed, new_storage_line,
+        parse_sources, pass_finished, prefix_question, readers_line, reads_storage_again,
+        repository_line, shared_with, storage_banner, sync_line,
     };
     use crate::wording::counted;
     use workspace_core::*;
@@ -2325,42 +2049,6 @@ mod tests {
         assert_eq!(saved.description, "Sage Haven work");
         assert_eq!(saved.additions, "Never log child PII.");
         assert_eq!(saved.models, SpaceModels::default());
-    }
-
-    #[test]
-    fn the_brains_compile_and_gate_read_as_its_config_says() {
-        let brain = |config: serde_json::Value, missing: &[&str]| -> Brain {
-            serde_json::from_value(serde_json::json!({
-                "repository": "Sage-Social/sage-brain", "spaces": ["sage"], "granted": true,
-                "checkout": "/data/brains/sage-brain", "config": config,
-                "required_checks": ["sensitive-info", "secret-scan"],
-                "missing_checks": missing,
-            }))
-            .unwrap()
-        };
-        let read = serde_json::json!({"kind": "read", "config": {"version": 1,
-            "compiler": {"host_id": "mike", "name": "Mike's MacBook"},
-            "compile": {"at": "06:00", "timezone": "America/Chicago"}}});
-        assert_eq!(
-            brain_lines(&brain(read.clone(), &[]), None),
-            (
-                "Daily at 06:00 America/Chicago on Mike's MacBook".into(),
-                "main requires sensitive-info, secret-scan".into()
-            )
-        );
-        let this_mac = BrainCompiler {
-            host_id: "mike".into(),
-            name: "Mike's MacBook".into(),
-            extra: Extra::new(),
-        };
-        let (compile, gate) = brain_lines(&brain(read, &["secret-scan"]), Some(&this_mac));
-        assert_eq!(
-            compile,
-            "Daily at 06:00 America/Chicago on Mike's MacBook (this Mac)"
-        );
-        assert!(gate.ends_with("; not yet secret-scan, so batches wait"));
-        let unread = brain(serde_json::json!({"kind": "unread"}), &[]);
-        assert_eq!(brain_lines(&unread, None).0, "Not read yet");
     }
 
     #[test]
@@ -2520,30 +2208,9 @@ mod tests {
     }
 
     #[test]
-    fn new_project_names_the_brain_it_will_log_to() {
-        let mut sage = sage();
-        assert_eq!(brain_label(&sage, None), "no brain");
-        sage.brain = Some(SpaceBrain {
-            repository: BrainRepository::GitHub {
-                owner: "Sage-Social".into(),
-                name: "sagehaven-docs".into(),
-                extra: Extra::new(),
-            },
-            folder: "second-brain".into(),
-            extra: Extra::new(),
-        });
-        assert_eq!(brain_label(&sage, None), "Sage-Social/sagehaven-docs");
-        let mut personal = personal();
-        personal.brain = Some(SpaceBrain {
-            repository: BrainRepository::local(),
-            folder: "second-brain".into(),
-            extra: Extra::new(),
-        });
-        let local = SpaceLocal {
-            brain_path: Some("/Users/m/dev/brain".into()),
-            ..SpaceLocal::default()
-        };
-        assert_eq!(brain_label(&personal, Some(&local)), "/Users/m/dev/brain");
+    fn new_project_names_the_repository_it_will_log_to() {
+        assert_eq!(brain_label(&sage()), sage().storage.repository.key());
+        assert_eq!(brain_label(&personal()), "local-7k2q");
     }
 
     #[test]
@@ -2597,41 +2264,6 @@ mod tests {
     }
 
     #[test]
-    fn choosing_a_brains_clone_keeps_an_unsaved_folder_edit() {
-        let mut read = sage();
-        read.brain = Some(SpaceBrain {
-            repository: BrainRepository::GitHub {
-                owner: "Sage-Social".into(),
-                name: "sagehaven-docs".into(),
-                extra: Extra::new(),
-            },
-            folder: "second-brain".into(),
-            extra: Extra::new(),
-        });
-        // The human changes the folder, then chooses where the brain is cloned.
-        let mut form = read.clone();
-        form.brain.as_mut().unwrap().folder = "team-brain".into();
-        form.brain = brain_after_choosing(&form.brain, &read);
-        // The reply changed only this Mac's clone path; the definition is as read.
-        let saved = merged(&read, &form, &read);
-        assert_eq!(saved.brain.unwrap().folder, "team-brain");
-        // After No brain, the brain the Space has stays, and Save keeps it.
-        let none = brain_after_choosing(&None, &read);
-        assert_eq!(
-            merged(
-                &read,
-                &Space {
-                    brain: none,
-                    ..read.clone()
-                },
-                &read
-            )
-            .brain,
-            read.brain
-        );
-    }
-
-    #[test]
     fn the_space_shown_after_a_removal_reads_its_own_storage() {
         let (removed, next) = (SpaceId("sage".into()), SpaceId("personal".into()));
         let asked = (removed.clone(), 1_000);
@@ -2677,48 +2309,6 @@ mod tests {
             tracker("personal", Some(5), None),
         ];
         assert!(!pass_finished(&before, &elsewhere, &sage));
-    }
-
-    #[test]
-    fn a_folder_chosen_after_no_brain_replaces_only_a_github_brain() {
-        let github = SpaceBrain {
-            repository: BrainRepository::GitHub {
-                owner: "Sage-Social".into(),
-                name: "sagehaven-docs".into(),
-                extra: Extra::new(),
-            },
-            folder: "second-brain".into(),
-            extra: Extra::new(),
-        };
-        let local = SpaceBrain {
-            repository: BrainRepository::local(),
-            ..github.clone()
-        };
-        assert!(replaces_github_brain(&None, &Some(github.clone())));
-        assert!(!replaces_github_brain(&Some(github.clone()), &Some(github)));
-        assert!(!replaces_github_brain(&None, &Some(local)));
-        assert!(!replaces_github_brain(&None, &None));
-    }
-
-    #[test]
-    fn an_edited_form_takes_only_a_changed_brain_it_left_alone() {
-        let local = Some(SpaceBrain {
-            repository: BrainRepository::local(),
-            folder: "second-brain".into(),
-            extra: Extra::new(),
-        });
-        assert!(
-            follows_brain(&None, &None, &local),
-            "a brain chosen meanwhile"
-        );
-        assert!(
-            !follows_brain(&local, &local, &local),
-            "an unrelated snapshot leaves the folder input alone"
-        );
-        assert!(
-            !follows_brain(&None, &local, &local),
-            "No brain is the form's edit"
-        );
     }
 
     #[test]

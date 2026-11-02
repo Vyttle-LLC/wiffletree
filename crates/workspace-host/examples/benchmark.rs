@@ -318,6 +318,7 @@ fn main() -> Result<()> {
                 brain: None,
                 path: None,
                 batch_id: None,
+                written: false,
                 author: None,
                 provider: None,
                 model: None,

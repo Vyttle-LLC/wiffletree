@@ -66,7 +66,6 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::BrainStatus { .. }
         | Command::BrainCompileRuns { .. }
         | Command::SearchBrain { .. }
-        | Command::SuggestSpaceBrain { .. }
         | Command::OriginBranches { .. }
         | Command::Issues { .. }
         | Command::Issue { .. }
@@ -136,7 +135,6 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::BoardVersions { .. }
         | Command::BoardVersionFolder { .. }
         | Command::ShareBoard { .. }
-        | Command::SetSpaceBrain { .. }
         | Command::CreateSpace { .. }
         | Command::UpdateSpace { .. }
         | Command::RemoveSpace { .. }
@@ -148,19 +146,14 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::SetTrackerPrefix { .. }
         | Command::SetUpIssues { .. }
         | Command::MoveIntoFolder { .. }
-        | Command::ConfirmBrain { .. }
-        | Command::ForgetBrain { .. }
-        | Command::SetUpBrain { .. }
-        | Command::UpdateBrainGate { .. }
-        | Command::SetBrainCompiler { .. }
-        | Command::SetBrainCompileTime { .. }
-        | Command::AmendBrainBatch { .. }
-        | Command::SendLogsNow { .. }
-        | Command::ImportLegacyLogs { .. }
         | Command::RunBrainCompile { .. }
         | Command::RuleConflict { .. }
         | Command::FixHeldLog { .. }
         | Command::ReleaseHeldLog { .. }
+        | Command::HeldEntryText { .. }
+        | Command::EditHeldEntry { .. }
+        | Command::MarkEntryNotSensitive { .. }
+        | Command::DiscardHeldEntry { .. }
         | Command::SyncIssues { .. }
         | Command::CreateIssue { .. }
         | Command::EditIssue { .. }

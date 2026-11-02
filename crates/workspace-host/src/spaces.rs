@@ -216,15 +216,6 @@ pub(crate) enum GhAccount {
     /// `gh` could not say, such as while GitHub is out of reach.
     Unknown,
 }
-impl GhAccount {
-    /// The login `gh` is signed in as, if it said.
-    pub(crate) fn login(self) -> Option<String> {
-        match self {
-            Self::SignedIn(login) => Some(login),
-            Self::SignedOut | Self::Unknown => None,
-        }
-    }
-}
 /// `gh`'s exit code when a command needs it signed in.
 const GH_AUTH_REQUIRED: i32 = 4;
 
@@ -450,8 +441,10 @@ impl Host {
         self.check_space_behaviors(&current.space, &space)?;
         self.check_space_models(&current.space, &space)?;
         self.ensure_unused_name(&space.name, Some(&space.id))?;
+        // The `brain` key is a record of an older brain, which no screen edits.
         let space = Space {
             name: space.name.trim().into(),
+            brain: current.space.brain.clone(),
             ..space
         };
         self.atomically(|host| {
@@ -545,69 +538,6 @@ impl Host {
         Self::event(&tx, &project.id, None, "space_changed", &target.name)?;
         tx.commit()?;
         Ok(project)
-    }
-    /// Sets the Space's brain from its page: where a GitHub brain is cloned on this Mac, or else
-    /// a local folder.
-    pub fn set_space_brain(&mut self, space: &SpaceId, path: &str) -> Result<()> {
-        let SpaceRecord { space, mut local } = self.space(space)?;
-        let Some(SpaceBrain {
-            repository: BrainRepository::GitHub { owner, name, .. },
-            ..
-        }) = &space.brain
-        else {
-            return self.set_local_brain(&space.id, path);
-        };
-        let brain = format!("{owner}/{name}");
-        let path = fs::canonicalize(path).context("The brain's clone must already exist")?;
-        let cloned = match repositories::read_origin(&path) {
-            repositories::Origin::GitHub { owner, name, .. } => format!("{owner}/{name}"),
-            _ => String::new(),
-        };
-        ensure!(
-            cloned.eq_ignore_ascii_case(&brain),
-            "{} is not a clone of {brain}",
-            path.display()
-        );
-        local.brain_path = Some(path.to_str().context("Brain path is not UTF-8")?.into());
-        self.db.execute(
-            "UPDATE spaces SET local=?2 WHERE id=?1",
-            params![space.id.as_str(), encode(&local)?],
-        )?;
-        Ok(())
-    }
-    /// Sets the Space's brain to the local folder `path`, keeping the folder in it that a local
-    /// brain already names.
-    fn set_local_brain(&mut self, space: &SpaceId, path: &str) -> Result<()> {
-        let path = fs::canonicalize(path)
-            .context("Brain directory must already exist; setup is explicit")?;
-        ensure!(path.is_dir(), "Brain attachment must be a directory");
-        let path: String = path.to_str().context("Brain path is not UTF-8")?.into();
-        let SpaceRecord {
-            mut space,
-            mut local,
-        } = self.space(space)?;
-        // A local brain keeps its folder and the keys this release does not know.
-        space.brain = Some(match space.brain {
-            Some(
-                brain @ SpaceBrain {
-                    repository: BrainRepository::Local { .. },
-                    ..
-                },
-            ) => brain,
-            _ => SpaceBrain {
-                repository: BrainRepository::local(),
-                folder: SpaceBrain::DEFAULT_FOLDER.into(),
-                extra: Extra::new(),
-            },
-        });
-        local.brain_path = Some(path.clone());
-        self.atomically(|host| {
-            host.db.execute(
-                "UPDATE spaces SET data=?2,local=?3 WHERE id=?1",
-                params![space.id.as_str(), encode(&space)?, encode(&local)?],
-            )?;
-            host.write_space_file(&space)
-        })
     }
     /// The workspace repositories whose GitHub name `space` lists, and the ones it lists that
     /// are not cloned on this Mac.

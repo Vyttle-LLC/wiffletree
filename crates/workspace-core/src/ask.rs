@@ -245,6 +245,9 @@ pub fn brain_conflicts(repository: String, project_id: Option<String>) -> Ask<Ve
 pub fn run_brain_compile(repository: String) -> Ask<CompileRun> {
     Ask::new(Command::RunBrainCompile { repository })
 }
+pub fn held_entry_text(repository: String, path: String) -> Ask<String> {
+    Ask::new(Command::HeldEntryText { repository, path })
+}
 pub fn brain_compile_runs(repository: String, offset: usize, limit: usize) -> Ask<CompileRunPage> {
     Ask::new(Command::BrainCompileRuns {
         repository,

@@ -65,7 +65,7 @@ A project SHALL store no brain of its own. A project's brain SHALL be its Space'
 - **WHEN** a coordinator in the Vyttle Space creates a project with `create_project` that adds a repository outside Vyttle
 - **THEN** the new project is in the Vyttle Space and logs only to `vyttle-docs`
 
-#### Scenario: No brain
+#### Scenario: A Space on this Mac alone
 - **WHEN** a project's Space names no brain
 - **THEN** the project has no brain and its Memory panel says so, with a link to Settings › Spaces
 
