@@ -17,7 +17,7 @@ Press **Open the file** on the alert, remove the text, and save. Wiffletree push
 
 This replaces `main` with a version in which the text never existed. Everyone's next pull takes the new history. Do it from a terminal, on one Mac.
 
-1. **Lift Protect history for the rewrite.** A repository with Protect history on refuses a force push, which is what this needs. Someone with admin rights on the repository edits its ruleset on GitHub (**Settings → Rules → Rulesets**) and adds themselves to the bypass list, or turns the ruleset off for the next steps.
+1. **Lift Protect history for the rewrite.** A repository with Protect history on refuses a force push, which is what this needs. Someone with admin rights on the repository edits the ruleset named Protect history on GitHub (**Settings → Rules → Rulesets**) and adds themselves to the bypass list, or turns the ruleset off for the next steps.
 2. **Rewrite a fresh copy.** Install [git-filter-repo](https://github.com/newren/git-filter-repo), then, outside any folder Wiffletree uses:
 
    ```sh
