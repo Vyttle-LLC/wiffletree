@@ -246,15 +246,20 @@ fn entry_file(log: &WorkLog, author: &str) -> Result<String> {
 /// Why `text` breaks the entry contract as the file `path`, relative to the brain's `logs/`, or
 /// `None` when it keeps to it. Names the rule and never the text, which may be sensitive.
 pub(crate) fn contract_problem(path: &str, text: &str) -> Option<String> {
+    let bad_path = || Some("its path is not <repo>/YYYY/MM/YYYY-MM-DD-<id>.md".to_owned());
     let [repo, year, month, name] = path.split('/').collect::<Vec<_>>()[..] else {
-        return Some("its path is not <repo>/YYYY/MM/YYYY-MM-DD-<id>.md".into());
+        return bad_path();
     };
-    let stem = name.strip_suffix(".md")?;
-    let (date, id) = (stem.get(..10)?, stem.get(11..)?);
+    let dated_id = name
+        .strip_suffix(".md")
+        .and_then(|stem| Some((stem.get(..10)?, stem.get(11..)?)));
+    let Some((date, id)) = dated_id else {
+        return bad_path();
+    };
     let dated = date.starts_with(&format!("{year}-{month}-"))
         && chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok();
     if !valid_folder(repo) || !dated || !valid_ulid(id) {
-        return Some("its path is not <repo>/YYYY/MM/YYYY-MM-DD-<id>.md".into());
+        return bad_path();
     }
     let Some((frontmatter, body)) =
         (text.strip_prefix("---\n")).and_then(|t| t.split_once("\n---\n"))
@@ -1457,6 +1462,13 @@ mod tests {
         assert_eq!(contract_problem(in_logs, &fits), None);
         let over = text.replace(line, &format!("{line}{room}x"));
         assert!(contract_problem(in_logs, &over).unwrap().contains("cap"));
+        for malformed in [
+            "app/2026/10/2026-10-01-x.txt",
+            "app/2026/10/short.md",
+            "app/2026/10/.md",
+        ] {
+            assert!(contract_problem(malformed, &fits).unwrap().contains("path"));
+        }
         let leaks = text.replace("- type: decision", &format!("- type: {}", tests::PHONE));
         let problem = contract_problem(in_logs, &leaks).unwrap();
         assert!(!problem.contains("555"), "{problem}");

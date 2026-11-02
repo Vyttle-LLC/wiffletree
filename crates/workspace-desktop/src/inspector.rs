@@ -1069,13 +1069,17 @@ impl Inspector {
                 .find(|item| !item.is_permission())
                 .map(|item| item.id.clone())
         });
-        // Issue notes first, under their own label, as every project's Inbox shows them.
+        // Alerts at the very top, then issue notes under their own label, as every project's
+        // Inbox shows them.
+        let (alerts, notes): (Vec<&WorkspaceNote>, Vec<&WorkspaceNote>) =
+            (notes.into_iter()).partition(|note| matches!(note, WorkspaceNote::Alert(_)));
         let (issues, others): (Vec<&WorkspaceNote>, Vec<&WorkspaceNote>) =
             (notes.into_iter()).partition(|note| matches!(note, WorkspaceNote::Issue(_)));
         let mut body = div()
             .flex()
             .flex_col()
             .gap_3()
+            .children(alerts.into_iter().map(|note| self.note_card(note, p, cx)))
             .when(!issues.is_empty(), |body| body.child(section("Issues", p)))
             .children(issues.into_iter().map(|note| self.note_card(note, p, cx)))
             .children(others.into_iter().map(|note| self.note_card(note, p, cx)));
@@ -1100,6 +1104,10 @@ impl Inspector {
             WorkspaceNote::HeldEntry(entry) => self
                 .inbox
                 .update(cx, |inbox, cx| inbox.held_entry_card(entry, p, cx)),
+            WorkspaceNote::Alert(alert) => self
+                .inbox
+                .update(cx, |inbox, cx| inbox.alert_card(alert, p, cx)),
+            WorkspaceNote::ScanStopped(stopped) => scan_alert::stopped_card(stopped, p),
             WorkspaceNote::Issue(note) => {
                 let (inspector, id) = (cx.entity().downgrade(), note.id.clone());
                 let open: inbox::OpenIssue = Rc::new(move |_, cx| {

@@ -778,6 +778,13 @@ fn space_commands_need_the_apps_credential_and_reads_do_not() {
             path: "a.md".into(),
             text: "Text.".into(),
         },
+        Command::MarkAlertNotSensitive {
+            repository: "Sage-Social/api".into(),
+            path: "a.md".into(),
+            check: "sensitive-info".into(),
+            rule: "phone".into(),
+            reason: "A fixture".into(),
+        },
         Command::MarkEntryNotSensitive {
             repository: "Sage-Social/api".into(),
             path: "a.md".into(),

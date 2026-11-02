@@ -25,6 +25,8 @@ pub(super) struct Inbox {
     scope: Entity<InputState>,
     /// The form of the held entry being edited or marked.
     held: held_entry::HeldForm,
+    /// The reason line of the alert being marked.
+    alert: scan_alert::AlertForm,
 }
 impl Inbox {
     pub(super) fn new(bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -43,6 +45,7 @@ impl Inbox {
             scope: cx
                 .new(|cx| InputState::new(window, cx).placeholder("One line that scopes both")),
             held: held_entry::HeldForm::new(window, cx),
+            alert: scan_alert::AlertForm::new(window, cx),
         }
     }
     /// A held log entry's card.
@@ -60,6 +63,22 @@ impl Inbox {
             });
         });
         held_entry::held_entry_card(entry, &self.held, on, p)
+    }
+    /// An alert's card.
+    pub(super) fn alert_card(
+        &mut self,
+        alert: &ScanAlert,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let (view, kept) = (cx.entity().downgrade(), alert.clone());
+        let on: scan_alert::OnAlert = Rc::new(move |action, window, cx| {
+            let alert = kept.clone();
+            let _ = view.update(cx, |view: &mut Self, cx| {
+                scan_alert::act(view, |v| &mut v.alert, alert, action, window, cx)
+            });
+        });
+        scan_alert::alert_card(alert, &self.alert, on, p)
     }
     /// A brain conflict's card; `evidence` opens the brain browser's Conflicts view.
     pub(super) fn conflict_card(
@@ -564,6 +583,7 @@ impl Requests for Inbox {
             Command::SettlePausedFile { .. } => self.compared = None,
             Command::RuleConflict { .. } => self.keeping_both = None,
             command if held_entry::settles(&command) => self.held.close(),
+            command if scan_alert::settles(&command) => self.alert.close(),
             _ => {}
         }
     }

@@ -483,6 +483,15 @@ fn spawn_storage_pass(
         Event::StorageSynced,
     );
 }
+fn spawn_pull_scan(sender: Sender<Event>, job: alerts::PullScan) {
+    spawn_job(
+        sender,
+        job,
+        |job| Some(job.run()),
+        |_| None,
+        |job, scanned| Event::PullScanned(job.key().to_owned(), scanned),
+    );
+}
 fn spawn_brain_pass(
     sender: Sender<Event>,
     repository: String,
@@ -671,6 +680,7 @@ enum Event {
     },
     /// A brain's pass finished on its own thread; `None` when it panicked.
     BrainPassed(String, Option<brains::Passed>),
+    PullScanned(String, Option<alerts::Scanned>),
     /// A storage repository was checked and cloned off the host thread, for a new Space or the
     /// Spaces to join.
     StorageStaged {
@@ -991,6 +1001,8 @@ struct Actor {
     /// By `repos::key`, the pace of each GitHub storage repository that is not the settings
     /// repository, whose pass runs with the settings rule set.
     storage_paces: std::collections::BTreeMap<String, repos::Pace>,
+    /// The repositories with a pull scan job running.
+    pull_scans: std::collections::BTreeSet<String>,
     /// By `owner/name`, the pace of each brain a Space names.
     brain_paces: std::collections::BTreeMap<String, repos::Pace>,
     /// The listener for paired devices, open while remote access is on.
@@ -1144,6 +1156,7 @@ impl Service {
                     publish_tools: publish::Tools::default(),
                     sync_pace: repos::Pace::every(&[sync::CADENCE_MS]),
                     storage_paces: Default::default(),
+                    pull_scans: Default::default(),
                     brain_paces: Default::default(),
                     remote: remote::Remote::new(remote, requests),
                     attention: None,
@@ -1802,6 +1815,7 @@ impl Actor {
                         .is_some_and(|read| reservations.blocks_repository(&self.host, &read.id))
             }
             Event::Synced(_)
+            | Event::PullScanned(..)
             | Event::GitHub(_)
             | Event::SettingsRepositoryPrepared { .. }
             | Event::StorageSynced(..)
@@ -2166,6 +2180,20 @@ impl Actor {
     }
 
     /// After the pass of the storage repository `key`: the import waiting on it goes on.
+    /// Starts the repository's next pull scan job, off the pass, unless one is running.
+    fn start_pull_scan(&mut self, key: &str) {
+        if self.pull_scans.contains(key) {
+            return;
+        }
+        match self.host.pull_scan(key) {
+            Ok(Some(job)) => {
+                self.pull_scans.insert(key.to_owned());
+                spawn_pull_scan(self.sender.clone(), job);
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!("Scanning {key}: {error:#}"),
+        }
+    }
     fn linear_pass_ended(&mut self, key: &str) -> bool {
         let Some(step) = self.host.linear_pass_ended(key) else {
             return false;
@@ -2362,7 +2390,20 @@ impl Actor {
                         eprintln!("Syncing {key}: {e:#}");
                     });
                 self.linear_pass_ended(&key);
+                self.start_pull_scan(&key);
                 true
+            }
+            Event::PullScanned(key, scanned) => {
+                self.pull_scans.remove(&key);
+                let finished = scanned.map(|scanned| self.host.finish_pull_scan(scanned));
+                let (more, changed) = finished.unwrap_or(Ok((false, false))).unwrap_or_else(|e| {
+                    eprintln!("Scanning {key}: {e:#}");
+                    (false, false)
+                });
+                if more {
+                    self.start_pull_scan(&key);
+                }
+                changed
             }
             Event::FolderMoved { key, moved, reply } => {
                 let result = moved
@@ -2418,6 +2459,9 @@ impl Actor {
                     false
                 });
                 let key = self.host.settings_key();
+                if let Some(key) = &key {
+                    self.start_pull_scan(key);
+                }
                 changed | key.is_some_and(|key| self.linear_pass_ended(&key))
             }
             Event::LinearTeamsRead { flow, teams, reply } => {
@@ -5304,6 +5348,7 @@ mod tests {
             publish_tools: publish::Tools::default(),
             sync_pace: repos::Pace::every(&[sync::CADENCE_MS]),
             storage_paces: Default::default(),
+            pull_scans: Default::default(),
             brain_paces: Default::default(),
             remote: remote::Remote::new(remote::Options::default(), requests),
             attention: None,
@@ -9467,7 +9512,7 @@ mod tests {
     fn not_a_brain_refresh(events: &async_channel::Receiver<Event>) -> Event {
         loop {
             match events.recv_blocking().unwrap() {
-                Event::BrainPassed(..) | Event::ClaimEnded => {}
+                Event::BrainPassed(..) | Event::ClaimEnded | Event::PullScanned(..) => {}
                 event => return event,
             }
         }

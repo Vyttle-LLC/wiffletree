@@ -24,7 +24,7 @@ const HELD: &str = "held";
 const DISCARDED: &str = "discarded";
 
 /// A reason the human gives for Not sensitive, as long as the marker's line can carry.
-const MAX_REASON_CHARS: usize = 200;
+pub(crate) const MAX_REASON_CHARS: usize = 200;
 
 /// Adds the table of unlanded entries, and the line a held file's card names.
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
@@ -510,21 +510,29 @@ impl Host {
         self.issues_written.borrow_mut().insert(key);
         Ok(())
     }
+    /// Why `text` may not stand as the entry at `path` of the repository, by the entry contract.
+    fn entry_problem(&self, repository: &str, path: &str, text: &str) -> Result<Option<String>> {
+        let logs = format!(
+            "{}/logs/",
+            brain_dir(&self.root_of_key(&repos::key(repository))?)
+        );
+        let in_logs = (path.strip_prefix(logs.as_str()))
+            .with_context(|| format!("{path} is not a log entry"))?;
+        Ok(memory::contract_problem(in_logs, text))
+    }
     /// Edit it: the entry takes the human's text, refused while it breaks the contract, and is
     /// scanned again by the next pass.
     pub fn edit_held_entry(&mut self, repository: &str, path: &str, text: &str) -> Result<()> {
         let (clone, _) = self.held_entry(repository, path)?;
-        let in_logs = (path.split_once("/logs/").map(|(_, rest)| rest))
-            .or_else(|| path.strip_prefix("logs/"))
-            .with_context(|| format!("{path} is not a log entry"))?;
-        if let Some(problem) = memory::contract_problem(in_logs, text) {
+        if let Some(problem) = self.entry_problem(repository, path, text)? {
             bail!("This entry still cannot land: {problem}. Nothing was changed.");
         }
         shared::write_atomically(&clone.join(path), text.as_bytes())?;
         self.scan_again(repository, path)
     }
     /// Not sensitive: appends the inline marker to the line a `sensitive-info` finding names, so
-    /// the next scan passes it. Offered for no other held entry.
+    /// the next scan passes it, refused when the marker would break the entry contract. Offered
+    /// for no other held entry.
     pub fn mark_entry_not_sensitive(
         &mut self,
         repository: &str,
@@ -548,7 +556,11 @@ impl Host {
             .and_then(|at| lines.get_mut(at))
             .with_context(|| format!("{path} has no line {line}"))?;
         marked.push_str(&format!(" <!-- gate:allow {rule} {reason} -->"));
-        shared::write_atomically(&clone.join(path), lines.join("\n").as_bytes())?;
+        let text = lines.join("\n");
+        if let Some(problem) = self.entry_problem(repository, path, &text)? {
+            bail!("The marker would break this entry: {problem}. Edit it instead.");
+        }
+        shared::write_atomically(&clone.join(path), text.as_bytes())?;
         self.scan_again(repository, path)
     }
     /// Discard: the entry leaves this Mac's clone, and its row stays so it is never written
@@ -1055,6 +1067,65 @@ pub(crate) mod tests {
             "{line}"
         );
         assert!(s.held().is_empty(), "the card closes");
+    }
+
+    #[test]
+    fn not_sensitive_is_refused_when_its_marker_would_break_the_entry() {
+        let mut s = stored();
+        let held = Stored::path_of(&s.log(&format!("Call {PHONE}.")));
+        s.sync();
+        let clone = s.clone_folder();
+        let text = fs::read_to_string(clone.join(&held)).unwrap();
+        let padded = text.replace(
+            &format!("Call {PHONE}."),
+            &format!("Call {PHONE}. {}", "x".repeat(memory::MAX_BODY_CHARS)),
+        );
+        fs::write(clone.join(&held), &padded).unwrap();
+        let refused =
+            s.f.host
+                .mark_entry_not_sensitive(REPO, &held, "Fixture call ID")
+                .unwrap_err();
+        assert!(format!("{refused:#}").contains("cap"), "{refused:#}");
+        assert_eq!(fs::read_to_string(clone.join(&held)).unwrap(), padded);
+        // A ref that takes the marker stops being one the contract allows.
+        let line = text.lines().position(|l| l.contains(PHONE)).unwrap();
+        let moved: Vec<String> = (text.lines().enumerate())
+            .map(|(at, l)| match at == line {
+                true => "- changed: Clean.".to_owned(),
+                false if l.starts_with("- ref: ") => format!("{l} {PHONE}"),
+                false => l.to_owned(),
+            })
+            .collect();
+        fs::write(
+            clone.join(&held),
+            moved.join(
+                "
+",
+            ) + "
+",
+        )
+        .unwrap();
+        s.sync();
+        let refused = (s.f.host)
+            .mark_entry_not_sensitive(REPO, &held, "Fixture call ID")
+            .unwrap_err();
+        assert!(format!("{refused:#}").contains("ref"), "{refused:#}");
+    }
+
+    #[test]
+    fn edit_it_finds_the_entry_in_a_custom_folder_with_a_part_named_logs() {
+        let mut s = stored();
+        let held = Stored::path_of(&s.log(&format!("Call {PHONE}.")));
+        s.sync();
+        let text = fs::read_to_string(s.clone_folder().join(&held)).unwrap();
+        let (_, in_logs) = held.split_once("/second-brain/logs/").unwrap();
+        let custom = "team/logs/wiffletree";
+        let moved = "UPDATE spaces SET data=json_set(data,'$.storage.root',?1)";
+        s.f.host.db.execute(moved, [custom]).unwrap();
+        let nested = format!("{custom}/second-brain/logs/{in_logs}");
+        let host = &s.f.host;
+        assert_eq!(host.entry_problem(REPO, &nested, &text).unwrap(), None);
+        assert!(host.entry_problem(REPO, &held, &text).is_err());
     }
 
     #[test]

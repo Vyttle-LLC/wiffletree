@@ -1139,6 +1139,7 @@ impl Host {
             "sync_held",
             "issue_parts",
             "entry_files",
+            "scan_alerts",
         ] {
             let paths: Vec<String> = (tx.prepare(&format!(
                 "SELECT DISTINCT path FROM {table} WHERE repository=?1"
@@ -1736,7 +1737,8 @@ impl Host {
         let has_tracker = self.tracker(&joined[0].space).is_ok();
         let passes = self.sync_passes.clone();
         let _no_pass = sync::no_pass_running(&passes)?;
-        self.place_storage(staged)?;
+        let (key, _) = self.place_storage(staged)?;
+        self.forget_scan_marks(&key)?;
         self.atomically(|host| {
             for (at, record) in joined.iter().enumerate() {
                 let tracker = tracker.as_ref().filter(|_| at == 0 && !has_tracker);
@@ -1954,6 +1956,7 @@ impl Host {
         commit: &str,
     ) -> Result<()> {
         self.brains_now |= before != Some(commit);
+        self.start_scan_marks(key, before.unwrap_or(commit))?;
         self.compile_after_pull(key)
     }
     /// The commit sync last recorded for the repository `key`.
@@ -3498,14 +3501,14 @@ repository_settings:
     }
 
     /// The human's Move into the folder, on this Mac.
-    fn press_move(host: &mut Host, github: &Arc<GitHub>) {
+    pub(crate) fn press_move(host: &mut Host, github: &Arc<GitHub>) {
         let sage = space_named(host, "Sage");
         let moving = host.start_move(&sage.id).unwrap();
         let root = moving.run(&github.tools()).unwrap();
         host.finish_move(&moving.key, &root).unwrap();
     }
 
-    fn issue(id: &str) -> Vec<u8> {
+    pub(crate) fn issue(id: &str) -> Vec<u8> {
         tracker::issue_md(&tracker::tests::blurry(id)).unwrap()
     }
 

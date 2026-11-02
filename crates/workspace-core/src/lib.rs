@@ -1136,6 +1136,8 @@ impl Snapshot {
             WorkspaceNote::SkillQuestion(_)
             | WorkspaceNote::Held(_)
             | WorkspaceNote::HeldEntry(_)
+            | WorkspaceNote::Alert(_)
+            | WorkspaceNote::ScanStopped(_)
             | WorkspaceNote::Conflict(_) => None,
         })
     }
@@ -1330,6 +1332,11 @@ pub enum WorkspaceNote {
     Held(HeldFile),
     /// A log entry a scan held, listed in the Inbox of the project that wrote it.
     HeldEntry(HeldEntry),
+    /// Something on a repository's default branch that failed a scan of what this Mac pulled,
+    /// listed at the top of the Inbox of each project of the Spaces using the folder.
+    Alert(ScanAlert),
+    /// A check that cannot run on what this Mac pulls.
+    ScanStopped(ScanStopped),
     /// An issue the human should look at, listed under Issues at the top of every Inbox.
     Issue(IssueNote),
     /// A brain conflict, listed only in the Inbox of each project the card names.
@@ -1342,6 +1349,7 @@ impl WorkspaceNote {
         match self {
             Self::Conflict(card) => card.projects.iter().any(|p| p == project),
             Self::HeldEntry(entry) => entry.project_id.as_deref() == Some(project),
+            Self::Alert(alert) => alert.projects.iter().any(|p| p == project),
             _ => true,
         }
     }
@@ -1351,6 +1359,7 @@ impl WorkspaceNote {
         match self {
             Self::Conflict(card) => card.state == ConflictState::Open && !card.projects.is_empty(),
             Self::HeldEntry(entry) => entry.project_id.is_some(),
+            Self::Alert(alert) => !alert.projects.is_empty(),
             _ => true,
         }
     }
@@ -3805,6 +3814,15 @@ pub enum Command {
         repository: String,
         path: String,
     },
+    /// Not sensitive: closes an alert from a pull scan on this Mac alone, with a reason. Nothing
+    /// reaches the repository.
+    MarkAlertNotSensitive {
+        repository: String,
+        path: String,
+        check: String,
+        rule: String,
+        reason: String,
+    },
     /// Replaces a held entry's text with the human's fix, which must then fit the entry
     /// contract and the cap; answered with the `WorkLog`.
     FixHeldLog {
@@ -4310,6 +4328,7 @@ impl Command {
             | Self::EditHeldEntry { .. }
             | Self::MarkEntryNotSensitive { .. }
             | Self::DiscardHeldEntry { .. }
+            | Self::MarkAlertNotSensitive { .. }
             | Self::SyncIssues { .. }
             | Self::CreateIssue { .. }
             | Self::EditIssue { .. }
@@ -4461,6 +4480,7 @@ impl Command {
                 | Self::EditHeldEntry { .. }
                 | Self::MarkEntryNotSensitive { .. }
                 | Self::DiscardHeldEntry { .. }
+                | Self::MarkAlertNotSensitive { .. }
                 | Self::RemoteAccess
                 | Self::SetRemoteAccess { .. }
                 | Self::OpenPairing

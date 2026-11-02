@@ -1371,6 +1371,7 @@ impl Host {
         Ok((self.issue_notes()?.into_iter())
             .chain(notes)
             .chain(self.held_notes()?)
+            .chain(self.alert_notes()?)
             .chain(held_entries)
             .chain(questions.map(WorkspaceNote::SkillQuestion))
             .chain(

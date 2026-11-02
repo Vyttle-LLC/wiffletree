@@ -3932,6 +3932,34 @@ mod tests {
     }
 
     #[test]
+    fn a_login_that_can_read_but_not_push_ends_the_attempt_with_its_reason_and_stops_retrying() {
+        let mut b = brained();
+        b.merge(&[relay(1)]);
+        b.with_compiler_row();
+        let inner = b.tools.git.clone();
+        b.tools.git = Arc::new(move |path: &Path, args: &[&str]| {
+            if publish::subcommand(args) != "push" {
+                return inner(path, args);
+            }
+            Ok(runtime::GitAnswer {
+                status: crate::publish::tests::exit(128),
+                output: String::new(),
+                error: "fatal: unable to access: The requested URL returned error: 403".into(),
+            })
+        });
+        b.due();
+        b.prepare();
+        let runs = b.runs();
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert_eq!(runs[0].outcome, CompileOutcome::Failed);
+        assert!(runs[0].reason.contains("403"), "{}", runs[0].reason);
+        assert!(b.owed().is_none(), "this due time is over");
+        b.pull();
+        b.prepare();
+        assert_eq!(b.runs().len(), 1, "no row for each pull");
+    }
+
+    #[test]
     fn an_owed_mac_stops_when_nothing_is_pending_any_more() {
         let mut b = brained();
         let head = b.merge(&[relay(1)]);

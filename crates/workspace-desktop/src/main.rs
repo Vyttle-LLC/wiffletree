@@ -54,6 +54,7 @@ mod render_counts;
 mod repositories_view;
 mod repository_chooser;
 mod repository_tree;
+mod scan_alert;
 mod settings;
 mod shared;
 mod sidebar;

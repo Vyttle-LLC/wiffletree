@@ -179,6 +179,7 @@ impl Host {
             compiles: self.brain_compile_states()?,
             conflicts,
             held,
+            alerts: self.scan_alerts()?,
             left_pull_requests: self.left_pull_requests()?,
         })
     }

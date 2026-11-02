@@ -1,12 +1,14 @@
 //! The Brains page (OpenSpec change `one-space-repository`): one group per wiki on this Mac, named
 //! after its Spaces, with its sync, last run, Run now and runs; then the pull requests an earlier
-//! release left open, the held entries and the conflicts no project's Inbox shows. Every action
+//! release left open, the alerts from pull scans, and the held entries and conflicts no project's
+//! Inbox shows. Every action
 //! here is the human's, and nothing on the page shows a matched value. Only a conflict card quotes
 //! brain text, as plain text. Who compiles and the compile time arrive with the volunteers.
 use super::*;
 use brain_browser_view::{BrainOpening, BrainTarget, BrainView};
 use gpui_component::{Disableable, Sizable, button::ButtonVariants, input::InputState};
 use held_entry::{HeldAction, HeldForm};
+use scan_alert::{AlertAction, AlertForm};
 use std::collections::HashMap;
 use ui::{banner, card, empty_state, hint, icon, pill, section};
 use wording::age;
@@ -36,6 +38,8 @@ pub(super) struct BrainsPage {
     scope: Entity<InputState>,
     /// The form of the held entry being edited or marked.
     held: HeldForm,
+    /// The reason line of the alert being marked.
+    alert: AlertForm,
 }
 
 /// Compile runs shown per page.
@@ -55,6 +59,7 @@ impl BrainsPage {
             scope: cx
                 .new(|cx| InputState::new(window, cx).placeholder("One line that scopes both")),
             held: HeldForm::new(window, cx),
+            alert: AlertForm::new(window, cx),
         }
     }
 
@@ -180,6 +185,15 @@ impl BrainsPage {
                 body = body.child(card(p).child(line));
             }
         }
+        if !listing.alerts.is_empty() {
+            body = body.child(section(
+                format!("FAILED A SCAN · {}", listing.alerts.len()),
+                p,
+            ));
+            for alert in &listing.alerts {
+                body = body.child(self.alert_card(alert, p, cx));
+            }
+        }
         if !listing.held.is_empty() {
             body = body
                 .child(section(
@@ -206,6 +220,17 @@ impl BrainsPage {
             }
         }
         body
+    }
+
+    fn alert_card(&self, alert: &ScanAlert, p: Palette, cx: &mut Context<Self>) -> Div {
+        let (view, kept) = (cx.entity().downgrade(), alert.clone());
+        let on: scan_alert::OnAlert = Rc::new(move |action: AlertAction, window, cx| {
+            let alert = kept.clone();
+            let _ = view.update(cx, |view: &mut Self, cx| {
+                scan_alert::act(view, |v| &mut v.alert, alert, action, window, cx)
+            });
+        });
+        scan_alert::alert_card(alert, &self.alert, on, p)
     }
 
     fn held_card(&self, entry: &HeldEntry, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -418,6 +443,9 @@ impl Requests for BrainsPage {
                 self.error = None;
                 if held_entry::settles(&command) {
                     self.held.close();
+                }
+                if scan_alert::settles(&command) {
+                    self.alert.close();
                 }
             }
         }

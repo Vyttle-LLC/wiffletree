@@ -907,14 +907,15 @@ pub(crate) enum Claiming {
     Won(String),
     /// Another Mac's commit is the tip.
     Lost,
-    /// GitHub turned the claim down, with the branch where it was.
+    /// The push failed with GitHub in reach and the branch where it was, as for a login that can
+    /// read but not push.
     Refused(String),
 }
 
 /// Writes `claim` as a child of `tip`, or as the first claim, and pushes it once, never forced.
 /// The tip is then read whatever Git answered, so a push that landed with its answer lost is won.
 /// A refused claim ends here, with no fetch, merge or second push. An error means this Mac could
-/// not reach GitHub, and it claimed nothing.
+/// not read the tip, so it could not reach GitHub, and it claimed nothing.
 pub(crate) fn claim(
     clone: &Path,
     url: &str,
@@ -930,11 +931,7 @@ pub(crate) fn claim(
         return Ok(Claiming::Won(commit));
     }
     match pushed {
-        Err(error) if now.as_deref() == parent => {
-            let error = format!("{error:#}");
-            ensure!(rejected(&error), "{error}");
-            Ok(Claiming::Refused(error))
-        }
+        Err(error) if now.as_deref() == parent => Ok(Claiming::Refused(format!("{error:#}"))),
         _ => Ok(Claiming::Lost),
     }
 }

@@ -276,6 +276,13 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
             path: text(),
             reason: text(),
         },
+        Command::MarkAlertNotSensitive {
+            repository: text(),
+            path: text(),
+            check: text(),
+            rule: text(),
+            reason: text(),
+        },
         Command::DiscardHeldEntry {
             repository: text(),
             path: text(),

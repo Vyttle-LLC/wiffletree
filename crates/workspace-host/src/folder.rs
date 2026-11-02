@@ -160,7 +160,7 @@ fn holder(path: &str) -> Option<&str> {
 
 /// The plain files at `commit` that `wanted` takes, hidden ones aside. A symbolic link or a
 /// submodule is left out, as it can't be read as a Space, a tracker or a stub.
-fn plain_files(
+pub(crate) fn plain_files(
     clone: &Path,
     commit: &str,
     wanted: &dyn Fn(&str) -> bool,
@@ -226,7 +226,7 @@ pub(crate) fn moved_to(clone: &Path, commit: &str) -> Result<Option<Root>> {
 }
 
 /// Each path at `commit`, with its mode and blob.
-fn tree(clone: &Path, commit: &str) -> Result<BTreeMap<String, String>> {
+pub(crate) fn tree(clone: &Path, commit: &str) -> Result<BTreeMap<String, String>> {
     let listing = runtime::git_output(clone, &["ls-tree", "-r", "-z", commit])?;
     let mut paths = BTreeMap::new();
     for entry in listing.split('\0').filter(|entry| !entry.is_empty()) {
@@ -298,6 +298,19 @@ pub(crate) fn check_move(clone: &Path, parent: &str, commit: &str, root: &Root) 
         ensure!(same, "The move adds {path}, which is no moved file or stub");
     }
     Ok(())
+}
+
+/// Whether `path` of the repository, holding `blob` after a move into `root`, only moved: its old
+/// path held that blob in the tree `before` the move. By content, as in `check_move`.
+pub(crate) fn carried(
+    before: &BTreeMap<String, String>,
+    root: &Root,
+    path: &str,
+    blob: &str,
+) -> bool {
+    (root.moved_from(path).filter(|old| moves(old)))
+        .and_then(|old| before.get(old))
+        .is_some_and(|kind| kind.rsplit(' ').next() == Some(blob))
 }
 
 /// Moves this clone's files a move carries under the folder, unpushed ones with them. Run again

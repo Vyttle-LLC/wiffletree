@@ -69,15 +69,15 @@ Claims, the on-this-Mac choice, checking claims through GitHub, product pages, a
 
 Each Mac scans what it pulls, and raises the Inbox card.
 
-- [ ] 4.1 `scan_marks` and `scan_alerts`, created if missing. Marks start at the head at join and at upgrade, and restart at the merge base after a rewrite. Moving a repository and adopting a move rewrite `scan_alerts` paths in one transaction with the record.
-- [ ] 4.2 The pull scan: off the pass, commit by commit against the first parent through `Scanner::scan`, over the scanned paths, skipping binary files, the move's stubs and any path that holds the blob its old path held in the parent commit, with each check's mark moving as it goes (decision 5).
-- [ ] 4.3 The alert: one row per repository, path, check and rule; the workspace card in each project of the folder's Spaces and on the Brains page; who pushed it, with GitHub's web editor named; Open the file, Not sensitive and How to clean history.
-- [ ] 4.4 Clearing: a whole-file scan at the head after a pull changes the file, and Not sensitive recorded here with a reason, writing nothing to the repository.
-- [ ] 4.5 A check that cannot run: its mark stays, one workspace note, and it catches up.
-- [ ] 4.6 **A slipped scan** tests: an edit made outside Wiffletree raises one card, which names the rule and never the text; added and removed between two pulls still alerts; a file outside the folder raises nothing. In a repository with an empty root and in a moved one, a pushed `.gitleaks.toml`, a `.gitleaksignore`, and a root `wiffletree-brain.json` naming `gate.allowlist` each stay out of the scratch repository and silence nothing, before a push and after a pull.
-- [ ] 4.7 Once-per-Mac tests: three commits, one card; two Macs each raise their own; removal closes each at its own pull; Not sensitive closes here only and survives an unrelated edit; a new finding in the file raises anew; an open alert follows its file through Move into the folder, on the Mac that moved and the Mac that adopted, and stays open until the text is gone from `main`.
-- [ ] 4.8 Mark tests: a quit mid-range resumes; a joining Mac scans no old history; a rewrite restarts at the merge base; 900 commits do not delay a pass.
-- [ ] 4.9 gitleaks tests: missing, the pull completes, `sensitive-info` runs, one note; arriving, the note closes and `secret-scan` catches up.
+- [x] 4.1 `scan_marks` and `scan_alerts`, created if missing. Marks start at the head at join and at upgrade, and restart at the merge base after a rewrite. Moving a repository and adopting a move rewrite `scan_alerts` paths in one transaction with the record.
+- [x] 4.2 The pull scan: off the pass, commit by commit against the first parent through `Scanner::scan`, over the scanned paths, skipping binary files, the move's stubs and any path that holds the blob its old path held in the parent commit, with each check's mark moving as it goes (decision 5).
+- [x] 4.3 The alert: one row per repository, path, check and rule; the workspace card in each project of the folder's Spaces and on the Brains page; who pushed it, with GitHub's web editor named; Open the file, Not sensitive and How to clean history.
+- [x] 4.4 Clearing: a whole-file scan at the head after a pull changes the file, and Not sensitive recorded here with a reason, writing nothing to the repository.
+- [x] 4.5 A check that cannot run: its mark stays, one workspace note, and it catches up.
+- [x] 4.6 **A slipped scan** tests: an edit made outside Wiffletree raises one card, which names the rule and never the text; added and removed between two pulls still alerts; a file outside the folder raises nothing. In a repository with an empty root and in a moved one, a pushed `.gitleaks.toml`, a `.gitleaksignore`, and a root `wiffletree-brain.json` naming `gate.allowlist` each stay out of the scratch repository and silence nothing, before a push and after a pull.
+- [x] 4.7 Once-per-Mac tests: three commits, one card; two Macs each raise their own; removal closes each at its own pull; Not sensitive closes here only and survives an unrelated edit; a new finding in the file raises anew; an open alert follows its file through Move into the folder, on the Mac that moved and the Mac that adopted, and stays open until the text is gone from `main`.
+- [x] 4.8 Mark tests: a quit mid-range resumes; a joining Mac scans no old history; a rewrite restarts at the merge base; 900 commits do not delay a pass.
+- [x] 4.9 gitleaks tests: missing, the pull completes, `sensitive-info` runs, one note; arriving, the note closes and `secret-scan` catches up.
 
 ## 5. Setup screens
 

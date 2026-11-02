@@ -1,5 +1,6 @@
 //! Single-writer durable host, independent of graphics and provider inference.
 mod agent_processes;
+mod alerts;
 mod assistant;
 pub mod attachments;
 pub mod behaviors;
@@ -435,6 +436,7 @@ impl Host {
         host.move_settings_clone()?;
         // Before the move, which rewrites the paths in the table this adds.
         brain_sync::migrate(&host.db)?;
+        alerts::migrate(&host.db)?;
         host.ensure_local_storage()?;
         host.move_local_repositories()?;
         brains::migrate(&mut host)?;
@@ -2077,6 +2079,16 @@ impl Host {
             } => {
                 self.mark_entry_not_sensitive(&repository, &path, &reason)?;
                 json!({"scanned_again": true})
+            }
+            Command::MarkAlertNotSensitive {
+                repository,
+                path,
+                check,
+                rule,
+                reason,
+            } => {
+                self.mark_alert_not_sensitive(&repository, &path, &check, &rule, &reason)?;
+                json!({"closed": true})
             }
             Command::DiscardHeldEntry { repository, path } => {
                 self.discard_held_entry(&repository, &path)?;

@@ -155,6 +155,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::HeldEntryText { .. }
         | Command::EditHeldEntry { .. }
         | Command::MarkEntryNotSensitive { .. }
+        | Command::MarkAlertNotSensitive { .. }
         | Command::DiscardHeldEntry { .. }
         | Command::SyncIssues { .. }
         | Command::CreateIssue { .. }
