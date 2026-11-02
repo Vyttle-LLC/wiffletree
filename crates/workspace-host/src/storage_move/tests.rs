@@ -828,6 +828,33 @@ fn a_retry_after_a_stopped_adoption_leaves_the_targets_tracker_and_issues_alone(
 }
 
 #[test]
+fn an_issue_filed_during_an_adoption_ends_the_move_and_stays_in_its_tracker() {
+    let folder = tempfile::tempdir().unwrap();
+    let github = shared_storage(folder.path(), Some("SAGE"));
+    let (home, mut host) = host();
+    let space = personal(&host);
+    let tools = github.tools();
+    let staged = storage::stage(&host.home, NAME, &tools, &[]).unwrap();
+    let run = host.begin_storage_move(&space.id, Some(staged)).unwrap();
+    copy(&run, &tools).unwrap();
+    host.note_push(&run).unwrap();
+    push(&run, &tools).unwrap();
+    file(&mut host, &space, "Filed during the move", "");
+    let before = listed(&host, &space.id);
+
+    let error = host.switch_storage(run).err().unwrap();
+
+    assert_eq!(format!("{error:#}"), CHANGED);
+    host.end_storage_move();
+    is_local(&host, &space);
+    assert_eq!(listed(&host, &space.id), before);
+    assert_eq!(before.len(), 1);
+    assert!(backups(home.path()).is_empty());
+    let said = refusal(&mut host, &space.id, Some(NAME), &tools);
+    assert!(said.contains("is already a tracker"), "{said}");
+}
+
+#[test]
 fn a_stopped_adoption_still_refuses_storage_that_has_since_gained_issues() {
     let folder = tempfile::tempdir().unwrap();
     let github = shared_storage(folder.path(), Some("SAGE"));

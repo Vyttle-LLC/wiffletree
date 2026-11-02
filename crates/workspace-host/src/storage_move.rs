@@ -620,6 +620,9 @@ impl Host {
         let rewritten = self.rewritten_files(&moved, &run.to, run.new_tracker.as_ref())?;
         let files = files_to_move(&run.source, &run.roots, &rewritten)?;
         ensure!(run.changes(&files)?.is_empty(), CHANGED);
+        // A move that takes on the target's tracker compares no issue, and leaves none behind.
+        let takes_issues = run.roots.iter().any(|root| root == ISSUES);
+        ensure!(takes_issues || !self.storage_has_issues(&from)?, CHANGED);
         let clone = self.storage_folder(&run.to);
         // A clone already here, of a repository with another use, takes the files in place and
         // reaches GitHub's head at its next pass; else the staging clone becomes the clone.
