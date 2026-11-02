@@ -5,7 +5,7 @@ use file_links::Linked;
 use gpui_component::button::ButtonVariants;
 use gpui_component::input::InputState;
 use repository_tree::shown_path;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use ui::{card, hint, mono, pill};
 
 /// Opens the issue an Inbox note names.
@@ -22,6 +22,8 @@ pub(super) struct Inbox {
     /// Each open item's prompt, or a repository request's reason, with its file references
     /// linked, by item id.
     prompts: HashMap<String, Linked>,
+    /// Each publish or merge approval's open-finding summaries, linked, by item id.
+    findings: HashMap<String, Vec<Linked>>,
     /// The brain conflict whose Keep both line is open, by its card's key, and that line.
     keeping_both: Option<String>,
     scope: Entity<InputState>,
@@ -43,6 +45,7 @@ impl Inbox {
             answering: None,
             compared: None,
             prompts: HashMap::new(),
+            findings: HashMap::new(),
             keeping_both: None,
             scope: cx
                 .new(|cx| InputState::new(window, cx).placeholder("One line that scopes both")),
@@ -146,7 +149,24 @@ impl Inbox {
                 (item.id.clone(), linked)
             };
             self.prompts = snapshot.attention.iter().map(link).collect();
-            file_links::link_when_resolved(self.prompts.values(), &self.bridge, cx);
+            let findings = |item: &Attention| {
+                let card = self.approval_card(item)?;
+                let bases: Arc<[PathBuf]> = self.shared.link_bases(&item.session_id).into();
+                let summaries = (card.findings.iter().enumerate())
+                    .map(|(ix, (_, summary))| {
+                        let id = format!("finding-{}-{ix}", item.id);
+                        Linked::new(&id, summary, bases.clone(), &self.bridge)
+                    })
+                    .collect();
+                Some((item.id.clone(), summaries))
+            };
+            let findings = snapshot.attention.iter().filter_map(findings).collect();
+            self.findings = findings;
+            let linked = self
+                .prompts
+                .values()
+                .chain(self.findings.values().flatten());
+            file_links::link_when_resolved(linked, &self.bridge, cx);
         }
         if before.as_ref() != Some(&synced(snapshot)) {
             let paused = snapshot.paused_settings();
@@ -227,7 +247,15 @@ impl Inbox {
             });
         let (body, actions) = match (self.approval_card(item), &item.repository_request) {
             (Some(approval), _) => {
-                approval_card(item.id.clone(), approval, &self.shared.host, p, cx)
+                let findings = self.findings.get(&item.id).map_or(&[][..], Vec::as_slice);
+                approval_card(
+                    item.id.clone(),
+                    approval,
+                    findings,
+                    &self.shared.host,
+                    p,
+                    cx,
+                )
             }
             (None, Some(request)) => self.repository_request(item, request, p, cx),
             (None, None) if item.is_permission() => self.permission(item, p, cx),
@@ -249,6 +277,8 @@ impl Inbox {
     fn permission(&self, item: &Attention, p: Palette, cx: &mut Context<Self>) -> (Div, Div) {
         let (id, approve) = (item.id.clone(), item.id.clone());
         let body = div()
+            // Plain, not Linked: the prompt holds the tool's raw JSON input, which Markdown
+            // would mangle.
             .child(
                 div()
                     .text_size(px(font::TEXT))
@@ -698,10 +728,11 @@ fn approval_row(label: &'static str, value: AnyElement, p: Palette) -> Div {
 }
 
 /// A publish or merge approval: what would leave the machine or merge, then Deny and the
-/// request's own approve button.
+/// request's own approve button. `findings` are the card's open-finding summaries, linked.
 fn approval_card(
     id: String,
     card: ApprovalCard,
+    findings: &[Linked],
     host: &HostView,
     p: Palette,
     cx: &mut Context<Inbox>,
@@ -712,15 +743,16 @@ fn approval_card(
         rows = rows.child(row(label, value.into_any_element()));
     }
     if !card.findings.is_empty() {
-        let mut findings = div().flex().flex_col().gap_1p5();
-        for (heading, summary) in card.findings {
-            findings = findings.child(div().child(mono(heading, p)).child(summary));
+        let mut shown = div().flex().flex_col().gap_1p5();
+        for ((heading, _), summary) in card.findings.into_iter().zip(findings) {
+            shown = shown.child(div().child(mono(heading, p)).child(summary.view()));
         }
-        rows = rows.child(row("Open findings", findings.into_any_element()));
+        rows = rows.child(row("Open findings", shown.into_any_element()));
     }
     if let Some(sent) = card.would_send {
         rows = rows.child(row("Would send", sent.into_any_element()));
     }
+    // Plain, not Linked: the description shows exactly the text that will be sent.
     if let Some(description) = card.description {
         let block = div().p_2().rounded_md().bg(p.overlay).child(description);
         rows = rows.child(row("Description", block.into_any_element()));

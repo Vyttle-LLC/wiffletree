@@ -325,7 +325,7 @@ fn candidates(body: &str) -> Vec<Candidate> {
         .into_iter()
         // `!` before the new link would make it an image.
         .filter(|(start, ..)| !body[..*start].ends_with('!'))
-        .filter_map(|(start, end, code)| Some((start, end, reference(&code)?.to_owned())))
+        .filter_map(|(start, end, text)| Some((start, end, reference(&text)?.to_owned())))
         .collect()
 }
 
@@ -442,8 +442,9 @@ fn destination(path: &Path) -> String {
     escaped
 }
 
-/// The path that inline code may refer to, without a trailing `:line` or `:line:col`; `None` when
-/// the code cannot be a path, such as a URL or a shell pipeline, so it is never looked up on disk.
+/// The path that inline code or a prose path may refer to, without a trailing `:line` or
+/// `:line:col`; `None` when the text cannot be a path, such as a URL or a shell pipeline, so it is
+/// never looked up on disk.
 fn reference(code: &str) -> Option<&str> {
     let code = code.trim().trim_end_matches(TRAILING);
     let path = without_location(code);
