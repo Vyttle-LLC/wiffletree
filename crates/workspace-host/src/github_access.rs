@@ -185,8 +185,8 @@ pub(crate) fn reader_count(
 }
 
 /// Reads the rulesets and branch protection on `branch` of the repository `name`, refusing a
-/// branch whose rules require pull requests or status checks, or take no push, as Wiffletree
-/// pushes straight to it. Answers whether they protect its history: block force-pushes and
+/// branch whose rules require pull requests, status checks, signed commits, a merge queue,
+/// deployments or workflows, or take no push, as Wiffletree pushes straight to it. Answers whether they protect its history: block force-pushes and
 /// deleting it.
 pub(crate) fn direct_push(tools: &Tools, home: &Path, name: &str, branch: &str) -> Result<bool> {
     let cannot = |rule: &str| {
@@ -217,6 +217,10 @@ pub(crate) fn direct_push(tools: &Tools, home: &Path, name: &str, branch: &str) 
         ("pull_request", "requires pull requests"),
         ("required_status_checks", "requires status checks"),
         ("update", "takes no push"),
+        ("required_signatures", "requires signed commits"),
+        ("merge_queue", "requires a merge queue"),
+        ("required_deployments", "requires a deployment to succeed"),
+        ("workflows", "requires workflows to pass"),
     ] {
         if types.contains(&kind) {
             return Err(cannot(rule));
@@ -247,6 +251,9 @@ pub(crate) fn direct_push(tools: &Tools, home: &Path, name: &str, branch: &str) 
             }
             if protection["lock_branch"]["enabled"] == true {
                 return Err(cannot("takes no push"));
+            }
+            if protection["required_signatures"]["enabled"] == true {
+                return Err(cannot("requires signed commits"));
             }
             let allowed = |key: &str| protection[key]["enabled"] == true;
             protected |= !allowed("allow_force_pushes") && !allowed("allow_deletions");

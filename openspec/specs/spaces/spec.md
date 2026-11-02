@@ -405,7 +405,7 @@ New Space SHALL ask for a name; where it lives, A private GitHub repository or O
 ### Requirement: A repository is checked before it is used
 Choosing a GitHub repository for a Space SHALL check it, read-only, before anything is written, and SHALL show each result:
 - it is private, saying who can read it; a public repository SHALL be refused, saying issues and logs need a private repository;
-- Wiffletree can write to its default branch, called `main` here; a repository whose rules require pull requests or status checks there SHALL be refused, naming the rule and saying to choose another repository or turn that rule off on GitHub;
+- Wiffletree can write to its default branch, called `main` here; a repository whose rules there require pull requests, status checks, signed commits, a merge queue, deployments or workflows, or take no push, SHALL be refused, naming the rule and saying to choose another repository or turn that rule off on GitHub;
 - whether history is protected; history that is not protected SHALL be a warning that does not refuse, offering Protect history.
 
 A repository SHALL be usable whatever else it holds. A repository that is a code repository of a Space, or the settings repository, SHALL NOT be refused for that.
