@@ -117,7 +117,8 @@ impl UsagePage {
     }
     pub(super) fn scoped_project_id(&self) -> Option<String> {
         if self.scoped {
-            self.shared.project_id()
+            // An Assistant thread belongs to a Space and has no project to scope to.
+            self.shared.project_id().filter(|id| !id.is_empty())
         } else {
             None
         }
