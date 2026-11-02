@@ -1874,6 +1874,7 @@ mod tests {
             prompt: "Push?".into(),
             options: vec![],
             answer: None,
+            repository_request: None,
         };
         let with_publish = |stamp| {
             let index = index(stamp);

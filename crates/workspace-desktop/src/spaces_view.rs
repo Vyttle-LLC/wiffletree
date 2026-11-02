@@ -1805,7 +1805,7 @@ fn merged(read: &Space, form: &Space, latest: &Space) -> Space {
 }
 
 /// This Mac's home, which paths on the page and in the dialog show as `~`.
-fn home() -> Option<String> {
+pub(super) fn home() -> Option<String> {
     std::env::var("HOME").ok()
 }
 
