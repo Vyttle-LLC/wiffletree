@@ -1,6 +1,7 @@
 //! File references in rendered messages. Inline code naming a file on disk, such as
-//! `crates/foo/src/bar.rs:63`, becomes a link that opens the file in its default app, and a
-//! Markdown link to a local path opens the same way. Web links keep opening in the browser.
+//! `crates/foo/src/bar.rs:63`, or an absolute or home path written in prose, becomes a link that
+//! opens the file in its default app, and a Markdown link to a local path opens the same way. Web
+//! links keep opening in the browser.
 //!
 //! Only the host knows which references are files, and the UI thread never waits for it: a
 //! message shows as plain text at once and gains its links when the host answers.
@@ -21,6 +22,10 @@ use std::{
 
 /// Characters that never appear in a file reference, so code holding them is not looked up.
 const NOT_IN_PATHS: &[char] = &['`', '*', '?', '|', ';', '$', '"', '<', '>', '\\'];
+/// Characters that end a path written in prose, besides those never in a path and spaces.
+const AROUND_PATHS: &[char] = &['(', ')', '[', ']', '{', '}', '\''];
+/// Sentence punctuation after a reference, which is not part of it.
+const TRAILING: &[char] = &['.', ',', ';', ':', '!', '?'];
 /// Linked bodies kept before the cache starts over; enough for every message on screen.
 const CACHE_LIMIT: usize = 1024;
 /// The room for references in one request, leaving the rest of the host's line limit for the
@@ -42,7 +47,7 @@ fn scrolling_table() -> StyleRefinement {
 pub(super) struct Linked {
     id: SharedString,
     body: SharedString,
-    /// None when the body has no inline code, so there is nothing to ask.
+    /// None when the body has neither inline code nor a path, so there is nothing to ask.
     resolution: Option<Arc<Resolution>>,
     bases: Arc<[PathBuf]>,
     bridge: Bridge,
@@ -55,7 +60,7 @@ impl Linked {
         Self {
             id: SharedString::from(format!("message-markdown-{id}")),
             body: SharedString::from(body.to_owned()),
-            resolution: (body.contains('`'))
+            resolution: (body.contains(['`', '/']))
                 .then(|| Resolution::of(body, &bases, bridge.remote().map(|r| r.id.as_str()))),
             bases,
             bridge: bridge.clone(),
@@ -300,11 +305,12 @@ fn batches(bodies: Vec<(Asking, Vec<Candidate>)>) -> Vec<Batch> {
     batches
 }
 
-/// An inline code span's source range, with its code or the file reference the code names.
+/// An inline code span's or prose path's source range, with its text or the file reference it
+/// names.
 type Candidate = (usize, usize, String);
 
-/// The source range of each inline code span in `body` that may name a file, with the
-/// reference it names.
+/// The source range of each inline code span and prose path in `body` that may name a file,
+/// with the reference it names.
 fn candidates(body: &str) -> Vec<Candidate> {
     let mut options = markdown::ParseOptions::gfm();
     // As the text view parses, so code inside math is not mistaken for a code span.
@@ -314,12 +320,12 @@ fn candidates(body: &str) -> Vec<Candidate> {
         return vec![];
     };
     let mut spans = vec![];
-    code_spans(&root, &mut spans);
+    reference_spans(body, &root, &mut spans);
     spans
         .into_iter()
         // `!` before the new link would make it an image.
         .filter(|(start, ..)| !body[..*start].ends_with('!'))
-        .filter_map(|(start, end, code)| Some((start, end, reference(&code)?.to_owned())))
+        .filter_map(|(start, end, text)| Some((start, end, reference(&text)?.to_owned())))
         .collect()
 }
 
@@ -364,8 +370,9 @@ fn escaped_text(text: &str) -> String {
     escaped
 }
 
-/// The source range and text of every inline code span outside a link, in document order.
-fn code_spans(node: &markdown::mdast::Node, spans: &mut Vec<Candidate>) {
+/// The source range and text of every inline code span and prose path outside a link, in
+/// document order. Web addresses are links already, so their paths are never found.
+fn reference_spans(body: &str, node: &markdown::mdast::Node, spans: &mut Vec<Candidate>) {
     use markdown::mdast::Node;
     match node {
         Node::InlineCode(code) => {
@@ -377,12 +384,42 @@ fn code_spans(node: &markdown::mdast::Node, spans: &mut Vec<Candidate>) {
                 ));
             }
         }
+        Node::Text(text) => {
+            if let Some(position) = &text.position {
+                prose_paths(body, position.start.offset..position.end.offset, spans);
+            }
+        }
         Node::Link(_) | Node::LinkReference(_) => {}
         _ => {
             for child in node.children().into_iter().flatten() {
-                code_spans(child, spans);
+                reference_spans(body, child, spans);
             }
         }
+    }
+}
+
+/// The source range and text of each absolute or home path in the prose at `range` of `body`: a
+/// `/` or `~/` starting a word, up to a space or a character no path holds, without trailing
+/// sentence punctuation. A relative path in prose is too often not one to be looked up.
+fn prose_paths(body: &str, range: std::ops::Range<usize>, spans: &mut Vec<Candidate>) {
+    let starts_word = |at: usize| {
+        (body[..at].chars().next_back()).is_none_or(|c| c.is_whitespace() || "([{'\"*_".contains(c))
+    };
+    let mut at = range.start;
+    while at < range.end {
+        let rest = &body[at..range.end];
+        if !(starts_word(at) && (rest.starts_with('/') || rest.starts_with("~/"))) {
+            at += rest.chars().next().map_or(1, char::len_utf8);
+            continue;
+        }
+        let word = rest
+            .find(|c: char| {
+                c.is_whitespace() || NOT_IN_PATHS.contains(&c) || AROUND_PATHS.contains(&c)
+            })
+            .unwrap_or(rest.len());
+        let path = rest[..word].trim_end_matches(TRAILING);
+        spans.push((at, at + path.len(), path.to_owned()));
+        at += word;
     }
 }
 
@@ -405,10 +442,11 @@ fn destination(path: &Path) -> String {
     escaped
 }
 
-/// The path that inline code may refer to, without a trailing `:line` or `:line:col`; `None` when
-/// the code cannot be a path, such as a URL or a shell pipeline, so it is never looked up on disk.
+/// The path that inline code or a prose path may refer to, without a trailing `:line` or
+/// `:line:col`; `None` when the text cannot be a path, such as a URL or a shell pipeline, so it is
+/// never looked up on disk.
 fn reference(code: &str) -> Option<&str> {
-    let code = code.trim().trim_end_matches(['.', ',', ';', ':', '!', '?']);
+    let code = code.trim().trim_end_matches(TRAILING);
     let path = without_location(code);
     let plausible = !path.contains("://")
         && !path.contains(|c: char| c.is_control() || NOT_IN_PATHS.contains(&c))
@@ -960,6 +998,70 @@ mod tests {
         );
         assert_eq!(link_code("```\n`x.rs`\n```", found), "```\n`x.rs`\n```");
         assert_eq!(link_code("Wow!`x.rs`", found), "Wow!`x.rs`");
+    }
+
+    #[test]
+    fn absolute_and_home_paths_in_prose_link_without_their_punctuation() {
+        let found = |reference: &str| {
+            ["/w/mockup.html", "~/notes.md", "/w/a.rs"]
+                .contains(&reference)
+                .then(|| PathBuf::from(reference.replace('~', "/Users/m")))
+        };
+        let link = |body: &str| super::link_code(body, &candidates(body), None, found);
+        assert_eq!(
+            link("See this mockup: /w/mockup.html."),
+            "See this mockup: [/w/mockup.html](</w/mockup.html>)."
+        );
+        assert_eq!(
+            link("Read ~/notes.md, then (/w/a.rs:12): done"),
+            "Read [~/notes.md](</Users/m/notes.md>), then ([/w/a.rs:12](</w/a.rs>)): done"
+        );
+        assert_eq!(
+            link("- '/w/a.rs' and **/w/mockup.html**"),
+            "- '[/w/a.rs](</w/a.rs>)' and **[/w/mockup.html](</w/mockup.html>)**"
+        );
+    }
+
+    #[test]
+    fn paths_in_code_links_and_urls_stay_as_written() {
+        let found = |reference: &str| Some(PathBuf::from("/w").join(reference));
+        let link = |body: &str| super::link_code(body, &candidates(body), None, found);
+        for body in [
+            "```\n/w/a.rs\n```",
+            "    /w/a.rs",
+            "[see /w/a.rs](https://example.com)",
+            "[/w/a.rs]\n\n[/w/a.rs]: https://example.com",
+            "<file:///w/a.rs>",
+            "https://example.com/w/a.rs and www.example.com/w/a.rs",
+            "file:///w/a.rs and see/w/a.rs",
+            "and/or, 1/2, / alone, ~ and ~user/a.rs",
+        ] {
+            assert_eq!(link(body), body);
+        }
+    }
+
+    #[test]
+    fn only_a_prose_path_naming_a_file_becomes_a_link() {
+        let served = serve(|_| {});
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("mockup.html");
+        fs::write(&file, "").unwrap();
+        let body = format!(
+            "See {}. Not {} or {}.",
+            file.display(),
+            dir.path().join("gone.html").display(),
+            dir.path().display()
+        );
+        let linked = linked(&body, &[], &served.bridge);
+        assert_eq!(
+            linked.text(),
+            format!(
+                "See [{0}](<{0}>). Not {1} or {2}.",
+                file.display(),
+                dir.path().join("gone.html").display(),
+                dir.path().display()
+            )
+        );
     }
 
     #[test]
