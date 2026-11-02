@@ -735,7 +735,12 @@ fn no_bundled_text_names_a_retired_brain_skill_or_sends_entries_by_pull_request(
         texts.extend(tools.iter().map(|t| t["description"].to_string()));
     }
     for text in &texts {
-        for retired in ["brain-log", "brain-query", "brain-compile", "brain-reconcile"] {
+        for retired in [
+            "brain-log",
+            "brain-query",
+            "brain-compile",
+            "brain-reconcile",
+        ] {
             assert!(!text.contains(retired), "{retired} in {text}");
         }
         // A sentence about the brain or its entries says nothing of batches or pull requests.

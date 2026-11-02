@@ -1639,6 +1639,45 @@ mod tests {
     }
 
     #[test]
+    fn two_takeovers_of_an_expired_claim_have_one_winner() {
+        for _ in 0..5 {
+            let folder = tempfile::tempdir().unwrap();
+            let github = Arc::new(GitHub::new(folder.path(), true));
+            let (crashed, one, two) = (
+                mac(&github, folder.path(), "crashed"),
+                mac(&github, folder.path(), "one"),
+                mac(&github, folder.path(), "two"),
+            );
+            let git_tool = github.tools().git;
+            const MINUTE: i64 = 60_000;
+            let at = 1_000 * MINUTE;
+            let stale = stamped("crashed", ClaimState::Claimed, at);
+            claim(&crashed, URL, None, &stale, &git_tool).unwrap();
+            let tip = read_tip(&one, URL, &git_tool).unwrap().unwrap();
+            read_tip(&two, URL, &git_tool).unwrap();
+            assert!(tip.free(at + 61 * MINUTE));
+            let macs = [
+                (
+                    one.as_path(),
+                    stamped("one", ClaimState::Claimed, at + 61 * MINUTE),
+                ),
+                (
+                    two.as_path(),
+                    stamped("two", ClaimState::Claimed, at + 61 * MINUTE),
+                ),
+            ];
+            let before = github.pushes();
+            let won = race(&github, &macs, Some(&tip));
+            assert_eq!(won.len(), 1, "exactly one takes it over");
+            assert_eq!(
+                claim_branch_log(&github),
+                [won[0].clone(), tip.commit.clone()]
+            );
+            assert_eq!(github.pushes(), before + 2, "one push each");
+        }
+    }
+
+    #[test]
     fn a_landed_claim_names_its_mac_for_its_due_time_alone() {
         let tip = |state| Tip {
             commit: "c".into(),

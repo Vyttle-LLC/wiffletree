@@ -901,7 +901,10 @@ fn compile_and_repository_commands_need_the_apps_credential() {
         std::fs::read(folder.join("wiffletree-issues.yaml")).unwrap(),
         tracker
     );
-    assert!(!folder.join("second-brain/logs").exists(), "nothing brought in");
+    assert!(
+        !folder.join("second-brain/logs").exists(),
+        "nothing brought in"
+    );
 }
 
 #[test]
