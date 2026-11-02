@@ -221,7 +221,7 @@ impl Settings {
 /// Why the latest pass failed: Git's words when GitHub could not be reached.
 fn error_banner(error: &str, status: &SyncStatus, p: Palette) -> Div {
     if status.stopped {
-        return banner(p.yellow).child(error.to_owned());
+        return banner(p.yellow).child(div().flex_1().min_w_0().child(error.to_owned()));
     }
     let reached = format!(
         "Couldn’t reach GitHub at {}. Git said:",

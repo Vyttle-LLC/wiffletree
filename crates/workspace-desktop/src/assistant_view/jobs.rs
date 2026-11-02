@@ -347,7 +347,7 @@ impl AssistantPage {
         Some(
             ui::banner(p.subtle)
                 .text_size(px(font::SMALL))
-                .child(div().flex_1().child(line.join(" · ")))
+                .child(div().flex_1().min_w_0().child(line.join(" · ")))
                 .when(job.can_take_over(), |d| {
                     d.child(
                         button("job-take-over")
@@ -845,6 +845,7 @@ impl AssistantPage {
                     ui::banner(p.yellow).text_size(px(font::SMALL)).child(
                         div()
                             .flex_1()
+                            .min_w_0()
                             .flex()
                             .flex_wrap()
                             .gap_1()

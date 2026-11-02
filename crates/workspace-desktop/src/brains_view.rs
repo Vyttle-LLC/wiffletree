@@ -195,7 +195,7 @@ impl BrainsPage {
             Some(Ok(listing)) => listing,
         };
         if let Some(error) = &self.error {
-            body = body.child(banner(p.red).child(error.clone()));
+            body = body.child(banner(p.red).child(div().flex_1().min_w_0().child(error.clone())));
         }
         body = body.child(
             section(format!("BRAINS · {}", listing.brains.len()), p).child(

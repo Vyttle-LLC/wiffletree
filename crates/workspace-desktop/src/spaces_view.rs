@@ -650,6 +650,8 @@ impl SpacesPage {
             .child(
                 banner(if is_shared(space) { p.yellow } else { p.subtle }).child(
                     div()
+                        .flex_1()
+                        .min_w_0()
                         .child(
                             div()
                                 .font_weight(FontWeight::SEMIBOLD)
@@ -1160,19 +1162,19 @@ fn storage_banner(space: &Space, readers: Option<Readers>) -> (&'static str, Str
         return (
             "Only on this Mac.",
             format!(
-                " {}’s storage is a local Git repository with no remote. Nothing in it is pushed anywhere.",
+                "{}’s storage is a local Git repository with no remote. Nothing in it is pushed anywhere.",
                 space.name
             ),
         );
     };
     let repository = space.storage.repository.key();
     let read = readers.map_or(String::new(), |r| {
-        format!(" {}", readers_sentence(r, &repository))
+        format!("{} ", readers_sentence(r, &repository))
     });
     (
         "Shared.",
         format!(
-            "{read} Anyone who can push to {repository} can change this Space’s Behaviors, additions and models for everyone in it, and can read and edit its issues. Edits to the Space are commits and follow the settings repository’s sync, pause and compare rules."
+            "{read}Anyone who can push to {repository} can change this Space’s Behaviors, additions and models for everyone in it, and can read and edit its issues. Edits to the Space are commits and follow the settings repository’s sync, pause and compare rules."
         ),
     )
 }
@@ -1512,6 +1514,7 @@ mod tests {
         let sage = sage();
         let (lead, text) = storage_banner(&sage, Some(Readers::EveryMember));
         assert_eq!(lead, "Shared.");
+        assert!(text.starts_with("Every member of Sage-Social can read"));
         assert!(
             text.contains("Every member of Sage-Social can read Sage-Social/wiffletree-storage.")
         );
@@ -1690,7 +1693,7 @@ mod tests {
         let personal = personal();
         let (lead, text) = storage_banner(&personal, None);
         assert_eq!(lead, "Only on this Mac.");
-        assert!(text.contains("Personal’s storage is a local Git repository with no remote."));
+        assert!(text.starts_with("Personal’s storage is a local Git repository with no remote."));
         let moved = Space {
             storage: SpaceStorage {
                 root: "wiffletree".into(),
