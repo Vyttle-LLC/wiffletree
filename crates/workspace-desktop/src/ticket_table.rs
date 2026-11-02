@@ -215,7 +215,7 @@ fn ticket_row(ticket: &Ticket, p: Palette, link: Hsla) -> Div {
                     div()
                         .id(SharedString::from(format!("ticket-table-pr-{}", ticket.id)))
                         .absolute()
-                        .size_full()
+                        .inset_0()
                         .cursor_pointer()
                         .on_click(move |_, _, cx| cx.open_url(&url)),
                 )
@@ -249,7 +249,11 @@ fn ticket_row(ticket: &Ticket, p: Palette, link: Hsla) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{TicketTable, pr_label, status};
+    use super::{TicketTable, palette, pr_label, status, ticket_row};
+    use gpui::{
+        Context, IntoElement, Modifiers, ParentElement as _, Render, Styled as _, TestAppContext,
+        Window, div, point, px,
+    };
     use workspace_core::{PrState, PullRequest, Ticket, TicketState};
 
     fn ticket(id: &str, state: TicketState) -> Ticket {
@@ -318,5 +322,30 @@ mod tests {
         draft.draft = true;
         accepted.pull_request = Some(draft);
         assert_eq!(pr_label(&accepted), "#12 draft");
+    }
+
+    /// A window 600px wide showing one row.
+    struct Row(Ticket);
+    impl Render for Row {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let p = palette(false);
+            div().w(px(600.)).child(ticket_row(&self.0, p, p.focus))
+        }
+    }
+
+    #[gpui::test]
+    fn a_click_on_the_pr_label_opens_the_pull_request(cx: &mut TestAppContext) {
+        let mut ticket = ticket("t", TicketState::Assigned);
+        let mut pr = pull_request(242, PrState::Open);
+        pr.url = "https://github.com/o/r/pull/242".into();
+        ticket.pull_request = Some(pr);
+        let (_, cx) = cx.add_window_view(|_, _| Row(ticket));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        // The PR column is the row's last 110px; its label starts at the column's left.
+        cx.simulate_click(point(px(500.), px(8.)), Modifiers::default());
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some("https://github.com/o/r/pull/242")
+        );
     }
 }
