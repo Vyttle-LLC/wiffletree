@@ -205,7 +205,8 @@ impl PullScan {
     }
     /// Scans the next commit on the head's first-parent line after `mark`, with any commits a
     /// merge brought, oldest first: where the mark goes, `None` when it is at the head. Walking
-    /// that line keeps the mark an ancestor of what is left, so it always moves forward.
+    /// that line keeps the mark an ancestor of what is left, so it always moves forward. A mark
+    /// the clone does not have yet, such as a kept clone's before its first fetch, waits for it.
     fn advance(
         &self,
         check: &str,
@@ -214,6 +215,11 @@ impl PullScan {
     ) -> std::result::Result<Option<String>, String> {
         let failed = |error: anyhow::Error| format!("{error:#}");
         let clone = self.clone.as_path();
+        let known = format!("{mark}^{{commit}}");
+        let answer = runtime::git_answer(clone, &["cat-file", "-e", &known]).map_err(failed)?;
+        if !answer.status.success() {
+            return Ok(None);
+        }
         let start = self.start(mark);
         let range = format!("{start}..{}", self.head);
         let walk = ["rev-list", "--first-parent", "--reverse", &range];
@@ -1048,6 +1054,21 @@ mod tests {
             let new = crate::storage::tests::form("Sage Watch", None);
             host.create_stored_space(&new, staged).unwrap();
         });
+    }
+
+    #[test]
+    fn a_kept_clones_first_scan_waits_for_its_fetch_and_scans_no_old_history() {
+        let (_folder, github) = fixture();
+        let mut mac = Mac::join(&github);
+        let sage = crate::storage::tests::space_named(&mac.host, "Sage");
+        mac.host.remove_space(&sage.id).unwrap();
+        github.commit(&in_folder(NOTE), PHONE);
+        join_sage(&mut mac.host, &github).unwrap();
+        mac.scan();
+        assert_eq!(mac.mark(SENSITIVE_INFO), head(&github), "the mark waits");
+        mac.pull(&github);
+        assert_eq!(mac.alerts(), [], "what it missed is old history");
+        assert_eq!(mac.mark(SENSITIVE_INFO), head(&github));
     }
 
     #[test]
