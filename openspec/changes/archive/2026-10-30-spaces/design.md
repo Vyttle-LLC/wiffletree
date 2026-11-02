@@ -14,7 +14,7 @@ The open changes this one reconciles are `assistant-spaces-jobs-boards` (#163), 
 
 **Goals:** one answer to "where does this go?" for brains, threads, jobs, issues and projects; one clone and one sync engine per repository; a foundation that ships first with little UI, so that the brain track, shared issues and the assistant can then run in parallel.
 
-**Non-Goals:** threads, the router, jobs and Boards; the issue model, its pages, merges and ID allocation; brain checkouts, batches and the gate itself; a cloud or headless host; moving a Space's storage from one repository to another.
+**Non-Goals:** threads, the router, jobs and Boards; the issue model, its pages, merges and ID allocation; brain checkouts, batches and the gate itself; a cloud or headless host. Moving a Space's storage from one repository to another was a non-goal here and is now `move-space-storage`.
 
 ## Michael's decisions (October 29, 2026)
 

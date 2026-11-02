@@ -23,7 +23,7 @@ const CADENCE_MS: i64 = 300_000;
 pub(crate) const TRACKER_CADENCE_MS: i64 = 60_000;
 
 /// A Space's definition file, relative to its storage repository.
-fn space_file(folder: &str) -> String {
+pub(crate) fn space_file(folder: &str) -> String {
     format!("spaces/{folder}/space.yaml")
 }
 
@@ -111,7 +111,7 @@ fn read_space(content: &[u8], storage: SpaceStorage) -> Result<Space> {
     Ok(space)
 }
 
-fn tracker_yaml(tracker: &TrackerConfig) -> Result<Vec<u8>> {
+pub(crate) fn tracker_yaml(tracker: &TrackerConfig) -> Result<Vec<u8>> {
     Ok(serde_yaml::to_string(tracker)?.into_bytes())
 }
 
@@ -294,7 +294,7 @@ fn check_clone(space: &Space, clone: &str) -> Result<()> {
 
 /// Whether a tracker holds any issue: in its clone, or on GitHub as of `synced`, the commit last
 /// synced, which may hold one a pass has not brought into the clone yet.
-fn has_issues(folder: &Path, synced: &str) -> Result<bool> {
+pub(crate) fn has_issues(folder: &Path, synced: &str) -> Result<bool> {
     let listed = ["ls-tree", "-r", "--name-only", synced, "--", ISSUES];
     let on_github = !runtime::git_output(folder, &listed)?.trim().is_empty();
     Ok(on_github || !files_under(&folder.join(ISSUES))?.is_empty())
@@ -305,14 +305,15 @@ fn has_issues(folder: &Path, synced: &str) -> Result<bool> {
 pub(crate) struct Staged {
     pub(crate) check: StorageCheck,
     /// Its tracker's config as read, with the keys this release does not know.
-    tracker: Option<TrackerConfig>,
-    staging: TempDir,
+    pub(crate) tracker: Option<TrackerConfig>,
+    pub(crate) staging: TempDir,
 }
 
 /// Checks `input` as a storage repository and clones it, off the host thread. `added` names the
 /// Spaces already on this Mac. Writes nothing that outlasts the check.
 pub(crate) fn stage(home: &Path, input: &str, tools: &Tools, added: &[SpaceId]) -> Result<Staged> {
-    let (repository, organization, staging) = repos::clone_to_staging(home, input, tools)?;
+    let (repository, organization, staging) =
+        repos::clone_to_staging(home, input, tools, "Its Spaces and issues")?;
     let mut spaces = vec![];
     for entry in fs::read_dir(staging.path().join("spaces"))
         .into_iter()
@@ -381,14 +382,20 @@ pub(crate) fn start_if_empty(
         "GitHub names this repository {}; choose it by that name",
         repository.name
     );
-    let message = format!("Start Wiffletree storage · {}", sync::machine_name());
-    let commit = ["commit", "--quiet", "--allow-empty", "--no-verify", "-m"];
-    github_access::run(&tools.git, at, &[&commit[..], &[message.as_str()]].concat())?;
+    first_commit(at, tools)?;
     let remote = Remote {
         url: &repository.push_url,
         branch: &repository.branch,
     };
     repos::push(at, &remote, &|_| None, &tools.git)
+}
+
+/// The first commit of a clone of an empty repository, with no file.
+pub(crate) fn first_commit(at: &Path, tools: &Tools) -> Result<()> {
+    let message = format!("Start Wiffletree storage · {}", sync::machine_name());
+    let commit = ["commit", "--quiet", "--allow-empty", "--no-verify", "-m"];
+    github_access::run(&tools.git, at, &[&commit[..], &[message.as_str()]].concat())?;
+    Ok(())
 }
 
 /// The storage repository `owner/name` on GitHub.
@@ -683,7 +690,7 @@ impl RuleSet for WholeFiles {
 }
 
 /// Whether `path` is one of `roots` or under one, hidden files aside.
-fn under(roots: &[String], path: &str) -> bool {
+pub(crate) fn under(roots: &[String], path: &str) -> bool {
     !path.split('/').any(|part| part.starts_with('.'))
         && (roots.iter()).any(|root| path == root || path.starts_with(&format!("{root}/")))
 }
@@ -852,7 +859,7 @@ impl Host {
         }
     }
     /// The record key of a GitHub storage repository, or `None` for local storage.
-    fn storage_key(repository: &StorageRepository) -> Option<String> {
+    pub(crate) fn storage_key(repository: &StorageRepository) -> Option<String> {
         match repository {
             StorageRepository::Local { .. } => None,
             StorageRepository::GitHub { .. } => Some(repos::key(&repository.key())),
@@ -957,12 +964,12 @@ impl Host {
         self.storage_written.borrow_mut().insert(key);
         Ok(())
     }
-    /// The prefixes the other storage repositories on this Mac use, with a Space of each.
-    fn other_prefixes(&self, except: &str) -> Result<Vec<(String, Space)>> {
+    /// The prefixes the storage repositories on this Mac but `except` use, with a Space of each.
+    fn other_prefixes(&self, except: &[&str]) -> Result<Vec<(String, Space)>> {
         let mut taken = vec![];
         for record in self.spaces()? {
             let storage = record.space.storage.repository.key();
-            if !storage.eq_ignore_ascii_case(except)
+            if !except.iter().any(|e| e.eq_ignore_ascii_case(&storage))
                 && !taken
                     .iter()
                     .any(|(_, s): &(String, Space)| s.storage.repository.key() == storage)
@@ -976,7 +983,11 @@ impl Host {
     /// Refuses `prefix` when another storage repository on this Mac uses it, naming its Space;
     /// a local one can be renamed to make way.
     pub(crate) fn refuse_used_prefix(&self, prefix: &str, storage: &str) -> Result<()> {
-        let taken = self.other_prefixes(storage)?;
+        self.refuse_prefix_outside(prefix, &[storage])
+    }
+    /// Refuses `prefix` when a storage repository on this Mac but `except` uses it.
+    pub(crate) fn refuse_prefix_outside(&self, prefix: &str, except: &[&str]) -> Result<()> {
+        let taken = self.other_prefixes(except)?;
         let Some((_, space)) = taken.iter().find(|(taken, _)| taken == prefix) else {
             return Ok(());
         };
@@ -995,23 +1006,15 @@ impl Host {
     /// Refuses a repository for `wanted` when it has a use on this Mac it cannot share: a brain
     /// is never storage or settings, and storage may also be the settings repository.
     pub(crate) fn refuse_second_use(&self, name: &str, wanted: Use) -> Result<()> {
+        if wanted != Use::Brain
+            && let Some(space) = self.space_with_brain(name)?
+        {
+            bail!(
+                "{name} is the {space} Space's brain, which changes only through pull requests; choose another repository"
+            );
+        }
         for record in self.spaces()? {
             let space = &record.space;
-            if wanted != Use::Brain
-                && let Some(SpaceBrain {
-                    repository:
-                        BrainRepository::GitHub {
-                            owner, name: brain, ..
-                        },
-                    ..
-                }) = &space.brain
-                && format!("{owner}/{brain}").eq_ignore_ascii_case(name)
-            {
-                bail!(
-                    "{name} is the {} Space's brain, which changes only through pull requests; choose another repository",
-                    space.name
-                );
-            }
             if wanted == Use::Brain && space.storage.repository.key().eq_ignore_ascii_case(name) {
                 bail!(
                     "{name} is the {} Space's storage; a brain needs a repository of its own",
@@ -1026,6 +1029,24 @@ impl Host {
             );
         }
         Ok(())
+    }
+    /// The name of a Space whose brain is the repository `name` on GitHub.
+    pub(crate) fn space_with_brain(&self, name: &str) -> Result<Option<String>> {
+        Ok((self.spaces()?.into_iter()).find_map(|record| {
+            let Some(SpaceBrain {
+                repository:
+                    BrainRepository::GitHub {
+                        owner, name: brain, ..
+                    },
+                ..
+            }) = &record.space.brain
+            else {
+                return None;
+            };
+            format!("{owner}/{brain}")
+                .eq_ignore_ascii_case(name)
+                .then_some(record.space.name)
+        }))
     }
     /// Refuses a Space from another Mac whose GitHub brain is its own storage or has another use
     /// here, as `UpdateSpace` refuses it from the human.
@@ -1258,7 +1279,7 @@ impl Host {
             (Some(theirs), _) => theirs.clone(),
             (None, Some(asked)) => TrackerConfig::new(asked.into()),
             (None, None) => {
-                let taken: Vec<String> = (self.other_prefixes(&storage.key())?.into_iter())
+                let taken: Vec<String> = (self.other_prefixes(&[&storage.key()])?.into_iter())
                     .map(|(prefix, _)| prefix)
                     .collect();
                 TrackerConfig::new(propose_prefix(name, &taken))
@@ -1505,6 +1526,9 @@ impl Host {
     }
     /// The pass a storage repository that syncs on its own runs next.
     pub(crate) fn storage_pass(&self, key: &str) -> Result<Option<Pass>> {
+        if self.storage_moving {
+            return Ok(None);
+        }
         let Some(input) = self.storage_input(key)? else {
             return Ok(None);
         };
@@ -1822,20 +1846,13 @@ impl Host {
         Ok(rows
             .into_iter()
             .map(|(key, held)| {
+                let why = held.why();
                 let scan::Held {
-                    path,
-                    check,
-                    rule,
-                    reason,
+                    path, check, rule, ..
                 } = held;
                 let repository = (storage.iter())
                     .find(|r| repos::key(&r.name) == key)
                     .map_or(key, |r| r.name.clone());
-                let why = match (&rule, &reason) {
-                    (Some(rule), _) => format!("the {check} check found a possible match of its {rule} rule"),
-                    (None, Some(reason)) => format!("the {check} check could not run: {reason}"),
-                    (None, None) => format!("the {check} check could not run"),
-                };
                 let text = format!(
                     "{path} in {repository} isn’t pushed: {why}. This Mac keeps using it. Edit the file to remove the value, or mark a false positive with gate:allow, and it is pushed at the next sync."
                 );

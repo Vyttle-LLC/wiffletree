@@ -59,6 +59,7 @@ mod sidebar;
 mod skills_view;
 mod spaces_view;
 mod staging;
+mod storage_move_view;
 mod team_view;
 #[cfg(test)]
 mod test_support;

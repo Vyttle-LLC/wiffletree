@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Moving a Space's storage</title>
+<!--
+  Static study for moving a Space's storage. No script, no network.
+  Styles copied from space-repositories.html.
+  APPROVED by Michael on 2026-11-01, as drawn.
+-->
+<style>
+.light,:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}}
+body:has(#force-light:checked){--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+body:has(#force-dark:checked){--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+h2{font-size:15px;font-weight:600;margin:0 0 2px}
+h3{font-size:13px;font-weight:600;margin:0}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.intro{max-width:880px;margin-bottom:22px}
+.intro p{color:var(--subtle);font-size:12px;margin-top:4px}
+.pending{display:inline-block;margin:6px 0 4px;padding:3px 10px;border-radius:9px;font-size:11.5px;font-weight:600;color:var(--yellow);background:color-mix(in srgb,var(--yellow) 16%,transparent)}
+.switch{display:flex;gap:6px;margin:10px 0 0;font-size:12px;color:var(--subtle)}
+.switch input{display:none}
+.switch label{padding:3px 10px;border:1px solid var(--edge);border-radius:7px;cursor:pointer}
+.switch input:checked+label{background:var(--overlay);color:var(--text)}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:26px;align-items:start}
+.wide{grid-column:1/-1}
+.study>.eyebrow{margin-bottom:6px}
+.caption{margin:10px 2px 0;font-size:11.5px;color:var(--subtle)}
+.caption b{color:var(--text);font-weight:600}
+.frame{background:var(--surface);border:1px solid var(--edge);border-radius:12px;overflow:hidden;color:var(--text)}
+.label{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--subtle);margin:8px 6px 2px}
+.row{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:7px;font-size:13px}
+.row.sel{background:var(--overlay)}
+.row .r{margin-left:auto;font-size:11px;color:var(--subtle)}
+.sp{width:8px;height:8px;border-radius:2px;flex:none}
+.sage{background:var(--focus)}.personal{background:var(--magenta)}.vyttle{background:var(--blue)}
+.chip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--edge);border-radius:7px;padding:1px 8px;font-size:11.5px;color:var(--subtle)}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--edge);border-radius:7px;padding:4px 11px;font-size:12px;background:var(--surface);color:var(--text)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.btn.quiet{border-color:transparent;color:var(--subtle)}
+code{font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--overlay);padding:0 4px;border-radius:4px}
+.ok{color:var(--green)}.warn{color:var(--yellow)}
+.note{font-size:11.5px;color:var(--subtle)}
+.actions{display:flex;gap:8px;justify-content:flex-end}
+.page{padding:16px 18px;display:flex;flex-direction:column;gap:12px}
+.form{display:grid;grid-template-columns:150px 1fr;gap:10px 16px;font-size:12.5px;align-items:start}
+.form>label{color:var(--subtle);padding-top:5px}
+.field{border:1px solid var(--edge);border-radius:7px;padding:5px 9px;background:var(--surface)}
+.field.area{min-height:58px;color:var(--text)}
+.field small{color:var(--subtle)}
+.banner{border:1px solid color-mix(in srgb,var(--yellow) 45%,var(--edge));background:color-mix(in srgb,var(--yellow) 9%,transparent);border-radius:9px;padding:8px 11px;font-size:12px}
+.banner b{color:var(--yellow)}
+.banner.calm{border-color:var(--edge);background:var(--base)}
+.banner.calm b{color:var(--text)}
+.split{display:grid;grid-template-columns:180px 1fr}
+.spaces{border-right:1px solid var(--edge);padding:12px 8px;display:flex;flex-direction:column;gap:2px;background:var(--base)}
+.group{border:1px solid var(--edge);border-radius:10px;background:var(--base);padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.group h3{display:flex;align-items:center;gap:8px}
+.group h3 .r{margin-left:auto;font-weight:400;font-size:11.5px;color:var(--subtle)}
+.kv{display:grid;grid-template-columns:130px 1fr;gap:5px 12px;font-size:12px}
+.kv dt{color:var(--subtle)}
+.kv dd{margin:0}
+.repos{display:flex;flex-direction:column;gap:3px;font-size:12.5px}
+.repos .rep{display:flex;align-items:center;gap:8px;padding:3px 6px;border-radius:6px}
+.repos .rep .r{margin-left:auto;font-size:11px;color:var(--subtle)}
+.box{width:13px;height:13px;border:1.5px solid var(--edge);border-radius:3px;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:10px;line-height:1}
+.box.on{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.sheet{max-width:620px;margin:22px auto;border:1px solid var(--edge);border-radius:12px;background:var(--surface);box-shadow:0 10px 30px rgba(0,0,0,.12)}
+.sheet .head{padding:12px 16px;border-bottom:1px solid var(--edge);display:flex;align-items:center;gap:10px}
+.sheet .body{padding:14px 16px;display:flex;flex-direction:column;gap:12px}
+.sheet .foot{padding:10px 16px;border-top:1px solid var(--edge)}
+.dim{background:var(--base);padding:1px 0}
+ul.legend{margin:6px 0 0;padding-left:18px;color:var(--subtle);font-size:12px;max-width:900px}
+ul.legend li{margin:3px 0}
+@media(max-width:1100px){.grid{grid-template-columns:1fr}}
+.head{padding:9px 12px;border-bottom:1px solid var(--edge);display:flex;align-items:center;gap:8px}
+.sect{display:flex;align-items:center;gap:8px;font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.sect .r{margin-left:auto}
+.sub{display:flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;margin:10px 0 2px}
+.sub .r{margin-left:auto;font-weight:400;color:var(--accent)}
+.badge{display:inline-block;margin:0 0 6px;padding:1px 8px;border-radius:7px;font-size:11px;font-weight:600}
+.badge.was{color:var(--red);background:color-mix(in srgb,var(--red) 12%,transparent)}
+.badge.now{color:var(--green);background:color-mix(in srgb,var(--green) 14%,transparent)}
+.say{border-left:2px solid var(--edge);padding:6px 10px;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+.say.bad{border-color:var(--red)}
+.say.good{border-color:var(--green)}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th{font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--subtle);font-weight:600;text-align:left}
+th,td{padding:7px 12px;border-bottom:1px solid var(--edge);vertical-align:top}
+tr:last-child td{border-bottom:0}
+.menu{border:1px solid var(--edge);border-radius:8px;background:var(--surface);padding:4px;font-size:12px;width:230px;margin-left:auto;box-shadow:0 6px 18px rgba(0,0,0,.1)}
+.menu div{padding:3px 8px;border-radius:5px}
+.menu .on{background:var(--overlay)}
+
+.box.mid{background:var(--overlay);border-color:var(--accent);color:var(--accent);font-weight:700}
+.box.off{opacity:.45}
+.tree{display:flex;flex-direction:column;border:1px solid var(--edge);border-radius:9px;overflow:hidden}
+.tree .scroll{max-height:430px;overflow:auto}
+.fold{display:flex;align-items:center;gap:8px;padding:7px 10px;background:var(--base);border-top:1px solid var(--edge);font-size:12.5px;font-weight:600;position:sticky;top:0}
+.fold:first-child{border-top:0}
+.fold .chev{width:10px;color:var(--subtle);font-size:10px}
+.fold .r{margin-left:auto;font-weight:400;font-size:11.5px;color:var(--subtle)}
+.leaf{display:flex;align-items:center;gap:8px;padding:4px 10px 4px 38px;font-size:12.5px;border-top:1px solid color-mix(in srgb,var(--edge) 45%,transparent)}
+.leaf .id{color:var(--subtle);font-size:11.5px}
+.leaf .r{margin-left:auto;display:flex;gap:4px;align-items:center;font-size:11px;color:var(--subtle)}
+.leaf.new{background:color-mix(in srgb,var(--green) 9%,transparent)}
+.leaf.dim{color:var(--muted)}
+.mark{width:7px;height:7px;border-radius:2px;background:var(--magenta);display:inline-block}
+.chip.small{font-size:10.5px;padding:0 6px}
+.inline{display:flex;align-items:center;gap:8px}
+.inline .field{flex:1;min-width:0}
+.field.ph{color:var(--muted)}
+.foot{display:flex;align-items:center;gap:8px}
+.foot .note{flex:1}
+.replist{display:flex;flex-direction:column;gap:5px;font-size:13px}
+.replist .rep{display:flex;align-items:center;gap:8px}
+.replist .rep .x{margin-left:auto;color:var(--subtle)}
+.link{color:var(--accent)}
+.sheet{max-width:none;margin:0}
+.follow{font-size:11px;font-weight:500;border:1px solid var(--edge);border-radius:7px;padding:0 8px;color:var(--text);background:var(--surface)}
+.follow.on{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.followline{display:flex;align-items:center;gap:8px;font-size:12px;padding:5px 8px;margin-bottom:8px;border:1px solid var(--edge);border-radius:7px;background:var(--base)}
+.followline .x{margin-left:auto;color:var(--subtle)}
+.toast{display:inline-block;margin-top:10px;padding:6px 11px;border:1px solid var(--edge);border-radius:8px;background:var(--overlay);font-size:12px}
+
+.seg{display:inline-flex;align-self:flex-start;border:1px solid var(--edge);border-radius:7px;overflow:hidden;font-size:12px}
+.seg span{padding:3px 11px;color:var(--subtle)}
+.seg .on{background:var(--overlay);color:var(--text);font-weight:600}
+.facts{display:grid;grid-template-columns:130px 1fr;gap:5px 12px;font-size:12px}
+.facts b{font-weight:400;color:var(--subtle)}
+.lines{margin:0;padding-left:16px;font-size:12px}
+.lines li{margin:2px 0}
+.bad{color:var(--red)}
+</style>
+</head>
+<body>
+<div class="intro">
+  <div class="eyebrow">Wiffletree · design study</div>
+  <h1>Moving a Space's storage</h1>
+  <span class="pending">Approved by Michael, November 1, 2026</span>
+  <p><b>The change:</b> a Space's storage can move after it is created: from this Mac to GitHub, from GitHub to this Mac, or to another GitHub repository.</p>
+  <p>Nothing here runs. Vyttle's prefix and issue count are real. The target repository and its readers are samples.</p>
+  <div class="switch">
+    <span>Appearance:</span>
+    <input type="radio" name="theme" id="force-system" checked><label for="force-system">System</label>
+    <input type="radio" name="theme" id="force-light"><label for="force-light">Light</label>
+    <input type="radio" name="theme" id="force-dark"><label for="force-dark">Dark</label>
+  </div>
+</div>
+<div class="grid">
+  <div class="study"><div class="eyebrow">1 · The storage box, today</div><span class="badge was">Today</span><div class="frame"><div class="page"><div class="group">
+  <h3>Storage and issues</h3>
+  <div class="facts"><b>Repository</b><span>Only on this Mac</span><b>Issues</b><span>VYT · 0 issues</span><b>Who can read them</b><span>Only you</span><b>On this Mac</b><span><code>~/Library/Application Support/Agent Workspace/repos/local-b2d7500c…</code></span></div>
+  <div class="actions"><span class="btn quiet">Import from Linear…</span><span class="btn quiet">Open Issues</span></div>
+</div></div></div>
+    <p class="caption">Storage is chosen once, when the Space is created, and nothing changes it afterwards.</p></div>
+  <div class="study"><div class="eyebrow">1 · The storage box, proposed</div><span class="badge now">Proposed</span><div class="frame"><div class="page"><div class="group">
+  <h3>Storage and issues</h3>
+  <div class="facts"><b>Repository</b><span>Only on this Mac</span><b>Issues</b><span>VYT · 0 issues</span><b>Who can read them</b><span>Only you</span><b>On this Mac</b><span><code>~/Library/Application Support/Agent Workspace/repos/local-b2d7500c…</code></span></div>
+  <div class="actions"><span class="btn quiet">Import from Linear…</span><span class="btn quiet">Open Issues</span><span class="btn">Move storage…</span></div>
+</div></div></div>
+    <p class="caption">One new button, Move storage…, on every Space's page.</p></div>
+  <div class="study"><div class="eyebrow">2 · Choose where</div><div class="frame dim"><div class="sheet">
+  <div class="head"><h2>Move Vyttle’s storage</h2></div>
+  <div class="body">
+    <div class="seg"><span class="">This Mac</span><span class="on">A GitHub repository</span></div>
+    <div class="inline"><div class="field ph">owner/name or a GitHub URL</div><span class="btn">Check</span></div><p class="note">A private repository. Nothing is written until you click Move.</p>
+  </div>
+  <div class="foot"><span class="note"></span><span class="btn quiet">Cancel</span><span class="btn primary" style="opacity:.45">Move to GitHub</span></div>
+</div></div>
+    <p class="caption">The same choice New Space offers, starting on the side the Space is not on. Check is the check New Space runs.</p></div>
+  <div class="study"><div class="eyebrow">3 · After Check</div><div class="frame dim"><div class="sheet">
+  <div class="head"><h2>Move Vyttle’s storage</h2></div>
+  <div class="body">
+    <div class="seg"><span class="">This Mac</span><span class="on">A GitHub repository</span></div>
+    <div class="inline"><div class="field">Vyttle-LLC/wiffletree-spaces</div><span class="btn">Check</span></div><div class="banner"><b>Who can read it:</b> 3 people invited to this private repository. They can read Vyttle and its issues, and anyone who can push can change Vyttle’s additions and Behaviors for everyone. <span class="note">(sample)</span></div><div class="banner calm"><b>What moves</b><ul class="lines"><li>Vyttle: its settings, repositories, jobs and boards</li><li>Its tracker: prefix VYT and 0 issues</li></ul></div>
+  </div>
+  <div class="foot"><span class="note">Files are scanned before they are pushed.</span><span class="btn quiet">Cancel</span><span class="btn primary">Move to GitHub</span></div>
+</div></div>
+    <p class="caption"><b>You see who gains access before anything moves.</b> The dialog lists what moves. Any other Space in the same storage moves with it and is named here, because Spaces in one storage repository share its tracker.</p></div>
+  <div class="study"><div class="eyebrow">4 · A refused repository</div><div class="frame dim"><div class="sheet">
+  <div class="head"><h2>Move Vyttle’s storage</h2></div>
+  <div class="body">
+    <div class="seg"><span class="">This Mac</span><span class="on">A GitHub repository</span></div>
+    <div class="inline"><div class="field">Vyttle-LLC/vyttle-docs</div><span class="btn">Check</span></div><div class="banner"><b>Vyttle-LLC/vyttle-docs is Vyttle’s brain.</b> A repository is a brain or storage, not both, because a brain changes only through reviewed pull requests. <span class="note">(sample)</span></div>
+  </div>
+  <div class="foot"><span class="note"></span><span class="btn quiet">Cancel</span><span class="btn primary" style="opacity:.45">Move to GitHub</span></div>
+</div></div>
+    <p class="caption">Also refused, each with its own sentence: a public repository, a prefix another storage repository on this Mac uses, and a repository with a tracker when the storage being moved has issues. Storage with no issues takes on that tracker and its prefix.</p></div>
+  <div class="study"><div class="eyebrow">5 · From GitHub to this Mac</div><div class="frame dim"><div class="sheet">
+  <div class="head"><h2>Move Vyttle’s storage</h2></div>
+  <div class="body">
+    <div class="seg"><span class="on">This Mac</span><span class="">A GitHub repository</span></div>
+    <div class="banner calm"><b>Vyttle moves to a new local repository on this Mac.</b> Its tracker becomes private to this Mac.</div><div class="banner"><b>Teammates keep the GitHub repository.</b> It stays as it is, and this Mac stops syncing it, so later changes on either side do not reach the other.</div>
+  </div>
+  <div class="foot"><span class="note"></span><span class="btn quiet">Cancel</span><span class="btn primary">Move to this Mac</span></div>
+</div></div>
+    <p class="caption">This is the way out of a shared Space. It takes a copy and changes nothing on GitHub.</p></div>
+  <div class="study wide"><div class="eyebrow">6 · After the move</div><div class="frame"><div class="page"><div class="group">
+  <h3>Storage and issues</h3>
+  <div class="facts"><b>Repository</b><span>Vyttle-LLC/wiffletree-spaces <span class="note">(sample)</span></span><b>Issues</b><span>VYT · 0 issues</span><b>Who can read them</b><span>3 people invited <span class="note">(sample)</span></span><b>On this Mac</b><span><code>~/Library/Application Support/Agent Workspace/repos/github.com/Vyttle-LLC/wiffletree-spaces</code></span></div>
+  <div class="actions"><span class="btn quiet">Import from Linear…</span><span class="btn quiet">Open Issues</span><span class="btn">Sync now</span><span class="btn">Move storage…</span></div>
+</div></div></div>
+    <p class="caption">The page reads as any GitHub Space does, with Sync now, and Vyttle's issues, jobs and boards carry on under the same IDs.</p></div>
+</div>
+<ul class="legend">
+  <li><b>All or nothing.</b> The files are copied, scanned and pushed first, and the Space switches only after GitHub has them. If a scan holds a file or a push fails, the Space stays where it was and the dialog says why.</li>
+  <li><b>Nothing is deleted.</b> Old local storage goes to the backups folder, with its Git history. New storage starts with a commit of the current files.</li>
+  <li><b>Only you can do it.</b> No agent or workspace tool can move storage.</li>
+</ul>
+</body>
+</html>
