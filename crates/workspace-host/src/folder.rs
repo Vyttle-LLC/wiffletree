@@ -70,10 +70,29 @@ impl Root {
     pub(crate) fn scanned(&self, path: &str) -> bool {
         self.strip(path).is_some_and(scan::scanned)
     }
+    /// Where `path` of the repository was before the repository moved into a folder.
+    pub(crate) fn moved_from<'a>(&self, path: &'a str) -> Option<&'a str> {
+        self.strip(path).filter(|_| !self.is_empty())
+    }
     /// Whether `path` of the repository is outside a folder that is not the root.
     fn outside(&self, path: &str) -> bool {
         !self.is_empty() && self.strip(path).is_none()
     }
+}
+
+/// How many commits up to the clone's head wrote the file at `path` of the repository, in the
+/// folder or before the move. The move's own commit touches both paths and writes nothing new.
+pub(crate) fn saves(clone: &Path, root: &Root, path: &str) -> Result<u32> {
+    let count = |path: &str| -> Result<u32> {
+        let args = ["rev-list", "--count", "HEAD", "--", path];
+        Ok(runtime::git_output(clone, &args)?.trim().parse()?)
+    };
+    let here = count(path)?;
+    let before = root.moved_from(path).map(count).transpose()?;
+    Ok(match before {
+        None | Some(0) => here,
+        Some(before) => here + before - 2,
+    })
 }
 
 /// Whether `path`, at a repository's root, is one of the files a move carries.

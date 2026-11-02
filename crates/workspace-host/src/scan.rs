@@ -61,6 +61,8 @@ pub(crate) struct Scanner {
     gate: PathBuf,
     /// `PATH` for the checks and the tools they run; the host's own when `None`.
     path: Option<OsString>,
+    /// The folder of the repository it scans for.
+    root: folder::Root,
 }
 impl Scanner {
     /// The bundled gate, written once per version to `<data folder>/gate/<hash>/`, run with
@@ -84,11 +86,19 @@ impl Scanner {
             // Another host's write of the same version may have won; either is the same.
             let _ = fs::rename(staging.keep(), &gate);
         }
-        Ok(Self { gate, path })
+        Ok(Self {
+            gate,
+            path,
+            root: Default::default(),
+        })
     }
-    /// The files of `files` that may not be pushed: each scanned file with content is checked
-    /// as a change from its version at the clone's `remote` commit, so only lines it adds are
-    /// scanned, as the gate scans a pull request.
+    /// This scanner for a repository whose Wiffletree folder is `root`.
+    pub(crate) fn in_folder(self, root: folder::Root) -> Self {
+        Self { root, ..self }
+    }
+    /// The files of `files`, by their paths in the repository, that may not be pushed: each
+    /// scanned file with content is checked as a change from its version at the clone's `remote`
+    /// commit, so only lines it adds are scanned, as the gate scans a pull request.
     pub(crate) fn scan(
         &self,
         clone: &Path,
@@ -96,7 +106,7 @@ impl Scanner {
         files: &[(String, Content)],
     ) -> Vec<Held> {
         let candidates: Vec<(&String, &Vec<u8>)> = (files.iter())
-            .filter(|(path, _)| scanned(path))
+            .filter(|(path, _)| self.root.scanned(path))
             .filter_map(|(path, content)| Some((path, content.as_ref()?)))
             .collect();
         if candidates.is_empty() {

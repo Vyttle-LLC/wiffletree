@@ -1721,12 +1721,13 @@ impl Host {
         let commit = Record::read(&self.db, key)?
             .context("The storage repository has no record")?
             .commit;
+        let scanner = scan::Scanner::bundled(&self.home, self.scan_path.clone())?;
         Ok(Some(Pass {
             clone: repos::clone_folder(&self.home, &repository.name),
             repository,
             commit,
+            scanner: scanner.in_folder(input.root.clone()),
             input,
-            scanner: scan::Scanner::bundled(&self.home, self.scan_path.clone())?,
             running: self.sync_passes.clone(),
         }))
     }
@@ -3803,6 +3804,74 @@ future_key: 3
         let plain = tracker_yaml(&TrackerConfig::new("SAGE".into())).unwrap();
         let plain = String::from_utf8(plain).unwrap();
         assert!(!plain.contains("compile") && !plain.contains("allowed_email_domains"));
+    }
+
+    fn held_paths(host: &Host) -> Vec<String> {
+        (host.held_notes().unwrap().into_iter())
+            .map(|note| match note {
+                WorkspaceNote::Held(held) => held.path,
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    const PHONE: &str = "Text the parent at (415) 555-0134.";
+
+    #[test]
+    fn a_file_in_a_folder_is_scanned_and_held_before_a_push() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = in_a_folder(folder.path());
+        let (_home, mut host) = host();
+        join_sage(&mut host, &github).unwrap();
+        let sage = space_named(&host, "Sage");
+        host.update_space(Space {
+            additions: PHONE.into(),
+            ..sage
+        })
+        .unwrap();
+        sync(&mut host, &github);
+        assert!(!github.show(SAGE_FILE).unwrap().contains("555-0134"));
+        assert_eq!(held_paths(&host), [SAGE_FILE]);
+    }
+
+    #[test]
+    fn a_file_in_a_folder_is_scanned_in_a_repository_that_is_also_the_settings_repository() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = in_a_folder(folder.path());
+        let (_home, mut host) = host();
+        let tools = github.tools();
+        host.choose_settings_repository(NAME, None, &tools).unwrap();
+        join_sage(&mut host, &github).unwrap();
+        let sage = space_named(&host, "Sage");
+        host.update_space(Space {
+            additions: PHONE.into(),
+            ..sage
+        })
+        .unwrap();
+        host.sync_now(&tools).unwrap();
+        assert!(!github.show(SAGE_FILE).unwrap().contains("555-0134"));
+        assert_eq!(held_paths(&host), [SAGE_FILE]);
+    }
+
+    #[test]
+    fn a_file_held_at_the_root_stays_held_after_the_move() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = shared_storage(folder.path(), Some("SAGE"));
+        let (_home, mut host) = host();
+        join_sage(&mut host, &github).unwrap();
+        let sage = space_named(&host, "Sage");
+        host.update_space(Space {
+            additions: PHONE.into(),
+            ..sage
+        })
+        .unwrap();
+        sync(&mut host, &github);
+        assert_eq!(held_paths(&host), ["spaces/sage/space.yaml"]);
+        press_move(&mut host, &github);
+        assert_eq!(held_paths(&host), [SAGE_FILE], "its hold moved with it");
+        sync(&mut host, &github);
+        assert!(!github.show(SAGE_FILE).unwrap().contains("555-0134"));
+        assert_eq!(held_paths(&host), [SAGE_FILE]);
     }
 
     #[test]

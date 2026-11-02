@@ -1067,6 +1067,7 @@ impl Host {
         let storage = match self.storage_input(&key)? {
             Some(input) => {
                 let scanner = scan::Scanner::bundled(&self.home, self.scan_path.clone())?;
+                let scanner = scanner.in_folder(input.root.clone());
                 Some((input, scanner))
             }
             None => None,

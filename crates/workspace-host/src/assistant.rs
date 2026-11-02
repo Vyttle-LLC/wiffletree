@@ -820,6 +820,20 @@ pub(crate) fn store_output(
     base: &str,
     title: &str,
     source: &Path,
+    about: Value,
+) -> Result<(String, u32)> {
+    let root = folder::Root::default();
+    store_output_in(&root, repository, base, title, source, about)
+}
+
+/// `store_output` for a repository whose Wiffletree folder is `root`, whose versions from before
+/// its move still count.
+pub(crate) fn store_output_in(
+    root: &folder::Root,
+    repository: &Path,
+    base: &str,
+    title: &str,
+    source: &Path,
     mut about: Value,
 ) -> Result<(String, u32)> {
     if !repository.join(".git").exists() {
@@ -870,11 +884,7 @@ pub(crate) fn store_output(
     ]);
     runtime::git_output(repository, &commit)?;
     // Each save rewrites the metadata, so its commits count the versions.
-    let count = runtime::git_output(
-        repository,
-        &["rev-list", "--count", "HEAD", "--", &metadata],
-    )?;
-    Ok((file, count.trim().parse().unwrap_or(1)))
+    Ok((file, folder::saves(repository, root, &metadata)?))
 }
 
 /// The recipe a thread's `propose_job` describes, in the thread's own Space, for its card.

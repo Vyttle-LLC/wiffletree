@@ -1260,8 +1260,15 @@ impl Host {
         let output = if local {
             let storage = self.storage_folder(&space.storage.repository);
             let base = board_folder(&space.storage.folder, &recipe.id);
-            let base = folder::Root::new(&space.storage.root).join(&base);
-            let (file, version) = assistant::store_output(&storage, &base, title, source, about)?;
+            let root = folder::Root::new(&space.storage.root);
+            let (file, version) = assistant::store_output_in(
+                &root,
+                &storage,
+                &root.join(&base),
+                title,
+                source,
+                about,
+            )?;
             RunOutput {
                 title: title.into(),
                 file,
@@ -1335,7 +1342,8 @@ impl Host {
         let base = board_folder(&space.storage.folder, &recipe.id);
         let storage = self.storage_folder(&space.storage.repository);
         let title = about["title"].as_str().context("An output has a title")?;
-        let in_repository = folder::Root::new(&space.storage.root).join(&base);
+        let root = folder::Root::new(&space.storage.root);
+        let in_repository = root.join(&base);
         let folder = format!(
             "{in_repository}/{}",
             assistant::output_folder(&storage.join(&in_repository), title)?
@@ -1349,11 +1357,8 @@ impl Host {
         let kept_here = self.keep_replaced_here(space, recipe, title, &metadata, &record)?;
         let message = format!("{}: saved an output of {}", space.name, recipe.name);
         self.write_output(space, &base, file, bytes, about, &message)?;
-        let pushed =
-            runtime::git_output(&storage, &["rev-list", "--count", "HEAD", "--", &metadata]);
-        Ok(Some(
-            pushed.map_or(0, |count| count.trim().parse().unwrap_or(0)) + kept_here + 1,
-        ))
+        let pushed = folder::saves(&storage, &root, &metadata).unwrap_or(0);
+        Ok(Some(pushed + kept_here + 1))
     }
     /// Whether the files of the output at `folder` in the clone are not what Wiffletree last
     /// wrote or synced: an edit made outside Wiffletree, which the next pass pauses and no save
