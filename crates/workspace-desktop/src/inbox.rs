@@ -19,7 +19,8 @@ pub(super) struct Inbox {
     pub(super) answering: Option<String>,
     /// The workspace note open in Compare.
     compared: workspace_notes::Compared,
-    /// Each open item's prompt with its file references linked, by item id.
+    /// Each open item's prompt, or a repository request's reason, with its file references
+    /// linked, by item id.
     prompts: HashMap<String, Linked>,
     /// The brain conflict whose Keep both line is open, by its card's key, and that line.
     keeping_both: Option<String>,
@@ -132,9 +133,13 @@ impl Inbox {
             // Linked here, as the items arrive, so drawing them asks the host nothing.
             let link = |item: &Attention| {
                 let bases = self.shared.link_bases(&item.session_id).into();
+                let words = match &item.repository_request {
+                    Some(request) => &request.reason,
+                    None => &item.prompt,
+                };
                 let linked = Linked::new(
                     &format!("attention-{}", item.id),
-                    &item.prompt,
+                    words,
                     bases,
                     &self.bridge,
                 );
@@ -337,12 +342,7 @@ impl Inbox {
                     .font_weight(FontWeight::MEDIUM)
                     .child(request.title()),
             )
-            .child(
-                div()
-                    .text_size(px(font::TEXT))
-                    .line_height(relative(1.5))
-                    .child(request.reason.clone()),
-            )
+            .children(self.prompts.get(&item.id).map(Linked::view))
             .child(rows);
         let approve = "Add to this project";
         let actions = approval_actions(item.id.clone(), approve, &self.shared.host, cx);
