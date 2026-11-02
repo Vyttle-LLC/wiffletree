@@ -786,9 +786,9 @@ impl Render for IssueView {
                 .child(crumbs)
                 .children(paused)
                 .child(
-                    ui::banner(p.yellow).child(format!(
+                    ui::banner(p.yellow).child(div().flex_1().min_w_0().child(format!(
                         "This issue.md can’t be read: {problem}. It is shown as written, and Wiffletree won’t change it."
-                    )),
+                    ))),
                 )
                 .child(
                     div()

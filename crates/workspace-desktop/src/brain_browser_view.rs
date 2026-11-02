@@ -918,7 +918,12 @@ impl BrainBrowser {
             .child(hint("claim → log entry → commit and PR", p));
         if !note.sources_readable {
             list = list.child(
-                banner(p.yellow).child("Some sources are not readable: a footnote names no entry."),
+                banner(p.yellow).child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child("Some sources are not readable: a footnote names no entry."),
+                ),
             );
         }
         if note.claims.is_empty() {

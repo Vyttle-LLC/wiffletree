@@ -497,7 +497,7 @@ impl Conversation {
             return vec![
                 banner(p.subtle)
                     .child(icon("archive").text_color(p.subtle))
-                    .child(div().flex_1().child(
+                    .child(div().flex_1().min_w_0().child(
                         "Archived. Its conversation and work are kept, and it receives nothing until restored.",
                     )),
             ];
@@ -585,7 +585,7 @@ impl Conversation {
             notices.push(
                 banner(p.focus)
                     .child(icon("pause").text_color(p.focus))
-                    .child(div().flex_1().child(format!(
+                    .child(div().flex_1().min_w_0().child(format!(
                         "This project is stopped. {waiting} {} waiting.",
                         plural(waiting, "message is", "messages are")
                     )))

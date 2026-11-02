@@ -1333,6 +1333,8 @@ impl ModelsPage {
         (!lines.is_empty()).then(|| {
             ui::banner(p.yellow).items_start().child(
                 div()
+                    .flex_1()
+                    .min_w_0()
                     .flex()
                     .flex_col()
                     .gap_1()
