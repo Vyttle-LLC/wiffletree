@@ -184,27 +184,49 @@ impl Conversation {
 }
 
 /// One ticket: its title, its status in its state's color and its PR, linked when it has one.
+/// A link is underlined faintly, firmer on hover, and ends in an arrow marking that it leaves
+/// the app.
 fn ticket_row(ticket: &Ticket, p: Palette) -> Div {
-    let pr = div()
-        .w(px(110.))
-        .flex_none()
-        .text_ellipsis()
-        .child(pr_label(ticket));
+    let pr = div().w(px(110.)).flex_none();
     let pr = match &ticket.pull_request {
         Some(pull_request) => {
             let url = pull_request.url.clone();
-            pr.child(
-                div()
-                    .id(SharedString::from(format!("ticket-table-pr-{}", ticket.id)))
-                    .absolute()
-                    .size_full()
-                    .cursor_pointer()
-                    .on_click(move |_, _, cx| cx.open_url(&url)),
-            )
-            .relative()
-            .text_color(p.focus)
+            let group = SharedString::from(format!("ticket-table-pr-group-{}", ticket.id));
+            pr.group(group.clone())
+                .relative()
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .text_color(p.focus)
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .underline()
+                        .text_decoration_color(p.focus.opacity(0.45))
+                        .group_hover(group, |d| d.underline().text_decoration_color(p.focus))
+                        .child(pr_label(ticket)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(font::CAPTION))
+                        .opacity(0.7)
+                        .child("↗"),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("ticket-table-pr-{}", ticket.id)))
+                        .absolute()
+                        .size_full()
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| cx.open_url(&url)),
+                )
         }
-        None => pr.text_color(p.subtle),
+        None => pr
+            .text_ellipsis()
+            .text_color(p.subtle)
+            .child(pr_label(ticket)),
     };
     div()
         .flex()
