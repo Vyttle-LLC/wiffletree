@@ -626,6 +626,8 @@ enum StorageChoice {
     },
     /// The Spaces to join, and whether this Mac compiles their wiki too.
     Join(Vec<JoinSpace>, bool),
+    /// Only answers what moving this Space's storage there would do.
+    CheckMove(SpaceId),
 }
 enum Event {
     KeeperPolled(
@@ -698,6 +700,16 @@ enum Event {
         land: bool,
         reply: Reply,
     },
+    /// The target of a storage move, checked and cloned.
+    StorageMoveStaged {
+        space_id: SpaceId,
+        staged: Result<storage::Staged>,
+        reply: Reply,
+    },
+    /// A storage move's files, copied and scanned.
+    StorageMoveCopied(Box<storage_move::Move>, Result<()>, Reply),
+    /// A storage move's push.
+    StorageMovePushed(Box<storage_move::Move>, Result<()>, Reply),
     /// Codex's account limits, read on their own thread, to record.
     QuotaRead {
         reading: QuotaReading,
@@ -1657,6 +1669,27 @@ impl Actor {
                     },
                 );
             }
+            Command::CheckStorageMove {
+                space_id,
+                repository: None,
+            } => {
+                let check = self.host.check_storage_move(space_id, None)?;
+                let _ = reply.try_send(Ok(serde_json::to_value(check)?));
+            }
+            Command::CheckStorageMove {
+                space_id,
+                repository: Some(repository),
+            } => {
+                self.host.precheck_storage_move(space_id)?;
+                let then = StorageChoice::CheckMove(space_id.clone());
+                self.stage_storage(repository, then, reply)?;
+            }
+            Command::MoveStorage {
+                space_id,
+                repository,
+            } => {
+                self.start_storage_move(space_id, repository.as_deref(), reply)?;
+            }
             Command::SetUpSettingsRepository { repository }
             | Command::JoinSettingsRepository { repository, .. } => {
                 let with = match command {
@@ -2058,7 +2091,7 @@ impl Actor {
                 )?;
                 (Some(requested), setup.create_repository)
             }
-            StorageChoice::Join(..) => (None, false),
+            StorageChoice::Join(..) | StorageChoice::CheckMove(_) => (None, false),
         };
         std::thread::spawn(move || {
             let created = match (&requested, create) {
@@ -2080,6 +2113,91 @@ impl Actor {
             });
         });
         Ok(())
+    }
+
+    /// Starts moving the storage of a Space, checking and cloning the target off the host
+    /// thread. A pass already started, even one not yet at its lock, refuses it.
+    fn start_storage_move(
+        &mut self,
+        space_id: &SpaceId,
+        repository: Option<&str>,
+        reply: &Reply,
+    ) -> Result<()> {
+        ensure!(
+            !self.sync_pace.running() && !self.storage_paces.values().any(repos::Pace::running),
+            "Sync is running. Try again in a moment."
+        );
+        self.host.precheck_storage_move(space_id)?;
+        let Some(repository) = repository else {
+            return self.copy_storage_move(space_id, None, reply.clone());
+        };
+        let added = self.host.space_ids()?;
+        let (home, input, reply) = (self.host.home.clone(), repository.to_owned(), reply.clone());
+        let (sender, tools, space_id) = (
+            self.sender.clone(),
+            self.publish_tools.clone(),
+            space_id.clone(),
+        );
+        std::thread::spawn(move || {
+            let staged = storage::stage(&home, &input, &tools, &added);
+            let _ = sender.send_blocking(Event::StorageMoveStaged {
+                space_id,
+                staged,
+                reply,
+            });
+        });
+        Ok(())
+    }
+    /// Copies and scans a storage move's files off the host thread.
+    fn copy_storage_move(
+        &mut self,
+        space_id: &SpaceId,
+        staged: Option<storage::Staged>,
+        reply: Reply,
+    ) -> Result<()> {
+        let run = self.host.begin_storage_move(space_id, staged)?;
+        let tools = self.publish_tools.clone();
+        spawn_job(
+            self.sender.clone(),
+            (run, reply),
+            move |(run, _)| storage_move::copy(run, &tools),
+            |_| Err(anyhow::anyhow!("The storage move stopped unexpectedly")),
+            |(run, reply), copied| Event::StorageMoveCopied(Box::new(run), copied, reply),
+        );
+        Ok(())
+    }
+    /// Pushes a copied storage move off the host thread, recording what it pushes first; a move
+    /// to this Mac has nothing to push and switches.
+    fn push_storage_move(&mut self, run: Box<storage_move::Move>, reply: Reply) -> Result<bool> {
+        if !run.pushes() {
+            return self.switch_storage_move(*run, reply);
+        }
+        self.host.note_push(&run)?;
+        let tools = self.publish_tools.clone();
+        spawn_job(
+            self.sender.clone(),
+            (run, reply),
+            move |(run, _)| storage_move::push(run, &tools),
+            |_| Err(anyhow::anyhow!("The storage move stopped unexpectedly")),
+            |(run, reply), pushed| Event::StorageMovePushed(run, pushed, reply),
+        );
+        Ok(false)
+    }
+    /// Switches a storage move's Spaces and answers it; `true` once they moved.
+    fn switch_storage_move(&mut self, run: storage_move::Move, reply: Reply) -> Result<bool> {
+        let switched = self.host.switch_storage(run)?;
+        let record = self.host.finish_storage_move(switched)?;
+        let _ = reply.try_send(Ok(serde_json::to_value(record)?));
+        // The login the human writes the moved tracker's issues as.
+        let (tools, home) = (self.publish_tools.clone(), self.host.home.clone());
+        spawn_gh_login_read(self.sender.clone(), tools, home);
+        Ok(true)
+    }
+    /// Ends a storage move that failed, answering why.
+    fn storage_move_failed(&mut self, error: anyhow::Error, reply: &Reply) -> bool {
+        self.host.end_storage_move();
+        let _ = reply.try_send(Err(format!("{error:#}")));
+        true
     }
 
     /// Starts a pass of each GitHub storage repository that syncs on its own when one is due,
@@ -2512,6 +2630,7 @@ impl Actor {
                 then,
                 reply,
             } => {
+                let checked_only = matches!(then, StorageChoice::CheckMove(_));
                 let result = staged
                     .and_then(|staged| match then {
                         StorageChoice::Create {
@@ -2535,9 +2654,12 @@ impl Actor {
                         StorageChoice::Join(spaces, compile_here) => Ok(serde_json::to_value(
                             self.host.join_spaces(staged, &spaces, compile_here)?,
                         )?),
+                        StorageChoice::CheckMove(space_id) => Ok(serde_json::to_value(
+                            self.host.check_storage_move(&space_id, Some(&staged))?,
+                        )?),
                     })
                     .map_err(|e| format!("{e:#}"));
-                let added = result.is_ok();
+                let added = result.is_ok() && !checked_only;
                 let _ = reply.try_send(result);
                 // The login the human writes the chosen or joined tracker's issues as.
                 if added {
@@ -2561,6 +2683,30 @@ impl Actor {
                     .map_err(|e| format!("{e:#}"));
                 let _ = reply.try_send(result);
                 land
+            }
+            Event::StorageMoveStaged {
+                space_id,
+                staged,
+                reply,
+            } => {
+                let copying =
+                    staged.and_then(|s| self.copy_storage_move(&space_id, Some(s), reply.clone()));
+                // Refused before it began, so the gate is another move's, if anyone's.
+                match copying {
+                    Ok(()) => false,
+                    Err(error) => {
+                        let _ = reply.try_send(Err(format!("{error:#}")));
+                        true
+                    }
+                }
+            }
+            Event::StorageMoveCopied(run, copied, reply) => {
+                let moved = copied.and_then(|()| self.push_storage_move(run, reply.clone()));
+                moved.unwrap_or_else(|error| self.storage_move_failed(error, &reply))
+            }
+            Event::StorageMovePushed(run, pushed, reply) => {
+                let moved = pushed.and_then(|()| self.switch_storage_move(*run, reply.clone()));
+                moved.unwrap_or_else(|error| self.storage_move_failed(error, &reply))
             }
             Event::Synced(passed) => {
                 let at = now();
@@ -2932,6 +3078,12 @@ impl Actor {
                                 json!({"behavior":"deny","message":answer})
                             };
                             let _ = permission.reply.try_send(Ok(decision));
+                        } else if attention.is_repository_request() {
+                            // Answered in `execute`, with its own result. A new repository has
+                            // no GitHub facts yet.
+                            if answer == "approved" {
+                                self.refresh_github();
+                            }
                         } else if attention.is_merge() {
                             // As for a publish, the request's own result is its one message.
                             if let Some(job) = self.host.answer_merge(id, answer == "approved")? {
@@ -5953,6 +6105,100 @@ mod tests {
         assert!(!actor.github_reading && events.try_recv().is_err());
     }
 
+    /// Moves the Personal Space's storage to `github` through the actor, step by step as its
+    /// events arrive, and returns its answer.
+    fn move_through_actor(
+        actor: &mut Actor,
+        events: &Receiver<Event>,
+        github: &Arc<crate::sync::tests::GitHub>,
+    ) -> std::result::Result<Value, String> {
+        actor.publish_tools = github.tools();
+        let space = actor.host.spaces().unwrap().remove(0).space;
+        let (reply, answer) = async_channel::bounded(1);
+        let command = Command::MoveStorage {
+            space_id: space.id,
+            repository: Some(crate::sync::tests::NAME.into()),
+        };
+        actor.process(Event::Command(command, reply));
+        loop {
+            if let Ok(answer) = answer.try_recv() {
+                return answer;
+            }
+            actor.handle(events.recv_blocking().unwrap());
+        }
+    }
+
+    #[test]
+    fn a_storage_move_runs_through_its_steps_and_answers_once_the_space_switched() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(crate::sync::tests::GitHub::new(folder.path(), false));
+        let (_home, host) = crate::storage::tests::host();
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(8);
+        actor.sender = sender;
+        let moved = move_through_actor(&mut actor, &events, &github).unwrap();
+        let record: SpaceRecord = serde_json::from_value(moved).unwrap();
+        assert_eq!(
+            record.space.storage.repository.key(),
+            crate::sync::tests::NAME
+        );
+        assert!(!actor.host.storage_moving);
+        assert!(github.show(storage::TRACKER).is_some());
+    }
+
+    #[test]
+    fn a_storage_move_that_fails_answers_why_and_sync_passes_start_again() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(crate::sync::tests::GitHub::new(folder.path(), false));
+        let (_home, mut host) = crate::storage::tests::host();
+        let space = host.spaces().unwrap().remove(0).space;
+        host.gh_login = Some("mhohlios".into());
+        let new = NewIssue {
+            title: "Call".into(),
+            description: "Call the parent at (415) 555-0134 tonight.\n".into(),
+            ..NewIssue::default()
+        };
+        host.create_issue(&space.id, new).unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(8);
+        actor.sender = sender;
+        let error = move_through_actor(&mut actor, &events, &github).unwrap_err();
+        assert!(error.contains("sensitive-info"), "{error}");
+        assert!(!actor.host.storage_moving);
+    }
+
+    #[test]
+    fn a_second_storage_move_refused_leaves_the_first_ones_gate_shut() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(crate::sync::tests::GitHub::new(folder.path(), false));
+        let (_home, mut host) = crate::storage::tests::host();
+        let space = host.spaces().unwrap().remove(0).space;
+        let staged =
+            storage::stage(&host.home, crate::sync::tests::NAME, &github.tools(), &[]).unwrap();
+        let _first = host.begin_storage_move(&space.id, Some(staged)).unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(8);
+        actor.sender = sender;
+        let error = move_through_actor(&mut actor, &events, &github).unwrap_err();
+        assert_eq!(error, "Another storage move is running.");
+        assert!(actor.host.storage_moving, "the first move still holds it");
+    }
+
+    #[test]
+    fn a_pass_already_started_refuses_a_storage_move() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(crate::sync::tests::GitHub::new(folder.path(), false));
+        let (_home, host) = crate::storage::tests::host();
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(8);
+        actor.sender = sender;
+        let mut pace = repos::Pace::every(&[1]);
+        assert!(pace.start(now()));
+        actor.storage_paces.insert("sage".into(), pace);
+        let error = move_through_actor(&mut actor, &events, &github).unwrap_err();
+        assert_eq!(error, "Sync is running. Try again in a moment.");
+    }
+
     /// An idle actor whose fake `gh` is signed in as `jlin` and counts reads of the account. Its
     /// events arrive on the receiver.
     fn login_actor(host: Host) -> (Actor, Receiver<Event>, Arc<AtomicUsize>) {
@@ -6505,6 +6751,44 @@ mod tests {
             .host
             .create_project_from(&briefed, "Chained", "Do", None)
             .unwrap();
+    }
+
+    #[test]
+    fn answering_a_repository_request_resumes_the_coordinator_with_its_one_result() {
+        for answer in ["approved", "denied"] {
+            let home = tempfile::tempdir().unwrap();
+            let repository = tempfile::tempdir().unwrap();
+            crate::test_support::git(repository.path(), &["init", "-q", "-b", "main"]);
+            crate::test_support::git(
+                repository.path(),
+                &["commit", "--allow-empty", "-m", "Initial"],
+            );
+            let mut host = Host::open_set_up(home.path()).unwrap();
+            let project = host.create_project("Mudling").unwrap();
+            let coordinator = host.sessions().unwrap().remove(0);
+            let folder = repository.path().to_str().unwrap();
+            let args = json!({"repository": folder, "reason": "The registry lives there"});
+            host.agent_tool(&coordinator.id, "request_repository", args)
+                .unwrap();
+            let item = host.open_attention(&project.id).unwrap().remove(0);
+            let (mut actor, ..) = idle_actor(host);
+            assert!(!actor.host.live_projects().unwrap().contains(&project.id));
+            command(
+                &mut actor,
+                Command::ResolveAttention {
+                    id: item.id.clone(),
+                    answer: answer.into(),
+                },
+            )
+            .unwrap();
+            let live = actor.host.live_projects().unwrap();
+            assert!(live.contains(&project.id), "the answer starts its turn");
+            let messages = actor.host.messages(&coordinator.id, None, 10).unwrap();
+            let [result] = &messages[..] else {
+                panic!("{messages:?}");
+            };
+            assert_eq!(result.id, item.operation_id);
+        }
     }
 
     #[test]

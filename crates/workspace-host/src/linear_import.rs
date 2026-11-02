@@ -428,6 +428,10 @@ pub(crate) struct Linear {
     pub(crate) status: Option<LinearImportStatus>,
 }
 impl Linear {
+    /// An import is writing to its tracker.
+    pub(crate) fn running(&self) -> bool {
+        self.run.is_some()
+    }
     pub(crate) fn new(tools: Tools) -> Self {
         Self {
             tools,

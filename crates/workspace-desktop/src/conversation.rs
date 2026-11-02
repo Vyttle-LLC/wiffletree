@@ -1235,6 +1235,7 @@ mod tests {
             prompt: "Which way?".to_owned(),
             options: Vec::new(),
             answer: None,
+            repository_request: None,
         }
     }
 

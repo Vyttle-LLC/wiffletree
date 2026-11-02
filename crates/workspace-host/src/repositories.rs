@@ -388,6 +388,14 @@ pub(crate) fn read_origin(repository: &Path) -> Origin {
     }
 }
 
+/// The `owner/name` of the repository at `path`, read on disk.
+pub(crate) fn origin_identity(path: &Path) -> Option<String> {
+    match read_origin(path) {
+        Origin::GitHub { owner, name, .. } => Some(format!("{owner}/{name}")),
+        _ => None,
+    }
+}
+
 /// A repository as stored, for a read off the host thread.
 pub(crate) struct GitHubInput {
     pub id: String,
@@ -608,13 +616,13 @@ impl Host {
             .collect())
     }
 
-    /// Refuses a repository `project` does not use, saying what the human can do about it.
+    /// Refuses a repository `project` does not use, saying how to ask for it.
     pub(crate) fn ensure_uses(&self, project: &Project, repository: &Repository) -> Result<()> {
         let space = self.space(&project.space)?.space;
         let open_tickets = open_ticket_repositories(&self.db)?;
         ensure!(
             (project.repository_use(repository, Some(&space), &open_tickets)).is_some(),
-            "Project {project} does not use repository {repository}: {space} does not list it and it was not added to this project. Ask the human to add it to {space} on the Repositories page, or to this project from its Overview.",
+            "Project {project} does not use repository {repository}: {space} does not list it and it was not added to this project. A coordinator asks for it with request_repository, and the human answers in the Inbox.",
             project = project.name,
             repository = repository.name,
             space = space.name,
@@ -810,7 +818,7 @@ impl Host {
     }
 
     /// Adds repositories to a project, keeping those added before.
-    fn include_repositories(&mut self, project: &str, ids: &[String]) -> Result<()> {
+    pub(crate) fn include_repositories(&mut self, project: &str, ids: &[String]) -> Result<()> {
         let project = self.project(project)?;
         let added = &project.added_repositories;
         let missing: Vec<_> = ids.iter().filter(|id| !added.contains(id)).collect();
@@ -985,10 +993,9 @@ impl Host {
     /// The `owner/name` of the clone at `path`, unless the workspace already has that
     /// repository: another clone of one the human took out of a Space must not bring it back.
     fn first_found_identity(&self, path: &str) -> Result<Option<String>> {
-        let Origin::GitHub { owner, name, .. } = read_origin(Path::new(path)) else {
+        let Some(identity) = origin_identity(Path::new(path)) else {
             return Ok(None);
         };
-        let identity = format!("{owner}/{name}");
         let known = self.repositories()?.iter().any(|r| r.is_github(&identity));
         Ok((!known).then_some(identity))
     }

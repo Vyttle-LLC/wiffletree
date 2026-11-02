@@ -48,6 +48,7 @@ pub mod remote;
 mod repos;
 mod repositories;
 mod repository_reads;
+mod repository_requests;
 mod revisions;
 mod router;
 pub mod runtime;
@@ -63,6 +64,7 @@ mod spaces;
 mod stacks;
 mod steps;
 mod storage;
+mod storage_move;
 mod stream;
 mod sync;
 mod telemetry;
@@ -170,6 +172,8 @@ pub struct Host {
     pub(crate) sync_passes: std::sync::Arc<std::sync::Mutex<()>>,
     /// What the latest sync pass did; see `sync`.
     pub(crate) sync: sync::Synced,
+    /// A storage move is running, so no sync pass starts; see `storage_move`.
+    pub(crate) storage_moving: bool,
     /// The GitHub storage repositories, by `repos::key`, the host wrote to since their sync took
     /// this; see `storage`.
     pub(crate) storage_written: std::cell::RefCell<std::collections::BTreeSet<String>>,
@@ -287,6 +291,7 @@ fn ensure_unreserved(operation: &str) -> Result<()> {
         BRAIN_NOTICE_PREFIX,
         PUBLISH_PREFIX,
         MERGE_PREFIX,
+        REPOSITORY_REQUEST_PREFIX,
         PERMISSION_PREFIX,
     ] {
         ensure!(
@@ -306,6 +311,9 @@ enum Delivery {
     /// Starts a turn and is never refused for a full queue; see `send_human_notice` and
     /// `send_publish_result`.
     PastCap,
+    /// Like `PastCap`, and an archived recipient keeps it for when it is restored; see
+    /// `send_repository_result`.
+    PastArchive,
 }
 pub(crate) fn text(value: &str, maximum: usize) -> Result<()> {
     ensure!(
@@ -407,6 +415,7 @@ impl Host {
             shared_written: Default::default(),
             shared_writes: Default::default(),
             sync_passes: Default::default(),
+            storage_moving: false,
             sync: Default::default(),
             storage_written: Default::default(),
             issues_written: Default::default(),
@@ -1234,6 +1243,16 @@ impl Host {
     ) -> Result<Message> {
         self.queue(id, None, recipient, body, &[], &[], Delivery::PastCap)
     }
+    /// Queues a repository request's one result. Archiving a project archives its coordinator,
+    /// which must still learn why nothing was added, so it reads this on restore.
+    pub(crate) fn send_repository_result(
+        &mut self,
+        id: &str,
+        recipient: &str,
+        body: &str,
+    ) -> Result<Message> {
+        self.queue(id, None, recipient, body, &[], &[], Delivery::PastArchive)
+    }
     /// `uploads` are the upload ids `files` ends with, recorded with the message.
     #[allow(clippy::too_many_arguments)]
     fn queue(
@@ -1259,7 +1278,7 @@ impl Host {
         }
         let target = self.session(recipient)?;
         ensure!(
-            !target.archived,
+            !target.archived || delivery == Delivery::PastArchive,
             "{} is archived; restore it before sending",
             target.name
         );
@@ -1298,7 +1317,7 @@ impl Host {
             |r| r.get(0),
         )?;
         ensure!(
-            queued < 1024 || delivery == Delivery::PastCap,
+            queued < 1024 || matches!(delivery, Delivery::PastCap | Delivery::PastArchive),
             "Recipient queue is full; accepted messages are preserved"
         );
         if target.role.is_thread() {
@@ -1414,6 +1433,18 @@ impl Host {
         prompt: &str,
         options: &[String],
     ) -> Result<Attention> {
+        self.raise_attention(session, host, operation, prompt, options, None)
+    }
+    /// Raises an inbox item, or returns the one this session already raised for `operation`.
+    pub(crate) fn raise_attention(
+        &mut self,
+        session: &str,
+        host: &str,
+        operation: &str,
+        prompt: &str,
+        options: &[String],
+        repository_request: Option<RepositoryRequest>,
+    ) -> Result<Attention> {
         text(host, 128)?;
         text(operation, 128)?;
         text(prompt, 4096)?;
@@ -1446,6 +1477,7 @@ impl Host {
             prompt: prompt.into(),
             options: options.to_vec(),
             answer: None,
+            repository_request,
         };
         // A savepoint, so a note can be raised inside another change, such as an archive.
         let tx = self.db.savepoint()?;
@@ -1937,7 +1969,7 @@ impl Host {
             } => serde_json::to_value(self.set_setup(&selection, verification)?)?,
             Command::DismissModelNotes => serde_json::to_value(self.dismiss_model_notes()?)?,
             Command::ResolveAttention { id, answer } => {
-                serde_json::to_value(self.resolve_attention(&id, &answer)?)?
+                serde_json::to_value(self.answer_attention(&id, &answer)?)?
             }
             Command::DismissAttention { id } => serde_json::to_value(self.dismiss_attention(&id)?)?,
             Command::AppendLog { input } => serde_json::to_value(self.append_log(input)?)?,
@@ -2186,6 +2218,26 @@ impl Host {
                 serde_json::to_value(
                     storage::stage(&self.home, &repository, &tools, &added)?.check,
                 )?
+            }
+            Command::CheckStorageMove {
+                space_id,
+                repository,
+            } => {
+                self.precheck_storage_move(&space_id)?;
+                let added = self.space_ids()?;
+                let tools = publish::Tools::default();
+                let staged = repository
+                    .map(|input| storage::stage(&self.home, &input, &tools, &added))
+                    .transpose()?;
+                serde_json::to_value(self.check_storage_move(&space_id, staged.as_ref())?)?
+            }
+            Command::MoveStorage {
+                space_id,
+                repository,
+            } => {
+                let tools = publish::Tools::default();
+                let moved = self.move_storage(&space_id, repository.as_deref(), &tools)?;
+                serde_json::to_value(moved)?
             }
             Command::JoinSpaces {
                 repository,

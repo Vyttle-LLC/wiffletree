@@ -262,6 +262,16 @@ impl SpacesPage {
                 cx.listener(move |view, _, window, cx| view.open_bring_in(&shown, window, cx)),
             )
         });
+        // To another repository, the folder and every Space here in it.
+        let moved = space.clone();
+        let move_storage =
+            ui::gated(
+                button("space-move-storage").label("Move…"),
+                &self.shared.host,
+            )
+            .on_click(cx.listener(move |view, _, window, cx| {
+                view.open_move_storage(moved.clone(), window, cx)
+            }));
         // The repository's own files still at its root: one commit moves them into the folder.
         let move_into = (is_shared(space) && space.storage.root.is_empty()).then(|| {
             let space_id = space.id.clone();
@@ -292,6 +302,7 @@ impl SpacesPage {
             .children(sync_now)
             .children(import)
             .children(bring_in)
+            .child(move_storage)
             .children(move_into)
             .child(div().flex_1())
             .children(open_issues)

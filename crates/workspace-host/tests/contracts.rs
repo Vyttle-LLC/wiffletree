@@ -38,6 +38,7 @@ fn the_tool_list_offers_ticket_tools_and_no_repository_coordinator_tools() {
             "workspace_context",
             "create_ticket",
             "create_project",
+            "request_repository",
             "assign_ticket",
             "verify_ticket",
             "send_message",
@@ -349,6 +350,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
     for tool in [
         "create_ticket",
         "create_project",
+        "request_repository",
         "assign_ticket",
         "verify_ticket",
         "triage_findings",

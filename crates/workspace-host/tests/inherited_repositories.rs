@@ -130,7 +130,7 @@ fn a_refusal_names_the_space_and_the_way_forward() {
     let refused = f.ticket(&f.web.clone(), "Work").unwrap_err();
     assert_eq!(
         format!("{refused:#}"),
-        "Project Calls does not use repository web: Vyttle does not list it and it was not added to this project. Ask the human to add it to Vyttle on the Repositories page, or to this project from its Overview."
+        "Project Calls does not use repository web: Vyttle does not list it and it was not added to this project. A coordinator asks for it with request_repository, and the human answers in the Inbox."
     );
 }
 

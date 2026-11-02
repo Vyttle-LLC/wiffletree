@@ -41,6 +41,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::Settings
         | Command::CheckSettingsRepository { .. }
         | Command::CheckStorageRepository { .. }
+        | Command::CheckStorageMove { .. }
         | Command::ComparePausedFile { .. }
         | Command::SkillHistory { .. }
         | Command::SkillMergeReview { .. }
@@ -143,6 +144,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::SetFollowedRoots { .. }
         | Command::ConfirmRepositorySuggestions { .. }
         | Command::JoinSpaces { .. }
+        | Command::MoveStorage { .. }
         | Command::SetTrackerPrefix { .. }
         | Command::SetUpIssues { .. }
         | Command::MoveIntoFolder { .. }

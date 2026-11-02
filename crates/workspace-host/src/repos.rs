@@ -43,12 +43,7 @@ pub(crate) fn key(name: &str) -> String {
 /// log line.
 pub(crate) fn migrate_clone_folders(db: &Connection, home: &Path) -> Result<()> {
     let root = home.join(FOLDER);
-    let moves: Vec<(String, String)> = (db.prepare("SELECT from_path,to_path FROM repo_moves")?)
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    for (from, to) in moves {
-        finish_move(db, &root, &from, &to)?;
-    }
+    finish_moves(db, home)?;
     let recorded = recorded_repositories(db, home)?;
     let Ok(entries) = fs::read_dir(&root) else {
         return Ok(());
@@ -139,6 +134,18 @@ pub(crate) fn migrate_records(db: &Connection, home: &Path) -> Result<()> {
     )?;
     tx.execute_batch("DROP TABLE sync_record_unkeyed; DROP TABLE sync_paused_unkeyed;")?;
     tx.commit()?;
+    Ok(())
+}
+
+/// Makes every rename `repo_moves` records.
+pub(crate) fn finish_moves(db: &Connection, home: &Path) -> Result<()> {
+    let root = home.join(FOLDER);
+    let moves: Vec<(String, String)> = (db.prepare("SELECT from_path,to_path FROM repo_moves")?)
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (from, to) in moves {
+        finish_move(db, &root, &from, &to)?;
+    }
     Ok(())
 }
 
@@ -635,7 +642,7 @@ pub(crate) fn files_at(
 }
 
 /// Stages exactly the content a pass read, so no file written since reaches the commit.
-fn stage(clone: &Path, files: &[(String, Content)]) -> Result<()> {
+pub(crate) fn stage(clone: &Path, files: &[(String, Content)]) -> Result<()> {
     let mut index = vec![];
     for (path, content) in files {
         let entry = match content {
@@ -796,9 +803,22 @@ impl Record {
         written: &BTreeMap<String, Vec<u8>>,
         owns: &dyn Fn(&str) -> bool,
     ) -> Result<()> {
+        let tx = db.unchecked_transaction()?;
+        Self::restart_within(&tx, repository, head, synced, written, owns)?;
+        tx.commit()?;
+        Ok(())
+    }
+    /// `restart`, within a transaction the caller holds.
+    pub(crate) fn restart_within(
+        tx: &Connection,
+        repository: &str,
+        head: &str,
+        synced: &BTreeMap<String, Vec<u8>>,
+        written: &BTreeMap<String, Vec<u8>>,
+        owns: &dyn Fn(&str) -> bool,
+    ) -> Result<()> {
         let paths: std::collections::BTreeSet<&String> =
             synced.keys().chain(written.keys()).collect();
-        let tx = db.unchecked_transaction()?;
         for table in ["sync_record", "sync_paused", "sync_held"] {
             let listed: Vec<String> = (tx
                 .prepare(&format!("SELECT path FROM {table} WHERE repository=?1"))?)
@@ -821,7 +841,6 @@ impl Record {
                 params![repository, path, synced.get(path), written.get(path)],
             )?;
         }
-        tx.commit()?;
         Ok(())
     }
     /// Notes that the host wrote `content` to `path` of the repository's clone, `None` for a file

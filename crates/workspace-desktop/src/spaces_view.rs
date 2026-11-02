@@ -173,6 +173,18 @@ impl SpacesPage {
         cx.notify();
     }
 
+    /// Opens Move… for the Space, and reads its storage again once it moved.
+    fn open_move_storage(&mut self, space: Space, window: &mut Window, cx: &mut Context<Self>) {
+        let (bridge, shared) = (self.bridge.clone(), self.shared.clone());
+        let sheet = storage_move_view::open(bridge, shared, space, window, cx);
+        cx.subscribe_in(
+            &sheet,
+            window,
+            |view, _, _: &storage_move_view::Moved, window, cx| view.read_storage(window, cx),
+        )
+        .detach();
+    }
+
     /// Redraws while shown, loads the shown Space into the form, and reads its storage again
     /// once the reading is old or is another Space's, as after the shown one is removed, or once
     /// a storage pass for it finished.
@@ -1035,7 +1047,7 @@ fn merged(read: &Space, form: &Space, latest: &Space) -> Space {
 }
 
 /// This Mac's home, which paths on the page and in the dialog show as `~`.
-fn home() -> Option<String> {
+pub(super) fn home() -> Option<String> {
     std::env::var("HOME").ok()
 }
 
@@ -1130,7 +1142,7 @@ pub(super) fn is_shared(space: &Space) -> bool {
 }
 
 /// Who `readers` are, as a sentence about `repository`.
-fn readers_sentence(readers: Readers, repository: &str) -> String {
+pub(super) fn readers_sentence(readers: Readers, repository: &str) -> String {
     let owner = repository_owner(repository);
     match readers {
         Readers::Invited => format!("Only you and people you invite can read {repository}."),

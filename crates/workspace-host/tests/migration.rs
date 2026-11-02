@@ -194,6 +194,7 @@ fn fixture() -> Fixture {
         prompt: "team requests Bash".into(),
         options: vec![],
         answer: None,
+        repository_request: None,
     };
     db.execute(
         "INSERT INTO attention VALUES (?1,?2,?3,?4,?5)",

@@ -61,6 +61,7 @@ mod sidebar;
 mod skills_view;
 mod spaces_view;
 mod staging;
+mod storage_move_view;
 mod team_view;
 #[cfg(test)]
 mod test_support;
@@ -1872,6 +1873,7 @@ mod tests {
             prompt: "Push?".into(),
             options: vec![],
             answer: None,
+            repository_request: None,
         };
         let with_publish = |stamp| {
             let index = index(stamp);

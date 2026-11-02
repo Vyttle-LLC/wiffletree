@@ -1911,6 +1911,7 @@ mod tests {
             prompt: "Q".into(),
             options: Vec::new(),
             answer: None,
+            repository_request: None,
         };
         let note = WorkspaceNote::Paused(workspace_core::PausedSetting {
             path: "skills/implementing/".into(),

@@ -955,6 +955,7 @@ impl Host {
                     repositories,
                 )?)?)
             }
+            "request_repository" => self.request_repository(&session, &args),
             "assign_ticket" => {
                 let ticket = self.owned_ticket(id, string("ticket_id")?)?;
                 ensure!(ticket.is_open(), "Ticket is already {}", ticket.state);

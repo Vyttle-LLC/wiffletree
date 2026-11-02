@@ -1053,6 +1053,9 @@ impl Host {
     }
     /// The pass sync runs next, or `None` while no settings repository is chosen.
     pub(crate) fn sync_pass(&mut self) -> Result<Option<Pass>> {
+        if self.storage_moving {
+            return Ok(None);
+        }
         let Some(repository) = self.settings().settings_repository else {
             return Ok(None);
         };

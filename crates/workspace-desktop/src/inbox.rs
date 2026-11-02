@@ -4,6 +4,7 @@ use super::*;
 use file_links::Linked;
 use gpui_component::button::ButtonVariants;
 use gpui_component::input::InputState;
+use repository_tree::shown_path;
 use std::collections::HashMap;
 use ui::{card, hint, mono, pill};
 
@@ -219,10 +220,13 @@ impl Inbox {
             } else {
                 pill("Question", p.focus)
             });
-        let (body, actions) = match self.approval_card(item) {
-            Some(approval) => approval_card(item.id.clone(), approval, &self.shared.host, p, cx),
-            None if item.is_permission() => self.permission(item, p, cx),
-            None => self.question(item, answering, max_height.is_none(), p, cx),
+        let (body, actions) = match (self.approval_card(item), &item.repository_request) {
+            (Some(approval), _) => {
+                approval_card(item.id.clone(), approval, &self.shared.host, p, cx)
+            }
+            (None, Some(request)) => self.repository_request(item, request, p, cx),
+            (None, None) if item.is_permission() => self.permission(item, p, cx),
+            (None, None) => self.question(item, answering, max_height.is_none(), p, cx),
         };
         let body = body.flex().flex_col().gap_2();
         let entry = card(p).child(header);
@@ -269,6 +273,79 @@ impl Inbox {
                         v.resolve_attention(&approve, "approved", w, c)
                     })),
             );
+        (body, actions)
+    }
+    /// A coordinator's repository request: what would be added, why, which Spaces list it and
+    /// which this project is in. Approving changes this project only, so no Space is offered.
+    fn repository_request(
+        &self,
+        item: &Attention,
+        request: &RepositoryRequest,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> (Div, Div) {
+        let snapshot = self.shared.snapshot();
+        let spaces = snapshot.map_or(&[][..], |s| &s.spaces);
+        let space_name = |space: &Space| -> AnyElement {
+            div()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .child(spaces_view::space_mark(spaces_view::space_color(
+                    spaces, &space.id, p,
+                )))
+                .child(space.name.clone())
+                .into_any_element()
+        };
+        let listing = request.identity.as_deref().map_or(vec![], |identity| {
+            (spaces.iter())
+                .filter(|space| space.lists_named(identity))
+                .map(space_name)
+                .collect()
+        });
+        let listed_by = match listing.is_empty() {
+            true => div().child("No Space"),
+            false => div().flex().flex_wrap().gap_x_3().children(listing),
+        };
+        let project_space = snapshot.and_then(|snapshot| {
+            let project = (snapshot.projects.iter()).find(|p| p.id == item.project_id)?;
+            snapshot.space_of(project)
+        });
+        let folder = shown_path(&request.path, spaces_view::home().as_deref());
+        let (label, target) = match (&request.repository_id, &request.identity) {
+            (Some(_), Some(identity)) => ("Repository", identity.clone()),
+            (Some(_), None) => ("Repository", folder),
+            (None, _) => ("Folder", folder),
+        };
+        let rows = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(approval_row(label, code(target, p).into_any_element(), p))
+            .child(approval_row("Listed by", listed_by.into_any_element(), p))
+            .child(approval_row(
+                "This project",
+                div()
+                    .children(project_space.map(space_name))
+                    .into_any_element(),
+                p,
+            ));
+        let body = div()
+            .child(
+                div()
+                    .text_size(px(font::TEXT))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(request.title()),
+            )
+            .child(
+                div()
+                    .text_size(px(font::TEXT))
+                    .line_height(relative(1.5))
+                    .child(request.reason.clone()),
+            )
+            .child(rows);
+        let approve = "Add to this project";
+        let actions = approval_actions(item.id.clone(), approve, &self.shared.host, cx);
         (body, actions)
     }
     /// A question's prompt, choices and answer box, then Dismiss and Answer or Send answer.
@@ -589,6 +666,37 @@ impl Requests for Inbox {
     }
 }
 
+/// A repository or folder in full, wrapping rather than cut off: this is what approving adds.
+fn code(text: String, p: Palette) -> Div {
+    div().flex().child(
+        div()
+            .min_w_0()
+            .px_1()
+            .rounded(px(4.))
+            .bg(p.overlay)
+            .font_family(".SystemMonoFont")
+            .text_size(px(font::CAPTION))
+            .child(text),
+    )
+}
+
+/// One row of an approval card: its label, then its value.
+fn approval_row(label: &'static str, value: AnyElement, p: Palette) -> Div {
+    div()
+        .flex()
+        .gap_3()
+        .text_size(px(font::SMALL))
+        .line_height(relative(1.5))
+        .child(
+            div()
+                .w(px(104.))
+                .flex_none()
+                .text_color(p.subtle)
+                .child(label),
+        )
+        .child(div().flex_1().min_w_0().child(value))
+}
+
 /// A publish or merge approval: what would leave the machine or merge, then Deny and the
 /// request's own approve button.
 fn approval_card(
@@ -598,21 +706,7 @@ fn approval_card(
     p: Palette,
     cx: &mut Context<Inbox>,
 ) -> (Div, Div) {
-    let row = |label: &'static str, value: AnyElement| {
-        div()
-            .flex()
-            .gap_3()
-            .text_size(px(font::SMALL))
-            .line_height(relative(1.5))
-            .child(
-                div()
-                    .w(px(104.))
-                    .flex_none()
-                    .text_color(p.subtle)
-                    .child(label),
-            )
-            .child(div().flex_1().min_w_0().child(value))
-    };
+    let row = |label, value| approval_row(label, value, p);
     let mut rows = div().flex().flex_col().gap_1();
     for (label, value) in card.rows {
         rows = rows.child(row(label, value.into_any_element()));
@@ -631,7 +725,6 @@ fn approval_card(
         let block = div().p_2().rounded_md().bg(p.overlay).child(description);
         rows = rows.child(row("Description", block.into_any_element()));
     }
-    let approve = id.clone();
     let body = div()
         .child(
             div()
@@ -641,7 +734,18 @@ fn approval_card(
         )
         .child(rows)
         .child(hint(card.note, p));
-    let actions = div()
+    (body, approval_actions(id, card.approve, host, cx))
+}
+
+/// Deny and the request's approve button, which answer the item `id` and nothing else.
+fn approval_actions(
+    id: String,
+    approve: &'static str,
+    host: &HostView,
+    cx: &mut Context<Inbox>,
+) -> Div {
+    let approved = id.clone();
+    div()
         .flex()
         .justify_end()
         .gap_2()
@@ -653,13 +757,12 @@ fn approval_card(
                 .on_click(cx.listener(move |v, _, w, c| v.resolve_attention(&id, "denied", w, c))),
         )
         .child(
-            button(SharedString::from(format!("approve-{approve}")))
+            button(SharedString::from(format!("approve-{approved}")))
                 .primary()
-                .label(card.approve)
+                .label(approve)
                 .map(|b| ui::gated(b, host))
                 .on_click(
-                    cx.listener(move |v, _, w, c| v.resolve_attention(&approve, "approved", w, c)),
+                    cx.listener(move |v, _, w, c| v.resolve_attention(&approved, "approved", w, c)),
                 ),
-        );
-    (body, actions)
+        )
 }
