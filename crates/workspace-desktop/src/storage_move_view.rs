@@ -297,7 +297,10 @@ fn plan_banners(plan: &StorageMove, p: Palette) -> Vec<Div> {
             .child(div().font_weight(FontWeight::SEMIBOLD).child("What moves")),
         |lines, line| lines.child(format!("• {line}")),
     );
-    if let Some(line) = keeps_reading(plan) {
+    for line in [stays_behind(plan), keeps_reading(plan)]
+        .into_iter()
+        .flatten()
+    {
         lines = lines.child(line);
     }
     vec![
@@ -349,6 +352,16 @@ fn what_moves(plan: &StorageMove) -> Vec<String> {
     spaces.chain(tracker).collect()
 }
 
+/// Where the logs and wiki stay when the Space takes on a tracker that already holds its own.
+fn stays_behind(plan: &StorageMove) -> Option<String> {
+    plan.adopts.as_ref()?;
+    let old = plan
+        .leaves
+        .as_deref()
+        .unwrap_or("the local repository on this Mac");
+    Some(format!("Its logs and wiki stay in {old}."))
+}
+
 /// What a move between two GitHub repositories leaves behind.
 fn keeps_reading(plan: &StorageMove) -> Option<String> {
     let (leaves, repository) = (plan.leaves.as_ref()?, plan.repository.as_ref()?);
@@ -383,7 +396,9 @@ fn refusal_parts(refused: &str) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{keeps_reading, move_label, refusal_parts, starts_on_github, what_moves};
+    use super::{
+        keeps_reading, move_label, refusal_parts, starts_on_github, stays_behind, what_moves,
+    };
     use workspace_core::*;
 
     fn repository(name: &str) -> SettingsRepository {
@@ -468,6 +483,28 @@ mod tests {
             ..plan()
         };
         assert!(what_moves(&adopting)[1].contains("takes on SAGE"));
+    }
+
+    #[test]
+    fn only_taking_on_a_tracker_says_the_logs_and_wiki_stay_in_the_old_repository() {
+        assert_eq!(stays_behind(&plan()), None);
+        let from_github = StorageMove {
+            adopts: Some("SAGE".into()),
+            leaves: Some("Vyttle-LLC/old".into()),
+            ..plan()
+        };
+        assert_eq!(
+            stays_behind(&from_github).unwrap(),
+            "Its logs and wiki stay in Vyttle-LLC/old."
+        );
+        let from_this_mac = StorageMove {
+            leaves: None,
+            ..from_github
+        };
+        assert_eq!(
+            stays_behind(&from_this_mac).unwrap(),
+            "Its logs and wiki stay in the local repository on this Mac."
+        );
     }
 
     #[test]
