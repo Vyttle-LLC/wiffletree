@@ -2532,9 +2532,13 @@ impl Actor {
             } => {
                 let copying =
                     staged.and_then(|s| self.copy_storage_move(&space_id, Some(s), reply.clone()));
+                // Refused before it began, so the gate is another move's, if anyone's.
                 match copying {
                     Ok(()) => false,
-                    Err(error) => self.storage_move_failed(error, &reply),
+                    Err(error) => {
+                        let _ = reply.try_send(Err(format!("{error:#}")));
+                        true
+                    }
                 }
             }
             Event::StorageMoveCopied(run, copied, reply) => {
@@ -6002,6 +6006,23 @@ mod tests {
         let error = move_through_actor(&mut actor, &events, &github).unwrap_err();
         assert!(error.contains("sensitive-info"), "{error}");
         assert!(!actor.host.storage_moving);
+    }
+
+    #[test]
+    fn a_second_storage_move_refused_leaves_the_first_ones_gate_shut() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(crate::sync::tests::GitHub::new(folder.path(), false));
+        let (_home, mut host) = crate::storage::tests::host();
+        let space = host.spaces().unwrap().remove(0).space;
+        let staged =
+            storage::stage(&host.home, crate::sync::tests::NAME, &github.tools(), &[]).unwrap();
+        let _first = host.begin_storage_move(&space.id, Some(staged)).unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(8);
+        actor.sender = sender;
+        let error = move_through_actor(&mut actor, &events, &github).unwrap_err();
+        assert_eq!(error, "Another storage move is running.");
+        assert!(actor.host.storage_moving, "the first move still holds it");
     }
 
     #[test]
