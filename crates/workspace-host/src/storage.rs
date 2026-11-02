@@ -800,7 +800,7 @@ impl RuleSet for WholeFiles {
             {
                 let by = match paused.is_empty() {
                     true => String::new(),
-                    false => issues_sync::last_author(clone, remote, path),
+                    false => issues_sync::last_author(clone, remote, &self.root, path),
                 };
                 for (part, theirs) in paused {
                     let path = path.clone();

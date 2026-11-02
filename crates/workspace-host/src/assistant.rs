@@ -646,14 +646,10 @@ impl Host {
             return None;
         }
         let clone = self.storage_folder(&space.storage.repository);
-        let file = format!("spaces/{}/space.yaml", space.storage.folder);
-        let file = format!(
-            ":(literal){}",
-            folder::Root::new(&space.storage.root).join(&file)
-        );
-        let args = ["log", "-1", "--format=%an%x00%s", "--", file.as_str()];
-        let line = runtime::git_output(&clone, &args).ok()?;
-        let (author, subject) = line.trim_end().split_once('\0')?;
+        let root = folder::Root::new(&space.storage.root);
+        let file = root.join(&format!("spaces/{}/space.yaml", space.storage.folder));
+        let line = folder::last_change(&clone, "HEAD", &root, &file, "%an%x00%s")?;
+        let (author, subject) = line.split_once('\0')?;
         Some(sync::named(author, subject).to_owned())
     }
     /// What a thread's turn may use beyond reading: its scratch folder and its Space's

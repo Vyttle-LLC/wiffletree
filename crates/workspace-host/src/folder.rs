@@ -97,6 +97,40 @@ pub(crate) fn saves(clone: &Path, root: &Root, path: &str) -> Result<u32> {
     })
 }
 
+/// The last commit up to `rev` that changed the file at `path` of the repository, in `format` as
+/// `git log` writes it. A move into `root` only carried the file, so past the move's commit it is
+/// the last change at the old path. `None` when no commit changed it or history cannot be read.
+pub(crate) fn last_change(
+    clone: &Path,
+    rev: &str,
+    root: &Root,
+    path: &str,
+    format: &str,
+) -> Option<String> {
+    let log = |rev: &str, path: &str| -> Option<(String, String)> {
+        let format = format!("--format=%H%x00{format}");
+        let literal = format!(":(literal){path}");
+        let args = ["log", "-1", &format, rev, "--", &literal];
+        let line = runtime::git_output(clone, &args).ok()?;
+        let (commit, change) = line.trim_end().split_once('\0')?;
+        Some((commit.to_owned(), change.to_owned()))
+    };
+    let (commit, change) = log(rev, path)?;
+    match (root.moved_from(path)).filter(|old| only_moved(clone, &commit, path, old)) {
+        Some(old) => log(&format!("{commit}^"), old).map(|(_, change)| change),
+        None => Some(change),
+    }
+}
+
+/// Whether `commit` wrote at `path` exactly what its parent held at `old`.
+fn only_moved(clone: &Path, commit: &str, path: &str, old: &str) -> bool {
+    let blob = |object: String| {
+        runtime::git_output(clone, &["rev-parse", "--verify", "--quiet", &object]).ok()
+    };
+    blob(format!("{commit}^:{old}"))
+        .is_some_and(|before| blob(format!("{commit}:{path}")) == Some(before))
+}
+
 /// Whether `path`, at a repository's root, is one of the files a move carries.
 pub(crate) fn moves(path: &str) -> bool {
     !path.split('/').any(|part| part.starts_with('.'))
