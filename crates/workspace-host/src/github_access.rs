@@ -185,9 +185,8 @@ pub(crate) fn reader_count(
 }
 
 /// Reads the rulesets and branch protection on `branch` of the repository `name`, refusing a
-/// branch whose rules require pull requests, status checks, signed commits, a merge queue,
-/// deployments or workflows, or take no push, as Wiffletree pushes straight to it. Answers whether they protect its history: block force-pushes and
-/// deleting it.
+/// branch whose rules reject a plain push, as Wiffletree pushes straight to it. Answers whether
+/// they protect its history: block force-pushes and deleting it.
 pub(crate) fn direct_push(tools: &Tools, home: &Path, name: &str, branch: &str) -> Result<bool> {
     let cannot = |rule: &str| {
         anyhow::anyhow!(

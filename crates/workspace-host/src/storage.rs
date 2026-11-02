@@ -3299,6 +3299,9 @@ repository_settings:
             Some(json!({"required_signatures": {"enabled": true}}));
         assert!(refused(&github).starts_with("main requires signed commits"));
         assert!(!home.path().join("repos/github.com").exists());
+        *github.protection.lock().unwrap() =
+            Some(json!({"required_signatures": {"enabled": false}}));
+        assert!(stage(&host.home, NAME, &github.tools(), &[]).is_ok());
     }
 
     #[test]
