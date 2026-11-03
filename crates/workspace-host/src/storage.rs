@@ -3807,7 +3807,7 @@ repository_settings:
             !github
                 .show("spaces/sage/space.yaml")
                 .unwrap()
-                .contains("555")
+                .contains("555-0134")
         );
         let notes = host.workspace_notes(&[]).unwrap();
         let [WorkspaceNote::Held(held)] = notes.as_slice() else {
@@ -3819,7 +3819,7 @@ repository_settings:
         );
         assert_eq!(held.rule.as_deref(), Some("phone"));
         assert!(
-            !held.text.contains("555") && held.text.contains(NAME),
+            !held.text.contains("555-0134") && held.text.contains(NAME),
             "{}",
             held.text
         );

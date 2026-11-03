@@ -742,9 +742,12 @@ mod tests {
         assert!(alert.web_editor);
         let card = alert.found();
         assert!(card.contains("pushed from GitHub's web editor"), "{card}");
-        assert!(!card.contains("555") && !card.contains("415"), "{card}");
+        assert!(
+            !card.contains("555-0134") && !card.contains("(415)"),
+            "{card}"
+        );
         let shown = serde_json::to_string(&mac.host.alert_notes().unwrap()).unwrap();
-        assert!(!shown.contains("555"), "{shown}");
+        assert!(!shown.contains("555-0134"), "{shown}");
         mac.pull(&github);
         assert_eq!(mac.alerts().len(), 1, "a second pass raises nothing");
     }

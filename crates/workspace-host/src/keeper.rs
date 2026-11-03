@@ -5009,7 +5009,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_changed_patch_whose_checks_fail_is_dropped_before_the_branch_moves_and_told_once() {
-        let (mut f, r) = reviewing("exit 101");
+        let (mut f, r) = reviewing("echo CHECKS-OUTPUT; exit 101");
         let before = worktree(&f);
         let job = rebase_changed(&mut f, &r);
         assert!(job.checks.is_some());
@@ -5023,7 +5023,7 @@ pub(crate) mod tests {
             "{}",
             told[0].2
         );
-        assert!(!told[0].2.contains("101"));
+        assert!(!told[0].2.contains("CHECKS-OUTPUT"), "{}", told[0].2);
     }
 
     #[test]

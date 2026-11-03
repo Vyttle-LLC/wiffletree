@@ -3103,7 +3103,7 @@ mod tests {
             "{}",
             run.reason
         );
-        assert!(!run.reason.contains("555"), "{}", run.reason);
+        assert!(!run.reason.contains("555-0134"), "{}", run.reason);
         assert_eq!(
             b.github.log("%s").len(),
             commits,
