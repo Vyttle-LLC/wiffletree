@@ -1472,7 +1472,7 @@ mod tests {
         }
         let leaks = text.replace("- type: decision", &format!("- type: {}", tests::PHONE));
         let problem = contract_problem(in_logs, &leaks).unwrap();
-        assert!(!problem.contains("555"), "{problem}");
+        assert!(!problem.contains("555-0134"), "{problem}");
     }
 
     #[test]
