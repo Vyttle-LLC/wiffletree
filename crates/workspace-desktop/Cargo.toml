@@ -46,3 +46,5 @@ block2 = "=0.6.2"
 workspace-host.workspace = true
 tempfile = "3.23"
 rusqlite = { version = "0.40", features = ["bundled"] }
+# Windows whose clicks tests simulate.
+gpui = { package = "gpui-pre", version = "=0.3.8", features = ["test-support"] }
