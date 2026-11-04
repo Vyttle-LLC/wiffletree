@@ -450,6 +450,13 @@ impl Host {
                 "The app under test may not be given {name}: no Wiffletree session variable or token reaches it"
             );
         }
+        ensure!(
+            (target.arguments.iter())
+                .filter(|arg| *arg == "--data-dir")
+                .count()
+                <= 1,
+            "Give the app under test one --data-dir"
+        );
         let given_data = target
             .data_folder()
             .filter(|folder| Path::new(folder).is_absolute())
@@ -846,15 +853,24 @@ fn session_variable(name: &str) -> bool {
         || (name.starts_with("WORKSPACE_")
             && !["WORKSPACE_CLAUDE_BIN", "WORKSPACE_CODEX_BIN"].contains(&name))
 }
-/// `path` canonical, or for a folder not created yet, its canonical parent's entry.
+/// Absolute `path` as it will be once created: its deepest existing ancestor canonical, and
+/// the parts below it, which hold no link yet, with `.` and `..` applied.
 fn resolved(path: &Path) -> PathBuf {
-    fs::canonicalize(path)
-        .ok()
-        .or_else(|| {
-            let parent = fs::canonicalize(path.parent()?).ok()?;
-            Some(parent.join(path.file_name()?))
-        })
-        .unwrap_or_else(|| path.into())
+    let Some((existing, mut resolved)) =
+        (path.ancestors()).find_map(|ancestor| Some((ancestor, fs::canonicalize(ancestor).ok()?)))
+    else {
+        return path.into();
+    };
+    for part in path.strip_prefix(existing).unwrap_or(path).components() {
+        match part {
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            std::path::Component::Normal(name) => resolved.push(name),
+            _ => {}
+        }
+    }
+    resolved
 }
 
 /// Why a run ended when what its project allows no longer allows it.
@@ -991,6 +1007,10 @@ pub(crate) mod tests {
         let mut no_data = f.target(&data);
         no_data["arguments"] = json!(["--demo-repository", "/tmp/demo"]);
         assert!(refused(&mut f, no_data).contains("--data-dir"));
+        let own = f.host.home.to_string_lossy().into_owned();
+        let mut twice = f.target(&data);
+        twice["arguments"] = json!(["--data-dir", data, "--data-dir", own]);
+        assert!(refused(&mut f, twice).contains("one --data-dir"));
         let mut socket = f.target(&data);
         socket["arguments"] = json!(["--data-dir", data, "--automation-socket", "/tmp/s"]);
         assert!(refused(&mut f, socket).contains("--automation-socket"));
@@ -1045,6 +1065,19 @@ pub(crate) mod tests {
             f.runs.path().file_name().unwrap().to_string_lossy()
         );
         assert!(f.start_with(&second, "app", f.target(&other_path)).is_err());
+        // So is a profile two levels from being created, however it is spelled.
+        let fresh = f
+            .runs
+            .path()
+            .join("profiles")
+            .to_string_lossy()
+            .into_owned();
+        let third = f.folder("run-c");
+        let spelled = f.target(&format!("{fresh}/./test"));
+        f.start_with(&third, "app", spelled).unwrap();
+        let fourth = f.folder("run-d");
+        let plain = f.target(&format!("{fresh}/test"));
+        assert!(f.start_with(&fourth, "app", plain).is_err());
         let session = f.host.evaluation(&id).unwrap().session_id.unwrap();
         f.host
             .evaluation_turn_ended(&session, None, None, None)
