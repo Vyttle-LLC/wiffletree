@@ -6,9 +6,6 @@ use super::*;
 /// How long a test copy may take to answer on its socket with a window, as a debug build
 /// opening a fresh data folder can.
 pub(crate) const SOCKET_WAIT: Duration = Duration::from_secs(90);
-/// How long the copy and what it started have to exit after SIGTERM before they are killed. Its
-/// own host stops its agents on SIGTERM.
-const STOP_GRACE: Duration = Duration::from_secs(5);
 
 /// What an app run's turn starts and drives.
 #[derive(Clone, Debug)]
@@ -59,6 +56,7 @@ pub(crate) struct RunningTarget {
     /// their parent, so the stop finds every one of them.
     watch: Option<Watch>,
     run: String,
+    log: PathBuf,
 }
 impl RunningTarget {
     /// Starts the copy and returns once its socket answers with a window. A copy that exits
@@ -86,6 +84,7 @@ impl RunningTarget {
             child,
             socket: launch.socket.clone(),
             run,
+            log: launch.log.clone(),
         };
         running.wait_for_window(wait, cancel)?;
         Ok(running)
@@ -95,9 +94,12 @@ impl RunningTarget {
         let deadline = Instant::now() + wait;
         loop {
             check_running(cancel)?;
-            if let Some(status) = self.child.try_wait()? {
-                bail!("The app under test exited ({status}) before its automation socket answered");
-            }
+            // Not reaped here: the stop signals its group, which must still be its own.
+            ensure!(
+                !exited_unreaped(&self.child)?,
+                "The app under test exited before its automation socket answered; its output is in {}",
+                self.log.display()
+            );
             let error = match crate::app_driver::send(&self.socket, &json!({"do": "window"})) {
                 Ok(_) => return Ok(()),
                 Err(error) => error,
@@ -111,39 +113,21 @@ impl RunningTarget {
         }
     }
 
-    /// SIGTERM to the copy's group and the group of every process it started, then SIGKILL to
-    /// whatever is left after the grace period.
+    /// Stops the copy's group, then each group of what it started. The copy is reaped only at
+    /// the end, so until then neither its id nor its group's can name another process, and
+    /// each other group is signalled only while a process the watcher followed is alive in it.
     fn stop(&mut self) {
         let leader = self.child.id() as i32;
-        let followed = processes::followed_now(&self.run);
-        let mut groups: Vec<i32> = (followed.into_iter())
-            .chain(processes::descendants(leader))
-            .map(|process| process.group)
-            .filter(|group| *group > 1)
-            .collect();
-        groups.push(leader);
-        groups.sort_unstable();
-        groups.dedup();
-        let signal = |signal| {
-            for group in &groups {
-                // SAFETY: killpg only sends a signal to groups the copy's tree is in.
-                unsafe { libc::killpg(*group, signal) };
-            }
-        };
-        let mut settle = |grace: Duration| {
-            let deadline = Instant::now() + grace;
-            while Instant::now() < deadline {
-                let _ = self.child.try_wait();
-                if !groups.iter().any(|group| processes::group_runs(*group)) {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-        };
-        signal(libc::SIGTERM);
-        settle(STOP_GRACE);
-        signal(libc::SIGKILL);
-        settle(Duration::from_secs(1));
+        // Frozen while the watcher looks, so what it forked a moment ago is followed.
+        processes::stop_provider_group(leader, processes::look);
+        let mut groups: std::collections::HashMap<i32, Vec<processes::Member>> = Default::default();
+        for process in processes::followed_now(&self.run) {
+            let member = (i64::from(process.pid), process.started);
+            groups.entry(process.group).or_default().push(member);
+        }
+        for (group, members) in groups {
+            processes::stop_group(i64::from(group), &members);
+        }
         let _ = self.child.wait();
         drop(self.watch.take());
         processes::release(&self.run);
@@ -277,7 +261,9 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let error = std::thread::scope(|scope| {
             scope.spawn(|| {
-                while !folder.path().join("pid").exists() {
+                // Bounded, so a start that fails first cannot leave this waiting forever.
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !folder.path().join("pid").exists() && Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(10));
                 }
                 cancel.store(true, Ordering::Relaxed);
@@ -321,7 +307,32 @@ mod tests {
     }
 
     #[test]
-    fn a_copy_that_exits_fails_the_turn_with_its_status() {
+    fn a_copy_that_exits_keeps_its_id_until_the_stop_has_signalled_its_group() {
+        let folder = tempfile::tempdir().unwrap();
+        let launch = launch("/usr/bin/true", &[], folder.path());
+        let child = launch.command().spawn().unwrap();
+        let pid = child.id() as i32;
+        let run = format!("app-target:{pid}");
+        let mut running = RunningTarget {
+            watch: Some(Watch::start(pid, &run)),
+            child,
+            socket: launch.socket.clone(),
+            run,
+            log: launch.log.clone(),
+        };
+        let error = running
+            .wait_for_window(Duration::from_secs(10), &AtomicBool::new(false))
+            .unwrap_err();
+        assert!(error.to_string().contains("exited"), "{error:#}");
+        // Unreaped, so its id and its group's cannot name another process yet.
+        // SAFETY: signal-0 probes of the copy's id.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "reaped before its stop");
+        drop(running);
+        assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "never reaped");
+    }
+
+    #[test]
+    fn a_copy_that_exits_fails_the_turn() {
         let folder = tempfile::tempdir().unwrap();
         let launch = launch("/usr/bin/false", &[], folder.path());
         let cancel = AtomicBool::new(false);
