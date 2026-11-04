@@ -50,17 +50,55 @@ A run SHALL use only the provider, model and effort it was started with, and SHA
 
 ### Requirement: A run is blind and isolated by its provider
 
-A run SHALL have no shell, web, repository, brain, memory, history or workspace tools, and none of the human's provider instructions, settings, skills or MCP servers. It SHALL read and write only inside its run folder. Its first message SHALL be the content of `prompt.md` with nothing added, and no instructions SHALL be appended to its system prompt. Its environment SHALL carry no Wiffletree session variable. A Claude run that starts with another tool, an MCP server, another permission mode or auto memory SHALL be stopped; so SHALL a Codex run that calls any MCP tool.
+A run SHALL have no shell, web, repository, brain, memory, history or workspace tools, and none of the human's provider instructions, settings, skills or MCP servers. It SHALL read and write only inside its run folder. Its first message SHALL be the content of `prompt.md` with nothing added, and no instructions SHALL be appended to its system prompt. Its environment SHALL carry no Wiffletree session variable. A Claude run that starts with another tool, an MCP server other than an app run's driver, another permission mode or auto memory SHALL be stopped; so SHALL a Codex run that calls any MCP tool but its driver's.
 
 #### Scenario: Claude's launch
 
 - **WHEN** a Claude run starts
-- **THEN** it runs with no setting sources, a strict and empty MCP configuration, `dontAsk`, only the read and write file tools, and allow rules for its folder alone
+- **THEN** it runs with no setting sources, a strict MCP configuration holding only an app run's driver, `dontAsk`, only the read and write file tools, and allow rules for its folder alone
 
 #### Scenario: Codex's launch
 
 - **WHEN** a Codex run starts
 - **THEN** it ignores the user's config and rules, runs in a workspace-write sandbox rooted at its folder with no network or web search, has no shell, and uses a Codex home of its own that holds only the user's sign-in
+
+### Requirement: An app run drives a test copy the host starts
+
+An app run SHALL name its target: an absolute executable, its arguments with a test data folder given by `--data-dir`, and the variables it needs. The workspace SHALL refuse a target without its own data folder, one whose data folder overlaps Wiffletree's own or is used by another run that has not ended, one that gives `--automation-socket`, and one given a Wiffletree session variable or a token. Before the run's turn, the host SHALL start the copy with `--automation-socket` on a socket of the run's own, from a clean environment holding the given variables, a given `PATH` before its own and the switch that keeps the copy's host from adopting the login shell's environment, and SHALL fail the run with the reason when the socket does not answer. When the turn ends or is stopped, the host SHALL stop the copy and everything it started.
+
+#### Scenario: The copy starts
+
+- **WHEN** an app run's turn starts
+- **THEN** its copy runs on its own socket with no `WORKSPACE_TOKEN`, `WORKSPACE_SOCKET`, `GH_TOKEN` or `GITHUB_TOKEN`, with the given `PATH` first, and the provider starts only once the socket answers
+
+#### Scenario: The socket never answers
+
+- **WHEN** the copy exits or does not answer within the wait
+- **THEN** the run fails with that reason and the copy is stopped
+
+#### Scenario: Two runs on one data folder
+
+- **WHEN** a coordinator starts an app run on the data folder of a run that has not ended
+- **THEN** the call is refused, naming that run
+
+### Requirement: The app driver reaches only the copy's window
+
+An app run's only MCP server SHALL be the app driver, connected to its copy's socket, with the tools screenshot, click, double_click, right_click, move, type_text, key, scroll, drag, resize_window and window, in window points that match a screenshot at scale 1. A screenshot SHALL be saved as a PNG inside the run folder under the name the model gives and returned as an image with its pixel size and the window's scale. resize_window SHALL report the size reached. The app SHALL capture its own window, at one pixel per point or the display's scale, without Screen Recording permission; on macOS 27.0.1 this was measured from a launch with no grant.
+
+#### Scenario: A screenshot
+
+- **WHEN** the evaluator calls screenshot with the name `screenshots/models-dark` and scale native
+- **THEN** `screenshots/models-dark.png` in its folder holds the window at the display's scale, and the tool returns that image with its size and scale
+
+#### Scenario: A name outside the folder
+
+- **WHEN** the evaluator names a screenshot `../x.png`
+- **THEN** the tool refuses it and writes nothing
+
+#### Scenario: Another server or tool
+
+- **WHEN** a Claude app run starts with any MCP server but the connected driver, or a tool beyond its files and the driver's, or a Codex app run calls another server's tool
+- **THEN** the run is stopped
 
 ### Requirement: The human authorizes evaluators per project
 

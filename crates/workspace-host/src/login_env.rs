@@ -12,6 +12,9 @@ use std::{
 };
 
 const TIMEOUT: Duration = Duration::from_secs(10);
+/// Set, it keeps `serve` from adopting the login shell's environment, so the environment the
+/// host was started with stands.
+pub const SKIP: &str = "WORKSPACE_SKIP_LOGIN_ENV";
 
 /// Describe the terminal session the probe ran in, not the user's environment.
 const PER_SESSION: &[&str] = &[
