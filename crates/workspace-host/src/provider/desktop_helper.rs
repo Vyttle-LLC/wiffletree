@@ -73,7 +73,10 @@ pub fn helper_beside(executable: &Path) -> PathBuf {
 /// kills it if it has not quit within the grace period.
 pub(crate) struct RunningHelper {
     control: UnixStream,
+    /// The helper's process id and its start time when it answered: LaunchServices started
+    /// it, so the host cannot hold it unreaped, and a reused id names another process.
     pid: i32,
+    started: Option<i64>,
     socket: PathBuf,
     /// Why the human stopped the run, until the turn takes it.
     stopped: Arc<Mutex<Option<String>>>,
@@ -130,8 +133,10 @@ impl RunningHelper {
         let hello = &hello["result"];
         // macOS refuses this once the helper has closed its end, which the reader then sees.
         let _ = control.set_read_timeout(None);
+        let pid = hello["pid"].as_i64().unwrap_or_default() as i32;
         let mut helper = Self {
-            pid: hello["pid"].as_i64().unwrap_or_default() as i32,
+            pid,
+            started: (pid > 1).then(|| processes::process_start(pid)).flatten(),
             control,
             socket: socket.to_owned(),
             stopped: Default::default(),
@@ -183,12 +188,15 @@ impl Drop for RunningHelper {
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
+        // The helper still runs only while its id names the process that answered.
+        let runs = || self.started.is_some() && processes::process_start(self.pid) == self.started;
         let deadline = Instant::now() + QUIT_GRACE;
-        while self.pid > 1 && processes::read(self.pid).is_some() && Instant::now() < deadline {
+        while runs() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
         }
-        if self.pid > 1 && processes::read(self.pid).is_some() {
-            // SAFETY: a signal to the helper this turn started, which outlived its grace.
+        if runs() {
+            // SAFETY: a signal to the helper this turn started, confirmed by its start time,
+            // which outlived its grace.
             unsafe { libc::kill(self.pid, libc::SIGKILL) };
         }
         let _ = fs::remove_file(&self.socket);
@@ -390,6 +398,32 @@ mod tests {
             std::os::unix::process::ExitStatusExt::signal(&status),
             Some(libc::SIGKILL)
         );
+    }
+
+    /// macOS only, as above.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_process_that_took_the_helpers_id_is_never_killed() {
+        let folder = tempfile::tempdir().unwrap();
+        let socket = folder.path().join("h.sock");
+        let mut other = std::process::Command::new("/bin/sleep")
+            .arg("300")
+            .spawn()
+            .unwrap();
+        let closed = helper(&socket, granted(other.id()), vec![]);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut running = RunningHelper::connect(&socket, Duration::from_secs(5), &cancel).unwrap();
+        // As if the helper had exited and its id now named a process started later.
+        running.started = running.started.map(|started| started - 1);
+        drop(running);
+        closed.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            other.try_wait().unwrap(),
+            None,
+            "the other process was killed"
+        );
+        other.kill().unwrap();
+        other.wait().unwrap();
     }
 
     #[test]
