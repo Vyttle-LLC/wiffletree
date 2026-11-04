@@ -12,6 +12,7 @@ mod context;
 pub mod data_dir;
 #[cfg(target_os = "macos")]
 pub mod device_key;
+mod evaluation;
 mod files;
 mod host;
 pub mod host_copy;
@@ -44,6 +45,7 @@ pub use brain_browser::*;
 pub use client::*;
 pub use compile::*;
 pub use context::*;
+pub use evaluation::*;
 pub use files::*;
 pub use host::*;
 pub use index::WorkspaceIndex;
@@ -98,9 +100,12 @@ pub enum Role {
     /// One brain compile run: owned by the brain it compiles, outside every project and Space,
     /// writing only that brain's wiki in a worktree. Only the compile job starts one.
     Compiler,
+    /// One UI evaluator run: blind, on the model it was started with, outside every agent tree,
+    /// reading and writing only its run folder. Only `start_evaluation` starts one.
+    Evaluator,
 }
 impl Role {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::ProjectOrchestrator,
         Self::TaskOrchestrator,
         Self::Implementer,
@@ -111,6 +116,7 @@ impl Role {
         Self::Assistant,
         Self::JobRun,
         Self::Compiler,
+        Self::Evaluator,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -124,6 +130,7 @@ impl Role {
             Self::Assistant => "Assistant",
             Self::JobRun => "Job run",
             Self::Compiler => "Brain compiler",
+            Self::Evaluator => "UI evaluator",
         }
     }
     pub fn is_worker(self) -> bool {
@@ -134,6 +141,7 @@ impl Role {
                 | Self::Assistant
                 | Self::JobRun
                 | Self::Compiler
+                | Self::Evaluator
         )
     }
     /// A thread of the assistant or a job's run: owned by a Space, read-only but for its
@@ -178,7 +186,7 @@ impl Skill {
             Role::Tester | Role::Reviewer => Self::Reviewing,
             Role::Keeper => Self::KeepingAPr,
             Role::Assistant | Role::JobRun => Self::Assisting,
-            Role::Compiler => return None,
+            Role::Compiler | Role::Evaluator => return None,
         })
     }
     pub fn name(self) -> &'static str {
@@ -2682,6 +2690,9 @@ pub const MERGE_PREFIX: &str = "merge:";
 /// The id prefix of a repository request's Inbox item and of its result message. Only the host
 /// creates either.
 pub const REPOSITORY_REQUEST_PREFIX: &str = "repository:";
+/// The id prefix of the Inbox item that asks whether a project allows UI evaluators, and of the
+/// messages about evaluator runs. Only the host creates either.
+pub const EVALUATION_PREFIX: &str = "evaluation:";
 /// The id prefix of the Inbox item for a parked provider permission.
 pub const PERMISSION_PREFIX: &str = "permission:";
 /// The id prefix of the notices about the processes an agent left running and the ones the
@@ -2694,9 +2705,9 @@ const MIGRATION_PREFIX: &str = "migration:";
 /// carries another coordinator's words, never the human's.
 pub const PROJECT_BRIEF_PREFIX: &str = "project-brief:";
 /// The id prefixes of the host's other messages without a sender: verification results, kept
-/// worktrees, migration notices, publish, merge and repository request results, process notices
-/// and project briefs. Inbox answers (`answer:`) carry the human's words.
-const HOST_NOTICE_PREFIXES: [&str; 8] = [
+/// worktrees, migration notices, publish, merge and repository request results, process notices,
+/// project briefs and evaluator runs. Inbox answers (`answer:`) carry the human's words.
+const HOST_NOTICE_PREFIXES: [&str; 9] = [
     VERIFICATION_NOTICE_PREFIX,
     WORKTREE_KEPT_PREFIX,
     MIGRATION_PREFIX,
@@ -2705,6 +2716,7 @@ const HOST_NOTICE_PREFIXES: [&str; 8] = [
     REPOSITORY_REQUEST_PREFIX,
     PROCESS_NOTICE_PREFIX,
     PROJECT_BRIEF_PREFIX,
+    EVALUATION_PREFIX,
 ];
 /// A ticket's latest verification cycle: rounds of concurrent, commit-pinned verifier turns.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3555,6 +3567,19 @@ pub enum Command {
     StopJobRun {
         run_id: String,
     },
+    /// Read-only: a project's UI evaluator runs, newest first; answered with `Vec<Evaluation>`.
+    Evaluations {
+        project_id: String,
+    },
+    /// What UI evaluators may do in a project. Only the human sets it.
+    SetEvaluatorPermission {
+        project_id: String,
+        permission: EvaluatorPermission,
+    },
+    /// Stops a UI evaluator run that has not ended.
+    StopEvaluation {
+        run_id: String,
+    },
     /// The user opened a job's page: its failed and unstarted runs, and its outputs waiting for
     /// approval, stop counting on the assistant's row.
     SeeJobRuns {
@@ -4338,6 +4363,7 @@ impl Command {
             | Self::SearchThreads { .. }
             | Self::ScratchFiles { .. }
             | Self::Proposals { .. }
+            | Self::Evaluations { .. }
             | Self::PreviewJob { .. }
             | Self::Boards
             | Self::BoardVersions { .. }
@@ -4392,6 +4418,8 @@ impl Command {
             | Self::RunJobNow { .. }
             | Self::DeleteJob { .. }
             | Self::StopJobRun { .. }
+            | Self::SetEvaluatorPermission { .. }
+            | Self::StopEvaluation { .. }
             | Self::SeeJobRuns { .. }
             | Self::TakeOverJob { .. }
             | Self::ApproveJobOutput { .. }
@@ -4489,7 +4517,9 @@ impl Command {
     /// too: its state carries the pairing code. The assistant is the human's: its threads, their
     /// text and its name. So are jobs: only the user saves, pauses, runs or deletes one. So are
     /// Boards, the outputs threads and jobs saved, and only the user shares one into a Space.
-    /// So are issue threads' proposals: only the human applies or discards one.
+    /// So are issue threads' proposals: only the human applies or discards one. So are UI
+    /// evaluators: what a project allows, stopping a run, and reading runs, whose reasons can
+    /// quote what the evaluator said.
     pub fn is_human_only(&self) -> bool {
         matches!(
             self,
@@ -4519,6 +4549,9 @@ impl Command {
                 | Self::RunJobNow { .. }
                 | Self::DeleteJob { .. }
                 | Self::StopJobRun { .. }
+                | Self::Evaluations { .. }
+                | Self::SetEvaluatorPermission { .. }
+                | Self::StopEvaluation { .. }
                 | Self::SeeJobRuns { .. }
                 | Self::TakeOverJob { .. }
                 | Self::ApproveJobOutput { .. }

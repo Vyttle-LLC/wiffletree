@@ -2,6 +2,7 @@
 //! sorting and assistant threads, which the provider holds to what they are given.
 mod codex_compaction;
 mod constrained;
+mod evaluator;
 mod output;
 mod restricted;
 mod router;
@@ -10,6 +11,7 @@ use crate::processes::{self, Sighting, Watch};
 use crate::runtime::LowPriority as _;
 use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
+pub use evaluator::{EvaluatorLaunch, prepare_codex_home};
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
 use output::{Next, Output, StopReading};
 pub use restricted::{ThreadLaunch, server_definition, shell_text_refused};
@@ -52,6 +54,8 @@ pub enum ProviderEvent {
     ModelUsage(Value),
     /// What the provider said about the compaction this run is; a turn's run sends none.
     Compaction(CompactionRecord),
+    /// The model a UI evaluator's provider said it runs, once, before it is checked.
+    Model(String),
     Finished {
         error: Option<String>,
         usage: Value,
@@ -91,6 +95,8 @@ pub struct Turn {
     pub instructions: String,
     /// An assistant thread's restricted launch; every other turn runs in YOLO mode.
     pub thread: Option<ThreadLaunch>,
+    /// A UI evaluator run's launch, which has no workspace server, credential or instructions.
+    pub evaluator: Option<EvaluatorLaunch>,
 }
 pub fn executable(provider: Provider) -> Result<PathBuf> {
     let name = match provider {
@@ -175,6 +181,8 @@ fn core(role: Role) -> &'static str {
         Role::Assistant => 6,
         Role::JobRun => 7,
         Role::Compiler => return compile::PROCEDURE,
+        // An evaluator is blind: Wiffletree gives it no instructions at all.
+        Role::Evaluator => return "",
     };
     CORE[part].1
 }
@@ -307,6 +315,14 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
         .own_descriptors_only();
     if matches!(turn.kind, TurnKind::Sort) {
         constrained::configure(cmd, &turn.profile, keeper::SORTING, keeper::ANSWER_SCHEMA);
+        return;
+    }
+    // Before any credential is set: an evaluator gets none.
+    if let Some(launch) = &turn.evaluator {
+        match turn.session.provider {
+            Provider::Claude => evaluator::configure_claude(cmd, turn, launch),
+            Provider::Codex => evaluator::configure_codex(cmd, turn, launch),
+        }
         return;
     }
     // Credentials go to the MCP subprocess environment, never in the prompt.
@@ -672,6 +688,9 @@ fn run_turn(
     // The exit is checked on every pass, so a leftover process writing to stdout cannot hide
     // it. Every event the reader accepted is handled; the reader decides when to stop.
     let mut exited = false;
+    // An evaluator's model, once its provider has named it; Codex's thread, to find it by.
+    let mut model_reported = false;
+    let mut codex_thread: Option<String> = None;
     loop {
         check_running(&cancel)?;
         report_seen(watching, emit);
@@ -710,6 +729,21 @@ fn run_turn(
             }
             continue;
         }
+        // An evaluator's Codex names its model only in its session record, which it writes
+        // once its turn has started, so it is looked for until it is found.
+        if let Some(launch) = &turn.evaluator
+            && turn.session.provider == Provider::Codex
+            && !model_reported
+        {
+            if let Some(thread) = value["thread_id"].as_str() {
+                codex_thread = Some(thread.to_owned());
+            }
+            if let Some(model) = codex_thread.as_deref().and_then(|t| launch.codex_model(t)) {
+                model_reported = true;
+                emit(ProviderEvent::Model(model.clone()));
+                launch.check_model(&turn.profile, &model)?;
+            }
+        }
         match turn.session.provider {
             Provider::Codex => match value["type"].as_str().unwrap_or_default() {
                 "thread.started" => {
@@ -719,6 +753,9 @@ fn run_turn(
                 }
                 "item.started" | "item.updated" | "item.completed" => {
                     if let Some(launch) = &turn.thread {
+                        launch.check_codex_item(&value["item"])?;
+                    }
+                    if let Some(launch) = &turn.evaluator {
                         launch.check_codex_item(&value["item"])?;
                     }
                     codex
@@ -772,6 +809,15 @@ fn run_turn(
                     }
                     if let Some(launch) = &turn.thread {
                         launch.check_claude_start(&value)?;
+                    }
+                    // An evaluator has no workspace server to connect.
+                    if let Some(launch) = &turn.evaluator {
+                        launch.check_claude_start(&value)?;
+                        if let Some(model) = value["model"].as_str() {
+                            emit(ProviderEvent::Model(model.to_owned()));
+                            launch.check_model(&turn.profile, model)?;
+                        }
+                        continue;
                     }
                     ensure!(
                         value["mcp_servers"]
@@ -998,6 +1044,7 @@ mod tests {
             helper: PathBuf::new(),
             instructions: String::new(),
             thread: None,
+            evaluator: None,
         };
         let mut cmd = ProcessCommand::new("claude");
         configure(&mut cmd, &turn);
@@ -1165,6 +1212,7 @@ mod tests {
             helper: "/tmp/helper".into(),
             instructions: skill(Role::ProjectOrchestrator),
             thread: None,
+            evaluator: None,
         }
     }
 

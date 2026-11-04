@@ -74,6 +74,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::IssuePeople { .. }
         | Command::SearchThreads { .. }
         | Command::Proposals { .. }
+        | Command::Evaluations { .. }
         | Command::ScratchFiles { .. } => Row::Read,
         Command::ResolvePaths { .. } | Command::ReadFile { .. } | Command::ListFolder { .. } => {
             Row::HostPath
@@ -129,6 +130,8 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::RunJobNow { .. }
         | Command::DeleteJob { .. }
         | Command::StopJobRun { .. }
+        | Command::SetEvaluatorPermission { .. }
+        | Command::StopEvaluation { .. }
         | Command::SeeJobRuns { .. }
         | Command::TakeOverJob { .. }
         | Command::ApproveJobOutput { .. }

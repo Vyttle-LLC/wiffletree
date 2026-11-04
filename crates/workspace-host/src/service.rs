@@ -279,7 +279,7 @@ const MOVED: &str = "Stopped: you moved its message to another thread.";
 /// one this way.
 fn stopped_notice(session: &Session, reason: &str) -> String {
     match session.role {
-        Role::Assistant | Role::JobRun | Role::Compiler => reason.into(),
+        Role::Assistant | Role::JobRun | Role::Compiler | Role::Evaluator => reason.into(),
         _ => stopped_by_parent_notice(reason),
     }
 }
@@ -722,6 +722,9 @@ enum Event {
         report: ProviderReport,
         reply: Reply,
     },
+    /// The models a provider's CLI listed, read on their own thread for a UI evaluator's check;
+    /// none when it could not list them.
+    ModelsListed(Provider, Vec<ModelOption>),
     /// A root scan finished on its own thread; adding what it found is quick.
     Discovered {
         found: Vec<repositories::ScannedRepository>,
@@ -2778,9 +2781,15 @@ impl Actor {
                 report,
                 reply,
             } => {
-                self.host.record_detection(provider, &report.status);
+                self.host.record_report(provider, &report);
                 let report = serde_json::to_value(report).map_err(|e| e.to_string());
                 let _ = reply.try_send(report);
+                false
+            }
+            Event::ModelsListed(provider, models) => {
+                if !models.is_empty() {
+                    self.host.listed_models.insert(provider, models);
+                }
                 false
             }
             Event::QuotaRead { reading, reply } => {
@@ -2984,6 +2993,19 @@ impl Actor {
                         active.stopped_by_parent = Some(crate::jobs::STOPPED_BY_YOU.into());
                         active.cancel.store(true, Ordering::Relaxed);
                     }
+                    // Stop on an evaluator run in its turn ends that turn, and the run, as stopped.
+                    if let Command::StopEvaluation { .. } = &command
+                        && let Some(session) = response["session"].as_str()
+                    {
+                        self.cancel_evaluation(session, crate::evaluations::STOPPED_BY_YOU);
+                    }
+                    // A narrower choice stops the runs in a turn that it no longer allows.
+                    if let Command::SetEvaluatorPermission { project_id, .. } = &command {
+                        for (session, mode) in self.host.disallowed_in_turn(project_id)? {
+                            let reason = crate::evaluations::not_allowed(mode);
+                            self.cancel_evaluation(&session, &reason);
+                        }
+                    }
                     // Stopping an agent stops what it started, before the command returns: for
                     // every agent of a stopped project, and for a paused session.
                     let stopped = match &command {
@@ -3020,6 +3042,15 @@ impl Actor {
                         for session in self.host.session_tree(session_id)? {
                             if let Some(active) = self.active.get(&session.id) {
                                 active.cancel.store(true, Ordering::Relaxed);
+                            }
+                        }
+                        // Archiving the coordinator closes the project, which stops its runs.
+                        let archived = self.host.session(session_id)?;
+                        if archived.role == Role::ProjectOrchestrator {
+                            let project = archived.project_id;
+                            for (session, _) in self.host.disallowed_in_turn(&project)? {
+                                let reason = crate::evaluations::PROJECT_CLOSED;
+                                self.cancel_evaluation(&session, reason);
                             }
                         }
                     }
@@ -3072,6 +3103,8 @@ impl Actor {
                                 json!({"behavior":"deny","message":answer})
                             };
                             let _ = permission.reply.try_send(Ok(decision));
+                        } else if attention.operation_id.starts_with(EVALUATION_PREFIX) {
+                            // Answered in `execute`, with its own result.
                         } else if attention.is_repository_request() {
                             // Answered in `execute`, with its own result. A new repository has
                             // no GitHub facts yet.
@@ -3133,8 +3166,13 @@ impl Actor {
                     .map(|(id, _)| id.clone());
                 let result = (|| -> Result<Option<Value>> {
                     let id = identity.context("Expired or invalid session credential")?;
-                    // A thread is offered its own tools, and only those; so is a compile.
+                    // A thread is offered its own tools, and only those; so is a compile. An
+                    // evaluator has no credential, so a call that claims one is refused.
                     let session = self.host.session(&id)?;
+                    ensure!(
+                        session.role != Role::Evaluator,
+                        "A UI evaluator has no workspace tools"
+                    );
                     if session.role == Role::Compiler {
                         return self.host.compile_tool(&session, &name, &args).map(Some);
                     }
@@ -3169,6 +3207,19 @@ impl Actor {
                     );
                     match name.as_str() {
                         "stop_agents" => return self.stop_agents(&id, &args).map(Some),
+                        "stop_evaluation" => {
+                            return self.stop_evaluation(&session, &args).map(Some);
+                        }
+                        // A model is checked against its CLI's own list; one not read yet is
+                        // read now, so the call refused for want of it succeeds when repeated.
+                        "start_evaluation" => {
+                            let provider = serde_json::from_value(args["provider"].clone());
+                            if let Ok(provider) = provider
+                                && !self.host.listed_models.contains_key(&provider)
+                            {
+                                self.list_models(provider);
+                            }
+                        }
                         "resume_agent" => return self.resume_agent(&id, &args).map(Some),
                         "set_plan" => return self.set_plan(&id, &args).map(Some),
                         "create_ticket" => {
@@ -3613,6 +3664,12 @@ impl Actor {
             }
             // Only a compaction's run sends these; see `compaction_event`.
             ProviderEvent::Compaction(_) => {}
+            // Only an evaluator's run sends this; its end shows the human the model it ran.
+            ProviderEvent::Model(model) => {
+                if session.role == Role::Evaluator {
+                    self.host.evaluation_model_reported(id, &model)?;
+                }
+            }
             ProviderEvent::Finished {
                 error,
                 usage,
@@ -3747,6 +3804,14 @@ impl Actor {
                     self.host
                         .compile_turn_ended(id, stopped, error.as_deref())?;
                 }
+                // So is an evaluator's run, unless its limit stopped it: then it waits for the
+                // reset on the same model, and the retry goes on in the same session.
+                if session.role == Role::Evaluator {
+                    let waits = runtime.limit_retry.as_ref().map(|retry| retry.resets_at);
+                    let stopped = stop_reason.as_deref();
+                    self.host
+                        .evaluation_turn_ended(id, stopped, error.as_deref(), waits)?;
+                }
                 self.settle_check_ins(&session)?;
                 if let Some(error) = &error {
                     self.host.append_output(
@@ -3856,7 +3921,10 @@ impl Actor {
             | ProviderEvent::Usage { .. }
             | ProviderEvent::ModelUsage(_)
             | ProviderEvent::Quota(_)) => self.provider_event(id, run, event),
-            ProviderEvent::Session(_) | ProviderEvent::Step(_) | ProviderEvent::Reply(_) => Ok(()),
+            ProviderEvent::Session(_)
+            | ProviderEvent::Step(_)
+            | ProviderEvent::Reply(_)
+            | ProviderEvent::Model(_) => Ok(()),
         }
     }
     /// Settles a compaction whose process has ended. Only the host's stopping cancels one, so
@@ -4404,6 +4472,31 @@ impl Actor {
         self.stop_processes_of(&stopped);
         Ok(json!({ "agents": results }))
     }
+    /// Reads `provider`'s model list off the host thread.
+    fn list_models(&self, provider: Provider) {
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            let models = runtime::models(provider).unwrap_or_default();
+            let _ = sender.send_blocking(Event::ModelsListed(provider, models));
+        });
+    }
+    /// `stop_evaluation`: a run in a turn stops through its cancel flag, and its turn's end
+    /// ends it as stopped; any other run ends at once.
+    fn stop_evaluation(&mut self, caller: &Session, args: &Value) -> Result<Value> {
+        let (result, in_turn) = self.host.coordinator_stops_evaluation(caller, args)?;
+        if let Some(session) = in_turn {
+            self.cancel_evaluation(&session, crate::evaluations::STOPPED_BY_COORDINATOR);
+        }
+        self.state_changed();
+        Ok(result)
+    }
+    /// Stops an evaluator run's turn, which then ends the run as stopped for `reason`.
+    fn cancel_evaluation(&mut self, session: &str, reason: &str) {
+        if let Some(active) = self.active.get_mut(session) {
+            active.stopped_by_parent = Some(reason.into());
+            active.cancel.store(true, Ordering::Relaxed);
+        }
+    }
     /// Lets a coordinator release a direct child that is paused or interrupted, through the same
     /// reconciliation as the human's Retry and Skip. Held input must be retried or skipped
     /// explicitly; a retried turn's prompt says it was interrupted. Nothing changes unless all
@@ -4594,6 +4687,11 @@ impl Actor {
             }
             return Ok(());
         }
+        // An evaluator's run has no time limit, and no one to check in with: its coordinator
+        // must not see its steps.
+        if session.role == Role::Evaluator {
+            return Ok(());
+        }
         let active = &self.active[id];
         // A job's run has no time limit: its note on the assistant's row says how long it has
         // run, with Stop.
@@ -4753,6 +4851,11 @@ impl Actor {
         };
         let run = new_id();
         let ready = (|| -> Result<_> {
+            // A compaction runs with a turn's arguments, which an evaluator's isolation is not.
+            ensure!(
+                session.role != Role::Evaluator,
+                "A UI evaluator's run is never compacted"
+            );
             provider::executable(session.provider)?;
             let cwd = runtime.directory.clone();
             let cwd =
@@ -4823,6 +4926,7 @@ impl Actor {
             helper: self.helper.clone(),
             instructions: role_instructions,
             thread: None,
+            evaluator: None,
         };
         self.run_provider(turn, cancel);
         Ok(())
@@ -4932,6 +5036,10 @@ impl Actor {
                 "UPDATE messages SET receipt='completed' WHERE recipient=?1 AND receipt='queued'",
                 [&session.id],
             )?;
+        }
+        if session.role == Role::Evaluator {
+            self.host
+                .evaluation_start_failed(&session.id, &format!("{error:#}"))?;
         }
         if session.role == Role::JobRun {
             let failed = crate::jobs::RunEnd::Failed(format!("Could not start: {error:#}"));
@@ -5126,17 +5234,31 @@ impl Actor {
         let token = format!("{}{}", new_id(), new_id());
         let (prompt, sorted) = match sort {
             Some((prompt, sorted)) => (prompt, Some(sorted)),
-            None if session.role.is_thread() || session.role == Role::Compiler => {
+            None if session.role.is_thread()
+                || session.role == Role::Compiler
+                || session.role == Role::Evaluator =>
+            {
                 (thread_prompt(&input), None)
             }
             None => (self.prompt(&session, &input)?, None),
         };
-        let instructions = self.host.session_instructions(&session)?;
+        // An evaluator is blind: its prompt is all it gets, with no instructions of Wiffletree's.
+        let instructions = match session.role {
+            Role::Evaluator => String::new(),
+            _ => self.host.session_instructions(&session)?,
+        };
         let thread = match session.role {
             Role::Assistant | Role::JobRun => Some(self.host.thread_launch(&session)?),
             Role::Compiler => Some(self.host.compile_launch(&session)?),
             _ => None,
         };
+        let evaluator = match session.role {
+            Role::Evaluator => Some(self.host.evaluator_launch(&session)?),
+            _ => None,
+        };
+        if evaluator.is_some() {
+            self.host.evaluation_turn_started(&session.id)?;
+        }
         let started_at = now();
         let detail = json!({"profile":profile,"provider_session_id":runtime.provider_session_id,"skill_version":1,"selection":runtime.selection,"model_selection_revision":self.host.model_selection()?.revision});
         runtime.last_error = None;
@@ -5166,6 +5288,7 @@ impl Actor {
             helper: self.helper.clone(),
             instructions,
             thread,
+            evaluator,
         };
         let mut active = Active::new(
             run.clone(),
@@ -5396,6 +5519,103 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider.py")
     }
 
+    /// A Claude that writes its environment, arguments and input into its working folder, then
+    /// answers as a Claude evaluator starts and finishes. `opus` stands for claude-opus-5-5,
+    /// and asked for claude-opus-5-5 by name it runs claude-opus-5-6, as if the model moved.
+    const RECORDING_PROVIDER: &str = r#"#!/bin/sh
+env > env.txt
+printf '%s\n' "$@" > args.txt
+cat > stdin.txt
+model=claude-opus-5-5
+case " $* " in *" --model claude-opus-5-5 "*) model=claude-opus-5-6 ;; esac
+echo '{"type":"system","subtype":"init","session_id":"s1","model":"'$model'","mcp_servers":[],"tools":["Read","Glob","Grep","Write","Edit"],"permissionMode":"dontAsk"}'
+echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REPLY","usage":{}}'
+"#;
+
+    #[test]
+    fn an_evaluator_turn_runs_blind_and_wakes_its_coordinator_with_only_its_end() {
+        let folder = tempfile::tempdir().unwrap();
+        let provider = folder.path().join("claude");
+        fs::write(&provider, RECORDING_PROVIDER).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&provider, fs::Permissions::from_mode(0o755)).unwrap();
+        run_with_provider(
+            "service::tests::an_evaluator_turn_with_a_recording_provider",
+            &provider,
+        );
+    }
+    #[test]
+    #[ignore = "run by an_evaluator_turn_runs_blind_and_wakes_its_coordinator_with_only_its_end, with a recording provider"]
+    fn an_evaluator_turn_with_a_recording_provider() {
+        assert!(
+            std::env::var_os("WORKSPACE_CLAUDE_BIN").is_some(),
+            "never a real provider"
+        );
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        host.listed_models
+            .insert(Provider::Claude, crate::evaluations::tests::claude_listed());
+        let project = host.create_project("UX loop").unwrap();
+        let coordinator = host.coordinator_of(&project.id).unwrap().unwrap();
+        let coordinator = host.session(&coordinator).unwrap();
+        host.set_evaluator_permission(&project.id, EvaluatorPermission::App)
+            .unwrap();
+        let runs = tempfile::tempdir().unwrap();
+        let runs = fs::canonicalize(runs.path()).unwrap();
+        let prompt = "Evaluate the Models page.\nWrite report.md.";
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(64);
+        actor.sender = sender;
+        // Runs `model` in a folder of its own to its end, and returns the run and its folder.
+        let mut evaluate = |model: &str| {
+            let folder = runs.join(model);
+            fs::create_dir(&folder).unwrap();
+            fs::write(folder.join("prompt.md"), prompt).unwrap();
+            let args = json!({"run_folder":folder,"provider":"claude","model":model,"effort":"high","mode":"app"});
+            let started = actor.host.start_evaluation(&coordinator, &args).unwrap();
+            actor.schedule().unwrap();
+            assert_eq!(actor.active.len(), 1, "the run's turn started");
+            while !actor.active.is_empty() {
+                actor.process(events.recv_blocking().unwrap());
+            }
+            let id = started["run_id"].as_str().unwrap();
+            (actor.host.evaluation(id).unwrap(), folder)
+        };
+        let (run, folder) = evaluate("opus");
+        // A full ID the provider does not run fails the run; it never goes on another model.
+        let (moved, _) = evaluate("claude-opus-5-5");
+        assert_eq!(moved.state, EvaluationState::Failed);
+        assert_eq!(moved.reported_model.as_deref(), Some("claude-opus-5-6"));
+        let why = moved.reason.unwrap();
+        assert!(
+            why.contains("ran claude-opus-5-6, not claude-opus-5-5"),
+            "{why}"
+        );
+
+        let read = |name: &str| fs::read_to_string(folder.join(name)).unwrap();
+        // Its input is prompt.md alone, and nothing of the workspace reaches its process.
+        assert_eq!(read("stdin.txt"), prompt);
+        let env = read("env.txt");
+        assert!(!env.contains("WORKSPACE_"), "{env}");
+        let launched = read("args.txt");
+        assert!(launched.contains("--setting-sources"), "{launched}");
+        assert!(!launched.contains("--append-system-prompt"), "{launched}");
+        // The alias's run finished and records the model it stood for.
+        assert_eq!(run.state, EvaluationState::Finished, "{:?}", run.reason);
+        assert_eq!(run.reported_model.as_deref(), Some("claude-opus-5-5"));
+        let told: Vec<Message> = (actor.host.messages(&coordinator.id, None, 100).unwrap())
+            .into_iter()
+            .filter(|m| m.id.starts_with(EVALUATION_PREFIX))
+            .collect();
+        assert_eq!(told.len(), 2);
+        assert_eq!(told[0].body, crate::evaluations::ended_message(&run));
+        assert!(!told.iter().any(|m| m.body.contains("SECRET")));
+        assert!(
+            !told[1].body.contains("ran claude-opus-5-6"),
+            "{}",
+            told[1].body
+        );
+    }
     #[test]
     fn other_work_runs_while_an_agent_waits_for_a_reset() {
         run_with_provider(

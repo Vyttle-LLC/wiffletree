@@ -15,6 +15,7 @@ mod compile;
 pub mod context;
 pub mod detection;
 mod diffs;
+mod evaluations;
 pub mod events;
 mod files;
 mod flatten;
@@ -118,8 +119,8 @@ fn sessions_where(live: bool) -> String {
         "id IN (SELECT session_id FROM runtimes WHERE json_extract(data,'$.ticket_id') IN (SELECT id FROM tickets WHERE {}))",
         tickets_where(true)
     );
-    // Threads are listed only as the assistant's, and compile runs only on the Brains page,
-    // never as a project's sessions.
+    // Threads are listed only as the assistant's, compile runs only on the Brains page and
+    // evaluator runs only as their project's runs, never as a project's sessions.
     if live {
         format!("({NOT_THREAD} AND ({ARCHIVED_FLAG}=0 OR {on_open_ticket}))")
     } else {
@@ -128,7 +129,7 @@ fn sessions_where(live: bool) -> String {
 }
 /// SQL condition on `sessions` for a session that is not an assistant thread or a brain
 /// compile, which belong to no project.
-const NOT_THREAD: &str = "role NOT IN ('assistant','job_run','compiler')";
+const NOT_THREAD: &str = "role NOT IN ('assistant','job_run','compiler','evaluator')";
 pub struct Host {
     pub(crate) db: Connection,
     /// Files remote devices are uploading, kept while the host runs.
@@ -199,6 +200,8 @@ pub struct Host {
     router_runs: Vec<router::RouterRun>,
     /// By provider, whether detection last found its CLI installed and signed in.
     pub(crate) detected: std::collections::BTreeMap<Provider, bool>,
+    /// By provider, the models its CLI last listed, which a UI evaluator's model must be one of.
+    pub(crate) listed_models: std::collections::BTreeMap<Provider, Vec<ModelOption>>,
     /// A pass or a commit moved a repository, so every brain's index refresh is due now.
     pub(crate) brains_now: bool,
     /// What an earlier release left waiting has all landed.
@@ -293,6 +296,7 @@ fn ensure_unreserved(operation: &str) -> Result<()> {
         MERGE_PREFIX,
         REPOSITORY_REQUEST_PREFIX,
         PERMISSION_PREFIX,
+        EVALUATION_PREFIX,
     ] {
         ensure!(
             !operation.starts_with(prefix),
@@ -373,6 +377,7 @@ impl Host {
         router::migrate(&db)?;
         jobs::migrate(&db)?;
         compile::migrate(&db)?;
+        evaluations::migrate(&db)?;
         db.execute_batch(include_str!("steps.sql"))?;
         db.execute_batch(include_str!("schedules.sql"))?;
         db.execute_batch(include_str!("selection.sql"))?;
@@ -427,6 +432,7 @@ impl Host {
             merge_runs: vec![],
             router_runs: vec![],
             detected: Default::default(),
+            listed_models: Default::default(),
             uploads: Default::default(),
             gh_login: None,
             brains_now: false,
@@ -544,6 +550,7 @@ impl Host {
         self.recover_steps()?;
         self.end_interrupted_job_runs()?;
         self.end_interrupted_compiles()?;
+        self.end_interrupted_evaluations()?;
         self.ask_about_interrupted_routes()
     }
     pub(crate) fn event(
@@ -642,7 +649,7 @@ impl Host {
         turning.sort();
         for id in turning {
             let session = self.session(id)?;
-            if !session.role.is_thread() {
+            if !session.role.is_thread() && session.role != Role::Evaluator {
                 sessions.push(session);
             }
         }
@@ -1087,6 +1094,10 @@ impl Host {
                 )?;
             }
             tx.commit()?;
+            // Closing the project turns its UI evaluators off; the service stops runs in a turn.
+            if stops_project && let Err(error) = host.close_evaluations(&project) {
+                eprintln!("Turning off the project's UI evaluators: {error:#}");
+            }
             Ok(affected)
         };
         if !archived {
@@ -1679,7 +1690,7 @@ impl Host {
             }
             Command::InspectProvider { provider } => {
                 let report = detection::report(provider);
-                self.record_detection(provider, &report.status);
+                self.record_report(provider, &report);
                 serde_json::to_value(report)?
             }
             Command::MeasureContext {
@@ -1825,6 +1836,20 @@ impl Host {
             }
             // The service stops the turn of a run that is in one.
             Command::StopJobRun { run_id } => json!({"thread": self.stop_job_run(&run_id)?}),
+            Command::Evaluations { project_id } => {
+                serde_json::to_value(self.evaluations(&project_id)?)?
+            }
+            Command::SetEvaluatorPermission {
+                project_id,
+                permission,
+            } => {
+                self.set_evaluator_permission(&project_id, permission)?;
+                Value::Null
+            }
+            // The service stops the turn of a run that is in one.
+            Command::StopEvaluation { run_id } => {
+                json!({"session": self.stop_evaluation(&run_id)?})
+            }
             Command::SeeJobRuns { job } => {
                 self.see_job_runs(&job)?;
                 Value::Null

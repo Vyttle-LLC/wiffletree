@@ -92,6 +92,7 @@ fn run(home: &Path, prompt: &str, hold_until_closed: bool) -> Outcome {
         helper: home.join("provider"),
         instructions: String::new(),
         thread: None,
+        evaluator: None,
     };
     let mut outcome = Outcome {
         steps: 0,

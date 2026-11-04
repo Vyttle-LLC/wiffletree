@@ -131,7 +131,7 @@ impl Job {
             Role::Assistant => Some(Job::Assistant),
             Role::JobRun => Some(Job::Job),
             Role::Compiler => Some(Job::Compiler),
-            Role::TaskOrchestrator | Role::Maintenance => None,
+            Role::TaskOrchestrator | Role::Maintenance | Role::Evaluator => None,
         }
     }
 }
