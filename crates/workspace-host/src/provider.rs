@@ -1,5 +1,6 @@
 //! Noninteractive provider turns with the user's YOLO execution policy, apart from comment
 //! sorting and assistant threads, which the provider holds to what they are given.
+mod app_target;
 mod codex_compaction;
 mod constrained;
 mod evaluator;
@@ -11,6 +12,7 @@ use crate::processes::{self, Sighting, Watch};
 use crate::runtime::LowPriority as _;
 use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
+pub use app_target::AppLaunch;
 pub use evaluator::{EvaluatorLaunch, prepare_codex_home};
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
 use output::{Next, Output, StopReading};
@@ -552,16 +554,7 @@ impl Process {
         if self.status.is_some() {
             return Ok(true);
         }
-        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        let options = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
-        if unsafe { libc::waitid(libc::P_PID, self.child.id(), &mut info, options) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        #[cfg(target_os = "macos")]
-        let pid = info.si_pid;
-        #[cfg(not(target_os = "macos"))]
-        let pid = unsafe { info.si_pid() };
-        Ok(pid != 0)
+        exited_unreaped(&self.child)
     }
     /// Stops the provider's group, after the watcher's last look at it, and only then reaps
     /// the leader. Later calls return its status without signalling again.
@@ -574,6 +567,20 @@ impl Process {
         self.status = Some(status);
         Ok(status)
     }
+}
+/// Whether `child` has exited, without reaping it: until it is reaped, neither its id nor its
+/// group's can be given to another process.
+fn exited_unreaped(child: &Child) -> Result<bool> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let options = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
+    if unsafe { libc::waitid(libc::P_PID, child.id(), &mut info, options) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    #[cfg(target_os = "macos")]
+    let pid = info.si_pid;
+    #[cfg(not(target_os = "macos"))]
+    let pid = unsafe { info.si_pid() };
+    Ok(pid != 0)
 }
 /// The error a running turn stops with when its cancel flag is set. Callers recognise it by
 /// type, so provider output with the same text cannot pass for it.
@@ -631,6 +638,19 @@ fn run_turn(
     // A stop that lands before launch is a cancellation like any other.
     check_running(&cancel)?;
     let input = input(&turn)?;
+    // An app run's test copy runs for the turn and is stopped with it, however it ends.
+    let _target = match turn
+        .evaluator
+        .as_ref()
+        .and_then(|launch| launch.app.as_ref())
+    {
+        Some(app) => Some(app_target::RunningTarget::start(
+            app,
+            app_target::SOCKET_WAIT,
+            &cancel,
+        )?),
+        None => None,
+    };
     let mut process = Process {
         child: command(&turn)?
             .spawn()

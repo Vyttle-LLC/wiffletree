@@ -10,15 +10,18 @@ Start the app with `--automation-socket <path>`, then:
     drive_desktop.py --socket <path> drag 120 180 120 320
     drive_desktop.py --socket <path> drop 640 400 ~/Desktop/shot.png notes.txt
     drive_desktop.py --socket <path> shot /tmp/window.png
+    drive_desktop.py --socket <path> resize 960 600
 
 Coordinates are window points from the top-left corner. `shot` saves the window at one pixel
-per point, so positions read from a screenshot can be passed straight back to `click`.
+per point, so positions read from a screenshot can be passed straight back to `click`; `--native`
+saves it at the display's scale. The app captures its own window, which needs no Screen
+Recording permission. `resize` prints the size the window reached.
 """
 import argparse
+import base64
 import json
 import os
 import socket
-import subprocess
 import sys
 import time
 
@@ -33,14 +36,12 @@ def send(path, step):
     return response["result"]
 
 
-def shot(path, output):
-    window = send(path, {"do": "window"})
+def shot(path, output, native):
+    send(path, {"do": "window"})
     time.sleep(0.2)  # the window step asks for a repaint; let it land
-    capture = ["screencapture", "-x", "-o", "-l", str(window["number"]), output]
-    if subprocess.run(capture, capture_output=True).returncode:
-        sys.exit("Could not capture the window. macOS refuses captures while the screen is locked.")
-    size = [str(round(window["height"])), str(round(window["width"]))]
-    subprocess.run(["sips", "-z", *size, output], check=True, capture_output=True)
+    image = send(path, {"do": "capture", "native": native})
+    with open(output, "wb") as written:
+        written.write(base64.b64decode(image["png"]))
 
 
 def drag(path, start, end, hold, settle, count):
@@ -88,10 +89,20 @@ def main():
     drop.add_argument("x", type=float)
     drop.add_argument("y", type=float)
     drop.add_argument("paths", nargs="+", type=lambda p: os.path.abspath(os.path.expanduser(p)))
-    commands.add_parser("shot").add_argument("output")
+    shooting = commands.add_parser("shot")
+    shooting.add_argument("output")
+    shooting.add_argument("--native", action="store_true", help="at the display's scale")
+    resize = commands.add_parser("resize")
+    resize.add_argument("width", type=float)
+    resize.add_argument("height", type=float)
     args = parser.parse_args()
     if args.command == "shot":
-        return shot(args.socket, args.output)
+        return shot(args.socket, args.output, args.native)
+    if args.command == "resize":
+        send(args.socket, {"do": "resize", "width": args.width, "height": args.height})
+        time.sleep(0.5)  # AppKit applies the resize after the step
+        window = send(args.socket, {"do": "window"})
+        return print(f"{window['width']:g}x{window['height']:g} (largest {window['max_width']:g}x{window['max_height']:g})")
     if args.command == "drag":
         drag(args.socket, (args.x1, args.y1), (args.x2, args.y2), args.hold, args.settle, args.count)
         return time.sleep(args.settle)

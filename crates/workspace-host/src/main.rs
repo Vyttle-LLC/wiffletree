@@ -13,6 +13,11 @@ fn main() -> Result<()> {
             .and_then(|role| serde_json::from_value(serde_json::Value::String(role.clone())).ok());
         return workspace_host::mcp::serve_stdio(workspace_host::mcp::tools_for(role));
     }
+    if let [command, socket, folder] = args.as_slice()
+        && command == "app-driver-mcp"
+    {
+        return workspace_host::app_driver::serve_stdio(socket.as_ref(), folder.as_ref());
+    }
     if args.first().map(String::as_str) == Some("thread-mcp") {
         return workspace_host::mcp::serve_stdio(workspace_host::mcp::thread_tools());
     }
@@ -163,8 +168,12 @@ fn install_build_gate(data: &std::path::Path, binary: &std::path::Path) {
 /// removes the copies no host uses.
 fn serve(args: &[String]) -> Result<()> {
     let mut stops = catch_stop_signals()?;
-    // SAFETY: no other thread has started yet.
-    unsafe { workspace_host::login_env::adopt() };
+    // A test copy of the app that a UI evaluator drives keeps the PATH and provider stubs it
+    // was started with.
+    if std::env::var_os(workspace_host::login_env::SKIP).is_none() {
+        // SAFETY: no other thread has started yet.
+        unsafe { workspace_host::login_env::adopt() };
+    }
     let mut data = None;
     let mut child = false;
     let mut app = None;
