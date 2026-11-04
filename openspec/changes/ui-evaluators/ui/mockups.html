@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · UI evaluators study</title>
+<!--
+  Static study for UI evaluators: blind, model-pinned agents that drive an app's screen.
+  No script, no network. Drawn 2026-11-04. The theme switch is a CSS-only radio group.
+  Projects, runs, times and models are sample data drawn by hand.
+  1. Allowing evaluators in a project (Inbox card).
+  2. Settings › Screen control: macOS permissions and provider checks.
+  3. A full-desktop run waiting for you to step away, and the banner while it runs.
+  4. The Agents panel's Evaluations group, with every run state.
+  5. One run's page.
+  APPROVED by Michael on 2026-11-04, with both modes and every recommendation in its notes:
+  app-only runs side by side, full-desktop runs one at a time through one queue for every
+  project, and a pinned model at its limit waits for the reset and never falls back.
+-->
+<style>
+.light,:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}}
+body:has(#force-light:checked){--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+body:has(#force-dark:checked){--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+h2{font-size:15px;font-weight:600;margin:0 0 2px}
+h3{font-size:13px;font-weight:600;margin:14px 0 4px}
+p{margin:0}
+code{font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.intro{max-width:900px;margin-bottom:22px}
+.intro p{color:var(--subtle);font-size:12px;margin-top:4px}
+.intro ul{margin:8px 0 0;padding-left:18px;color:var(--subtle);font-size:12px}
+.intro li b{color:var(--text);font-weight:600}
+.pending{display:inline-block;margin:6px 0 4px;padding:3px 10px;border-radius:9px;font-size:11.5px;font-weight:600;color:var(--yellow);background:color-mix(in srgb,var(--yellow) 16%,transparent)}
+.switch{display:flex;gap:6px;margin:10px 0 0;font-size:12px;color:var(--subtle)}
+.switch label{padding:3px 10px;border:1px solid var(--edge);border-radius:7px;cursor:pointer}
+body:has(#force-system:checked) label[for=force-system],body:has(#force-light:checked) label[for=force-light],body:has(#force-dark:checked) label[for=force-dark]{background:var(--overlay);color:var(--text)}
+.study{margin-bottom:30px;max-width:1160px}
+.study>.eyebrow{margin-bottom:6px}
+.pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;align-items:start}
+.tag{font-size:11px;font-weight:600;margin-bottom:4px;color:var(--green)}
+.caption{margin:10px 2px 0;font-size:11.5px;color:var(--subtle);max-width:900px}
+.caption b{color:var(--text);font-weight:600}
+.frame{background:var(--surface);border:1px solid var(--edge);border-radius:12px;overflow:hidden}
+.frame+.tag{margin-top:14px}
+.page{padding:14px 16px}
+.head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px}
+.head .r{margin-left:auto}
+.note{font-size:11.5px;color:var(--subtle)}
+.warn{color:var(--yellow)}
+.ok{color:var(--green)}
+.bad{color:var(--red)}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--edge);border-radius:7px;padding:3px 10px;font-size:12px;background:var(--surface);color:var(--text);white-space:nowrap}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.btn.quiet{border-color:transparent;color:var(--subtle)}
+.btn.stop{border-color:var(--red);color:var(--red)}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.actions.end{justify-content:flex-end}
+.kv{display:grid;grid-template-columns:130px 1fr;gap:5px 14px;font-size:12.5px;margin-top:6px}
+.kv .k{color:var(--subtle)}
+.card{border:1px solid var(--edge);border-radius:10px;padding:11px 13px;background:var(--base)}
+.card .who{font-size:11px;color:var(--subtle);margin-bottom:4px}
+.choice{display:grid;grid-template-columns:18px 1fr;gap:2px 8px;padding:7px 9px;border:1px solid var(--edge);border-radius:8px;margin-top:6px;background:var(--surface);font-size:12.5px}
+.choice.sel{border-color:var(--focus);box-shadow:0 0 0 1px var(--focus) inset}
+.choice .dot{width:12px;height:12px;border-radius:50%;border:1.5px solid var(--muted);margin-top:3px}
+.choice.sel .dot{border-color:var(--focus);background:radial-gradient(var(--focus) 0 3px,transparent 3.5px)}
+.choice .s{grid-column:2;font-size:11.5px;color:var(--subtle)}
+.check{display:grid;grid-template-columns:16px 1fr auto;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid color-mix(in srgb,var(--edge) 50%,transparent);font-size:12.5px}
+.check .s{display:block;font-size:11px;color:var(--subtle)}
+.glyph{font-size:12px;text-align:center}
+.banner{display:flex;align-items:center;gap:10px;padding:8px 12px;font-size:12.5px;background:color-mix(in srgb,var(--red) 14%,var(--surface));border-bottom:1px solid color-mix(in srgb,var(--red) 40%,transparent)}
+.banner b{color:var(--red)}
+.banner .r{margin-left:auto;display:flex;gap:8px;align-items:center}
+.banner.app{background:color-mix(in srgb,var(--focus) 12%,var(--surface));border-bottom-color:color-mix(in srgb,var(--focus) 40%,transparent)}
+.banner.app b{color:var(--focus)}
+.kbd{font:11px ui-monospace,monospace;border:1px solid var(--edge);border-radius:4px;padding:0 5px}
+.win{display:grid;grid-template-columns:200px 1fr;min-height:250px}
+.side{background:var(--base);border-right:1px solid var(--edge);padding:10px 8px}
+.side .g{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--subtle);margin:10px 6px 3px}
+.side .i{padding:3px 8px;border-radius:7px;font-size:12.5px}
+.side .i.sel{background:var(--overlay)}
+.side .i .r{float:right;font-size:11px;color:var(--muted)}
+.side .sub{font-size:11px;color:var(--focus);padding:0 8px 3px 22px}
+.main{padding:14px 16px;color:var(--subtle);font-size:12px}
+.row{display:grid;grid-template-columns:14px 1fr auto;gap:8px;padding:6px 2px;border-bottom:1px solid color-mix(in srgb,var(--edge) 50%,transparent);font-size:12.5px;align-items:start}
+.row .s{display:block;font-size:11px;color:var(--subtle)}
+.row .t{font-size:11px;color:var(--muted);text-align:right;white-space:nowrap}
+.state{display:inline-block;border-radius:7px;padding:0 7px;font-size:11px;font-weight:600}
+.state.run{color:var(--focus);background:color-mix(in srgb,var(--focus) 14%,transparent)}
+.state.q{color:var(--subtle);border:1px dashed var(--edge)}
+.state.wait{color:var(--yellow);background:color-mix(in srgb,var(--yellow) 14%,transparent)}
+.state.done{color:var(--green);background:color-mix(in srgb,var(--green) 14%,transparent)}
+.state.fail{color:var(--red);background:color-mix(in srgb,var(--red) 12%,transparent)}
+.mode{font-size:10.5px;color:var(--subtle);border:1px solid var(--edge);border-radius:6px;padding:0 5px;margin-left:4px}
+.pin{font-size:11px;color:var(--magenta)}
+.step{font-size:12px;padding:4px 0;border-bottom:1px solid color-mix(in srgb,var(--edge) 40%,transparent);display:grid;grid-template-columns:70px 1fr;gap:8px}
+.step .k{color:var(--muted);font:11px ui-monospace,monospace}
+.thumb{display:inline-block;width:58px;height:38px;border:1px solid var(--edge);border-radius:4px;background:linear-gradient(135deg,var(--overlay),var(--base));vertical-align:middle;margin-right:4px}
+.menu{display:flex;justify-content:flex-end;gap:14px;align-items:center;padding:4px 12px;font-size:12px;background:var(--overlay);border-bottom:1px solid var(--edge)}
+.menu .cu{color:var(--red);font-weight:600}
+@media(max-width:820px){.pair{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<input type="radio" name="theme" id="force-system" checked hidden>
+<input type="radio" name="theme" id="force-light" hidden>
+<input type="radio" name="theme" id="force-dark" hidden>
+
+<div class="intro">
+  <div class="eyebrow">Wiffletree · UI evaluators study</div>
+  <h1>Evaluators that drive the screen, only when you allow it</h1>
+  <p>A coordinator can start a <b>UI evaluator</b>: a fresh, blind agent on one exact model that gets only a prompt and a run folder, drives an app, and writes a report there. There are two modes. <b>App only</b> drives just the app under test, through its automation socket. <b>Full desktop</b> uses Claude's or Codex's own computer use and can reach any app.</p>
+  <span class="pending">Approved by Michael, 2026-11-04</span>
+  <div class="switch"><label for="force-system">System</label><label for="force-light">Light</label><label for="force-dark">Dark</label></div>
+  <ul>
+    <li><b>Off by default.</b> The first time a coordinator asks, you choose a mode for that project (screen 1). Each later full-desktop run still waits for you to press Start (screen 3).</li>
+    <li><b>Blind.</b> An evaluator has no repository, shell, brain, history, memory, or any of your CLAUDE.md, settings, skills or MCP servers. It reads its prompt and writes only to its run folder. The coordinator gets the run's state and folder, never the transcript.</li>
+    <li><b>Pinned model.</b> A run names its provider, model and effort and never falls back. At a usage limit it waits for the reset, and says so (screen 4).</li>
+    <li><b>Recommendations to confirm:</b> app-only runs may run side by side, since each drives its own copy of the app. Full-desktop runs go one at a time, through one queue shared by every project.</li>
+  </ul>
+</div>
+
+<!-- 1 -->
+<section class="study">
+  <div class="eyebrow">1 · Inbox · a coordinator's first evaluator run in a project</div>
+  <div class="pair">
+    <div>
+      <div class="frame"><div class="page">
+        <div class="card">
+          <div class="who">Wiffletree: UX eval-and-improve loop · Coordinator</div>
+          <h2>Allow UI evaluators in this project?</h2>
+          <p class="note" style="margin-top:4px">The coordinator wants to start 2 evaluators: Claude Opus 5.5 and Codex Sol 6.1. Each gets only its prompt and its own folder under <code>~/ux-eval/runs/</code>.</p>
+          <div class="choice sel"><span class="dot"></span><span><b>App only</b></span><span class="s">Drives only the app under test, a separate copy on a test profile. It can't see or click your other apps, and you can keep working.</span></div>
+          <div class="choice"><span class="dot"></span><span><b>Full desktop</b></span><span class="s">Can see your whole screen and click any app you approve, including mail and chat. Each run waits for you to press Start and step away.</span></div>
+          <div class="choice"><span class="dot"></span><span><b>Not in this project</b></span><span class="s">The coordinator is told evaluators are off.</span></div>
+          <div class="actions end"><span class="btn quiet">Ask me later</span><span class="btn primary">Allow app only</span></div>
+        </div>
+      </div></div>
+      <p class="caption"><b>One choice per project, kept until you change it</b> on the project's menu › UI evaluators. Closing the project turns it off. A coordinator can never change it.</p>
+    </div>
+    <div>
+      <div class="tag">What the coordinator gets back</div>
+      <div class="frame"><div class="page">
+        <div class="kv">
+          <span class="k">Allowed</span><span>App only</span>
+          <span class="k">Refused</span><span><code>start_evaluation</code> with <code>mode: desktop</code>: "Full desktop is not allowed in this project. Ask the human."</span>
+          <span class="k">On finish</span><span>Run <code>run-91fb906c</code> finished · folder <code>~/ux-eval/runs/run-91fb906c</code> · 41 min</span>
+        </div>
+      </div></div>
+      <p class="caption">The wake-up holds only the state, the folder and the time. The coordinator reads the report from the folder, as the loop does today.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 2 -->
+<section class="study">
+  <div class="eyebrow">2 · Settings › Screen control · needed for full desktop only</div>
+  <div class="pair">
+    <div>
+      <div class="frame"><div class="page">
+        <div class="head"><h2>Screen control</h2></div>
+        <p class="note">Full-desktop evaluators run inside <b>Wiffletree Evaluator</b>, a small helper app, so only evaluators get these permissions and your other agents never do.</p>
+        <h3>macOS permissions</h3>
+        <div class="check"><span class="glyph ok">●</span><span>Screen Recording<span class="s">Lets an evaluator see the screen.</span></span><span class="ok">Granted</span></div>
+        <div class="check"><span class="glyph warn">●</span><span>Accessibility<span class="s">Lets an evaluator click, type and scroll.</span></span><span class="btn">Open System Settings…</span></div>
+        <h3>Providers</h3>
+        <div class="check"><span class="glyph ok">●</span><span>Claude computer use<span class="s">Max plan, signed in through claude.ai · Claude Code 2.1.317</span></span><span class="ok">Ready</span></div>
+        <div class="check"><span class="glyph bad">●</span><span>Codex computer use<span class="s">Codex is not signed in on this Mac.</span></span><span class="btn">How to fix</span></div>
+        <div class="actions"><span class="btn">Check again</span></div>
+      </div></div>
+      <p class="caption"><b>Checked, never assumed.</b> Each row comes from a live check. A full-desktop run on a provider that isn't Ready doesn't start, and its card says which row to fix.</p>
+    </div>
+    <div>
+      <div class="tag">App only needs nothing here</div>
+      <div class="frame"><div class="page">
+        <p class="note">App-only evaluators take screenshots of their own test copy and send input straight to it. They need no macOS permission, so this page shows only a line about them:</p>
+        <div class="check"><span class="glyph ok">●</span><span>App only<span class="s">Works for apps with an automation socket. Today that means Wiffletree.</span></span><span class="ok">Ready</span></div>
+      </div></div>
+    </div>
+  </div>
+</section>
+
+<!-- 3 -->
+<section class="study">
+  <div class="eyebrow">3 · Full desktop · waiting for you, then running</div>
+  <div class="pair">
+    <div>
+      <div class="tag">Inbox, when a full-desktop run reaches the front of the queue</div>
+      <div class="frame"><div class="page">
+        <div class="card">
+          <div class="who">Wiffletree: UX eval-and-improve loop · Coordinator</div>
+          <h2>Ready to use your screen</h2>
+          <p class="note" style="margin-top:4px">2 runs in turn: Claude Opus 5.5, then Codex Sol 6.1, about 40 minutes each. Don't use this Mac until they finish. Press <span class="kbd">Esc</span> anywhere to stop.</p>
+          <div class="actions end"><span class="btn quiet">Skip these runs</span><span class="btn">Later</span><span class="btn primary">Start now</span></div>
+        </div>
+      </div></div>
+      <p class="caption"><b>Nothing takes the screen without this click.</b> Later keeps the runs at the front of the queue. Skip tells the coordinator they didn't run.</p>
+    </div>
+    <div>
+      <div class="tag">While it runs</div>
+      <div class="frame">
+        <div class="menu"><span class="cu">● Evaluator using this Mac</span><span>Wi-Fi</span><span>Wed 14:12</span></div>
+        <div class="banner"><b>An evaluator is using this Mac.</b> <span>Claude Opus 5.5 · run 1 of 2 · 12 min</span><span class="r"><span class="kbd">Esc</span><span class="btn stop">Stop</span></span></div>
+        <div class="main">The menu bar item stays visible even when the evaluator hides other windows. Its menu holds Stop and opens the run.</div>
+      </div>
+      <div class="tag">An app-only run, for comparison</div>
+      <div class="frame">
+        <div class="banner app"><b>Evaluator running in a test copy.</b> <span>Codex Sol 6.1 · 8 min</span><span class="r"><span class="btn">Open run</span><span class="btn stop">Stop</span></span></div>
+        <div class="main">A quiet band in the main window. Your screen and other apps are untouched.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 4 -->
+<section class="study">
+  <div class="eyebrow">4 · Agents panel · the project's Evaluations group</div>
+  <div class="pair">
+    <div>
+      <div class="frame"><div class="win">
+        <div class="side">
+          <div class="g">Vyttle</div>
+          <div class="i sel">UX eval-and-improve loop <span class="r">2</span></div>
+          <div class="sub">◐ Evaluating · 1 running</div>
+          <div class="i">computer-use agents</div>
+          <div class="i">Theme files</div>
+        </div>
+        <div class="page">
+          <div class="head"><h2>Evaluations</h2><span class="note r">5 runs</span></div>
+          <div class="row"><span class="glyph" style="color:var(--focus)">◐</span><span>run-3c07d1a2 <span class="mode">App only</span><span class="s"><span class="pin">Pinned</span> Claude Opus 5.5 · high</span></span><span class="t"><span class="state run">Running</span><br>12 min</span></div>
+          <div class="row"><span class="glyph">○</span><span>run-8e41b6f0 <span class="mode">App only</span><span class="s"><span class="pin">Pinned</span> Codex Sol 6.1 · high</span></span><span class="t"><span class="state wait">Waiting</span><br>Codex resets 15:00</span></div>
+          <div class="row"><span class="glyph">○</span><span>run-a19f2c55 <span class="mode">Full desktop</span><span class="s"><span class="pin">Pinned</span> Claude Opus 5.5 · high</span></span><span class="t"><span class="state q">Queued</span><br>2nd for the screen</span></div>
+          <div class="row"><span class="glyph ok">●</span><span>run-91fb906c <span class="mode">App only</span><span class="s"><span class="pin">Pinned</span> Claude Opus 5.5 · high · 41 min</span></span><span class="t"><span class="state done">Finished</span><br>13:20</span></div>
+          <div class="row"><span class="glyph bad">●</span><span>run-5d2e0b9a <span class="mode">App only</span><span class="s"><span class="pin">Pinned</span> Codex Sol 6.1 · stopped by you</span></span><span class="t"><span class="state fail">Stopped</span><br>12:58</span></div>
+        </div>
+      </div></div>
+      <p class="caption"><b>Runs sit beside tickets, not inside them.</b> An evaluator belongs to the project, never to a ticket or worktree. <b>Waiting</b> means its pinned model is at its limit. It never moves to another model.</p>
+    </div>
+    <div>
+      <div class="tag">The states</div>
+      <div class="frame"><div class="page">
+        <div class="kv">
+          <span class="k"><span class="state q">Queued</span></span><span>Waiting for the screen. Full desktop only.</span>
+          <span class="k"><span class="state wait">Waiting</span></span><span>Its pinned model is at its limit, or it needs your Start click.</span>
+          <span class="k"><span class="state run">Running</span></span><span>Driving the app now.</span>
+          <span class="k"><span class="state done">Finished</span></span><span>It stopped on its own. Whether its report is valid is the coordinator's call.</span>
+          <span class="k"><span class="state fail">Failed</span> <span class="state fail">Stopped</span></span><span>Ended with an error, or by you, the Esc key or the coordinator.</span>
+        </div>
+      </div></div>
+    </div>
+  </div>
+</section>
+
+<!-- 5 -->
+<section class="study">
+  <div class="eyebrow">5 · One run</div>
+  <div class="pair">
+    <div>
+      <div class="frame"><div class="page">
+        <div class="head"><h2>run-3c07d1a2</h2><span class="state run">Running</span><span class="r btn stop">Stop</span></div>
+        <div class="kv">
+          <span class="k">Model</span><span><span class="pin">Pinned</span> Claude Opus 5.5 · high · no fallback</span>
+          <span class="k">Mode</span><span>App only · test copy of Wiffletree on <code>/tmp/wiffletree-ux-eval</code></span>
+          <span class="k">Folder</span><span><code>~/ux-eval/runs/run-3c07d1a2</code> · <span class="link" style="color:var(--accent)">Show in Finder</span></span>
+          <span class="k">Started by</span><span>UX eval-and-improve loop · Coordinator · 14:00</span>
+          <span class="k">It has</span><span>Its prompt, the app driver and its folder. No shell, repository or your settings.</span>
+        </div>
+        <h3>Recent steps</h3>
+        <div class="step"><span class="k">14:11:52</span><span><span class="thumb"></span>screenshot · saved screenshots/models-dark-1280.png</span></div>
+        <div class="step"><span class="k">14:11:47</span><span>click 1182, 64 · Models</span></div>
+        <div class="step"><span class="k">14:11:40</span><span>resize window to 1280 × 820</span></div>
+      </div></div>
+      <p class="caption"><b>You can watch, the coordinator can't.</b> The steps and screenshots show here for you. The coordinator sees only the state and the folder, so it can't leak the loop's goals to the evaluator or learn its reasoning early.</p>
+    </div>
+    <div>
+      <div class="tag">Out of scope for this change</div>
+      <div class="frame"><div class="page">
+        <ul class="note" style="margin:0;padding-left:18px">
+          <li>Sending a message to a running evaluator. It runs one prompt to the end.</li>
+          <li>An editable list of apps a full-desktop run may never open. Instead, Wiffletree approves only the apps the run names when Claude asks for app access.</li>
+          <li>Evaluators on a paired remote Mac.</li>
+        </ul>
+      </div></div>
+    </div>
+  </div>
+</section>
+</body>
+</html>
