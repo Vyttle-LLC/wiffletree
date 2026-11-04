@@ -104,6 +104,7 @@ fn launched_turn(
         helper: env!("CARGO_BIN_EXE_wiffletree-host").into(),
         instructions: provider::skill(role),
         thread: Some(launch),
+        evaluator: None,
     };
     let mut reply = String::new();
     let mut failure = None;

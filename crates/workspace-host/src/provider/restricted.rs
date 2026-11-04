@@ -70,7 +70,7 @@ const CLAUDE_TOOLS: [&str; 7] = [
     "Edit",
 ];
 /// Codex features that act outside the sandbox or start other agents, turned off for threads.
-const CODEX_FEATURES_OFF: [&str; 11] = [
+pub(super) const CODEX_FEATURES_OFF: [&str; 11] = [
     "apps",
     "browser_use",
     "browser_use_external",
@@ -277,17 +277,22 @@ impl ThreadLaunch {
 /// folder, where `dontAsk` still lets the session write its auto memory, and for an issue
 /// thread reach the web.
 fn claude_denied(launch: &ThreadLaunch) -> Vec<String> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    let claude = home.join(".claude");
-    let mut denied: Vec<String> = ["Write", "Edit", "MultiEdit"]
-        .map(|tool| format!("{tool}(/{}/**)", claude.display()))
-        .into();
+    let mut denied = claude_home_denied();
     if !launch.web() {
         denied.extend(WEB_TOOLS.map(String::from));
     }
     denied
+}
+/// Writes to Claude's own folder under the home folder, where `dontAsk` still lets a session
+/// write its auto memory.
+pub(super) fn claude_home_denied() -> Vec<String> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let claude = home.join(".claude");
+    ["Write", "Edit", "MultiEdit"]
+        .map(|tool| format!("{tool}(/{}/**)", claude.display()))
+        .into()
 }
 
 /// Claude in `dontAsk` mode, which denies without asking every tool not allowed, with no

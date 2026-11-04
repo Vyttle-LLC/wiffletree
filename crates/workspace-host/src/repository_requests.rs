@@ -137,6 +137,15 @@ impl Host {
                 .query_row("SELECT data FROM attention WHERE id=?1", [id], |r| {
                     decode(r, 0)
                 })?;
+        // Answering sets the project's permission, which resolves the card.
+        if item.operation_id.starts_with(EVALUATION_PREFIX) && item.answer.is_none() {
+            self.answer_evaluator_card(&item, answer)?;
+            return Ok(self
+                .db
+                .query_row("SELECT data FROM attention WHERE id=?1", [id], |r| {
+                    decode(r, 0)
+                })?);
+        }
         if !item.is_repository_request() {
             return self.resolve_attention(id, answer);
         }

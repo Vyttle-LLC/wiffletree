@@ -1,6 +1,6 @@
 //! The tools and role instructions agents see describe the two-level hierarchy only.
 use serde_json::json;
-use workspace_core::{Role, Skill};
+use workspace_core::{Command, EvaluatorPermission, Role, Skill};
 use workspace_host::provider;
 use workspace_host::{behaviors, mcp, skills};
 
@@ -11,9 +11,10 @@ const RETIRED: [&str; 3] = [
 ];
 
 /// The roles that get the agents' communication contract; assistant threads and job runs get
-/// its thread version.
+/// its thread version, and a UI evaluator gets no instructions at all.
 fn agent_roles() -> impl Iterator<Item = Role> {
-    (Role::ALL.into_iter()).filter(|role| !role.is_thread() && *role != Role::Compiler)
+    (Role::ALL.into_iter())
+        .filter(|role| !role.is_thread() && !matches!(role, Role::Compiler | Role::Evaluator))
 }
 
 /// A role's instructions with its skill rewritten to an empty text: the fixed core alone, which
@@ -58,6 +59,9 @@ fn the_tool_list_offers_ticket_tools_and_no_repository_coordinator_tools() {
             "read_issue",
             "link_issue",
             "archive_agent",
+            "start_evaluation",
+            "list_evaluations",
+            "stop_evaluation",
             "log_work",
             "query_brain",
             "ask_user",
@@ -114,6 +118,63 @@ fn the_tool_list_offers_ticket_tools_and_no_repository_coordinator_tools() {
         create["inputSchema"]["required"],
         serde_json::json!(["repository_id", "title", "brief"])
     );
+}
+
+#[test]
+fn the_evaluator_tools_take_an_exact_model_and_no_agent_can_set_what_a_project_allows() {
+    let tools = mcp::tools();
+    let tool = |name: &str| {
+        (tools.as_array().unwrap().iter())
+            .find(|t| t["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    let start = tool("start_evaluation");
+    assert_eq!(
+        start["inputSchema"]["required"],
+        json!(["run_folder", "provider", "model", "effort", "mode"])
+    );
+    let properties = &start["inputSchema"]["properties"];
+    assert_eq!(properties["mode"]["enum"], json!(["app", "desktop"]));
+    assert_eq!(properties["provider"]["enum"], json!(["claude", "codex"]));
+    assert_eq!(start["inputSchema"]["additionalProperties"], false);
+    let described = start["description"].as_str().unwrap();
+    for promise in [
+        "never another",
+        "only its id, state, folder and duration",
+        "You never see what the evaluator says",
+    ] {
+        assert!(described.contains(promise), "{promise}");
+    }
+    assert_eq!(
+        tool("stop_evaluation")["inputSchema"]["required"],
+        json!(["run_id"])
+    );
+    assert_eq!(
+        tool("list_evaluations")["inputSchema"]["required"],
+        json!([])
+    );
+    // What a project allows is the human's: no tool sets it.
+    let names = tools.to_string();
+    for setter in ["set_evaluator", "allow_evaluat", "evaluator_permission"] {
+        assert!(!names.contains(setter), "{setter}");
+    }
+    assert!(
+        Command::SetEvaluatorPermission {
+            project_id: "p".into(),
+            permission: EvaluatorPermission::App,
+        }
+        .is_human_only()
+    );
+    assert!(Command::StopEvaluation { run_id: "r".into() }.is_human_only());
+    assert!(
+        Command::Evaluations {
+            project_id: "p".into()
+        }
+        .is_human_only()
+    );
+    // A blind evaluator gets no instructions of Wiffletree's.
+    assert_eq!(provider::skill(Role::Evaluator), "");
 }
 
 #[test]
@@ -296,7 +357,15 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = core(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator core — v15"));
+    assert!(coordinator.contains("Project coordinator core — v16"));
+    // UI evaluators: the coordinator writes the whole prompt and hears only the end.
+    for told in [
+        "call start_evaluation",
+        "uses that model and no other",
+        "with only its id, state, folder and duration",
+    ] {
+        assert!(coordinator.contains(told), "{told}");
+    }
     // A background reply the records show unchanged folds; news keeps it full.
     assert!(
         coordinator

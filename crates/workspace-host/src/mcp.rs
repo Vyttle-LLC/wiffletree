@@ -161,6 +161,24 @@ pub fn tools() -> Value {
             vec!["session_id"]
         ),
         tool(
+            "start_evaluation",
+            "Coordinator: start a UI evaluator, a fresh and blind agent on exactly the provider, model and effort you name, never another; Who runs what does not apply. run_folder is an absolute path to an existing folder holding prompt.md, outside every repository, worktree and Wiffletree's data folder, used by no other unfinished run. The evaluator's first and only message is prompt.md as it is, so put everything it needs there. It has no shell, web, repository, brain, memory or workspace tools and none of the human's instructions or settings, and it reads and writes only in its folder, where it leaves its report. mode is app, which drives only the app under test, or desktop, the whole screen, which is not available yet. The human allows evaluators per project: the first run in a project asks them in their Inbox and waits; where they are off, or the mode is not allowed, the call is refused with the reason, and only the human can change that. A model that is not offered, an effort it does not offer or a provider not signed in is refused. At a usage limit the run waits for the reset. Returns the run's id and state. Finish your turn: Wiffletree messages you once, when the run ends, with only its id, state, folder and duration; read the report from the folder then. You never see what the evaluator says.",
+            json!({"run_folder":string,"provider":{"type":"string","enum":["claude","codex"]},"model":string,"effort":string,"mode":{"type":"string","enum":["app","desktop"]}}),
+            vec!["run_folder", "provider", "model", "effort", "mode"]
+        ),
+        tool(
+            "list_evaluations",
+            "Coordinator: list this project's UI evaluator runs, newest first, with what the project allows: each run's id, state (queued, waiting, running, finished, failed or stopped), mode, model, folder and times, and why a waiting run waits. Never what a run said or why it failed.",
+            json!({}),
+            vec![]
+        ),
+        tool(
+            "stop_evaluation",
+            "Coordinator: stop one of this project's UI evaluator runs that has not ended. A running run stops at once; Wiffletree then messages you that it ended, as for any run.",
+            json!({"run_id":string}),
+            vec!["run_id"]
+        ),
+        tool(
             "log_work",
             "Coordinator or implementer: record one terse entry in your project's Space's brain, at a meaningful milestone: a decision, a finished assignment, a handoff or a blocker. Give type, a one-line title of at most 80 characters, and one line each of changed, why and state; newlines become spaces. No transcripts, step-by-step narration or pasted output, and never child personal information (names, message text, phone numbers, locations), credentials or secrets. Wiffletree fills in the entry's id, date, author and ref, from your ticket's branch, commits and pull request; you cannot give them. An implementer always logs for its ticket's repository. The coordinator may name one of the project's tickets as ticket_id, for an entry about that ticket, such as after accepting or publishing it: it is for the ticket's repository, with its ref, and counts for that ticket's milestones. Or it may name one of the project's repositories as repository; with neither, the entry is a planning entry. milestone is an optional deduplication key: the same key with the same content returns the first entry, and with other content is refused. Refused, storing nothing, when gh is not signed in for a Space on GitHub, or the entry is over 2,000 characters, saying how much to cut. Each entry lands straight in the brain's logs within seconds, and the next compile folds it into the wiki. Returns the entry's id, file path and ref.",
             json!({"type":{"type":"string","enum":["decision","observation"]},"title":string,"changed":string,"why":string,"state":string,"repository":string,"ticket_id":string,"milestone":string}),

@@ -2,6 +2,7 @@
 //! sorting and assistant threads, which the provider holds to what they are given.
 mod codex_compaction;
 mod constrained;
+mod evaluator;
 mod output;
 mod restricted;
 mod router;
@@ -10,6 +11,7 @@ use crate::processes::{self, Sighting, Watch};
 use crate::runtime::LowPriority as _;
 use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
+pub use evaluator::{EvaluatorLaunch, prepare_codex_home};
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
 use output::{Next, Output, StopReading};
 pub use restricted::{ThreadLaunch, server_definition, shell_text_refused};
@@ -91,6 +93,8 @@ pub struct Turn {
     pub instructions: String,
     /// An assistant thread's restricted launch; every other turn runs in YOLO mode.
     pub thread: Option<ThreadLaunch>,
+    /// A UI evaluator run's launch, which has no workspace server, credential or instructions.
+    pub evaluator: Option<EvaluatorLaunch>,
 }
 pub fn executable(provider: Provider) -> Result<PathBuf> {
     let name = match provider {
@@ -175,6 +179,8 @@ fn core(role: Role) -> &'static str {
         Role::Assistant => 6,
         Role::JobRun => 7,
         Role::Compiler => return compile::PROCEDURE,
+        // An evaluator is blind: Wiffletree gives it no instructions at all.
+        Role::Evaluator => return "",
     };
     CORE[part].1
 }
@@ -307,6 +313,14 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
         .own_descriptors_only();
     if matches!(turn.kind, TurnKind::Sort) {
         constrained::configure(cmd, &turn.profile, keeper::SORTING, keeper::ANSWER_SCHEMA);
+        return;
+    }
+    // Before any credential is set: an evaluator gets none.
+    if let Some(launch) = &turn.evaluator {
+        match turn.session.provider {
+            Provider::Claude => evaluator::configure_claude(cmd, turn, launch),
+            Provider::Codex => evaluator::configure_codex(cmd, turn, launch),
+        }
         return;
     }
     // Credentials go to the MCP subprocess environment, never in the prompt.
@@ -721,6 +735,9 @@ fn run_turn(
                     if let Some(launch) = &turn.thread {
                         launch.check_codex_item(&value["item"])?;
                     }
+                    if let Some(launch) = &turn.evaluator {
+                        launch.check_codex_item(&value["item"])?;
+                    }
                     codex
                         .event(&value)
                         .into_iter()
@@ -772,6 +789,11 @@ fn run_turn(
                     }
                     if let Some(launch) = &turn.thread {
                         launch.check_claude_start(&value)?;
+                    }
+                    // An evaluator has no workspace server to connect.
+                    if let Some(launch) = &turn.evaluator {
+                        launch.check_claude_start(&value)?;
+                        continue;
                     }
                     ensure!(
                         value["mcp_servers"]
@@ -998,6 +1020,7 @@ mod tests {
             helper: PathBuf::new(),
             instructions: String::new(),
             thread: None,
+            evaluator: None,
         };
         let mut cmd = ProcessCommand::new("claude");
         configure(&mut cmd, &turn);
@@ -1165,6 +1188,7 @@ mod tests {
             helper: "/tmp/helper".into(),
             instructions: skill(Role::ProjectOrchestrator),
             thread: None,
+            evaluator: None,
         }
     }
 
