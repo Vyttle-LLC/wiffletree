@@ -55,6 +55,10 @@ impl AppLaunch {
 pub(crate) struct RunningTarget {
     child: Child,
     socket: PathBuf,
+    /// Follows what the copy starts, also once the copy has exited and its children have lost
+    /// their parent, so the stop finds every one of them.
+    watch: Option<Watch>,
+    run: String,
 }
 impl RunningTarget {
     /// Starts the copy and returns once its socket answers with a window. A copy that exits
@@ -76,9 +80,12 @@ impl RunningTarget {
                     launch.target.executable
                 )
             })?;
+        let run = format!("app-target:{}", child.id());
         let mut running = Self {
+            watch: Some(Watch::start(child.id() as i32, &run)),
             child,
             socket: launch.socket.clone(),
+            run,
         };
         running.wait_for_window(wait, cancel)?;
         Ok(running)
@@ -108,7 +115,9 @@ impl RunningTarget {
     /// whatever is left after the grace period.
     fn stop(&mut self) {
         let leader = self.child.id() as i32;
-        let mut groups: Vec<i32> = (processes::descendants(leader).into_iter())
+        let followed = processes::followed_now(&self.run);
+        let mut groups: Vec<i32> = (followed.into_iter())
+            .chain(processes::descendants(leader))
             .map(|process| process.group)
             .filter(|group| *group > 1)
             .collect();
@@ -136,6 +145,8 @@ impl RunningTarget {
         signal(libc::SIGKILL);
         settle(Duration::from_secs(1));
         let _ = self.child.wait();
+        drop(self.watch.take());
+        processes::release(&self.run);
         let _ = fs::remove_file(&self.socket);
     }
 }
@@ -282,6 +293,31 @@ mod tests {
             .parse()
             .unwrap();
         assert!(processes::read(pid).is_none(), "the copy still runs");
+    }
+
+    #[test]
+    fn what_a_copy_started_stops_even_after_the_copy_exited() {
+        let folder = tempfile::tempdir().unwrap();
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/app_under_test.py");
+        let agent_file = folder.path().join("agent");
+        let mut launch = launch(script.to_str().unwrap(), &[], folder.path());
+        let agent_path = agent_file.to_string_lossy().into_owned();
+        launch.target.environment.insert("AGENT".into(), agent_path);
+        launch.target.environment.insert("EXIT".into(), "1".into());
+        let cancel = AtomicBool::new(false);
+        let error = RunningTarget::start(&launch, Duration::from_secs(20), &cancel)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("exited"), "{error:#}");
+        let agent: i32 = fs::read_to_string(&agent_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            processes::read(agent).is_none(),
+            "the orphaned agent still runs"
+        );
     }
 
     #[test]
