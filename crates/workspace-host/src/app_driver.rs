@@ -38,7 +38,7 @@ pub fn tools() -> Value {
     json!([
         tool(
             "screenshot",
-            "Capture the app's window and save it in your folder as name (a .png path relative to the folder, such as screenshots/models-dark.png). Returns the image, its size in pixels and the window's scale. scale points (the default) gives one pixel per window point, so a position in the image is the position to click; native gives the display's full resolution, for sampling pixels and measuring fine detail.",
+            "Capture the app's window and save it in your folder as name (a .png path relative to the folder, such as screenshots/models-dark.png). Returns the image, its size in pixels and the window's scale. scale points (the default) gives one pixel per window point, so a position in the image is the position to click; native gives the display's full resolution, for measuring fine detail. An image over 2000 pixels on its long edge, such as a native shot of a large window, is downsized before you see it, so sample pixels from a points shot, or from a native shot of a window small enough to stay under that size.",
             json!({"type":"object","properties":{"name":{"type":"string"},"scale":{"type":"string","enum":["points","native"]}},"required":["name"],"additionalProperties":false})
         ),
         tool(
