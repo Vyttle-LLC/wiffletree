@@ -5574,9 +5574,11 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
             let folder = runs.join(model);
             fs::create_dir(&folder).unwrap();
             fs::write(folder.join("prompt.md"), prompt).unwrap();
+            let profile = runs.join(format!("{model}-profile"));
+            fs::create_dir(&profile).unwrap();
             let target = json!({
                 "executable": app,
-                "arguments": ["--data-dir", runs.join(format!("{model}-profile"))],
+                "arguments": ["--data-dir", profile],
                 "environment": {"PATH": "/stubs/bin", "RECORD": runs.join(format!("{model}.json")), "GH_CONFIG_DIR": "/tmp/eval-gh"},
             });
             let args = json!({"run_folder":folder,"provider":"claude","model":model,"effort":"high","mode":"app","target":target});
