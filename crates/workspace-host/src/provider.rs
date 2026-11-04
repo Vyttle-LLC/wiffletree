@@ -554,16 +554,7 @@ impl Process {
         if self.status.is_some() {
             return Ok(true);
         }
-        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        let options = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
-        if unsafe { libc::waitid(libc::P_PID, self.child.id(), &mut info, options) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        #[cfg(target_os = "macos")]
-        let pid = info.si_pid;
-        #[cfg(not(target_os = "macos"))]
-        let pid = unsafe { info.si_pid() };
-        Ok(pid != 0)
+        exited_unreaped(&self.child)
     }
     /// Stops the provider's group, after the watcher's last look at it, and only then reaps
     /// the leader. Later calls return its status without signalling again.
@@ -576,6 +567,20 @@ impl Process {
         self.status = Some(status);
         Ok(status)
     }
+}
+/// Whether `child` has exited, without reaping it: until it is reaped, neither its id nor its
+/// group's can be given to another process.
+fn exited_unreaped(child: &Child) -> Result<bool> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let options = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
+    if unsafe { libc::waitid(libc::P_PID, child.id(), &mut info, options) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    #[cfg(target_os = "macos")]
+    let pid = info.si_pid;
+    #[cfg(not(target_os = "macos"))]
+    let pid = unsafe { info.si_pid() };
+    Ok(pid != 0)
 }
 /// The error a running turn stops with when its cancel flag is set. Callers recognise it by
 /// type, so provider output with the same text cannot pass for it.

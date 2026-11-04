@@ -171,21 +171,6 @@ pub(crate) fn group_members(group: i32) -> Vec<ProcessInfo> {
         .collect()
 }
 
-/// Every live process `root` started, and those they started, wherever their groups are.
-pub(crate) fn descendants(root: i32) -> Vec<ProcessInfo> {
-    let mut found = vec![];
-    let mut next = vec![root];
-    while let Some(parent) = next.pop() {
-        for child in os::children(parent).into_iter().filter_map(read) {
-            if found.len() < MAX_TREE {
-                next.push(child.pid);
-                found.push(child);
-            }
-        }
-    }
-    found
-}
-
 /// Whether the group has a live process this user may signal; the probe delivers nothing. A
 /// group whose only members are zombies answers EPERM.
 pub(crate) fn group_runs(group: i32) -> bool {
