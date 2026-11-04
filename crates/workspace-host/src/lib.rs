@@ -550,6 +550,7 @@ impl Host {
         self.recover_steps()?;
         self.end_interrupted_job_runs()?;
         self.end_interrupted_compiles()?;
+        self.end_interrupted_evaluations()?;
         self.ask_about_interrupted_routes()
     }
     pub(crate) fn event(

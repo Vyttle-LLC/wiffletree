@@ -13,6 +13,8 @@ const ASKED: &str = "Waiting for the human to allow UI evaluators in this projec
 /// Why a run the human stopped ended.
 pub(crate) const STOPPED_BY_YOU: &str = "Stopped by you.";
 pub(crate) const STOPPED_BY_COORDINATOR: &str = "Stopped by its coordinator.";
+/// Why a run whose turn the host's crash, kill or quit cut short ended.
+const INTERRUPTED: &str = "Wiffletree stopped during the run.";
 pub(crate) const PROJECT_CLOSED: &str = "Stopped: the project was closed.";
 
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
@@ -671,6 +673,30 @@ impl Host {
         self.admit_evaluations()
     }
 
+    /// At startup, ends as failed each run whose turn the host's stop cut short, and wakes its
+    /// coordinator. A run whose prompt still waits to be delivered, or that waits for its
+    /// limit's reset, goes on; one with no session yet waits for the human or the screen.
+    pub(crate) fn end_interrupted_evaluations(&mut self) -> Result<()> {
+        let unended: Vec<Evaluation> = self
+            .db
+            .prepare("SELECT data FROM evaluations WHERE session_id IS NOT NULL AND json_extract(data,'$.state') NOT IN ('finished','failed','stopped') ORDER BY created_at")?
+            .query_map([], |r| decode(r, 0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for run in unended {
+            let session = run.session_id.clone().unwrap_or_default();
+            let queued: i64 = self.db.query_row(
+                "SELECT count(*) FROM messages WHERE recipient=?1 AND receipt='queued'",
+                [&session],
+                |r| r.get(0),
+            )?;
+            if queued > 0 || self.session_runtime(&session)?.limit_retry.is_some() {
+                continue;
+            }
+            self.end_evaluation(run, EvaluationState::Failed, INTERRUPTED)?;
+        }
+        self.admit_evaluations()
+    }
+
     /// A run's session that could not start a turn: the run fails.
     pub(crate) fn evaluation_start_failed(&mut self, session: &str, error: &str) -> Result<()> {
         let run = self.session_evaluation(session)?;
@@ -1175,6 +1201,75 @@ pub(crate) mod tests {
             .filter(|run| run.state == EvaluationState::Running)
             .count();
         assert_eq!(running, 2);
+    }
+
+    #[test]
+    fn a_run_the_hosts_stop_cut_short_fails_at_the_next_start_and_wakes_its_coordinator() {
+        let mut f = fixture();
+        f.allow(EvaluatorPermission::App);
+        let started = |f: &mut Fixture, name: &str| {
+            let folder = f.folder(name);
+            let id = f.start(&folder, "app").unwrap()["run_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let session = f.host.evaluation(&id).unwrap().session_id.unwrap();
+            (id, session)
+        };
+        // In its turn when the host went: its prompt was delivered.
+        let (cut, session) = started(&mut f, "cut");
+        f.host.evaluation_turn_started(&session).unwrap();
+        f.host
+            .db
+            .execute(
+                "UPDATE messages SET receipt='delivered' WHERE recipient=?1",
+                [&session],
+            )
+            .unwrap();
+        // Waiting for its limit's reset, with its prompt held for the retry.
+        let (waiting, session) = started(&mut f, "waiting");
+        let mut runtime = f.host.session_runtime(&session).unwrap();
+        runtime.limit_retry = Some(LimitRetry {
+            failed_at: now(),
+            resets_at: None,
+        });
+        f.host.save_runtime(&runtime).unwrap();
+        f.host
+            .db
+            .execute(
+                "UPDATE messages SET receipt='held' WHERE recipient=?1",
+                [&session],
+            )
+            .unwrap();
+        // Admitted, its prompt not delivered yet.
+        let (queued, _) = started(&mut f, "queued");
+
+        let Fixture {
+            _home: home,
+            runs: _runs,
+            host,
+            coordinator,
+        } = f;
+        drop(host);
+        let host = Host::open_set_up(home.path()).unwrap();
+
+        let run = host.evaluation(&cut).unwrap();
+        assert_eq!(run.state, EvaluationState::Failed);
+        assert_eq!(run.reason.as_deref(), Some(INTERRUPTED));
+        assert!(
+            host.session(run.session_id.as_deref().unwrap())
+                .unwrap()
+                .archived
+        );
+        let told: Vec<Message> = (host.messages(&coordinator.id, None, 100).unwrap())
+            .into_iter()
+            .filter(|m| m.id.starts_with(EVALUATION_PREFIX))
+            .collect();
+        assert_eq!(told.len(), 1);
+        assert_eq!(told[0].body, ended_message(&run));
+        for going_on in [waiting, queued] {
+            assert!(!host.evaluation(&going_on).unwrap().state.ended());
+        }
     }
 
     #[test]

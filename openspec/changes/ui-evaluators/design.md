@@ -14,7 +14,7 @@ Wiffletree already runs sessions the provider holds to what they are given: assi
 
 An evaluator run is an `evaluations` row: id, project, the coordinator that started it, provider, model, effort, mode, folder, state, reason and times. When it starts it gets a session of role `evaluator` with no project, no parent and no repository, as a compile does. That keeps it out of `workspace_context`'s team, the Agents panel's ticket tree, check-ins and `send_message`, which would otherwise hand its replies to the coordinator. The session gives it the scheduler's turn, steps, transcript and usage-limit wait for free. Each run gets a new session, so there is no history to resume across runs.
 
-The session is archived when the run ends, so nothing can start another turn in it.
+The session is archived when the run ends, so nothing can start another turn in it. A run whose turn a crash, kill or long quit cut short is ended as failed when the host next starts, "Wiffletree stopped during the run.", and its coordinator is told, as job runs are ended. A run still waiting to deliver its prompt, or waiting for its limit's reset, goes on.
 
 ### Isolation is the provider's, as for threads
 
@@ -23,6 +23,8 @@ Claude runs as `-p` with stream-json, `--setting-sources ""`, `--strict-mcp-conf
 Codex runs `exec --json --ignore-user-config --ignore-rules` in a workspace-write sandbox rooted at the folder, with no network, no temporary folders, web search disabled, the threads' features off and also `shell_tool`, `unified_exec`, `view_image`, which reads any path, and `image_generation`. Its code mode then has only `apply_patch`, which the sandbox holds to the folder. Any MCP call stops the run. No developer instructions are given.
 
 `--ignore-user-config` does not keep `~/.codex/AGENTS.md` out: a probe on Codex 0.160.0 received it. So an evaluator's Codex gets its own `CODEX_HOME` in Wiffletree's data folder, holding only a link to the user's `auth.json`, so sign-in and token refreshes still use the user's one file. The probe with that home received no AGENTS.md.
+
+A separate `CODEX_HOME` still lets Codex find the human's skills under `~/.agents/skills`. A request captured by a local endpoint carried them in its skills catalog, and neither `skip_host_skill_discovery` nor turning off `skill_search` removed them. So the evaluator's Codex also runs with an empty `HOME` of its own, beside its Codex home. Only Codex's bundled system skills (imagegen, openai-docs, skill-creator, skill-installer) remain, as Claude keeps its built-in ones.
 
 The link holds only because Codex rewrites `auth.json` in place. A probe on 0.160.0 confirmed it with a throwaway home: a fake, stale `auth.json` reached through a link, and `CODEX_REFRESH_TOKEN_URL_OVERRIDE` pointing at a local server. Codex refreshed, the refreshed token landed in the link's target with the same inode, and the link stayed a link. The home holds no lock for the ChatGPT token refresh, so two homes share nothing that one home would not.
 

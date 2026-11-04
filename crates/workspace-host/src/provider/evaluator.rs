@@ -29,6 +29,11 @@ pub struct EvaluatorLaunch {
     pub codex_home: PathBuf,
 }
 impl EvaluatorLaunch {
+    /// The empty folder an evaluator's Codex runs with as `HOME`, beside its Codex home: Codex
+    /// also finds the human's skills under `~/.agents/skills`, whatever its own home says.
+    pub fn codex_user_home(&self) -> PathBuf {
+        self.codex_home.with_file_name("home")
+    }
     /// `Read`, `Glob` and `Grep` of the folder and `Write`, `Edit` and `MultiEdit` in it;
     /// everything else is denied without asking.
     pub(crate) fn claude_allowed(&self) -> Vec<String> {
@@ -176,10 +181,12 @@ pub(super) fn configure_claude(cmd: &mut ProcessCommand, turn: &Turn, launch: &E
 }
 
 /// Codex's workspace-write sandbox rooted at the run folder, with no network, temporary
-/// folder, web search, shell or MCP server, in a home that holds only the human's sign-in.
+/// folder, web search, shell or MCP server, in a home that holds only the human's sign-in and
+/// with an empty `HOME`, so none of the human's skills reach it.
 pub(super) fn configure_codex(cmd: &mut ProcessCommand, turn: &Turn, launch: &EvaluatorLaunch) {
     clear_environment(cmd);
     cmd.env("CODEX_HOME", &launch.codex_home)
+        .env("HOME", launch.codex_user_home())
         .args([
             "exec",
             "--json",
@@ -217,8 +224,10 @@ pub(super) fn configure_codex(cmd: &mut ProcessCommand, turn: &Turn, launch: &Ev
 
 /// Makes `home` a Codex home holding only a link to the human's `auth.json`, in `$CODEX_HOME`
 /// or `~/.codex`. A link, not a copy, so a token Codex refreshes is the human's one token.
+/// Makes the empty `HOME` beside it too (`EvaluatorLaunch::codex_user_home`).
 pub fn prepare_codex_home(home: &Path) -> Result<()> {
     fs::create_dir_all(home)?;
+    fs::create_dir_all(home.with_file_name("home"))?;
     let source = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
@@ -356,6 +365,8 @@ mod tests {
             "CODEX_HOME".into(),
             Some("/data/evaluators/codex-home".into())
         )));
+        // An empty HOME keeps out the skills Codex finds under ~/.agents/skills.
+        assert!(env.contains(&("HOME".into(), Some("/data/evaluators/home".into()))));
         assert!(
             !env.iter().any(|(name, _)| name.starts_with("WORKSPACE_")),
             "{env:?}"
@@ -460,5 +471,7 @@ mod tests {
         let entries: Vec<_> = fs::read_dir(&evaluators).unwrap().collect();
         assert_eq!(entries.len(), 1);
         assert!(fs::read_link(evaluators.join("auth.json")).is_ok());
+        let user_home = home.path().join("home");
+        assert_eq!(fs::read_dir(user_home).unwrap().count(), 0);
     }
 }
