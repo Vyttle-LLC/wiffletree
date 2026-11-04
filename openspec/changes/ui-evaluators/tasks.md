@@ -20,9 +20,9 @@
 
 ## 3. Ticket 3 · App driver and test target
 
-- [ ] 3.1 An MCP driver over `workspace-desktop --automation-socket`: screenshot, click, type, key, scroll, drag, resize; offered to app runs only, through the run's strict MCP configuration.
-- [ ] 3.2 The app captures its own window in-process if it can, so no Screen Recording grant is needed.
-- [ ] 3.3 The host launches the test copy with `launch.sh`'s isolation: a disposable profile, fake provider CLIs, an empty `GH_CONFIG_DIR`, no workspace variables, and a switch that stops login-shell PATH adoption.
+- [x] 3.1 An MCP driver over `workspace-desktop --automation-socket`: screenshot, click, double-click, right-click, move, type, key, scroll, drag, resize and window; offered to app runs only, through the run's strict MCP configuration, and allowed by the start and tool-call checks.
+- [x] 3.2 The app captures its own window in-process (`capture`, at points or native scale), measured to need no Screen Recording grant; `resize` keeps the window on its display.
+- [x] 3.3 The host launches the test copy with `launch.sh`'s isolation: a disposable profile, fake provider CLIs, an empty `GH_CONFIG_DIR`, no workspace variables, and `WORKSPACE_SKIP_LOGIN_ENV`, which stops login-shell PATH adoption. It waits for the socket, stops the copy's whole tree when the turn ends, and refuses a second live run on the same data folder.
 
 ## 4. Ticket 4 · Desktop driver
 

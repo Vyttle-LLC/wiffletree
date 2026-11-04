@@ -1,5 +1,6 @@
 //! Noninteractive provider turns with the user's YOLO execution policy, apart from comment
 //! sorting and assistant threads, which the provider holds to what they are given.
+mod app_target;
 mod codex_compaction;
 mod constrained;
 mod evaluator;
@@ -11,6 +12,7 @@ use crate::processes::{self, Sighting, Watch};
 use crate::runtime::LowPriority as _;
 use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
+pub use app_target::AppLaunch;
 pub use evaluator::{EvaluatorLaunch, prepare_codex_home};
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
 use output::{Next, Output, StopReading};
@@ -631,6 +633,19 @@ fn run_turn(
     // A stop that lands before launch is a cancellation like any other.
     check_running(&cancel)?;
     let input = input(&turn)?;
+    // An app run's test copy runs for the turn and is stopped with it, however it ends.
+    let _target = match turn
+        .evaluator
+        .as_ref()
+        .and_then(|launch| launch.app.as_ref())
+    {
+        Some(app) => Some(app_target::RunningTarget::start(
+            app,
+            app_target::SOCKET_WAIT,
+            &cancel,
+        )?),
+        None => None,
+    };
     let mut process = Process {
         child: command(&turn)?
             .spawn()

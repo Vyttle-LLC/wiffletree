@@ -8,6 +8,8 @@ use crate::*;
 /// Where an evaluator's Codex keeps its home, under the data folder.
 const CODEX_HOME: &str = "evaluators/codex-home";
 const PROMPT_FILE: &str = "prompt.md";
+/// Where each app run's test copy writes its output, under the data folder, for the human.
+const TARGET_LOGS: &str = "evaluators/logs";
 /// Why a run waits before the human has chosen for its project.
 const ASKED: &str = "Waiting for the human to allow UI evaluators in this project.";
 /// Why a run the human stopped ended.
@@ -249,7 +251,14 @@ impl Host {
         service::only_arguments(
             "start_evaluation",
             args,
-            &["run_folder", "provider", "model", "effort", "mode"],
+            &[
+                "run_folder",
+                "provider",
+                "model",
+                "effort",
+                "mode",
+                "target",
+            ],
         )?;
         let string = |key: &str| -> Result<&str> {
             let value = args[key].as_str().map(str::trim).unwrap_or_default();
@@ -283,6 +292,7 @@ impl Host {
             "Full desktop evaluators are not available yet. Start an app run instead."
         );
         let folder = self.run_folder(string("run_folder")?)?;
+        let target = self.app_target(&args["target"])?;
         self.check_model(&profile)?;
         let at = now();
         let run = Evaluation {
@@ -294,6 +304,7 @@ impl Host {
             reported_model: None,
             mode,
             folder: folder.to_string_lossy().into_owned(),
+            target: Some(target),
             state: match permission {
                 Some(_) => EvaluationState::Queued,
                 None => EvaluationState::Waiting,
@@ -407,6 +418,76 @@ impl Host {
             bail!("The run {run} still uses the folder {given}. Give each run its own folder");
         }
         Ok(folder)
+    }
+
+    /// An app run's test copy, as it will start: an absolute executable on a test data folder
+    /// of its own, which no other run that has not ended uses, and given no Wiffletree session
+    /// variable or credential.
+    fn app_target(&self, given: &Value) -> Result<EvaluationTarget> {
+        ensure!(
+            given.is_object(),
+            "Give target: the app under test's executable, its arguments with --data-dir <test data folder>, and the environment it needs"
+        );
+        service::only_arguments("target", given, &["executable", "arguments", "environment"])?;
+        let mut target: EvaluationTarget = serde_json::from_value(given.clone()).context(
+            "Give target as {executable, arguments: [strings], environment: {NAME: value}}",
+        )?;
+        let executable = Path::new(&target.executable);
+        ensure!(
+            executable.is_absolute() && executable.is_file(),
+            "The app under test {} is not an absolute path to an executable",
+            target.executable
+        );
+        ensure!(
+            !target
+                .arguments
+                .iter()
+                .any(|arg| arg == "--automation-socket"),
+            "Leave --automation-socket out of the target's arguments: Wiffletree gives the app a socket of the run's own"
+        );
+        if let Some(name) = (target.environment.keys()).find(|name| session_variable(name)) {
+            bail!(
+                "The app under test may not be given {name}: no Wiffletree session variable or token reaches it"
+            );
+        }
+        let given_data = target
+            .data_folder()
+            .filter(|folder| Path::new(folder).is_absolute())
+            .context("Give the app under test a test data folder of its own with --data-dir <absolute path>")?;
+        let data = resolved(Path::new(given_data));
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        for own in [
+            self.home.clone(),
+            workspace_core::data_dir::default_directory(&home),
+        ] {
+            let own = resolved(&own);
+            ensure!(
+                !data.starts_with(&own) && !own.starts_with(&data),
+                "The test data folder {given_data} overlaps Wiffletree's own data folder {}",
+                own.display()
+            );
+        }
+        let data_text = data.to_string_lossy().into_owned();
+        for run in self.unended_evaluations()? {
+            if run.target.as_ref().and_then(EvaluationTarget::data_folder) == Some(&data_text) {
+                bail!(
+                    "The run {} still drives a copy on the data folder {given_data}. Give each run its own data folder",
+                    run.id
+                );
+            }
+        }
+        let at = target.arguments.iter().position(|arg| arg == "--data-dir");
+        target.arguments[at.expect("data_folder found it") + 1] = data_text;
+        Ok(target)
+    }
+    fn unended_evaluations(&self) -> Result<Vec<Evaluation>> {
+        Ok(self
+            .db
+            .prepare("SELECT data FROM evaluations WHERE json_extract(data,'$.state') NOT IN ('finished','failed','stopped')")?
+            .query_map([], |r| decode(r, 0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Refuses a provider not signed in here, a model its CLI did not list, full IDs and aliases
@@ -624,9 +705,15 @@ impl Host {
         if session.provider == Provider::Codex {
             provider::prepare_codex_home(&codex_home)?;
         }
+        let app = run.target.map(|target| provider::AppLaunch {
+            target,
+            socket: std::env::temp_dir().join(format!("wiffletree-{}.sock", run.id)),
+            log: self.home.join(TARGET_LOGS).join(format!("{}.log", run.id)),
+        });
         Ok(provider::EvaluatorLaunch {
             folder: fs::canonicalize(&run.folder)?,
             codex_home,
+            app,
         })
     }
 
@@ -752,6 +839,24 @@ impl Host {
     }
 }
 
+/// A variable that could carry a Wiffletree session or a credential into the test copy. Only
+/// the provider stubs are passed among Wiffletree's own.
+fn session_variable(name: &str) -> bool {
+    name.ends_with("_TOKEN")
+        || (name.starts_with("WORKSPACE_")
+            && !["WORKSPACE_CLAUDE_BIN", "WORKSPACE_CODEX_BIN"].contains(&name))
+}
+/// `path` canonical, or for a folder not created yet, its canonical parent's entry.
+fn resolved(path: &Path) -> PathBuf {
+    fs::canonicalize(path)
+        .ok()
+        .or_else(|| {
+            let parent = fs::canonicalize(path.parent()?).ok()?;
+            Some(parent.join(path.file_name()?))
+        })
+        .unwrap_or_else(|| path.into())
+}
+
 /// Why a run ended when what its project allows no longer allows it.
 pub(crate) fn not_allowed(mode: EvaluationMode) -> String {
     format!("Stopped: {} is not allowed in this project.", mode.label())
@@ -812,7 +917,15 @@ pub(crate) mod tests {
             folder.to_string_lossy().into_owned()
         }
         fn start(&mut self, folder: &str, mode: &str) -> Result<Value> {
-            let args = json!({"run_folder":folder,"provider":"claude","model":"opus","effort":"high","mode":mode});
+            let data = format!("{folder}-data");
+            self.start_with(folder, mode, self.target(&data))
+        }
+        /// An app under test on the test data folder `data`.
+        fn target(&self, data: &str) -> Value {
+            json!({"executable":"/usr/bin/true","arguments":["--data-dir",data],"environment":{"WORKSPACE_CLAUDE_BIN":"/stubs/claude"}})
+        }
+        fn start_with(&mut self, folder: &str, mode: &str, target: Value) -> Result<Value> {
+            let args = json!({"run_folder":folder,"provider":"claude","model":"opus","effort":"high","mode":mode,"target":target});
             let coordinator = self.coordinator.clone();
             self.host.start_evaluation(&coordinator, &args)
         }
@@ -853,6 +966,90 @@ pub(crate) mod tests {
                 .unwrap();
             id
         }
+    }
+
+    #[test]
+    fn an_app_run_needs_a_test_copy_on_a_data_folder_of_its_own_with_no_session_variable() {
+        let mut f = fixture();
+        f.allow(EvaluatorPermission::App);
+        let folder = f.folder("run-a");
+        let data = f.runs.path().join("profile").to_string_lossy().into_owned();
+        let refused = |f: &mut Fixture, target: Value| {
+            let error = f.start_with(&folder, "app", target).unwrap_err();
+            assert!(
+                f.host
+                    .evaluations(&f.coordinator.project_id)
+                    .unwrap()
+                    .is_empty()
+            );
+            error.to_string()
+        };
+        assert!(refused(&mut f, Value::Null).contains("Give target"));
+        let mut relative = f.target(&data);
+        relative["executable"] = json!("workspace-desktop");
+        assert!(refused(&mut f, relative).contains("absolute path to an executable"));
+        let mut no_data = f.target(&data);
+        no_data["arguments"] = json!(["--demo-repository", "/tmp/demo"]);
+        assert!(refused(&mut f, no_data).contains("--data-dir"));
+        let mut socket = f.target(&data);
+        socket["arguments"] = json!(["--data-dir", data, "--automation-socket", "/tmp/s"]);
+        assert!(refused(&mut f, socket).contains("--automation-socket"));
+        for variable in [
+            "WORKSPACE_TOKEN",
+            "WORKSPACE_SOCKET",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+        ] {
+            let mut secret = f.target(&data);
+            secret["environment"][variable] = json!("x");
+            assert!(refused(&mut f, secret).contains(variable), "{variable}");
+        }
+        let own = f
+            .host
+            .home
+            .join("test-profile")
+            .to_string_lossy()
+            .into_owned();
+        let own = f.target(&own);
+        assert!(refused(&mut f, own).contains("Wiffletree's own data folder"));
+
+        let started = f.start_with(&folder, "app", f.target(&data)).unwrap();
+        let run = f
+            .host
+            .evaluation(started["run_id"].as_str().unwrap())
+            .unwrap();
+        let target = run.target.unwrap();
+        assert_eq!(target.environment["WORKSPACE_CLAUDE_BIN"], "/stubs/claude");
+        // Stored resolved, as the copy will use it.
+        let resolved = resolved(Path::new(&data)).to_string_lossy().into_owned();
+        assert_eq!(target.data_folder(), Some(resolved.as_str()));
+    }
+
+    #[test]
+    fn a_second_live_run_on_the_same_data_folder_is_refused() {
+        let mut f = fixture();
+        f.allow(EvaluatorPermission::App);
+        let data = f.runs.path().join("profile").to_string_lossy().into_owned();
+        let first = f.folder("run-a");
+        let id = f.start_with(&first, "app", f.target(&data)).unwrap()["run_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let second = f.folder("run-b");
+        let refused = f.start_with(&second, "app", f.target(&data)).unwrap_err();
+        assert!(refused.to_string().contains(&id), "{refused}");
+        // The same folder through another path is the same folder.
+        let other_path = format!(
+            "{}/../{}/profile",
+            f.runs.path().display(),
+            f.runs.path().file_name().unwrap().to_string_lossy()
+        );
+        assert!(f.start_with(&second, "app", f.target(&other_path)).is_err());
+        let session = f.host.evaluation(&id).unwrap().session_id.unwrap();
+        f.host
+            .evaluation_turn_ended(&session, None, None, None)
+            .unwrap();
+        f.start_with(&second, "app", f.target(&data)).unwrap();
     }
 
     #[test]
@@ -920,7 +1117,8 @@ pub(crate) mod tests {
                 f.host.start_evaluation(&coordinator, &args).unwrap_err()
             )
         };
-        let args = |folder: &str, model: &str, effort: &str, mode: &str| json!({"run_folder":folder,"provider":"claude","model":model,"effort":effort,"mode":mode});
+        let target = f.target(&format!("{folder}-data"));
+        let args = |folder: &str, model: &str, effort: &str, mode: &str| json!({"run_folder":folder,"provider":"claude","model":model,"effort":effort,"mode":mode,"target":target});
         // Desktop is not available until ticket 4, and raises no card.
         let desktop = refused(&mut f, args(&folder, "opus", "high", "desktop"));
         assert!(desktop.contains("not available yet"), "{desktop}");
@@ -1071,7 +1269,8 @@ pub(crate) mod tests {
         let mut f = fixture();
         f.allow(EvaluatorPermission::App);
         let folder = f.folder("run-a");
-        let args = json!({"run_folder":folder,"provider":"claude","model":"claude-opus-5-5","effort":"high","mode":"app"});
+        let target = f.target(&format!("{folder}-data"));
+        let args = json!({"run_folder":folder,"provider":"claude","model":"claude-opus-5-5","effort":"high","mode":"app","target":target});
         let coordinator = f.coordinator.clone();
         let started = f.host.start_evaluation(&coordinator, &args).unwrap();
         assert_eq!(started["state"], "running");

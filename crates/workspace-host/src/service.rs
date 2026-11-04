@@ -5520,7 +5520,8 @@ mod tests {
     }
 
     /// A Claude that writes its environment, arguments and input into its working folder, then
-    /// answers as a Claude evaluator starts and finishes. `opus` stands for claude-opus-5-5,
+    /// answers as an app run's Claude evaluator starts, with its driver, and finishes. `opus`
+    /// stands for claude-opus-5-5,
     /// and asked for claude-opus-5-5 by name it runs claude-opus-5-6, as if the model moved.
     const RECORDING_PROVIDER: &str = r#"#!/bin/sh
 env > env.txt
@@ -5528,7 +5529,7 @@ printf '%s\n' "$@" > args.txt
 cat > stdin.txt
 model=claude-opus-5-5
 case " $* " in *" --model claude-opus-5-5 "*) model=claude-opus-5-6 ;; esac
-echo '{"type":"system","subtype":"init","session_id":"s1","model":"'$model'","mcp_servers":[],"tools":["Read","Glob","Grep","Write","Edit"],"permissionMode":"dontAsk"}'
+echo '{"type":"system","subtype":"init","session_id":"s1","model":"'$model'","mcp_servers":[{"name":"app","status":"connected"}],"tools":["Read","Glob","Grep","Write","Edit","mcp__app__screenshot","mcp__app__click"],"permissionMode":"dontAsk"}'
 echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REPLY","usage":{}}'
 "#;
 
@@ -5566,12 +5567,19 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
         let (mut actor, _, _) = idle_actor(host);
         let (sender, events) = async_channel::bounded(64);
         actor.sender = sender;
-        // Runs `model` in a folder of its own to its end, and returns the run and its folder.
+        let app = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/app_under_test.py");
+        // Runs `model` in a folder of its own to its end, driving a test copy that records how
+        // it started in `<model>.json`, and returns the run and its folder.
         let mut evaluate = |model: &str| {
             let folder = runs.join(model);
             fs::create_dir(&folder).unwrap();
             fs::write(folder.join("prompt.md"), prompt).unwrap();
-            let args = json!({"run_folder":folder,"provider":"claude","model":model,"effort":"high","mode":"app"});
+            let target = json!({
+                "executable": app,
+                "arguments": ["--data-dir", runs.join(format!("{model}-profile"))],
+                "environment": {"PATH": "/stubs/bin", "RECORD": runs.join(format!("{model}.json")), "GH_CONFIG_DIR": "/tmp/eval-gh"},
+            });
+            let args = json!({"run_folder":folder,"provider":"claude","model":model,"effort":"high","mode":"app","target":target});
             let started = actor.host.start_evaluation(&coordinator, &args).unwrap();
             actor.schedule().unwrap();
             assert_eq!(actor.active.len(), 1, "the run's turn started");
@@ -5600,6 +5608,37 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
         let launched = read("args.txt");
         assert!(launched.contains("--setting-sources"), "{launched}");
         assert!(!launched.contains("--append-system-prompt"), "{launched}");
+        // Its one MCP server is the driver, on its test copy's socket.
+        let config: Vec<&str> = launched.lines().collect();
+        let at = (config.iter())
+            .position(|arg| *arg == "--mcp-config")
+            .unwrap();
+        let servers: Value = serde_json::from_str(config[at + 1]).unwrap();
+        let servers = servers["mcpServers"].as_object().unwrap();
+        assert_eq!(servers.keys().collect::<Vec<_>>(), ["app"]);
+        assert_eq!(servers["app"]["args"][0], "app-driver-mcp");
+        // The host started the copy before the turn, from a clean environment with the given
+        // PATH first and no login shell, and stopped it when the turn ended.
+        let copy: Value =
+            serde_json::from_str(&fs::read_to_string(runs.join("opus.json")).unwrap()).unwrap();
+        assert_eq!(copy["args"][2], "--automation-socket");
+        assert_eq!(servers["app"]["args"][1], copy["args"][3]);
+        let copy_env = copy["env"].as_object().unwrap();
+        assert!(
+            copy_env["PATH"]
+                .as_str()
+                .unwrap()
+                .starts_with("/stubs/bin:")
+        );
+        assert_eq!(copy_env[crate::login_env::SKIP], "1");
+        assert!(
+            !(copy_env.keys())
+                .any(|name| name.starts_with("WORKSPACE_") && name != crate::login_env::SKIP),
+            "{copy_env:?}"
+        );
+        let pid = copy["pid"].as_i64().unwrap() as i32;
+        // SAFETY: a signal-0 probe of the copy's process id.
+        assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "the copy still runs");
         // The alias's run finished and records the model it stood for.
         assert_eq!(run.state, EvaluationState::Finished, "{:?}", run.reason);
         assert_eq!(run.reported_model.as_deref(), Some("claude-opus-5-5"));

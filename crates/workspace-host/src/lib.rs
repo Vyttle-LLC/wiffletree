@@ -1,6 +1,7 @@
 //! Single-writer durable host, independent of graphics and provider inference.
 mod agent_processes;
 mod alerts;
+pub mod app_driver;
 mod assistant;
 pub mod attachments;
 pub mod behaviors;
