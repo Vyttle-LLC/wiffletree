@@ -214,6 +214,32 @@ pub(crate) fn screenshot_path(folder: &Path, name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Writes `bytes` to `path` in `folder`, creating its folders, without following a link: one
+/// already there could lead the write out of the folder, and this server writes outside the
+/// evaluator's sandbox.
+fn write_inside(folder: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let relative = path.strip_prefix(folder)?;
+    let mut at = folder.to_path_buf();
+    let mut parts = relative.components().peekable();
+    while let Some(part) = parts.next() {
+        at.push(part);
+        match std::fs::symlink_metadata(&at) {
+            Ok(entry) => ensure!(!entry.file_type().is_symlink(), "it is a link"),
+            Err(_) if parts.peek().is_some() => std::fs::create_dir(&at)?,
+            Err(_) => {}
+        }
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    file.write_all(bytes)?;
+    Ok(())
+}
+
 fn screenshot(socket: &Path, folder: &Path, args: &Value) -> Result<Value> {
     let name = args["name"].as_str().context("Give name")?;
     let path = screenshot_path(folder, name)?;
@@ -228,14 +254,7 @@ fn screenshot(socket: &Path, folder: &Path, args: &Value) -> Result<Value> {
     let image = send(socket, &json!({"do":"capture","native":native}))?;
     let png = image["png"].as_str().context("The app sent no image")?;
     let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, png)?;
-    let parent = path.parent().context("No folder for the screenshot")?;
-    std::fs::create_dir_all(parent)?;
-    // A link inside the folder must not lead a write out of it.
-    ensure!(
-        std::fs::canonicalize(parent)?.starts_with(std::fs::canonicalize(folder)?),
-        "{name} is outside your folder"
-    );
-    std::fs::write(&path, bytes)?;
+    write_inside(folder, &path, &bytes).with_context(|| format!("Could not save {name}"))?;
     let saved = path.strip_prefix(folder).unwrap_or(&path);
     let about = json!({
         "saved": saved,
@@ -384,6 +403,27 @@ mod tests {
         }
         assert!(plan("drop", &json!({"x":1,"y":1})).is_err());
         assert!(plan("click", &json!({"x":"left","y":1})).is_err());
+    }
+
+    #[test]
+    fn a_screenshot_never_follows_a_link_out_of_the_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("run");
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("kept.png"), b"KEPT").unwrap();
+        std::os::unix::fs::symlink(outside.join("kept.png"), folder.join("shot.png")).unwrap();
+        std::os::unix::fs::symlink(&outside, folder.join("shots")).unwrap();
+        for name in ["shot", "shots/new", "shots/deeper/new"] {
+            let path = screenshot_path(&folder, name).unwrap();
+            assert!(write_inside(&folder, &path, b"PNG").is_err(), "{name}");
+        }
+        assert_eq!(std::fs::read(outside.join("kept.png")).unwrap(), b"KEPT");
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+        let path = screenshot_path(&folder, "fresh/one").unwrap();
+        write_inside(&folder, &path, b"PNG").unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"PNG");
     }
 
     #[test]
