@@ -26,14 +26,19 @@
 
 ## 4. Ticket 4 · Desktop driver
 
-- [ ] 4.1 Each provider's computer-use server connected to desktop runs through the spike's helper app; `computer_use` on for those Codex runs only.
-- [ ] 4.2 Settings › Screen control: live permission and provider checks (screen 2).
-- [ ] 4.3 The Start-now card between taking the screen lock and starting (screen 3); Later and Skip.
-- [ ] 4.4 Esc and Stop, and the menu bar indicator while a run holds the screen.
-- [ ] 4.5 Lift the refusal of desktop runs.
+The spike ruled out each provider's own computer use; the human chose Wiffletree's own driver in a helper app.
+
+- [x] 4.1 Wiffletree Evaluator (`crates/workspace-evaluator`): its socket protocol, the allowlist and hit-test rules as pure functions, ScreenCaptureKit screenshots of the allowed apps alone, input posted only over their windows and keys only to an allowed frontmost app, open_app and list_windows.
+- [x] 4.2 Bundled in `Contents/Helpers` and signed with the app by `scripts/package_macos.sh`; development signing in `docs/DEVELOPMENT.md`.
+- [x] 4.3 `wiffletree-host desktop-driver-mcp`, the `desktop` server, as Claude's and Codex's only MCP server, with the app driver's start and tool-call checks; Codex keeps `--ignore-user-config` and `computer_use` off.
+- [x] 4.4 `apps` in `start_evaluation`; the refusal of desktop runs lifted.
+- [x] 4.5 The Start card between taking the screen lock and starting (screen 3): Start now, Later and Skip these runs; a desktop run at its limit ends.
+- [x] 4.6 The helper's grants checked before the provider starts; Esc, the menu bar item's Stop and the helper quitting stop the run; the helper quits, or is killed, when the turn ends.
+- [ ] 4.7 On-screen check with the human: the signed helper's grants, a Calculator run for Claude and for Codex, Esc and Stop.
 
 ## 5. Ticket 5 · UI
 
+- [ ] 5.0 Settings › Screen control (screen 2): the helper's Screen Recording and Accessibility rows, read through the helper; the Providers rows no longer apply.
 - [ ] 5.1 The Agents panel's Evaluations group with every state (screen 4).
 - [ ] 5.2 A run's page with its model, mode, folder, steps and Stop (screen 5).
 - [ ] 5.3 The banners, the Inbox card as drawn (screen 1) and the project menu's UI evaluators choice.

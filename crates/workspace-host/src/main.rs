@@ -19,6 +19,11 @@ fn main() -> Result<()> {
     {
         return workspace_host::app_driver::serve_stdio(socket.as_ref(), folder.as_ref());
     }
+    if let [command, socket, folder] = args.as_slice()
+        && command == "desktop-driver-mcp"
+    {
+        return workspace_host::desktop_driver::serve_stdio(socket.as_ref(), folder.as_ref());
+    }
     if args.first().map(String::as_str) == Some("thread-mcp") {
         return workspace_host::mcp::serve_stdio(workspace_host::mcp::thread_tools());
     }
@@ -193,6 +198,18 @@ fn serve(args: &[String]) -> Result<()> {
     }
     let data = data.context("serve needs --data-dir <directory>")?;
     ensure!(!(child && app.is_some()), "A child host takes no --app");
+    // Full-desktop UI evaluators run in the helper bundled with the app, also when this host
+    // runs from a versioned copy outside the bundle.
+    if std::env::var_os(workspace_host::provider::EVALUATOR_APP).is_none() {
+        let beside = app.clone().or_else(|| std::env::current_exe().ok());
+        if let Some(helper) = beside
+            .as_deref()
+            .map(workspace_host::provider::helper_beside)
+        {
+            // SAFETY: no other thread has started yet.
+            unsafe { std::env::set_var(workspace_host::provider::EVALUATOR_APP, helper) };
+        }
+    }
     std::fs::create_dir_all(&data)?;
     let data = std::fs::canonicalize(&data)?;
     workspace_host::socket::socket_path(&data)?;

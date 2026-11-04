@@ -3,6 +3,7 @@
 mod app_target;
 mod codex_compaction;
 mod constrained;
+mod desktop_helper;
 mod evaluator;
 mod output;
 mod restricted;
@@ -13,6 +14,9 @@ use crate::runtime::LowPriority as _;
 use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
 pub use app_target::AppLaunch;
+pub use desktop_helper::{
+    DesktopLaunch, EVALUATOR_APP, STOPPED_BY_ESCAPE, STOPPED_FROM_MENU, helper_app, helper_beside,
+};
 pub use evaluator::{EvaluatorLaunch, prepare_codex_home};
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
 use output::{Next, Output, StopReading};
@@ -58,6 +62,9 @@ pub enum ProviderEvent {
     Compaction(CompactionRecord),
     /// The model a UI evaluator's provider said it runs, once, before it is checked.
     Model(String),
+    /// The human stopped a full-desktop run on the screen, with Esc or the menu bar's Stop; the
+    /// turn is already cancelled, and this is why.
+    StoppedOnScreen(String),
     Finished {
         error: Option<String>,
         usage: Value,
@@ -661,6 +668,15 @@ fn run_turn(
         )?),
         None => None,
     };
+    // A full-desktop run's helper runs for the turn and quits with it, however it ends.
+    let desktop = match turn
+        .evaluator
+        .as_ref()
+        .and_then(|launch| launch.desktop.as_ref())
+    {
+        Some(launch) => Some(desktop_helper::RunningHelper::start(launch, &cancel)?),
+        None => None,
+    };
     let mut process = Process {
         child: command(&turn)?
             .spawn()
@@ -722,6 +738,10 @@ fn run_turn(
     let mut model_reported = false;
     let mut codex_thread: Option<String> = None;
     loop {
+        // Said before the cancellation it caused ends the turn, so the run ends as stopped.
+        if let Some(reason) = desktop.as_ref().and_then(|helper| helper.take_stop()) {
+            emit(ProviderEvent::StoppedOnScreen(reason));
+        }
         check_running(&cancel)?;
         report_seen(watching, emit);
         if !ended && out_of_time() {

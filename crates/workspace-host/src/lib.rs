@@ -16,6 +16,7 @@ mod checkout;
 pub mod compaction;
 mod compile;
 pub mod context;
+pub mod desktop_driver;
 pub mod detection;
 mod diffs;
 mod evaluations;
@@ -1614,6 +1615,11 @@ impl Host {
         ensure!(
             !attention.is_permission(),
             "Approve or deny a permission request"
+        );
+        // A dismissed Start card would leave its run holding the screen with no way to start.
+        ensure!(
+            !evaluations::is_start_card(&attention),
+            "Press Start now, Later or Skip these runs"
         );
         self.resolve_attention(id, "Dismissed by the human")
     }

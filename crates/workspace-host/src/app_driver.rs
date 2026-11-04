@@ -179,20 +179,26 @@ pub(crate) fn plan(name: &str, args: &Value) -> Result<Vec<Planned>> {
 
 /// Sends one step to the app's automation socket and returns its result.
 pub(crate) fn send(socket: &Path, step: &Value) -> Result<Value> {
-    let mut stream = UnixStream::connect(socket).context("The app under test is not running")?;
+    ask(socket, step, "The app under test")
+}
+
+/// Sends one request to `who`'s socket, which answers as the automation socket does, and
+/// returns its result.
+pub(crate) fn ask(socket: &Path, step: &Value, who: &str) -> Result<Value> {
+    let mut stream =
+        UnixStream::connect(socket).with_context(|| format!("{who} is not running"))?;
     stream.set_read_timeout(Some(STEP_TIMEOUT))?;
     stream.set_write_timeout(Some(STEP_TIMEOUT))?;
     writeln!(stream, "{step}")?;
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line)?;
-    let reply: Value = serde_json::from_str(&line).context("The app under test did not answer")?;
+    let reply: Value =
+        serde_json::from_str(&line).with_context(|| format!("{who} did not answer"))?;
     match reply["ok"].as_bool() {
         Some(true) => Ok(reply["result"].clone()),
         _ => bail!(
             "{}",
-            reply["error"]
-                .as_str()
-                .unwrap_or("The app under test refused the step")
+            reply["error"].as_str().unwrap_or("The step was refused")
         ),
     }
 }
@@ -217,7 +223,7 @@ pub(crate) fn screenshot_path(folder: &Path, name: &str) -> Result<PathBuf> {
 /// Writes `bytes` to `path` in `folder`, creating its folders, without following a link: one
 /// already there could lead the write out of the folder, and this server writes outside the
 /// evaluator's sandbox.
-fn write_inside(folder: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_inside(folder: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt as _;
     let relative = path.strip_prefix(folder)?;
     let mut at = folder.to_path_buf();
@@ -287,7 +293,18 @@ fn call(socket: &Path, folder: &Path, name: &str, args: &Value) -> Result<Value>
 
 /// Serves the driver's tools on standard input and output.
 pub fn serve_stdio(socket: &Path, folder: &Path) -> Result<()> {
-    let tools = tools();
+    serve_tools("wiffletree-app-driver", tools(), |name, args| {
+        call(socket, folder, name, args)
+    })
+}
+
+/// Serves `tools` as the MCP server `server` on standard input and output, answering each
+/// call with `call`'s content, or its error as the tool's error.
+pub(crate) fn serve_tools(
+    server: &str,
+    tools: Value,
+    call: impl Fn(&str, &Value) -> Result<Value>,
+) -> Result<()> {
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stdout().lock();
     while let Some(request) = crate::mcp::read_json(&mut input)? {
@@ -296,14 +313,14 @@ pub fn serve_stdio(socket: &Path, folder: &Path) -> Result<()> {
         };
         let result = match request["method"].as_str().unwrap_or_default() {
             "initialize" => Ok(
-                json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"wiffletree-app-driver","version":"0.1.0"}}),
+                json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":server,"version":"0.1.0"}}),
             ),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({"tools":tools})),
             "tools/call" => {
                 let params = &request["params"];
                 let name = params["name"].as_str().unwrap_or_default();
-                Ok(match call(socket, folder, name, &params["arguments"]) {
+                Ok(match call(name, &params["arguments"]) {
                     Ok(content) => json!({"isError":false,"content":content}),
                     Err(error) => {
                         json!({"isError":true,"content":[{"type":"text","text":format!("{error:#}")}]})

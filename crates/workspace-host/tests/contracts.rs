@@ -143,9 +143,12 @@ fn the_evaluator_tools_take_an_exact_model_and_no_agent_can_set_what_a_project_a
         json!(["executable", "arguments"])
     );
     assert_eq!(properties["provider"]["enum"], json!(["claude", "codex"]));
+    assert_eq!(properties["apps"]["items"]["type"], "string");
     assert_eq!(start["inputSchema"]["additionalProperties"], false);
     let described = start["description"].as_str().unwrap();
     for promise in [
+        "A desktop run needs apps",
+        "waits for the human to press Start",
         "never another",
         "only its id, state, model, folder and duration",
         "a run whose provider names another model when it starts fails",
