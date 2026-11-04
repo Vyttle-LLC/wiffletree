@@ -722,6 +722,9 @@ enum Event {
         report: ProviderReport,
         reply: Reply,
     },
+    /// The models a provider's CLI listed, read on their own thread for a UI evaluator's check;
+    /// none when it could not list them.
+    ModelsListed(Provider, Vec<ModelOption>),
     /// A root scan finished on its own thread; adding what it found is quick.
     Discovered {
         found: Vec<repositories::ScannedRepository>,
@@ -2783,6 +2786,12 @@ impl Actor {
                 let _ = reply.try_send(report);
                 false
             }
+            Event::ModelsListed(provider, models) => {
+                if !models.is_empty() {
+                    self.host.listed_models.insert(provider, models);
+                }
+                false
+            }
             Event::QuotaRead { reading, reply } => {
                 let result = self
                     .host
@@ -3200,6 +3209,16 @@ impl Actor {
                         "stop_agents" => return self.stop_agents(&id, &args).map(Some),
                         "stop_evaluation" => {
                             return self.stop_evaluation(&session, &args).map(Some);
+                        }
+                        // A model is checked against its CLI's own list; one not read yet is
+                        // read now, so the call refused for want of it succeeds when repeated.
+                        "start_evaluation" => {
+                            let provider = serde_json::from_value(args["provider"].clone());
+                            if let Ok(provider) = provider
+                                && !self.host.listed_models.contains_key(&provider)
+                            {
+                                self.list_models(provider);
+                            }
                         }
                         "resume_agent" => return self.resume_agent(&id, &args).map(Some),
                         "set_plan" => return self.set_plan(&id, &args).map(Some),
@@ -3645,6 +3664,12 @@ impl Actor {
             }
             // Only a compaction's run sends these; see `compaction_event`.
             ProviderEvent::Compaction(_) => {}
+            // Only an evaluator's run sends this; its end shows the human the model it ran.
+            ProviderEvent::Model(model) => {
+                if session.role == Role::Evaluator {
+                    self.host.evaluation_model_reported(id, &model)?;
+                }
+            }
             ProviderEvent::Finished {
                 error,
                 usage,
@@ -3896,7 +3921,10 @@ impl Actor {
             | ProviderEvent::Usage { .. }
             | ProviderEvent::ModelUsage(_)
             | ProviderEvent::Quota(_)) => self.provider_event(id, run, event),
-            ProviderEvent::Session(_) | ProviderEvent::Step(_) | ProviderEvent::Reply(_) => Ok(()),
+            ProviderEvent::Session(_)
+            | ProviderEvent::Step(_)
+            | ProviderEvent::Reply(_)
+            | ProviderEvent::Model(_) => Ok(()),
         }
     }
     /// Settles a compaction whose process has ended. Only the host's stopping cancels one, so
@@ -4443,6 +4471,14 @@ impl Actor {
         // Before the call returns; a stopped turn's agent is looked at again as the turn ends.
         self.stop_processes_of(&stopped);
         Ok(json!({ "agents": results }))
+    }
+    /// Reads `provider`'s model list off the host thread.
+    fn list_models(&self, provider: Provider) {
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            let models = runtime::models(provider).unwrap_or_default();
+            let _ = sender.send_blocking(Event::ModelsListed(provider, models));
+        });
     }
     /// `stop_evaluation`: a run in a turn stops through its cancel flag, and its turn's end
     /// ends it as stopped; any other run ends at once.
@@ -5484,12 +5520,15 @@ mod tests {
     }
 
     /// A Claude that writes its environment, arguments and input into its working folder, then
-    /// answers as a Claude evaluator starts and finishes.
+    /// answers as a Claude evaluator starts and finishes. `opus` stands for claude-opus-5-5,
+    /// and asked for claude-opus-5-5 by name it runs claude-opus-5-6, as if the model moved.
     const RECORDING_PROVIDER: &str = r#"#!/bin/sh
 env > env.txt
 printf '%s\n' "$@" > args.txt
 cat > stdin.txt
-echo '{"type":"system","subtype":"init","session_id":"s1","mcp_servers":[],"tools":["Read","Glob","Grep","Write","Edit"],"permissionMode":"dontAsk"}'
+model=claude-opus-5-5
+case " $* " in *" --model claude-opus-5-5 "*) model=claude-opus-5-6 ;; esac
+echo '{"type":"system","subtype":"init","session_id":"s1","model":"'$model'","mcp_servers":[],"tools":["Read","Glob","Grep","Write","Edit"],"permissionMode":"dontAsk"}'
 echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REPLY","usage":{}}'
 "#;
 
@@ -5514,27 +5553,44 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
         );
         let home = tempfile::tempdir().unwrap();
         let mut host = Host::open_set_up(home.path()).unwrap();
+        host.listed_models
+            .insert(Provider::Claude, crate::evaluations::tests::claude_listed());
         let project = host.create_project("UX loop").unwrap();
         let coordinator = host.coordinator_of(&project.id).unwrap().unwrap();
         let coordinator = host.session(&coordinator).unwrap();
         host.set_evaluator_permission(&project.id, EvaluatorPermission::App)
             .unwrap();
         let runs = tempfile::tempdir().unwrap();
-        let folder = fs::canonicalize(runs.path()).unwrap();
+        let runs = fs::canonicalize(runs.path()).unwrap();
         let prompt = "Evaluate the Models page.\nWrite report.md.";
-        fs::write(folder.join("prompt.md"), prompt).unwrap();
         let (mut actor, _, _) = idle_actor(host);
         let (sender, events) = async_channel::bounded(64);
         actor.sender = sender;
-        let args = json!({"run_folder":folder,"provider":"claude","model":"opus","effort":"high","mode":"app"});
-        let started = actor.host.start_evaluation(&coordinator, &args).unwrap();
-        let id = started["run_id"].as_str().unwrap().to_owned();
-
-        actor.schedule().unwrap();
-        assert_eq!(actor.active.len(), 1, "the run's turn started");
-        while !actor.active.is_empty() {
-            actor.process(events.recv_blocking().unwrap());
-        }
+        // Runs `model` in a folder of its own to its end, and returns the run and its folder.
+        let mut evaluate = |model: &str| {
+            let folder = runs.join(model);
+            fs::create_dir(&folder).unwrap();
+            fs::write(folder.join("prompt.md"), prompt).unwrap();
+            let args = json!({"run_folder":folder,"provider":"claude","model":model,"effort":"high","mode":"app"});
+            let started = actor.host.start_evaluation(&coordinator, &args).unwrap();
+            actor.schedule().unwrap();
+            assert_eq!(actor.active.len(), 1, "the run's turn started");
+            while !actor.active.is_empty() {
+                actor.process(events.recv_blocking().unwrap());
+            }
+            let id = started["run_id"].as_str().unwrap();
+            (actor.host.evaluation(id).unwrap(), folder)
+        };
+        let (run, folder) = evaluate("opus");
+        // A full ID the provider does not run fails the run; it never goes on another model.
+        let (moved, _) = evaluate("claude-opus-5-5");
+        assert_eq!(moved.state, EvaluationState::Failed);
+        assert_eq!(moved.reported_model.as_deref(), Some("claude-opus-5-6"));
+        let why = moved.reason.unwrap();
+        assert!(
+            why.contains("ran claude-opus-5-6, not claude-opus-5-5"),
+            "{why}"
+        );
 
         let read = |name: &str| fs::read_to_string(folder.join(name)).unwrap();
         // Its input is prompt.md alone, and nothing of the workspace reaches its process.
@@ -5544,15 +5600,21 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
         let launched = read("args.txt");
         assert!(launched.contains("--setting-sources"), "{launched}");
         assert!(!launched.contains("--append-system-prompt"), "{launched}");
-        let run = actor.host.evaluation(&id).unwrap();
+        // The alias's run finished and records the model it stood for.
         assert_eq!(run.state, EvaluationState::Finished, "{:?}", run.reason);
+        assert_eq!(run.reported_model.as_deref(), Some("claude-opus-5-5"));
         let told: Vec<Message> = (actor.host.messages(&coordinator.id, None, 100).unwrap())
             .into_iter()
             .filter(|m| m.id.starts_with(EVALUATION_PREFIX))
             .collect();
-        assert_eq!(told.len(), 1);
+        assert_eq!(told.len(), 2);
         assert_eq!(told[0].body, crate::evaluations::ended_message(&run));
-        assert!(!told[0].body.contains("SECRET"));
+        assert!(!told.iter().any(|m| m.body.contains("SECRET")));
+        assert!(
+            !told[1].body.contains("ran claude-opus-5-6"),
+            "{}",
+            told[1].body
+        );
     }
     #[test]
     fn other_work_runs_while_an_agent_waits_for_a_reset() {

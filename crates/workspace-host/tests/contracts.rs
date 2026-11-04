@@ -141,7 +141,8 @@ fn the_evaluator_tools_take_an_exact_model_and_no_agent_can_set_what_a_project_a
     let described = start["description"].as_str().unwrap();
     for promise in [
         "never another",
-        "only its id, state, folder and duration",
+        "only its id, state, model, folder and duration",
+        "a run whose provider names another model when it starts fails",
         "You never see what the evaluator says",
     ] {
         assert!(described.contains(promise), "{promise}");
@@ -361,8 +362,8 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
     // UI evaluators: the coordinator writes the whole prompt and hears only the end.
     for told in [
         "call start_evaluation",
-        "uses that model and no other",
-        "with only its id, state, folder and duration",
+        "uses that model and no other, fails if the provider runs another",
+        "with only its id, state, model, folder and duration",
     ] {
         assert!(coordinator.contains(told), "{told}");
     }

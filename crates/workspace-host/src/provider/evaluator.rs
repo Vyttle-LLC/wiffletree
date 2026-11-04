@@ -76,6 +76,54 @@ impl EvaluatorLaunch {
         );
         Ok(())
     }
+    /// Refuses a model other than the full ID asked for. An alias, such as `opus`, stands for
+    /// whichever model the provider names, which the run records.
+    pub(crate) fn check_model(&self, profile: &ModelProfile, reported: &str) -> Result<()> {
+        ensure!(
+            !pins_exactly(profile.provider, &profile.model) || reported == profile.model,
+            "Stopped: {} ran {reported}, not {}, the model the run was started with. Wiffletree never runs an evaluator on another model.",
+            profile.provider.label(),
+            profile.model
+        );
+        Ok(())
+    }
+    /// The model Codex's session record for `thread` says its turn runs, once it is written.
+    pub(crate) fn codex_model(&self, thread: &str) -> Option<String> {
+        let file = rollout(
+            &self.codex_home.join("sessions"),
+            &format!("-{thread}.jsonl"),
+        )?;
+        let text = fs::read_to_string(file).ok()?;
+        text.lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|record| record["type"] == "turn_context")
+            .and_then(|record| record["payload"]["model"].as_str().map(str::to_owned))
+    }
+}
+
+/// Whether `model` names one model rather than an alias: Claude's aliases, such as `opus`,
+/// move to newer models, and its full IDs start with `claude-`. Codex's models have no alias.
+pub fn pins_exactly(provider: Provider, model: &str) -> bool {
+    match provider {
+        Provider::Claude => model.starts_with("claude-"),
+        Provider::Codex => true,
+    }
+}
+
+/// The file under `folder`, at any depth, whose name ends with `suffix`. Codex files a session
+/// under `sessions/<year>/<month>/<day>/`.
+fn rollout(folder: &Path, suffix: &str) -> Option<PathBuf> {
+    for entry in fs::read_dir(folder).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = rollout(&path, suffix) {
+                return Some(found);
+            }
+        } else if path.to_string_lossy().ends_with(suffix) {
+            return Some(path);
+        }
+    }
+    None
 }
 
 /// Clears the environment the host inherited and passes on only `ENVIRONMENT` and the locale.
@@ -346,6 +394,53 @@ mod tests {
         let mut remembering = init(json!([]), tools);
         remembering["memory_paths"] = json!({"auto": "/Users/x/.claude/projects/-eval/memory/"});
         assert!(launch.check_claude_start(&remembering).is_err());
+    }
+
+    #[test]
+    fn a_full_id_must_be_the_model_the_provider_runs_and_an_alias_takes_its_word() {
+        let profile = |provider, model: &str| ModelProfile {
+            provider,
+            model: model.into(),
+            effort: "high".into(),
+        };
+        let exact = profile(Provider::Claude, "claude-opus-5-5");
+        launch().check_model(&exact, "claude-opus-5-5").unwrap();
+        let moved = launch()
+            .check_model(&exact, "claude-opus-5-6")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            moved.contains("Claude ran claude-opus-5-6, not claude-opus-5-5"),
+            "{moved}"
+        );
+        // `opus` names whichever model Claude says; the run records which.
+        let alias = profile(Provider::Claude, "opus");
+        launch().check_model(&alias, "claude-opus-5-6").unwrap();
+        // Codex's models have no alias.
+        let codex = profile(Provider::Codex, "gpt-6.1-sol");
+        assert!(launch().check_model(&codex, "gpt-6.2-sol").is_err());
+        launch().check_model(&codex, "gpt-6.1-sol").unwrap();
+    }
+
+    #[test]
+    fn codexs_model_is_read_from_its_session_record_once_written() {
+        let home = tempfile::tempdir().unwrap();
+        let launch = EvaluatorLaunch {
+            codex_home: home.path().into(),
+            ..launch()
+        };
+        assert_eq!(launch.codex_model("t1"), None);
+        let day = home.path().join("sessions/2026/11/04");
+        fs::create_dir_all(&day).unwrap();
+        let record = [
+            json!({"type":"session_meta","payload":{"id":"t1"}}),
+            json!({"type":"turn_context","payload":{"model":"gpt-6-luna","effort":"low"}}),
+        ]
+        .map(|line| line.to_string())
+        .join("\n");
+        fs::write(day.join("rollout-2026-11-04T06-25-43-t1.jsonl"), record).unwrap();
+        assert_eq!(launch.codex_model("t1").as_deref(), Some("gpt-6-luna"));
+        assert_eq!(launch.codex_model("t2"), None);
     }
 
     #[test]

@@ -54,6 +54,8 @@ pub enum ProviderEvent {
     ModelUsage(Value),
     /// What the provider said about the compaction this run is; a turn's run sends none.
     Compaction(CompactionRecord),
+    /// The model a UI evaluator's provider said it runs, once, before it is checked.
+    Model(String),
     Finished {
         error: Option<String>,
         usage: Value,
@@ -686,6 +688,9 @@ fn run_turn(
     // The exit is checked on every pass, so a leftover process writing to stdout cannot hide
     // it. Every event the reader accepted is handled; the reader decides when to stop.
     let mut exited = false;
+    // An evaluator's model, once its provider has named it; Codex's thread, to find it by.
+    let mut model_reported = false;
+    let mut codex_thread: Option<String> = None;
     loop {
         check_running(&cancel)?;
         report_seen(watching, emit);
@@ -723,6 +728,21 @@ fn run_turn(
                 stop_at = Some(Instant::now() + codex_compaction::EXIT_MARGIN);
             }
             continue;
+        }
+        // An evaluator's Codex names its model only in its session record, which it writes
+        // once its turn has started, so it is looked for until it is found.
+        if let Some(launch) = &turn.evaluator
+            && turn.session.provider == Provider::Codex
+            && !model_reported
+        {
+            if let Some(thread) = value["thread_id"].as_str() {
+                codex_thread = Some(thread.to_owned());
+            }
+            if let Some(model) = codex_thread.as_deref().and_then(|t| launch.codex_model(t)) {
+                model_reported = true;
+                emit(ProviderEvent::Model(model.clone()));
+                launch.check_model(&turn.profile, &model)?;
+            }
         }
         match turn.session.provider {
             Provider::Codex => match value["type"].as_str().unwrap_or_default() {
@@ -793,6 +813,10 @@ fn run_turn(
                     // An evaluator has no workspace server to connect.
                     if let Some(launch) = &turn.evaluator {
                         launch.check_claude_start(&value)?;
+                        if let Some(model) = value["model"].as_str() {
+                            emit(ProviderEvent::Model(model.to_owned()));
+                            launch.check_model(&turn.profile, model)?;
+                        }
                         continue;
                     }
                     ensure!(

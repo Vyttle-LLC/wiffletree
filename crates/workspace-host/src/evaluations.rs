@@ -37,8 +37,9 @@ fn duration(run: &Evaluation) -> String {
 /// The message that wakes a run's coordinator: its id, state, folder and duration, and nothing
 /// the run said.
 pub(crate) fn ended_message(run: &Evaluation) -> String {
+    let model = run.reported_model.as_ref().unwrap_or(&run.profile.model);
     format!(
-        "Run {} {} · folder {} · {}",
+        "Run {} {} · model {model} · folder {} · {}",
         run.id,
         run.state.name(),
         run.folder,
@@ -64,6 +65,7 @@ fn summary(run: &Evaluation) -> Value {
         "mode": run.mode,
         "provider": run.profile.provider,
         "model": run.profile.model,
+        "reported_model": run.reported_model,
         "effort": run.profile.effort,
         "folder": run.folder,
         "created_at": run.created_at,
@@ -287,6 +289,7 @@ impl Host {
             coordinator_id: caller.id.clone(),
             session_id: None,
             profile,
+            reported_model: None,
             mode,
             folder: folder.to_string_lossy().into_owned(),
             state: match permission {
@@ -404,9 +407,9 @@ impl Host {
         Ok(folder)
     }
 
-    /// Refuses a provider not signed in here, a model its CLI did not list and an effort the
-    /// model does not offer. Until a provider has listed its models, Wiffletree's own lineup
-    /// stands in.
+    /// Refuses a provider not signed in here, a model its CLI did not list, full IDs and aliases
+    /// alike, and an effort the model does not offer. Until the CLI has listed its models
+    /// nothing is checked against a guess: the run is refused, and the service reads the list.
     fn check_model(&self, profile: &ModelProfile) -> Result<()> {
         let provider = profile.provider;
         ensure!(
@@ -414,11 +417,12 @@ impl Host {
             "{} is not signed in on this Mac, or Wiffletree has not checked it yet. Ask the human.",
             provider.label()
         );
-        let options: Vec<ModelOption> = match self.listed_models.get(&provider) {
-            Some(listed) => listed.clone(),
-            None => (fallback_catalog().into_iter())
-                .filter(|option| option.provider == provider)
-                .collect(),
+        let Some(options) = self.listed_models.get(&provider) else {
+            bail!(
+                "Wiffletree has not read {}'s model list on this Mac yet, so it cannot check {}. It is reading it now: call start_evaluation again in a minute.",
+                provider.label(),
+                profile.model
+            );
         };
         let Some(option) = options.iter().find(|option| option.model == profile.model) else {
             bail!(
@@ -633,6 +637,13 @@ impl Host {
         self.save_evaluation(&run)
     }
 
+    /// Records the model a run's provider said it runs, which a later turn may say again.
+    pub(crate) fn evaluation_model_reported(&mut self, session: &str, model: &str) -> Result<()> {
+        let mut run = self.session_evaluation(session)?;
+        run.reported_model = Some(model.chars().take(200).collect());
+        self.save_evaluation(&run)
+    }
+
     /// A run's turn has ended: at a usage limit it waits for the reset in the same session;
     /// otherwise the run ends as stopped, failed or finished.
     pub(crate) fn evaluation_turn_ended(
@@ -730,7 +741,7 @@ fn permission_label(permission: EvaluatorPermission) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const PROMPT: &str = "Open Models in dark mode at 1280 wide.\nWrite report.md.";
@@ -741,9 +752,21 @@ mod tests {
         host: Host,
         coordinator: Session,
     }
+    /// Models as Claude's CLI lists them: an alias and the full ID it stands for.
+    pub(crate) fn claude_listed() -> Vec<ModelOption> {
+        ["opus", "claude-opus-5-5"]
+            .map(|model| ModelOption {
+                provider: Provider::Claude,
+                model: model.into(),
+                label: model.into(),
+                efforts: vec!["low".into(), "high".into()],
+            })
+            .into()
+    }
     fn fixture() -> Fixture {
         let home = tempfile::tempdir().unwrap();
         let mut host = Host::open_set_up(home.path()).unwrap();
+        host.listed_models.insert(Provider::Claude, claude_listed());
         let project = host.create_project("UX loop").unwrap();
         let id = host.coordinator_of(&project.id).unwrap().unwrap();
         let coordinator = host.session(&id).unwrap();
@@ -885,10 +908,16 @@ mod tests {
             effort.contains("does not offer the effort ultra"),
             "{effort}"
         );
-        let signed_out = ProviderStatus::default();
-        f.host.record_detection(Provider::Codex, &signed_out);
+        // A list not read yet checks nothing against a guess.
         let mut codex = args(&folder, "gpt-6.1-sol", "high", "app");
         codex["provider"] = json!("codex");
+        let unread = refused(&mut f, codex.clone());
+        assert!(
+            unread.contains("has not read Codex's model list"),
+            "{unread}"
+        );
+        let signed_out = ProviderStatus::default();
+        f.host.record_detection(Provider::Codex, &signed_out);
         let codex = refused(&mut f, codex);
         assert!(codex.contains("Codex is not signed in"), "{codex}");
         // Bad folders.
@@ -1012,6 +1041,49 @@ mod tests {
     }
 
     #[test]
+    fn a_full_id_is_started_as_given_and_an_alias_records_the_model_it_stood_for() {
+        let mut f = fixture();
+        f.allow(EvaluatorPermission::App);
+        let folder = f.folder("run-a");
+        let args = json!({"run_folder":folder,"provider":"claude","model":"claude-opus-5-5","effort":"high","mode":"app"});
+        let coordinator = f.coordinator.clone();
+        let started = f.host.start_evaluation(&coordinator, &args).unwrap();
+        assert_eq!(started["state"], "running");
+        let run = f
+            .host
+            .evaluation(started["run_id"].as_str().unwrap())
+            .unwrap();
+        let session = f.host.session(run.session_id.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            f.host.turn_profile(&session).unwrap().model,
+            "claude-opus-5-5"
+        );
+        // An alias's run records the model Claude said it stood for, which the coordinator
+        // may see, and its end names it.
+        let other = f.folder("run-b");
+        let id = f.start(&other, "app").unwrap()["run_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let session = f.host.evaluation(&id).unwrap().session_id.unwrap();
+        f.host
+            .evaluation_model_reported(&session, "claude-opus-5-5")
+            .unwrap();
+        let listed = f.host.list_evaluations(&coordinator, &json!({})).unwrap();
+        assert_eq!(listed["runs"][0]["model"], "opus");
+        assert_eq!(listed["runs"][0]["reported_model"], "claude-opus-5-5");
+        f.host
+            .evaluation_turn_ended(&session, None, None, None)
+            .unwrap();
+        let told = f.messages_to_coordinator();
+        assert!(
+            told[0].body.contains("· model claude-opus-5-5 ·"),
+            "{}",
+            told[0].body
+        );
+    }
+
+    #[test]
     fn the_end_wakes_the_coordinator_with_only_the_id_state_folder_and_time() {
         let mut f = fixture();
         f.allow(EvaluatorPermission::App);
@@ -1038,7 +1110,10 @@ mod tests {
         assert_eq!(told.len(), 1);
         assert_eq!(
             told[0].body,
-            format!("Run {id} finished · folder {} · under 1 min", run.folder)
+            format!(
+                "Run {id} finished · model opus · folder {} · under 1 min",
+                run.folder
+            )
         );
         assert!(f.host.session(&session).unwrap().archived);
         // A failure's reason reaches neither the message nor the coordinator's list.

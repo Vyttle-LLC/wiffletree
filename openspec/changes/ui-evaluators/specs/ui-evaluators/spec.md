@@ -21,12 +21,27 @@ The workspace SHALL offer `start_evaluation` with `run_folder`, `provider`, `mod
 
 ### Requirement: A run uses exactly the model it was started with
 
-A run SHALL use only the provider, model and effort it was started with, and SHALL NOT consult Who runs what or fall back to another model. A provider not signed in on this Mac, a model its CLI did not list and an effort the model does not offer SHALL be refused at start. A run whose provider is at its usage limit SHALL wait, showing the reset time, and SHALL continue on the same model after the reset.
+A run SHALL use only the provider, model and effort it was started with, and SHALL NOT consult Who runs what or fall back to another model. A provider not signed in on this Mac, a model its CLI did not list, whether a full ID or an alias, and an effort the model does not offer SHALL be refused at start. The run SHALL record the model its provider names when it starts, and a run started on a full ID whose provider names another model SHALL fail at once. A run whose provider is at its usage limit SHALL wait, showing the reset time, and SHALL continue on the same model after the reset.
 
 #### Scenario: Unknown model
 
 - **WHEN** `start_evaluation` names a model the provider does not offer
 - **THEN** the call is refused, naming the model and the provider
+
+#### Scenario: The list is not read yet
+
+- **WHEN** `start_evaluation` names a provider whose CLI's model list Wiffletree has not read
+- **THEN** the call is refused with that reason, and Wiffletree reads the list so a repeated call can succeed
+
+#### Scenario: The model moved
+
+- **WHEN** a run started on `claude-opus-5-5` and Claude names another model at its start
+- **THEN** the run fails, with the reason recorded for the human, and runs no further
+
+#### Scenario: An alias
+
+- **WHEN** a run started on `opus` and Claude names `claude-opus-5-5`
+- **THEN** the run goes on and records `claude-opus-5-5`
 
 #### Scenario: At a limit
 
@@ -82,9 +97,9 @@ App-only runs SHALL run side by side. Full-desktop runs SHALL share one queue fo
 
 ### Requirement: The coordinator learns the outcome, never the content
 
-When a run ends, Wiffletree SHALL message its coordinator with only the run's id, state, folder and duration. `list_evaluations` SHALL list the project's runs with their state, mode, model, folder, times and a waiting run's reset, and no transcript, reply or failure text. `stop_evaluation` SHALL stop one of the project's runs; the human can stop any run.
+When a run ends, Wiffletree SHALL message its coordinator with only the run's id, state, model, folder and duration. `list_evaluations` SHALL list the project's runs with their state, mode, the model asked for and the one reported, folder, times and a waiting run's reset, and no transcript, reply or failure text. `stop_evaluation` SHALL stop one of the project's runs; the human can stop any run.
 
 #### Scenario: A run finishes
 
 - **WHEN** a run's turn ends on its own
-- **THEN** the coordinator receives "Run <id> finished · folder <folder> · <minutes>", with none of the run's reply
+- **THEN** the coordinator receives "Run <id> finished · model <model> · folder <folder> · <minutes>", with none of the run's reply

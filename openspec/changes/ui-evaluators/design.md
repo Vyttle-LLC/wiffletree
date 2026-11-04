@@ -24,11 +24,15 @@ Codex runs `exec --json --ignore-user-config --ignore-rules` in a workspace-writ
 
 `--ignore-user-config` does not keep `~/.codex/AGENTS.md` out: a probe on Codex 0.160.0 received it. So an evaluator's Codex gets its own `CODEX_HOME` in Wiffletree's data folder, holding only a link to the user's `auth.json`, so sign-in and token refreshes still use the user's one file. The probe with that home received no AGENTS.md.
 
+The link holds only because Codex rewrites `auth.json` in place. A probe on 0.160.0 confirmed it with a throwaway home: a fake, stale `auth.json` reached through a link, and `CODEX_REFRESH_TOKEN_URL_OVERRIDE` pointing at a local server. Codex refreshed, the refreshed token landed in the link's target with the same inode, and the link stayed a link. The home holds no lock for the ChatGPT token refresh, so two homes share nothing that one home would not.
+
 The environment is cleared and only `HOME`, `USER`, `LOGNAME`, `PATH`, `SHELL`, `TMPDIR`, `LANG` and the `LC_*` locale variables are passed on, so no `WORKSPACE_TOKEN`, `WORKSPACE_SOCKET` or other variable of Wiffletree's or the human's sessions reaches the run or anything it starts.
 
 ### The model is checked, pinned and never replaced
 
-`start_evaluation` refuses a provider this Mac has not found signed in, a model the provider's CLI did not list (Wiffletree's own lineup until it has listed them) and an effort the model does not offer. The profile is pinned on the run's session as given; Who runs what is never consulted. A run whose provider is past its limit when it starts is marked waiting and its turn is held until the reset, as any pinned agent's is. A turn that fails at a limit is retried in the same session at the reset, and the run shows waiting meanwhile.
+`start_evaluation` refuses a provider this Mac has not found signed in, a model the provider's CLI did not list, full IDs such as `claude-opus-5-5` and aliases such as `opus` alike, and an effort the model does not offer. Until the CLI's list has been read, a run is refused with that reason and the service reads the list, so the call succeeds when repeated; Wiffletree never checks against a guess. The profile is pinned on the run's session as given; Who runs what is never consulted.
+
+An alias can move to a newer model without notice, so the run records the model the provider names: Claude's in its start record, Codex's in the `turn_context` of the session record in the evaluator's Codex home, since its JSON stream names none. A run started on a full ID whose provider names another model fails at once, with the reason for the human. A run on an alias records which model it got. The coordinator may see the reported model in `list_evaluations` and the end message. A run whose provider is past its limit when it starts is marked waiting and its turn is held until the reset, as any pinned agent's is. A turn that fails at a limit is retried in the same session at the reset, and the run shows waiting meanwhile.
 
 ### Authorization is the human's, on an Inbox card
 
@@ -42,4 +46,4 @@ App-only runs start as soon as they are admitted. A desktop run needs the screen
 
 ### The coordinator hears only the outcome
 
-When a run ends, Wiffletree messages its coordinator: `Run <id> <state> · folder <folder> · <duration>`. `list_evaluations` gives state, mode, model, folder and times, and a waiting run's reset time. A failure's reason is shown to the human only, since a provider's error can quote the model's text.
+When a run ends, Wiffletree messages its coordinator: `Run <id> <state> · model <model> · folder <folder> · <duration>`, naming the model the provider reported, or the one asked for when none was. `list_evaluations` gives state, mode, the model asked for and the one reported, folder and times, and a waiting run's reset time. A failure's reason is shown to the human only, since a provider's error can quote the model's text.

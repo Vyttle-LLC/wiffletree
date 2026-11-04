@@ -58,18 +58,25 @@ fn evaluate(
             codex_home: codex_home.into(),
         }),
     };
-    let (mut reply, mut failure) = (String::new(), None);
+    let (mut reply, mut failure, mut reported) = (String::new(), None, None);
     provider::run(
         turn,
         Arc::new(AtomicBool::new(false)),
         |event| match event {
             ProviderEvent::Reply(text) => reply = text,
+            ProviderEvent::Model(model) => reported = Some(model),
             ProviderEvent::Finished { error, .. } => failure = error,
             _ => {}
         },
     )
     .unwrap();
     assert_eq!(failure, None, "the run failed: {reply}");
+    // The provider named the model it ran: an alias's, or the full ID asked for.
+    let reported = reported.expect("the provider named its model");
+    assert!(
+        reported == model || (model == "haiku" && reported.starts_with("claude-haiku-")),
+        "{reported}"
+    );
     reply
 }
 

@@ -92,6 +92,10 @@ pub struct Evaluation {
     pub session_id: Option<String>,
     /// Exactly what it was started with; nothing replaces it.
     pub profile: ModelProfile,
+    /// The model the provider said it runs: Claude's at its start, Codex's in its session
+    /// record. For an alias such as `opus`, the model it stood for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_model: Option<String>,
     pub mode: EvaluationMode,
     /// Absolute and canonical; it holds `prompt.md`.
     pub folder: String,
