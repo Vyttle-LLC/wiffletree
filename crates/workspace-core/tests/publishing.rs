@@ -424,6 +424,40 @@ fn a_later_push_card_names_the_pull_request_it_updates() {
 }
 
 #[test]
+fn a_card_that_moves_the_pull_requests_base_names_where_it_moves() {
+    let (mut ticket, repository) = waiting_ticket("edit_pull_request", "passed");
+    let mut open = pull_request(731, "open");
+    open.base = "wiffletree/parent".into();
+    ticket.pull_request = Some(open);
+    let request = ticket.publishing.as_mut().unwrap();
+    (request.title, request.body) = (None, None);
+    (request.edits, request.retargets) = (Some(731), true);
+    let card = card(&ticket, &repository, &[]);
+    assert_eq!(
+        card.title,
+        "Change the base of PR #731 in celadon-theme/website?"
+    );
+    assert_eq!(row(&card, "Moves base"), Some("wiffletree/parent → main"));
+    assert_eq!(
+        card.note,
+        "The pull request then opens into main; nothing is merged."
+    );
+
+    // One approval after a blocked review names the move it would send.
+    ticket.verification.as_mut().unwrap().outcome = VerificationOutcome::Blocked;
+    let request = ticket.publishing.as_mut().unwrap();
+    request.step = PublishStep::Push;
+    request.body = Some("Why".into());
+    let card = self::card(&ticket, &repository, &["celadon-theme"]);
+    assert_eq!(
+        card.would_send.as_deref(),
+        Some(
+            "Push wiffletree/fix-palette-contrast at 9e03c1b and change PR #731’s description and its base to main"
+        )
+    );
+}
+
+#[test]
 fn the_blocked_review_card_lists_the_open_findings_and_what_one_approval_would_send() {
     let (mut ticket, repository) = waiting_ticket("push", "blocked");
     let mut untriaged = entry("F6", EntryStatus::Untriaged);

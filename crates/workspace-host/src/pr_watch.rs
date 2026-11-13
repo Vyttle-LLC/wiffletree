@@ -578,12 +578,11 @@ impl Host {
         self.follow_pull_request_base(ticket)?;
         Ok(true)
     }
-    /// Makes an open ticket's base the base of its open pull request, after a retarget on
-    /// GitHub, and tells the coordinator once. Returns whether the ticket changed.
+    /// Makes a ticket's base the base of its open pull request, after a retarget on GitHub, and
+    /// tells the coordinator of an open ticket once. A finished ticket follows too, as tickets
+    /// stacked on it later start from its base, but calls for no message. Returns whether the
+    /// ticket changed.
     fn follow_pull_request_base(&mut self, mut ticket: Ticket) -> Result<bool> {
-        if !ticket.is_open() {
-            return Ok(false);
-        }
         let base = self.ticket_base(&ticket)?;
         let repository = self.ticket_repository(&ticket)?;
         let parent = ticket.stacked_on.clone();
@@ -605,7 +604,8 @@ impl Host {
             "{PR_NOTICE_PREFIX}{}:base:{}:{}",
             ticket.id, pr.number, pr.base
         );
-        if !self.message_exists(&id)?
+        if ticket.is_open()
+            && !self.message_exists(&id)?
             && let Err(e) = self.send(&id, None, &ticket.coordinator_id, &body)
         {
             eprintln!("Workspace PR watch: {id}: {e:#}");
