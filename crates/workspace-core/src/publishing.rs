@@ -133,6 +133,27 @@ pub fn waiting_card(
     publish_card(ticket, request, repository, ask)
 }
 
+/// What an edit of the open pull request changes, such as "title to “Fix” and its base to
+/// main".
+fn edits(request: &PublishRequest) -> String {
+    let mut parts: Vec<String> = vec![];
+    let its = |parts: &Vec<String>| if parts.is_empty() { "" } else { "its " };
+    if let Some(title) = &request.title {
+        parts.push(format!("title to “{title}”"));
+    }
+    if request.body.is_some() {
+        parts.push(format!("{}description", its(&parts)));
+    }
+    if request.retargets {
+        parts.push(format!("{}base to {}", its(&parts), request.base));
+    }
+    match parts.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => String::new(),
+    }
+}
+
 /// The card for the request's next step, which waits for `ask`.
 pub fn publish_card(
     ticket: &Ticket,
@@ -164,6 +185,9 @@ pub fn publish_card(
     match (request.step, open_pr) {
         (PublishStep::Push | PublishStep::EditPullRequest, Some(pr)) => {
             rows.push(("Updates", format!("PR #{} · {}", pr.number, request.branch)));
+            if request.retargets {
+                rows.push(("Moves base", format!("{} → {}", pr.base, request.base)));
+            }
         }
         (PublishStep::EditPullRequest, None) => rows.push(("Branch", request.branch.clone())),
         (PublishStep::Push, None) if ticket.pushed.is_none() && ticket.pull_request.is_none() => {
@@ -268,7 +292,11 @@ pub fn publish_card(
                 request.edits.unwrap_or_default(),
                 request.repository
             ),
-            "The new words are the agent’s, shown in full. Anyone who can see the repository will see them.".to_owned(),
+            match (request.title.is_some() || request.body.is_some(), request.retargets) {
+                (true, false) => "The new words are the agent’s, shown in full. Anyone who can see the repository will see them.".to_owned(),
+                (true, true) => format!("The new words are the agent’s, shown in full. Anyone who can see the repository will see them. The pull request then opens into {}; nothing is merged.", request.base),
+                (false, _) => format!("The pull request then opens into {}; nothing is merged.", request.base),
+            },
             "Update pull request",
         ),
     };
@@ -277,13 +305,7 @@ pub fn publish_card(
         rows,
         findings,
         would_send: covers_commit.then(|| match (request.edits, &request.title) {
-            (Some(number), Some(title)) => match request.body {
-                Some(_) => format!(
-                    "{pushes} and change PR #{number}’s title to “{title}” and its description"
-                ),
-                None => format!("{pushes} and change PR #{number}’s title to “{title}”"),
-            },
-            (Some(number), None) => format!("{pushes} and change PR #{number}’s description"),
+            (Some(number), _) => format!("{pushes} and change PR #{number}’s {}", edits(request)),
             (None, Some(title)) => format!("{pushes} and open its pull request, “{title}”"),
             (None, None) => pushes,
         }),

@@ -956,9 +956,15 @@ impl Host {
     pub(crate) fn diff_lines(&self, ticket: &Ticket, commit: &str) -> String {
         let worktree = Path::new(&ticket.worktree);
         let lines = || -> Result<String> {
-            let base = self.ticket_base(ticket)?;
-            let base = base.measured();
-            let merge_base = worktrees::merge_base(worktree, base, commit)?;
+            // A child rebased off its merged parent is measured from where it left its landing
+            // branch, no longer from the parent.
+            let ticket_base = self.ticket_base(ticket)?;
+            let built_on = ticket_base.built_on(worktree, commit);
+            let base = match built_on == ticket_base.measured() {
+                true => ticket_base.measured(),
+                false => ticket_base.lands_on(),
+            };
+            let merge_base = worktrees::merge_base(worktree, &built_on, commit)?;
             let stat = worktrees::shortstat(worktree, &merge_base, commit)?;
             Ok(format!(
                 "Base: {merge_base} ({base})\nDiff: {merge_base}..{commit}, {stat}"
