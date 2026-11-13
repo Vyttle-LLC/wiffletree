@@ -761,7 +761,12 @@ impl Attention {
         self.operation_id.starts_with(PERMISSION_PREFIX)
             || self.is_publish()
             || self.is_merge()
+            || self.is_retarget()
             || self.is_repository_request()
+    }
+    /// A coordinator's `set_ticket_base` retarget waiting for the human's approval.
+    pub fn is_retarget(&self) -> bool {
+        self.operation_id.starts_with(RETARGET_PREFIX)
     }
     /// A step of a ticket's publish request waiting for the human's approval.
     pub fn is_publish(&self) -> bool {
@@ -1952,12 +1957,14 @@ pub struct Ticket {
     pub worktree: String,
     pub branch: String,
     /// The ticket this one is stacked on, in the same repository: its branch started from the
-    /// parent's branch, is measured against it, and its pull request opens into it.
+    /// parent's branch, is measured against it, and its pull request opens into it. A pull
+    /// request retargeted elsewhere, or `set_ticket_base`, unstacks it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stacked_on: Option<String>,
     /// The branch on origin, such as `Parental-controls`, that the ticket starts from, is
     /// measured against and whose pull request opens into it, in place of the repository's base.
-    /// A stacked ticket carries its parent's.
+    /// A stacked ticket carries its parent's. Once the ticket's pull request is open, it follows
+    /// that pull request's base on GitHub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
     pub state: TicketState,
@@ -1986,6 +1993,9 @@ pub struct Ticket {
     /// The coordinator's `merge_ticket` request while it is decided, waits or runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merging: Option<MergeRequest>,
+    /// The coordinator's `set_ticket_base` request while it waits for the human or runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retargeting: Option<RetargetRequest>,
     /// The commit the host last pushed to the ticket's branch on GitHub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pushed: Option<String>,
@@ -2216,9 +2226,14 @@ pub struct PublishRequest {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
-    /// The open pull request whose title or description the request edits after its push.
+    /// The open pull request whose title, description or base the request edits after its
+    /// push.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edits: Option<u64>,
+    /// The edit moves the open pull request's base to `base`, such as after the ticket's
+    /// stacked parent merged into another branch than the one the pull request opens into.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retargets: bool,
     /// The step that runs or waits next.
     pub step: PublishStep,
     /// The Inbox item the step waits on.
@@ -2244,6 +2259,29 @@ pub struct PublishRequest {
     /// each step asks the human even in an allowed owner's repository.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub always_ask: bool,
+}
+/// One accepted `set_ticket_base` call: the ticket moves to `base`, and so does its open pull
+/// request on GitHub, if it has one elsewhere. Only the host changes it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetargetRequest {
+    pub id: String,
+    /// The coordinator that called `set_ticket_base` and gets the result.
+    pub caller: String,
+    /// GitHub's `owner/name` for the repository, or its name when no pull request moves.
+    pub repository: String,
+    /// The open pull request that moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number: Option<u64>,
+    /// The branch the ticket's pull request opens into now, or would open into.
+    pub from: String,
+    /// The branch on origin it moves to.
+    pub base: String,
+    /// Why the human approves it first, such as that `base` is protected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asks: Option<String>,
+    /// The Inbox item it waits on; none while it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<String>,
 }
 /// One accepted `merge_ticket` call: the pull request and head the host merges, decided on one
 /// review. Only the host changes it.
@@ -2366,10 +2404,14 @@ impl PublishRequest {
     }
     /// What an edit changes, such as "title and description".
     pub fn edited_fields(&self) -> &'static str {
-        match (&self.title, &self.body) {
-            (Some(_), Some(_)) => "title and description",
-            (Some(_), None) => "title",
-            _ => "description",
+        match (&self.title, &self.body, self.retargets) {
+            (Some(_), Some(_), false) => "title and description",
+            (Some(_), None, false) => "title",
+            (None, _, false) => "description",
+            (Some(_), Some(_), true) => "title, description and base",
+            (Some(_), None, true) => "title and base",
+            (None, Some(_), true) => "description and base",
+            (None, None, true) => "base",
         }
     }
 }
@@ -2687,6 +2729,9 @@ pub const PUBLISH_PREFIX: &str = "publish:";
 /// The id prefix of a merge request's result message and of its Inbox item. Only the host
 /// creates either.
 pub const MERGE_PREFIX: &str = "merge:";
+/// The id prefix of a `set_ticket_base` retarget's result message and of its Inbox item. Only
+/// the host creates either.
+pub const RETARGET_PREFIX: &str = "retarget:";
 /// The id prefix of a repository request's Inbox item and of its result message. Only the host
 /// creates either.
 pub const REPOSITORY_REQUEST_PREFIX: &str = "repository:";
@@ -2705,14 +2750,15 @@ const MIGRATION_PREFIX: &str = "migration:";
 /// carries another coordinator's words, never the human's.
 pub const PROJECT_BRIEF_PREFIX: &str = "project-brief:";
 /// The id prefixes of the host's other messages without a sender: verification results, kept
-/// worktrees, migration notices, publish, merge and repository request results, process notices,
-/// project briefs and evaluator runs. Inbox answers (`answer:`) carry the human's words.
-const HOST_NOTICE_PREFIXES: [&str; 9] = [
+/// worktrees, migration notices, publish, merge, retarget and repository request results, process
+/// notices, project briefs and evaluator runs. Inbox answers (`answer:`) carry the human's words.
+const HOST_NOTICE_PREFIXES: [&str; 10] = [
     VERIFICATION_NOTICE_PREFIX,
     WORKTREE_KEPT_PREFIX,
     MIGRATION_PREFIX,
     PUBLISH_PREFIX,
     MERGE_PREFIX,
+    RETARGET_PREFIX,
     REPOSITORY_REQUEST_PREFIX,
     PROCESS_NOTICE_PREFIX,
     PROJECT_BRIEF_PREFIX,

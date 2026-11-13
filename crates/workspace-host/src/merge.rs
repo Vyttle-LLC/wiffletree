@@ -552,6 +552,10 @@ impl Host {
                 }
             );
         }
+        ensure!(
+            ticket.retargeting.is_none(),
+            "A change of this ticket's base runs or waits for the human; merge it once that ends. Nothing was merged"
+        );
         let waived = waived.map(one_line_reason).transpose()?;
         let checked = self.merge_checks(&ticket, waived)?;
         ticket.merging = Some(MergeRequest {
@@ -600,13 +604,9 @@ impl Host {
             .and_then(|github| github.facts.as_ref())
             .map(|facts| facts.name_with_owner.clone())
             .context("GitHub has not answered for this repository")?;
-        let base = self.ticket_base(ticket)?.pull_request_base()?;
-        ensure!(
-            pr.base == base,
-            "PR #{} opens into {}, not {base}, the ticket's base. Nothing was merged",
-            pr.number,
-            pr.base
-        );
+        // The pull request's own base on GitHub, wherever it was retargeted: the PR watcher makes
+        // it the ticket's base, and the read before the merge checks GitHub's protection of it.
+        let base = pr.base.clone();
         if let Some(why) = ProtectedBranches::of(&repository).why(&base) {
             bail!("{base} is protected: {why}. Only the human merges into it; nothing was merged");
         }
@@ -1632,6 +1632,45 @@ mod tests {
         assert_eq!(by_host.head, head);
         // The tool's answer was the result; no message repeats it.
         assert!(messages(&f.host).is_empty());
+    }
+
+    #[test]
+    fn a_pr_retargeted_to_another_unprotected_branch_merges_into_it() {
+        // The ticket was created on feature/spaces; the human moved its PR on GitHub.
+        let (mut f, fake) = ready();
+        watch(&mut f, 180, "feature/other");
+        fake.set(180, "baseRefName", json!("feature/other"));
+        let merged = merge(&mut f, &fake, None).unwrap();
+        assert_eq!(merged["status"], "merged");
+        assert_eq!(merged["base"], "feature/other");
+    }
+
+    #[test]
+    fn a_pr_retargeted_to_a_protected_branch_is_never_merged() {
+        // Into main, which Wiffletree protects as the repository's base.
+        let (mut f, fake) = ready();
+        watch(&mut f, 180, "main");
+        fake.set(180, "baseRefName", json!("main"));
+        let result = merge(&mut f, &fake, None);
+        refused(
+            &f,
+            &fake,
+            result,
+            "main is protected: it is this repository’s base",
+        );
+
+        // Into a branch only GitHub's branch protection covers.
+        let (mut f, fake) = ready();
+        fake.github.lock().unwrap().protected.push("release".into());
+        watch(&mut f, 180, "release");
+        fake.set(180, "baseRefName", json!("release"));
+        let result = merge(&mut f, &fake, None);
+        refused(
+            &f,
+            &fake,
+            result,
+            "release is protected: GitHub branch protection protects it",
+        );
     }
 
     #[test]

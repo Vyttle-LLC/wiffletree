@@ -393,7 +393,8 @@ fn open_pull_request(job: &Job, tools: &Tools) -> StepResult {
     }
 }
 
-/// Changes the open pull request's title, description or both, as the frozen request gives them.
+/// Changes the open pull request's title, description, base or several, as the frozen request
+/// gives them.
 fn edit_pull_request(job: &Job, tools: &Tools) -> StepResult {
     let request = &job.request;
     if let Err(changed) = recheck_stored(job) {
@@ -402,6 +403,9 @@ fn edit_pull_request(job: &Job, tools: &Tools) -> StepResult {
     let repository = format!("{}/{}", repositories::GITHUB_HOST, request.repository);
     let number = request.edits.unwrap_or_default().to_string();
     let mut args = vec!["pr", "edit", &number, "--repo", &repository];
+    if request.retargets {
+        args.extend(["--base", &request.base]);
+    }
     if let Some(title) = &request.title {
         args.extend(["--title", title]);
     }
@@ -512,6 +516,10 @@ impl Host {
         waived: Option<&str>,
     ) -> Result<(Value, Option<Job>)> {
         let mut ticket = self.publish_inputs(caller, ticket_id, title, body, waived.is_some())?;
+        ensure!(
+            ticket.retargeting.is_none(),
+            "A change of this ticket's base runs or waits for the human; publish it once that ends. Nothing was pushed."
+        );
         let waived = waived.map(one_line_reason).transpose()?;
         let mut checked = self.check_publish(&ticket, self.ticket_repository(&ticket)?, waived)?;
         waive_blocked_review(&ticket, &mut checked, waived.or(ticket.waiver.as_deref()))?;
@@ -576,9 +584,12 @@ impl Host {
         keeper: bool,
     ) -> Result<Option<Job>> {
         let worktree = Path::new(&ticket.worktree);
-        let edits = ticket
-            .open_pull_request()
-            .filter(|_| title.is_some() || body.is_some())
+        let open = ticket.open_pull_request();
+        // Such as a stacked PR still into its parent's branch after the parent merged elsewhere.
+        // The keeper only pushes.
+        let retargets = !keeper && open.is_some_and(|pr| pr.base != checked.base);
+        let edits = open
+            .filter(|_| title.is_some() || body.is_some() || retargets)
             .map(|pr| pr.number);
         let size = match checked.size.clone() {
             Some(size) => size,
@@ -603,6 +614,7 @@ impl Host {
             title: title.map(Into::into),
             body: body.map(Into::into),
             edits,
+            retargets,
             step: PublishStep::Push,
             waiting: None,
             blocked_review_approved: false,
@@ -943,6 +955,11 @@ impl Host {
             }
             StepResult::Edited => {
                 let number = request.edits.unwrap_or_default();
+                if let Some(pr) = (ticket.pull_request.as_mut())
+                    .filter(|pr| request.retargets && pr.number == number)
+                {
+                    pr.base = request.base.clone();
+                }
                 let detail = format!("{}: PR #{number}", ticket.id);
                 Self::event(
                     &self.db,

@@ -1,14 +1,15 @@
-//! Stacked tickets: a ticket whose branch starts from another ticket's branch in the same
-//! repository, is measured against it, and whose pull request opens into it.
+//! A ticket's base, the one place that decides what a ticket is measured against and where its
+//! pull request opens, and stacked tickets: a ticket whose branch starts from another ticket's
+//! branch in the same repository, is measured against it, and whose pull request opens into it.
 use crate::*;
 
 /// What a ticket's branch is measured against and where its pull request opens.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Base {
-    /// The repository's base, such as `origin/main`.
+    /// The repository's base, such as `origin/main`, or the ticket's own branch of origin.
     Repository(String),
     Stacked {
-        /// The parent's base: its own branch on origin, or the repository's base.
+        /// Where the parent's pull request merged, once it merged; until then the parent's base.
         repository: String,
         /// The parent ticket's branch.
         branch: String,
@@ -21,20 +22,31 @@ pub(crate) enum Base {
 }
 impl Base {
     /// `parent` is the ticket's `stacked_on` ticket, which a stacked ticket must have.
+    /// A merged parent's children follow the branch its pull request actually merged into,
+    /// which down a stack is the grandparent's branch, not the base the parent was created on.
     pub(crate) fn of(ticket: &Ticket, repository: &Repository, parent: Option<&Ticket>) -> Self {
         match parent.filter(|p| ticket.stacked_on.as_ref() == Some(&p.id)) {
-            Some(parent) => Self::Stacked {
-                repository: effective_base(parent, repository),
-                branch: parent.branch.clone(),
-                parent: parent.title.clone(),
-                pushed: parent.pushed.clone(),
-                merged: parent
-                    .pull_request
-                    .as_ref()
-                    .is_some_and(|pr| pr.state == PrState::Merged),
-            },
+            Some(parent) => {
+                let merged_into = (parent.pull_request.as_ref())
+                    .filter(|pr| pr.state == PrState::Merged)
+                    .map(|pr| format!("origin/{}", pr.base));
+                Self::Stacked {
+                    merged: merged_into.is_some(),
+                    repository: merged_into.unwrap_or_else(|| effective_base(parent, repository)),
+                    branch: parent.branch.clone(),
+                    parent: parent.title.clone(),
+                    pushed: parent.pushed.clone(),
+                }
+            }
             None => Self::Repository(effective_base(ticket, repository)),
         }
+    }
+    /// Whether an open pull request into `branch` is where this base puts it: the branch it
+    /// would open into, or a stacked ticket's parent's branch, which GitHub may keep after the
+    /// parent merged until the next publish moves it.
+    fn holds(&self, branch: &str) -> bool {
+        matches!(self, Self::Stacked { branch: parent, .. } if parent == branch)
+            || self.pull_request_base().is_ok_and(|base| base == branch)
     }
     /// The ref reviews, sizes and merge-bases measure against: the parent's branch for a
     /// stacked ticket, so its reviewers see only its own changes.
@@ -127,6 +139,34 @@ pub(crate) fn effective_base(ticket: &Ticket, repository: &Repository) -> String
         Some(base) => format!("origin/{base}"),
         None => repository.base.clone(),
     }
+}
+
+/// Puts the ticket on `branch` of origin and unstacks it. The repository's own base branch is
+/// recorded as no base of the ticket's own.
+pub(crate) fn move_base(ticket: &mut Ticket, repository: &Repository, branch: &str) {
+    ticket.stacked_on = None;
+    ticket.base = (origin_branch(&repository.base) != Some(branch)).then(|| branch.to_owned());
+}
+
+/// Follows a retarget of the ticket's open pull request on GitHub: when it opens into a branch
+/// its base does not put it in, that branch becomes the ticket's base. A stacked ticket whose
+/// pull request left its parent's branch is unstacked, because it no longer builds on the
+/// parent. Returns whether the ticket changed.
+pub(crate) fn follow_pull_request(
+    ticket: &mut Ticket,
+    base: &Base,
+    repository: &Repository,
+) -> bool {
+    let Some(pr) = ticket.open_pull_request() else {
+        return false;
+    };
+    // A repository whose base is not on origin publishes nothing, so has no base to follow.
+    if base.pull_request_base().is_err() || base.holds(&pr.base) {
+        return false;
+    }
+    let branch = pr.base.clone();
+    move_base(ticket, repository, &branch);
+    true
 }
 
 impl Host {
@@ -408,6 +448,7 @@ mod tests {
         );
         let mut merged = crate::publish::tests::watch_open_pr(&mut f, 1);
         merged.state = PrState::Merged;
+        merged.base = "release".into();
         ticket.pull_request = Some(merged);
         child.stacked_on = Some(ticket.id.clone());
         assert_eq!(
@@ -416,6 +457,166 @@ mod tests {
                 .unwrap(),
             "release"
         );
+    }
+
+    /// Records `pr` for the ticket as a PR watcher pass would.
+    fn watched(f: &mut Fixture, ticket: &Ticket, pr: PullRequest) {
+        let pass = crate::pr_watch::tests::found(ticket, pr);
+        (f.host)
+            .record_pull_requests(&ticket.repository_id, &pass, 0, 0)
+            .unwrap();
+    }
+    /// The PR watcher's messages to the coordinator about tickets' bases.
+    fn base_notices(f: &Fixture) -> Vec<String> {
+        (f.host.db)
+            .prepare("SELECT body FROM messages WHERE id LIKE 'pr:%:base:%' ORDER BY sequence")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    #[test]
+    fn a_retargeted_pr_moves_the_tickets_base_for_reviews_overlaps_and_publishes() {
+        let mut f = fixture();
+        f.allow("allowed-org");
+        let (_, _, mut ticket) = on_release(&mut f);
+        fs::write(Path::new(&ticket.worktree).join("t.txt"), "ticket\n").unwrap();
+        git(Path::new(&ticket.worktree), &["add", "."]);
+        git(Path::new(&ticket.worktree), &["commit", "-q", "-m", "t"]);
+        let head = git(Path::new(&ticket.worktree), &["rev-parse", "HEAD"]);
+        // The watcher stored the PR's reading into main before bases followed it, as release
+        // was merged into main and the human retargeted the PR.
+        let mut pr = crate::publish::tests::watch_open_pr(&mut f, 688);
+        pr.base = "main".into();
+        ticket.pull_request = Some(pr.clone());
+        ticket.verification = f.ticket().verification;
+        ticket.verification.as_mut().unwrap().rounds[0].commit = head.clone();
+        f.host.save_ticket(&ticket).unwrap();
+        assert_eq!(
+            f.host.ticket_base(&ticket).unwrap().measured(),
+            "origin/release"
+        );
+
+        watched(&mut f, &ticket, pr.clone());
+        let ticket = f.host.ticket(&ticket.id).unwrap();
+        assert_eq!(
+            ticket.base, None,
+            "the repository's own base is no base of its own"
+        );
+        assert_eq!(
+            f.host.ticket_base(&ticket).unwrap().measured(),
+            "origin/main"
+        );
+        let lines = f.host.diff_lines(&ticket, &head);
+        assert!(lines.contains("(origin/main)"), "{lines}");
+        let checks = f.host.overlap_checks().unwrap();
+        assert!(checks.iter().all(|(_, c)| c.base == "origin/main"));
+        let coordinator = f.coordinator.id.clone();
+        let (_, job) = (f.host)
+            .publish_ticket(&coordinator, &ticket.id, None, None, None)
+            .unwrap();
+        let request = job.unwrap().request;
+        assert_eq!((request.base.as_str(), request.retargets), ("main", false));
+        let notices = base_notices(&f);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("PR #688") && notices[0].contains("now opens into main"));
+        // The next pass changes nothing and tells nobody again.
+        watched(&mut f, &ticket, pr);
+        assert_eq!(base_notices(&f).len(), 1);
+    }
+
+    #[test]
+    fn a_stacked_pr_moved_off_its_parents_branch_unstacks_the_ticket() {
+        let mut f = fixture();
+        let mut parent = f.ticket();
+        parent.pushed = Some(f.head());
+        f.host.save_ticket(&parent).unwrap();
+        let child = child(&mut f);
+        let mut pr = crate::publish::tests::watch_open_pr(&mut f, 2);
+        pr.base = parent.branch.clone();
+        // Into its parent's branch, it stays stacked.
+        watched(&mut f, &child, pr.clone());
+        let stacked = f.host.ticket(&child.id).unwrap();
+        assert_eq!(stacked.stacked_on.as_ref(), Some(&parent.id));
+        assert!(base_notices(&f).is_empty());
+
+        pr.base = "main".into();
+        watched(&mut f, &stacked, pr);
+        let moved = f.host.ticket(&child.id).unwrap();
+        assert_eq!((&moved.stacked_on, &moved.base), (&None, &None));
+        assert_eq!(
+            f.host.ticket_base(&moved).unwrap().measured(),
+            "origin/main"
+        );
+        let notices = base_notices(&f);
+        assert!(notices[0].contains("no longer stacked"), "{notices:?}");
+    }
+
+    #[test]
+    fn down_a_stack_each_child_follows_the_branch_its_parent_merged_into() {
+        let mut f = fixture();
+        let r = remote(&f);
+        f.allow("allowed-org");
+        // Grandparent, the fixture's ticket on main; parent stacked on it; child on the parent.
+        let mut grandparent = f.ticket();
+        grandparent.pushed = Some(f.head());
+        f.host.save_ticket(&grandparent).unwrap();
+        let mut parent = child(&mut f);
+        parent.pushed = Some(f.head());
+        let mut merged = crate::publish::tests::watch_open_pr(&mut f, 727);
+        merged.state = PrState::Merged;
+        merged.base = grandparent.branch.clone();
+        parent.pull_request = Some(merged);
+        f.host.save_ticket(&parent).unwrap();
+        let repository = parent.repository_id.clone();
+        let coordinator = f.coordinator.id.clone();
+        let mut child = (f.host)
+            .create_stacked_ticket(
+                &coordinator,
+                &repository,
+                "Grandchild",
+                "Do",
+                Some(&parent.id),
+            )
+            .unwrap();
+        let worktree = Path::new(&child.worktree);
+        fs::write(worktree.join("c.txt"), "three\n").unwrap();
+        git(worktree, &["add", "."]);
+        git(worktree, &["commit", "-q", "-m", "c"]);
+        child.verification = f.ticket().verification;
+        child.verification.as_mut().unwrap().rounds[0].commit =
+            git(worktree, &["rev-parse", "HEAD"]);
+        // Its PR still opens into the merged parent's branch, which GitHub kept.
+        let mut open = crate::publish::tests::watch_open_pr(&mut f, 731);
+        open.base = parent.branch.clone();
+        child.pull_request = Some(open.clone());
+        f.host.save_ticket(&child).unwrap();
+
+        let base = f.host.ticket_base(&child).unwrap();
+        assert_eq!(base.pull_request_base().unwrap(), grandparent.branch);
+        assert_eq!(
+            base.measured(),
+            parent.branch,
+            "reviews still see only its own changes"
+        );
+        // The watcher leaves it stacked, and its next publish moves the PR.
+        watched(&mut f, &child, open);
+        assert_eq!(
+            f.host.ticket(&child.id).unwrap().stacked_on,
+            Some(parent.id)
+        );
+        let (_, job) = (f.host)
+            .publish_ticket(&coordinator, &child.id, None, None, None)
+            .unwrap();
+        crate::publish::tests::drive(&mut f, &r, job);
+        let edited = r.github.lock().unwrap().edited.clone();
+        assert_eq!(edited.len(), 1);
+        assert_eq!(edited[0][..3], ["pr", "edit", "731"]);
+        assert_eq!(edited[0][5..], ["--base", grandparent.branch.as_str()]);
+        let child = f.host.ticket(&child.id).unwrap();
+        assert_eq!(child.pull_request.unwrap().base, grandparent.branch);
     }
 
     #[test]
