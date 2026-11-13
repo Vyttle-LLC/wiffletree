@@ -339,7 +339,16 @@ fn recheck_stored(job: &Job) -> Result<()> {
         ),
         None => None,
     };
-    let base = stacks::Base::of(&ticket, &repository, parent.as_ref());
+    // A merged parent's landing may be up the stack, among the other tickets.
+    let tickets: Vec<Ticket> = match &parent {
+        Some(parent) if parent.ended_pull_request().is_some() => {
+            let mut rows = store.prepare("SELECT data FROM tickets")?;
+            let tickets = rows.query_map([], |r| decode(r, 0))?;
+            tickets.collect::<rusqlite::Result<_>>()?
+        }
+        _ => vec![],
+    };
+    let base = stacks::Base::of(&ticket, &repository, parent.as_ref(), &tickets);
     recheck(&ticket, repository, &base, &job.request).map(drop)
 }
 
@@ -1350,6 +1359,8 @@ pub(crate) mod tests {
         pub edit_error: Option<String>,
         /// The arguments of every `gh pr edit` call.
         pub edited: Vec<Vec<String>>,
+        /// The branches GitHub's branch protection covers now.
+        pub protected: Vec<String>,
         /// The arguments of every `git ls-remote` and `git push`.
         pub git: Vec<Vec<String>>,
         /// The local bare repository behind each GitHub URL.
@@ -1422,6 +1433,16 @@ pub(crate) mod tests {
                     ),
                     None => answer(1, String::new(), "error connecting to api.github.com"),
                 };
+            }
+            // A branch's protection and rules, as `set_ticket_base` reads them.
+            if let ["api", "--hostname", _, endpoint] = args
+                && let Some((_, branch)) = endpoint.split_once("/branches/")
+            {
+                let answer_json = match endpoint.contains("/rules/") {
+                    true => json!([]),
+                    false => json!({"protected": state.protected.iter().any(|p| p == branch)}),
+                };
+                return answer(0, answer_json.to_string(), "");
             }
             if args[..2] == ["pr", "edit"] {
                 state

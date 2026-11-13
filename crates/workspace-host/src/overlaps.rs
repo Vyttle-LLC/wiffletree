@@ -43,7 +43,10 @@ impl Host {
                 .iter()
                 .filter(|t| t.is_open() && t.repository_id == repository.id)
             {
-                let base = stacks::effective_base(t, &repository);
+                let parent = (t.stacked_on.as_ref())
+                    .and_then(|id| tickets.iter().find(|parent| &parent.id == id));
+                let base = stacks::Base::of(t, &repository, parent, &tickets);
+                let base = base.lands_on().to_owned();
                 bases.entry(base).or_default().push(OpenBranch {
                     ticket_id: t.id.clone(),
                     title: t.title.clone(),

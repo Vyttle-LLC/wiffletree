@@ -21,17 +21,31 @@ pub(crate) struct Job {
 pub(crate) struct Outcome {
     pub ticket_id: String,
     pub request_id: String,
-    /// Why nothing changed, when it failed.
-    pub result: Result<(), String>,
+    pub result: Moved,
+}
+pub(crate) enum Moved {
+    /// The base was fetched, and the pull request, if any, moved to it.
+    Done,
+    /// GitHub protects the base now, though the daily read did not say so, and the human has not
+    /// approved the move: nothing was moved.
+    Protected(String),
+    /// Why nothing changed.
+    Failed(String),
 }
 
-/// Fetches the base, then moves the pull request to it.
+/// Fetches the base, then moves the pull request to it. A move the human did not approve reads
+/// the base's protection from GitHub first, as the daily read may be a day old.
 pub(crate) fn run(job: &Job, tools: &Tools) -> Outcome {
     let request = &job.request;
     let result = checkout::fetch_base(&tools.git, &job.checkout, &request.base).and_then(|()| {
         let Some(number) = request.number else {
-            return Ok(());
+            return Ok(Moved::Done);
         };
+        if request.asks.is_none()
+            && let Some(why) = protected_now(job, tools)?
+        {
+            return Ok(Moved::Protected(why));
+        }
         // The host is named, so `GH_HOST` cannot move a pull request on another GitHub.
         let repository = format!("{}/{}", repositories::GITHUB_HOST, request.repository);
         let number = number.to_string();
@@ -50,13 +64,33 @@ pub(crate) fn run(job: &Job, tools: &Tools) -> Outcome {
             "gh pr edit failed: {}",
             answer.error
         );
-        Ok(())
+        Ok(Moved::Done)
     });
     Outcome {
         ticket_id: job.ticket_id.clone(),
         request_id: request.id.clone(),
-        result: result.map_err(|error| format!("{error:#}")),
+        result: result.unwrap_or_else(|error| Moved::Failed(format!("{error:#}"))),
     }
+}
+
+/// Why GitHub protects the base now, by branch protection or a ruleset, if it does.
+fn protected_now(job: &Job, tools: &Tools) -> Result<Option<String>> {
+    let (repository, base) = (&job.request.repository, &job.request.base);
+    let read = |endpoint: String| github_access::gh_json(tools, &job.checkout, &endpoint);
+    let branch = read(format!("repos/{repository}/branches/{base}"))?;
+    let protected = (branch["protected"].as_bool())
+        .context("GitHub did not say whether the base is protected")?;
+    let rules = read(format!("repos/{repository}/rules/branches/{base}"))?;
+    let ruled = !(rules.as_array())
+        .context("GitHub's rules are not a list")?
+        .is_empty();
+    Ok(match (protected, ruled) {
+        (true, _) => Some(format!(
+            "{base} is protected: GitHub branch protection protects it"
+        )),
+        (false, true) => Some(format!("{base} is protected: a GitHub ruleset protects it")),
+        (false, false) => None,
+    })
 }
 
 /// The outcome of a job whose thread stopped before it reported, such as by a panic.
@@ -64,7 +98,7 @@ pub(crate) fn stopped(job: &Job) -> Outcome {
     Outcome {
         ticket_id: job.ticket_id.clone(),
         request_id: job.request.id.clone(),
-        result: Err("the job stopped unexpectedly".into()),
+        result: Moved::Failed("the job stopped unexpectedly".into()),
     }
 }
 
@@ -128,18 +162,7 @@ impl Host {
         };
         ticket.retargeting = Some(request.clone());
         if let Some(why) = &request.asks {
-            let item = self.request_attention(
-                caller,
-                "local",
-                &format!("{RETARGET_PREFIX}{}", request.id),
-                &retarget_prompt(&ticket, &request, why),
-                &[],
-            )?;
-            ticket.retargeting = Some(RetargetRequest {
-                waiting: Some(item.id),
-                ..request.clone()
-            });
-            self.save_ticket(&ticket)?;
+            self.ask_human(&mut ticket, request.clone())?;
             return Ok((
                 json!({"status": "waiting_for_human", "base": base, "reason": why,
                     "next": "Finish your turn. Wiffletree moves the pull request once the human approves and messages you the result."}),
@@ -173,6 +196,24 @@ impl Host {
                 None
             },
         )
+    }
+
+    /// Raises the Inbox item for `request`, which says why it asks, and records that the
+    /// request waits on it.
+    fn ask_human(&mut self, ticket: &mut Ticket, request: RetargetRequest) -> Result<()> {
+        let why = request.asks.as_deref().unwrap_or_default();
+        let item = self.request_attention(
+            &request.caller,
+            "local",
+            &format!("{RETARGET_PREFIX}{}", request.id),
+            &retarget_prompt(ticket, &request, why),
+            &[],
+        )?;
+        ticket.retargeting = Some(RetargetRequest {
+            waiting: Some(item.id),
+            ..request
+        });
+        self.save_ticket(ticket)
     }
 
     fn retarget_job(&self, ticket: &Ticket, request: &RetargetRequest) -> Result<Job> {
@@ -223,11 +264,20 @@ impl Host {
         };
         let named = named(&ticket, &request);
         let result = match outcome.result {
-            Err(why) => format!(
+            Moved::Protected(why) => {
+                // The coordinator hears the outcome once the human answers.
+                let asks = RetargetRequest {
+                    asks: Some(why),
+                    ..request
+                };
+                self.ask_human(&mut ticket, asks)?;
+                return Ok(None);
+            }
+            Moved::Failed(why) => format!(
                 "Changing the base of {named} to {} failed: {why}. Nothing changed.",
                 request.base
             ),
-            Ok(()) => {
+            Moved::Done => {
                 let repository = self.ticket_repository(&ticket)?;
                 stacks::move_base(&mut ticket, &repository, &request.base);
                 if let Some(pr) =
@@ -391,6 +441,38 @@ mod tests {
         let (status, job) = set(&mut f, &ticket, "release").unwrap();
         assert_eq!(status["status"], "unchanged");
         assert!(job.is_none());
+    }
+
+    #[test]
+    fn a_branch_github_protects_since_the_daily_read_waits_for_the_human() {
+        let (mut f, r) = on_github();
+        f.allow("allowed-org");
+        watch_open_pr(&mut f, 45);
+        r.github.lock().unwrap().protected.push("release".into());
+        let ticket = f.ticket.clone();
+        let (status, job) = set(&mut f, &ticket, "release").unwrap();
+        assert_eq!(
+            status["status"], "setting_base",
+            "the daily read says unprotected"
+        );
+        finish(&mut f, &r, job);
+        assert!(edits(&r).is_empty(), "nothing was moved");
+        assert!(
+            results(&f).is_empty(),
+            "the coordinator hears once the human answers"
+        );
+        let items = f.open_items();
+        assert!(items[0].is_retarget());
+        assert!(
+            (items[0].prompt).contains("GitHub branch protection protects it"),
+            "{}",
+            items[0].prompt
+        );
+        // Approved, the move runs without reading again.
+        let job = f.host.answer_retarget(&items[0].id, true).unwrap();
+        finish(&mut f, &r, job);
+        assert_eq!(edits(&r), [moved_to("release")]);
+        assert_eq!(f.ticket().base.as_deref(), Some("release"));
     }
 
     #[test]
