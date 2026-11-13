@@ -76,6 +76,7 @@ fn a_ticket_stored_before_publishing_decodes_and_a_request_round_trips() {
         title: Some("Fix".into()),
         body: Some("Why".into()),
         edits: None,
+        retargets: false,
         step: PublishStep::OpenPullRequest,
         waiting: Some("attention".into()),
         blocked_review_approved: false,

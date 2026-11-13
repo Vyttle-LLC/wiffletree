@@ -394,7 +394,7 @@ A keeper publish SHALL be started only for a ticket whose publish would run with
 - **THEN** the request is ended, no agent is messaged, and a later pass pushes again only if the checks still pass
 
 ### Requirement: A stacked ticket's pull request opens into its parent's branch
-A new pull request for a stacked ticket SHALL open into its parent's branch. `publish_ticket` SHALL refuse it, sending nothing and creating no request, until the host has pushed the parent's branch, and the refusal SHALL say to publish the parent first. Once the parent's pull request has merged, a new pull request for the child SHALL open into the parent's base instead: the parent's `base` if it has one, otherwise the repository's base branch. The size a publish reports SHALL be measured against the ticket's base. A ticket without a parent SHALL publish as before.
+A new pull request for a stacked ticket SHALL open into its parent's branch. `publish_ticket` SHALL refuse it, sending nothing and creating no request, until the host has pushed the parent's branch, and the refusal SHALL say to publish the parent first. Once the parent's pull request has merged, a new pull request for the child SHALL open into the branch the parent's pull request merged into instead, and a publish of a child whose open pull request still opens into the merged parent's branch SHALL move it there. The size a publish reports SHALL be measured against the ticket's base. A ticket without a parent SHALL publish as before.
 
 #### Scenario: Before the parent is pushed
 - **WHEN** the coordinator publishes a stacked ticket whose parent was never published
@@ -475,7 +475,7 @@ When the ticket's latest verification cycle ended blocked and the request carrie
 - **THEN** the human is asked again for that commit
 
 ### Requirement: The host never approves, closes or comments, and merges only through merge_ticket
-The host SHALL offer agents no operation that approves, closes, reopens, comments on, labels or reviews a pull request, or that edits an open pull request other than its title and description through `publish_ticket`. The host SHALL merge a pull request only through `merge_ticket`, and SHALL change an open pull request's base only to retarget a stacked ticket's pull request after a merge it made (see ticket-merging). Merging into a protected branch SHALL remain the human's, including a plan's feature branch into the default branch.
+The host SHALL offer agents no operation that approves, closes, reopens, comments on, labels or reviews a pull request, or that edits an open pull request other than its title and description through `publish_ticket`. The host SHALL merge a pull request only through `merge_ticket`, and SHALL change an open pull request's base only to retarget a stacked ticket's pull request after a merge it made (see ticket-merging), when a publish moves a stacked ticket's pull request off its merged parent's branch, and through the coordinator's `set_ticket_base` under the publishing rules, never into a protected branch without the human's approval. Merging into a protected branch SHALL remain the human's, including a plan's feature branch into the default branch.
 
 #### Scenario: No merge tool
 - **WHEN** an agent lists the workspace tools

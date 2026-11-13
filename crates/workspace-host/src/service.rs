@@ -460,6 +460,15 @@ fn spawn_merge_job(
         |(_, reply), outcome| Event::Merged(Box::new(outcome), reply),
     );
 }
+fn spawn_retarget_job(sender: Sender<Event>, job: retarget::Job, tools: publish::Tools) {
+    spawn_job(
+        sender,
+        job,
+        move |job| retarget::run(job, &tools),
+        retarget::stopped,
+        |_, outcome| Event::Retargeted(outcome),
+    );
+}
 fn spawn_sync_pass(sender: Sender<Event>, pass: sync::Pass, tools: publish::Tools) {
     spawn_job(
         sender,
@@ -784,6 +793,8 @@ enum Event {
     /// A merge decision finished on its own thread, with the `merge_ticket` call waiting for
     /// it, if one is.
     Merged(Box<merge::Outcome>, Option<Reply>),
+    /// A `set_ticket_base` fetch and pull request move finished on its own thread.
+    Retargeted(retarget::Outcome),
     /// A PR keeper rebase finished on its own thread.
     Kept(keeper::Outcome),
     /// A PR keeper fetch of GitHub's branch finished on its own thread.
@@ -1902,6 +1913,7 @@ impl Actor {
                         | "close_ticket"
                         | "publish_ticket"
                         | "merge_ticket"
+                        | "set_ticket_base"
                         | "triage_findings"
                 ) =>
             {
@@ -1914,6 +1926,7 @@ impl Actor {
                 .is_some_and(|id| reservations.blocks_session(&self.host, id)),
             Event::Kept(outcome) => reservations.contains(&outcome.ticket_id),
             Event::Merged(outcome, _) => reservations.contains(&outcome.ticket_id),
+            Event::Retargeted(outcome) => reservations.contains(&outcome.ticket_id),
             Event::Gated(outcome) => reservations.contains(&outcome.ticket_id),
             Event::Reproduced(outcome) => reservations.contains(&outcome.ticket_id),
             Event::Fetched(outcome) => reservations.contains(&outcome.ticket_id),
@@ -3116,6 +3129,10 @@ impl Actor {
                             if let Some(job) = self.host.answer_merge(id, answer == "approved")? {
                                 self.run_merge_job(job, None);
                             }
+                        } else if attention.is_retarget() {
+                            // As for a merge, the request's own result is its one message.
+                            let job = self.host.answer_retarget(id, answer == "approved")?;
+                            self.run_retarget_job(job);
                         } else if attention.is_publish() {
                             // The request's own result is its caller's one message, so the
                             // answer is not sent on as other Inbox answers are.
@@ -3245,6 +3262,19 @@ impl Actor {
                                     .merge_ticket(&id, ticket, args["waived"].as_str())?;
                             self.run_merge_job(job, Some(reply.clone()));
                             return Ok(None);
+                        }
+                        "set_ticket_base" => {
+                            only_arguments("set_ticket_base", &args, &["ticket_id", "base"])?;
+                            let string = |key: &str| {
+                                args[key].as_str().with_context(|| format!("Missing {key}"))
+                            };
+                            let (status, job) = self.host.set_ticket_base(
+                                &id,
+                                string("ticket_id")?,
+                                string("base")?,
+                            )?;
+                            self.run_retarget_job(job);
+                            return Ok(Some(status));
                         }
                         "publish_ticket" => {
                             only_arguments(
@@ -3529,6 +3559,14 @@ impl Actor {
                         Ok(next) => self.run_publish_step(next),
                         Err(error) => eprintln!("Workspace publish: {error:#}"),
                     }
+                }
+                true
+            }
+            Event::Retargeted(outcome) => {
+                match self.host.record_retarget(outcome) {
+                    Ok(Some(repository)) => self.pr_watch.check_now(&repository),
+                    Ok(None) => {}
+                    Err(error) => eprintln!("Workspace set_ticket_base: {error:#}"),
                 }
                 true
             }
@@ -4272,6 +4310,12 @@ impl Actor {
             return;
         }
         spawn_merge_job(self.sender.clone(), job, self.publish_tools.clone(), reply);
+    }
+    fn run_retarget_job(&mut self, job: Option<retarget::Job>) {
+        // A request whose job never started ends at the next start.
+        if let Some(job) = job.filter(|_| !self.stopping) {
+            spawn_retarget_job(self.sender.clone(), job, self.publish_tools.clone());
+        }
     }
     fn run_publish_step(&mut self, step: Option<publish::Job>) {
         if self.stopping {
