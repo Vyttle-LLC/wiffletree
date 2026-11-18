@@ -35,7 +35,8 @@ const REFERENCE_BYTES: usize = MAX_LINE_BYTES / 2;
 const CLICK_REPLY: Duration = Duration::from_secs(2);
 
 /// Tables size their columns to the content, wrap cells down to a floor, and then scroll
-/// sideways rather than squeeze further.
+/// sideways rather than squeeze further. The library draws no scrollbar for a table, so it
+/// scrolls only by a sideways wheel: a trackpad swipe or Shift with a mouse wheel.
 fn scrolling_table() -> StyleRefinement {
     let mut table = StyleRefinement::default();
     table.overflow.x = Some(Overflow::Scroll);
@@ -1335,5 +1336,56 @@ mod tests {
         assert_eq!(cx.opened_url(), None);
         let selected = cx.update(gpui_base::TextSelection::selected_text);
         assert!(selected.contains("the"), "selected {selected:?}");
+    }
+
+    /// The words a double-click picks along the header row of a table drawn at the top left.
+    fn header_words(cx: &mut VisualTestContext) -> Vec<String> {
+        (0..400)
+            .step_by(20)
+            .map(|x| {
+                let (at, modifiers) = (point(px(x as f32), px(14.)), Modifiers::default());
+                cx.simulate_event(gpui::MouseDownEvent {
+                    position: at,
+                    button: MouseButton::Left,
+                    modifiers,
+                    click_count: 2,
+                    first_mouse: false,
+                });
+                cx.simulate_event(MouseUpEvent {
+                    position: at,
+                    button: MouseButton::Left,
+                    modifiers,
+                    click_count: 2,
+                });
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                cx.update(gpui_base::TextSelection::selected_text)
+            })
+            .collect()
+    }
+
+    #[gpui::test]
+    fn a_table_wider_than_its_message_scrolls_sideways_to_its_last_column(cx: &mut TestAppContext) {
+        let served = serve(|_| {});
+        cx.update(gpui_component::init);
+        let cell = "a cell long enough to wrap into a column wider than its floor";
+        let body = format!(
+            "| First | Second | Third | Fourth | Last |\n|---|---|---|---|---|\n| {cell} | {cell} | {cell} | {cell} | {cell} |\n"
+        );
+        let linked = Linked::new("m", &body, Vec::new().into(), &served.bridge);
+        let (_, cx) = cx.add_window_view(|_, _| Message(linked, ClickSlop::default()));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let last = "Last".to_owned();
+        assert!(
+            !header_words(cx).contains(&last),
+            "the last column starts out of view"
+        );
+
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: point(px(200.), px(14.)),
+            delta: gpui::ScrollDelta::Pixels(point(px(-1000.), px(0.))),
+            ..Default::default()
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(header_words(cx).contains(&last));
     }
 }
