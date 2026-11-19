@@ -136,6 +136,10 @@ fn the_evaluator_tools_take_an_exact_model_and_no_agent_can_set_what_a_project_a
     );
     let properties = &start["inputSchema"]["properties"];
     assert_eq!(properties["mode"]["enum"], json!(["app", "desktop"]));
+    assert_eq!(
+        properties["target"]["required"],
+        json!(["executable", "arguments"])
+    );
     assert_eq!(properties["provider"]["enum"], json!(["claude", "codex"]));
     assert_eq!(start["inputSchema"]["additionalProperties"], false);
     let described = start["description"].as_str().unwrap();

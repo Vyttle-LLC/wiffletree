@@ -13,6 +13,7 @@ package(workspace-desktop)
 | binary_id(workspace-host::leftover_processes)
 | (binary_id(workspace-host) & (
     test(/^processes::tests::/)
+    | test(/^provider::app_target::tests::/)
     | test(/^remote::bonjour::tests::/)
     | test(=agent_processes::tests::lazy_confirmation_prunes_an_exited_identity_but_keeps_a_live_member_outside_the_group)
     | test(=provider::tests::the_leader_stays_unreaped_until_its_group_has_been_signalled)
