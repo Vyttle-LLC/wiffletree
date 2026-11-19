@@ -392,6 +392,7 @@ impl Creation {
             pull_request: None,
             publishing: None,
             merging: None,
+            retargeting: None,
             pushed: None,
             keeper: None,
         };
@@ -492,7 +493,7 @@ fn requested_base(ticket: &Ticket) -> Option<&str> {
 }
 /// Fetches `base` from origin into `origin/<base>`, which a ticket on it starts from. A branch
 /// only this clone has is refused, so the ticket's pull request never crosses repositories.
-fn fetch_base(git: &publish::GitTool, repository: &Path, base: &str) -> Result<()> {
+pub(crate) fn fetch_base(git: &publish::GitTool, repository: &Path, base: &str) -> Result<()> {
     let tracking = format!("refs/remotes/origin/{base}");
     let valid = runtime::git_answer(repository, &["check-ref-format", &tracking])?;
     ensure!(valid.status.success(), "\"{base}\" is not a branch name");

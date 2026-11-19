@@ -534,7 +534,7 @@ impl Host {
             new.merged_by_host = old.merged_by_host.clone();
         }
         if old.as_ref() == Some(&new) {
-            return Ok(false);
+            return self.follow_pull_request_base(ticket);
         }
         // Sent before saving: after a crash in between, the next pass sees the same change
         // and skips each message whose id exists.
@@ -574,7 +574,49 @@ impl Host {
             self.follow_ticket_work(&ticket, true);
         }
         let project = self.session(&ticket.coordinator_id)?.project_id;
-        Self::event(&self.db, &project, None, "pull_request", &detail).map(|_| true)
+        Self::event(&self.db, &project, None, "pull_request", &detail)?;
+        self.follow_pull_request_base(ticket)?;
+        Ok(true)
+    }
+    /// Makes a ticket's base the base of its open pull request, after a retarget on GitHub, and
+    /// tells the coordinator of an open ticket once. A finished ticket follows too, as tickets
+    /// stacked on it later start from its base, but calls for no message. Returns whether the
+    /// ticket changed.
+    fn follow_pull_request_base(&mut self, mut ticket: Ticket) -> Result<bool> {
+        let base = self.ticket_base(&ticket)?;
+        let repository = self.ticket_repository(&ticket)?;
+        let parent = ticket.stacked_on.clone();
+        if !stacks::follow_pull_request(&mut ticket, &base, &repository) {
+            return Ok(false);
+        }
+        let pr = ticket.open_pull_request().context("No open pull request")?;
+        let mut body = format!(
+            "PR #{} for ticket \"{}\" ({}) now opens into {}, so that is the ticket's base: reviews, sizes, overlap warnings, publishes and merge_ticket measure against it.",
+            pr.number, ticket.title, ticket.id, pr.base
+        );
+        if let Some(parent) = parent {
+            body.push_str(&format!(
+                " It is no longer stacked on ticket {parent}, so its reviews see every change since {}.",
+                pr.base
+            ));
+        }
+        let id = format!(
+            "{PR_NOTICE_PREFIX}{}:base:{}:{}",
+            ticket.id, pr.number, pr.base
+        );
+        if ticket.is_open()
+            && !self.message_exists(&id)?
+            && let Err(e) = self.send(&id, None, &ticket.coordinator_id, &body)
+        {
+            eprintln!("Workspace PR watch: {id}: {e:#}");
+            if !self.session(&ticket.coordinator_id)?.archived {
+                return Ok(false);
+            }
+        }
+        let detail = format!("{}: base {}", ticket.id, pr.base);
+        self.save_ticket(&ticket)?;
+        let project = self.session(&ticket.coordinator_id)?.project_id;
+        Self::event(&self.db, &project, None, "ticket_base", &detail).map(|_| true)
     }
     /// The coordinator messages a PR's new snapshot calls for that were never sent, and the
     /// wakes held back because the PR keeper will try their problem. Wakes on failed checks and

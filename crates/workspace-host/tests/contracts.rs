@@ -54,6 +54,7 @@ fn the_tool_list_offers_ticket_tools_and_no_repository_coordinator_tools() {
             "accept_ticket",
             "publish_ticket",
             "merge_ticket",
+            "set_ticket_base",
             "close_ticket",
             "list_issues",
             "read_issue",

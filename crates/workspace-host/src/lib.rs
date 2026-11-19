@@ -50,6 +50,7 @@ mod repos;
 mod repositories;
 mod repository_reads;
 mod repository_requests;
+mod retarget;
 mod revisions;
 mod router;
 pub mod runtime;
@@ -294,6 +295,7 @@ fn ensure_unreserved(operation: &str) -> Result<()> {
         BRAIN_NOTICE_PREFIX,
         PUBLISH_PREFIX,
         MERGE_PREFIX,
+        RETARGET_PREFIX,
         REPOSITORY_REQUEST_PREFIX,
         PERMISSION_PREFIX,
         EVALUATION_PREFIX,
@@ -462,6 +464,7 @@ impl Host {
         host.recover()?;
         host.end_interrupted_publishes()?;
         host.end_interrupted_merges()?;
+        host.end_interrupted_retargets()?;
         host.end_keeper_work()?;
         host.migrate_opus_defaults()?;
         host.migrate_model_selection()?;
