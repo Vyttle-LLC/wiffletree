@@ -128,7 +128,7 @@ enum Call {
     /// A Go compiler, linker or vet run. It waits silently: Go caches and replays a tool's
     /// output.
     GoTool,
-    /// A test or bench binary Cargo or nextest runs from a `deps` folder.
+    /// A test or bench binary Cargo or nextest runs from where Cargo builds them.
     TestBinary,
     /// Anything else, such as the version and target queries behind `cargo tree` and `go env`,
     /// or the app `cargo run` starts.
@@ -159,10 +159,21 @@ fn classify(program: &Path, args: &[OsString]) -> Call {
             false => Call::GoTool,
         };
     }
-    if folder(program).is_some_and(|n| n == "deps") {
+    if cargo_test_binary(program) {
         return Call::TestBinary;
     }
     Call::Other
+}
+
+/// Whether Cargo built `program` as a test or bench binary: one in a `deps` folder, or, in the
+/// build-dir layout of Cargo 1.100 and later, in `build/<package>/<hash>/out`.
+fn cargo_test_binary(program: &Path) -> bool {
+    let mut folders = program.ancestors().skip(1).map(Path::file_name);
+    match folders.next().flatten() {
+        Some(name) if name == "deps" => true,
+        Some(name) if name == "out" => folders.nth(2).flatten().is_some_and(|n| n == "build"),
+        _ => false,
+    }
 }
 
 /// Runs the gate when this binary was started by `GATE_NAME`, and never returns then.
@@ -537,6 +548,10 @@ mod tests {
         assert_eq!(classify(tool, &args(&["-V=full"])), Call::Other);
         let deps = Path::new("/w/target/debug/deps/core-1a2b");
         assert_eq!(classify(deps, &args(&["--nocapture"])), Call::TestBinary);
+        // Cargo 1.100's build-dir layout.
+        let out = Path::new("/w/target/debug/build/core/1a2b/out/core-1a2b");
+        assert_eq!(classify(out, &args(&["--nocapture"])), Call::TestBinary);
+        assert_eq!(classify(Path::new("/w/out/app"), &[]), Call::Other);
         // `cargo run`'s app.
         assert_eq!(classify(Path::new("/w/target/debug/app"), &[]), Call::Other);
     }
