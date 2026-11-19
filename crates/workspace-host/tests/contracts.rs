@@ -389,7 +389,11 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
     }
     for role in agent_roles() {
         let core = core(role);
-        assert!(core.contains("Wiffletree communication contract — v12"));
+        assert!(core.contains("Wiffletree communication contract — v13"));
+        // Every role is told to send a file as a Markdown link to its absolute path.
+        assert!(core.contains(
+            "When you point the human to a file, write a Markdown link to its absolute path, such as [mockup.html](/Users/me/project/mockup.html), wrapping a path with spaces in angle brackets. Never write a shell command to open it, a code block or a file:// URL."
+        ));
         // The core outranks the skill that follows it.
         assert!(core.contains(
             "where it disagrees with this contract, the contract's tools and rules still apply"
@@ -713,8 +717,11 @@ fn only_the_tester_runs_the_full_suite_and_every_build_reuses_the_cache_one_at_a
 #[test]
 fn a_thread_is_told_its_authority_and_tools_and_nothing_of_coordination() {
     let thread = core(Role::Assistant);
-    assert!(thread.starts_with("# Wiffletree thread contract — v2"));
+    assert!(thread.starts_with("# Wiffletree thread contract — v3"));
     assert!(thread.contains("# Assistant core — v4"));
+    assert!(thread.contains(
+        "When you point the human to a file, write a Markdown link to its absolute path, such as [mockup.html](/Users/me/project/mockup.html), wrapping a path with spaces in angle brackets. Never write a shell command to open it, a code block or a file:// URL."
+    ));
     for stated in [
         "read-only plus your scratch folder, and the provider enforces it",
         "You never edit a repository, commit, push, write outside your scratch folder, start agents or create tickets",
@@ -753,7 +760,7 @@ fn a_thread_is_told_its_authority_and_tools_and_nothing_of_coordination() {
 #[test]
 fn a_job_run_is_told_it_only_reads_and_saves_and_offers_no_card() {
     let run = core(Role::JobRun);
-    assert!(run.starts_with("# Wiffletree thread contract — v2"));
+    assert!(run.starts_with("# Wiffletree thread contract — v3"));
     assert!(run.contains("# Job run core — v3"));
     for stated in [
         "`save_output`",
