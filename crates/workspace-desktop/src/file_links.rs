@@ -1,7 +1,7 @@
 //! File references in rendered messages. Inline code naming a file on disk, such as
-//! `crates/foo/src/bar.rs:63`, or an absolute or home path written in prose, becomes a link that
-//! opens the file in its default app, and a Markdown link to a local path opens the same way. Web
-//! links keep opening in the browser.
+//! `crates/foo/src/bar.rs:63`, or an absolute or home path or `file://` URL written in prose,
+//! becomes a link that opens the file in its default app, and a Markdown link to a local path opens
+//! the same way. Web links keep opening in the browser.
 //!
 //! Only the host knows which references are files, and the UI thread never waits for it: a
 //! message shows as plain text at once and gains its links when the host answers.
@@ -371,8 +371,8 @@ fn escaped_text(text: &str) -> String {
     escaped
 }
 
-/// The source range and text of every inline code span and prose path outside a link, in
-/// document order. Web addresses are links already, so their paths are never found.
+/// The source range and text of every inline code span, prose path and prose `file://` URL outside
+/// a link, in document order. Web addresses are links already, so their paths are never found.
 fn reference_spans(body: &str, node: &markdown::mdast::Node, spans: &mut Vec<Candidate>) {
     use markdown::mdast::Node;
     match node {
@@ -399,9 +399,13 @@ fn reference_spans(body: &str, node: &markdown::mdast::Node, spans: &mut Vec<Can
     }
 }
 
-/// The source range and text of each absolute or home path in the prose at `range` of `body`: a
-/// `/` or `~/` starting a word, up to a space or a character no path holds, without trailing
-/// sentence punctuation. A relative path in prose is too often not one to be looked up.
+/// The start of a `file://` URL naming an absolute path.
+const FILE_URL: &str = "file:///";
+
+/// The source range and text of each absolute or home path, or `file://` URL of an absolute path,
+/// in the prose at `range` of `body`: a `/`, `~/` or `file:///` starting a word, up to a space or a
+/// character no path holds, without trailing sentence punctuation. The text of a URL is the
+/// percent-decoded path it names. A relative path in prose is too often not one to be looked up.
 fn prose_paths(body: &str, range: std::ops::Range<usize>, spans: &mut Vec<Candidate>) {
     let starts_word = |at: usize| {
         (body[..at].chars().next_back()).is_none_or(|c| c.is_whitespace() || "([{'\"*_".contains(c))
@@ -409,7 +413,8 @@ fn prose_paths(body: &str, range: std::ops::Range<usize>, spans: &mut Vec<Candid
     let mut at = range.start;
     while at < range.end {
         let rest = &body[at..range.end];
-        if !(starts_word(at) && (rest.starts_with('/') || rest.starts_with("~/"))) {
+        let url = rest.starts_with(FILE_URL);
+        if !(starts_word(at) && (url || rest.starts_with('/') || rest.starts_with("~/"))) {
             at += rest.chars().next().map_or(1, char::len_utf8);
             continue;
         }
@@ -418,8 +423,12 @@ fn prose_paths(body: &str, range: std::ops::Range<usize>, spans: &mut Vec<Candid
                 c.is_whitespace() || NOT_IN_PATHS.contains(&c) || AROUND_PATHS.contains(&c)
             })
             .unwrap_or(rest.len());
-        let path = rest[..word].trim_end_matches(TRAILING);
-        spans.push((at, at + path.len(), path.to_owned()));
+        let written = rest[..word].trim_end_matches(TRAILING);
+        let path = match written.strip_prefix("file://") {
+            Some(encoded) => percent_decoded(encoded),
+            None => written.to_owned(),
+        };
+        spans.push((at, at + written.len(), path));
         at += word;
     }
 }
@@ -1035,11 +1044,54 @@ mod tests {
             "[/w/a.rs]\n\n[/w/a.rs]: https://example.com",
             "<file:///w/a.rs>",
             "https://example.com/w/a.rs and www.example.com/w/a.rs",
-            "file:///w/a.rs and see/w/a.rs",
+            "`file:///w/a.rs` and ```file:///w/a.rs```",
+            "[file:///w/a.rs](https://example.com) and see/w/a.rs",
+            "https://example.com/?next=file:///w/a.rs and xfile:///w/a.rs",
             "and/or, 1/2, / alone, ~ and ~user/a.rs",
         ] {
             assert_eq!(link(body), body);
         }
+    }
+
+    #[test]
+    fn bare_file_urls_in_prose_link_as_one_link_without_their_punctuation() {
+        let found = |reference: &str| {
+            ["/w/mockup.html", "/tmp/a b.md", "/w/a.rs"]
+                .contains(&reference)
+                .then(|| PathBuf::from(reference))
+        };
+        let link = |body: &str| super::link_code(body, &candidates(body), None, found);
+        assert_eq!(
+            link("It is at file:///w/mockup.html, beside it."),
+            "It is at [file:///w/mockup.html](</w/mockup.html>), beside it."
+        );
+        assert_eq!(
+            link("Open (file:///w/a.rs:12). Then file:///tmp/a%20b.md."),
+            "Open ([file:///w/a.rs:12](</w/a.rs>)). Then [file:///tmp/a%20b.md](</tmp/a b.md>)."
+        );
+        assert_eq!(
+            link("see file:///w/gone.rs and file://host/w/a.rs and file://"),
+            "see file:///w/gone.rs and file://host/w/a.rs and file://"
+        );
+    }
+
+    #[test]
+    fn only_a_prose_file_url_naming_a_file_becomes_a_link() {
+        let served = serve(|_| {});
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a b.html");
+        fs::write(&file, "").unwrap();
+        let (url, gone) = (
+            format!("file://{}", dir.path().join("a%20b.html").display()),
+            format!("file://{}", dir.path().join("gone.html").display()),
+        );
+        let folder = format!("file://{}", dir.path().display());
+        let body = format!("See {url}, not {gone} or {folder}.");
+        let linked = linked(&body, &[], &served.bridge);
+        assert_eq!(
+            linked.text(),
+            format!("See [{url}](<{}>), not {gone} or {folder}.", file.display())
+        );
     }
 
     #[test]
