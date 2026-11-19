@@ -525,17 +525,15 @@ mod tests {
         bridge.shutdown();
     }
 
-    /// The host binary `cargo` built beside this test.
+    /// The host binary `cargo` built into the profile folder this test runs under. The test sits
+    /// in `deps/` or, in Cargo's newer layout, deeper in `build/`, so the folder is the nearest
+    /// one above it that holds the host.
     fn host_binary() -> std::path::PathBuf {
         let exe = std::env::current_exe().unwrap();
-        let binary = exe
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("wiffletree-host");
-        assert!(binary.is_file(), "build wiffletree-host first: {binary:?}");
-        binary
+        exe.ancestors()
+            .map(|folder| folder.join("wiffletree-host"))
+            .find(|binary| binary.is_file())
+            .unwrap_or_else(|| panic!("build wiffletree-host first: none above {exe:?}"))
     }
 
     /// A login shell that only runs what it is given, so the host's start is quick and sees the
