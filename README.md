@@ -200,7 +200,7 @@ The full explanation of everything below is in **[docs/FEATURES.md](docs/FEATURE
 
 ## Build from source
 
-You need macOS on Apple Silicon, a recent stable Rust toolchain and Xcode with its Metal toolchain.
+You need macOS on Apple Silicon, [rustup](https://rustup.rs) and Xcode with its Metal toolchain. `rust-toolchain.toml` pins the Rust version, and rustup installs it the first time you run `cargo` here.
 
 ```sh
 bash scripts/package_macos.sh

@@ -4,7 +4,7 @@ Wiffletree is the product name, selected October 5, 2026. This is a working loca
 
 ## Build and open
 
-On macOS with Rust, Xcode and its Metal toolchain:
+On macOS with rustup, Xcode and its Metal toolchain. `rust-toolchain.toml` pins the Rust version, and rustup installs it. CI and the release workflow install the same file. To bump the version, edit the file in its own PR:
 
 ```sh
 bash scripts/package_macos.sh
