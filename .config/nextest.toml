@@ -1,5 +1,5 @@
 # A hung test fails as TIMEOUT under its own name instead of holding the job until CI cancels it.
-# The slowest test takes about 36 seconds in CI, so three periods leave it plenty of room. The
+# The slowest tests take under 40 seconds in CI, so three periods leave them plenty of room. The
 # `mac` profile inherits this.
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 3 }
@@ -55,7 +55,9 @@ package(workspace-desktop)
     | test(=closing_a_ticket_stops_what_its_agents_started)
   ))
 | (binary_id(workspace-host::compaction) & (
-    test(=a_helper_given_an_earlier_groups_id_is_recorded_as_the_compactions_and_spared)
+    test(=a_crash_while_a_codex_agent_compacts_stops_the_app_server_at_the_next_start)
+    | test(=a_crash_while_compacting_stops_its_process_and_the_next_turn_takes_the_waiting_message)
+    | test(=a_helper_given_an_earlier_groups_id_is_recorded_as_the_compactions_and_spared)
     | test(=what_a_codex_compactions_server_starts_is_recorded_spared_by_a_pause_and_stopped_at_a_quit)
   ))
 | (binary_id(workspace-host::host_socket)

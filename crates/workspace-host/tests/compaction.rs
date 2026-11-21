@@ -1054,6 +1054,9 @@ fn a_compaction_that_cannot_start_fails_with_its_reason_and_the_next_turn_runs()
     assert_eq!(world.turns(&main).len(), 2);
 }
 
+// Only macOS has the process table startup confirms the leftover process by; elsewhere it is
+// never stopped and the double only exits at its own deadline.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_crash_while_compacting_stops_its_process_and_the_next_turn_takes_the_waiting_message() {
     let mut world = World::new();
@@ -2205,6 +2208,8 @@ fn a_helper_given_an_earlier_groups_id_is_recorded_as_the_compactions_and_spared
     assert!(!group_runs(helper));
 }
 
+// As above, only macOS can confirm the leftover server.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_crash_while_a_codex_agent_compacts_stops_the_app_server_at_the_next_start() {
     let mut world = World::codex();
