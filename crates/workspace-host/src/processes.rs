@@ -173,8 +173,46 @@ pub(crate) fn group_members(group: i32) -> Vec<ProcessInfo> {
 
 /// Whether the group has a live process this user may signal; the probe delivers nothing. A
 /// group whose only members are zombies answers EPERM.
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn group_runs(group: i32) -> bool {
     unsafe { libc::killpg(group, 0) == 0 }
+}
+
+/// Whether the group has a live process this user may signal. Linux signals a group whose only
+/// members are zombies without error, so a provider's leader, kept unreaped until its group is
+/// stopped, would hold every stop for the whole grace period; `/proc` leaves zombies out.
+#[cfg(target_os = "linux")]
+pub(crate) fn group_runs(group: i32) -> bool {
+    if unsafe { libc::killpg(group, 0) } != 0 {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return true;
+    };
+    let group = group.to_string();
+    // A process whose main thread has exited reads Z while its other threads run, so each
+    // thread's own state counts.
+    entries.flatten().any(|process| {
+        let Ok(threads) = std::fs::read_dir(process.path().join("task")) else {
+            return false;
+        };
+        threads.flatten().any(|thread| {
+            std::fs::read_to_string(thread.path().join("stat"))
+                .is_ok_and(|stat| live_in_group(&stat, &group))
+        })
+    })
+}
+
+/// Whether a `/proc` stat line is of a live thread in the group.
+#[cfg(target_os = "linux")]
+fn live_in_group(stat: &str, group: &str) -> bool {
+    // After the command name in parentheses: state, parent, process group.
+    let mut fields = stat
+        .rsplit_once(')')
+        .map_or("", |(_, rest)| rest)
+        .split_whitespace();
+    let state = fields.next();
+    state != Some("Z") && fields.nth(1) == Some(group)
 }
 
 /// Sends SIGTERM and waits out the grace period while live members remain. A frozen process
@@ -1447,5 +1485,67 @@ sys.stdin.readline()
         drop(provider);
         followed_now(&run);
         assert!(!shared().0.trees.contains_key(&key));
+    }
+}
+
+#[cfg(test)]
+mod group_runs_tests {
+    use super::group_runs;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_group_whose_only_member_is_an_unreaped_zombie_no_longer_runs() {
+        let mut leader = Command::new("sh")
+            .args(["-c", "read line"])
+            .stdin(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let group = leader.id() as i32;
+        assert!(group_runs(group));
+
+        drop(leader.stdin.take());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while group_runs(group) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let still_runs = group_runs(group);
+        leader.wait().unwrap();
+        assert!(
+            !still_runs,
+            "the exited leader, not yet reaped, still counts"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_process_whose_main_thread_has_exited_runs_while_another_thread_does() {
+        // The second thread reads standard input after the main thread has exited.
+        let script = "import ctypes,sys,threading; threading.Thread(target=sys.stdin.read).start(); ctypes.CDLL(None).pthread_exit(None)";
+        let mut process = Command::new("python3")
+            .args(["-c", script])
+            .stdin(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let group = process.id() as i32;
+        let stat = format!("/proc/{group}/stat");
+        let main_thread_exited = || {
+            std::fs::read_to_string(&stat).is_ok_and(|s| {
+                s.rsplit_once(')')
+                    .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !main_thread_exited() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(main_thread_exited(), "the main thread never exited");
+        assert!(group_runs(group), "its other thread still runs");
+
+        drop(process.stdin.take());
+        process.wait().unwrap();
     }
 }
