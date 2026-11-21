@@ -70,6 +70,8 @@ jobs:
     steps:
       # The tests read fixtures from the checkout.
       - uses: actions/checkout@v7
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: rustup toolchain install
       - uses: taiki-e/install-action@nextest
       - uses: actions/download-artifact@v8
         with:
