@@ -36,9 +36,9 @@ The spike ruled out each provider's own computer use; the human chose Wiffletree
 - [x] 4.6 The helper's grants checked before the provider starts; Esc, the menu bar item's Stop and the helper quitting stop the run; the helper quits, or is killed, when the turn ends.
 - [x] 4.7 On-screen check with the human (design, "Live check"): grants, the Start gate, Calculator-only screenshots and input for Claude and Codex, cleanup.
 - [x] 4.8 On-screen check of Esc: three runs stopped at once (design, "Live check").
-- [ ] 4.9 On-screen check of the menu bar's Stop, which the human did not use in either round.
+- [ ] 4.9 On-screen check of the menu bar's Stop, which the human never used: Esc and the panel's Stop, which share its path, each ended runs live.
 - [x] 4.10 The floating control panel (`ui/control-overlay.html`, approved by Michael on November 23, 2026): placement in a remembered corner, the detail line, Stopping…, the compact form, Stop through the shared stop path, and the model and queue passed at launch.
-- [ ] 4.11 On-screen check of the panel: seen top right at the status level and absent from the run's screenshot (design, "Live check"); its Stop ending the run is not yet observed.
+- [x] 4.11 On-screen check of the panel: top right at the status level, absent from the runs' screenshots, and its Stop ended three runs at once (design, "Live check").
 
 ## 5. Ticket 5 · UI
 
