@@ -31,7 +31,8 @@ jobs:
         with:
           fetch-depth: 0 # Needed to confirm the tag is on main.
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
 
       - name: Ensure the Metal toolchain

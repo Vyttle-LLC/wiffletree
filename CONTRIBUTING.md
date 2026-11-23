@@ -10,7 +10,7 @@ Thanks for helping with Wiffletree. It is early software: expect the product and
 
 ## Development
 
-You need macOS on Apple Silicon, a recent stable Rust toolchain and Xcode with its Metal toolchain. Build and open a local bundle with:
+You need macOS on Apple Silicon, [rustup](https://rustup.rs) and Xcode with its Metal toolchain. `rust-toolchain.toml` pins the Rust version and rustup installs it. To bump it, edit that file in its own PR. Build and open a local bundle with:
 
 ```sh
 bash scripts/package_macos.sh
