@@ -35,7 +35,7 @@ const DEFAULT_NAMES: &[&str] = &[
     ".terraform",
 ];
 
-/// The file in which a repository declares more build output folders, in addition to the
+/// The committed file in which a repository declares more build output folders, in addition to the
 /// defaults: one path or glob per line, relative to the repository's root. `*` and `?` match
 /// within one path segment, `**` any number of segments, and a line starting with `#` is a
 /// comment.
@@ -94,9 +94,6 @@ pub fn xcode_derived_data() -> Option<PathBuf> {
 ///
 /// It runs Git and walks every folder it finds, which can take seconds for a large build, so
 /// call it on a worker thread, never on the host's own thread.
-///
-/// A declared folder is found when Git lists it, or a path inside it, as ignored or untracked; a
-/// folder inside a larger folder that Git ignores as a whole is not.
 pub fn scan(worktree: &Path, derived_data: Option<&Path>) -> Result<BuildOutput> {
     let status = Status::read(worktree)?;
     let tracked = tracked_paths(worktree)?;
@@ -104,7 +101,7 @@ pub fn scan(worktree: &Path, derived_data: Option<&Path>) -> Result<BuildOutput>
     let mut found = Vec::new();
     let mut ambiguous = Vec::new();
     let mut taken: Vec<String> = Vec::new();
-    for (folder, source) in candidates(worktree, &status, &declared) {
+    for (folder, source) in candidates(worktree, &status, &tracked, &declared) {
         if taken.iter().any(|outer| within(&folder, outer)) {
             continue;
         }
@@ -218,33 +215,86 @@ fn tracked_paths(worktree: &Path) -> Result<HashSet<String>> {
     Ok(paths)
 }
 
-/// The candidate folders among the ignored and untracked paths and the folders above them, in
-/// path order, so a folder comes before those inside it.
+/// The candidate folders in path order, so a folder comes before those inside it: the ignored,
+/// untracked and tracked paths' folders and those above them, and the folders inside an ignored
+/// folder that is not a candidate itself, which Git lists without what it holds.
 fn candidates(
     worktree: &Path,
     status: &Status,
+    tracked: &HashSet<String>,
     declared: &[Vec<String>],
 ) -> BTreeMap<String, Source> {
-    let mut considered = HashSet::new();
-    let mut candidates = BTreeMap::new();
+    let mut search = Search {
+        worktree,
+        declared,
+        considered: HashSet::new(),
+        candidates: BTreeMap::new(),
+    };
     for path in status.ignored.iter().chain(&status.untracked) {
-        let is_folder = worktree.join(path).is_dir();
-        let mut folder = if is_folder {
-            Some(path.as_str())
+        if worktree.join(path).is_dir() {
+            search.upward(Some(path));
         } else {
-            path.rsplit_once('/').map(|(parent, _)| parent)
-        };
-        while let Some(current) = folder {
-            if !considered.insert(current.to_owned()) {
-                break;
-            }
-            if let Some(source) = source_of(worktree, current, declared) {
-                candidates.insert(current.to_owned(), source);
-            }
-            folder = current.rsplit_once('/').map(|(parent, _)| parent);
+            search.upward(parent(path));
         }
     }
-    candidates
+    for path in tracked {
+        search.upward(parent(path));
+    }
+    for path in &status.ignored {
+        if worktree.join(path).is_dir() && !search.candidates.contains_key(path) {
+            search.downward(path);
+        }
+    }
+    search.candidates
+}
+
+struct Search<'a> {
+    worktree: &'a Path,
+    declared: &'a [Vec<String>],
+    /// Every folder looked at, each with all the folders above it.
+    considered: HashSet<String>,
+    candidates: BTreeMap<String, Source>,
+}
+impl Search<'_> {
+    fn upward(&mut self, mut folder: Option<&str>) {
+        while let Some(current) = folder {
+            if !self.consider(current) {
+                break;
+            }
+            folder = parent(current);
+        }
+    }
+
+    /// Looks at the folders inside `folder`, but not inside a candidate or a symbolic link.
+    fn downward(&mut self, folder: &str) {
+        let Ok(entries) = fs::read_dir(self.worktree.join(folder)) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let inner = format!("{folder}/{}", entry.file_name().to_string_lossy());
+            if self.consider(&inner) && !self.candidates.contains_key(&inner) {
+                self.downward(&inner);
+            }
+        }
+    }
+
+    /// Records `folder` as a candidate if it is one, or returns false if it was looked at before.
+    fn consider(&mut self, folder: &str) -> bool {
+        if !self.considered.insert(folder.to_owned()) {
+            return false;
+        }
+        if let Some(source) = source_of(self.worktree, folder, self.declared) {
+            self.candidates.insert(folder.to_owned(), source);
+        }
+        true
+    }
+}
+
+fn parent(path: &str) -> Option<&str> {
+    path.rsplit_once('/').map(|(parent, _)| parent)
 }
 
 fn source_of(worktree: &Path, folder: &str, declared: &[Vec<String>]) -> Option<Source> {
@@ -264,10 +314,13 @@ fn source_of(worktree: &Path, folder: &str, declared: &[Vec<String>]) -> Option<
     }
 }
 
-/// The repository's declared patterns, each split into path segments.
+/// The repository's declared patterns as committed at `HEAD`, each split into path segments. An
+/// uncommitted declaration, or change to one, declares nothing.
 fn declared_patterns(worktree: &Path) -> Vec<Vec<String>> {
-    let Ok(text) = fs::read_to_string(worktree.join(DECLARATION)) else {
-        return Vec::new();
+    let blob = format!("HEAD:{DECLARATION}");
+    let text = match runtime::git_answer(worktree, &["cat-file", "blob", &blob]) {
+        Ok(answer) if answer.status.success() => answer.output,
+        _ => return Vec::new(),
     };
     text.lines()
         .map(|line| line.trim().trim_matches('/'))
@@ -435,8 +488,10 @@ mod tests {
             (".gitignore", "/target/\nnode_modules/\n*.pyc\ndist/\n"),
             ("README.md", "readme\n"),
             ("src/main.rs", "fn main() {}\n"),
+            ("ios/build/notes.txt", "tracked, named like build output\n"),
         ]);
         write(&root, "README.md", "an uncommitted change\n");
+        write(&root, "ios/build/notes.txt", "an uncommitted change\n");
         write(&root, "notes.txt", "untracked\n");
         write(
             &root,
@@ -466,6 +521,7 @@ mod tests {
             [
                 ("build".into(), Reason::NotIgnored),
                 ("dist".into(), Reason::HoldsTracked),
+                ("ios/build".into(), Reason::HoldsTracked),
             ]
         );
         for work in [
@@ -540,6 +596,54 @@ mod tests {
             ambiguous(&root, &output),
             [("reports".into(), Reason::NotIgnored)]
         );
+    }
+
+    #[test]
+    fn folders_inside_a_folder_git_ignores_as_a_whole_are_found() {
+        let (_folder, root) = worktree(&[
+            (DECLARATION, "artifacts/custom\n"),
+            (".gitignore", "/artifacts/\n"),
+        ]);
+        write(&root, "artifacts/target/debug/app", "binary");
+        write(
+            &root,
+            "artifacts/cache/CACHEDIR.TAG",
+            "Signature: 8a477f597d28d172789f06886806bc55",
+        );
+        write(&root, "artifacts/custom/blob", "generated");
+        write(
+            &root,
+            "artifacts/logs/today.log",
+            "neither named nor tagged",
+        );
+
+        let output = scan(&root, None).unwrap();
+
+        assert_eq!(
+            found(&root, &output),
+            [
+                ("artifacts/cache".into(), Source::CacheDirTag),
+                ("artifacts/custom".into(), Source::Declared),
+                ("artifacts/target".into(), Source::DefaultName),
+            ]
+        );
+        assert!(output.ambiguous.is_empty());
+    }
+
+    #[test]
+    fn an_uncommitted_declaration_declares_nothing() {
+        let (_folder, root) = worktree(&[(".gitignore", "/private-notes/\n")]);
+        write(
+            &root,
+            "private-notes/notes.txt",
+            "ignored, but not build output",
+        );
+        write(&root, DECLARATION, "private-notes\n");
+
+        let output = scan(&root, None).unwrap();
+
+        assert!(output.found.is_empty());
+        assert!(output.ambiguous.is_empty());
     }
 
     #[test]
