@@ -571,6 +571,88 @@ pub fn compile_tools() -> Value {
         "inputSchema": {"type":"object","properties":{"summary":string},"required":["summary"],"additionalProperties":false}
     }])
 }
+/// Serves an MCP source to the Assistant's Claude with only its `allowed` read tools: starts the
+/// server `command` with `args`, lists only those tools and answers a call to any other with
+/// an error, never passing it on. Claude offers every tool a server lists, so this is what
+/// keeps a source's act tools and unlisted tools from it.
+pub fn filter_stdio(allowed: &[String], command: &str, args: &[String]) -> Result<()> {
+    filter(
+        allowed,
+        command,
+        args,
+        std::io::stdin().lock(),
+        std::io::stdout(),
+    )
+}
+fn filter(
+    allowed: &[String],
+    command: &str,
+    args: &[String],
+    input: impl BufRead,
+    output: impl Write + Send + 'static,
+) -> Result<()> {
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex};
+    let mut child = Command::new(command)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("Could not start {command}"))?;
+    let mut server = child.stdin.take().context("The server took no input")?;
+    let answers = child.stdout.take().context("The server gave no output")?;
+    let output = Arc::new(Mutex::new(output));
+    fn send(output: &Mutex<impl Write>, message: &Value) -> Result<()> {
+        let mut output = output.lock().expect("one writer at a time");
+        writeln!(output, "{message}")?;
+        Ok(output.flush()?)
+    }
+    let allowed: Vec<String> = allowed.to_vec();
+    let is_allowed = move |name: &Value| allowed.iter().any(|tool| name == tool);
+    // The ids of the tool listings asked for, whose answers are filtered.
+    let listings: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let relay = {
+        let (output, listings, is_allowed) = (output.clone(), listings.clone(), is_allowed.clone());
+        std::thread::spawn(move || -> Result<()> {
+            for line in BufReader::new(answers).lines() {
+                let Ok(mut answer) = serde_json::from_str::<Value>(&line?) else {
+                    continue;
+                };
+                let mut asked = listings.lock().expect("one reader at a time");
+                if let Some(at) = asked.iter().position(|id| *id == answer["id"]) {
+                    asked.remove(at);
+                    if let Some(tools) = answer["result"]["tools"].as_array_mut() {
+                        tools.retain(|tool| is_allowed(&tool["name"]));
+                    }
+                }
+                drop(asked);
+                send(&output, &answer)?;
+            }
+            Ok(())
+        })
+    };
+    for line in input.lines() {
+        let line = line?;
+        let request: Value = serde_json::from_str(&line).unwrap_or_default();
+        match request["method"].as_str() {
+            Some("tools/list") => {
+                (listings.lock().expect("one reader at a time")).push(request["id"].clone())
+            }
+            Some("tools/call") if !is_allowed(&request["params"]["name"]) => {
+                let refused = json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32601,"message":"Wiffletree offers the Assistant only this source's read tools; acting in the app goes through act"}});
+                send(&output, &refused)?;
+                continue;
+            }
+            _ => {}
+        }
+        writeln!(server, "{line}")?;
+        server.flush()?;
+    }
+    drop(server);
+    let _ = child.wait();
+    let _ = relay.join();
+    Ok(())
+}
 /// Serves a session's MCP `tools`: `tools_for` its role, or a thread's `thread_tools`.
 pub fn serve_stdio(tools: Value) -> Result<()> {
     let socket = std::env::var("WORKSPACE_SOCKET").context("Missing workspace endpoint")?;
@@ -638,6 +720,61 @@ mod tests {
         ] {
             assert!(!names.contains(&coordination), "{coordination}");
         }
+    }
+
+    #[test]
+    fn a_filtered_source_lists_and_runs_only_its_read_tools() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = tempfile::tempdir().unwrap();
+        let server = folder.path().join("server.py");
+        std::fs::write(&server, "#!/usr/bin/env python3\nimport json, sys\nfor line in sys.stdin:\n    m = json.loads(line)\n    tools = [{'name': n} for n in ['search_threads', 'send_message', 'delete_thread']]\n    result = {'tools': tools} if m['method'] == 'tools/list' else {'content': [{'type': 'text', 'text': 'ran ' + m['params']['name']}]}\n    print(json.dumps({'jsonrpc': '2.0', 'id': m['id'], 'result': result}), flush=True)\n").unwrap();
+        std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let requests = [
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send_message","arguments":{}}}),
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_threads","arguments":{}}}),
+        ];
+        let input: String = requests.iter().map(|r| format!("{r}\n")).collect();
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        struct Shared(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Shared {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().write(bytes)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let allowed = ["search_threads".to_owned()];
+        let command = server.to_str().unwrap();
+        filter(
+            &allowed,
+            command,
+            &[],
+            input.as_bytes(),
+            Shared(written.clone()),
+        )
+        .unwrap();
+        let answers: Vec<Value> = String::from_utf8(written.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let by_id = |id: i64| answers.iter().find(|a| a["id"] == id).unwrap();
+        assert_eq!(
+            by_id(1)["result"]["tools"],
+            json!([{"name": "search_threads"}])
+        );
+        assert!(
+            by_id(2)["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("act")
+        );
+        assert_eq!(
+            by_id(3)["result"]["content"][0]["text"],
+            "ran search_threads"
+        );
     }
 
     #[test]

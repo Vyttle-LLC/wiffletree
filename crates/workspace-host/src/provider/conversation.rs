@@ -44,10 +44,38 @@ impl ConversationLaunch {
             .chain(acts)
             .collect()
     }
+    /// Each source's server as Claude starts it: through the helper's `mcp-filter`, which lists
+    /// and passes on only its read tools. A server reached by URL cannot be filtered, so Claude
+    /// is not given it.
+    fn claude_servers(&self, helper: &Path) -> Vec<(&str, Value)> {
+        let filtered = |source: &SourceServer| -> Option<Value> {
+            let command = source.definition["command"].as_str()?;
+            let offered: Vec<&String> = source.offered().collect();
+            let mut args = vec![
+                json!("mcp-filter"),
+                json!(json!(offered).to_string()),
+                json!(command),
+            ];
+            args.extend(
+                source.definition["args"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
+            let mut wrapped = json!({"command": helper, "args": args});
+            if let Some(env) = source.definition.get("env") {
+                wrapped["env"] = env.clone();
+            }
+            Some(wrapped)
+        };
+        (self.servers.iter())
+            .filter_map(|(server, source)| Some((server.as_str(), filtered(source)?)))
+            .collect()
+    }
     /// Refuses a call to an MCP tool the provider was not offered, as it is made: only the
-    /// workspace's tools and the sources' read tools. Claude is offered every tool of a source's
-    /// server that is not denied by name, and Codex only the enabled ones, so this is what holds
-    /// a server's other tools back.
+    /// workspace's tools and the sources' read tools. Claude's filter and Codex's enabled tools
+    /// already offer no others; this stops a turn that reaches one anyway.
     pub(crate) fn check_call(&self, call: &ToolCall) -> Result<()> {
         let ToolCall::Mcp { server, tool } = call else {
             return Ok(());
@@ -134,8 +162,8 @@ pub(super) fn configure(cmd: &mut ProcessCommand, turn: &Turn, launch: &Conversa
         Provider::Claude => {
             let mut servers = serde_json::Map::new();
             servers.insert("agent_workspace".into(), workspace);
-            for (server, source) in &launch.servers {
-                servers.insert(server.clone(), source.definition.clone());
+            for (server, filtered) in launch.claude_servers(&turn.helper) {
+                servers.insert(server.into(), filtered);
             }
             cmd.args([
                 "-p",
@@ -232,6 +260,15 @@ mod tests {
             server: server.into(),
             tool: tool.into(),
         };
+        // Claude starts the server through the filter, given only its read tools.
+        let servers = launch.claude_servers(Path::new("/app/wiffletree-host"));
+        assert_eq!(
+            servers,
+            [(
+                "gmail",
+                json!({"command": "/app/wiffletree-host", "args": ["mcp-filter", "[\"search_threads\"]", "gmail-mcp"]})
+            )]
+        );
         launch.check_call(&call("gmail", "search_threads")).unwrap();
         launch.check_call(&call("agent_workspace", "act")).unwrap();
         for (server, tool) in [
