@@ -101,7 +101,7 @@ impl Host {
         };
         if let Some(after) = &after {
             jobs::validate(after)?;
-            self.refuse_acts_as_reads(&space, after)?;
+            jobs::refuse_acts_as_reads(&space, after)?;
         }
         let job_id = (after.as_ref().or(before.as_ref()))
             .map(|recipe| recipe.id.clone())
@@ -122,34 +122,20 @@ impl Host {
                 "note": format!("Nothing changed: this turn read text written by others ({}), so the human sees a loop card and applies it with Apply.", guard.read.join("; ")),
             }));
         }
-        let applied = self.apply_loop_change(&card)?;
+        let applied = self.apply_loop_change(&mut card)?;
         card.state = LoopCardState::Applied;
         let card = self.raise_card(CardKind::Loop(card), guard)?;
         Ok(json!({"card": card.id, "applied": true, "loop": applied}))
     }
-    /// A recipe may list a source's read entries alone, never what its Space lists as an act.
-    fn refuse_acts_as_reads(&self, space: &Space, recipe: &Recipe) -> Result<()> {
-        for source in &recipe.sources {
-            let listed = (space.sources.iter()).find(|s| s.name() == source.name());
-            let acts = listed.map(Source::acts).unwrap_or_default();
-            let named: Vec<&str> = (source.reads().iter())
-                .filter(|read| acts.contains(read))
-                .map(String::as_str)
-                .collect();
-            ensure!(
-                named.is_empty(),
-                "A loop only reads, and {} lists {} as acting in the app",
-                space.name,
-                named.join(", ")
-            );
-        }
-        Ok(())
-    }
-    fn apply_loop_change(&mut self, card: &LoopCard) -> Result<Value> {
+    /// Makes the change; a saved loop is kept on the card as `save_job` stored it, with the
+    /// runner it may have added, so Undo finds it unchanged.
+    fn apply_loop_change(&mut self, card: &mut LoopCard) -> Result<Value> {
         let recipe = || card.after.as_deref().cloned().context("No loop to save");
         Ok(match card.change {
             LoopChange::Create | LoopChange::Edit | LoopChange::Pause | LoopChange::Resume => {
-                serde_json::to_value(self.save_job(recipe()?)?)?
+                let saved = self.save_job(recipe()?)?;
+                card.after = Some(Box::new(saved.recipe.clone()));
+                serde_json::to_value(saved)?
             }
             LoopChange::Delete => {
                 self.delete_job(&card.space_id, &card.job_id)?;
@@ -185,7 +171,7 @@ impl Host {
             change.state == LoopCardState::Waiting,
             "This loop change is not waiting"
         );
-        self.apply_loop_change(&change)?;
+        self.apply_loop_change(&mut change)?;
         change.state = LoopCardState::Applied;
         self.set_loop_card(card, change)
     }
@@ -339,6 +325,14 @@ mod tests {
         assert!(sends.unwrap_err().to_string().contains("send_message"));
         let acts = host.loop_tool("create_loop", &recipe(json!([{"kind":"mcp","server":"gmail","tools":["search_threads"],"act":["send_message"]}])), &guard);
         assert!(acts.unwrap_err().to_string().contains("A loop only reads"));
+        // The human's own save, from a loop's page, is held to the same reads.
+        let mut by_hand = assistant::proposed_recipe(&celadon, &recipe(json!([]))).unwrap();
+        by_hand.sources = vec![
+            serde_json::from_value(json!({"kind":"mcp","server":"gmail","tools":["send_message"]}))
+                .unwrap(),
+        ];
+        let refused = host.save_job(by_hand).unwrap_err().to_string();
+        assert!(refused.contains("send_message"), "{refused}");
         let comments = host.loop_tool(
             "create_loop",
             &recipe(json!([{"kind":"cli","command":"gh","prefixes":["gh pr comment"]}])),

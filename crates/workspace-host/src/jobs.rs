@@ -177,6 +177,25 @@ pub(crate) fn read_recipe(content: &[u8], space: &SpaceId, id: &str) -> Result<R
     Ok(recipe)
 }
 
+/// A loop may list a source's read entries alone, never what its Space lists as an act.
+pub(crate) fn refuse_acts_as_reads(space: &Space, recipe: &Recipe) -> Result<()> {
+    for source in &recipe.sources {
+        let listed = (space.sources.iter()).find(|s| s.name() == source.name());
+        let acts = listed.map(Source::acts).unwrap_or_default();
+        let named: Vec<&str> = (source.reads().iter())
+            .filter(|read| acts.contains(read))
+            .map(String::as_str)
+            .collect();
+        ensure!(
+            named.is_empty(),
+            "A loop only reads, and {} lists {} as acting in the app",
+            space.name,
+            named.join(", ")
+        );
+    }
+    Ok(())
+}
+
 /// The recipe's own checks, and that its timezone is an IANA name.
 pub(crate) fn validate(recipe: &Recipe) -> Result<()> {
     workspace_core::job::validate(recipe)?;
@@ -708,6 +727,7 @@ impl Host {
             record.space.name
         );
         validate(&recipe)?;
+        refuse_acts_as_reads(&record.space, &recipe)?;
         let stored = !matches!(
             record.space.storage.repository,
             StorageRepository::Local { .. }
@@ -2701,6 +2721,33 @@ mod tests {
                 }),
                 ..dashboard(sage)
             }
+        }
+
+        #[test]
+        fn undo_deletes_a_loop_the_assistant_created_in_a_space_stored_on_github() {
+            use crate::conversation::TurnGuard;
+            let mut s = shared(false);
+            let sage = s.sage.id.clone();
+            let guard = crate::work::tests::human_turn(&mut s.host, "m1", "a sweep please");
+            let mut held = guard.clone();
+            held.note("Sage's brain".into());
+            let card = |host: &mut Host, name: &str, guard: &TurnGuard| {
+                let args = json!({"space": sage, "name": name, "prompt": "List open PRs", "cron": "0 16 * * 5", "timezone": "UTC", "sources": []});
+                let made = host.loop_tool("create_loop", &args, guard).unwrap();
+                made["card"].as_str().unwrap().to_owned()
+            };
+            let saved = card(&mut s.host, "Open PRs sweep", &guard);
+            let key = JobKey::recipe(&sage, "open-prs-sweep");
+            assert!(
+                s.host.recipe(&key).unwrap().runner.is_some(),
+                "one runner: this Mac"
+            );
+            s.host.undo_loop_change(&saved).unwrap();
+            assert!(s.host.recipe(&key).is_err());
+            let applied = card(&mut s.host, "Open PRs sweep", &held);
+            s.host.apply_loop_card(&applied).unwrap();
+            s.host.undo_loop_change(&applied).unwrap();
+            assert!(s.host.recipe(&key).is_err());
         }
 
         #[test]
