@@ -9,14 +9,49 @@ pub(crate) fn workspace_folder(home: &Path) -> PathBuf {
     home.join("assistant").join("workspace")
 }
 
-/// The conversation's cards, the tags on the human's messages it passed to work, and the Space
-/// the human picked in the composer for a message.
+/// The conversation's cards, the tags on the human's messages it passed to work, the Space the
+/// human picked in the composer for a message, and the human's unsent draft.
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS conversation_cards (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, data TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS conversation_routes (message_id TEXT PRIMARY KEY, data TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS conversation_picks (message_id TEXT PRIMARY KEY, space_id TEXT NOT NULL);
-         CREATE TABLE IF NOT EXISTS conversation_source_tools (server TEXT NOT NULL, tool TEXT NOT NULL, PRIMARY KEY(server,tool));",
+         CREATE TABLE IF NOT EXISTS conversation_source_tools (server TEXT NOT NULL, tool TEXT NOT NULL, PRIMARY KEY(server,tool));
+         CREATE TABLE IF NOT EXISTS conversation_draft (id INTEGER PRIMARY KEY CHECK (id=1), body TEXT NOT NULL);",
+    )?;
+    draft_held_messages(db)
+}
+
+/// Migration (`assistant-does-the-work`): the messages an earlier release's router held unsent
+/// become the conversation's draft, oldest first, and their table goes.
+fn draft_held_messages(db: &Connection) -> Result<()> {
+    let held: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='held_messages')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !held {
+        return Ok(());
+    }
+    let tx = db.unchecked_transaction()?;
+    let bodies: Vec<Option<String>> = tx
+        .prepare("SELECT json_extract(data,'$.body') FROM held_messages ORDER BY rowid")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let bodies: Vec<String> = (bodies.into_iter().flatten())
+        .filter(|body| !body.trim().is_empty())
+        .collect();
+    if !bodies.is_empty() {
+        add_to_draft(&tx, &bodies.join("\n\n"))?;
+    }
+    tx.execute("DROP TABLE held_messages", [])?;
+    tx.commit()?;
+    Ok(())
+}
+fn add_to_draft(db: &Connection, text: &str) -> Result<()> {
+    db.execute(
+        "INSERT INTO conversation_draft VALUES (1,?1) ON CONFLICT(id) DO UPDATE SET body=body||char(10)||char(10)||excluded.body",
+        [text],
     )?;
     Ok(())
 }
@@ -154,8 +189,16 @@ impl Host {
                 )?;
             }
             host.record_human_message(&assistant.id)?;
+            host.db.execute("DELETE FROM conversation_draft", [])?;
             Ok(message)
         })
+    }
+    /// The human's unsent draft for the conversation, which their next message replaces.
+    pub fn conversation_draft(&self) -> Result<Option<String>> {
+        Ok(self
+            .db
+            .query_row("SELECT body FROM conversation_draft", [], |r| r.get(0))
+            .optional()?)
     }
     /// The conversation's cards, oldest first.
     pub fn conversation_cards(&self) -> Result<Vec<ConversationCard>> {
@@ -527,6 +570,33 @@ mod tests {
             "{prompt}"
         );
         assert!(prompt.contains("From: a report from work “Comment colour”"));
+    }
+
+    #[test]
+    fn the_conversation_gets_every_spaces_additions_each_under_its_heading() {
+        let (_home, mut host, assistant, celadon) = assistant_with_space();
+        host.create_space("Sage", "", "Treat production as read-only.", None)
+            .unwrap();
+        let mut space = host.space(&celadon).unwrap().space;
+        space.additions = "Keep contrast at AA.".into();
+        host.update_space(space).unwrap();
+        let text = host.session_instructions(&assistant).unwrap();
+        let order = [
+            "# Wiffletree Assistant contract",
+            "# Assistant core",
+            "# Assisting",
+            "\n## Spaces\n",
+            "## Additions from the Celadon Space\nThe human's Celadon Space adds these for requests in it.",
+            "Keep contrast at AA.",
+            "## Additions from the Sage Space\nThe human's Sage Space adds these for requests in it.",
+            "Treat production as read-only.",
+        ];
+        let at: Vec<usize> = (order.iter())
+            .map(|part| text.find(part).unwrap_or_else(|| panic!("{part}: {text}")))
+            .collect();
+        assert!(at.is_sorted(), "{at:?}");
+        // Personal has none, so it has no heading.
+        assert!(!text.contains("## Additions from the Personal Space"));
     }
 
     #[test]

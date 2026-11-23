@@ -1,19 +1,16 @@
-//! The assistant's threads: sessions of role `Assistant` owned by a Space, with no project,
-//! parent or ticket, each in its own scratch folder, kept only on this Mac.
+//! The assistant's threads: sessions owned by a Space, with no project, parent or ticket, each
+//! in its own scratch folder, kept only on this Mac. Issue threads and job runs still run; every
+//! other thread an earlier release started is read-only history, never resumed.
 use crate::*;
 use workspace_core::assistant::proposal::Attached;
 use workspace_core::assistant::{
     CardKind, JobRunOf, Thread, ThreadCard, ThreadHit, ThreadTab, title_from_message,
     validate_title,
 };
-use workspace_core::job::{OutputKind, Recipe, RecipePreview, Sharing, job_id};
+use workspace_core::job::{OutputKind, Recipe, Sharing, job_id};
 
-/// The message a thread is sent when the human asks for Make this a project's brief.
-pub(crate) const BRIEF_REQUEST: &str = "Make this a project: write a project brief from our conversation, with a short project name, and show it to me with project_brief.";
 /// The largest file `save_output` copies.
 const MAX_OUTPUT_BYTES: u64 = 20 * 1024 * 1024;
-/// At most this many scratch files are listed for Make this a project.
-const MAX_SCRATCH_FILES: usize = 200;
 const MAX_CARD_TEXT: usize = 16 * 1024;
 
 /// Threads and their scratch folders sit under `assistant/` in the data folder.
@@ -50,7 +47,8 @@ const PROJECT_OPTIONAL: [&str; 5] = [
 ];
 
 /// The thread table, and sessions, messages, activity, usage and log entries that need no
-/// project, so that a thread's session holds no project record.
+/// project, so that a thread's session holds no project record. A message an earlier release
+/// left waiting for a thread that is now history is cancelled, so that thread never runs again.
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY REFERENCES sessions(id), space_id TEXT NOT NULL, data TEXT NOT NULL);",
@@ -60,6 +58,10 @@ pub(crate) fn migrate(db: &Connection) -> Result<()> {
             allow_no_project(db, table)?;
         }
     }
+    db.execute(
+        "UPDATE messages SET receipt='cancelled' WHERE receipt IN ('queued','delivered','held') AND recipient IN (SELECT id FROM threads WHERE json_extract(data,'$.job') IS NULL AND json_extract(data,'$.attached') IS NULL)",
+        [],
+    )?;
     Ok(())
 }
 fn project_required(db: &Connection, table: &str) -> Result<bool> {
@@ -215,61 +217,29 @@ impl Host {
             })
             .collect()
     }
-    /// Starts a thread in `space` and sends it its first message, which titles it. Starting the
-    /// same id again returns the thread it started.
-    pub fn start_thread(
-        &mut self,
-        id: &str,
-        space: &SpaceId,
-        body: &str,
-        files: &[PathBuf],
-        chosen: Option<ModelProfile>,
-    ) -> Result<Thread> {
-        let first = FirstMessage {
-            id: &new_id(),
-            body,
-            files,
-        };
-        self.begin_thread(id, space, &title_from_message(body), first, chosen)
+    /// A thread as an earlier release started it in `space` on the human's first message, which
+    /// is now read-only history: the store an upgrade finds.
+    #[cfg(test)]
+    pub(crate) fn history_thread(&mut self, id: &str, space: &SpaceId, body: &str) -> Thread {
+        let record = self.space(space).unwrap();
+        let model = self.thread_model(&record).unwrap();
+        let title = title_from_message(body);
+        let thread = (self.create_thread(id, space, &title, (None, None), model, None)).unwrap();
+        let session = self.session(id).unwrap();
+        (self.insert_message(&new_id(), &session, None, body, &[], &[], false)).unwrap();
+        thread
     }
-    /// Starts a thread titled `title` in `space` with its `first` message.
-    pub(crate) fn begin_thread(
-        &mut self,
-        id: &str,
-        space: &SpaceId,
-        title: &str,
-        first: FirstMessage,
-        chosen: Option<ModelProfile>,
-    ) -> Result<Thread> {
-        ensure!(
-            Path::new(id).file_name() == Some(id.as_ref())
-                && !id.starts_with('.')
-                && id.len() <= 64,
-            "A thread id is a plain name"
-        );
-        if let Ok(thread) = self.thread(id) {
-            ensure!(
-                &thread.space_id == space,
-                "Thread ID reused in another Space"
-            );
-            return Ok(thread);
-        }
-        let record = self.space(space)?;
-        let model = self.thread_model(&record, chosen)?;
-        self.open_thread(id, space, title, None, model, first)
-    }
-    /// Starts a thread, or with `job` a job's run, on `model` and sends it its `first`
-    /// message.
+    /// Starts a job's run on `model` and sends it its `first` message, the recipe's prompt.
     pub(crate) fn open_thread(
         &mut self,
         id: &str,
         space: &SpaceId,
         title: &str,
-        job: Option<JobRunOf>,
+        job: JobRunOf,
         model: (ModelProfile, Chooser, String, bool),
         first: FirstMessage,
     ) -> Result<Thread> {
-        let kind = (job, None);
+        let kind = (Some(job), None);
         self.create_thread(id, space, title, kind, model, Some(first))
     }
     /// Creates a thread, a job's run with `job` or an issue thread with `attached`, on its
@@ -322,8 +292,6 @@ impl Host {
             position,
             project_id: None,
             cards: vec![],
-            routed: vec![],
-            moved: vec![],
             job,
             attached,
             proposals: vec![],
@@ -385,7 +353,7 @@ impl Host {
             return self.set_thread_open(&thread.id, true);
         }
         let record = self.space(&space.id)?;
-        let model = self.thread_model(&record, None)?;
+        let model = self.thread_model(&record)?;
         let kind = (None, Some(attached.clone()));
         self.create_thread(&new_id(), &space.id, &title, kind, model, None)
     }
@@ -396,16 +364,9 @@ impl Host {
         )?;
         Self::event(&self.db, "", Some(&session.id), "thread_started", "")
     }
-    /// The model a new thread starts on: the one the user chose, else the Assistant row as its
-    /// Space resolves it, which says when the Space's row fell back to this Mac's.
-    fn thread_model(
-        &self,
-        record: &SpaceRecord,
-        chosen: Option<ModelProfile>,
-    ) -> Result<(ModelProfile, Chooser, String, bool)> {
-        if let Some(profile) = chosen {
-            return Ok((profile, Chooser::Human, "Chosen by you".into(), false));
-        }
+    /// The model a new thread starts on: the Assistant row as its Space resolves it, which says
+    /// when the Space's row fell back to this Mac's.
+    fn thread_model(&self, record: &SpaceRecord) -> Result<(ModelProfile, Chooser, String, bool)> {
         let pick = self.resolve_job(Some(&record.space.id), &Job::Assistant, false, false)?;
         Ok((pick.profile, Chooser::Wiffletree, pick.reason, pick.waits))
     }
@@ -417,7 +378,7 @@ impl Host {
             .is_none_or(|signed_in| *signed_in)
     }
     /// Called as a message is queued for a thread's session: the human's message counts as its
-    /// latest, and a thread that became a project takes no more.
+    /// latest, and a history thread takes no more.
     pub(crate) fn thread_receives(
         &mut self,
         session: &Session,
@@ -425,8 +386,8 @@ impl Host {
     ) -> Result<()> {
         let mut thread = self.thread(&session.id)?;
         ensure!(
-            thread.project_id.is_none(),
-            "This thread became a project and is read-only"
+            !thread.is_history(),
+            "This thread is read-only history: write to the Assistant's conversation instead"
         );
         if thread.job.is_some() {
             let sent: i64 = self.db.query_row(
@@ -541,73 +502,6 @@ impl Host {
                 Ok(ThreadHit { thread, excerpt })
             })
             .collect()
-    }
-    /// Asks a thread for Make this a project's brief, which it shows with `project_brief`.
-    pub fn draft_project_brief(&mut self, id: &str) -> Result<Message> {
-        self.thread(id)?;
-        self.send(&new_id(), None, id, BRIEF_REQUEST)
-    }
-    /// Make this a project: a project in the thread's Space with that Space's repositories on
-    /// this Mac, started on `brief` with a link back to the thread and copies of the scratch
-    /// `files`. The thread stays, read-only, and links to the project.
-    pub fn make_project(
-        &mut self,
-        id: &str,
-        name: &str,
-        brief: &str,
-        files: &[String],
-    ) -> Result<Project> {
-        let mut thread = self.thread(id)?;
-        ensure!(
-            thread.project_id.is_none(),
-            "This thread is already a project"
-        );
-        ensure!(!brief.trim().is_empty(), "The brief must not be empty");
-        let scratch = fs::canonicalize(scratch_folder(&self.home, id))?;
-        let files = files
-            .iter()
-            .map(|file| inside_scratch(&scratch, file))
-            .collect::<Result<Vec<_>>>()?;
-        let body = format!(
-            "{}\n\nFrom the assistant thread “{}” (wiffletree://thread/{id}).",
-            brief.trim(),
-            thread.title
-        );
-        let project = self.atomically(|host| {
-            let (project, coordinator) = host.insert_project(name, &thread.space_id, None)?;
-            host.send_with_files(&new_id(), None, &coordinator.id, &body, &files)?;
-            host.set_live(&project.id, true)?;
-            thread.project_id = Some(project.id.clone());
-            host.save_thread(&thread)?;
-            Ok(project)
-        })?;
-        Ok(project)
-    }
-    /// The regular files in a thread's scratch folder, relative to it, hidden ones left out.
-    pub fn scratch_files(&self, id: &str) -> Result<Vec<String>> {
-        self.thread(id)?;
-        let root = scratch_folder(&self.home, id);
-        let mut files = vec![];
-        let mut folders = vec![root.clone()];
-        while let Some(folder) = folders.pop() {
-            let Ok(entries) = fs::read_dir(&folder) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                if entry.file_name().to_string_lossy().starts_with('.') {
-                    continue;
-                }
-                let kind = entry.file_type()?;
-                if kind.is_dir() {
-                    folders.push(entry.path());
-                } else if kind.is_file() && files.len() < MAX_SCRATCH_FILES {
-                    let relative = entry.path().strip_prefix(&root)?.to_owned();
-                    files.push(relative.to_string_lossy().into_owned());
-                }
-            }
-        }
-        files.sort();
-        Ok(files)
     }
     pub fn dismiss_thread_card(&mut self, id: &str, card: &str) -> Result<Thread> {
         let mut thread = self.thread(id)?;
@@ -732,49 +626,15 @@ impl Host {
                 let description = card_text(args, "description", MAX_CARD_TEXT)?.into();
                 self.add_card(&mut thread, CardKind::SuggestSpace { name, description })
             }
-            "project_brief" => {
-                let name = card_text(args, "name", 128)?.into();
-                let brief = card_text(args, "brief", MAX_CARD_TEXT)?.into();
-                self.add_card(&mut thread, CardKind::ProjectBrief { name, brief })
-            }
             "propose_issue" | "propose_edit" | "propose_comment" | "propose_split"
             | "propose_duplicate" => self.propose_change(&mut thread, name, args),
             "list_issues" | "read_issue" => self.issue_tool(session, name, args),
-            "log_work" if thread.attached.is_some() => {
+            "log_work" => {
                 bail!("An issue thread writes to no repository, so it has no log_work")
             }
-            "log_work" => self.log_work(session, args),
             "query_brain" => self.query_brain(session, args),
             other => bail!("{other} is not one of a thread's tools"),
         }
-    }
-    /// The recipe a thread's `propose_job` describes, with its card's preview waiting for its
-    /// sources' checks, which the service runs off the host thread.
-    pub(crate) fn propose_job(
-        &self,
-        session: &Session,
-        args: &Value,
-    ) -> Result<(Recipe, jobs::PendingPreview)> {
-        let thread = self.thread(&session.id)?;
-        ensure!(
-            thread.job.is_none(),
-            "propose_job is not one of a job run's tools"
-        );
-        let recipe = proposed_recipe(&thread.space_id, args)?;
-        self.refuse_taken_job(&recipe)?;
-        let preview = self.preview_job(&recipe)?;
-        Ok((recipe, preview))
-    }
-    /// Shows a proposed recipe's card, its sources checked, in the thread.
-    pub(crate) fn add_recipe_card(
-        &self,
-        thread: &str,
-        recipe: Recipe,
-        preview: RecipePreview,
-    ) -> Result<Value> {
-        let mut thread = self.thread(thread)?;
-        let recipe = Box::new(recipe);
-        self.add_card(&mut thread, CardKind::Recipe { recipe, preview })
     }
     /// Copies a scratch file into the board store under the thread's Space and commits it; a
     /// title saved before gets a new version. Each output is a folder holding only its file,
@@ -1005,7 +865,73 @@ mod tests {
         (home, host, sage)
     }
     fn start(host: &mut Host, id: &str, space: &SpaceId, body: &str) -> Thread {
-        host.start_thread(id, space, body, &[], None).unwrap()
+        host.history_thread(id, space, body)
+    }
+    /// A reply a thread wrote before it became history.
+    fn reply(host: &mut Host, thread: &str, body: &str) {
+        let session = host.session(thread).unwrap();
+        (host.insert_message(&new_id(), &session, Some(thread), body, &[], &[], false)).unwrap();
+    }
+
+    #[test]
+    fn an_upgrade_keeps_threads_as_history_and_a_held_message_as_a_draft() {
+        let (home, mut host, sage) = store();
+        start(&mut host, "dentist", &sage, "Book the dentist");
+        let model = host.thread_model(&host.space(&sage).unwrap()).unwrap();
+        let attached = (None, Some(Attached::Issues));
+        (host.create_thread("issues", &sage, "Issues · Sage", attached, model, None)).unwrap();
+        // As an earlier release left them: a message queued for each thread, and two messages
+        // its router held unsent.
+        for thread in ["dentist", "issues"] {
+            let session = host.session(thread).unwrap();
+            let id = format!("waiting-{thread}");
+            (host.insert_message(&id, &session, None, "Still there?", &[], &[], false)).unwrap();
+        }
+        host.db
+            .execute_batch(
+                r#"CREATE TABLE held_messages (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+                INSERT INTO held_messages VALUES ('h1','{"id":"h1","body":"Fix the footer","created_at":1,"question":{"why":"Not sure","choices":[]}}');
+                INSERT INTO held_messages VALUES ('h2','{"id":"h2","body":"and the header","created_at":2}');"#,
+            )
+            .unwrap();
+        drop(host);
+
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        assert_eq!(
+            host.conversation_draft().unwrap().as_deref(),
+            Some("Fix the footer\n\nand the header")
+        );
+        let held: bool = (host.db)
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='held_messages')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!held);
+        // The history thread is never resumed; the issue thread is unchanged.
+        let receipt = |host: &Host, id: &str| host.message(id).unwrap().receipt;
+        assert_eq!(receipt(&host, "waiting-dentist"), Receipt::Cancelled);
+        assert_eq!(receipt(&host, "waiting-issues"), Receipt::Queued);
+        let refused = host.send("late", None, "dentist", "One more").unwrap_err();
+        assert!(
+            format!("{refused}").contains("read-only history"),
+            "{refused}"
+        );
+        host.send("asked", None, "issues", "What's open?").unwrap();
+        // History is searchable and deletable.
+        let hits = host.search_threads("dentist", Some(&sage)).unwrap();
+        assert_eq!(hits[0].thread.id, "dentist");
+        host.delete_thread("dentist").unwrap();
+        assert!(host.thread("dentist").is_err());
+
+        // A second start changes nothing, and the human's next message replaces the draft.
+        drop(host);
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        assert!(host.conversation_draft().unwrap().is_some());
+        host.send_to_assistant("m1", "Fix the footer and the header", &[], None)
+            .unwrap();
+        assert_eq!(host.conversation_draft().unwrap(), None);
     }
 
     #[test]
@@ -1083,13 +1009,6 @@ mod tests {
             "Sage's Assistant row falls back to this Mac's: Codex is not signed in on this Mac. \
              First choice"
         );
-        let chosen = host
-            .start_thread("t3", &sage, "Hi", &[], Some(opus.clone()))
-            .unwrap();
-        assert_eq!(
-            host.session_runtime(&chosen.id).unwrap().profile,
-            Some(opus.clone())
-        );
         // As anywhere in the table, a provider not detected yet is not chosen.
         host.detected.remove(&Provider::Codex);
         start(&mut host, "t4", &sage, "Hi");
@@ -1152,7 +1071,7 @@ mod tests {
     #[test]
     fn a_space_cannot_gain_a_router_or_compiler_row_through_either_save() {
         let (_home, mut host, sage) = store();
-        for job in [Job::Router, Job::Compiler] {
+        for job in [Job::RetiredRouter, Job::Compiler] {
             let name = job.name();
             let row = space_row(job, false);
             let mut space = host.space(&sage).unwrap().space;
@@ -1193,21 +1112,15 @@ mod tests {
     }
 
     #[test]
-    fn an_old_compiler_row_changes_nothing_and_blocks_no_other_save() {
+    fn an_old_compiler_or_router_row_changes_nothing_and_blocks_no_other_save() {
         let (_home, mut host, sage) = store();
-        // It also breaks the table's rules, which must not count against it.
+        // The compiler row also breaks the table's rules, which must not count against it.
         let old = vec![
             space_row(Job::Compiler, true),
-            space_row(Job::Router, false),
+            space_row(Job::RetiredRouter, false),
         ];
         saved_by_an_older_host(&mut host, &sage, old.clone());
 
-        let this_mac = host.resolve_job(None, &Job::Router, false, false).unwrap();
-        let in_sage = host
-            .resolve_job(Some(&sage), &Job::Router, false, false)
-            .unwrap();
-        assert_ne!(old[1].main.first, this_mac.profile);
-        assert_eq!(in_sage.profile, this_mac.profile);
         let table = host.space_table(Some(&sage), &Default::default()).unwrap();
         assert!(
             table
@@ -1366,8 +1279,7 @@ mod tests {
         assert_eq!(found("DENTIST", None), ["dentist"]);
         assert!(found("dentist", Some(&sage)).is_empty());
         assert!(found("100%", None).is_empty());
-        host.send("reply", Some("dates"), "dates", "ISO 8601 in UTC")
-            .unwrap();
+        reply(&mut host, "dates", "ISO 8601 in UTC");
         let hits = host.search_threads("iso 8601", None).unwrap();
         assert_eq!(hits[0].excerpt.as_deref(), Some("ISO 8601 in UTC"));
         host.set_thread_open("dates", true).unwrap();
@@ -1381,7 +1293,7 @@ mod tests {
         start(&mut host, "t2", &sage, "Another");
         let scratch = scratch_folder(home.path(), "t1");
         fs::write(scratch.join("memo.md"), "draft").unwrap();
-        host.send("reply", Some("t1"), "t1", "Drafted").unwrap();
+        reply(&mut host, "t1", "Drafted");
         host.delete_thread("t1").unwrap();
         assert!(host.thread("t1").is_err() && host.session("t1").is_err());
         assert!(!scratch.exists());
@@ -1398,70 +1310,21 @@ mod tests {
     }
 
     #[test]
-    fn make_this_a_project_starts_one_in_the_threads_space_and_leaves_it_read_only() {
-        let (home, mut host, sage) = store();
-        start(&mut host, "t1", &sage, "The sign-in retry is broken");
-        fs::write(
-            scratch_folder(home.path(), "t1").join("findings.md"),
-            "notes",
-        )
-        .unwrap();
-        assert_eq!(host.scratch_files("t1").unwrap(), ["findings.md"]);
-        assert!(
-            host.make_project("t1", "Sign-in", "Fix it", &["../../x".into()])
-                .is_err()
-        );
-        let project = host
-            .make_project(
-                "t1",
-                "Sign-in retry",
-                "Fix the retry.",
-                &["findings.md".into()],
-            )
-            .unwrap();
-        assert_eq!(project.space, sage);
-        assert!(
-            project.added_repositories.is_empty(),
-            "it inherits its Space's"
-        );
-        assert!(host.live_projects().unwrap().contains(&project.id));
-        let coordinator = (host.sessions().unwrap().into_iter())
-            .find(|s| s.project_id == project.id)
-            .unwrap();
-        let brief = host.messages(&coordinator.id, None, 10).unwrap().remove(0);
-        assert!(brief.sender.is_none());
-        assert!(brief.body.starts_with("Fix the retry."));
-        assert!(brief.body.contains("wiffletree://thread/t1"));
-        assert_eq!(brief.attachments[0].name(), "findings.md");
-        assert_eq!(host.thread("t1").unwrap().project_id, Some(project.id));
-        let refused = host.send("late", None, "t1", "One more thing").unwrap_err();
-        assert!(format!("{refused}").contains("read-only"));
-    }
-
-    #[test]
     fn a_threads_tools_show_cards_and_nothing_else_is_offered() {
         let (_home, mut host, sage) = store();
         start(&mut host, "t1", &sage, "Woodworking plans");
         let session = host.session("t1").unwrap();
         let args = json!({"name":"Woodworking","description":"Shop projects"});
         host.thread_tool(&session, "suggest_space", &args).unwrap();
-        let args = json!({"name":"Sign-in","brief":"Fix it"});
-        host.thread_tool(&session, "project_brief", &args).unwrap();
         let kinds: Vec<CardKind> = (host.thread("t1").unwrap().cards.into_iter())
             .map(|card| card.kind)
             .collect();
         assert_eq!(
             kinds,
-            [
-                CardKind::SuggestSpace {
-                    name: "Woodworking".into(),
-                    description: "Shop projects".into()
-                },
-                CardKind::ProjectBrief {
-                    name: "Sign-in".into(),
-                    brief: "Fix it".into()
-                }
-            ]
+            [CardKind::SuggestSpace {
+                name: "Woodworking".into(),
+                description: "Shop projects".into()
+            }]
         );
         assert_eq!(
             host.spaces().unwrap().len(),
@@ -1473,6 +1336,9 @@ mod tests {
             "report",
             "send_message",
             "workspace_context",
+            "project_brief",
+            "propose_job",
+            "log_work",
         ] {
             assert!(
                 host.thread_tool(&session, tool, &json!({})).is_err(),

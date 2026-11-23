@@ -75,8 +75,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::SearchThreads { .. }
         | Command::ConversationCards
         | Command::Proposals { .. }
-        | Command::Evaluations { .. }
-        | Command::ScratchFiles { .. } => Row::Read,
+        | Command::Evaluations { .. } => Row::Read,
         Command::ResolvePaths { .. } | Command::ReadFile { .. } | Command::ListFolder { .. } => {
             Row::HostPath
         }
@@ -109,13 +108,10 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::ResolveAttention { .. }
         | Command::DismissAttention { .. }
         | Command::AppendLog { .. }
-        | Command::StartThread { .. }
         | Command::RenameThread { .. }
         | Command::SetThreadOpen { .. }
         | Command::OrderThreads { .. }
         | Command::DeleteThread { .. }
-        | Command::DraftProjectBrief { .. }
-        | Command::MakeProject { .. }
         | Command::DismissThreadCard { .. }
         | Command::OpenIssueThread { .. }
         | Command::ApplyProposal { .. }
@@ -130,10 +126,6 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::DeclineAction { .. }
         | Command::StopWork { .. }
         | Command::MoveRoutedMessage { .. }
-        | Command::RouteMessage { .. }
-        | Command::AnswerHeld { .. }
-        | Command::ChangeRoute { .. }
-        | Command::SetRouterThreshold { .. }
         | Command::SaveJob { .. }
         | Command::PreviewJob { .. }
         | Command::SetJobEnabled { .. }
@@ -237,9 +229,7 @@ pub(crate) fn check(command: &Command, level: AccessLevel, host: &str) -> Result
         (Row::Read | Row::HostPath, _) => Ok(()),
         (Row::Scan | Row::Change, AccessLevel::ViewOnly) => Err(view_only()),
         (Row::Change, AccessLevel::Control) => match command {
-            Command::Send { attachments, .. }
-            | Command::StartThread { attachments, .. }
-            | Command::SendToAssistant { attachments, .. }
+            Command::Send { attachments, .. } | Command::SendToAssistant { attachments, .. }
                 if !attachments.is_empty() =>
             {
                 Err("Remote devices attach files by uploading them".into())

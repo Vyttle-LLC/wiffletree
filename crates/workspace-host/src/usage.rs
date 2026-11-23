@@ -864,7 +864,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut host = Host::open_set_up(directory.path()).unwrap();
         let space = host.create_space("Sage", "", "", None).unwrap().space.id;
-        let thread = host.start_thread("t1", &space, "Hi", &[], None).unwrap();
+        let thread = host.history_thread("t1", &space, "Hi");
         spend(&host, &host.session(&thread.id).unwrap());
         let report = host
             .usage_report(7, None, None, "America/New_York")

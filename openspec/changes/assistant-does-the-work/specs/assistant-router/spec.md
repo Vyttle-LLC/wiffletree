@@ -18,7 +18,7 @@
 
 ### Requirement: Changing a routed message
 **Reason**: Replaced by Change on a message's work tag (see assistant, "Follow-ups go to the work they are about").
-**Migration**: Moved-message lines in earlier threads stay in their history.
+**Migration**: The messages of earlier threads stay in their history; the lines Change and the router left in them are no longer shown, and their records stay in the store, unread.
 
 ### Requirement: The router never writes
 **Reason**: No router runs.

@@ -814,13 +814,12 @@ fn core_tab(part: &CoreInstructions) -> String {
         "implementers" => "Implementer",
         "testers and reviewers" => "Verifier",
         "the PR keeper" => "PR keeper",
-        // Threads get a contract of their own and the Assistant core.
-        "assistant threads" if part.name.contains("contract") => "Thread contract",
-        "assistant threads" => "Assistant",
+        // Issue threads and job runs get a contract of their own, and the Assistant's one
+        // conversation another; the conversation and issue threads share the Assistant core.
+        "assistant threads" => "Thread contract",
+        "the Assistant" => "Assistant contract",
+        "the Assistant and issue threads" => "Assistant",
         "job runs" => "Job run",
-        // The Assistant's one conversation has its own contract and core.
-        "the Assistant" if part.name.contains("contract") => "Assistant contract",
-        "the Assistant" => "Assistant conversation",
         _ => &part.name,
     };
     format!("{label} {}", part.version)
@@ -2488,15 +2487,14 @@ mod tests {
             tabs,
             [
                 "Contract v13",
-                "Coordinator v16",
+                "Coordinator v17",
                 "Implementer v5",
                 "Verifier v2",
                 "PR keeper v1",
                 "Thread contract v3",
-                "Assistant v4",
-                "Job run v3",
-                "Assistant contract v1",
-                "Assistant conversation v1"
+                "Assistant contract v2",
+                "Assistant v5",
+                "Job run v3"
             ]
         );
     }

@@ -5,23 +5,12 @@ use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 use workspace_core::Source;
 
-/// The thread tools, as MCP lists them.
-pub(crate) const THREAD_TOOLS: [&str; 7] = [
+/// An issue thread's tools, as MCP lists them: its outputs, cards and brain reads, its tracker's
+/// and repositories' reads, and its proposals. It has no `log_work`, as it writes to no
+/// repository. Issue threads are the only threads besides job runs that still run.
+pub(crate) const ISSUE_THREAD_TOOLS: [&str; 12] = [
     "save_output",
     "suggest_space",
-    "project_brief",
-    "propose_job",
-    "propose_issue",
-    "log_work",
-    "query_brain",
-];
-/// An issue thread's tools: a thread's but `log_work`, as it has no tool that writes to a
-/// repository, then its tracker's and repositories' reads and its proposals.
-pub(crate) const ISSUE_THREAD_TOOLS: [&str; 14] = [
-    "save_output",
-    "suggest_space",
-    "project_brief",
-    "propose_job",
     "propose_issue",
     "query_brain",
     "list_issues",
@@ -124,8 +113,7 @@ impl ThreadLaunch {
         match (self.compile.is_some(), self.job_run, self.issue_thread) {
             (true, _, _) => &COMPILE_TOOLS,
             (false, true, _) => &JOB_RUN_TOOLS,
-            (false, false, true) => &ISSUE_THREAD_TOOLS,
-            (false, false, false) => &THREAD_TOOLS,
+            (false, false, _) => &ISSUE_THREAD_TOOLS,
         }
     }
     /// The helper's argument that serves those tools.
@@ -133,8 +121,7 @@ impl ThreadLaunch {
         match (self.compile.is_some(), self.job_run, self.issue_thread) {
             (true, _, _) => "compile-mcp",
             (false, true, _) => "job-mcp",
-            (false, false, true) => "issue-thread-mcp",
-            (false, false, false) => "thread-mcp",
+            (false, false, _) => "issue-thread-mcp",
         }
     }
     /// Whether the run may search and fetch the web.
@@ -645,10 +632,6 @@ mod tests {
 
     #[test]
     fn the_rules_allow_exactly_the_tools_a_thread_is_offered() {
-        let offered: Vec<String> = (crate::mcp::thread_tools().as_array().unwrap().iter())
-            .map(|tool| tool["name"].as_str().unwrap().to_owned())
-            .collect();
-        assert_eq!(offered, THREAD_TOOLS);
         let offered: Vec<String> = (crate::mcp::issue_thread_tools().as_array().unwrap().iter())
             .map(|tool| tool["name"].as_str().unwrap().to_owned())
             .collect();
@@ -706,7 +689,7 @@ mod tests {
         run.job_run = true;
         let allowed = run.claude_allowed();
         assert!(allowed.contains(&"mcp__agent_workspace__save_output".into()));
-        for tool in ["propose_job", "suggest_space", "project_brief"] {
+        for tool in ["propose_issue", "suggest_space", "read_issue"] {
             assert!(
                 !allowed.contains(&format!("mcp__agent_workspace__{tool}")),
                 "{tool}"
@@ -718,7 +701,8 @@ mod tests {
                 .iter()
                 .any(|rule| rule == "Bash" || rule == "Bash(gh:*)")
         );
-        let call = json!({"type":"mcp_tool_call","server":"agent_workspace","tool":"propose_job"});
+        let call =
+            json!({"type":"mcp_tool_call","server":"agent_workspace","tool":"propose_issue"});
         assert!(run.check_codex_item(&call).is_err());
         // Codex cannot hold gh to its commands, so a run with a CLI source never starts on it.
         assert!(!run.codex_may_run());

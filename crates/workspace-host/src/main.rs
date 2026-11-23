@@ -23,9 +23,6 @@ fn main() -> Result<()> {
     if args.first().map(String::as_str) == Some("assistant-mcp") {
         return workspace_host::mcp::serve_stdio(workspace_host::mcp::assistant_tools());
     }
-    if args.first().map(String::as_str) == Some("thread-mcp") {
-        return workspace_host::mcp::serve_stdio(workspace_host::mcp::thread_tools());
-    }
     if args.first().map(String::as_str) == Some("issue-thread-mcp") {
         return workspace_host::mcp::serve_stdio(workspace_host::mcp::issue_thread_tools());
     }

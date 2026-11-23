@@ -1064,9 +1064,6 @@ pub struct Snapshot {
     /// `sessions`: no project, panel or tree lists them.
     #[serde(default)]
     pub threads: Vec<assistant::ThreadTab>,
-    /// The messages the router holds unsent, oldest first.
-    #[serde(default)]
-    pub held: Vec<assistant::HeldMessage>,
     /// The jobs saved in the Spaces on this Mac, by Space and name. Built-in host jobs are in
     /// no Space and not listed.
     #[serde(default)]
@@ -1324,12 +1321,6 @@ pub struct HostSettings {
     /// The assistant's name. Shared: read from `settings/assistant.json`.
     #[serde(default = "assistant_name")]
     pub assistant_name: String,
-    /// The confidence below which the router asks. Shared: read from `settings/assistant.json`.
-    #[serde(default = "router_threshold")]
-    pub router_threshold: f64,
-}
-fn router_threshold() -> f64 {
-    assistant::router::DEFAULT_THRESHOLD
 }
 /// A private GitHub repository the shared folder syncs with, as this machine recorded it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1553,7 +1544,6 @@ impl HostSettings {
             remote_access: false,
             builds_at_once: DEFAULT_BUILDS_AT_ONCE,
             assistant_name: assistant_name(),
-            router_threshold: router_threshold(),
         }
     }
     pub fn validate_check_ins(child_turns: u32, human_turns: u32) -> Result<()> {
@@ -3513,18 +3503,6 @@ pub enum Command {
         before: Option<i64>,
         limit: usize,
     },
-    /// Starts an assistant thread in `space_id` with its first message, `body`, and titles it
-    /// from that message; `profile` is the model the user chose in the composer, if any.
-    /// Answered with the `Thread`. Later messages go to it with `Send`, its id the recipient.
-    StartThread {
-        id: String,
-        space_id: SpaceId,
-        body: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        attachments: Vec<PathBuf>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        profile: Option<ModelProfile>,
-    },
     RenameThread {
         thread_id: String,
         title: String,
@@ -3548,25 +3526,6 @@ pub enum Command {
         query: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         space_id: Option<SpaceId>,
-    },
-    /// Asks the thread to write a project brief from its conversation with `project_brief`.
-    DraftProjectBrief {
-        thread_id: String,
-    },
-    /// Make this a project: creates a project in the thread's Space with that Space's
-    /// repositories, whose first human message is `brief` with a link back to the thread and
-    /// copies of the scratch files named in `files`. The thread becomes read-only. Answered
-    /// with the `Project`.
-    MakeProject {
-        thread_id: String,
-        name: String,
-        brief: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        files: Vec<String>,
-    },
-    /// The files in a thread's scratch folder, by path relative to it.
-    ScratchFiles {
-        thread_id: String,
     },
     DismissThreadCard {
         thread_id: String,
@@ -3658,30 +3617,6 @@ pub enum Command {
         message_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project_id: Option<String>,
-    },
-    /// Sends `body` where the router decides, from the thread open in the assistant, if any.
-    /// Unsure, the message is held unsent and the user asked. Answered with `null`.
-    RouteMessage {
-        id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        thread_id: Option<String>,
-        body: String,
-    },
-    /// Sends a held message where the user chose.
-    AnswerHeld {
-        id: String,
-        destination: assistant::router::Destination,
-    },
-    /// Change on a routed message: stops the turn it started if that still runs, marks it and
-    /// its reply as moved there, and sends it to `destination`.
-    ChangeRoute {
-        thread_id: String,
-        message_id: String,
-        destination: assistant::router::Destination,
-    },
-    /// Sets the router's confidence threshold, a shared setting; answers with `HostSettings`.
-    SetRouterThreshold {
-        threshold: f64,
     },
     /// Saves a job, new or changed, as the user confirmed it on its recipe card or its page:
     /// the only way a job is created or changed. With `new`, from a card, it is refused when a
@@ -4510,7 +4445,6 @@ impl Command {
             | Self::IssuePeople { .. }
             | Self::SearchThreads { .. }
             | Self::ConversationCards
-            | Self::ScratchFiles { .. }
             | Self::Proposals { .. }
             | Self::Evaluations { .. }
             | Self::PreviewJob { .. }
@@ -4546,13 +4480,10 @@ impl Command {
             | Self::ResolveAttention { .. }
             | Self::DismissAttention { .. }
             | Self::AppendLog { .. }
-            | Self::StartThread { .. }
             | Self::RenameThread { .. }
             | Self::SetThreadOpen { .. }
             | Self::OrderThreads { .. }
             | Self::DeleteThread { .. }
-            | Self::DraftProjectBrief { .. }
-            | Self::MakeProject { .. }
             | Self::DismissThreadCard { .. }
             | Self::OpenIssueThread { .. }
             | Self::ApplyProposal { .. }
@@ -4567,10 +4498,6 @@ impl Command {
             | Self::DeclineAction { .. }
             | Self::StopWork { .. }
             | Self::MoveRoutedMessage { .. }
-            | Self::RouteMessage { .. }
-            | Self::AnswerHeld { .. }
-            | Self::ChangeRoute { .. }
-            | Self::SetRouterThreshold { .. }
             | Self::SaveJob { .. }
             | Self::SetJobEnabled { .. }
             | Self::RunJobNow { .. }
@@ -4682,15 +4609,11 @@ impl Command {
         matches!(
             self,
             Self::Send { sender: None, .. }
-                | Self::StartThread { .. }
                 | Self::RenameThread { .. }
                 | Self::SetThreadOpen { .. }
                 | Self::OrderThreads { .. }
                 | Self::DeleteThread { .. }
                 | Self::SearchThreads { .. }
-                | Self::DraftProjectBrief { .. }
-                | Self::MakeProject { .. }
-                | Self::ScratchFiles { .. }
                 | Self::DismissThreadCard { .. }
                 | Self::OpenIssueThread { .. }
                 | Self::Proposals { .. }
@@ -4707,10 +4630,6 @@ impl Command {
                 | Self::DeclineAction { .. }
                 | Self::StopWork { .. }
                 | Self::MoveRoutedMessage { .. }
-                | Self::RouteMessage { .. }
-                | Self::AnswerHeld { .. }
-                | Self::ChangeRoute { .. }
-                | Self::SetRouterThreshold { .. }
                 | Self::SaveJob { .. }
                 | Self::PreviewJob { .. }
                 | Self::SetJobEnabled { .. }

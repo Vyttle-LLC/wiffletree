@@ -1205,14 +1205,7 @@ impl Host {
         self.atomically(|host| {
             host.save_run(run)?;
             let model = (profile, Chooser::Wiffletree, reason, waits);
-            host.open_thread(
-                &thread_id,
-                &recipe.space_id,
-                &title,
-                Some(job),
-                model,
-                first,
-            )?;
+            host.open_thread(&thread_id, &recipe.space_id, &title, job, model, first)?;
             Ok(())
         })
     }
@@ -1616,9 +1609,14 @@ impl Host {
             }
         }
     }
-    pub(crate) fn propose(&mut self, session: &Session, args: &Value) -> Result<Value> {
-        let (recipe, pending) = self.propose_job(session, args)?;
-        self.add_recipe_card(&session.id, recipe, pending.check())
+    /// The recipe the Assistant's `create_loop` describes with `args` in `space`, with its
+    /// preview, or why it is refused there, as the loop tool checks it before any change.
+    pub(crate) fn propose(&self, space: &Space, args: &Value) -> Result<(Recipe, RecipePreview)> {
+        let recipe = assistant::proposed_recipe(&space.id, args)?;
+        self.refuse_taken_job(&recipe)?;
+        refuse_acts_as_reads(space, &recipe)?;
+        let preview = self.preview_job(&recipe)?.check();
+        Ok((recipe, preview))
     }
 }
 
@@ -1626,7 +1624,6 @@ impl Host {
 mod tests {
     use super::*;
     use chrono::NaiveDateTime;
-    use workspace_core::assistant::CardKind;
 
     fn at(zone: Tz, text: &str) -> i64 {
         let local = NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap();
@@ -1820,27 +1817,12 @@ mod tests {
     #[test]
     fn only_the_users_save_makes_a_job_and_it_is_a_commit_in_the_spaces_storage() {
         let mut s = jobs();
-        let thread = (s.host)
-            .start_thread("t1", &s.personal.id, "Brief me each weekday", &[], None)
-            .unwrap();
-        let session = s.host.session(&thread.id).unwrap();
         let args = json!({"name":"Morning brief","prompt":"Brief me.","cron":"0 7 * * 1-5","timezone":"America/New_York","sources":[]});
-        s.host.propose(&session, &args).unwrap();
-        let card = s.host.thread("t1").unwrap().cards.remove(0);
-        let CardKind::Recipe { recipe, preview } = card.kind else {
-            panic!("a recipe card");
-        };
+        let (recipe, preview) = s.host.propose(&s.personal, &args).unwrap();
         assert_eq!(preview.schedule, "Weekdays at 07:00 (America/New_York)");
         assert_eq!(preview.next_runs.len(), 3);
-        assert!(s.host.recipes().unwrap().is_empty(), "a card saves nothing");
-        // No thread tool saves, enables, runs or removes a job.
-        for tool in ["save_job", "set_job_enabled", "run_job_now", "delete_job"] {
-            assert!(
-                s.host.thread_tool(&session, tool, &json!({})).is_err(),
-                "{tool}"
-            );
-        }
-        let saved = s.host.save_job(*recipe).unwrap();
+        assert!(s.host.recipes().unwrap().is_empty());
+        let saved = s.host.save_job(recipe).unwrap();
         let file = s
             .storage()
             .join(recipe_file(&s.personal.storage.folder, "morning-brief"));
@@ -2007,10 +1989,6 @@ mod tests {
         // A stand-in gh that records each command it is given.
         let calls = s.home.path().join("calls.log");
         s.script("gh", &format!("echo \"$*\" >> '{}'", calls.display()));
-        let thread = (s.host)
-            .start_thread("t1", &s.personal.id, "Brief me", &[], None)
-            .unwrap();
-        let session = s.host.session(&thread.id).unwrap();
         let propose = |prefix: &str, check: Option<&str>| {
             let command = prefix.split(' ').next().unwrap();
             json!({"name":"Brief","prompt":"Brief me.","cron":"0 7 * * *","timezone":"America/New_York",
@@ -2025,7 +2003,7 @@ mod tests {
             ("aws --profile readonly ec2 describe-instances", None),
         ] {
             let args = propose(prefix, check);
-            assert!(s.host.propose(&session, &args).is_err(), "{prefix}");
+            assert!(s.host.propose(&s.personal, &args).is_err(), "{prefix}");
             let mut write = recipe(&s.personal, "Brief", "0 7 * * *");
             write.sources = vec![Source::Cli {
                 command: prefix.split(' ').next().unwrap().into(),
@@ -2045,7 +2023,7 @@ mod tests {
         assert!(s.host.recipes().unwrap().is_empty());
         // A read is proposed, saved and run, and the host runs only `gh auth status`.
         let args = propose("gh pr list", None);
-        s.host.propose(&session, &args).unwrap();
+        s.host.propose(&s.personal, &args).unwrap();
         let mut brief = recipe(&s.personal, "Brief", "0 7 * * *");
         brief.sources = vec![gh()];
         let key = s.host.save_job(brief).unwrap().recipe.key();
@@ -2121,7 +2099,7 @@ mod tests {
         let session = s.host.session(run.thread_id.as_ref().unwrap()).unwrap();
         let text = s.host.session_instructions(&session).unwrap();
         assert!(text.contains("# Job run core — v3"), "{text}");
-        assert!(!text.contains("# Assistant core") && !text.contains("`propose_job`"));
+        assert!(!text.contains("# Assistant core") && !text.contains("`start_work`"));
     }
 
     #[test]
@@ -2131,12 +2109,8 @@ mod tests {
             .host
             .save_job(recipe(&s.personal, "Morning brief", "0 7 * * *"));
         first.unwrap();
-        let thread = (s.host)
-            .start_thread("t1", &s.personal.id, "Another brief", &[], None)
-            .unwrap();
-        let session = s.host.session(&thread.id).unwrap();
         let args = json!({"name":"Morning brief","prompt":"Other.","cron":"0 8 * * *","timezone":"America/New_York","sources":[]});
-        let refused = s.host.propose(&session, &args).unwrap_err();
+        let refused = s.host.propose(&s.personal, &args).unwrap_err();
         assert!(
             refused
                 .to_string()
@@ -2339,7 +2313,7 @@ mod tests {
             let saved = s.host.thread_tool(&session, "save_output", &args).unwrap();
             assert_eq!(saved["version"], version);
             // A run has no other tool.
-            for tool in ["propose_job", "suggest_space", "project_brief"] {
+            for tool in ["propose_issue", "suggest_space", "log_work"] {
                 assert!(
                     s.host.thread_tool(&session, tool, &json!({})).is_err(),
                     "{tool}"

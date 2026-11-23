@@ -112,12 +112,14 @@ impl Host {
         check_keeper_needs(&settings.keeper, selection, &settings.verification)?;
         let row = self.saved_selection()?.unwrap_or_default();
         let model_changed = row.sorting_model() != selection.sorting_model();
-        let saved = ModelSelection {
+        let mut saved = ModelSelection {
             revision: row.revision + 1,
             notes: row.notes.clone(),
             copied: vec![],
             ..selection.clone()
         };
+        // A Router row an earlier release saved is dropped here as at load.
+        saved.jobs.retain(|row| row.job != Job::RetiredRouter);
         let unchanged_guide = ModelSelection {
             guide: row.guide,
             ..saved.clone()
