@@ -253,3 +253,126 @@ fn edited(before: &Recipe, args: &Value) -> Result<Recipe> {
         ..parsed
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::work::tests::{assistant_with_space, human_turn};
+
+    fn card_state(host: &Host, card: &Value) -> LoopCardState {
+        match host
+            .conversation_card(card["card"].as_str().unwrap())
+            .unwrap()
+            .kind
+        {
+            CardKind::Loop(change) => change.state,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn each_loop_change_applies_at_once_in_the_humans_turn_and_undo_restores_what_was_before() {
+        let (_home, mut host, _, celadon) = assistant_with_space();
+        let guard = human_turn(&mut host, "m1", "every friday tell me which PRs are open");
+        let key = JobKey::recipe(&celadon, "open-prs-sweep");
+        let created = host.loop_tool("create_loop", &json!({"space": celadon, "name": "Open PRs sweep", "prompt": "List open PRs", "cron": "0 16 * * 5", "timezone": "America/New_York", "sources": []}), &guard).unwrap();
+        assert_eq!(created["applied"], true);
+        let edited = host
+            .loop_tool(
+                "edit_loop",
+                &json!({"space": celadon, "job_id": "open-prs-sweep", "cron": "0 9 * * 1"}),
+                &guard,
+            )
+            .unwrap();
+        assert_eq!(host.recipe(&key).unwrap().schedule.cron, "0 9 * * 1");
+        assert_eq!(
+            host.recipe(&key).unwrap().prompt,
+            "List open PRs",
+            "the rest is kept"
+        );
+        // Undo is offered until the loop changes again.
+        assert!(
+            host.undo_loop_change(created["card"].as_str().unwrap())
+                .is_err()
+        );
+        host.undo_loop_change(edited["card"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(host.recipe(&key).unwrap().schedule.cron, "0 16 * * 5");
+        assert_eq!(card_state(&host, &edited), LoopCardState::Undone);
+        let paused = host
+            .loop_tool(
+                "pause_loop",
+                &json!({"space": celadon, "job_id": "open-prs-sweep"}),
+                &guard,
+            )
+            .unwrap();
+        assert!(!host.recipe(&key).unwrap().enabled);
+        host.undo_loop_change(paused["card"].as_str().unwrap())
+            .unwrap();
+        assert!(host.recipe(&key).unwrap().enabled);
+        let deleted = host
+            .loop_tool(
+                "delete_loop",
+                &json!({"space": celadon, "job_id": "open-prs-sweep"}),
+                &guard,
+            )
+            .unwrap();
+        assert!(host.recipe(&key).is_err());
+        host.undo_loop_change(deleted["card"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(host.recipe(&key).unwrap().name, "Open PRs sweep");
+    }
+
+    #[test]
+    fn a_loop_only_reads_and_a_held_turn_changes_nothing_until_apply() {
+        let (_home, mut host, _, celadon) = assistant_with_space();
+        let mut space = host.space(&celadon).unwrap().space;
+        space.sources = vec![serde_json::from_value(json!({"kind":"mcp","server":"gmail","tools":["search_threads"],"act":["send_message"]})).unwrap()];
+        host.update_space(space).unwrap();
+        let guard = human_turn(&mut host, "m1", "a loop please");
+        let recipe = |sources: Value| json!({"space": celadon, "name": "Mail digest", "prompt": "Summarise", "cron": "0 7 * * *", "timezone": "UTC", "sources": sources});
+        let sends = host.loop_tool(
+            "create_loop",
+            &recipe(json!([{"kind":"mcp","server":"gmail","tools":["send_message"]}])),
+            &guard,
+        );
+        assert!(sends.unwrap_err().to_string().contains("send_message"));
+        let acts = host.loop_tool("create_loop", &recipe(json!([{"kind":"mcp","server":"gmail","tools":["search_threads"],"act":["send_message"]}])), &guard);
+        assert!(acts.unwrap_err().to_string().contains("A loop only reads"));
+        let comments = host.loop_tool(
+            "create_loop",
+            &recipe(json!([{"kind":"cli","command":"gh","prefixes":["gh pr comment"]}])),
+            &guard,
+        );
+        assert!(comments.unwrap_err().to_string().contains("gh pr comment"));
+
+        let mut held = guard.clone();
+        held.note("Celadon's brain".into());
+        let card = host
+            .loop_tool(
+                "create_loop",
+                &recipe(json!([{"kind":"mcp","server":"gmail","tools":["search_threads"]}])),
+                &held,
+            )
+            .unwrap();
+        assert_eq!(card["applied"], false);
+        assert!(host.recipes().unwrap().is_empty());
+        host.apply_loop_card(card["card"].as_str().unwrap())
+            .unwrap();
+        let saved = host.recipes().unwrap().pop().unwrap();
+        assert_eq!(saved.sources[0].reads(), ["search_threads"]);
+        assert!(saved.sources[0].acts().is_empty());
+        let run = host
+            .loop_tool(
+                "run_loop",
+                &json!({"space": celadon, "job_id": saved.id}),
+                &held,
+            )
+            .unwrap();
+        assert_eq!(card_state(&host, &run), LoopCardState::Waiting);
+        host.decline_loop_card(run["card"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(card_state(&host, &run), LoopCardState::Declined);
+        assert!(host.job_runs(&saved.key(), 10).unwrap().is_empty());
+    }
+}

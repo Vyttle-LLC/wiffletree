@@ -530,6 +530,32 @@ mod tests {
     }
 
     #[test]
+    fn a_loop_run_is_never_given_a_sources_act_tools_or_commands() {
+        let acting = |source: Value| -> Source { serde_json::from_value(source).unwrap() };
+        let run = ThreadLaunch {
+            job_run: true,
+            ..launch(vec![
+                acting(
+                    json!({"kind":"mcp","server":"linear","tools":["list_issues"],"act":["create_issue"],"without_asking":["create_issue"]}),
+                ),
+                acting(
+                    json!({"kind":"cli","command":"gh","prefixes":["gh pr list"],"act":["gh pr comment"]}),
+                ),
+            ])
+        };
+        let allowed = run.claude_allowed();
+        assert!(allowed.contains(&"mcp__linear__list_issues".into()));
+        assert!(allowed.contains(&"Bash(gh pr list:*)".into()));
+        assert!(
+            !allowed
+                .iter()
+                .any(|rule| rule.contains("create_issue") || rule.contains("comment"))
+        );
+        let call = json!({"type":"mcp_tool_call","server":"linear","tool":"create_issue"});
+        assert!(run.check_codex_item(&call).is_err());
+    }
+
+    #[test]
     fn claude_may_never_write_its_own_folder_under_home() {
         let home = std::env::var("HOME").unwrap();
         assert_eq!(

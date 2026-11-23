@@ -3114,7 +3114,9 @@ impl Actor {
                             session_id,
                             retry: true,
                         } => Some(self.host.session(session_id)?.project_id)
-                            .filter(|project| !project.is_empty()),
+                            .filter(|project| !project.is_empty())
+                            // The Assistant's paused or stopped work stays held.
+                            .filter(|project| !self.host.work_held(project)),
                         Command::ResolveAttention { .. } => {
                             response["project_id"].as_str().map(str::to_owned)
                         }
@@ -8596,6 +8598,75 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
             second[1].body
         );
         assert!(!actor.active[&tester.id].cancel.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn the_assistants_work_checks_in_with_it_and_stopping_the_work_stops_its_turns() {
+        let (_home, mut host, assistant, celadon) = crate::work::tests::assistant_with_space();
+        let (work, coordinator) =
+            crate::work::tests::start(&mut host, &assistant, &celadon, "Comment colour");
+        let (mut actor, _, _) = idle_actor(host);
+        let started = now();
+        for id in [&coordinator.id, &assistant.id] {
+            let mut turn = active_turn(id, vec![]);
+            turn.token = id.clone();
+            actor.active.insert(id.clone(), turn);
+        }
+        actor.check_in_long_turns(started + 30 * 60_000);
+        let told = check_ins(&actor, &assistant);
+        assert_eq!(told.len(), 1, "the work's turn, not the Assistant's own");
+        assert!(
+            told[0]
+                .body
+                .contains(&format!("pause_work or stop_work with work_id {}", work.id)),
+            "{}",
+            told[0].body
+        );
+        assert!(actor.host.open_attention(&work.id).unwrap().is_empty());
+        assert!(
+            actor.host.snapshot().unwrap().attention.is_empty(),
+            "the Inbox gains nothing"
+        );
+
+        let stopped = call_tool(
+            &mut actor,
+            &assistant.id,
+            "stop_work",
+            json!({"work_id": work.id}),
+        );
+        assert_eq!(stopped.unwrap()["state"], "stopped");
+        assert!(actor.active[&coordinator.id].cancel.load(Ordering::Relaxed));
+        assert!(!actor.active[&assistant.id].cancel.load(Ordering::Relaxed));
+        assert!(!actor.host.live_projects().unwrap().contains(&work.id));
+        // A coordination tool is refused before it reaches the host.
+        let refused = call_tool(&mut actor, &assistant.id, "create_ticket", json!({}));
+        assert!(
+            refused
+                .unwrap_err()
+                .contains("not one of the Assistant's tools")
+        );
+    }
+
+    #[test]
+    fn an_email_the_provider_read_holds_the_rest_of_the_assistants_turn() {
+        let (_home, mut host, assistant, celadon) = crate::work::tests::assistant_with_space();
+        let guard = crate::work::tests::human_turn(&mut host, "m1", "summarise my inbox");
+        let (mut actor, _, _) = idle_actor(host);
+        let mut turn = active_turn("run", vec!["m1".into()]);
+        turn.token = assistant.id.clone();
+        turn.guard = Some(guard);
+        actor.active.insert(assistant.id.clone(), turn);
+        actor.handle(Event::Provider {
+            session: assistant.id.clone(),
+            run: "run".into(),
+            event: ProviderEvent::ReadOthers("gmail search_threads".into()),
+        });
+        let args = json!({"space": celadon, "name": "Invoice forward", "prompt": "Forward invoices", "cron": "0 8 * * *", "timezone": "UTC", "sources": []});
+        let made = call_tool(&mut actor, &assistant.id, "create_loop", args).unwrap();
+        assert_eq!(made["applied"], false);
+        let card = actor.host.conversation_cards().unwrap().pop().unwrap();
+        assert_eq!(card.read, ["gmail search_threads"]);
+        assert!(actor.host.recipes().unwrap().is_empty());
     }
 
     #[test]

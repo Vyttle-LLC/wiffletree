@@ -175,6 +175,13 @@ impl Host {
         })?;
         Ok(project)
     }
+    /// Whether `project` is the Assistant's work and paused or stopped, so its deliveries stay
+    /// held whoever speaks to it.
+    pub(crate) fn work_held(&self, project: &str) -> bool {
+        (self.project(project).ok())
+            .and_then(|project| project.assistant_work)
+            .is_some_and(|work| matches!(work.state, WorkState::Paused | WorkState::Stopped))
+    }
     /// The sessions of a work item whose running turns stop when it is paused or stopped.
     pub(crate) fn work_sessions(&self, project: &str) -> Result<Vec<String>> {
         Ok((self.sessions()?.into_iter())
@@ -422,4 +429,218 @@ impl Host {
 
 fn work_state(project: &Project) -> WorkState {
     (project.assistant_work.as_ref()).map_or(WorkState::Running, |work| work.state)
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    /// A set-up store with a Celadon Space and the Assistant's session.
+    pub(crate) fn assistant_with_space() -> (tempfile::TempDir, Host, Session, SpaceId) {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let celadon = (host.create_space("Celadon", "A colour theme", "", None))
+            .unwrap()
+            .space
+            .id;
+        let assistant = host.assistant().unwrap();
+        (home, host, assistant, celadon)
+    }
+    /// A turn the human's message `id` started, which they sent first.
+    pub(crate) fn human_turn(host: &mut Host, id: &str, body: &str) -> TurnGuard {
+        let message = host.send_to_assistant(id, body, &[], None).unwrap();
+        host.turn_guard(&[message]).unwrap()
+    }
+    /// Starts work titled `title` in `space` and returns its project and coordinator.
+    pub(crate) fn start(
+        host: &mut Host,
+        assistant: &Session,
+        space: &SpaceId,
+        title: &str,
+    ) -> (Project, Session) {
+        let args = json!({"space": space, "title": title, "brief": "Make it so"});
+        let started = host
+            .start_work(assistant, &args, &TurnGuard::default())
+            .unwrap();
+        let project = host.project(started["work_id"].as_str().unwrap()).unwrap();
+        let coordinator = host.work_coordinator(&project.id).unwrap();
+        (project, coordinator)
+    }
+    fn received(host: &Host, session: &str) -> Vec<Message> {
+        host.messages(session, None, 100).unwrap()
+    }
+
+    #[test]
+    fn a_follow_up_passed_to_work_is_tagged_and_change_moves_it() {
+        let (_home, mut host, assistant, celadon) = assistant_with_space();
+        let (colour, colour_coordinator) = start(&mut host, &assistant, &celadon, "Comment colour");
+        let (footer, footer_coordinator) = start(&mut host, &assistant, &celadon, "Docs footer");
+        let guard = human_turn(
+            &mut host,
+            "m1",
+            "make sure the Chrome tab text still reads OK",
+        );
+        let passed =
+            json!({"work_id": colour.id, "body": "The human asks: check the Chrome tab text."});
+        host.message_work(&assistant, &passed, &guard).unwrap();
+        let tagged = host.conversation_routes().unwrap();
+        assert_eq!(tagged[0].message_id, "m1");
+        assert_eq!(tagged[0].project_id.as_ref(), Some(&colour.id));
+        // A message the Assistant sends in a turn the human did not start tags nothing.
+        let quiet = TurnGuard::default();
+        host.message_work(&assistant, &passed, &quiet).unwrap();
+        assert_eq!(host.conversation_routes().unwrap().len(), 1);
+
+        host.move_routed_message("m1", Some(&footer.id)).unwrap();
+        let moved = received(&host, &footer_coordinator.id).pop().unwrap();
+        assert!(
+            moved.from_human(),
+            "the human's own message, moved by their Change"
+        );
+        assert_eq!(moved.body, "make sure the Chrome tab text still reads OK");
+        let told = received(&host, &colour_coordinator.id).pop().unwrap();
+        assert!(!told.from_human() && told.body.contains("it is not for you"));
+        let assistant_told = received(&host, &assistant.id).pop().unwrap();
+        assert!(assistant_told.body.contains("to work “Docs footer”"));
+        assert_eq!(
+            host.conversation_routes().unwrap()[0].project_id.as_ref(),
+            Some(&footer.id)
+        );
+        host.move_routed_message("m1", None).unwrap();
+        assert_eq!(host.conversation_routes().unwrap()[0].project_id, None);
+    }
+
+    #[test]
+    fn a_decision_only_the_human_makes_is_a_card_whose_answer_reaches_the_assistant_as_theirs() {
+        let (_home, mut host, assistant, celadon) = assistant_with_space();
+        let (work, _) = start(&mut host, &assistant, &celadon, "Comment colour");
+        let asked = json!({"question": "Which shade should comments use?", "recommendation": "Teal: it passes AA everywhere", "options": ["Teal", "Sage", "Show me both"], "work_id": work.id});
+        let card = host
+            .raise_decision(&assistant, &asked, &TurnGuard::default())
+            .unwrap();
+        let id = card["card"].as_str().unwrap();
+        assert!(host.conversation_card(id).unwrap().needs_human());
+        let listed = host.list_work(&assistant).unwrap();
+        assert_eq!(listed["work"][0]["open_decisions"], 1);
+
+        host.answer_decision(id, "Teal").unwrap();
+        assert!(!host.conversation_card(id).unwrap().needs_human());
+        let answer = received(&host, &assistant.id).pop().unwrap();
+        assert!(answer.from_human());
+        assert!(
+            answer
+                .body
+                .ends_with("Which shade should comments use?”: Teal")
+        );
+        assert!(host.answer_decision(id, "Sage").is_err(), "answered once");
+        // A decision about work that is not the Assistant's is refused.
+        let theirs = host.create_project("Mine").unwrap();
+        let elsewhere = json!({"question": "q", "recommendation": "r", "work_id": theirs.id});
+        assert!(
+            host.raise_decision(&assistant, &elsewhere, &TurnGuard::default())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn the_assistants_entries_go_to_the_brain_of_the_space_it_names_in_its_own_folder() {
+        let (_home, mut host, assistant, celadon) = assistant_with_space();
+        let personal = (host.spaces().unwrap().into_iter())
+            .find(|r| r.space.name == "Personal")
+            .unwrap()
+            .space
+            .id;
+        let entry = |space: &SpaceId| json!({"space": space, "type": "decision", "title": "Dentist on Tuesdays", "changed": "a", "why": "b", "state": "c"});
+        let mut guard = TurnGuard::default();
+        for space in [&personal, &celadon] {
+            host.conversation_tool(&assistant, "log_work", &entry(space), &mut guard)
+                .unwrap();
+        }
+        let stored: Vec<WorkLog> = host
+            .list_data(
+                "SELECT data FROM work_logs WHERE session_id=?1 ORDER BY rowid",
+                [&assistant.id],
+            )
+            .unwrap();
+        let spaces: Vec<_> = stored
+            .iter()
+            .map(|log| log.space_id.clone().unwrap())
+            .collect();
+        assert_eq!(spaces, [personal.clone(), celadon]);
+        for log in &stored {
+            assert_eq!(log.repository, "assistant");
+            assert!(log.path.as_ref().unwrap().contains("logs/assistant/"));
+            assert!(log.project_id.is_empty() && log.task_id.is_none());
+        }
+        let mut named = entry(&personal);
+        named["repository"] = json!("x");
+        assert!(
+            host.conversation_tool(&assistant, "log_work", &named, &mut guard)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn the_assistant_parents_only_its_coordinators_and_its_work_keeps_its_space() {
+        let (_home, mut host, assistant, celadon) = assistant_with_space();
+        let (work, coordinator) = start(&mut host, &assistant, &celadon, "Comment colour");
+        assert_eq!(coordinator.parent_id.as_ref(), Some(&assistant.id));
+        assert_eq!(coordinator.role, Role::ProjectOrchestrator);
+        // A worker cannot have the Assistant as its parent, and no session runs under the install.
+        let worker = host.create_session(
+            &work.id,
+            &assistant.id,
+            None,
+            "Impl",
+            Role::Implementer,
+            Provider::Claude,
+        );
+        assert!(worker.is_err());
+        let owned = host.create_owned_session(
+            &SessionOwner::Install,
+            &assistant.id,
+            None,
+            "x",
+            Role::Implementer,
+            Provider::Claude,
+        );
+        assert!(owned.is_err());
+        assert_eq!(
+            host.sessions()
+                .unwrap()
+                .iter()
+                .filter(|s| s.role == Role::Implementer)
+                .count(),
+            0
+        );
+        // A Space whose Assistant work runs cannot be removed.
+        let refused = host.remove_space(&celadon).unwrap_err().to_string();
+        assert!(refused.contains("Comment colour"), "{refused}");
+        // Work is listed with its Space and state; pausing holds it, stopping ends it.
+        assert_eq!(
+            host.list_work(&assistant).unwrap()["work"][0]["space"],
+            "Celadon"
+        );
+        host.steer_work(&assistant, "pause_work", &json!({"work_id": work.id}))
+            .unwrap();
+        assert!(!host.live_projects().unwrap().contains(&work.id));
+        host.steer_work(&assistant, "resume_work", &json!({"work_id": work.id}))
+            .unwrap();
+        assert!(host.live_projects().unwrap().contains(&work.id));
+        host.steer_work(&assistant, "stop_work", &json!({"work_id": work.id}))
+            .unwrap();
+        let stopped = host.project(&work.id).unwrap().assistant_work.unwrap();
+        assert_eq!(stopped.state, WorkState::Stopped);
+        assert!(stopped.ended_at.is_some());
+        assert!(!host.live_projects().unwrap().contains(&work.id));
+        assert!(
+            host.steer_work(&assistant, "resume_work", &json!({"work_id": work.id}))
+                .is_err()
+        );
+        let passed = json!({"work_id": work.id, "body": "one more thing"});
+        assert!(
+            host.message_work(&assistant, &passed, &TurnGuard::default())
+                .is_err()
+        );
+    }
 }

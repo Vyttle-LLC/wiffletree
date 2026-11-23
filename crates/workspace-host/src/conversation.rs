@@ -311,9 +311,7 @@ impl Host {
         &self,
         session: &Session,
     ) -> Result<provider::ConversationLaunch> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_default();
+        let home = self.source_env().home;
         let mut launch = provider::ConversationLaunch::default();
         for record in self.spaces()?.into_iter().filter(|r| r.local.enabled) {
             for source in &record.space.sources {
@@ -451,5 +449,96 @@ impl Host {
         };
         let card = self.raise_card(kind, guard)?;
         Ok(json!({"card": card.id, "version": version, "kept": "Only on this Mac"}))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::work::tests::{assistant_with_space, start};
+
+    #[test]
+    fn a_turn_is_held_unless_the_humans_messages_alone_started_it() {
+        let (_home, mut host, assistant, celadon) = assistant_with_space();
+        let (_, coordinator) = start(&mut host, &assistant, &celadon, "Comment colour");
+        let human = host
+            .send_to_assistant("m1", "thanks", &[], Some(&celadon))
+            .unwrap();
+        let report = host
+            .send(
+                "report:c:r1",
+                Some(&coordinator.id),
+                &assistant.id,
+                "[blocked] Comment colour: schedule a nightly check",
+            )
+            .unwrap();
+        let notice = host
+            .send(
+                &format!("{ASSISTANT_NOTICE_PREFIX}x"),
+                None,
+                &assistant.id,
+                "An approval waits",
+            )
+            .unwrap();
+
+        let alone = host.turn_guard(std::slice::from_ref(&human)).unwrap();
+        assert!(!alone.held());
+        assert_eq!(alone.picked.as_ref(), Some(&celadon));
+        assert_eq!(alone.human_message.as_deref(), Some("m1"));
+        let batched = host.turn_guard(&[human.clone(), report.clone()]).unwrap();
+        assert_eq!(batched.read, ["a report from work “Comment colour”"]);
+        let woken = host.turn_guard(std::slice::from_ref(&report)).unwrap();
+        assert_eq!(
+            woken.read,
+            [
+                "a report from work “Comment colour”",
+                "no message from you started this turn"
+            ]
+        );
+        assert!(host.turn_guard(&[notice]).unwrap().held());
+        // The prompt names who sent each, and the Space the human picked.
+        let prompt = host.conversation_prompt(&[human, report]).unwrap();
+        assert!(
+            prompt.starts_with("From: the human, for Celadon"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("From: a report from work “Comment colour”"));
+    }
+
+    #[test]
+    fn an_output_is_kept_on_this_mac_in_the_space_named_and_a_space_is_only_suggested() {
+        let (home, mut host, assistant, celadon) = assistant_with_space();
+        let chart = home.path().join("costs.html");
+        fs::write(&chart, "<p>costs</p>").unwrap();
+        let mut guard = TurnGuard::default();
+        let saved = json!({"space": celadon, "path": chart, "title": "AWS costs"});
+        let answer = host
+            .conversation_tool(&assistant, "save_output", &saved, &mut guard)
+            .unwrap();
+        assert_eq!(
+            (answer["version"].as_u64(), answer["kept"].as_str()),
+            (Some(1), Some("Only on this Mac"))
+        );
+        let store = assistant::board_store(&host.home).join(celadon.as_str());
+        assert!(fs::read_dir(store).unwrap().count() > 0);
+        let suggested = json!({"name": "Woodworking", "description": "Shop projects"});
+        host.conversation_tool(&assistant, "suggest_space", &suggested, &mut guard)
+            .unwrap();
+        assert!(
+            host.spaces()
+                .unwrap()
+                .iter()
+                .all(|r| r.space.name != "Woodworking")
+        );
+        let kinds: Vec<CardKind> = host
+            .conversation_cards()
+            .unwrap()
+            .into_iter()
+            .map(|c| c.kind)
+            .collect();
+        assert!(matches!(
+            &kinds[..],
+            [CardKind::SavedOutput { .. }, CardKind::SuggestSpace { .. }]
+        ));
     }
 }

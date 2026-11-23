@@ -301,3 +301,155 @@ impl Host {
         Ok(card)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::work::tests::{assistant_with_space, human_turn};
+
+    /// An MCP server that answers a call to `create_event` with what it created, and every
+    /// other call with an error, as a server whose sign-in expired does.
+    const SERVER: &str = r#"#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    if 'id' not in message:
+        continue
+    answer = {'jsonrpc': '2.0', 'id': message['id']}
+    params = message.get('params', {})
+    if message['method'] == 'initialize':
+        answer['result'] = {'protocolVersion': '2024-11-05', 'capabilities': {}}
+    elif params.get('name') == 'create_event':
+        answer['result'] = {'content': [{'type': 'text', 'text': 'Created ' + params['arguments']['title']}]}
+    else:
+        answer['error'] = {'code': -32000, 'message': 'signed out'}
+    print(json.dumps(answer), flush=True)
+"#;
+
+    /// Personal-like sources in `space`: a calendar whose holds are done without asking and a
+    /// mail server that is signed out, both defined in this Mac's Claude configuration.
+    fn with_sources(host: &mut Host, space: &SpaceId, folder: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let server = folder.join("server.py");
+        fs::write(&server, SERVER).unwrap();
+        fs::set_permissions(&server, fs::Permissions::from_mode(0o755)).unwrap();
+        let definition = json!({"command": server});
+        let config = json!({"mcpServers": {"calendar": definition, "gmail": definition}});
+        fs::write(folder.join(".claude.json"), config.to_string()).unwrap();
+        host.source_env = Some(jobs::SourceEnv {
+            path: vec!["/usr/bin".into(), "/bin".into()],
+            home: folder.into(),
+            mcp_limit: Duration::from_secs(10),
+        });
+        let mut record = host.space(space).unwrap().space;
+        record.sources = vec![
+            serde_json::from_value(json!({"kind":"mcp","server":"calendar","tools":["list_events"],"act":["create_event","respond_to_invite"],"without_asking":["create_event"]})).unwrap(),
+            serde_json::from_value(json!({"kind":"mcp","server":"gmail","tools":["search_threads"],"act":["send_message"]})).unwrap(),
+        ];
+        host.update_space(record).unwrap();
+    }
+    fn state(host: &Host, card: &ConversationCard) -> ActionState {
+        match host.conversation_card(&card.id).unwrap().kind {
+            CardKind::Action(action) => action.state,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_host_calls_an_act_tool_itself_on_run_or_at_once_for_a_kind_done_without_asking() {
+        let (home, mut host, assistant, space) = assistant_with_space();
+        with_sources(&mut host, &space, home.path());
+        let mut guard = human_turn(&mut host, "m1", "put a hold on Friday at 3");
+        let act = |tool: &str, arguments: Value| json!({"space": space, "source": tool.split('.').next().unwrap(), "tool": tool.split('.').nth(1).unwrap(), "arguments": arguments});
+
+        // A hold, marked Do without asking, runs at once in the human's own turn.
+        let (hold, run) = host
+            .act(
+                &assistant,
+                &act("calendar.create_event", json!({"title": "Hold"})),
+                &guard,
+            )
+            .unwrap();
+        let ran = run.expect("it runs at once").run();
+        host.action_ran(&hold.id, &ran, false).unwrap();
+        assert_eq!(
+            state(&host, &hold),
+            ActionState::Done {
+                result: "Created Hold".into()
+            }
+        );
+
+        // After reading mail, the same kind waits for Run, and the card says what was read.
+        guard.note("gmail search_threads".into());
+        let (waiting, run) = host
+            .act(
+                &assistant,
+                &act("calendar.create_event", json!({"title": "Meeting"})),
+                &guard,
+            )
+            .unwrap();
+        assert!(run.is_none());
+        assert_eq!(waiting.read, ["gmail search_threads"]);
+        assert_eq!(state(&host, &waiting), ActionState::Waiting);
+
+        // A send waits; on Run the host calls the server, and a signed-out server's failure
+        // shows on the card and reaches the Assistant.
+        let fresh = human_turn(&mut host, "m2", "reply to Sam that Thursday works");
+        let (send, run) = host
+            .act(
+                &assistant,
+                &act(
+                    "gmail.send_message",
+                    json!({"to": "sam@example.com", "body": "Thursday works"}),
+                ),
+                &fresh,
+            )
+            .unwrap();
+        assert!(run.is_none(), "a send is never done without asking");
+        let ran = host.run_action(&send.id).unwrap().run();
+        host.action_ran(&send.id, &ran, true).unwrap();
+        let ActionState::Failed { error } = state(&host, &send) else {
+            panic!("the send failed");
+        };
+        assert!(error.contains("sign-in"), "{error}");
+        let told = host
+            .messages(&assistant.id, None, 10)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(!told.from_human() && told.body.contains("pressed Run"));
+        assert!(host.run_action(&send.id).is_err(), "it runs once");
+
+        // Reads are called directly, and unlisted tools are no act.
+        assert!(
+            host.act(&assistant, &act("gmail.search_threads", json!({})), &fresh)
+                .is_err()
+        );
+        assert!(
+            host.act(&assistant, &act("gmail.delete_thread", json!({})), &fresh)
+                .is_err()
+        );
+        // Decline runs nothing.
+        let (invite, _) = host
+            .act(
+                &assistant,
+                &act("calendar.respond_to_invite", json!({"accept": true})),
+                &fresh,
+            )
+            .unwrap();
+        host.decline_action(&invite.id).unwrap();
+        assert_eq!(state(&host, &invite), ActionState::Declined);
+        assert!(host.run_action(&invite.id).is_err());
+    }
+
+    #[test]
+    fn the_assistants_provider_is_offered_only_read_tools_of_the_sources_it_can_start() {
+        let (home, mut host, assistant, space) = assistant_with_space();
+        with_sources(&mut host, &space, home.path());
+        let launch = host.conversation_launch(&assistant).unwrap();
+        let calendar = &launch.servers["calendar"];
+        assert_eq!(calendar.reads.iter().collect::<Vec<_>>(), ["list_events"]);
+        assert!(calendar.acts.contains("create_event"));
+        assert!(launch.servers.contains_key("gmail"));
+    }
+}

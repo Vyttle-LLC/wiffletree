@@ -818,6 +818,9 @@ fn core_tab(part: &CoreInstructions) -> String {
         "assistant threads" if part.name.contains("contract") => "Thread contract",
         "assistant threads" => "Assistant",
         "job runs" => "Job run",
+        // The Assistant's one conversation has its own contract and core.
+        "the Assistant" if part.name.contains("contract") => "Assistant contract",
+        "the Assistant" => "Assistant conversation",
         _ => &part.name,
     };
     format!("{label} {}", part.version)
@@ -2491,7 +2494,9 @@ mod tests {
                 "PR keeper v1",
                 "Thread contract v3",
                 "Assistant v4",
-                "Job run v3"
+                "Job run v3",
+                "Assistant contract v1",
+                "Assistant conversation v1"
             ]
         );
     }

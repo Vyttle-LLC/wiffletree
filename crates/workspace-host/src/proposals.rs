@@ -492,6 +492,63 @@ mod tests {
     }
 
     #[test]
+    fn the_assistant_writes_issues_at_once_as_the_human_and_reading_one_holds_its_turn() {
+        use crate::conversation::TurnGuard;
+        use workspace_core::assistant::conversation::{CardKind, LoopCardState};
+        let (_home, mut host, sage, issue) = sage_here();
+        let assistant = host.assistant().unwrap();
+        let mut guard = TurnGuard {
+            human_message: Some("m1".into()),
+            ..TurnGuard::default()
+        };
+        let tool = |host: &mut Host, name: &str, args: Value, guard: &mut TurnGuard| {
+            host.conversation_tool(&assistant, name, &args, guard)
+        };
+        let filed = tool(
+            &mut host,
+            "file_issue",
+            json!({"space": sage.id, "title": "Watch crash on call end"}),
+            &mut guard,
+        )
+        .unwrap();
+        let filed = IssueId::parse(filed["issue"].as_str().unwrap()).unwrap();
+        let commented =
+            json!({"space": sage.id, "id": issue.id.to_string(), "body": "Seen on watchOS 12"});
+        tool(&mut host, "comment_issue", commented, &mut guard).unwrap();
+        assert!(!guard.held(), "writing reads nothing written by others");
+
+        let record = host.read_issue(&filed).unwrap();
+        assert_eq!(filed_for(&record.issue.unwrap()), Some("jlin"));
+        let comment = host.read_issue(&issue.id).unwrap().comments.pop().unwrap();
+        assert_eq!(
+            (comment.author.as_str(), comment.assistant_for.as_deref()),
+            ("jlin", Some("jlin"))
+        );
+        let written: Vec<String> = (host.conversation_cards().unwrap().into_iter())
+            .filter_map(|card| match card.kind {
+                CardKind::IssueWritten { written, .. } => Some(written),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(written, ["Filed", "Commented"]);
+        // An issue of another Space's tracker is refused.
+        let elsewhere = json!({"space": sage.id, "id": "OTHER-1", "body": "x"});
+        assert!(tool(&mut host, "comment_issue", elsewhere, &mut guard).is_err());
+
+        let read = json!({"space": sage.id, "id": issue.id.to_string()});
+        tool(&mut host, "read_issue", read, &mut guard).unwrap();
+        assert_eq!(guard.read, [format!("issue {}", issue.id)]);
+        let new_loop = json!({"space": sage.id, "name": "Issue sweep", "prompt": "List open bugs", "cron": "0 9 * * 1", "timezone": "UTC", "sources": []});
+        let made = tool(&mut host, "create_loop", new_loop, &mut guard).unwrap();
+        assert_eq!(made["applied"], false);
+        assert!(host.recipes().unwrap().is_empty());
+        let card = host.conversation_cards().unwrap().pop().unwrap();
+        assert!(
+            matches!(card.kind, CardKind::Loop(change) if change.state == LoopCardState::Waiting)
+        );
+    }
+
+    #[test]
     fn an_issue_thread_opens_once_per_space_and_a_shared_tracker_has_one_in_each() {
         let folder = tempfile::tempdir().unwrap();
         let github = shared_storage(folder.path(), Some("SAGE"));

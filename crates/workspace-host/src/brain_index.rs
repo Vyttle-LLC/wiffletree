@@ -3629,6 +3629,38 @@ pub(crate) mod tests {
         }
 
         #[test]
+        fn the_assistant_reads_the_brain_of_the_space_it_names_and_the_turn_is_held_after() {
+            use crate::conversation::TurnGuard;
+            let mut b = brained();
+            b.merge(&with_app_entry());
+            let sage = b.sage.id.clone();
+            let host = &mut b.f.host;
+            let vyttle = host.create_space("Vyttle", "", "", None).unwrap().space;
+            let assistant = host.assistant().unwrap();
+            let mut guard = TurnGuard::default();
+            let ask = |space: &SpaceId| json!({"space": space, "question": "App retries Telnyx webhooks"});
+            let answer =
+                (host.conversation_tool(&assistant, "query_brain", &ask(&sage), &mut guard))
+                    .unwrap();
+            assert_eq!(
+                (answer["brain"].as_str(), answer["scope"].as_str()),
+                (Some(REPO), Some("brain"))
+            );
+            assert!(answer.to_string().contains("Telnyx"));
+            assert_eq!(
+                guard.read,
+                ["Sage's brain"],
+                "brain text holds the rest of the turn"
+            );
+            let unread =
+                host.conversation_tool(&assistant, "query_brain", &ask(&vyttle.id), &mut guard);
+            assert!(unread.is_err_and(|e| !e.to_string().contains("Telnyx")));
+            let unnamed = json!({"question": "x"});
+            let refused = host.conversation_tool(&assistant, "query_brain", &unnamed, &mut guard);
+            assert!(refused.unwrap_err().to_string().contains("Name the Space"));
+        }
+
+        #[test]
         fn query_brain_never_reads_another_organizations_brain() {
             let mut b = brained();
             b.merge(&with_app_entry());
