@@ -14,6 +14,11 @@ on:
   push:
     branches: [main]
   workflow_call:
+  # GitHub removes a cache nobody has used for 7 days. Running main's suite twice a week keeps its caches, which every pull request
+  # starts from, alive through a quiet week. A scheduled run is like a push to main: it runs every job, retries nothing, saves
+  # caches and has a concurrency group of its own.
+  schedule:
+    - cron: '17 6 * * 1,4'
 
 # Only a newer push to the same pull request replaces a run, so a stack's levels never cancel each other. Every other run has a
 # group of its own, because a group holds one waiting run, so even without cancelling in progress a third push to main would
@@ -31,6 +36,8 @@ jobs:
     # `stack` is set only on a pull request in a stack, and position equals size on its top level.
     if: &runs-tests "!github.event.pull_request.stack || github.event.pull_request.stack.position == github.event.pull_request.stack.size"
     runs-on: ubuntu-latest
+    # Each job's limit, well above a cold run, is a backstop for a hang outside nextest, which fails a hung test by name.
+    timeout-minutes: 20
     env:
       # Full debug info would make the archive each shard downloads about a gigabyte; line tables keep backtraces readable.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
@@ -63,6 +70,7 @@ jobs:
   linux-tests:
     needs: linux-build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -85,6 +93,7 @@ jobs:
 
   mac-lint:
     runs-on: macos-15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - name: Install the toolchain pinned in rust-toolchain.toml
@@ -105,6 +114,7 @@ jobs:
   mac-tests:
     if: *runs-tests
     runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - name: Install the toolchain pinned in rust-toolchain.toml
@@ -135,14 +145,16 @@ jobs:
             mac-only-tests.txt
           retention-days: 1
 
+      # The host binary the tests above were built with; selecting the whole workspace keeps their features, so this compiles nothing.
       - name: Communication tests
         run: |
-          cargo build --locked -p workspace-host
+          cargo build --locked --workspace --bin wiffletree-host
           python3 scripts/test_communications.py
 
   mac-full-suite:
     if: github.event_name != 'pull_request'
     runs-on: macos-15
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - name: Install the toolchain pinned in rust-toolchain.toml

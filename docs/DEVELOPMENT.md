@@ -521,7 +521,7 @@ python3 scripts/test_communications.py
 bash scripts/package_macos.sh
 ```
 
-The tests run with cargo-nextest: install it with `cargo install cargo-nextest --locked` or `brew install cargo-nextest`. `--workspace` includes the desktop tests, which `default-members` leaves out of a plain `cargo nextest run`; CI runs them too, except on a stack's lower levels.
+The tests run with cargo-nextest: install it with `cargo install cargo-nextest --locked` or `brew install cargo-nextest`. `--workspace` includes the desktop tests, which `default-members` leaves out of a plain `cargo nextest run`; CI runs them too, except on a stack's lower levels. A test still running after three minutes fails as TIMEOUT under its name; `slow-timeout` in `.config/nextest.toml` sets the limit.
 
 The core and host tests also pass on Linux, where CI runs most of them. A test that depends on macOS, such as one that needs the host to read the process table, launchd or `chflags`, is gated with `#[cfg(target_os = "macos")]`, and must be added to the `mac` profile's filter in `.config/nextest.toml` so that CI's macOS job runs it; `cargo nextest run --profile mac --workspace` runs that set with the desktop tests. CI's `check` job fails and names any core or host test that macOS builds, Linux does not, and the profile misses. To run the Linux suite locally, use Docker, for example a `rust` image with the checkout mounted, run as a user other than root.
 
