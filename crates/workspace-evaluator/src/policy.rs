@@ -346,6 +346,21 @@ pub(crate) mod tests {
         assert!(check_point(&windows, at(230., 200.), &allowed).is_err());
     }
 
+    /// The helper's own panel floats above every window: the evaluator can neither click it
+    /// nor see it.
+    #[test]
+    fn the_helpers_panel_is_out_of_the_evaluators_reach() {
+        let allowed = calculator();
+        let windows = [
+            window(HELPER_BUNDLE_ID, 25, (1500., 40., 380., 52.)),
+            window("com.apple.calculator", 0, (1400., 0., 600., 800.)),
+        ];
+        let refused = check_point(&windows, Point { x: 1600., y: 60. }, &allowed).unwrap_err();
+        assert!(refused.to_string().starts_with("Refused"), "{refused}");
+        check_point(&windows, Point { x: 1600., y: 400. }, &allowed).unwrap();
+        assert_eq!(allowed_windows(&windows, &allowed), [&windows[1]]);
+    }
+
     #[test]
     fn keys_need_an_allowed_app_frontmost() {
         let allowed = calculator();

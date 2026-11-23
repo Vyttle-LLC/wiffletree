@@ -854,6 +854,8 @@ impl Host {
             socket: std::env::temp_dir().join(format!("wiffletree-{}-desktop.sock", run.id)),
             run: run.id.clone(),
             apps: run.apps.clone(),
+            model: self.model_label(&run.profile),
+            queued: self.queued_desktop_runs().unwrap_or_default(),
         });
         Ok(provider::EvaluatorLaunch {
             folder: fs::canonicalize(&run.folder)?,
@@ -861,6 +863,27 @@ impl Host {
             app,
             desktop,
         })
+    }
+
+    /// A run's model as the human reads it: its provider and the label its CLI lists it under.
+    fn model_label(&self, profile: &ModelProfile) -> String {
+        let listed = (self
+            .listed_models
+            .get(&profile.provider)
+            .into_iter()
+            .flatten())
+        .find(|option| option.model == profile.model);
+        let model = listed.map_or(profile.model.as_str(), |option| option.label.as_str());
+        format!("{} {model}", profile.provider.label())
+    }
+    /// The full-desktop runs that wait for the screen, across every project.
+    fn queued_desktop_runs(&self) -> Result<usize> {
+        let count: i64 = self.db.query_row(
+            "SELECT count(*) FROM evaluations WHERE json_extract(data,'$.mode')='desktop' AND json_extract(data,'$.state')='queued'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(usize::try_from(count)?)
     }
 
     /// A run's turn has started: it runs, whether for the first time or after its limit reset.
@@ -1845,6 +1868,9 @@ pub(crate) mod tests {
         assert!(launch.app.is_none());
         let desktop = launch.desktop.unwrap();
         assert_eq!(desktop.apps, ["com.apple.calculator"]);
+        // The panel shows the model as the CLI lists it, here the label "opus".
+        assert_eq!(desktop.model, "Claude opus");
+        assert_eq!(desktop.queued, 0);
         assert_eq!(desktop.run, id);
         assert!(
             desktop

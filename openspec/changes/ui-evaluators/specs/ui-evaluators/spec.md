@@ -205,6 +205,20 @@ While a full-desktop run holds the screen, the helper SHALL show "Evaluator usin
 - **WHEN** the human presses Esc during a desktop run
 - **THEN** the turn is cancelled at once and the run ends as stopped, "Stopped: you pressed Esc.", and its coordinator is told
 
+### Requirement: A floating panel shows the run and stops it
+
+For the whole of a full-desktop run, the helper SHALL show the control panel approved in `ui/control-overlay.html`: a non-activating panel that floats above every window, on every Space and over full-screen apps, in the top-right corner under the menu bar unless the human has dragged it to another corner, which it SHALL remember. It SHALL show a red status dot, "Evaluator using this Mac", the run's model, its first two allowed apps then "+N", the time so far, and "1 of N" when more full-desktop runs wait; an Esc hint; and a red Stop. It SHALL shrink to "Evaluator", the time and Stop over a full-screen app, and show "Stopping…" while the run ends. Its Stop SHALL end the run as Esc and the menu bar's Stop do, as "Stopped from the evaluator's panel." Clicking it SHALL NOT take focus from the app under test. The host SHALL give the helper the run's model and the number of waiting runs when it starts it. The panel SHALL never appear in a screenshot, and the evaluator's input aimed at it SHALL be refused, since it is no allowed app's window.
+
+#### Scenario: Stop from the panel
+
+- **WHEN** the human clicks the panel's Stop during a desktop run
+- **THEN** the panel says "Stopping…", the run ends as stopped, "Stopped from the evaluator's panel.", and the panel disappears with the helper
+
+#### Scenario: The evaluator aims at the panel
+
+- **WHEN** the evaluator clicks a point the panel covers, even over an allowed app's window
+- **THEN** the click is refused, and no screenshot shows the panel
+
 ### Requirement: The coordinator learns the outcome, never the content
 
 When a run ends, Wiffletree SHALL message its coordinator with only the run's id, state, model, folder and duration. `list_evaluations` SHALL list the project's runs with their state, mode, the model asked for and the one reported, folder, times and a waiting run's reset, and no transcript, reply or failure text. `stop_evaluation` SHALL stop one of the project's runs; the human can stop any run.

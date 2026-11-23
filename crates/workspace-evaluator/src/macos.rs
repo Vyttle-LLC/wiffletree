@@ -2,6 +2,7 @@
 //! as the human's would be, ScreenCaptureKit limited to the run's apps, the Escape listener and
 //! the menu bar item. Each runs in this process, so macOS charges it to the helper's own
 //! grants.
+use crate::panel::{self, Corner, StopSource};
 use crate::policy::{self, Allowed, Keystroke, Point, Rect, Window};
 use crate::protocol::{Button, Capture, Control, Desktop, Grants};
 use anyhow::{Context, Result, bail, ensure};
@@ -11,25 +12,33 @@ use objc2::{
     runtime::AnyObject, sel,
 };
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBitmapImageFileType, NSBitmapImageRep, NSMenu,
-    NSMenuItem, NSRunningApplication, NSStatusBar, NSStatusItem, NSWorkspace,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBitmapImageFileType,
+    NSBitmapImageRep, NSBox, NSBoxType, NSButton, NSColor, NSEvent, NSFont, NSMenu, NSMenuItem,
+    NSPanel, NSRunningApplication, NSScreen, NSStatusBar, NSStatusItem, NSStatusWindowLevel,
+    NSTextField, NSTitlePosition, NSView, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSWorkspace,
 };
 use objc2_core_foundation::{
     CFMachPort, CFRetained, CFRunLoop, CGPoint, CGRect, CGSize, kCFRunLoopCommonModes,
 };
 use objc2_core_graphics::{
-    CGColorSpace, CGContext, CGEvent, CGEventField, CGEventFlags, CGEventTapLocation,
-    CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy, CGEventType, CGImage, CGMainDisplayID,
-    CGMouseButton, CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess, CGScrollEventUnit,
-    CGWindowListCopyWindowInfo, CGWindowListOption,
+    CGColorSpace, CGContext, CGDisplayBounds, CGEvent, CGEventField, CGEventFlags,
+    CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy, CGEventType,
+    CGImage, CGMainDisplayID, CGMouseButton, CGPreflightScreenCaptureAccess,
+    CGRequestScreenCaptureAccess, CGScrollEventUnit, CGWindowListCopyWindowInfo,
+    CGWindowListOption,
 };
-use objc2_foundation::{NSArray, NSDictionary, NSError, NSNumber, NSString};
+use objc2_foundation::{
+    NSArray, NSDictionary, NSError, NSNumber, NSPoint, NSRect, NSSize, NSString, NSTimer,
+    NSUserDefaults,
+};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration, SCWindow,
 };
 use std::{
     ffi::c_void,
     ptr::NonNull,
+    rc::Rc,
     sync::{Arc, OnceLock, mpsc},
     time::Duration,
 };
@@ -494,6 +503,17 @@ pub fn note(message: &str) {
     unsafe { libc::syslog(libc::LOG_NOTICE, c"%s".as_ptr(), message.as_ptr()) };
 }
 
+/// Ends the run, the one way for Esc, the menu bar's Stop and the panel's: logged, told to the
+/// host, and every later request refused.
+fn stop_run(source: StopSource) {
+    if let Some(control) = CONTROL.get()
+        && !control.stopped()
+    {
+        note(source.note());
+        control.stop(source);
+    }
+}
+
 /// Where Escape and the menu's Stop report.
 static CONTROL: OnceLock<Arc<Control>> = OnceLock::new();
 
@@ -540,11 +560,8 @@ unsafe extern "C-unwind" fn heard(
     if kind == CGEventType::KeyDown {
         let key = CGEvent::integer_value_field(Some(event_ref), CGEventField::KeyboardEventKeycode);
         let mark = CGEvent::integer_value_field(Some(event_ref), CGEventField::EventSourceUserData);
-        if policy::stops_run(key, mark)
-            && let Some(control) = CONTROL.get()
-        {
-            note("Esc heard: stopping the run");
-            control.stop("escape");
+        if policy::stops_run(key, mark) {
+            stop_run(StopSource::Escape);
         }
     }
     event.as_ptr()
@@ -560,10 +577,12 @@ define_class!(
     impl StopTarget {
         #[unsafe(method(stop:))]
         fn stop(&self, _sender: Option<&AnyObject>) {
-            if let Some(control) = CONTROL.get() {
-                note("Stop chosen from the menu bar: stopping the run");
-                control.stop("stop");
-            }
+            stop_run(StopSource::MenuBar);
+        }
+
+        #[unsafe(method(panelStop:))]
+        fn panel_stop(&self, _sender: Option<&AnyObject>) {
+            stop_run(StopSource::Panel);
         }
     }
 );
@@ -604,14 +623,261 @@ fn status_item(run: &str, mtm: MainThreadMarker) -> (Retained<NSStatusItem>, Ret
 
 /// Runs the helper's app: no Dock icon, the menu bar item, and the Escape listener. Never
 /// returns; the helper quits when the host closes its control connection.
-pub fn run_app(run: &str, control: Arc<Control>, escape_ready: impl FnOnce(bool)) -> Result<()> {
+pub fn run_app(
+    run: &str,
+    control: Arc<Control>,
+    model: String,
+    apps: &[String],
+    queued: usize,
+    escape_ready: impl FnOnce(bool),
+) -> Result<()> {
     let Some(mtm) = MainThreadMarker::new() else {
         bail!("The helper's app must run on the main thread");
     };
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     escape_ready(listen_for_escape(control));
-    let _item = status_item(run, mtm);
+    let (_item, target) = status_item(run, mtm);
+    let names = apps.iter().map(|app| app_name(app)).collect();
+    let run = panel::Run {
+        model,
+        apps: names,
+        queued,
+    };
+    let _panel = Panel::show(run, &target, mtm);
     app.run();
     Ok(())
+}
+
+/// An app's name as Finder shows it, or its bundle id when it is not installed.
+fn app_name(bundle_id: &str) -> String {
+    let url = NSWorkspace::sharedWorkspace()
+        .URLForApplicationWithBundleIdentifier(&NSString::from_str(bundle_id));
+    url.and_then(|url| url.URLByDeletingPathExtension())
+        .and_then(|url| url.lastPathComponent())
+        .map_or_else(|| bundle_id.to_owned(), |name| name.to_string())
+}
+
+/// Where the panel's corner is kept between runs, in the helper's own defaults.
+const CORNER_KEY: &str = "panelCorner";
+/// The panel's size in points, normally and over a full-screen app.
+const FULL: (f64, f64) = (400., 52.);
+const COMPACT: (f64, f64) = (210., 36.);
+
+/// The floating control panel: above every window, on every Space and over full-screen apps,
+/// for the whole run. It never activates the helper, so a click on it leaves the app under test
+/// frontmost; the helper's own windows are no allowed app's, so the evaluator can neither see
+/// it in a screenshot nor click it.
+struct Panel {
+    window: Retained<NSPanel>,
+    background: Retained<NSBox>,
+    dot: Retained<NSBox>,
+    title: Retained<NSTextField>,
+    detail: Retained<NSTextField>,
+    esc: Retained<NSTextField>,
+    stop: Retained<NSButton>,
+    run: panel::Run,
+    started: std::time::Instant,
+    corner: std::cell::Cell<Corner>,
+    compact: std::cell::Cell<Option<bool>>,
+}
+impl Panel {
+    fn show(run: panel::Run, target: &StopTarget, mtm: MainThreadMarker) -> Rc<Self> {
+        let label = |size: f64, bold: bool, white: f64| {
+            let field = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+            let font = match bold {
+                true => NSFont::boldSystemFontOfSize(size),
+                false => NSFont::systemFontOfSize(size),
+            };
+            field.setFont(Some(&font));
+            field.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+                white, white, white, 1.,
+            )));
+            field
+        };
+        let rounded = |fill: &NSColor, border: Option<&NSColor>, radius: f64| {
+            let view = NSBox::new(mtm);
+            view.setBoxType(NSBoxType::Custom);
+            view.setTitlePosition(NSTitlePosition::NoTitle);
+            view.setFillColor(fill);
+            view.setCornerRadius(radius);
+            match border {
+                Some(border) => {
+                    view.setBorderColor(border);
+                    view.setBorderWidth(1.5);
+                }
+                None => view.setBorderWidth(0.),
+            }
+            view
+        };
+        let red = NSColor::colorWithSRGBRed_green_blue_alpha(0.898, 0.282, 0.302, 1.);
+        let dark = NSColor::colorWithSRGBRed_green_blue_alpha(0.118, 0.118, 0.118, 0.92);
+        let background = rounded(&dark, Some(&red), 12.);
+        let dot = rounded(&red, None, 4.5);
+        let esc = label(10., false, 0.8);
+        esc.setStringValue(&NSString::from_str("Esc"));
+        // SAFETY: `panelStop:` is the target's action, and the target lives as long as the app.
+        let stop = unsafe {
+            NSButton::buttonWithTitle_target_action(
+                &NSString::from_str("Stop"),
+                Some(target),
+                Some(sel!(panelStop:)),
+                mtm,
+            )
+        };
+        stop.setBezelColor(Some(&red));
+        let window = NSPanel::initWithContentRect_styleMask_backing_defer(
+            NSPanel::alloc(mtm),
+            NSRect::new(NSPoint::ZERO, NSSize::new(FULL.0, FULL.1)),
+            NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
+            NSBackingStoreType::Buffered,
+            false,
+        );
+        // SAFETY: the panel is kept for the app's life, so it must not release itself.
+        unsafe { window.setReleasedWhenClosed(false) };
+        window.setFloatingPanel(true);
+        window.setBecomesKeyOnlyIfNeeded(true);
+        // The helper is never the active app, so the panel must not hide when it is not.
+        window.setHidesOnDeactivate(false);
+        window.setLevel(NSStatusWindowLevel);
+        window.setCollectionBehavior(
+            NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::FullScreenAuxiliary
+                | NSWindowCollectionBehavior::Stationary
+                | NSWindowCollectionBehavior::IgnoresCycle,
+        );
+        window.setOpaque(false);
+        window.setBackgroundColor(Some(&NSColor::clearColor()));
+        window.setHasShadow(true);
+        window.setMovableByWindowBackground(true);
+        let content = NSView::initWithFrame(
+            NSView::alloc(mtm),
+            NSRect::new(NSPoint::ZERO, NSSize::new(FULL.0, FULL.1)),
+        );
+        let (title, detail) = (label(12., true, 1.), label(11., false, 0.8));
+        let views: [&NSView; 6] = [&background, &dot, &title, &detail, &esc, &stop];
+        for view in views {
+            content.addSubview(view);
+        }
+        window.setContentView(Some(&content));
+        let corner = NSUserDefaults::standardUserDefaults()
+            .stringForKey(&NSString::from_str(CORNER_KEY))
+            .map_or_else(Corner::default, |key| Corner::from_key(&key.to_string()));
+        let panel = Rc::new(Self {
+            window,
+            background,
+            dot,
+            title,
+            detail,
+            esc,
+            stop,
+            run,
+            started: std::time::Instant::now(),
+            corner: std::cell::Cell::new(corner),
+            compact: std::cell::Cell::new(None),
+        });
+        panel.update();
+        panel.window.orderFrontRegardless();
+        let ticking = panel.clone();
+        let tick = RcBlock::new(move |_timer: NonNull<NSTimer>| ticking.update());
+        // SAFETY: the timer runs on the main run loop, where the panel lives.
+        unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.5, true, &tick) };
+        panel
+    }
+
+    /// The visible frame of the main screen, less its menu bar and Dock.
+    fn visible(&self) -> Rect {
+        let screen = MainThreadMarker::new()
+            .and_then(NSScreen::mainScreen)
+            .map(|screen| screen.visibleFrame())
+            .unwrap_or_default();
+        Rect {
+            x: screen.origin.x,
+            y: screen.origin.y,
+            width: screen.size.width,
+            height: screen.size.height,
+        }
+    }
+
+    /// Shows the run's state, shrinks over a full-screen app, and keeps the panel in its corner,
+    /// or in the corner nearest where the human dragged it.
+    fn update(&self) {
+        let stopping = CONTROL.get().is_some_and(|control| control.stopped());
+        let elapsed = self.started.elapsed();
+        let display = CGDisplayBounds(CGMainDisplayID());
+        let display = Rect {
+            x: display.origin.x,
+            y: display.origin.y,
+            width: display.size.width,
+            height: display.size.height,
+        };
+        let compact = Mac
+            .windows()
+            .is_ok_and(|windows| panel::full_screen(&windows, display));
+        if self.compact.replace(Some(compact)) != Some(compact) {
+            self.lay_out(compact);
+        }
+        let (title, detail) = match (stopping, compact) {
+            (true, _) => (panel::STOPPING.0.to_owned(), panel::STOPPING.1.to_owned()),
+            (false, false) => (panel::TITLE.to_owned(), panel::detail(&self.run, elapsed)),
+            (false, true) => ("Evaluator".to_owned(), panel::elapsed(elapsed)),
+        };
+        self.title.setStringValue(&NSString::from_str(&title));
+        self.detail.setStringValue(&NSString::from_str(&detail));
+        self.stop.setEnabled(!stopping);
+        let size = if compact { COMPACT } else { FULL };
+        let visible = self.visible();
+        let frame = self.window.frame();
+        let at = Rect {
+            x: frame.origin.x,
+            y: frame.origin.y,
+            width: frame.size.width,
+            height: frame.size.height,
+        };
+        let placed = panel::frame(self.corner.get(), visible, size.0, size.1);
+        // Once the human lets go of a drag, the panel settles in the nearest corner.
+        if at != placed && NSEvent::pressedMouseButtons() == 0 {
+            if at.width == size.0 && at.height == size.1 && frame.origin != NSPoint::ZERO {
+                let corner = panel::nearest(at, visible);
+                if corner != self.corner.get() {
+                    self.corner.set(corner);
+                    let key = NSString::from_str(corner.key());
+                    // SAFETY: a string value under the panel's own key.
+                    unsafe {
+                        NSUserDefaults::standardUserDefaults()
+                            .setObject_forKey(Some(&key), &NSString::from_str(CORNER_KEY))
+                    };
+                }
+            }
+            let placed = panel::frame(self.corner.get(), visible, size.0, size.1);
+            self.window.setFrame_display(
+                NSRect::new(
+                    NSPoint::new(placed.x, placed.y),
+                    NSSize::new(placed.width, placed.height),
+                ),
+                true,
+            );
+        }
+    }
+
+    /// Positions the views for the full panel or the compact one.
+    fn lay_out(&self, compact: bool) {
+        let rect =
+            |x: f64, y: f64, w: f64, h: f64| NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+        let (width, height) = if compact { COMPACT } else { FULL };
+        self.background.setFrame(rect(0., 0., width, height));
+        self.dot.setFrame(rect(12., height / 2. - 4.5, 9., 9.));
+        if compact {
+            self.title.setFrame(rect(28., 10., 72., 16.));
+            self.detail.setFrame(rect(100., 10., 46., 16.));
+            self.esc.setHidden(true);
+            self.stop.setFrame(rect(width - 64., 4., 56., 28.));
+        } else {
+            self.title.setFrame(rect(30., 26., 270., 17.));
+            self.detail.setFrame(rect(30., 8., 270., 16.));
+            self.esc.setHidden(false);
+            self.esc.setFrame(rect(width - 96., 18., 28., 14.));
+            self.stop.setFrame(rect(width - 64., 12., 56., 28.));
+        }
+    }
 }

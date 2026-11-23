@@ -17,6 +17,7 @@ const QUIT_GRACE: Duration = Duration::from_secs(3);
 /// Why a run ends when the human stops it on the screen, or the helper goes.
 pub const STOPPED_BY_ESCAPE: &str = "Stopped: you pressed Esc.";
 pub const STOPPED_FROM_MENU: &str = "Stopped from the menu bar.";
+pub const STOPPED_FROM_PANEL: &str = "Stopped from the evaluator's panel.";
 pub const HELPER_QUIT: &str = "Stopped: Wiffletree Evaluator quit during the run.";
 
 /// What a full-desktop run's turn starts: the helper, on a socket of the run's own, limited to
@@ -30,6 +31,10 @@ pub struct DesktopLaunch {
     pub run: String,
     /// Bundle ids; the helper refuses every other app.
     pub apps: Vec<String>,
+    /// The run's model as the human reads it, which the helper's panel shows.
+    pub model: String,
+    /// How many other full-desktop runs wait for the screen; the panel says "1 of N".
+    pub queued: usize,
 }
 impl DesktopLaunch {
     /// `open -n -g`: a new instance in the background, started by LaunchServices so that it is
@@ -42,6 +47,8 @@ impl DesktopLaunch {
             .arg("serve")
             .arg(&self.socket)
             .arg(&self.run)
+            .args(["--model", &self.model])
+            .args(["--queued", &self.queued.to_string()])
             .args(&self.apps)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -220,10 +227,9 @@ impl RunningHelper {
                 match reader.read_line(&mut line) {
                     Ok(read) if read > 0 => {
                         let event: Value = serde_json::from_str(&line).unwrap_or_default();
-                        match event["event"].as_str() {
-                            Some("escape") => break STOPPED_BY_ESCAPE,
-                            Some("stop") => break STOPPED_FROM_MENU,
-                            _ => continue,
+                        match stop_reason(&event) {
+                            Some(reason) => break reason,
+                            None => continue,
                         }
                     }
                     _ => break HELPER_QUIT,
@@ -264,6 +270,16 @@ impl Drop for RunningHelper {
     }
 }
 
+/// Why the run stops, for an event the helper sends when the human stops it on the screen.
+fn stop_reason(event: &Value) -> Option<&'static str> {
+    match event["event"].as_str()? {
+        "escape" => Some(STOPPED_BY_ESCAPE),
+        "stop" => Some(STOPPED_FROM_MENU),
+        "panel" => Some(STOPPED_FROM_PANEL),
+        _ => None,
+    }
+}
+
 /// What the helper lacks for a run, and where the human gives it: the run is refused before
 /// anything touches the screen.
 pub(crate) fn missing_grant(hello: &Value) -> Option<String> {
@@ -297,6 +313,8 @@ mod tests {
             socket: "/tmp/wiffletree-run-1-desktop.sock".into(),
             run: "run-1".into(),
             apps: vec!["com.apple.calculator".into(), "com.apple.TextEdit".into()],
+            model: "Claude · opus".into(),
+            queued: 2,
         }
     }
 
@@ -317,6 +335,10 @@ mod tests {
                 "serve",
                 "/tmp/wiffletree-run-1-desktop.sock",
                 "run-1",
+                "--model",
+                "Claude · opus",
+                "--queued",
+                "2",
                 "com.apple.calculator",
                 "com.apple.TextEdit"
             ]
@@ -373,6 +395,15 @@ mod tests {
         assert_eq!(fs::read(&binary).unwrap(), b"v2");
         assert_eq!(fs::read_dir(data.join("evaluator")).unwrap().count(), 1);
         assert_eq!(helper_app(&data), installed);
+    }
+
+    #[test]
+    fn each_way_to_stop_on_the_screen_names_itself() {
+        let reason = |event: &str| stop_reason(&json!({ "event": event }));
+        assert_eq!(reason("escape"), Some(STOPPED_BY_ESCAPE));
+        assert_eq!(reason("stop"), Some(STOPPED_FROM_MENU));
+        assert_eq!(reason("panel"), Some(STOPPED_FROM_PANEL));
+        assert_eq!(reason("other"), None);
     }
 
     #[test]

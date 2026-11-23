@@ -6,6 +6,7 @@
 //! or `{"event":"stop"}` on it. When the host closes it, the helper quits. Every other
 //! connection carries one request from the desktop driver, which the helper checks against
 //! the run's apps before it acts.
+use crate::panel::StopSource;
 use crate::policy::{self, Allowed, Keystroke, Point, Rect, Window};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -74,13 +75,14 @@ pub struct Control {
     stopped: AtomicBool,
 }
 impl Control {
-    /// Tells the host the run must stop, and refuses every later request.
-    pub fn stop(&self, event: &str) {
+    /// Tells the host the run must stop, and refuses every later request. Esc, the menu bar's
+    /// Stop and the panel's all end the run this one way.
+    pub fn stop(&self, source: StopSource) {
         if self.stopped.swap(true, Ordering::SeqCst) {
             return;
         }
         if let Some(stream) = self.stream.lock().unwrap().as_mut() {
-            let _ = writeln!(stream, "{}", json!({"event": event}));
+            let _ = writeln!(stream, "{}", json!({"event": source.event()}));
         }
     }
     pub fn stopped(&self) -> bool {
@@ -503,10 +505,36 @@ mod tests {
         let waiting = Control::default();
         assert!(ask(&screen, &waiting, click.clone()).is_err());
         let control = started();
-        control.stop("escape");
+        control.stop(StopSource::Escape);
         let refused = ask(&screen, &control, click).unwrap_err();
         assert!(refused.to_string().contains("stopped"), "{refused}");
         assert!(ask(&screen, &control, json!({"do":"screenshot"})).is_err());
+        assert!(screen.done().is_empty());
+    }
+
+    /// The panel's Stop takes the path Esc and the menu bar's take: the host hears it once on
+    /// the control connection, and every later request is refused.
+    #[test]
+    fn the_panels_stop_ends_the_run_as_esc_does() {
+        use std::io::Read as _;
+        let screen = Screen::front("com.apple.calculator");
+        let control = Control::default();
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        *control.stream.lock().unwrap() = Some(ours);
+        control.stop(StopSource::Panel);
+        control.stop(StopSource::Escape);
+        // The host's end sees everything said so far once the helper stops writing.
+        let held = control.stream.lock().unwrap();
+        held.as_ref()
+            .unwrap()
+            .shutdown(std::net::Shutdown::Write)
+            .unwrap();
+        drop(held);
+        let mut heard = String::new();
+        BufReader::new(theirs).read_to_string(&mut heard).unwrap();
+        assert_eq!(heard, "{\"event\":\"panel\"}\n");
+        let refused = ask(&screen, &control, json!({"do":"click","x":50,"y":60})).unwrap_err();
+        assert!(refused.to_string().contains("stopped"), "{refused}");
         assert!(screen.done().is_empty());
     }
 
@@ -553,7 +581,7 @@ mod tests {
         assert_eq!(listed["ok"], true, "{listed}");
         assert_eq!(request(json!({"do":"click","x":500,"y":5}))["ok"], false);
         // The menu bar's Stop reaches the host, and later requests are refused.
-        control.stop("stop");
+        control.stop(StopSource::MenuBar);
         line.clear();
         events.read_line(&mut line).unwrap();
         assert_eq!(

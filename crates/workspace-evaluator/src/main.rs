@@ -3,19 +3,20 @@
 //! one per run through LaunchServices, so macOS charges the helper, not Wiffletree, for what it
 //! does. It sees and touches only the apps the run names, and quits when the run ends.
 //!
-//! - `serve <socket> <run> <bundle id>…` serves the run on its socket (see `protocol`).
+//! - `serve <socket> <run> [--model <label>] [--queued <n>] <bundle id>…` serves the run on its
+//!   socket (see `protocol`) and shows the floating control panel (see `panel`).
 //! - `check` prints the helper's grants as JSON.
 //! - `request` asks macOS for both grants, which shows its prompts, waits up to two minutes
 //!   for both, then prints them.
 #[cfg(target_os = "macos")]
 mod macos;
+mod panel;
 mod policy;
 mod protocol;
 
 use anyhow::{Result, bail};
 
-const USAGE: &str =
-    "Usage: wiffletree-evaluator serve <socket> <run> <bundle id>… | check | request";
+const USAGE: &str = "Usage: wiffletree-evaluator serve <socket> <run> [--model <label>] [--queued <n>] <bundle id>… | check | request";
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -39,7 +40,10 @@ fn run(mode: &str, args: &[String]) -> Result<()> {
         );
     };
     match (mode, args) {
-        ("serve", [socket, run, apps @ ..]) => serve(socket.as_ref(), run, apps),
+        ("serve", [socket, run, rest @ ..]) => {
+            let (model, queued, apps) = panel::options(rest)?;
+            serve(socket.as_ref(), run, apps, model, queued)
+        }
         ("check", []) => {
             print(macos::grants(false));
             Ok(())
@@ -57,7 +61,13 @@ fn run(mode: &str, args: &[String]) -> Result<()> {
 const CONTROL_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[cfg(target_os = "macos")]
-fn serve(socket: &std::path::Path, run: &str, apps: &[String]) -> Result<()> {
+fn serve(
+    socket: &std::path::Path,
+    run: &str,
+    apps: &[String],
+    model: String,
+    queued: usize,
+) -> Result<()> {
     use std::sync::Arc;
     let allowed = policy::Allowed::new(apps)?;
     let _ = std::fs::remove_file(socket);
@@ -85,7 +95,8 @@ fn serve(socket: &std::path::Path, run: &str, apps: &[String]) -> Result<()> {
         });
     }
     let serving = control.clone();
-    macos::run_app(run, control, move |escape| {
+    let named = apps.to_vec();
+    macos::run_app(run, control, model, &named, queued, move |escape| {
         let grants = macos::grants(escape);
         let hello = serde_json::json!({
             "pid": std::process::id(),

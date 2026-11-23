@@ -339,6 +339,8 @@ mod tests {
                 socket: "/tmp/wiffletree-run-1-desktop.sock".into(),
                 run: "run-1".into(),
                 apps: vec!["com.apple.calculator".into()],
+                model: "Claude · opus".into(),
+                queued: 0,
             }),
             ..launch()
         }
