@@ -541,6 +541,19 @@ mod tests {
     }
 
     #[test]
+    fn a_save_holding_an_old_router_row_stores_none() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let mut selection = host.model_selection().unwrap();
+        let mut router = selection.row(&Job::Assistant).unwrap().clone();
+        router.job = Job::RetiredRouter;
+        selection.jobs.push(router);
+        host.set_model_selection(&selection).unwrap();
+        let stored = host.saved_selection().unwrap().unwrap();
+        assert!(stored.row(&Job::RetiredRouter).is_none());
+    }
+
+    #[test]
     fn the_guide_moves_exactly_as_saved_and_the_database_keeps_it() {
         let home = tempfile::tempdir().unwrap();
         let mut host = Host::open_set_up(home.path()).unwrap();
