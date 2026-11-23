@@ -530,8 +530,8 @@ fn acting_in_another_app_waits_for_run_unless_the_kind_is_done_without_asking_in
     ];
     say(&service, "m2", &read_then_act.join("\n"));
     let acts = wait_for_call(&fixture, "act", 4);
+    let reads = wait_for_call(&fixture, "read_source", 2);
 
-    let reads = calls(&fixture, "read_source");
     assert!(
         reads[0]["text"].as_str().unwrap().contains("inbox today"),
         "{}",
