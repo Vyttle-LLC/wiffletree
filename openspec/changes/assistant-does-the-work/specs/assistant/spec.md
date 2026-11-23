@@ -27,7 +27,7 @@ The Assistant SHALL decide which Space each request belongs to from the conversa
 - **THEN** the call is refused, naming the Space the human chose
 
 ### Requirement: The Assistant acts on this Mac
-The Assistant SHALL run like a project agent in YOLO mode: it SHALL run commands, read and write files anywhere this Mac's user can, and search and fetch the web, with one exception. It SHALL NOT write to a managed path: the clone of every repository added to Wiffletree, every ticket worktree and project folder, every Space storage, brain and settings repository clone, and Wiffletree's data folder apart from the Assistant's own folder at `<data folder>/assistant/workspace/`, which is its working directory. Changes to a managed repository SHALL go through work. It SHALL reach other apps, such as mail, calendars and trackers, only through Space sources, as "The Assistant uses apps through Space sources" says.
+The Assistant SHALL run in its provider's YOLO mode, as a coordinator does, in its working directory `<data folder>/assistant/workspace/`: it SHALL run commands, read and write files anywhere this Mac's user can, and search and fetch the web. It SHALL have full read and run access to every repository added to Wiffletree, every ticket worktree and every project folder, so it can inspect diffs, run builds and tests and read logs, in its work above all. The host SHALL NOT limit its repository access. Code changes to a repository added to Wiffletree SHALL land through work, as tickets that are reviewed and published as pull requests; the Assistant core SHALL say so in the way the Coordinating core tells coordinators not to implement, and SHALL give the reason: edits made from two places collide with the implementer's, and reviewed pull requests are the product's guarantee. The host SHALL NOT enforce it. The Assistant SHALL reach other apps, such as mail, calendars and trackers, through Space sources, as "The Assistant uses apps through Space sources" says.
 
 #### Scenario: A local script
 - **WHEN** the human asks the Assistant to tidy `~/Downloads` by file type
@@ -37,24 +37,16 @@ The Assistant SHALL run like a project agent in YOLO mode: it SHALL run commands
 - **WHEN** the human asks for a typo fix in `celadon-docs`, a repository added to Wiffletree
 - **THEN** the Assistant starts work for it, and does not edit the clone itself
 
-### Requirement: The host enforces the managed-path exception
-The host SHALL start the Assistant's provider process, Claude or Codex, inside a macOS sandbox profile that allows everything but writing to a managed path, creating a link into one, or writing `~/Library/LaunchAgents` and the user's crontab, and that allows writing the Assistant's own folder. The profile SHALL also refuse running the executable of every CLI a Space's sources list, so those CLIs run only through the host (see "Reading is free; acting needs a card"). Every process the provider starts SHALL inherit it. The profile's managed paths SHALL be rebuilt at the start of each turn from the host's records. The provider SHALL run in its own YOLO mode inside it. When the profile cannot be applied, the turn SHALL NOT start, and the chat SHALL say why. The Assistant core SHALL say that pushing, opening a pull request or committing to a managed repository's remote from any other clone is not allowed, because the profile cannot stop it.
+#### Scenario: Checking its work's build
+- **WHEN** the human asks whether the comment colour work's nvim ticket builds
+- **THEN** the Assistant runs the build in that ticket's worktree itself and answers, and changes nothing there
 
-#### Scenario: A write through the shell
-- **WHEN** the Assistant runs `echo x >> ~/dev/celadon/celadon-docs/README.md` on Claude or on Codex
-- **THEN** the write is refused by the sandbox, and the file is unchanged
+### Requirement: The Assistant reads its work directly
+The Assistant SHALL have `work_status`, which returns, for one of its work items, what a coordinator's `workspace_context` shows of its project: the plan, every ticket in full with its brief, branch, worktree, review cycles, findings and pull request, the agents with their status, and the reports and messages its coordinator received and sent. The Assistant SHALL be able to read these and the work's worktrees and folders whenever it needs to, in addition to the reports that reach it, and SHALL act on the work only through `message_work` and the other work tools.
 
-#### Scenario: A new repository
-- **WHEN** the human adds `website` to Wiffletree while the Assistant is idle
-- **THEN** the Assistant's next turn cannot write `website`'s clone
-
-#### Scenario: A source's CLI run directly
-- **WHEN** Personal lists the `gws` CLI as a source and the Assistant runs `gws gmail send …` in its shell
-- **THEN** the sandbox refuses to run it, and the Assistant can send only through an action card
-
-#### Scenario: No sandbox
-- **WHEN** the sandbox profile cannot be applied on this Mac
-- **THEN** the turn does not start and the chat says the Assistant cannot run without it
+#### Scenario: Why a review failed
+- **WHEN** the human asks why the docs footer work is not done yet
+- **THEN** the Assistant reads `work_status`, finds the failed review's finding, reads the diff in the ticket's worktree and explains it, without waiting for a report
 
 ### Requirement: The Assistant starts work
 The Assistant SHALL have `start_work`, taking a Space, a short title, a brief, optional repository ids and a small flag. It SHALL start without asking the human. The host SHALL create a project in that Space, titled with the title, whose coordinator's parent is the Assistant (see workspace-host), record it as a work item of the Assistant, and start the coordinator on the brief, sent as the Assistant's words relaying the human's request. The chat SHALL show a work card with the title, the Space, the work's stage and its pull requests, with Stop and Open details. A small flag SHALL tell the coordinator to use one implementer on the small-work line and the review level its Space allows that runs the fewest verifiers. Open details SHALL open the project's own view, with its plan, tickets, reviews, pull requests and agents, and Back to chat.
@@ -126,7 +118,7 @@ The Assistant SHALL have `list_issues` and `read_issue` over every Space's track
 - **THEN** the issue is filed in Sage's tracker as the human, marked as written by their assistant, and the chat links to it
 
 ### Requirement: The Assistant uses apps through Space sources
-The Assistant SHALL reach other apps, such as Gmail, Google Calendar and Linear, only through the sources each Space lists (see spaces): MCP servers and local CLIs the human installed and signed in to. Wiffletree SHALL build no connector of its own and SHALL NOT handle an app's sign-in itself. The Assistant's provider SHALL be offered each source's read tools directly. A source's read commands, and every act tool or command, SHALL reach the app only through the host: `read_source` runs a listed read command and returns its output, and `act` asks for an action (see "Reading is free; acting needs a card"). The host SHALL start an MCP source as its provider would start it and call its tools itself. A source that is missing or signed out SHALL be named in the chat with how to fix it, as a loop's pre-run check names it.
+The Assistant SHALL reach other apps, such as Gmail, Google Calendar and Linear, only through the sources each Space lists (see spaces): MCP servers and local CLIs the human installed and signed in to. Wiffletree SHALL build no connector of its own and SHALL NOT handle an app's sign-in itself. The Assistant's provider SHALL be offered each MCP source's read tools directly, and never its act tools: the host SHALL start an MCP source as its provider would start it and call its act tools itself, only through `act` (see "Reading is free; acting needs a card"). For a CLI source, the documented path SHALL be `read_source`, which runs a listed read command through the host and returns its output, and `act` for its act commands. Because the Assistant has a shell, the host cannot stop it running a source's CLI directly; the Assistant core SHALL say never to, and this rule SHALL be instruction-level. A source that is missing or signed out SHALL be named in the chat with how to fix it, as a loop's pre-run check names it.
 
 #### Scenario: Reading the calendar
 - **WHEN** Personal lists a Google Calendar MCP server whose `list_events` is a read tool, and the human asks "what's on tomorrow?"
@@ -137,11 +129,15 @@ The Assistant SHALL reach other apps, such as Gmail, Google Calendar and Linear,
 - **THEN** the chat says the Gmail source in Personal is not signed in and how to sign in with that server's own tool
 
 ### Requirement: Reading is free; acting needs a card
-Reading from a source SHALL need no confirmation. Anything that sends, posts, creates, changes or deletes in another app, such as sending an email, accepting an invite or creating an event, SHALL be asked for with `act`, naming the Space, the source, the tool or command and its exact arguments. Unless "Kinds of action done without asking" lets it run, the host SHALL show an action card in the chat with the target (the app, account and recipients or object), the exact content and Run and Decline, list it under Needs you, and run it only when the human presses Run, with the arguments shown. The result or error SHALL show on the card and reach the Assistant. Editing the content SHALL make a new card. The Assistant's provider SHALL NOT be offered any act tool directly, and a source's act command SHALL run only through the host. A Space's own tracker is part of Wiffletree, not another app: the Assistant's issue tools follow "The Assistant writes issues directly".
+Reading from a source SHALL need no confirmation. Anything that sends, posts, creates, changes or deletes in another app, such as sending an email, accepting an invite or creating an event, SHALL be asked for with `act`, naming the Space, the source, the tool or command and its exact arguments. Unless "Kinds of action done without asking" lets it run, the host SHALL show an action card in the chat with the target (the app, account and recipients or object), the exact content and Run and Decline, list it under Needs you, and run it only when the human presses Run, with the arguments shown. The result or error SHALL show on the card and reach the Assistant. Editing the content SHALL make a new card. The host SHALL run an MCP act tool only this way. A CLI source's act command SHALL go through `act` too, which the Assistant core requires but the host cannot enforce (see "The Assistant uses apps through Space sources"). A Space's own tracker is part of Wiffletree, not another app: the Assistant's issue tools follow "The Assistant writes issues directly".
 
 #### Scenario: Sending an email
 - **WHEN** the human asks the Assistant to reply to Sam that Thursday works
 - **THEN** a card shows the Gmail account, "To: Sam <sam@example.com>", the subject and the exact body with Run and Decline, Needs you counts it, and nothing is sent until the human presses Run
+
+#### Scenario: A source's CLI
+- **WHEN** Personal lists the `gws` CLI as a source with `gmail send` as an act command, and the human asks the Assistant to send a note
+- **THEN** the Assistant calls `act` for `gws gmail send …`, a card shows the exact command's target and content, and the host runs it on Run
 
 #### Scenario: Declined
 - **WHEN** the human presses Decline on that card
@@ -219,7 +215,7 @@ Issue threads and loop runs SHALL each run in their own scratch folder at `<data
 - **THEN** the file is written in the run's scratch folder
 
 ### Requirement: The provider enforces thread authority
-Issue threads and loop runs SHALL NOT start in the providers' YOLO mode. A Claude thread SHALL start with a permission mode that denies, without asking, every tool not allowed; the allowed tools SHALL be reading, file search, web search and fetch, writing and editing only under the scratch folder, the thread's workspace tools, and for each source in use its listed MCP tools and shell commands. A Codex thread SHALL start in the workspace-write sandbox rooted at the scratch folder, with no other writable root and with `sandbox_workspace_write.exclude_slash_tmp` and `sandbox_workspace_write.exclude_tmpdir_env_var` both true, so that its shell can write only the scratch folder and the device files Codex's sandbox always allows, such as `/dev/null`; it SHALL run with approvals never asked, shell network off and web search on, and with MCP servers limited to the listed tools. The host SHALL read the tools and MCP servers a run reports at its start, and SHALL stop the run, saying why, when it reports any it was not given. Codex reports no tools or MCP servers at a run's start, so for Codex the host SHALL check every MCP call as it is made and stop the run, saying why, at a call to a server or tool it was not given; and a Codex thread SHALL run with no user configuration and no project configuration or command rules read from its scratch folder, so that nothing a thread writes there can widen a later turn. The Assistant's conversation is not a thread and runs as "The host enforces the managed-path exception" says.
+Issue threads and loop runs SHALL NOT start in the providers' YOLO mode. A Claude thread SHALL start with a permission mode that denies, without asking, every tool not allowed; the allowed tools SHALL be reading, file search, web search and fetch, writing and editing only under the scratch folder, the thread's workspace tools, and for each source in use its listed MCP tools and shell commands. A Codex thread SHALL start in the workspace-write sandbox rooted at the scratch folder, with no other writable root and with `sandbox_workspace_write.exclude_slash_tmp` and `sandbox_workspace_write.exclude_tmpdir_env_var` both true, so that its shell can write only the scratch folder and the device files Codex's sandbox always allows, such as `/dev/null`; it SHALL run with approvals never asked, shell network off and web search on, and with MCP servers limited to the listed tools. The host SHALL read the tools and MCP servers a run reports at its start, and SHALL stop the run, saying why, when it reports any it was not given. Codex reports no tools or MCP servers at a run's start, so for Codex the host SHALL check every MCP call as it is made and stop the run, saying why, at a call to a server or tool it was not given; and a Codex thread SHALL run with no user configuration and no project configuration or command rules read from its scratch folder, so that nothing a thread writes there can widen a later turn. The Assistant's conversation is not a thread and runs as "The Assistant acts on this Mac" says.
 
 #### Scenario: A shell write on Claude
 - **WHEN** a Claude issue thread tries `Bash(git commit -am wip)` in a repository

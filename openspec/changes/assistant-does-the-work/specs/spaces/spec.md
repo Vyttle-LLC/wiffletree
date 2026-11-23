@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Only the user creates or edits a Space
-Spaces SHALL be created, edited and removed only on the Spaces page of Settings, by the user, apart from the Spaces the host creates at upgrade, the default "Personal" Space, and the repositories a rule the human set adds (see "A Space can follow root folders"). No agent, the Assistant, issue thread, job run or workspace tool SHALL create, change or remove a Space or read its machine-local facts. The Assistant's sandbox (see assistant) SHALL refuse its writes to every Space's storage clone. Removing a Space SHALL ask first, SHALL be refused while a non-archived project belongs to it, an Assistant work item included, or when it is the last Space, SHALL move its archived projects to the "Personal" Space, creating it if it was removed, and SHALL leave its repository unchanged. Removing "Personal" itself SHALL be refused while archived projects belong to it, because they would have nowhere to go.
+Spaces SHALL be created, edited and removed only on the Spaces page of Settings, by the user, apart from the Spaces the host creates at upgrade, the default "Personal" Space, and the repositories a rule the human set adds (see "A Space can follow root folders"). No agent, the Assistant, issue thread, job run or workspace tool SHALL create, change or remove a Space or read its machine-local facts. The Assistant core SHALL say not to edit a Space's files in its storage clone, as an instruction the host does not enforce, as for every YOLO agent. Removing a Space SHALL ask first, SHALL be refused while a non-archived project belongs to it, an Assistant work item included, or when it is the last Space, SHALL move its archived projects to the "Personal" Space, creating it if it was removed, and SHALL leave its repository unchanged. Removing "Personal" itself SHALL be refused while archived projects belong to it, because they would have nowhere to go.
 
 #### Scenario: A fresh install
 - **WHEN** Wiffletree starts with no Space, on a new Mac or after an upgrade with no projects
@@ -13,7 +13,7 @@ Spaces SHALL be created, edited and removed only on the Spaces page of Settings,
 
 #### Scenario: An agent asks to change instructions
 - **WHEN** a coordinator or the Assistant is asked to add a rule to a Space's instructions
-- **THEN** no tool lets it, the Assistant cannot write the Space's file, and it can only suggest the user edit the Space in Settings
+- **THEN** no tool lets it, the Assistant does not edit the Space's file, and it can only suggest the user edit the Space in Settings
 
 #### Scenario: Removing a Space with a project
 - **WHEN** the user removes a Space that one open project belongs to
@@ -49,7 +49,7 @@ A Space's sources SHALL list the MCP servers and local CLIs its loops and the As
 ## ADDED Requirements
 
 ### Requirement: Connecting a source is one form
-A Space's page SHALL offer Add source, which lists the MCP servers configured for this Mac's Claude and Codex and a short list of well-known CLIs found on this Mac, and lets the human add one by hand. Choosing one SHALL start it as its provider would, list its tools, and show each with a suggested kind: read when the server marks it read-only or its name only reads, act otherwise, which the human may change, untick or mark Do without asking. When the server or CLI is not signed in, the form SHALL say so and show the sign-in command or link its own documentation gives, and SHALL check again on Try again; Wiffletree SHALL NOT run an app's sign-in flow itself or store its tokens. Saving SHALL write the source to `space.yaml`.
+A Space's page SHALL offer Add source, which lists the MCP servers configured for this Mac's Claude and Codex and a short list of well-known CLIs found on this Mac, and lets the human add one by hand. Choosing one SHALL start it as its provider would, list its tools, and show each with a suggested kind: read when the server marks it read-only or its name only reads, act otherwise, which the human may change, untick or mark Do without asking. When the server or CLI is not signed in, the form SHALL say so and show the sign-in command or link its own documentation gives, and SHALL check again on Try again; Wiffletree SHALL NOT run an app's sign-in flow itself or store its tokens. For a CLI, the form SHALL say that its act commands wait for a card only because the Assistant is told to run them through `act`, whereas an MCP server's act tools always do. Saving SHALL write the source to `space.yaml`.
 
 #### Scenario: Adding Google Calendar
 - **WHEN** the human chooses Add source on Personal and picks a configured Google Calendar MCP server
