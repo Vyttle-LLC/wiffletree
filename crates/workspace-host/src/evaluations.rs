@@ -902,8 +902,9 @@ impl Host {
         self.save_evaluation(&run)
     }
 
-    /// A run's turn has ended: at a usage limit it waits for the reset in the same session;
-    /// otherwise the run ends as stopped, failed or finished.
+    /// A run's turn has ended: at a usage limit an app run waits for the reset in the same
+    /// session, and a desktop run fails (`DESKTOP_AT_LIMIT`); otherwise the run ends as
+    /// stopped, failed or finished.
     pub(crate) fn evaluation_turn_ended(
         &mut self,
         session: &str,
