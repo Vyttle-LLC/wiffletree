@@ -49,15 +49,15 @@ The fixed core SHALL hold every sentence that names a workspace tool, a report k
 
 #### Scenario: An empty rewrite
 - **WHEN** every skill is rewritten to an empty text
-- **THEN** every role's instructions still name its workspace tools, the report kinds, the findings format, the publishing rules the human confirmed on October 13, 2026 and the process rules
+- **THEN** every role's instructions still name its workspace tools, the report kinds, the findings format, the publishing rules the human confirmed on October 13, 2026 as the guard changed them on November 23, 2026, and the process rules
 
 #### Scenario: A stock statement
 - **WHEN** every skill is at stock
 - **THEN** the coordinator's instructions state the stop rule, the implementer's state the objection rule, and the verifiers' define a blocking finding
 
 #### Scenario: Rules that contradict the core
-- **WHEN** the human's rules for Implementing say to push the branch with `git push`
-- **THEN** the rules are sent as written, the core still says never to push from the shell, and `publish_ticket` refuses what it refused before
+- **WHEN** the human's rules for Implementing say to push the branch with `git push origin main`
+- **THEN** the rules are sent as written, the core still says an implementer pushes only its own ticket's branch, the guard refuses the push, and `publish_ticket` refuses what it refused before
 
 ### Requirement: Stock skills are bundled and versioned
 Each stock skill and each part of the fixed core SHALL be bundled with the app and SHALL begin with its name and a version, changed whenever its text changes. A skill with no saved state SHALL be at stock.
@@ -290,7 +290,7 @@ The host SHALL keep skills in the `skills` folder of the shared folder (see sett
 - **THEN** they are in the shared folder's `skills/implementing/`, the history is unchanged, and implementers keep getting the rules
 
 ### Requirement: The Skills page
-The sidebar's Workspace section SHALL have a Behaviors row after Models, opening the Behaviors page, which was the Skills page; a link to a skill SHALL open that skill's page there. The page SHALL have a scope bar of Workspace, a Space and one of that Space's repositories, the repository choice off until a Space is chosen, and SHALL open at a scope it is given. At the scope it SHALL list each role's Behaviors, each with its name, what agents are told for its value, a switch or a pick, a chip naming the layer its value came from (Stock, Workspace, the Space, the repository, or "Set here" for the scope's own) and, for a value the scope sets, Reset to what the scope inherits. A Behavior the scope's layer may not set SHALL show its value read-only, and at a Space or repository a safety Behavior SHALL offer only the choices at least as strict as it inherits, with a line saying so. At the Workspace each role's additions SHALL be its skill's rules, edited on the skill's page; a Space and a repository SHALL each have one additions editor, and a shared Space's scope SHALL say it is shared with the Space's members. The page SHALL read and save each layer only through `layer_values` and `set_layer_values`, show a refusal beside what it refused, and write nothing without the human's action. At the Workspace only, an Advanced disclosure SHALL list the five skills, each with what it is for, the roles that use it and its state ("Stock", "Stock and N of your rules", "Rewritten", "Rewritten · updated", "Rewritten · out of date", "Rewritten · needs you"), and the fixed core, marked read-only. A skill's page SHALL show its stock text, its mode and editor, Save and Discard, Reset to stock, its history, and what the app's own operations enforce whatever the text says. It SHALL NOT claim the app enforces more: it SHALL say that an agent's shell is not sandboxed and can still push with the human's credentials. The fixed core's page SHALL show its text and why it cannot be edited. The Reviewing page SHALL show each review level's "Use it" line read-only, with a link to the Models page, and the Coordinating page SHALL link to the model guide.
+The sidebar's Workspace section SHALL have a Behaviors row after Models, opening the Behaviors page, which was the Skills page; a link to a skill SHALL open that skill's page there. The page SHALL have a scope bar of Workspace, a Space and one of that Space's repositories, the repository choice off until a Space is chosen, and SHALL open at a scope it is given. At the scope it SHALL list each role's Behaviors, each with its name, what agents are told for its value, a switch or a pick, a chip naming the layer its value came from (Stock, Workspace, the Space, the repository, or "Set here" for the scope's own) and, for a value the scope sets, Reset to what the scope inherits. A Behavior the scope's layer may not set SHALL show its value read-only, and at a Space or repository a safety Behavior SHALL offer only the choices at least as strict as it inherits, with a line saying so. At the Workspace each role's additions SHALL be its skill's rules, edited on the skill's page; a Space and a repository SHALL each have one additions editor, and a shared Space's scope SHALL say it is shared with the Space's members. The page SHALL read and save each layer only through `layer_values` and `set_layer_values`, show a refusal beside what it refused, and write nothing without the human's action. At the Workspace only, an Advanced disclosure SHALL list the five skills, each with what it is for, the roles that use it and its state ("Stock", "Stock and N of your rules", "Rewritten", "Rewritten · updated", "Rewritten · out of date", "Rewritten · needs you"), and the fixed core, marked read-only. A skill's page SHALL show its stock text, its mode and editor, Save and Discard, Reset to stock, its history, and what the app's own operations enforce whatever the text says, including that Wiffletree's guard refuses agents' pull request writes and every push but an implementer's to its own ticket's branch before its pull request is open. It SHALL NOT claim the app enforces more: it SHALL say that the guard is a guardrail, not a sandbox, so an agent's shell can still reach GitHub with the human's credentials through a full path to `git` or `gh` or a direct call. The fixed core's page SHALL show its text and why it cannot be edited. The Reviewing page SHALL show each review level's "Use it" line read-only, with a link to the Models page, and the Coordinating page SHALL link to the model guide.
 
 #### Scenario: Opening the page
 - **WHEN** the human chooses Behaviors in the sidebar
@@ -319,6 +319,10 @@ The sidebar's Workspace section SHALL have a Behaviors row after Models, opening
 #### Scenario: Updated and needs you
 - **WHEN** Coordinating was merged into v2 and its note is not dismissed, and Reviewing has a question waiting
 - **THEN** Advanced shows Coordinating as "Rewritten · updated" and Reviewing as "Rewritten · needs you", and the sidebar's Behaviors row and Advanced show the out-of-date mark for Reviewing
+
+#### Scenario: What the guard holds
+- **WHEN** the human opens Implementing
+- **THEN** the page says the guard refuses pull request writes and every push but the implementer's own branch, and that it is a guardrail, not a sandbox
 
 ### Requirement: The limits of skills are documented
 The README SHALL say that skills change how agents work but not what they may do, which the app enforces; that the human's rules win over the stock text; that a new release is merged into a rewrite automatically, with a model for overlapping passages, a note that can be reviewed or undone, and a question only when the two wordings disagree; and that an agent's shell can write the skills folder, as it can write the settings file.

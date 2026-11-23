@@ -55,7 +55,7 @@ if args[:1]==['app-server']:
     scratch=Path(os.environ['WORKSPACE_TEST_USAGE_DIR']);streams=Path(__file__).parent/'streams'
     plan=json.loads((scratch/'codex-compact.json').read_text()) if (scratch/'codex-compact.json').exists() else {}
     overrides=[tomllib.loads(o) for o in args[2::2]]
-    assert args[1::2]==['-c']*3 and [list(o)[0] for o in overrides]==['model_reasoning_effort','developer_instructions','mcp_servers'],args
+    assert args[1::2]==['-c']*4 and [list(o)[0] for o in overrides]==['model_reasoning_effort','developer_instructions','mcp_servers','allow_login_shell'],args
     requests=[json.loads(sys.stdin.readline()) for _ in range(4)]
     assert [(r.get('method'),r.get('id')) for r in requests]==[('initialize',1),('initialized',None),('thread/resume',2),('thread/compact/start',3)],requests
     # The real server ends when its input closes, whatever it was doing. The double logs

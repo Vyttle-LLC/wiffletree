@@ -97,6 +97,8 @@ pub struct Turn {
     pub thread: Option<ThreadLaunch>,
     /// A UI evaluator run's launch, which has no workspace server, credential or instructions.
     pub evaluator: Option<EvaluatorLaunch>,
+    /// The one branch the guard lets this turn's shell push, an implementer's own; see `guard`.
+    pub push_branch: Option<String>,
 }
 pub fn executable(provider: Provider) -> Result<PathBuf> {
     let name = match provider {
@@ -328,6 +330,7 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
     // Credentials go to the MCP subprocess environment, never in the prompt.
     cmd.env("WORKSPACE_SOCKET", &turn.socket)
         .env("WORKSPACE_TOKEN", &turn.token);
+    cmd.envs(guard::agent_env(turn.push_branch.as_deref()));
     if let Some(launch) = &turn.thread {
         match turn.session.provider {
             Provider::Claude => restricted::configure_claude(cmd, turn, launch),
@@ -376,7 +379,9 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
             }
             cmd.args(["-c",&format!("model_reasoning_effort={}",json!(turn.profile.effort))])
                 .args(["-c",&format!("developer_instructions={}",json!(instructions))])
-                .args(["-c",&format!("mcp_servers.agent_workspace={{required=true, default_tools_approval_mode=\"approve\", command={}, args=[\"agent-mcp\",{}], env_vars=[\"WORKSPACE_SOCKET\",\"WORKSPACE_TOKEN\"] }}",json!(turn.helper),json!(role))]);
+                .args(["-c",&format!("mcp_servers.agent_workspace={{required=true, default_tools_approval_mode=\"approve\", command={}, args=[\"agent-mcp\",{}], env_vars=[\"WORKSPACE_SOCKET\",\"WORKSPACE_TOKEN\"] }}",json!(turn.helper),json!(role))])
+                // A login shell rebuilds PATH, which would put the guard's folder behind others.
+                .args(["-c", "allow_login_shell=false"]);
             if compaction {
                 return;
             }
@@ -1045,6 +1050,7 @@ mod tests {
             instructions: String::new(),
             thread: None,
             evaluator: None,
+            push_branch: None,
         };
         let mut cmd = ProcessCommand::new("claude");
         configure(&mut cmd, &turn);
@@ -1213,6 +1219,7 @@ mod tests {
             instructions: skill(Role::ProjectOrchestrator),
             thread: None,
             evaluator: None,
+            push_branch: None,
         }
     }
 
@@ -1328,14 +1335,15 @@ mod tests {
             values.map(|(_, value)| value.clone()).collect()
         };
         let args = arguments(&compaction);
-        // The reasoning effort, the role instructions and the workspace's tool server are a
-        // turn's own, so the summary request shares the turns' prefix.
+        // The reasoning effort, the role instructions, the workspace's tool server and the
+        // shell setting are a turn's own, so the summary request shares the turns' prefix.
         let shared = overrides(&turn);
         assert_eq!(overrides(&compaction), shared);
         for (value, name) in shared.iter().zip([
             "model_reasoning_effort=",
             "developer_instructions=",
             "mcp_servers.agent_workspace=",
+            "allow_login_shell=false",
         ]) {
             assert!(value.starts_with(name), "{value}");
         }
@@ -1418,6 +1426,17 @@ mod tests {
         ]
         .map(|path| format!("--image={}", path.display()));
         assert_eq!(&args[args.len() - 3..args.len() - 1], images);
+    }
+
+    #[test]
+    fn codex_shells_keep_the_guard_first_on_path_in_turns_and_compactions() {
+        let mut compaction = turn(Provider::Codex, Some("thread"), vec![]);
+        compaction.kind = TurnKind::CodexCompaction { before: None };
+        for turn in [turn(Provider::Codex, None, vec![]), compaction] {
+            let args = arguments(&turn);
+            let at = args.iter().position(|a| a == "allow_login_shell=false");
+            assert!(at.is_some_and(|at| args[at - 1] == "-c"), "{args:?}");
+        }
     }
 
     #[test]

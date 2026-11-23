@@ -1098,7 +1098,8 @@ impl Host {
     /// Makes a fetch of GitHub's branch due when the PR's head is neither the worktree's HEAD
     /// nor contained in it, for a kept ticket with no cycle running, no publish request and no
     /// keeper work of its own, while no agent of the ticket is in a turn, unless the same two
-    /// heads were already found diverged.
+    /// heads were already found diverged or the PR's head was once the branch's tip here, such
+    /// as a commit the implementer pushed and then amended, which the next publish replaces.
     fn fetch_due(
         &mut self,
         ticket: &Ticket,
@@ -1130,6 +1131,7 @@ impl Host {
             unpushed.is_some_and(|l| !l.pushed && pair == (l.before.clone(), l.after.clone()));
         if unpushed
             || ancestry.contains(worktree, &pr.head, head)
+            || ancestry.is_earlier_tip(ticket)
             || self.keeper.diverged.get(&ticket.id) == Some(&pair)
             || !self.kept(ticket, repository, &self.session(&ticket.coordinator_id)?)?
             || self
@@ -3466,6 +3468,21 @@ pub(crate) mod tests {
         }
         // The same two heads are not fetched again.
         assert!(fetches(&mut f).is_empty());
+    }
+
+    #[test]
+    fn the_implementers_pushed_and_amended_commit_is_not_taken_for_a_diverged_branch() {
+        let (mut f, r) = kept();
+        let pushed = f.commit("d.txt", "wip\n");
+        let bare = r.bare.to_str().unwrap().to_owned();
+        let destination = format!("HEAD:refs/heads/{BRANCH}");
+        git(&f.worktree, &["push", "-q", &bare, &destination]);
+        let mut ticket = f.ticket();
+        ticket.pull_request.as_mut().unwrap().head = pushed;
+        f.host.save_ticket(&ticket).unwrap();
+        git(&f.worktree, &["commit", "-q", "--amend", "-m", "done"]);
+        assert!(fetches(&mut f).is_empty());
+        assert!(notices(&f.host).is_empty());
     }
 
     #[test]

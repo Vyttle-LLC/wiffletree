@@ -140,7 +140,7 @@ fn commit_size(worktree: &Path, base: &str, pushed: Option<&str>, commit: &str) 
 /// Git rewrites a URL given on the command line through `url.*.insteadOf` and
 /// `url.*.pushInsteadOf`, as it already did for the URL `origin` reports. A URL some rule still
 /// matches would be rewritten once more, to a destination nobody checked.
-fn ensure_not_rewritten(repository: &Path, push_url: &str) -> Result<()> {
+pub(crate) fn ensure_not_rewritten(repository: &Path, push_url: &str) -> Result<()> {
     let rules = runtime::git_answer(
         repository,
         &[
@@ -445,6 +445,24 @@ pub(crate) fn check_with_size(
     Ok(checked)
 }
 impl Host {
+    /// The branch the guard lets a session's shell push: an implementer's own ticket branch,
+    /// when it is not protected, the human allowed the repository's owner (see `guard`) and
+    /// the ticket has no open pull request, which a push would update with unreviewed commits.
+    pub(crate) fn push_branch(
+        &self,
+        session: &Session,
+        ticket: Option<&str>,
+    ) -> Result<Option<String>> {
+        let Some(ticket) = ticket.filter(|_| session.role == Role::Implementer) else {
+            return Ok(None);
+        };
+        let ticket = self.ticket(ticket)?;
+        let repository = self.ticket_repository(&ticket)?;
+        let may_push = ticket.open_pull_request().is_none()
+            && is_allowed(&repository, &self.settings().allowed_owners)
+            && !ProtectedBranches::of(&repository).protects(&ticket.branch);
+        Ok(may_push.then_some(ticket.branch))
+    }
     fn check_publish(
         &self,
         ticket: &Ticket,
@@ -2461,6 +2479,85 @@ pub(crate) mod tests {
         // The lease names the exact head that was once this branch's tip here.
         let lease = format!("--force-with-lease=refs/heads/{BRANCH}:{shell_pushed}");
         assert!(remote.git_calls().last().unwrap().contains(&lease));
+    }
+
+    /// Pushes the worktree's HEAD to the ticket's branch on the remote, as the guard lets the
+    /// implementer's shell do.
+    fn implementer_pushes(f: &Fixture, remote: &Remote) -> String {
+        let bare = remote.bare.to_str().unwrap();
+        let destination = format!("HEAD:refs/heads/{BRANCH}");
+        git(&f.worktree, &["push", "-q", bare, &destination]);
+        f.head()
+    }
+
+    #[test]
+    fn the_implementers_push_of_the_reviewed_commit_opens_the_pull_request_without_pushing() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        f.allow("allowed-org");
+        let pushed = implementer_pushes(&f, &remote);
+        let (_, step) = f.publish(&f.implementer.id.clone()).unwrap();
+        drive(&mut f, &remote, step);
+        assert_eq!(remote.branch(BRANCH), Some(pushed));
+        assert_eq!(pushes(&remote), 0);
+        assert_eq!(remote.github.lock().unwrap().created.len(), 1);
+    }
+
+    #[test]
+    fn the_implementers_push_of_an_earlier_commit_is_pushed_over_as_usual() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        f.allow("allowed-org");
+        let earlier = implementer_pushes(&f, &remote);
+        let reviewed = f.commit("c.txt", "three\n");
+        f.review(VerificationOutcome::Passed);
+        let (_, step) = f.publish(&f.implementer.id.clone()).unwrap();
+        drive(&mut f, &remote, step);
+        assert_eq!(remote.branch(BRANCH), Some(reviewed));
+        let push = remote
+            .git_calls()
+            .into_iter()
+            .find(|c| c[0] == "push")
+            .unwrap();
+        assert!(
+            push.iter().all(|arg| !arg.starts_with("--force")),
+            "{push:?}"
+        );
+        assert!(is_ancestor(&f.worktree, &earlier, &f.head()));
+        assert_eq!(remote.github.lock().unwrap().created.len(), 1);
+    }
+
+    #[test]
+    fn only_an_implementer_of_an_allowed_owner_may_push_its_unprotected_branch() {
+        let mut f = fixture();
+        let branch = f.ticket().branch;
+        let ticket = f.ticket.clone();
+        let may_push =
+            |f: &Fixture, session: &Session| f.host.push_branch(session, Some(&ticket)).unwrap();
+        assert_eq!(may_push(&f, &f.implementer), None);
+        f.allow("allowed-org");
+        assert_eq!(may_push(&f, &f.implementer), Some(branch.clone()));
+        assert_eq!(f.host.push_branch(&f.implementer, None).unwrap(), None);
+        for role in [Role::Reviewer, Role::Tester] {
+            let verifier = f
+                .host
+                .assign_ticket(&ticket, role, Provider::Claude, "Check", None)
+                .unwrap();
+            assert_eq!(may_push(&f, &verifier), None);
+        }
+        assert_eq!(may_push(&f, &f.coordinator), None);
+        // Once its pull request is open, a push would add unreviewed commits to it.
+        watch_open_pr(&mut f, 45);
+        assert_eq!(may_push(&f, &f.implementer), None);
+        let mut ticket_record = f.ticket();
+        ticket_record.pull_request = None;
+        f.host.save_ticket(&ticket_record).unwrap();
+        assert_eq!(may_push(&f, &f.implementer), Some(branch.clone()));
+        let repository = f.ticket().repository_id;
+        f.host
+            .set_protected_branch(&repository, &branch, true)
+            .unwrap();
+        assert_eq!(may_push(&f, &f.implementer), None);
     }
 
     #[test]
