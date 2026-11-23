@@ -10,6 +10,53 @@ pub const STOPPING: (&str, &str) = ("Stopping…", "Giving your screen back");
 /// The gap between the panel and the screen's edges, in points.
 const MARGIN: f64 = 12.;
 
+/// The panel's size in points, normally and over a full-screen app.
+pub const FULL: (f64, f64) = (460., 52.);
+pub const COMPACT: (f64, f64) = (210., 36.);
+
+/// Where each part of the panel sits, in its own points from the bottom left.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layout {
+    pub size: (f64, f64),
+    pub dot: Rect,
+    pub title: Rect,
+    pub detail: Rect,
+    /// The Esc hint; the compact panel has none.
+    pub esc: Option<Rect>,
+    pub stop: Rect,
+}
+
+/// The panel's parts, normally or compact. Stop always sits wholly inside, clear of the text.
+pub fn layout(compact: bool) -> Layout {
+    let rect = |x, y, width, height| Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    let (width, height) = if compact { COMPACT } else { FULL };
+    let stop = rect(width - 66., (height - 26.) / 2., 56., 26.);
+    if compact {
+        Layout {
+            size: (width, height),
+            dot: rect(12., height / 2. - 4.5, 9., 9.),
+            title: rect(28., 10., 66., 16.),
+            detail: rect(96., 10., 44., 16.),
+            esc: None,
+            stop,
+        }
+    } else {
+        Layout {
+            size: (width, height),
+            dot: rect(12., height / 2. - 4.5, 9., 9.),
+            title: rect(30., 27., 318., 17.),
+            detail: rect(30., 9., 318., 16.),
+            esc: Some(rect(width - 104., (height - 16.) / 2., 30., 16.)),
+            stop,
+        }
+    }
+}
+
 /// What the run tells the panel about itself.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Run {
@@ -211,6 +258,44 @@ mod tests {
         assert_eq!(elapsed(Duration::from_secs(725)), "12:05");
         assert_eq!(elapsed(Duration::from_secs(3729)), "1:02:09");
         assert_eq!(elapsed(Duration::ZERO), "0:00");
+    }
+
+    /// The human saw the Esc hint but no Stop: Stop must lie wholly inside the panel, clear of
+    /// everything else, in both forms.
+    #[test]
+    fn stop_is_inside_the_panel_and_clear_of_its_text_in_both_forms() {
+        let inside = |part: Rect, (width, height): (f64, f64)| {
+            part.x >= 0.
+                && part.y >= 0.
+                && part.x + part.width <= width
+                && part.y + part.height <= height
+        };
+        let apart = |a: Rect, b: Rect| {
+            a.x + a.width <= b.x
+                || b.x + b.width <= a.x
+                || a.y + a.height <= b.y
+                || b.y + b.height <= a.y
+        };
+        for compact in [false, true] {
+            let parts = layout(compact);
+            assert!(
+                parts.stop.width >= 44. && parts.stop.height >= 24.,
+                "{parts:?}"
+            );
+            let others = [
+                Some(parts.dot),
+                Some(parts.title),
+                Some(parts.detail),
+                parts.esc,
+            ];
+            for part in others.into_iter().flatten().chain([parts.stop]) {
+                assert!(inside(part, parts.size), "{compact} {part:?}");
+            }
+            for part in others.into_iter().flatten() {
+                assert!(apart(part, parts.stop), "{compact} {part:?} overlaps Stop");
+            }
+            assert_eq!(parts.esc.is_some(), !compact);
+        }
     }
 
     #[test]

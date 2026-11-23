@@ -13,10 +13,10 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBitmapImageFileType,
-    NSBitmapImageRep, NSBox, NSBoxType, NSButton, NSColor, NSEvent, NSFont, NSMenu, NSMenuItem,
-    NSPanel, NSRunningApplication, NSScreen, NSStatusBar, NSStatusItem, NSStatusWindowLevel,
-    NSTextField, NSTitlePosition, NSView, NSWindowCollectionBehavior, NSWindowStyleMask,
-    NSWorkspace,
+    NSBitmapImageRep, NSBox, NSBoxType, NSColor, NSEvent, NSFont, NSMenu, NSMenuItem, NSPanel,
+    NSRunningApplication, NSScreen, NSStatusBar, NSStatusItem, NSStatusWindowLevel,
+    NSTextAlignment, NSTextField, NSTitlePosition, NSView, NSWindowCollectionBehavior,
+    NSWindowStyleMask, NSWorkspace,
 };
 use objc2_core_foundation::{
     CFMachPort, CFRetained, CFRunLoop, CGPoint, CGRect, CGSize, kCFRunLoopCommonModes,
@@ -579,13 +579,57 @@ define_class!(
         fn stop(&self, _sender: Option<&AnyObject>) {
             stop_run(StopSource::MenuBar);
         }
+    }
+);
 
-        #[unsafe(method(panelStop:))]
-        fn panel_stop(&self, _sender: Option<&AnyObject>) {
+define_class!(
+    // SAFETY: NSView has no subclassing requirements beyond those met here, and this class has
+    // no Drop.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "WiffletreeEvaluatorStopControl"]
+    /// The panel's Stop: it takes the first click, though the panel is never key and the
+    /// helper never active, and ends the run as Esc does.
+    struct StopControl;
+
+    impl StopControl {
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            true
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, _event: &NSEvent) {
             stop_run(StopSource::Panel);
         }
     }
 );
+
+/// Renders the panel off screen to `path`, normally or compact, so its look can be checked
+/// without a run or any grant.
+pub fn preview(path: &std::path::Path, compact: bool) -> Result<()> {
+    let Some(mtm) = MainThreadMarker::new() else {
+        bail!("The preview must run on the main thread");
+    };
+    let run = panel::Run {
+        model: "Claude Opus 5.5".into(),
+        apps: vec!["Calculator".into(), "TextEdit".into(), "Preview".into()],
+        queued: 2,
+    };
+    let panel = Panel::build(run.clone(), mtm);
+    panel.lay_out(compact);
+    let elapsed = Duration::from_secs(42);
+    let (title, detail) = match compact {
+        false => (panel::TITLE.to_owned(), panel::detail(&run, elapsed)),
+        true => ("Evaluator".to_owned(), panel::elapsed(elapsed)),
+    };
+    panel.title.setStringValue(&NSString::from_str(&title));
+    panel.detail.setStringValue(&NSString::from_str(&detail));
+    let size = panel::layout(compact).size;
+    panel.window.setContentSize(NSSize::new(size.0, size.1));
+    std::fs::write(path, panel.png()?)?;
+    Ok(())
+}
 
 /// The menu bar item that shows for the whole run, with Stop.
 fn status_item(run: &str, mtm: MainThreadMarker) -> (Retained<NSStatusItem>, Retained<StopTarget>) {
@@ -637,14 +681,14 @@ pub fn run_app(
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     escape_ready(listen_for_escape(control));
-    let (_item, target) = status_item(run, mtm);
+    let _item = status_item(run, mtm);
     let names = apps.iter().map(|app| app_name(app)).collect();
     let run = panel::Run {
         model,
         apps: names,
         queued,
     };
-    let _panel = Panel::show(run, &target, mtm);
+    let _panel = Panel::show(run, mtm);
     app.run();
     Ok(())
 }
@@ -660,9 +704,6 @@ fn app_name(bundle_id: &str) -> String {
 
 /// Where the panel's corner is kept between runs, in the helper's own defaults.
 const CORNER_KEY: &str = "panelCorner";
-/// The panel's size in points, normally and over a full-screen app.
-const FULL: (f64, f64) = (400., 52.);
-const COMPACT: (f64, f64) = (210., 36.);
 
 /// The floating control panel: above every window, on every Space and over full-screen apps,
 /// for the whole run. It never activates the helper, so a click on it leaves the app under test
@@ -675,14 +716,30 @@ struct Panel {
     title: Retained<NSTextField>,
     detail: Retained<NSTextField>,
     esc: Retained<NSTextField>,
-    stop: Retained<NSButton>,
+    /// Stop's red fill, its label, and the transparent control over both that takes the click.
+    stop_fill: Retained<NSBox>,
+    stop_label: Retained<NSTextField>,
+    stop: Retained<StopControl>,
     run: panel::Run,
     started: std::time::Instant,
     corner: std::cell::Cell<Corner>,
     compact: std::cell::Cell<Option<bool>>,
 }
 impl Panel {
-    fn show(run: panel::Run, target: &StopTarget, mtm: MainThreadMarker) -> Rc<Self> {
+    /// Shows the panel for the whole run, updating it twice a second.
+    fn show(run: panel::Run, mtm: MainThreadMarker) -> Rc<Self> {
+        let panel = Rc::new(Self::build(run, mtm));
+        panel.update();
+        panel.window.orderFrontRegardless();
+        let ticking = panel.clone();
+        let tick = RcBlock::new(move |_timer: NonNull<NSTimer>| ticking.update());
+        // SAFETY: the timer runs on the main run loop, where the panel lives.
+        unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.5, true, &tick) };
+        panel
+    }
+
+    /// The panel and its parts, laid out, not yet on screen.
+    fn build(run: panel::Run, mtm: MainThreadMarker) -> Self {
         let label = |size: f64, bold: bool, white: f64| {
             let field = NSTextField::labelWithString(&NSString::from_str(""), mtm);
             let font = match bold {
@@ -716,19 +773,21 @@ impl Panel {
         let dot = rounded(&red, None, 4.5);
         let esc = label(10., false, 0.8);
         esc.setStringValue(&NSString::from_str("Esc"));
-        // SAFETY: `panelStop:` is the target's action, and the target lives as long as the app.
-        let stop = unsafe {
-            NSButton::buttonWithTitle_target_action(
-                &NSString::from_str("Stop"),
-                Some(target),
-                Some(sel!(panelStop:)),
-                mtm,
-            )
+        // Drawn with its own colors rather than as a system button: the helper is never the
+        // active app, so a system button draws its inactive, near-invisible style and may spend
+        // its first click on the panel.
+        let stop_fill = rounded(&red, None, 7.);
+        let stop_label = label(12., true, 1.);
+        stop_label.setStringValue(&NSString::from_str("Stop"));
+        stop_label.setAlignment(NSTextAlignment::Center);
+        let stop: Retained<StopControl> = {
+            let this = StopControl::alloc(mtm).set_ivars(());
+            // SAFETY: NSView's designated initializer.
+            unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] }
         };
-        stop.setBezelColor(Some(&red));
         let window = NSPanel::initWithContentRect_styleMask_backing_defer(
             NSPanel::alloc(mtm),
-            NSRect::new(NSPoint::ZERO, NSSize::new(FULL.0, FULL.1)),
+            NSRect::new(NSPoint::ZERO, NSSize::new(panel::FULL.0, panel::FULL.1)),
             NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
             NSBackingStoreType::Buffered,
             false,
@@ -752,10 +811,20 @@ impl Panel {
         window.setMovableByWindowBackground(true);
         let content = NSView::initWithFrame(
             NSView::alloc(mtm),
-            NSRect::new(NSPoint::ZERO, NSSize::new(FULL.0, FULL.1)),
+            NSRect::new(NSPoint::ZERO, NSSize::new(panel::FULL.0, panel::FULL.1)),
         );
         let (title, detail) = (label(12., true, 1.), label(11., false, 0.8));
-        let views: [&NSView; 6] = [&background, &dot, &title, &detail, &esc, &stop];
+        // Stop's control last, so it is above its fill and label and takes their clicks.
+        let views: [&NSView; 8] = [
+            &background,
+            &dot,
+            &title,
+            &detail,
+            &esc,
+            &stop_fill,
+            &stop_label,
+            &stop,
+        ];
         for view in views {
             content.addSubview(view);
         }
@@ -763,25 +832,22 @@ impl Panel {
         let corner = NSUserDefaults::standardUserDefaults()
             .stringForKey(&NSString::from_str(CORNER_KEY))
             .map_or_else(Corner::default, |key| Corner::from_key(&key.to_string()));
-        let panel = Rc::new(Self {
+        let panel = Self {
             window,
             background,
             dot,
             title,
             detail,
             esc,
+            stop_fill,
+            stop_label,
             stop,
             run,
             started: std::time::Instant::now(),
             corner: std::cell::Cell::new(corner),
             compact: std::cell::Cell::new(None),
-        });
-        panel.update();
-        panel.window.orderFrontRegardless();
-        let ticking = panel.clone();
-        let tick = RcBlock::new(move |_timer: NonNull<NSTimer>| ticking.update());
-        // SAFETY: the timer runs on the main run loop, where the panel lives.
-        unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.5, true, &tick) };
+        };
+        panel.lay_out(false);
         panel
     }
 
@@ -824,8 +890,9 @@ impl Panel {
         };
         self.title.setStringValue(&NSString::from_str(&title));
         self.detail.setStringValue(&NSString::from_str(&detail));
-        self.stop.setEnabled(!stopping);
-        let size = if compact { COMPACT } else { FULL };
+        self.stop_fill.setHidden(stopping);
+        self.stop_label.setHidden(stopping);
+        let size = if compact { panel::COMPACT } else { panel::FULL };
         let visible = self.visible();
         let frame = self.window.frame();
         let at = Rect {
@@ -860,24 +927,52 @@ impl Panel {
         }
     }
 
-    /// Positions the views for the full panel or the compact one.
+    /// Positions the views for the full panel or the compact one (`panel::layout`).
     fn lay_out(&self, compact: bool) {
-        let rect =
-            |x: f64, y: f64, w: f64, h: f64| NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
-        let (width, height) = if compact { COMPACT } else { FULL };
-        self.background.setFrame(rect(0., 0., width, height));
-        self.dot.setFrame(rect(12., height / 2. - 4.5, 9., 9.));
-        if compact {
-            self.title.setFrame(rect(28., 10., 72., 16.));
-            self.detail.setFrame(rect(100., 10., 46., 16.));
-            self.esc.setHidden(true);
-            self.stop.setFrame(rect(width - 64., 4., 56., 28.));
-        } else {
-            self.title.setFrame(rect(30., 26., 270., 17.));
-            self.detail.setFrame(rect(30., 8., 270., 16.));
-            self.esc.setHidden(false);
-            self.esc.setFrame(rect(width - 96., 18., 28., 14.));
-            self.stop.setFrame(rect(width - 64., 12., 56., 28.));
+        let rect = |part: Rect| {
+            NSRect::new(
+                NSPoint::new(part.x, part.y),
+                NSSize::new(part.width, part.height),
+            )
+        };
+        let parts = panel::layout(compact);
+        let (width, height) = parts.size;
+        self.background
+            .setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(width, height)));
+        self.dot.setFrame(rect(parts.dot));
+        self.title.setFrame(rect(parts.title));
+        self.detail.setFrame(rect(parts.detail));
+        self.esc.setHidden(parts.esc.is_none());
+        if let Some(esc) = parts.esc {
+            self.esc.setFrame(rect(esc));
         }
+        self.stop_fill.setFrame(rect(parts.stop));
+        let label = Rect {
+            y: parts.stop.y + (parts.stop.height - 16.) / 2.,
+            height: 16.,
+            ..parts.stop
+        };
+        self.stop_label.setFrame(rect(label));
+        self.stop.setFrame(rect(parts.stop));
+    }
+
+    /// Draws the panel's own view into a PNG, off screen, as `panel-preview` does: a view may
+    /// always be drawn by its own app, with no Screen Recording grant.
+    fn png(&self) -> Result<Vec<u8>> {
+        let content = self.window.contentView().context("The panel has no view")?;
+        let bounds = content.bounds();
+        let bitmap = content
+            .bitmapImageRepForCachingDisplayInRect(bounds)
+            .context("macOS could not make the preview's bitmap")?;
+        content.cacheDisplayInRect_toBitmapImageRep(bounds, &bitmap);
+        // SAFETY: an empty properties dictionary.
+        let png = unsafe {
+            bitmap.representationUsingType_properties(
+                NSBitmapImageFileType::PNG,
+                &NSDictionary::new(),
+            )
+        }
+        .context("macOS could not encode the preview")?;
+        Ok(png.to_vec())
     }
 }

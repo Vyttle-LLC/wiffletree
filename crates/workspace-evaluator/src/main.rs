@@ -6,6 +6,7 @@
 //! - `serve <socket> <run> [--model <label>] [--queued <n>] <bundle id>…` serves the run on its
 //!   socket (see `protocol`) and shows the floating control panel (see `panel`).
 //! - `check` prints the helper's grants as JSON.
+//! - `panel-preview <png> [--compact]` draws the control panel off screen into a PNG.
 //! - `request` asks macOS for both grants, which shows its prompts, waits up to two minutes
 //!   for both, then prints them.
 #[cfg(target_os = "macos")]
@@ -43,6 +44,9 @@ fn run(mode: &str, args: &[String]) -> Result<()> {
         ("serve", [socket, run, rest @ ..]) => {
             let (model, queued, apps) = panel::options(rest)?;
             serve(socket.as_ref(), run, apps, model, queued)
+        }
+        ("panel-preview", [path, rest @ ..]) => {
+            macos::preview(path.as_ref(), rest == ["--compact"])
         }
         ("check", []) => {
             print(macos::grants(false));
