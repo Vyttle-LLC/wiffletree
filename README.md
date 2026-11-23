@@ -181,7 +181,7 @@ The full explanation of everything below is in **[docs/FEATURES.md](docs/FEATURE
 > Read this before you add a repository. The [full text](docs/FEATURES.md#safety) gives every condition.
 >
 > - **Permission prompts are bypassed,** so add only repositories you are comfortable letting agents change.
-> - **Agents can run any command on your Mac with your credentials,** including a push or a merge. Wiffletree does not prevent that.
+> - **Agents can run any command on your Mac with your credentials.** Wiffletree's guard refuses their pull request writes and every push but an implementer's to its own ticket's branch, but it is a guardrail, not a sandbox: a full path to `git` or `gh`, or a call to GitHub with your token, still gets through.
 > - **Wiffletree pushes and opens pull requests itself:** without asking for owners you allow, and after your approval elsewhere.
 > - **It merges through its checked merge,** when the coordinator asks, for allowed owners, and never into a protected branch.
 > - **A Space's repository takes direct pushes.** Every log entry, issue change and compile is a commit on `main` with no review, and anyone with write access can change anything there.

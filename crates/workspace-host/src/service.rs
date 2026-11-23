@@ -3254,6 +3254,21 @@ impl Actor {
                             )?;
                             return Ok(None);
                         }
+                        // Git waits on GitHub, so the branch is created off the host thread.
+                        "create_branch" => {
+                            only_arguments(
+                                "create_branch",
+                                &args,
+                                &["repository_id", "branch", "start"],
+                            )?;
+                            let creation = self.host.prepare_branch(&id, &args)?;
+                            let (git, reply) = (self.publish_tools.git.clone(), reply.clone());
+                            std::thread::spawn(move || {
+                                let created = creation.run(&git).map_err(|e| format!("{e:#}"));
+                                let _ = reply.try_send(created);
+                            });
+                            return Ok(None);
+                        }
                         "merge_ticket" => {
                             only_arguments("merge_ticket", &args, &["ticket_id", "waived"])?;
                             let ticket = args["ticket_id"].as_str().context("Missing ticket_id")?;
@@ -4971,6 +4986,8 @@ impl Actor {
             instructions: role_instructions,
             thread: None,
             evaluator: None,
+            // A compaction runs no shell command.
+            push_branch: None,
         };
         self.run_provider(turn, cancel);
         Ok(())
@@ -5303,6 +5320,9 @@ impl Actor {
         if evaluator.is_some() {
             self.host.evaluation_turn_started(&session.id)?;
         }
+        let push_branch = self
+            .host
+            .push_branch(&session, runtime.ticket_id.as_deref())?;
         let started_at = now();
         let detail = json!({"profile":profile,"provider_session_id":runtime.provider_session_id,"skill_version":1,"selection":runtime.selection,"model_selection_revision":self.host.model_selection()?.revision});
         runtime.last_error = None;
@@ -5333,6 +5353,7 @@ impl Actor {
             instructions,
             thread,
             evaluator,
+            push_branch,
         };
         let mut active = Active::new(
             run.clone(),

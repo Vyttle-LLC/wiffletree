@@ -241,7 +241,7 @@ code{font:11px ui-monospace,monospace;background:var(--overlay);padding:1px 4px;
 
 Use send_message for a specific decision or instruction; recipient must be your parent or a direct child. Use report immediately when blocked, ready for testing, or finished; it always reaches your parent. …
 
-Nothing leaves this machine from your shell: never run git push, and never create, edit, comment on, review, close or merge a pull request yourself. To push a ticket’s branch and open or update its pull request, call publish_ticket once the ticket’s review has ended. … Only the human merges.
+Wiffletree guards your shell’s git and gh: they refuse every push and every GitHub write it does not allow. Only an implementer may push, and only its own ticket’s branch to origin. … Never create, edit, comment on, review, close or merge a pull request yourself. To open or update a ticket’s pull request, call publish_ticket once the ticket’s review has ended. … Only the human merges into a protected branch.
 
 Your instructions end with a skill, the human’s own way of working for your role; where it disagrees with this contract, the contract’s tools and rules still apply, because the workspace enforces them.</div>
         <div class="under"><span>Bundled with Wiffletree · changes only with a new release</span><span>no Save, no Reset</span></div>
@@ -270,8 +270,8 @@ Keep commits small, with messages in the imperative.<span class="caret"></span><
 
         <div class="enforced">
           <div><b><svg class="i"><use href="#shield"/></svg>The app enforces, whatever this says</b>
-            <ul><li>One ticket, in its own worktree and branch</li><li>“Ready for testing” is refused with uncommitted files</li><li>Wiffletree pushes and opens pull requests only through its publishing, which checks the review and the owners you allowed</li><li>Wiffletree has no tool that merges</li></ul>
-            <p class="small" style="margin:6px 0 0;color:var(--yellow)">Not enforced: an agent’s shell isn’t sandboxed, so it can still run <span class="mono">git push</span> with your credentials.</p></div>
+            <ul><li>One ticket, in its own worktree and branch</li><li>“Ready for testing” is refused with uncommitted files</li><li>The shell’s git pushes only the ticket’s own branch, where you allowed the owner, and gh only reads</li><li>Pull requests open and update only through Wiffletree’s publishing, which checks the review and the owners you allowed</li><li>Only the coordinator merges, through Wiffletree, never into a protected branch</li></ul>
+            <p class="small" style="margin:6px 0 0;color:var(--yellow)">A guardrail, not a sandbox: an agent’s shell still runs as you, so a full path to <span class="mono">git</span> or <span class="mono">gh</span>, or a direct call to GitHub with your token, isn’t stopped.</p></div>
           <div><b><svg class="i"><use href="#pen"/></svg>This text decides</b>
             <ul><li>How to work and which checks to run</li><li>How big a fix is</li><li>When to object to a finding</li><li>How to write commits and pull requests</li></ul></div>
         </div>
@@ -431,7 +431,7 @@ Name every ticket after its outcome, not its files.</div>
 </div>
 
 <ul class="notes">
-  <li><b>What changes when you edit.</b> How agents work, from each one’s next turn. Not what Wiffletree’s own tools allow: its publishing, review rules and limits are enforced by the app. An agent’s shell isn’t sandboxed, so it can still run <span class="mono">git push</span> whatever a skill says.</li>
+  <li><b>What changes when you edit.</b> How agents work, from each one’s next turn. Not what Wiffletree’s own tools allow: its publishing, review rules and limits are enforced by the app. Wiffletree’s guard refuses an agent’s pull request writes and every push but an implementer’s to its own branch, whatever a skill says; it is a guardrail, not a sandbox, so a full path to <span class="mono">git</span> or <span class="mono">gh</span> still runs with your credentials.</li>
   <li><b>Wiffletree doesn’t judge an edit.</b> Any text up to 32,000 characters is accepted, even an empty rewrite, because the fixed core reaches every agent either way.</li>
   <li><b>Where skills are kept.</b> In a <span class="mono">skills</span> folder in Wiffletree’s data folder, as plain text with one file per history entry, ready to move into a settings repository later. Agents’ shells can write that folder, as they can write the settings file.</li>
   <li><b>No model is used</b> for any of this. Showing what changed between stock versions is a plain line comparison.</li>

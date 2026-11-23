@@ -57,6 +57,7 @@ fn evaluate(
             folder: folder.into(),
             codex_home: codex_home.into(),
         }),
+        push_branch: None,
     };
     let (mut reply, mut failure, mut reported) = (String::new(), None, None);
     provider::run(
