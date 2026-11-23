@@ -16,7 +16,7 @@ Each repository a Space lists SHALL have an optional app and an optional layer, 
 - **THEN** Celadon's projects read it as "frontend" and Vyttle's as untagged
 
 ### Requirement: Tags are edited on the Space's Repositories list
-The Space's page SHALL show App and Layer beside each of its code repositories. Each SHALL be a menu of the Space's values with "None" and a field to type a new value; a typed value SHALL join the Space's vocabulary and be offered for every repository in the Space. Removing a value from the vocabulary SHALL first say which repositories use it, and on confirming SHALL clear it from them. When a repository is added to the Space, by the human or a followed root, the add SHALL suggest the tags of the Space's repository whose name shares the longest leading run of hyphen-separated words with it, and none when no name shares a first word. A suggestion from the human's add SHALL apply only once the human confirms it; a repository a followed root adds SHALL stay untagged.
+The Space's page SHALL show App and Layer beside each of its code repositories. Each SHALL be a menu of the Space's values with "None" and a field to type a new value; a typed value SHALL join the Space's vocabulary and be offered for every repository in the Space. Removing a value from the vocabulary SHALL first say which repositories use it, and on confirming SHALL clear it from them. When a repository is added to the Space, by the human or a followed root, the add SHALL suggest the tags of the Space's repository whose name shares the longest leading run of hyphen-separated words with it, the alphabetically first such name when several tie, and none when no name shares a first word. A suggestion from the human's add SHALL apply only once the human confirms it; a repository a followed root adds SHALL stay untagged.
 
 #### Scenario: A typed value becomes a choice
 - **WHEN** the human types "web" as the app of `celadon-theme/website`
@@ -25,6 +25,10 @@ The Space's page SHALL show App and Layer beside each of its code repositories. 
 #### Scenario: A suggestion
 - **WHEN** the human adds `celadon-theme/palette-cli` to Celadon, where `celadon-theme/palette-api` has layer "backend" and no app
 - **THEN** the add suggests no app and layer "backend", and the repository is tagged only once the human confirms
+
+#### Scenario: A tie
+- **WHEN** the human adds `celadon-theme/palette-cli` to Celadon, where `palette-build` and `palette-api` both share "palette" and nothing shares more
+- **THEN** the add suggests the tags of `palette-api`
 
 #### Scenario: Nothing to suggest
 - **WHEN** the human adds `celadon-theme/wallpapers` and no repository in Celadon shares its first word
@@ -35,7 +39,7 @@ The Space's page SHALL show App and Layer beside each of its code repositories. 
 - **THEN** the page names both before asking, and on confirming both have no layer
 
 ### Requirement: A project's tags come from its tickets' repositories
-The host SHALL derive a project's apps and layers as the union of the tags, in its Space, of the repositories of all its tickets, in any state, open, accepted or closed. A project with tickets but no app among its repositories SHALL be "no app", and one with no layer "no layer"; an untagged repository SHALL otherwise add nothing. A project with no tickets SHALL have no tags and SHALL be "not started". The tags SHALL be recomputed when a ticket is created and when its Space's tags change, SHALL be given on the project in every snapshot and in the coordinator's `workspace_context`, and SHALL never be set by hand.
+The host SHALL derive a project's apps and layers as the union of the tags, in its Space, of the repositories of all its tickets, in any state, open, accepted or closed. A project with tickets but no app among its repositories SHALL be "no app", and one with no layer "no layer"; an untagged repository SHALL otherwise add nothing. A project with no tickets SHALL have no tags and SHALL be "not started". The tags SHALL be recomputed when a ticket is created, when its Space's tags change and when the project moves to another Space, SHALL be given on the project in every snapshot and in the coordinator's `workspace_context`, and SHALL never be set by hand.
 
 #### Scenario: Two repositories
 - **WHEN** "Contrast warnings" has a ticket in `nvim` (nvim, frontend) and a closed one in `palette-api` (no app, backend)
@@ -48,6 +52,10 @@ The host SHALL derive a project's apps and layers as the union of the tags, in i
 #### Scenario: Not started
 - **WHEN** a project has no tickets
 - **THEN** it has no tags and is "not started"
+
+#### Scenario: Moving to another Space
+- **WHEN** a project with a ticket in `celadon-theme/website`, layer "frontend" in Celadon and untagged in Vyttle, moves from Celadon to Vyttle
+- **THEN** its next snapshot no longer gives it "frontend"
 
 #### Scenario: Retagging a repository
 - **WHEN** the human changes `google-chrome`'s app from "chrome" to "browser"

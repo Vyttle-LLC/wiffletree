@@ -3,7 +3,7 @@ Six slices, one ticket each. Dependencies:
 - (a) depends on nothing.
 - (b) depends on (a).
 - (c) depends on nothing, and can run beside (a) and (b).
-- (d) depends on (a).
+- (d) depends on (a) and (b): its tree draws the hollow badge from (b)'s routing state. Task 4.3 owns the hollow badge on a child's row; 2.7 does not draw it.
 - (e) depends on (b), (c) and (d).
 - (f) depends on (a) and (c); its hollow badge on child cards needs (b).
 
@@ -32,7 +32,7 @@ Six slices, one ticket each. Dependencies:
 - [ ] 2.4 The answer resumes the child as a human answer does and counts for `questions_waiting`.
 - [ ] 2.5 The one-line notice to the parent when the human answers or messages a child, delivered with its next turn without starting one.
 - [ ] 2.6 Inbox, needs-you counts and the snapshot count only items with the human; the snapshot carries each project's count with its parent for the hollow badge.
-- [ ] 2.7 Desktop: the escalated Inbox label "<child> · via <parent>" with the note, and the hollow badge on a child's row.
+- [ ] 2.7 Desktop: the escalated Inbox label "<child> · via <parent>" with the note.
 - [ ] 2.8 Tests: answered by the parent, escalated, a race either way, an approval skipping the parent, a child unfiled with questions waiting, the notice not starting a turn, a restart with a question with the parent.
 
 ## 3. Slice (c) — Space repository tags and derived project tags

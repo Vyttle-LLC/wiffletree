@@ -45,7 +45,7 @@ The Outcome lens SHALL list, in each Space's section, its loose projects and its
 A parent row SHALL show a chevron, and activating the chevron SHALL collapse or expand its children. Collapsed, the row SHALL show "+N", where N is its number of shown children, and the most urgent state among the parent and its shown children: the number of items that need the human when there are any, otherwise the number of stuck agents as the stuck pill when there are any, otherwise blocked when a row would show blocked, otherwise working when a row would show working, and otherwise nothing. Parents SHALL start expanded at app start. Selecting a child inside a collapsed parent, such as from the Inbox, the Agents panel or a notification, SHALL expand it.
 
 #### Scenario: Collapsed with a question
-- **WHEN** "Neovim" is collapsed with two children, and one child has a question with the human
+- **WHEN** "Accessible contrast" is collapsed with two children, and one child has a question with the human
 - **THEN** its row shows "+2" and the needs-you count "1"
 
 #### Scenario: Questions with the parent do not count
@@ -102,14 +102,14 @@ The App lens SHALL list, in each Space's section, one bucket for each app of the
 The Me lens SHALL list, in each Space's section, up to four buckets in this order, each only when it holds an entry, and each entry SHALL be a project row with a muted reason line beneath it:
 - **Questions:** projects with an Inbox item with the human. The reason SHALL be the item's prompt, or "N questions" for several, followed by " · via <parent>" when a parent escalated them.
 - **Merge on GitHub:** projects with a ticket whose pull request is open, whose latest review passed, and whose base is a protected branch the coordinator cannot merge into. The reason SHALL read "PR #N into <base> passed review".
-- **Going quiet:** unarchived projects, not ready to close, where no session of the project, nor of its children, has started a turn for 5 days or more. The reason SHALL read "No turn for N days".
+- **Going quiet:** unarchived projects, not ready to close, where no session of the project, nor of its children, has started a turn for 5 days or more. Standing projects and projects with no tickets SHALL be included. The reason SHALL read "No turn for N days", or "No turn for N days, not started" for a project with no tickets.
 - **Ready to close:** unarchived projects that are not standing, have at least one ticket, every ticket accepted or closed, every pull request of its tickets merged, and every child archived. A ticket with no pull request SHALL not prevent it; a pull request open or closed without merging SHALL. The reason SHALL read "Every ticket accepted or closed, PRs merged".
 
 A project MAY be an entry in several buckets. The section of the selected project's Space SHALL start expanded and the others collapsed, each collapsed section showing its entry count. Selecting an entry SHALL open the project's coordinator. The Me lens SHALL be built from the host's records with no agent behind it, and there SHALL be no separate Needs you page.
 
 #### Scenario: An escalated question
-- **WHEN** "Neovim" escalated two questions from "Contrast warnings"
-- **THEN** the Me lens lists "Contrast warnings" under Questions with the reason "2 questions · via Neovim"
+- **WHEN** "Accessible contrast" escalated two questions from "Contrast warnings"
+- **THEN** the Me lens lists "Contrast warnings" under Questions with the reason "2 questions · via Accessible contrast"
 
 #### Scenario: A pull request only the human can merge
 - **WHEN** "Redo sponsor page" has PR #41 into `main`, a protected branch, whose review passed
@@ -118,6 +118,14 @@ A project MAY be an entry in several buckets. The section of the selected projec
 #### Scenario: Going quiet
 - **WHEN** "Colour-blind palettes" has an open ticket and none of its sessions has started a turn for six days
 - **THEN** it is listed under Going quiet with "No turn for 6 days"
+
+#### Scenario: A standing project going quiet
+- **WHEN** "Platform" is standing and none of its or its children's sessions has started a turn for five days
+- **THEN** it is listed under Going quiet with "No turn for 5 days"
+
+#### Scenario: Quiet before it started
+- **WHEN** "Recipes" has no tickets and its coordinator has not started a turn for seven days
+- **THEN** it is listed under Going quiet with "No turn for 7 days, not started"
 
 #### Scenario: Ready to close
 - **WHEN** every ticket of "CI runners" is accepted, its PRs are merged and it is not standing

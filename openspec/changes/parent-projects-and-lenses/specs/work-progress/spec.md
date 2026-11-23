@@ -20,11 +20,11 @@ The inspector rail of every conversation of a project, its coordinator's and eac
 - **THEN** the Agents button shows no badge
 
 #### Scenario: A parent's children
-- **WHEN** "Neovim" has one implementer working on its own ticket, and its children "Pickers: restore highlights", with a working coordinator, implementer and reviewer, and "Contrast warnings", with three questions with "Neovim" and an idle implementer
+- **WHEN** "Accessible contrast" has one implementer working on its own ticket, and its children "Pickers: restore highlights", with a working coordinator, implementer and reviewer, and "Contrast warnings", with three questions with "Accessible contrast" and an idle implementer
 - **THEN** the panel lists the own ticket's card with its implementer, then "Child projects" with a folded card for each child, the second showing the hollow badge "3", and the Agents button's badge reads "4"
 
 #### Scenario: Opening a child's card
-- **WHEN** the human activates the card of "Contrast warnings" in the panel of "Neovim"
+- **WHEN** the human activates the card of "Contrast warnings" in the panel of "Accessible contrast"
 - **THEN** the coordinator of "Contrast warnings" is selected and the panel stays open, listing "Contrast warnings"
 
 #### Scenario: Archived passed verifier

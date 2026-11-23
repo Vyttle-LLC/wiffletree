@@ -20,8 +20,8 @@ A project SHALL have at most one parent project, stored by the host as the proje
 - **THEN** the dialog says both children become loose and stay in Celadon, and after confirming "Light themes" is loose in Vyttle and its former children are loose in Celadon
 
 #### Scenario: An older store
-- **WHEN** a store from before this change holds "Pickers", created by the coordinator of "Neovim" with `create_project`
-- **THEN** "Pickers" opens loose, its `created_by` still names "Neovim", and the coordinator of "Neovim" still lists it under `created_projects`
+- **WHEN** a store from before this change holds "Pickers", created by the coordinator of "Accessible contrast" with `create_project`
+- **THEN** "Pickers" opens loose, its `created_by` still names "Accessible contrast", and the coordinator of "Accessible contrast" still lists it under `created_projects`
 
 ### Requirement: The human files a project under a parent
 The project menu SHALL offer "Move under…", which lists the other unarchived loose projects of the project's Space as possible parents and, for a child, "No parent". Dragging in the Outcome lens (see sidebar-lenses) SHALL make the same change. Either way, the desktop SHALL ask first, naming the project and its new parent, or saying the project becomes loose, and SHALL change nothing when the human cancels. The host SHALL refuse to move under a parent a project that has children, a project onto itself, and a project onto a child or a project in another Space. "Move under…" SHALL be disabled, with a tooltip saying why, for a project that has children. A project filed under a parent SHALL route its later questions through that parent; its questions already with the human SHALL stay with the human. A child that leaves its parent, made loose or filed under another parent, SHALL in the same change send every question still with its old parent to the human, each labelled with its name; the old parent SHALL no longer be able to answer them, and the new parent SHALL receive only questions asked after the move. Each change SHALL be recorded as activity on the project and on each parent it joined or left.
@@ -43,8 +43,8 @@ The project menu SHALL offer "Move under…", which lists the other unarchived l
 - **THEN** after confirming, "Contrast warnings" is loose and that question is in the human's Inbox labelled "Contrast warnings"
 
 #### Scenario: Refiling sends waiting questions to the human
-- **WHEN** "Contrast warnings", a child of "Neovim", has one question with "Neovim", and the human files it under "Accessible contrast" before "Neovim" answers
-- **THEN** after confirming, that question is in the human's Inbox labelled "Contrast warnings", "Neovim"'s `answer_question` on it is refused, and "Accessible contrast" is not woken with it
+- **WHEN** "Contrast warnings", a child of "Accessible contrast", has one question with "Accessible contrast", and the human files it under "Light themes" before "Accessible contrast" answers
+- **THEN** after confirming, that question is in the human's Inbox labelled "Contrast warnings", "Accessible contrast"'s `answer_question` on it is refused, and "Light themes" is not woken with it
 
 #### Scenario: Filing keeps the human's questions
 - **WHEN** a loose project with one question in the human's Inbox is filed under a parent
@@ -69,31 +69,31 @@ The project menu SHALL offer "Move under…", which lists the other unarchived l
 A parent project's coordinator and each of its children's coordinators SHALL be able to `send_message` each other, as a coordinator and its workers can. A child coordinator's `report` SHALL be delivered to its parent project's coordinator, with the same waking rules as any report. In the parent's conversation, a child's reports and messages SHALL fold into one line per run as other peer messages do (see work-stream), naming the child. A message from the parent SHALL show in the child's conversation under the parent's name. Coordinators of sibling projects SHALL NOT message each other, and a coordinator SHALL NOT message a project's coordinator it has no parent link with; such a call SHALL be refused, saying who it may message. `workspace_context` SHALL give a child coordinator `parent_project`, with the parent's id, name and coordinator id, and a parent coordinator `child_projects`, one entry per child with its id, name, coordinator id, standing flag and its tickets as the short entries accepted and closed tickets have.
 
 #### Scenario: Parent to child
-- **WHEN** the coordinator of "Neovim" sends a message to the coordinator of its child "Contrast warnings"
-- **THEN** it is delivered, and the child's conversation shows it as from "Neovim"
+- **WHEN** the coordinator of "Accessible contrast" sends a message to the coordinator of its child "Contrast warnings"
+- **THEN** it is delivered, and the child's conversation shows it as from "Accessible contrast"
 
 #### Scenario: A child reports
 - **WHEN** the coordinator of "Pickers: restore highlights" reports progress "fix ready for review"
-- **THEN** the coordinator of its parent "Neovim" receives it with its next turn, and its conversation shows one folded line naming "Pickers: restore highlights"
+- **THEN** the coordinator of its parent "Accessible contrast" receives it with its next turn, and its conversation shows one folded line naming "Pickers: restore highlights"
 
 #### Scenario: Siblings
 - **WHEN** the coordinator of "Contrast warnings" sends a message to the coordinator of its sibling "Pickers: restore highlights"
 - **THEN** it is refused, saying it may message its parent's coordinator and its own agents, and nothing is delivered
 
 #### Scenario: Who knows whom
-- **WHEN** the coordinators of "Neovim" and of its child "Contrast warnings" read `workspace_context`
-- **THEN** "Neovim" lists "Contrast warnings" under `child_projects` with its tickets, and "Contrast warnings" names "Neovim" as `parent_project`
+- **WHEN** the coordinators of "Accessible contrast" and of its child "Contrast warnings" read `workspace_context`
+- **THEN** "Accessible contrast" lists "Contrast warnings" under `child_projects` with its tickets, and "Contrast warnings" names "Accessible contrast" as `parent_project`
 
 ### Requirement: A child's questions go to its parent first
 A child coordinator's `ask_user` SHALL create its Inbox item with the parent, not the human, and SHALL wake the parent's coordinator with the question, its id, the child's name and its choices. Approvals that are not questions, such as `request_permission`, publish and merge approvals and `request_repository`, SHALL reach the human directly as today. The parent's coordinator SHALL resolve each question with one of two tools, offered only for its own children's questions with the parent: `answer_question`, taking the question id and an answer, which SHALL close the item and resume the child with the answer, labelled as its parent's; or `escalate_question`, taking the question id and an optional note, which SHALL move the item to the human's Inbox labelled with the child's name and "via" the parent, with the note. A question already answered or escalated SHALL be refused with "already answered" or "already with the human". The Inbox, the needs-you counts and the Me lens SHALL count only items with the human. A child's row SHALL show, beside any filled needs-you badge, a hollow badge counting its questions with its parent, with the tooltip "<parent> is handling it". The answer that resumes a child SHALL count as answering its blocked or waiting question as a human answer does. A loose or parent project's `ask_user` SHALL reach the human as today.
 
 #### Scenario: The parent answers
-- **WHEN** the coordinator of "Contrast warnings" asks whether comments get a contrast warning when no minimum is set, and its parent "Neovim" calls `answer_question` with "Yes, WCAG AA is always the floor."
-- **THEN** the item closes without reaching the human's Inbox, and "Contrast warnings" resumes with that answer shown as from "Neovim"
+- **WHEN** the coordinator of "Contrast warnings" asks whether comments get a contrast warning when no minimum is set, and its parent "Accessible contrast" calls `answer_question` with "Yes, WCAG AA is always the floor."
+- **THEN** the item closes without reaching the human's Inbox, and "Contrast warnings" resumes with that answer shown as from "Accessible contrast"
 
 #### Scenario: The parent escalates
-- **WHEN** "Neovim" calls `escalate_question` on a copy question from "Contrast warnings" with the note "Product call on user-facing copy"
-- **THEN** the human's Inbox shows the question labelled "Contrast warnings · via Neovim" with the note, and the Me badge counts it
+- **WHEN** "Accessible contrast" calls `escalate_question` on a copy question from "Contrast warnings" with the note "Product call on user-facing copy"
+- **THEN** the human's Inbox shows the question labelled "Contrast warnings · via Accessible contrast" with the note, and the Me badge counts it
 
 #### Scenario: Waiting with the parent
 - **WHEN** "Contrast warnings" has three questions with its parent and none with the human
@@ -115,12 +115,12 @@ A child coordinator's `ask_user` SHALL create its Inbox item with the parent, no
 When the human answers one of a child's questions or sends a message to a child's coordinator, the parent's coordinator SHALL get one Wiffletree notice of one line, naming the child and what the human answered or the message's first line. The notice SHALL NOT start a turn by itself and SHALL be delivered with the parent's next turn.
 
 #### Scenario: The human messages a child
-- **WHEN** the human sends "For the warning popup, keep the wording short. One line, no ratio." to the coordinator of "Contrast warnings" while "Neovim" is idle
-- **THEN** "Neovim" does not start a turn, and its next turn receives one line naming "Contrast warnings" and the message's first line
+- **WHEN** the human sends "For the warning popup, keep the wording short. One line, no ratio." to the coordinator of "Contrast warnings" while "Accessible contrast" is idle
+- **THEN** "Accessible contrast" does not start a turn, and its next turn receives one line naming "Contrast warnings" and the message's first line
 
 #### Scenario: The human answers an escalated question
-- **WHEN** the human answers a question "Neovim" escalated from "Contrast warnings"
-- **THEN** "Contrast warnings" resumes with the answer, and "Neovim" gets one line with the answer
+- **WHEN** the human answers a question "Accessible contrast" escalated from "Contrast warnings"
+- **THEN** "Contrast warnings" resumes with the answer, and "Accessible contrast" gets one line with the answer
 
 ### Requirement: A parent stays open while a child is open
 The human SHALL close a project by archiving it, and no workspace tool SHALL archive a project. The host SHALL refuse to archive a project while any of its children is unarchived, naming those children, and SHALL refuse to restore a child whose parent is archived, naming the parent. The desktop SHALL show the refusal's words.
