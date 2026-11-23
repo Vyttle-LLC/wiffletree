@@ -20,8 +20,9 @@ use std::{
     time::Duration,
 };
 
-/// Text is typed in pieces, and the frontmost app is checked before each.
-const TYPED_PIECE: usize = 16;
+/// Text is typed a character at a time; before each, the run must not have been stopped and an
+/// allowed app must be frontmost. So Esc or Stop ends the typing within a character.
+const TYPED_PIECE: usize = 1;
 /// How long a driver request may take to arrive.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -240,6 +241,7 @@ pub fn answer(
             let text = text("text")?;
             let chars: Vec<char> = text.chars().collect();
             for piece in chars.chunks(TYPED_PIECE) {
+                ensure!(!control.stopped(), "Refused: the run was stopped");
                 let pid = frontmost_pid()?;
                 desktop.type_text(pid, &piece.iter().collect::<String>())?;
             }
@@ -310,6 +312,8 @@ mod tests {
     struct Screen {
         frontmost: Mutex<Option<(String, i32)>>,
         done: Mutex<Vec<String>>,
+        /// Stopped as the first text is typed, as when the human presses Esc mid-request.
+        stops_while_typing: Mutex<Option<Arc<Control>>>,
     }
     impl Screen {
         fn front(app: &str) -> Self {
@@ -350,6 +354,9 @@ mod tests {
             self.record(format!("drag {} {} {} {}", from.x, from.y, to.x, to.y))
         }
         fn type_text(&self, pid: i32, text: &str) -> Result<()> {
+            if let Some(control) = self.stops_while_typing.lock().unwrap().take() {
+                control.stop(StopSource::Escape);
+            }
             self.record(format!("type {pid} {text}"))
         }
         fn key(&self, pid: i32, keystroke: Keystroke) -> Result<()> {
@@ -459,6 +466,18 @@ mod tests {
         }
         assert!(terminal.done().is_empty());
         assert!(ask(&screen, &control, json!({"do":"key","keystroke":"hyper-x"})).is_err());
+    }
+
+    /// Esc or Stop during a long type_text ends it within a character, not at its end.
+    #[test]
+    fn a_stop_while_typing_ends_the_typing_at_once() {
+        let screen = Screen::front("com.apple.calculator");
+        let control = Arc::new(started());
+        *screen.stops_while_typing.lock().unwrap() = Some(control.clone());
+        let long = "x".repeat(160);
+        let refused = ask(&screen, &control, json!({"do":"type","text":long})).unwrap_err();
+        assert!(refused.to_string().contains("stopped"), "{refused}");
+        assert_eq!(screen.done(), ["type 42 x"]);
     }
 
     #[test]
