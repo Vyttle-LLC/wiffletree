@@ -38,7 +38,7 @@ The spike ruled out each provider's own computer use; the human chose Wiffletree
 - [x] 4.8 On-screen check of Esc: three runs stopped at once (design, "Live check").
 - [ ] 4.9 On-screen check of the menu bar's Stop, which the human did not use in either round.
 - [x] 4.10 The floating control panel (`ui/control-overlay.html`, approved by Michael on November 23, 2026): placement in a remembered corner, the detail line, Stopping…, the compact form, Stop through the shared stop path, and the model and queue passed at launch.
-- [ ] 4.11 On-screen check of the panel: visible above Calculator, its Stop ends the run, and it is in no screenshot.
+- [ ] 4.11 On-screen check of the panel: seen top right at the status level and absent from the run's screenshot (design, "Live check"); its Stop ending the run is not yet observed.
 
 ## 5. Ticket 5 · UI
 
