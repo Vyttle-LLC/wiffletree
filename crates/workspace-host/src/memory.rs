@@ -437,7 +437,12 @@ impl Host {
             "log_work is for the project coordinator and implementers, the Assistant and assistant threads"
         );
         let input = folded(input)?;
-        if let Some(milestone) = &input.milestone
+        // The Assistant's milestones are kept per Space, since it logs in every Space's brain.
+        let milestone = (input.milestone.as_ref()).map(|milestone| match &named {
+            Some(space) => format!("{}/{milestone}", space.as_str()),
+            None => milestone.clone(),
+        });
+        if let Some(milestone) = &milestone
             && let Some(existing) = self
                 .db
                 .query_row(
@@ -575,7 +580,7 @@ impl Host {
         };
         let text = entry_file(&log, &author)?;
         self.atomically(|host| {
-            host.store_log(&mut log)?;
+            host.store_log(&mut log, milestone.as_deref())?;
             Self::event(
                 &host.db,
                 &log.project_id,
@@ -605,14 +610,15 @@ impl Host {
 
     /// Inserts the entry; one without a milestone takes its id as its milestone column, which
     /// is unique per session.
-    fn store_log(&mut self, log: &mut WorkLog) -> Result<()> {
+    /// Stores `log` under its `milestone` key, or under its id when it has none.
+    fn store_log(&mut self, log: &mut WorkLog, milestone: Option<&str>) -> Result<()> {
         self.db.execute(
             "INSERT INTO work_logs(id,project_id,session_id,milestone,repository,data,space_id) VALUES (?1,?2,?3,?4,?5,?6,?7)",
             params![
                 log.id,
                 assistant::project_column(&log.project_id),
                 log.input.session_id,
-                log.input.milestone.as_deref().unwrap_or(&log.id),
+                milestone.unwrap_or(&log.id),
                 log.repository,
                 encode(&*log)?,
                 log.space_id.as_ref().map(SpaceId::as_str),

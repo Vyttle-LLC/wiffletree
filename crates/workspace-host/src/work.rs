@@ -550,9 +550,10 @@ pub(crate) mod tests {
             .unwrap()
             .space
             .id;
-        let entry = |space: &SpaceId| json!({"space": space, "type": "decision", "title": "Dentist on Tuesdays", "changed": "a", "why": "b", "state": "c"});
+        let entry = |space: &SpaceId| json!({"space": space, "type": "decision", "title": "Dentist on Tuesdays", "changed": "a", "why": "b", "state": "c", "milestone": "dentist"});
         let mut guard = TurnGuard::default();
-        for space in [&personal, &celadon] {
+        // The same milestone in two Spaces is two entries; again in one returns its entry.
+        for space in [&personal, &celadon, &personal] {
             host.conversation_tool(&assistant, "log_work", &entry(space), &mut guard)
                 .unwrap();
         }
@@ -574,6 +575,7 @@ pub(crate) mod tests {
         }
         let mut named = entry(&personal);
         named["repository"] = json!("x");
+        named["milestone"] = json!("a repository");
         assert!(
             host.conversation_tool(&assistant, "log_work", &named, &mut guard)
                 .is_err()
