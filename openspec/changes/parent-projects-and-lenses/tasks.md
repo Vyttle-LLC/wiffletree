@@ -13,7 +13,7 @@ Six slices, one ticket each. Dependencies:
 
 - [ ] 1.1 `workspace-core`: `Project.parent_id` and `Project.standing`, both defaulting to empty and left out of the store when empty; the snapshot carries both.
 - [ ] 1.2 Host checks for every write of the link: same Space, one level, not onto itself, not onto a child, not for a project with children; a refusal names the rule.
-- [ ] 1.3 A command to set or clear a project's parent, with `project_moved_under` and `project_moved_out` activity on the project and each parent; questions with a parent go to the human when its child is made loose.
+- [ ] 1.3 A command to set or clear a project's parent, with `project_moved_under` and `project_moved_out` activity on the project and each parent; questions with a parent go to the human, in the same change, when its child is made loose or filed under another parent.
 - [ ] 1.4 Move to another Space clears the project's link and its children's; the Move dialog's wording names the children that become loose.
 - [ ] 1.5 `create_project` makes a child or a sibling, with the notice to the parent for a sibling; parents' messages do not count as the human's for the briefed-project rule.
 - [ ] 1.6 `send_message` between a parent's and its children's coordinators; a child coordinator's `report` delivered to its parent's coordinator; siblings refused with the reason.

@@ -24,7 +24,7 @@ A project SHALL have at most one parent project, stored by the host as the proje
 - **THEN** "Pickers" opens loose, its `created_by` still names "Neovim", and the coordinator of "Neovim" still lists it under `created_projects`
 
 ### Requirement: The human files a project under a parent
-The project menu SHALL offer "Move under…", which lists the other unarchived loose projects of the project's Space as possible parents and, for a child, "No parent". Dragging in the Outcome lens (see sidebar-lenses) SHALL make the same change. Either way, the desktop SHALL ask first, naming the project and its new parent, or saying the project becomes loose, and SHALL change nothing when the human cancels. The host SHALL refuse to move under a parent a project that has children, a project onto itself, and a project onto a child or a project in another Space. "Move under…" SHALL be disabled, with a tooltip saying why, for a project that has children. A project filed under a parent SHALL route its later questions through that parent; its questions already with the human SHALL stay with the human. A child made loose SHALL send every question still with its parent to the human, each labelled with its name. Each change SHALL be recorded as activity on the project and on each parent it joined or left.
+The project menu SHALL offer "Move under…", which lists the other unarchived loose projects of the project's Space as possible parents and, for a child, "No parent". Dragging in the Outcome lens (see sidebar-lenses) SHALL make the same change. Either way, the desktop SHALL ask first, naming the project and its new parent, or saying the project becomes loose, and SHALL change nothing when the human cancels. The host SHALL refuse to move under a parent a project that has children, a project onto itself, and a project onto a child or a project in another Space. "Move under…" SHALL be disabled, with a tooltip saying why, for a project that has children. A project filed under a parent SHALL route its later questions through that parent; its questions already with the human SHALL stay with the human. A child that leaves its parent, made loose or filed under another parent, SHALL in the same change send every question still with its old parent to the human, each labelled with its name; the old parent SHALL no longer be able to answer them, and the new parent SHALL receive only questions asked after the move. Each change SHALL be recorded as activity on the project and on each parent it joined or left.
 
 #### Scenario: Filing a loose project
 - **WHEN** the human chooses "Move under…" on "Redo sponsor page", picks "Sponsorships" and confirms
@@ -41,6 +41,10 @@ The project menu SHALL offer "Move under…", which lists the other unarchived l
 #### Scenario: Unfiling sends waiting questions to the human
 - **WHEN** "Contrast warnings" has one question with its parent and the human chooses "No parent"
 - **THEN** after confirming, "Contrast warnings" is loose and that question is in the human's Inbox labelled "Contrast warnings"
+
+#### Scenario: Refiling sends waiting questions to the human
+- **WHEN** "Contrast warnings", a child of "Neovim", has one question with "Neovim", and the human files it under "Accessible contrast" before "Neovim" answers
+- **THEN** after confirming, that question is in the human's Inbox labelled "Contrast warnings", "Neovim"'s `answer_question` on it is refused, and "Accessible contrast" is not woken with it
 
 #### Scenario: Filing keeps the human's questions
 - **WHEN** a loose project with one question in the human's Inbox is filed under a parent

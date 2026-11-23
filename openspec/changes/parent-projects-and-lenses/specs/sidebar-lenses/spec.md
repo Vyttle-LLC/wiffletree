@@ -103,7 +103,7 @@ The Me lens SHALL list, in each Space's section, up to four buckets in this orde
 - **Questions:** projects with an Inbox item with the human. The reason SHALL be the item's prompt, or "N questions" for several, followed by " · via <parent>" when a parent escalated them.
 - **Merge on GitHub:** projects with a ticket whose pull request is open, whose latest review passed, and whose base is a protected branch the coordinator cannot merge into. The reason SHALL read "PR #N into <base> passed review".
 - **Going quiet:** unarchived projects, not ready to close, where no session of the project, nor of its children, has started a turn for 5 days or more. The reason SHALL read "No turn for N days".
-- **Ready to close:** unarchived projects that are not standing, have at least one ticket, every ticket accepted or closed, no pull request still open, and every child archived. The reason SHALL read "Every ticket accepted or closed, no PR open".
+- **Ready to close:** unarchived projects that are not standing, have at least one ticket, every ticket accepted or closed, every pull request of its tickets merged, and every child archived. A ticket with no pull request SHALL not prevent it; a pull request open or closed without merging SHALL. The reason SHALL read "Every ticket accepted or closed, PRs merged".
 
 A project MAY be an entry in several buckets. The section of the selected project's Space SHALL start expanded and the others collapsed, each collapsed section showing its entry count. Selecting an entry SHALL open the project's coordinator. The Me lens SHALL be built from the host's records with no agent behind it, and there SHALL be no separate Needs you page.
 
@@ -121,7 +121,11 @@ A project MAY be an entry in several buckets. The section of the selected projec
 
 #### Scenario: Ready to close
 - **WHEN** every ticket of "CI runners" is accepted, its PRs are merged and it is not standing
-- **THEN** it is listed under Ready to close with "Every ticket accepted or closed, no PR open"
+- **THEN** it is listed under Ready to close with "Every ticket accepted or closed, PRs merged"
+
+#### Scenario: A pull request closed without merging
+- **WHEN** every ticket of "Recipes" is closed, it is not standing and has no open child, but one ticket's PR was closed without merging
+- **THEN** "Recipes" is not under Ready to close
 
 #### Scenario: A parent with an open child is not ready
 - **WHEN** every ticket of "Light themes" is accepted but its child "Generated palette check" is unarchived
