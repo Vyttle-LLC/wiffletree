@@ -1,5 +1,6 @@
 //! Noninteractive provider turns with the user's YOLO execution policy, apart from comment
 //! sorting and assistant threads, which the provider holds to what they are given.
+mod act_run;
 mod codex_compaction;
 mod constrained;
 mod conversation;
@@ -11,6 +12,7 @@ use crate::processes::{self, Sighting, Watch};
 use crate::runtime::LowPriority as _;
 use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
+pub use act_run::{UrlAct, act_call_refused, act_run};
 pub use conversation::ConversationLaunch;
 use conversation::tool_calls;
 pub use evaluator::{EvaluatorLaunch, prepare_codex_home};
@@ -469,8 +471,8 @@ impl std::fmt::Display for TookTooLong {
 impl std::error::Error for TookTooLong {}
 
 /// Runs Claude at `program`, set up by `configure`, of no session and in an empty temporary
-/// folder, with `input` on stdin, until `answer` finds the answer in its events and it exits,
-/// or until `limit`, when it is stopped.
+/// folder, with `input` on stdin, until `answer` finds the answer in its events or refuses one,
+/// or until `limit`; then it is stopped.
 fn answer_run<T>(
     program: &Path,
     configure: impl FnOnce(&mut ProcessCommand, &Path),
@@ -518,7 +520,6 @@ fn answer_run<T>(
         true => Ok(()),
         false => Err(TookTooLong),
     };
-    let mut answered = None;
     loop {
         if process.exited()? {
             output.provider_exited();
@@ -526,15 +527,11 @@ fn answer_run<T>(
         in_time()?;
         match output.next(Duration::from_millis(20)) {
             Next::Event(Ok(value)) => {
-                if answered.is_none() {
-                    answered = answer(&value)?;
+                if let Some(answered) = answer(&value)? {
+                    return Ok(answered);
                 }
             }
-            Next::Event(Err(error))
-                if answered.is_none() && error == "Provider event exceeds bound" =>
-            {
-                bail!("{error}")
-            }
+            Next::Event(Err(error)) if error == "Provider event exceeds bound" => bail!("{error}"),
             Next::Event(Err(_)) => {}
             Next::Waiting => {}
             Next::Finished => break,
@@ -545,9 +542,6 @@ fn answer_run<T>(
         std::thread::sleep(Duration::from_millis(20));
     }
     let status = process.stop()?;
-    if let Some(answered) = answered {
-        return Ok(answered);
-    }
     let stderr = errors.finish();
     let said = stderr.trim().chars().take(1500).collect::<String>();
     let ended = format!("{who} ended without an answer ({status}). {said}");

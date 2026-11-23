@@ -328,3 +328,44 @@ fn the_job_shell_hook_refuses_with_exit_2_unless_it_allows() {
         assert_eq!(hook(refused.as_bytes()), (Some(2), true), "{refused}");
     }
 }
+
+/// The hook before every call of an act run exits 2 for anything but the action card's call,
+/// and for that call made a second time.
+#[test]
+fn the_act_hook_refuses_with_exit_2_all_but_the_cards_call_once() {
+    use std::io::Write;
+    let folder = tempfile::tempdir().unwrap();
+    let expected = serde_json::json!({"name": "mcp__gmail__send_message", "arguments": {"to": "sam@example.com"}});
+    std::fs::write(folder.path().join("act-call.json"), expected.to_string()).unwrap();
+    let hook = |input: String| {
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_wiffletree-host"))
+            .arg("act-check")
+            .arg(folder.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        (output.status.code(), !output.stderr.is_empty())
+    };
+    let call = |name: &str, to: &str| {
+        serde_json::json!({"tool_name": name, "tool_input": {"to": to}}).to_string()
+    };
+    for refused in [
+        call("mcp__gmail__send_message", "eve@example.com"),
+        call("mcp__gmail__delete_thread", "sam@example.com"),
+        "not json".into(),
+    ] {
+        assert_eq!(hook(refused.clone()), (Some(2), true), "{refused}");
+    }
+    let card = call("mcp__gmail__send_message", "sam@example.com");
+    assert_eq!(hook(card.clone()), (Some(0), false));
+    assert_eq!(hook(card), (Some(2), true), "only once");
+}
