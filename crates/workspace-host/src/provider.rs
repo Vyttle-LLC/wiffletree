@@ -72,6 +72,10 @@ pub enum ProviderEvent {
         cancelled: bool,
     },
 }
+/// Why the Assistant's turn stopped at its start: a source's server offered tools Wiffletree
+/// had not seen. The host starts the same input again at once, with them denied.
+pub(crate) const NEW_SOURCE_TOOLS: &str =
+    "Stopped before acting: a source offered tools Wiffletree had not seen";
 /// What a run asks of the provider.
 pub enum TurnKind {
     /// A turn: `prompt` and the delivered messages' attachments.
@@ -854,6 +858,12 @@ fn run_turn(
                         if !reported.is_empty() {
                             emit(ProviderEvent::SourceTools(reported));
                         }
+                        let unseen = launch.unseen_by_claude(&value);
+                        ensure!(
+                            unseen.is_empty(),
+                            "{NEW_SOURCE_TOOLS} ({})",
+                            unseen.join(", ")
+                        );
                     }
                     // An evaluator has no workspace server to connect.
                     if let Some(launch) = &turn.evaluator {

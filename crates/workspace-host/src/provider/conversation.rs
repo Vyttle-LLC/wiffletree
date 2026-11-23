@@ -86,6 +86,21 @@ impl ConversationLaunch {
         }
         reported
     }
+    /// The source tools Claude's start offers that are neither read tools nor denied: tools of a
+    /// URL server it had not reported before. The turn stops before the model acts, and starts
+    /// again with them denied.
+    pub(crate) fn unseen_by_claude(&self, init: &Value) -> Vec<String> {
+        (self.reported_by_claude(init).into_iter())
+            .flat_map(|(server, tools)| tools.into_iter().map(move |tool| (server.clone(), tool)))
+            .filter(|(server, tool)| {
+                let source = &self.servers[server];
+                !source.offered().any(|offered| offered == tool)
+                    && !source.acts.contains(tool)
+                    && !source.reported.contains(tool)
+            })
+            .map(|(server, tool)| format!("{server} {tool}"))
+            .collect()
+    }
     /// Each source's server as Claude starts it: a command-line server through the helper's
     /// `mcp-filter`, which lists and passes on only its read tools; a server reached by URL as
     /// configured, held to its read tools by `claude_denied` and `check_call`.
@@ -374,7 +389,10 @@ mod tests {
                 .iter()
                 .any(|d| d == "mcp__calendar__delete_calendar")
         );
+        // So the turn stops at its start, before the model acts, until the tool is denied.
+        assert_eq!(launch.unseen_by_claude(&init), ["calendar delete_calendar"]);
         launch.reported("calendar", reported["calendar"].clone());
+        assert!(launch.unseen_by_claude(&init).is_empty());
         let denied = launch.claude_denied();
         assert!(denied.iter().any(|d| d == "mcp__calendar__delete_calendar"));
         assert!(!denied.iter().any(|d| d == "mcp__calendar__list_events"));

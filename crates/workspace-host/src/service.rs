@@ -3780,6 +3780,11 @@ impl Actor {
                 // Only our own cancellation counts; a real failure keeps its error and held input.
                 let stop_reason = active.stopped_by_parent.take().filter(|_| cancelled);
                 let error = error.filter(|_| stop_reason.is_none());
+                // The Assistant's turn that met source tools not seen before stopped before the
+                // model acted; its input starts again at once, with those tools denied.
+                let start_again = session.role == Role::Conversation
+                    && (error.as_deref())
+                        .is_some_and(|e| e.starts_with(provider::NEW_SOURCE_TOOLS));
                 // Settle the run first so a later failure cannot leave it open. If this update
                 // fails, the run stays open and blocks worktree removal until restart: safe.
                 // The provider thread stopped the process group before reporting this end.
@@ -3898,7 +3903,10 @@ impl Actor {
                         .evaluation_turn_ended(id, stopped, error.as_deref(), waits)?;
                 }
                 self.settle_check_ins(&session)?;
-                if let Some(error) = &error {
+                if start_again {
+                    self.host.set_status(id, Status::Ready)?;
+                    self.host.reconcile_session(id, true)?;
+                } else if let Some(error) = &error {
                     self.host.append_output(
                         &session,
                         &format!("error:{run}"),
@@ -8666,6 +8674,51 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
                 .unwrap_err()
                 .contains("not one of the Assistant's tools")
         );
+    }
+
+    #[test]
+    fn a_turn_that_meets_unseen_source_tools_starts_again_at_once_with_them_denied() {
+        let (_home, mut host, assistant, _) = crate::work::tests::assistant_with_space();
+        host.send_to_assistant("m1", "what's on tomorrow?", &[], None)
+            .unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+        let mut turn = active_turn("run", vec!["m1".into()]);
+        turn.token = assistant.id.clone();
+        actor.active.insert(assistant.id.clone(), turn);
+        actor
+            .host
+            .set_status(&assistant.id, Status::Working)
+            .unwrap();
+        let reported = [("calendar".to_owned(), ["delete_calendar".to_owned()].into())];
+        let stopped = format!("{} (calendar delete_calendar)", provider::NEW_SOURCE_TOOLS);
+        for event in [
+            ProviderEvent::SourceTools(reported.into()),
+            ProviderEvent::Finished {
+                error: Some(stopped),
+                usage: Value::Null,
+                cancelled: false,
+            },
+        ] {
+            actor.handle(Event::Provider {
+                session: assistant.id.clone(),
+                run: "run".into(),
+                event,
+            });
+        }
+        assert_eq!(actor.host.message("m1").unwrap().receipt, Receipt::Queued);
+        assert_eq!(
+            actor.host.session(&assistant.id).unwrap().status,
+            Status::Ready
+        );
+        assert!(messages_to(&actor, &assistant.id, "output:").is_empty());
+        let recorded: i64 = (actor.host.db)
+            .query_row(
+                "SELECT count(*) FROM conversation_source_tools WHERE server='calendar' AND tool='delete_calendar'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(recorded, 1, "denied from the next launch on");
     }
 
     #[test]
