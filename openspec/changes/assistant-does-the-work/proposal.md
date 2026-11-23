@@ -35,6 +35,7 @@ None. The work stays inside existing capabilities.
 - `settings-repository`: the router threshold is no longer a shared setting.
 - `settings-cascade`: the conversation and the Brain compiler resolve their rows on this Mac only; the Router row leaves the Models page.
 - `brain-browser` and `project-memory`: the Assistant names the Space whose brain it queries or logs to; issue threads and loop runs keep their own Space's brain.
+- `shared-issues`: the Assistant's `file_issue`, `edit_issue` and `comment_issue` are the one exception to "no agent tool writes an issue"; coordinators and issue threads keep their tools.
 - `spaces`: the Assistant may not create or change a Space; sources gain act lists and "Do without asking" marks, and Add source is one form.
 
 ## Impact
