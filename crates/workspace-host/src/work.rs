@@ -644,5 +644,12 @@ pub(crate) mod tests {
             host.message_work(&assistant, &passed, &TurnGuard::default())
                 .is_err()
         );
+        // A completed report that crossed the Stop is kept, and the work stays Stopped.
+        let late = json!({"message_id": "late", "kind": "completed", "body": "Done anyway"});
+        host.agent_tool(&coordinator.id, "report", late).unwrap();
+        let after = host.project(&work.id).unwrap().assistant_work.unwrap();
+        assert_eq!(after.state, WorkState::Stopped);
+        let told = received(&host, &assistant.id);
+        assert!(told.iter().any(|m| m.body.contains("Done anyway")));
     }
 }

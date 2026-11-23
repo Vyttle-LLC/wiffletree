@@ -3114,9 +3114,7 @@ impl Actor {
                             session_id,
                             retry: true,
                         } => Some(self.host.session(session_id)?.project_id)
-                            .filter(|project| !project.is_empty())
-                            // The Assistant's paused or stopped work stays held.
-                            .filter(|project| !self.host.work_held(project)),
+                            .filter(|project| !project.is_empty()),
                         Command::ResolveAttention { .. } => {
                             response["project_id"].as_str().map(str::to_owned)
                         }
@@ -3125,6 +3123,8 @@ impl Actor {
                         }
                         _ => None,
                     };
+                    // The Assistant's paused or stopped work stays held, whoever steps in.
+                    let started = started.filter(|project| !self.host.work_held(project));
                     if let Some(project) = started {
                         self.human_turns.insert(project.clone(), 0);
                         // Stepping in answers the coordinator's turn-count check-in.
@@ -3754,6 +3754,7 @@ impl Actor {
                     guard.note(read);
                 }
             }
+            ProviderEvent::SourceTools(reported) => self.host.record_source_tools(&reported)?,
             ProviderEvent::Finished {
                 error,
                 usage,
@@ -4009,7 +4010,8 @@ impl Actor {
             | ProviderEvent::Step(_)
             | ProviderEvent::Reply(_)
             | ProviderEvent::Model(_)
-            | ProviderEvent::ReadOthers(_) => Ok(()),
+            | ProviderEvent::ReadOthers(_)
+            | ProviderEvent::SourceTools(_) => Ok(()),
         }
     }
     /// Settles a compaction whose process has ended. Only the host's stopping cancels one, so
@@ -4563,7 +4565,6 @@ impl Actor {
         self.stop_processes_of(&stopped);
         Ok(json!({ "agents": results }))
     }
-    /// Reads `provider`'s model list off the host thread.
     /// One of the Assistant's tools, under its turn's guard. `read_source`, and an `act` that
     /// runs at once, answer from off the host thread; pausing or stopping work stops its turns.
     fn conversation_tool(
@@ -4653,6 +4654,7 @@ impl Actor {
         self.stop_processes_of(&sessions);
         Ok(())
     }
+    /// Reads `provider`'s model list off the host thread.
     fn list_models(&self, provider: Provider) {
         let sender = self.sender.clone();
         std::thread::spawn(move || {
@@ -8637,6 +8639,25 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
         assert_eq!(stopped.unwrap()["state"], "stopped");
         assert!(actor.active[&coordinator.id].cancel.load(Ordering::Relaxed));
         assert!(!actor.active[&assistant.id].cancel.load(Ordering::Relaxed));
+        assert!(!actor.host.live_projects().unwrap().contains(&work.id));
+        // Answering its Inbox item, or speaking to its coordinator, does not start it again.
+        let item = (actor.host)
+            .request_attention(&coordinator.id, "local", "publish:x:push", "Push?", &[])
+            .unwrap();
+        let answer = Command::ResolveAttention {
+            id: item.id,
+            answer: "denied".into(),
+        };
+        command(&mut actor, answer).unwrap();
+        let spoken = Command::Send {
+            id: "m-stopped".into(),
+            sender: None,
+            recipient: coordinator.id.clone(),
+            body: "still there?".into(),
+            attachments: vec![],
+            uploads: vec![],
+        };
+        command(&mut actor, spoken).unwrap();
         assert!(!actor.host.live_projects().unwrap().contains(&work.id));
         // A coordination tool is refused before it reaches the host.
         let refused = call_tool(&mut actor, &assistant.id, "create_ticket", json!({}));

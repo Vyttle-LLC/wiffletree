@@ -1008,9 +1008,12 @@ impl Host {
                     string("message_id")?,
                     &findings,
                 )?;
-                // The Assistant's work is done when its coordinator reports it completed.
+                // The Assistant's work is done when its coordinator reports it completed, unless
+                // the human stopped it first; the report is already stored either way.
                 if kind == "completed"
                     && let Some(work) = self.work_of(&session)?
+                    && (work.assistant_work.as_ref())
+                        .is_some_and(|item| item.state != WorkState::Stopped)
                 {
                     self.set_work_state(&work.id, WorkState::Done)?;
                 }
