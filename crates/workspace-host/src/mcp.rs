@@ -618,8 +618,12 @@ fn filter(
                 let Ok(mut answer) = serde_json::from_str::<Value>(&line?) else {
                     continue;
                 };
+                // Only a response answers a listing; the server's own request may reuse its id.
+                let response = answer.get("method").is_none()
+                    && (answer.get("result").is_some() || answer.get("error").is_some());
                 let mut asked = listings.lock().expect("one reader at a time");
-                if let Some(at) = asked.iter().position(|id| *id == answer["id"]) {
+                let pending = asked.iter().position(|id| *id == answer["id"]);
+                if let Some(at) = pending.filter(|_| response) {
                     asked.remove(at);
                     if let Some(tools) = answer["result"]["tools"].as_array_mut() {
                         tools.retain(|tool| is_allowed(&tool["name"]));
@@ -727,7 +731,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let folder = tempfile::tempdir().unwrap();
         let server = folder.path().join("server.py");
-        std::fs::write(&server, "#!/usr/bin/env python3\nimport json, sys\nfor line in sys.stdin:\n    m = json.loads(line)\n    tools = [{'name': n} for n in ['search_threads', 'send_message', 'delete_thread']]\n    result = {'tools': tools} if m['method'] == 'tools/list' else {'content': [{'type': 'text', 'text': 'ran ' + m['params']['name']}]}\n    print(json.dumps({'jsonrpc': '2.0', 'id': m['id'], 'result': result}), flush=True)\n").unwrap();
+        std::fs::write(&server, "#!/usr/bin/env python3\nimport json, sys\nfor line in sys.stdin:\n    m = json.loads(line)\n    tools = [{'name': n} for n in ['search_threads', 'send_message', 'delete_thread']]\n    result = {'tools': tools} if m['method'] == 'tools/list' else {'content': [{'type': 'text', 'text': 'ran ' + m['params']['name']}]}\n    if m['method'] == 'tools/list':\n        print(json.dumps({'jsonrpc': '2.0', 'id': m['id'], 'method': 'roots/list', 'params': {'tools': tools}}), flush=True)\n    print(json.dumps({'jsonrpc': '2.0', 'id': m['id'], 'result': result}), flush=True)\n").unwrap();
         std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
         let requests = [
             json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
@@ -760,7 +764,18 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        let by_id = |id: i64| answers.iter().find(|a| a["id"] == id).unwrap();
+        let by_id = |id: i64| {
+            (answers.iter())
+                .find(|a| a["id"] == id && a.get("method").is_none())
+                .unwrap()
+        };
+        // The server's own request with the listing's id passes untouched, and the listing
+        // that follows is still filtered.
+        let request = answers
+            .iter()
+            .find(|a| a["method"] == "roots/list")
+            .unwrap();
+        assert_eq!(request["params"]["tools"].as_array().unwrap().len(), 3);
         assert_eq!(
             by_id(1)["result"]["tools"],
             json!([{"name": "search_threads"}])

@@ -3782,9 +3782,13 @@ impl Actor {
                 let error = error.filter(|_| stop_reason.is_none());
                 // The Assistant's turn that met source tools not seen before stopped before the
                 // model acted; its input starts again at once, with those tools denied.
+                // A Stop that crossed the failed start wins: nothing starts again.
                 let start_again = session.role == Role::Conversation
                     && (error.as_deref())
-                        .is_some_and(|e| e.starts_with(provider::NEW_SOURCE_TOOLS));
+                        .is_some_and(|e| e.starts_with(provider::NEW_SOURCE_TOOLS))
+                    && !cancelled
+                    && !active.stopped_by_human
+                    && session.status != Status::Paused;
                 // Settle the run first so a later failure cannot leave it open. If this update
                 // fails, the run stays open and blocks worktree removal until restart: safe.
                 // The provider thread stopped the process group before reporting this end.
@@ -8719,6 +8723,42 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
             )
             .unwrap();
         assert_eq!(recorded, 1, "denied from the next launch on");
+    }
+
+    #[test]
+    fn a_stop_that_crosses_an_unseen_tools_start_keeps_the_assistant_stopped() {
+        let (_home, mut host, assistant, _) = crate::work::tests::assistant_with_space();
+        host.send_to_assistant("m1", "what's on tomorrow?", &[], None)
+            .unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+        let mut turn = active_turn("run", vec!["m1".into()]);
+        turn.token = assistant.id.clone();
+        actor.active.insert(assistant.id.clone(), turn);
+        actor
+            .host
+            .set_status(&assistant.id, Status::Working)
+            .unwrap();
+        let stop = Command::SetStatus {
+            session_id: assistant.id.clone(),
+            status: Status::Paused,
+        };
+        command(&mut actor, stop).unwrap();
+        // The failed start's end arrives after the Stop, as its own failure, not the cancel.
+        let stopped = format!("{} (calendar delete_calendar)", provider::NEW_SOURCE_TOOLS);
+        actor.handle(Event::Provider {
+            session: assistant.id.clone(),
+            run: "run".into(),
+            event: ProviderEvent::Finished {
+                error: Some(stopped),
+                usage: Value::Null,
+                cancelled: false,
+            },
+        });
+        assert_eq!(actor.host.message("m1").unwrap().receipt, Receipt::Held);
+        assert_eq!(
+            actor.host.session(&assistant.id).unwrap().status,
+            Status::Paused
+        );
     }
 
     #[test]
