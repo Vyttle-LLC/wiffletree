@@ -621,8 +621,9 @@ fn check_running(cancel: &AtomicBool) -> Result<()> {
 /// to an end of its own, `Finished` last. Whichever way it ends, the host hears of every
 /// process the watcher saw before it hears of the end.
 pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEvent)) -> Result<()> {
-    let mut watch = None;
-    let finished = run_turn(turn, cancel, &mut emit, &mut watch);
+    let (mut watch, mut desktop) = (None, None);
+    let finished = run_turn(turn, cancel, &mut emit, &mut watch, &mut desktop);
+    settle_desktop(desktop, &mut emit);
     if let Some(watch) = watch {
         // A turn that ended on its own may leave processes running, so those still exiting
         // with the provider get a moment first. A turn cut short has everything stopped.
@@ -633,6 +634,18 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
     }
     emit(finished?);
     Ok(())
+}
+/// Tells the host why a full-desktop run's helper stopped the turn, when the human stopped it on
+/// the screen, and then lets the helper quit. Read once the turn has ended, however it ended:
+/// the helper stores its reason before it cancels the turn, so a turn its stop cut short always
+/// ends as stopped, with the reason, never as failed.
+fn settle_desktop(
+    desktop: Option<desktop_helper::RunningHelper>,
+    emit: &mut impl FnMut(ProviderEvent),
+) {
+    if let Some(reason) = desktop.as_ref().and_then(|helper| helper.take_stop()) {
+        emit(ProviderEvent::StoppedOnScreen(reason));
+    }
 }
 /// Sends the host what the watcher has seen of the run's tree since it was last asked.
 fn report_seen(watching: &Watch, emit: &mut impl FnMut(ProviderEvent)) {
@@ -647,6 +660,7 @@ fn run_turn(
     cancel: Arc<AtomicBool>,
     emit: &mut impl FnMut(ProviderEvent),
     watch: &mut Option<Watch>,
+    desktop: &mut Option<desktop_helper::RunningHelper>,
 ) -> Result<ProviderEvent> {
     let quota_account = if turn.session.provider == Provider::Claude {
         crate::runtime::claude_account(&turn.cwd).ok().flatten()
@@ -669,8 +683,8 @@ fn run_turn(
         )?),
         None => None,
     };
-    // A full-desktop run's helper runs for the turn and quits with it, however it ends.
-    let desktop = match turn
+    // A full-desktop run's helper runs for the turn; `run` settles it once the turn has ended.
+    *desktop = match turn
         .evaluator
         .as_ref()
         .and_then(|launch| launch.desktop.as_ref())
@@ -739,10 +753,6 @@ fn run_turn(
     let mut model_reported = false;
     let mut codex_thread: Option<String> = None;
     loop {
-        // Said before the cancellation it caused ends the turn, so the run ends as stopped.
-        if let Some(reason) = desktop.as_ref().and_then(|helper| helper.take_stop()) {
-            emit(ProviderEvent::StoppedOnScreen(reason));
-        }
         check_running(&cancel)?;
         report_seen(watching, emit);
         if !ended && out_of_time() {

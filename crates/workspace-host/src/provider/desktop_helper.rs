@@ -472,6 +472,33 @@ mod tests {
         assert!(!socket.exists());
     }
 
+    /// The turn may end on the cancel the helper set before anything read why: the reason is
+    /// still told when the turn is settled, so the run ends as stopped, not failed.
+    #[test]
+    fn a_stop_the_turn_never_read_is_told_when_it_is_settled() {
+        let folder = tempfile::tempdir().unwrap();
+        let socket = folder.path().join("h.sock");
+        let _closed = helper(&socket, granted(0), vec![json!({"event":"panel"})]);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let running = RunningHelper::connect(&socket, Duration::from_secs(5), &cancel).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !cancel.load(Ordering::Relaxed) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // The turn returned Cancelled here, without asking the helper why.
+        assert!(cancel.load(Ordering::Relaxed));
+        let mut told = vec![];
+        super::super::settle_desktop(Some(running), &mut |event| told.push(event));
+        assert!(
+            matches!(told.as_slice(), [ProviderEvent::StoppedOnScreen(reason)] if reason == STOPPED_FROM_PANEL),
+            "{told:?}"
+        );
+        // A turn that ended on its own has nothing to tell.
+        let mut told = vec![];
+        super::super::settle_desktop(None, &mut |event| told.push(event));
+        assert!(told.is_empty());
+    }
+
     #[test]
     fn the_menu_bars_stop_and_a_helper_that_quits_stop_the_turn() {
         for (events, reason) in [
