@@ -441,7 +441,8 @@ pub fn merge_run(
             profile,
             skills::model::MERGING,
             skills::model::ANSWER_SCHEMA,
-        )
+        );
+        Ok(())
     };
     let mut run = constrained::Run::new("merge");
     answer_run(claude, configure, input, limit, |value| {
@@ -472,10 +473,10 @@ impl std::error::Error for TookTooLong {}
 
 /// Runs Claude at `program`, set up by `configure`, of no session and in an empty temporary
 /// folder, with `input` on stdin, until `answer` finds the answer in its events or refuses one,
-/// or until `limit`; then it is stopped.
+/// or until `limit`; then it is stopped. A setup that fails starts nothing.
 fn answer_run<T>(
     program: &Path,
-    configure: impl FnOnce(&mut ProcessCommand, &Path),
+    configure: impl FnOnce(&mut ProcessCommand, &Path) -> Result<()>,
     input: Vec<u8>,
     limit: Duration,
     mut answer: impl FnMut(&Value) -> Result<Option<T>>,
@@ -490,7 +491,7 @@ fn answer_run<T>(
         .process_group(0)
         .at_low_priority()
         .own_descriptors_only();
-    configure(&mut cmd, folder.path());
+    configure(&mut cmd, folder.path())?;
     let mut child = cmd
         .spawn()
         .with_context(|| format!("{who} could not be started"))?;

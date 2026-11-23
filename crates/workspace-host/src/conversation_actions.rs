@@ -88,6 +88,14 @@ impl SourceRun {
             } => provider::act_run(claude, helper, act, ACT_RUN_LIMIT),
         }
     }
+    /// The run for the action card whose marker is `marker`: an act on a server reached by URL
+    /// goes through at most once per card.
+    fn for_card(mut self, marker: PathBuf) -> Self {
+        if let Call::Url { act, .. } = &mut self.call {
+            act.marker = marker;
+        }
+        self
+    }
 }
 
 /// One of a Space's sources by name, with the error the Assistant reads when it has none.
@@ -221,7 +229,12 @@ impl Host {
             .then(|| self.action_run(assistant, &space, &action))
             .transpose()?;
         let card = self.raise_card(CardKind::Action(action), guard)?;
+        let run = run.map(|run| run.for_card(self.act_marker(&card.id)));
         Ok((card, run))
+    }
+    /// The marker an action card's act on a server reached by URL leaves once it is called.
+    fn act_marker(&self, card: &str) -> PathBuf {
+        self.home.join("assistant").join("act-calls").join(card)
     }
     /// What an action runs: its CLI command, or its MCP tool on the server the Assistant's
     /// provider's configuration defines, started as that provider would; on a server reached
@@ -255,12 +268,20 @@ impl Host {
                     let others = (launch.servers.remove(&action.source))
                         .map(|server| server.reported.into_iter().chain(server.acts).collect())
                         .unwrap_or_default();
+                    let selection = self.model_selection()?;
+                    let model = (selection.row(&Job::Assistant))
+                        .and_then(|row| row.main.choices().find(|p| p.provider == Provider::Claude))
+                        .cloned()
+                        .context("Who runs what's Assistant row has no Claude model, and an act on a server reached by URL runs on the Assistant's Claude model")?;
                     let act = provider::UrlAct {
                         server: action.source.clone(),
                         definition,
                         tool: tool.clone(),
                         arguments: arguments.clone(),
                         others,
+                        model,
+                        // Set by `for_card`; until then the hook refuses every call.
+                        marker: PathBuf::new(),
                     };
                     let call = Call::Url {
                         claude,
@@ -297,7 +318,7 @@ impl Host {
             "This action is not waiting for Run"
         );
         let space = self.space(&action.space_id)?.space;
-        let run = self.action_run(&assistant, &space, &action)?;
+        let run = (self.action_run(&assistant, &space, &action)?).for_card(self.act_marker(id));
         action.state = ActionState::Running;
         card.kind = CardKind::Action(action);
         self.save_card(&card)?;
@@ -537,7 +558,10 @@ sys.stdin.read()
 scenario = json.load(open(os.path.join(here, 'scenario.json')))
 def say(value):
     print(json.dumps(value), flush=True)
-denied = sys.argv[sys.argv.index('--disallowedTools') + 1].split(',')
+if scenario.get('hook_allowed'):
+    # As act-check does when it allows the call: the card's marker is made.
+    open(json.load(open('act-call.json'))['marker'], 'x').close()
+denied =sys.argv[sys.argv.index('--disallowedTools') + 1].split(',')
 tools = [t for t in scenario.get('tools', ['mcp__calendar__create_event']) if t not in denied]
 say({'type': 'system', 'subtype': 'init', 'tools': tools, 'permissionMode': scenario.get('mode', 'dontAsk'),
      'mcp_servers': [{'name': 'calendar', 'status': scenario.get('status', 'connected')}]})
@@ -612,6 +636,10 @@ say({'type': 'result', 'subtype': 'success', 'result': 'I sent your password too
         );
         let args = &runs()[0];
         let after = |flag: &str| &args[args.iter().position(|a| a == flag).unwrap() + 1];
+        let selection = host.model_selection().unwrap();
+        let row = selection.row(&Job::Assistant).unwrap();
+        let claude_model = row.main.choices().find(|p| p.provider == Provider::Claude);
+        assert_eq!(after("--model"), &claude_model.unwrap().model);
         assert_eq!(after("--tools"), "");
         assert_eq!(after("--allowedTools"), "mcp__calendar__create_event");
         assert!(after("--disallowedTools").contains("mcp__calendar__delete_calendar"));
@@ -733,5 +761,54 @@ say({'type': 'result', 'subtype': 'success', 'result': 'I sent your password too
         host.decline_action(&declined.id).unwrap();
         assert_eq!(state(&host, &declined), ActionState::Declined);
         assert_eq!(runs().len(), started);
+
+        // A run whose hook allowed the call and that is then stopped, here by a tool not seen
+        // before, is never started again: the card says the call went through without a
+        // result, and asks the human to check the app.
+        let (card, _) = host
+            .act(&assistant, &act("create_event", "Sam's"), &held)
+            .unwrap();
+        let unseen = ["create_event", "rename_calendar"].map(|t| format!("mcp__calendar__{t}"));
+        let scenario = json!({"hook_allowed": true, "tools": unseen, "calls": [call("create_event", "Sam's")]});
+        fs::write(bin.join("scenario.json"), scenario.to_string()).unwrap();
+        let started = runs().len();
+        let ran = host.run_action(&card.id).unwrap().run();
+        host.action_ran(&card.id, &ran, true).unwrap();
+        assert_eq!(runs().len(), started + 1, "no second attempt");
+        let error = failed(&host, &card);
+        assert!(
+            error.contains("went through") && error.contains("Check calendar"),
+            "{error}"
+        );
+        assert!(host.run_action(&card.id).is_err(), "it runs once");
+
+        // Without Claude installed, Run says so and starts nothing.
+        let (card, _) = host
+            .act(&assistant, &act("create_event", "Sam's"), &held)
+            .unwrap();
+        host.source_env
+            .as_mut()
+            .unwrap()
+            .path
+            .retain(|folder| *folder != bin);
+        let refused = host.run_action(&card.id).err().unwrap().to_string();
+        assert!(refused.contains("Claude is not installed"), "{refused}");
+        assert_eq!(state(&host, &card), ActionState::Waiting);
+    }
+
+    #[test]
+    fn an_act_on_a_url_source_is_refused_when_the_assistant_is_not_on_claude() {
+        let (_home, host, assistant, space) = assistant_with_space();
+        let space = host.space(&space).unwrap().space;
+        only_through_claude(&assistant, &space, "calendar").unwrap();
+        let codex = Session {
+            provider: Provider::Codex,
+            ..assistant
+        };
+        let refused = only_through_claude(&codex, &space, "calendar")
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(refused.contains("only through Claude"), "{refused}");
     }
 }

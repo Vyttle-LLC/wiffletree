@@ -335,7 +335,8 @@ fn the_job_shell_hook_refuses_with_exit_2_unless_it_allows() {
 fn the_act_hook_refuses_with_exit_2_all_but_the_cards_call_once() {
     use std::io::Write;
     let folder = tempfile::tempdir().unwrap();
-    let expected = serde_json::json!({"name": "mcp__gmail__send_message", "arguments": {"to": "sam@example.com"}});
+    let marker = folder.path().join("card-called");
+    let expected = serde_json::json!({"name": "mcp__gmail__send_message", "arguments": {"to": "sam@example.com"}, "marker": marker});
     std::fs::write(folder.path().join("act-call.json"), expected.to_string()).unwrap();
     let hook = |input: String| {
         let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_wiffletree-host"))
