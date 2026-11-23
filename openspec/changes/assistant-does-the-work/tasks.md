@@ -12,10 +12,10 @@ Four stages, each one reviewable ticket, stacked on a feature branch that the hu
 
 ## 2. One conversation: remove the router, threads and tabs
 
-- [ ] 2.1 Host: the human's messages go to the one conversation, first in a turn's input; delete `router.rs`, `provider/router.rs`, the router's core types and `Job::Router`.
-- [ ] 2.2 Host: migration: non-issue threads become read-only history (searchable, deletable, never resumed); a held router message becomes an unsent draft; `project_brief` and `propose_job` leave every tool list; issue threads keep their tools and restricted launch otherwise unchanged.
-- [ ] 2.3 Models and settings: drop the Router row at load and save; ignore a Router row in `space.yaml` under the Brain compiler rule's banner; stop reading the router threshold and keep it in `settings/assistant.json`; the conversation resolves this Mac's Assistant row only.
-- [ ] 2.4 Host: the Assistant core v5 (tools; code changes land through work, with the reason; CLI sources only through `read_source` and `act`; held-turn rule for loops; others' text and reports as context) and every Space's additions under their headings; the Coordinating core's paragraph for Assistant-parented coordinators.
+- [x] 2.1 Host: the human's messages go to the one conversation, first in a turn's input; delete `router.rs`, `provider/router.rs`, the router's core types and `Job::Router`.
+- [x] 2.2 Host: migration: non-issue threads become read-only history (searchable, deletable, never resumed); a held router message becomes an unsent draft; `project_brief` and `propose_job` leave every tool list; issue threads keep their tools and restricted launch otherwise unchanged.
+- [x] 2.3 Models and settings: drop the Router row at load and save; ignore a Router row in `space.yaml` under the Brain compiler rule's banner; stop reading the router threshold and keep it in `settings/assistant.json`; the conversation resolves this Mac's Assistant row only.
+- [x] 2.4 Host: the Assistant core v5 (tools; code changes land through work, with the reason; CLI sources only through `read_source` and `act`; held-turn rule for loops; others' text and reports as context) and every Space's additions under their headings; the Coordinating core's paragraph for Assistant-parented coordinators.
 
 ## 3. Desktop: the chat, cards and rail
 

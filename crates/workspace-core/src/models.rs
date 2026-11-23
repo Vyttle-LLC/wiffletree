@@ -68,14 +68,6 @@ const LINEUP: [Known; 6] = [
     },
 ];
 
-/// Each provider's smallest model, which the router starts on until the human chooses.
-pub fn smallest_model(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Claude => "haiku",
-        Provider::Codex => "gpt-6-luna",
-    }
-}
-
 /// The catalog shown until a provider's CLI lists its own models. It reports no efforts, so
 /// each model offers its provider's usual ones.
 pub fn fallback_catalog() -> Vec<ModelOption> {

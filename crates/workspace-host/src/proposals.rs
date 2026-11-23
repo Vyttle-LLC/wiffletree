@@ -675,23 +675,6 @@ mod tests {
             "{told}"
         );
         assert!(!told.contains(&issue.title));
-        // A thread with nothing attached may propose an issue, and nothing else of these.
-        let plain = host
-            .start_thread("plain", &sage.id, "Hi", &[], None)
-            .unwrap();
-        let plain = host.session(&plain.id).unwrap();
-        for tool in ["list_issues", "propose_edit", "search_repositories"] {
-            let args = json!({"id": issue.id, "title": "x", "query": "x"});
-            assert!(call(&mut host, &plain, tool, args).is_err(), "{tool}");
-        }
-        call(
-            &mut host,
-            &plain,
-            "propose_issue",
-            json!({"title": "Track the retry"}),
-        )
-        .unwrap();
-        assert!(!host.thread_launch(&plain).unwrap().issue_thread);
     }
 
     #[test]

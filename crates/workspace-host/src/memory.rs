@@ -1553,18 +1553,13 @@ mod tests {
     fn a_threads_entry_is_the_assistants_in_its_spaces_brain_and_outlives_its_thread() {
         let mut f = fixture();
         let sage = f.host.project(&f.coordinator.project_id).unwrap().space;
-        let thread = f
-            .host
-            .start_thread("t1", &sage, "Remember", &[], None)
-            .unwrap();
+        // A thread an earlier release ran, which logged before it became history.
+        let thread = f.host.history_thread("t1", &sage, "Remember");
         let session = f.host.session(&thread.id).unwrap();
         for (key, value) in [("repository", "app"), ("ticket_id", f.ticket.as_str())] {
             let mut named = args("Retry once");
             named[key] = json!(value);
-            let refused = f
-                .host
-                .thread_tool(&session, "log_work", &named)
-                .unwrap_err();
+            let refused = f.host.log_work(&session, &named).unwrap_err();
             assert!(
                 refused
                     .to_string()
@@ -1572,10 +1567,7 @@ mod tests {
                 "{key}"
             );
         }
-        let logged = (f
-            .host
-            .thread_tool(&session, "log_work", &args("Retry once")))
-        .unwrap();
+        let logged = f.host.log_work(&session, &args("Retry once")).unwrap();
         let path = logged["path"].as_str().unwrap();
         let wiki = "wiffletree/second-brain/logs/assistant/";
         assert!(path.starts_with(wiki), "{path}");

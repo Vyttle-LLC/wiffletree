@@ -19,28 +19,25 @@ pub(crate) const MODELS: &str = "settings/models.json";
 pub(crate) const ASSISTANT: &str = "settings/assistant.json";
 pub(crate) const BEHAVIORS: &str = "settings/behaviors.json";
 
-/// The assistant's shared settings as `settings/assistant.json` holds them.
+/// The assistant's shared settings as `settings/assistant.json` holds them. Fields this release
+/// does not read, such as the router threshold an earlier release wrote, stay through a write.
 #[derive(Serialize, Deserialize)]
 struct Assistant {
     #[serde(default = "default_assistant_name")]
     name: String,
-    /// The confidence below which the router asks.
-    #[serde(default = "default_router_threshold")]
-    threshold: f64,
+    #[serde(flatten)]
+    unread: Map<String, Value>,
 }
 impl Default for Assistant {
     fn default() -> Self {
         Self {
             name: default_assistant_name(),
-            threshold: default_router_threshold(),
+            unread: Map::new(),
         }
     }
 }
 fn default_assistant_name() -> String {
     workspace_core::assistant::DEFAULT_NAME.into()
-}
-fn default_router_threshold() -> f64 {
-    workspace_core::assistant::router::DEFAULT_THRESHOLD
 }
 
 /// The settings repository chosen on the machine whose data folder is `home`, as its host
@@ -174,7 +171,6 @@ pub(crate) fn check(path: &str, content: &[u8]) -> Result<()> {
         ASSISTANT => {
             let assistant = serde_json::from_str::<Assistant>(text)?;
             workspace_core::assistant::validate_name(&assistant.name)?;
-            workspace_core::assistant::router::validate_threshold(assistant.threshold)?;
             Ok(())
         }
         BEHAVIORS => {
@@ -303,18 +299,6 @@ impl SharedStore<'_> {
         let name = workspace_core::assistant::validate_name(name)?.into();
         let saved: Assistant = self.read_json(ASSISTANT).unwrap_or_default();
         self.write_json(ASSISTANT, &Assistant { name, ..saved })
-    }
-    /// The confidence below which the router asks; 0.8 until the user changes it.
-    pub(crate) fn router_threshold(&self) -> f64 {
-        let saved: Option<Assistant> = self.read_json(ASSISTANT);
-        (saved.map(|a| a.threshold))
-            .and_then(|t| workspace_core::assistant::router::validate_threshold(t).ok())
-            .unwrap_or_else(default_router_threshold)
-    }
-    pub(crate) fn set_router_threshold(&self, threshold: f64) -> Result<()> {
-        let threshold = workspace_core::assistant::router::validate_threshold(threshold)?;
-        let saved: Assistant = self.read_json(ASSISTANT).unwrap_or_default();
-        self.write_json(ASSISTANT, &Assistant { threshold, ..saved })
     }
     /// The Behaviors the human set for every Mac; none until they set one.
     pub(crate) fn behaviors(&self) -> workspace_core::cascade::Choices {
@@ -489,6 +473,19 @@ mod tests {
         for kept_free in ["logs", "tickets"] {
             assert!(!home.path().join(FOLDER).join(kept_free).exists());
         }
+    }
+
+    #[test]
+    fn an_old_router_threshold_stays_unread_beside_a_new_name() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open(home.path()).unwrap();
+        let file = host.shared_folder().join(ASSISTANT);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, r#"{"name": "Assistant", "threshold": 0.7}"#).unwrap();
+        host.set_assistant_name("Wren").unwrap();
+        let saved: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        assert_eq!(saved, json!({"name": "Wren", "threshold": 0.7}));
+        assert_eq!(host.assistant_name(), "Wren");
     }
 
     #[test]

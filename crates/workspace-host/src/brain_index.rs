@@ -3610,7 +3610,7 @@ pub(crate) mod tests {
             b.merge(&with_app_entry());
             let sage = b.sage.id.clone();
             let host = &mut b.f.host;
-            host.start_thread("t1", &sage, "Hi", &[], None).unwrap();
+            host.history_thread("t1", &sage, "Hi");
             let thread = host.session("t1").unwrap();
             let question = json!({"question": "App retries Telnyx webhooks", "scope": "project"});
             let answer = host.thread_tool(&thread, "query_brain", &question).unwrap();
@@ -3621,8 +3621,7 @@ pub(crate) mod tests {
             );
             assert!(answer.to_string().contains("Telnyx"));
             let vyttle = host.create_space("Vyttle", "", "", None).unwrap().space;
-            host.start_thread("t2", &vyttle.id, "Hi", &[], None)
-                .unwrap();
+            host.history_thread("t2", &vyttle.id, "Hi");
             let elsewhere = host.session("t2").unwrap();
             let unread = host.thread_tool(&elsewhere, "query_brain", &question);
             assert!(unread.is_err_and(|e| !e.to_string().contains("Telnyx")));

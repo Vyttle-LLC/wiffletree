@@ -22,7 +22,7 @@ mod repository_box;
 mod setup;
 
 const SCANS: &str = "Before pushing, Wiffletree runs its personal-data and secret scans on this Mac and holds a file that fails, instead of pushing it.";
-const ROUTER: &str = "The router reads this to decide where a message goes.";
+const WHAT_BELONGS: &str = "The Assistant reads this to decide which Space a request belongs to.";
 const ALSO_SETTINGS: &str =
     "Your settings repository. Settings, the Space and issues each sync only their own folders.";
 const SOURCES_FORMAT: &str =
@@ -692,7 +692,7 @@ impl SpacesPage {
             .child(row(
                 "What belongs here",
                 Textarea::new(&self.description).w_full(),
-                Some(ROUTER.into()),
+                Some(WHAT_BELONGS.into()),
                 p,
             ))
             .child(row(

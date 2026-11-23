@@ -491,19 +491,6 @@ pub fn list_folder(path: PathBuf) -> Ask<FolderListing> {
 pub fn core_instructions() -> Ask<Vec<crate::skills::CoreText>> {
     Ask::new(Command::CoreInstructions)
 }
-pub fn start_thread(
-    space_id: SpaceId,
-    body: String,
-    profile: Option<ModelProfile>,
-) -> Ask<assistant::Thread> {
-    Ask::new(Command::StartThread {
-        id: new_id(),
-        space_id,
-        body,
-        attachments: vec![],
-        profile,
-    })
-}
 pub fn rename_thread(thread_id: String, title: String) -> Ask<assistant::Thread> {
     Ask::new(Command::RenameThread { thread_id, title })
 }
@@ -518,25 +505,6 @@ pub fn delete_thread(thread_id: String) -> Ask<()> {
 }
 pub fn search_threads(query: String, space_id: Option<SpaceId>) -> Ask<Vec<assistant::ThreadHit>> {
     Ask::new(Command::SearchThreads { query, space_id })
-}
-pub fn draft_project_brief(thread_id: String) -> Ask<Message> {
-    Ask::new(Command::DraftProjectBrief { thread_id })
-}
-pub fn make_project(
-    thread_id: String,
-    name: String,
-    brief: String,
-    files: Vec<String>,
-) -> Ask<Project> {
-    Ask::new(Command::MakeProject {
-        thread_id,
-        name,
-        brief,
-        files,
-    })
-}
-pub fn scratch_files(thread_id: String) -> Ask<Vec<String>> {
-    Ask::new(Command::ScratchFiles { thread_id })
 }
 pub fn dismiss_thread_card(thread_id: String, card_id: String) -> Ask<assistant::Thread> {
     Ask::new(Command::DismissThreadCard { thread_id, card_id })
@@ -571,28 +539,14 @@ pub fn discard_proposal(thread_id: String, proposal_id: String) -> Ask<assistant
 pub fn set_assistant_name(name: String) -> Ask<String> {
     Ask::new(Command::SetAssistantName { name })
 }
-pub fn set_router_threshold(threshold: f64) -> Ask<HostSettings> {
-    Ask::new(Command::SetRouterThreshold { threshold })
-}
-pub fn route_message(id: String, thread_id: Option<String>, body: String) -> Ask<()> {
-    Ask::new(Command::RouteMessage {
+/// The human's message to the Assistant's one conversation; `space_id` is the Space picked in
+/// the composer, if any.
+pub fn send_to_assistant(id: String, body: String, space_id: Option<SpaceId>) -> Ask<Message> {
+    Ask::new(Command::SendToAssistant {
         id,
-        thread_id,
         body,
-    })
-}
-pub fn answer_held(id: String, destination: assistant::router::Destination) -> Ask<()> {
-    Ask::new(Command::AnswerHeld { id, destination })
-}
-pub fn change_route(
-    thread_id: String,
-    message_id: String,
-    destination: assistant::router::Destination,
-) -> Ask<()> {
-    Ask::new(Command::ChangeRoute {
-        thread_id,
-        message_id,
-        destination,
+        attachments: vec![],
+        space_id,
     })
 }
 /// With `new`, from a recipe card, refused when a job of that name exists.

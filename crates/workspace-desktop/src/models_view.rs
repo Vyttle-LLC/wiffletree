@@ -23,7 +23,7 @@ pub(super) fn card_title(title: &'static str, note: impl Into<SharedString>, p: 
 /// Where Wiffletree may move on, in percent, as the threshold menu offers it.
 const SWITCH_CHOICES: [u32; 6] = [75, 80, 85, 90, 95, 99];
 /// Why the table at a Space leaves two rows out.
-const ON_THIS_MAC: &str = "Router and Brain compiler are set on This Mac: routing happens before a message has a Space, and a brain can belong to several Spaces.";
+const ON_THIS_MAC: &str = "Brain compiler is set on This Mac, since a brain can belong to several Spaces. The Space's Assistant row applies to its issue threads and loops, not to the conversation.";
 
 fn provider_color(provider: Provider, p: Palette) -> Hsla {
     match provider {
@@ -712,12 +712,9 @@ impl ModelsPage {
     ) -> impl IntoElement {
         let catalog = self.catalog.clone();
         let may_skip = which.then && matches!(job, Job::Verifier { .. });
-        // The router never waits: with every choice spent, it asks you instead.
-        let router = *job == Job::Router;
         let label = match (&current, which) {
             (Some(profile), _) => models::cell_label(&catalog, profile),
             (None, Cell { then: true, .. }) if skips => "skip".to_owned(),
-            (None, Cell { then: true, .. }) if router => "ask you".to_owned(),
             (None, Cell { then: true, .. }) => "wait".to_owned(),
             (None, Cell { small: true, .. }) => "same".to_owned(),
             (None, _) => "No model".to_owned(),
@@ -734,7 +731,6 @@ impl ModelsPage {
             })
             .collect();
         let none = match which {
-            Cell { then: true, .. } if router => Some("Ask me where it goes"),
             Cell { then: true, .. } => Some("Wait for the reset"),
             Cell { small: true, .. } => Some("Same as the first line"),
             _ if matches!(job, Job::Keeper | Job::Compiler) => Some("No model"),
@@ -859,7 +855,6 @@ impl ModelsPage {
             Now::Skips(Some(at)) => pill(format!("Skips · {at}"), p.subtle),
             Now::Skips(None) => pill("Skips", p.subtle),
             Now::Cannot => pill("Cannot start", p.red),
-            Now::AsksYou => pill("Asks you", p.yellow),
             Now::Checking => pill("Checking…", p.subtle),
         };
         div()
@@ -1240,7 +1235,7 @@ impl ModelsPage {
             Some(name) => format!(
                 "A row {name} sets applies to every agent in {name}, after a job recipe's own model; the other rows are this Mac's. Shared with {name}'s members."
             ),
-            None => "This Mac's table. A Space may override a row for the work in it, but not Router or Brain compiler.".into(),
+            None => "This Mac's table. A Space may override a row for the work in it, but not Brain compiler.".into(),
         };
         Some(
             div()
@@ -1681,11 +1676,12 @@ fn job_label(job: &Job, verifiers: &[VerifierConfig]) -> (String, String) {
         Job::Implementer => ("Implementer".into(), "Writes the change".into()),
         Job::Tester => ("Tester".into(), "Runs build, lint, tests".into()),
         Job::Keeper => ("PR keeper".into(), "Fixes conflicts, sorts comments".into()),
-        Job::Assistant => ("Assistant".into(), "Answers in your threads".into()),
-        Job::Router => (
-            "Router".into(),
-            "Picks each message's thread; never waits".into(),
+        Job::Assistant => (
+            "Assistant".into(),
+            "Your conversation and issue threads".into(),
         ),
+        // Never in a table the page shows: this Mac's drops it, and a Space's is only named.
+        Job::RetiredRouter => ("Router".into(), "No longer runs".into()),
         Job::Job => ("Job".into(), "Runs your scheduled jobs".into()),
         Job::Compiler => (
             "Brain compiler".into(),

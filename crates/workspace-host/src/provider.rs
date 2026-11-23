@@ -6,7 +6,6 @@ mod conversation;
 mod evaluator;
 mod output;
 mod restricted;
-mod router;
 use crate::compaction::CompactionRecord;
 use crate::processes::{self, Sighting, Watch};
 use crate::runtime::LowPriority as _;
@@ -18,7 +17,6 @@ pub use evaluator::{EvaluatorLaunch, prepare_codex_home};
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
 use output::{Next, Output, StopReading};
 pub use restricted::{ThreadLaunch, server_definition, shell_text_refused};
-pub use router::{ROUTER_LIMIT, RouterProvider};
 use std::os::unix::process::CommandExt;
 use std::{
     io::{Read, Write},
@@ -141,9 +139,9 @@ pub fn executable(provider: Provider) -> Result<PathBuf> {
         .with_context(|| format!("Install {name} CLI and sign in before starting live work"))
 }
 /// The fixed core's parts, each with who gets it: the contract, then each role's core, then the
-/// contract's thread version, the assistant's core, a job run's, and the Assistant
-/// conversation's contract and core.
-pub const CORE: [(&str, &str); 10] = [
+/// contract's thread version, the Assistant conversation's contract, the Assistant core, which
+/// the conversation and issue threads share, and a job run's core.
+pub const CORE: [(&str, &str); 9] = [
     (
         "every agent",
         include_str!("../skills/core/communication.md"),
@@ -166,18 +164,14 @@ pub const CORE: [(&str, &str); 10] = [
         include_str!("../skills/core/thread-communication.md"),
     ),
     (
-        "assistant threads",
-        include_str!("../skills/core/assistant.md"),
-    ),
-    ("job runs", include_str!("../skills/core/job-run.md")),
-    (
         "the Assistant",
         include_str!("../skills/core/conversation-communication.md"),
     ),
     (
-        "the Assistant",
-        include_str!("../skills/core/conversation.md"),
+        "the Assistant and issue threads",
+        include_str!("../skills/core/assistant.md"),
     ),
+    ("job runs", include_str!("../skills/core/job-run.md")),
 ];
 /// The core's parts with their names and versions, for clients.
 pub fn core_instructions() -> Vec<workspace_core::skills::CoreInstructions> {
@@ -201,9 +195,8 @@ fn core(role: Role) -> &'static str {
         Role::Implementer | Role::Maintenance => 2,
         Role::Tester | Role::Reviewer => 3,
         Role::Keeper => 4,
-        Role::Assistant => 6,
-        Role::JobRun => 7,
-        Role::Conversation => 9,
+        Role::Assistant | Role::Conversation => 7,
+        Role::JobRun => 8,
         Role::Compiler => return compile::PROCEDURE,
         // An evaluator is blind: Wiffletree gives it no instructions at all.
         Role::Evaluator => return "",
@@ -214,7 +207,7 @@ fn core(role: Role) -> &'static str {
 fn contract(role: Role) -> &'static str {
     match role {
         Role::Assistant | Role::JobRun => CORE[5].1,
-        Role::Conversation => CORE[8].1,
+        Role::Conversation => CORE[6].1,
         _ => CORE[0].1,
     }
 }

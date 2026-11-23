@@ -1,10 +1,10 @@
 //! The assistant (OpenSpec change `assistant-spaces-jobs-boards`, screen 1 of its mockup): one
-//! view of thread tabs, each a small read-only provider session in a Space, with search, the
-//! cards a thread's tools show, and a composer whose Space chip is the router's until the user
-//! picks one by hand. Its jobs are in the `jobs` view.
+//! view of thread tabs, each a small read-only provider session in a Space, with search and the
+//! cards a thread's tools show. Since `assistant-does-the-work`, threads other than issue threads
+//! are read-only history, and the composer sends to the Assistant's one conversation, with a
+//! Space chip on auto until the user picks one by hand. Its jobs are in the `jobs` view.
 mod issue_threads;
 pub(super) mod jobs;
-mod routing;
 
 use super::*;
 use gpui_component::{
@@ -21,8 +21,8 @@ use workspace_core::assistant::{
     CardKind, DEFAULT_NAME, ThreadCard, ThreadHit, ThreadTab, is_notice,
 };
 
-/// What the composer says about a thread's authority, as the mockup words it.
-const AUTHORITY: &str = "Read-only · scratch folder";
+/// What the composer says about the Assistant's authority, as the mockup words it.
+const AUTHORITY: &str = "Can act on this Mac · repositories change through work";
 
 /// The assistant's name as the snapshot carries it; "Assistant" until the user names it.
 pub(super) fn assistant_name(snapshot: Option<&Snapshot>) -> String {
@@ -99,26 +99,14 @@ impl Render for TabDrag {
     }
 }
 
-/// Make this a project's brief while the user edits it.
-struct BriefForm {
-    card: String,
-    name: Entity<InputState>,
-    brief: Entity<TextareaState>,
-    /// The scratch files, each ticked to be copied into the project.
-    files: Vec<(String, bool)>,
-    busy: bool,
-}
-
 pub(super) struct AssistantPage {
     bridge: Bridge,
     shared: Shared,
     /// The tab shown: a thread, or with `None` a new tab.
     open: Option<String>,
-    /// The Space picked with the composer's chip for the next message; `None` lets the router
-    /// choose.
+    /// The Space picked with the composer's chip for the next message; `None` lets the
+    /// Assistant infer it.
     chosen_space: Option<SpaceId>,
-    /// A message sent from a new tab, whose thread the view opens once it has one.
-    following: Option<String>,
     composer: Entity<TextareaState>,
     /// The open thread's messages, and the thread and revision they were read at.
     messages: Vec<Message>,
@@ -130,7 +118,6 @@ pub(super) struct AssistantPage {
     search_space: Option<SpaceId>,
     title: Entity<InputState>,
     renaming: bool,
-    brief: Option<BriefForm>,
     sending: bool,
     /// The assistant's name the composer's placeholder uses.
     named: String,
@@ -185,7 +172,6 @@ impl AssistantPage {
             shared: Shared::default(),
             open: None,
             chosen_space: None,
-            following: None,
             composer,
             messages: vec![],
             read: None,
@@ -194,7 +180,6 @@ impl AssistantPage {
             search_space: None,
             title,
             renaming: false,
-            brief: None,
             sending: false,
             named: DEFAULT_NAME.into(),
             jobs_view: None,
@@ -250,13 +235,6 @@ impl AssistantPage {
         if self.open.is_some() && self.open_tab().is_none() {
             self.open = self.tabs().first().map(|tab| tab.thread.id.clone());
         }
-        if let Some(sent) = &self.following
-            && let Some(found) = routing::thread_of(self.tabs(), sent)
-        {
-            self.following = None;
-            self.open = Some(found);
-            self.read = None;
-        }
         if shown {
             self.read_messages(window, cx);
             cx.notify();
@@ -300,7 +278,6 @@ impl AssistantPage {
     fn select(&mut self, id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.open = id;
         self.renaming = false;
-        self.brief = None;
         self.jobs_view = None;
         self.read_messages(window, cx);
         cx.notify();
@@ -311,14 +288,9 @@ impl AssistantPage {
         if body.trim().is_empty() || self.sending {
             return;
         }
-        let read_only = self
-            .open_tab()
-            .is_some_and(|t| t.thread.project_id.is_some());
-        if read_only {
-            return;
-        }
         self.sending = true;
-        // An issue thread takes its messages without the router.
+        // An issue thread takes its own messages; every other message goes to the one
+        // conversation, which this view does not show yet.
         let issue_thread = (self.open_tab())
             .filter(|tab| tab.thread.attached.is_some())
             .map(|tab| tab.thread.id.clone());
@@ -335,51 +307,14 @@ impl AssistantPage {
             self.request(send, window, cx);
             return;
         }
-        let open_space = self.open_tab().map(|tab| tab.thread.space_id.clone());
-        // A Space picked by hand skips the router: its thread, or a new one there.
-        match (self.chosen_space.take(), self.open.clone()) {
-            (Some(space), Some(thread)) if Some(&space) == open_space.as_ref() => {
-                let send = Command::Send {
-                    id: new_id(),
-                    sender: None,
-                    recipient: thread,
-                    body,
-                    attachments: vec![],
-                    uploads: vec![],
-                };
-                self.request(send, window, cx);
+        let ask = ask::send_to_assistant(new_id(), body, self.chosen_space.take());
+        self.ask(ask, window, cx, |view, sent, window, cx| {
+            view.sending = false;
+            match sent {
+                Ok(_) => view.clear_composer(window, cx),
+                Err(error) => toast_error(error, window, cx),
             }
-            (Some(space), _) => {
-                let ask = ask::start_thread(space, body, None);
-                self.ask(ask, window, cx, |view, thread, window, cx| {
-                    view.sending = false;
-                    match thread {
-                        Ok(thread) => {
-                            view.clear_composer(window, cx);
-                            view.select(Some(thread.id), window, cx);
-                        }
-                        Err(error) => toast_error(error, window, cx),
-                    }
-                });
-            }
-            (None, open) => {
-                let id = new_id();
-                if open.is_none() {
-                    self.following = Some(id.clone());
-                }
-                let ask = ask::route_message(id, open, body);
-                self.ask(ask, window, cx, |view, routed, window, cx| {
-                    view.sending = false;
-                    match routed {
-                        Ok(()) => view.clear_composer(window, cx),
-                        Err(error) => {
-                            view.following = None;
-                            toast_error(error, window, cx)
-                        }
-                    }
-                });
-            }
-        }
+        });
     }
     fn clear_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.composer
@@ -514,86 +449,6 @@ impl AssistantPage {
                     true
                 })
         });
-    }
-    fn draft_brief(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.open.clone() else {
-            return;
-        };
-        self.ask(
-            ask::draft_project_brief(id),
-            window,
-            cx,
-            |_, sent, window, cx| {
-                if let Err(error) = sent {
-                    toast_error(error, window, cx);
-                }
-            },
-        );
-    }
-    /// Opens a brief card for editing, with the scratch files to tick.
-    fn edit_brief(&mut self, card: &ThreadCard, window: &mut Window, cx: &mut Context<Self>) {
-        let (CardKind::ProjectBrief { name, brief }, Some(thread)) =
-            (&card.kind, self.open.clone())
-        else {
-            return;
-        };
-        let name_input = cx.new(|cx| InputState::new(window, cx).default_value(name.clone()));
-        let brief_input = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .auto_grow(4, 14)
-                .default_value(brief.clone())
-        });
-        self.brief = Some(BriefForm {
-            card: card.id.clone(),
-            name: name_input,
-            brief: brief_input,
-            files: vec![],
-            busy: false,
-        });
-        self.ask(
-            ask::scratch_files(thread),
-            window,
-            cx,
-            |view, files, _, cx| {
-                if let (Some(form), Ok(files)) = (&mut view.brief, files) {
-                    form.files = files.into_iter().map(|f| (f, false)).collect();
-                    cx.notify();
-                }
-            },
-        );
-        cx.notify();
-    }
-    fn make_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(thread), Some(form)) = (self.open.clone(), &mut self.brief) else {
-            return;
-        };
-        form.busy = true;
-        let name = form.name.read(cx).value().to_string();
-        let brief = form.brief.read(cx).value().to_string();
-        let files = (form.files.iter())
-            .filter(|(_, ticked)| *ticked)
-            .map(|(f, _)| f.clone())
-            .collect();
-        let card = form.card.clone();
-        let ask = ask::make_project(thread.clone(), name, brief, files);
-        self.ask(ask, window, cx, move |view, project, window, cx| {
-            match project {
-                Ok(project) => {
-                    view.brief = None;
-                    toast(format!("Started the project {}", project.name), window, cx);
-                    let dismiss = ask::dismiss_thread_card(thread, card);
-                    view.ask(dismiss, window, cx, |_, _, _, _| {});
-                }
-                Err(error) => {
-                    if let Some(form) = &mut view.brief {
-                        form.busy = false;
-                    }
-                    toast_error(error, window, cx);
-                }
-            }
-            cx.notify();
-        });
-        cx.notify();
     }
     fn dismiss(&mut self, card: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(thread) = self.open.clone() else {
@@ -853,14 +708,6 @@ impl AssistantPage {
                         cx.listener(move |_, _, _, c| c.emit(Intent::Select(coordinator.clone()))),
                     )
             }))
-            .when(thread.project_id.is_none(), |d| {
-                d.child(
-                    button("make-project")
-                        .xsmall()
-                        .label("Make this a project")
-                        .on_click(cx.listener(|v, _, w, c| v.draft_brief(w, c))),
-                )
-            })
             .child(
                 button("rename-thread")
                     .ghost()
@@ -884,26 +731,9 @@ impl AssistantPage {
         let space = (self.spaces().iter())
             .find(|s| s.id == tab.thread.space_id)
             .map_or(String::new(), |s| s.name.clone());
-        let thread = &tab.thread;
         let mut column = div().flex().flex_col().gap_3().px_5().py_4();
         column = column.children(self.authors_notice(tab, p));
-        // A message Change moved out, and the replies after it, show dimmed.
-        let mut moved: Option<&str> = None;
-        for entry in routing::timeline(&self.messages, thread) {
-            let message = match entry {
-                routing::Entry::Away(line) => {
-                    column = column
-                        .child(Self::bubble(&line.body, p))
-                        .child(self.route_line(thread, line, p, cx));
-                    continue;
-                }
-                routing::Entry::Message(message) => message,
-            };
-            if message.sender.is_none() {
-                moved = (thread.moved.iter())
-                    .find(|m| m.message_id == message.id)
-                    .map(|m| m.to.as_str());
-            }
+        for message in &self.messages {
             let body: SharedString = message.body.clone().into();
             let shown = match (message.sender.is_none(), is_notice(&message.id)) {
                 (true, _) => Self::bubble(&message.body, p),
@@ -923,15 +753,7 @@ impl AssistantPage {
                         .text_size(px(font::BODY)),
                     ),
             };
-            column = column.child(shown.when(moved.is_some(), |d| d.opacity(0.5)));
-            if let Some(to) = moved.filter(|_| message.sender.is_none()) {
-                column = column.child(self.moved_line(to, p));
-            }
-            // A message from a new tab keeps its line, with Change, in the thread it went to.
-            let here = (thread.routed.iter()).find(|l| l.message_id == message.id);
-            if let Some(line) = here {
-                column = column.child(self.route_line(thread, line, p, cx));
-            }
+            column = column.child(shown);
         }
         if tab.status == Status::Working {
             column = column.child(
@@ -949,10 +771,19 @@ impl AssistantPage {
         for proposal in &tab.thread.proposals {
             column = column.child(self.proposal_card(proposal, p, cx));
         }
-        for held in self.held_for(Some(&thread.id)) {
-            column = column.child(self.held_message(&held, p, cx));
-        }
         column
+    }
+
+    /// The human's message, on the right.
+    fn bubble(body: &str, p: Palette) -> Div {
+        div()
+            .self_end()
+            .max_w(relative(0.85))
+            .px_3()
+            .py_2()
+            .rounded_lg()
+            .bg(p.overlay)
+            .child(SharedString::from(body.to_owned()))
     }
 
     fn card(&self, thread_card: &ThreadCard, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -992,31 +823,16 @@ impl AssistantPage {
                         ),
                     )
             }
-            CardKind::ProjectBrief { name, brief } => {
-                if let Some(form) = self.brief.as_ref().filter(|f| f.card == id) {
-                    return self.brief_form(form, p, cx);
-                }
-                let edited = thread_card.clone();
-                card(p)
-                    .gap_2()
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("Make this a project: {name}")),
-                    )
-                    .child(hint(brief.clone(), p))
-                    .child(
-                        div().flex().gap_2().justify_end().child(dismiss).child(
-                            button(SharedString::from(format!("brief-{id}")))
-                                .primary()
-                                .xsmall()
-                                .label("Review the brief")
-                                .on_click(
-                                    cx.listener(move |v, _, w, c| v.edit_brief(&edited, w, c)),
-                                ),
-                        ),
-                    )
-            }
+            // An earlier release's brief, kept readable in history.
+            CardKind::ProjectBrief { name, brief } => card(p)
+                .gap_2()
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(format!("Project brief: {name}")),
+                )
+                .child(hint(brief.clone(), p))
+                .child(div().flex().justify_end().child(dismiss)),
             CardKind::SavedOutput { title, version, .. } => card(p)
                 .flex_row()
                 .items_center()
@@ -1030,62 +846,6 @@ impl AssistantPage {
         }
     }
 
-    fn brief_form(&self, form: &BriefForm, p: Palette, cx: &mut Context<Self>) -> Div {
-        let space = (self.open_tab())
-            .and_then(|tab| self.spaces().iter().find(|s| s.id == tab.thread.space_id))
-            .map_or(String::new(), |s| s.name.clone());
-        let mut files = div().flex().flex_col().gap_1();
-        for (index, (file, ticked)) in form.files.iter().enumerate() {
-            files = files.child(
-                Checkbox::new(SharedString::from(format!("scratch-{index}")))
-                    .label(file.clone())
-                    .checked(*ticked)
-                    .on_click(cx.listener(move |v, _, _, c| {
-                        if let Some(form) = &mut v.brief {
-                            form.files[index].1 ^= true;
-                        }
-                        c.notify();
-                    })),
-            );
-        }
-        card(p)
-            .gap_2()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("A new project in {space}")))
-            .child(Input::new(&form.name).small())
-            .child(Textarea::new(&form.brief).w_full())
-            .child(hint(
-                "The brief is the project's first message, with a link back to this thread. The thread stays, read-only.",
-                p,
-            ))
-            .when(!form.files.is_empty(), |d| {
-                d.child(hint("Copy these scratch files into the project:", p)).child(files)
-            })
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .justify_end()
-                    .child(
-                        button("cancel-brief")
-                            .ghost()
-                            .xsmall()
-                            .label("Cancel")
-                            .on_click(cx.listener(|v, _, _, c| {
-                                v.brief = None;
-                                c.notify();
-                            })),
-                    )
-                    .child(
-                        button("confirm-brief")
-                            .primary()
-                            .xsmall()
-                            .label("Make this a project")
-                            .disabled(form.busy)
-                            .on_click(cx.listener(|v, _, w, c| v.make_project(w, c))),
-                    ),
-            )
-    }
-
     /// The model a new thread in `space` starts on, as the host picks it with nothing chosen.
     fn new_thread_model(&self, space: &SpaceId) -> Option<ModelProfile> {
         let snapshot = self.shared.snapshot()?;
@@ -1094,12 +854,9 @@ impl AssistantPage {
     }
     fn composer_box(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let tab = self.open_tab();
-        if let Some(project) = tab.and_then(|t| t.thread.project_id.as_deref()) {
-            let named = self
-                .project_coordinator(project)
-                .map_or("a project".into(), |(_, n)| n);
+        if tab.is_some_and(|t| t.thread.is_history()) {
             return div().m_4().child(hint(
-                format!("This thread became {named} and is read-only."),
+                "This thread is read-only history. Open a new tab to write to the Assistant.",
                 p,
             ));
         }
@@ -1113,8 +870,8 @@ impl AssistantPage {
             Some(_) => chip_name,
             None => format!("{chip_name} · auto"),
         };
-        // A thread shows its own model; a new tab what its thread would start on in the Space
-        // picked by hand. On auto the router may pick a Space that overrides this Mac's row.
+        // A thread shows its own model; a new tab what a thread would start on in the Space
+        // picked by hand.
         let model = match tab {
             Some(tab) => tab.profile.clone(),
             None => (self.chosen_space.as_ref())
@@ -1129,7 +886,7 @@ impl AssistantPage {
             .child(model.map_or("Who runs what".into(), |m| m.short()));
         let weak = cx.weak_entity();
         let chosen = self.chosen_space.clone();
-        // Auto lets the router choose; a Space picked by hand sends the next message there.
+        // Auto lets the Assistant infer the Space; one picked by hand holds the next message to it.
         let chip = button("composer-space")
             .xsmall()
             .when_some(space.clone(), |b, id| {
@@ -1182,7 +939,7 @@ impl AssistantPage {
                     .text_size(px(font::CAPTION))
                     .text_color(p.subtle)
                     .map(|bar| match issue_thread {
-                        true => bar.child("Goes to this thread, never the router"),
+                        true => bar.child("Goes to this thread only"),
                         false => bar.child(chip).child(model).child(AUTHORITY),
                     })
                     .child(div().flex_1())
@@ -1242,33 +999,19 @@ impl Render for AssistantPage {
                         .child(self.conversation(&tab, p, cx)),
                 )
                 .into_any_element(),
-            (None, None, None) => {
-                let held = self.held_for(None);
-                match held.is_empty() {
-                    true => div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(hint(
-                            format!(
-                                "Ask {} anything. Each thread is read-only plus its own scratch folder, and stays on this Mac.",
-                                assistant_name(self.shared.snapshot())
-                            ),
-                            p,
-                        ))
-                        .into_any_element(),
-                    false => div()
-                        .id("held-messages")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .child(div().flex().flex_col().gap_3().px_5().py_4().children(
-                            held.iter().map(|held| self.held_message(held, p, cx)),
-                        ))
-                        .into_any_element(),
-                }
-            }
+            (None, None, None) => div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(hint(
+                    format!(
+                        "Ask {} anything. It works on this Mac, and repositories change through work.",
+                        assistant_name(self.shared.snapshot())
+                    ),
+                    p,
+                ))
+                .into_any_element(),
         };
         div()
             .size_full()
@@ -1305,8 +1048,6 @@ mod tests {
                 position: 0,
                 project_id: None,
                 cards: vec![],
-                routed: vec![],
-                moved: vec![],
                 job: None,
                 attached: None,
                 proposals: vec![],

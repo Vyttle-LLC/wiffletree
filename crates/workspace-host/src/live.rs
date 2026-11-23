@@ -760,10 +760,10 @@ impl Host {
             Err(error) => json!({"cannot_start": format!("{error:#}")}),
         };
         let space_name = self.find_space(&space)?.map(|r| r.space.name);
-        // Only the human starts the assistant's threads, only their messages run the router, and
-        // no coordinator starts a compile.
+        // Only the human starts the Assistant and its issue threads, and no coordinator starts a
+        // compile.
         let jobs: Vec<Value> = (table.rows.iter())
-            .filter(|row| !matches!(row.job, Job::Assistant | Job::Router | Job::Compiler))
+            .filter(|row| !matches!(row.job, Job::Assistant | Job::Compiler))
             .map(|resolved| {
                 let row = &resolved.resolved.value;
                 let mut entry = json!({"job": row.job, "name": row.job.name(),
