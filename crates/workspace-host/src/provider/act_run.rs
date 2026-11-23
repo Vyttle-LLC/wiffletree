@@ -70,6 +70,8 @@ impl UrlAct {
         cmd.env_remove("WORKSPACE_SOCKET")
             .env_remove("WORKSPACE_TOKEN")
             .args(["-p", "--tools", "", "--no-session-persistence"])
+            // Overrides a bypass mode in the human's settings: only the act tool is allowed.
+            .args(["--permission-mode", "dontAsk"])
             .args(["--strict-mcp-config", "--mcp-config", &servers.to_string()])
             .args(["--allowedTools", &self.name()])
             .args(["--disallowedTools", &denied.join(",")])
@@ -111,7 +113,36 @@ pub fn act_call_refused(folder: &Path, input: &[u8]) -> Option<String> {
 
 /// Runs `act` through Claude at `claude`, whose hook is `helper`'s `act-check`, and returns
 /// the tool's text; an error says why the call did not go through, or what the server said.
+///
+/// A start that offers a tool of the server not yet denied is stopped before the model acts,
+/// and the run starts once more with those tools denied, so it is offered only the act tool.
 pub fn act_run(claude: &Path, helper: &Path, act: &UrlAct, limit: Duration) -> Result<String> {
+    let mut act = act.clone();
+    match one_run(claude, helper, &act, limit) {
+        Err(error) if error.is::<UnseenTools>() => {
+            let UnseenTools(unseen) = error.downcast().expect("checked above");
+            act.others.extend(unseen);
+            one_run(claude, helper, &act, limit)
+        }
+        ran => ran,
+    }
+}
+
+/// Tools of the server a run's start offered besides the act tool, by tool name.
+#[derive(Debug)]
+struct UnseenTools(Vec<String>);
+impl std::fmt::Display for UnseenTools {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Stopped: the run was offered other tools of the server ({})",
+            self.0.join(", ")
+        )
+    }
+}
+impl std::error::Error for UnseenTools {}
+
+fn one_run(claude: &Path, helper: &Path, act: &UrlAct, limit: Duration) -> Result<String> {
     let mut prepared = Ok(());
     let configure = |cmd: &mut ProcessCommand, folder: &Path| {
         prepared = act.configure(cmd, folder, helper);
@@ -162,9 +193,15 @@ pub fn act_run(claude: &Path, helper: &Path, act: &UrlAct, limit: Duration) -> R
     ran
 }
 
-/// Checks the run's start: it offers no tool but the server's, which is connected and offers
-/// the act tool. A server that is not connected is most often signed out.
+/// Checks the run's start: it denies whatever is not allowed, and offers exactly the act tool
+/// of a connected server. A server that is not connected is most often signed out; other
+/// tools of the server not yet denied are `UnseenTools`.
 fn started(act: &UrlAct, init: &Value) -> Result<()> {
+    ensure!(
+        init["permissionMode"] == "dontAsk",
+        "Stopped: the run started in permission mode {} instead of denying what is not allowed",
+        init["permissionMode"]
+    );
     let tools: Vec<&str> = (init["tools"].as_array().into_iter().flatten())
         .filter_map(Value::as_str)
         .collect();
@@ -186,6 +223,22 @@ fn started(act: &UrlAct, init: &Value) -> Result<()> {
         "The {} server offers no tool {}",
         act.server,
         act.tool
+    );
+    let name = act.name();
+    let others: Vec<&str> = (tools.iter().copied())
+        .filter(|tool| *tool != name)
+        .collect();
+    let unseen: Vec<String> = (others.iter())
+        .map(|tool| tool[prefix.len()..].to_owned())
+        .filter(|tool| !act.others.contains(tool))
+        .collect();
+    if !unseen.is_empty() {
+        return Err(UnseenTools(unseen).into());
+    }
+    ensure!(
+        others.is_empty(),
+        "Stopped: the run was offered tools it denies ({})",
+        others.join(", ")
     );
     Ok(())
 }

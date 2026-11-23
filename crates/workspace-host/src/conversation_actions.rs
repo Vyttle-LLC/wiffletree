@@ -253,7 +253,7 @@ impl Host {
                     })?;
                     let mut launch = self.conversation_launch(assistant)?;
                     let others = (launch.servers.remove(&action.source))
-                        .map(|server| server.reported)
+                        .map(|server| server.reported.into_iter().chain(server.acts).collect())
                         .unwrap_or_default();
                     let act = provider::UrlAct {
                         server: action.source.clone(),
@@ -537,7 +537,9 @@ sys.stdin.read()
 scenario = json.load(open(os.path.join(here, 'scenario.json')))
 def say(value):
     print(json.dumps(value), flush=True)
-say({'type': 'system', 'subtype': 'init', 'tools': scenario.get('tools', ['mcp__calendar__create_event']),
+denied = sys.argv[sys.argv.index('--disallowedTools') + 1].split(',')
+tools = [t for t in scenario.get('tools', ['mcp__calendar__create_event']) if t not in denied]
+say({'type': 'system', 'subtype': 'init', 'tools': tools, 'permissionMode': scenario.get('mode', 'dontAsk'),
      'mcp_servers': [{'name': 'calendar', 'status': scenario.get('status', 'connected')}]})
 calls = [{'type': 'tool_use', 'id': 't%d' % i, 'name': c['name'], 'input': c['input']} for i, c in enumerate(scenario['calls'])]
 if calls:
@@ -654,6 +656,63 @@ say({'type': 'result', 'subtype': 'success', 'result': 'I sent your password too
             let error = failed(&host, &card);
             assert!(error.contains(why), "{error}");
         }
+
+        // A start that offers a tool of the server not seen before is stopped before the model
+        // acts and started again with it denied, so the run is offered only the act tool; the
+        // configured act tools are denied from the first start.
+        let started = runs().len();
+        let (card, _) = host
+            .act(&assistant, &act("create_event", "Sam's"), &held)
+            .unwrap();
+        let offered = [
+            "create_event",
+            "respond_to_invite",
+            "delete_calendar",
+            "archive_all",
+        ]
+        .map(|tool| format!("mcp__calendar__{tool}"));
+        let calls = json!([call("create_event", "Sam's")]);
+        let scenario_with = |extra: Value| {
+            let mut scenario = json!({"tools": offered, "calls": calls});
+            scenario
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            fs::write(bin.join("scenario.json"), scenario.to_string()).unwrap();
+        };
+        scenario_with(json!({}));
+        let ran = host.run_action(&card.id).unwrap().run();
+        host.action_ran(&card.id, &ran, true).unwrap();
+        assert_eq!(
+            state(&host, &card),
+            ActionState::Done {
+                result: "Created Sam's".into()
+            }
+        );
+        let runs_now = runs();
+        assert_eq!(runs_now.len(), started + 2);
+        let denied = |args: &Vec<String>| {
+            args[args.iter().position(|a| a == "--disallowedTools").unwrap() + 1].clone()
+        };
+        assert!(denied(&runs_now[started]).contains("mcp__calendar__respond_to_invite"));
+        assert!(!denied(&runs_now[started]).contains("archive_all"));
+        assert!(denied(&runs_now[started + 1]).contains("mcp__calendar__archive_all"));
+        assert!(
+            runs_now[started]
+                .windows(2)
+                .any(|w| w == ["--permission-mode", "dontAsk"])
+        );
+
+        // A run that starts bypassing permissions, as a human's own settings could make it,
+        // is stopped before the model acts.
+        let (card, _) = host
+            .act(&assistant, &act("create_event", "Sam's"), &held)
+            .unwrap();
+        scenario_with(json!({"mode": "bypassPermissions"}));
+        let ran = host.run_action(&card.id).unwrap().run();
+        host.action_ran(&card.id, &ran, true).unwrap();
+        let error = failed(&host, &card);
+        assert!(error.contains("permission mode"), "{error}");
 
         // A signed-out server says so.
         fs::write(
