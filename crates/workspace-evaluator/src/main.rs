@@ -5,7 +5,8 @@
 //!
 //! - `serve <socket> <run> <bundle id>…` serves the run on its socket (see `protocol`).
 //! - `check` prints the helper's grants as JSON.
-//! - `request` asks macOS for both grants, which shows its prompts, then prints them.
+//! - `request` asks macOS for both grants, which shows its prompts, waits up to two minutes
+//!   for both, then prints them.
 #[cfg(target_os = "macos")]
 mod macos;
 mod policy;

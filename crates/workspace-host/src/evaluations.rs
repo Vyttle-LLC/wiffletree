@@ -850,7 +850,7 @@ impl Host {
             log: self.home.join(TARGET_LOGS).join(format!("{}.log", run.id)),
         });
         let desktop = (run.mode == EvaluationMode::Desktop).then(|| provider::DesktopLaunch {
-            helper: provider::helper_app(),
+            helper: provider::helper_app(&self.home),
             socket: std::env::temp_dir().join(format!("wiffletree-{}-desktop.sock", run.id)),
             run: run.id.clone(),
             apps: run.apps.clone(),
@@ -1847,7 +1847,9 @@ pub(crate) mod tests {
         assert_eq!(desktop.apps, ["com.apple.calculator"]);
         assert_eq!(desktop.run, id);
         assert!(
-            desktop.helper.ends_with("Helpers/Wiffletree Evaluator.app")
+            desktop
+                .helper
+                .ends_with("evaluator/Wiffletree Evaluator.app")
                 || std::env::var_os("WORKSPACE_EVALUATOR_APP").is_some()
         );
         assert!(

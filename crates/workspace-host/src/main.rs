@@ -198,20 +198,23 @@ fn serve(args: &[String]) -> Result<()> {
     }
     let data = data.context("serve needs --data-dir <directory>")?;
     ensure!(!(child && app.is_some()), "A child host takes no --app");
-    // Full-desktop UI evaluators run in the helper bundled with the app, also when this host
-    // runs from a versioned copy outside the bundle.
-    if std::env::var_os(workspace_host::provider::EVALUATOR_APP).is_none() {
-        let beside = app.clone().or_else(|| std::env::current_exe().ok());
-        if let Some(helper) = beside
-            .as_deref()
-            .map(workspace_host::provider::helper_beside)
-        {
-            // SAFETY: no other thread has started yet.
-            unsafe { std::env::set_var(workspace_host::provider::EVALUATOR_APP, helper) };
-        }
-    }
     std::fs::create_dir_all(&data)?;
     let data = std::fs::canonicalize(&data)?;
+    // Full-desktop UI evaluators run in the helper the app ships, installed outside the app's
+    // bundle so that macOS charges its grants to it alone. A launchd host is given the bundle
+    // with --app; a child host runs from inside it.
+    if std::env::var_os(workspace_host::provider::EVALUATOR_APP).is_none() {
+        let exe = std::env::current_exe()?;
+        let bundle = app.clone().or_else(|| {
+            workspace_host::provider::bundle_of(&exe).map(std::path::Path::to_path_buf)
+        });
+        let bundled = bundle.map(|bundle| workspace_host::provider::bundled_helper(&bundle));
+        if let Some(bundled) = bundled.filter(|bundled| bundled.is_dir())
+            && let Err(error) = workspace_host::provider::install_helper(&bundled, &data)
+        {
+            eprintln!("Installing Wiffletree Evaluator: {error:#}");
+        }
+    }
     workspace_host::socket::socket_path(&data)?;
     let binary = std::env::current_exe()?;
     install_agent_tools(&data, &binary);

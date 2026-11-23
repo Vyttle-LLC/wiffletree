@@ -29,7 +29,7 @@
 The spike ruled out each provider's own computer use; the human chose Wiffletree's own driver in a helper app.
 
 - [x] 4.1 Wiffletree Evaluator (`crates/workspace-evaluator`): its socket protocol, the allowlist and hit-test rules as pure functions, ScreenCaptureKit screenshots of the allowed apps alone, input posted only over their windows and keys only to an allowed frontmost app, open_app and list_windows.
-- [x] 4.2 Bundled in `Contents/Helpers` and signed with the app by `scripts/package_macos.sh`; development signing in `docs/DEVELOPMENT.md`.
+- [x] 4.2 Shipped in `Contents/Helpers` and signed with the app by `scripts/package_macos.sh`, and installed by the host in its data folder, since macOS charges a nested helper's Screen Recording to Wiffletree; development signing in `docs/DEVELOPMENT.md`.
 - [x] 4.3 `wiffletree-host desktop-driver-mcp`, the `desktop` server, as Claude's and Codex's only MCP server, with the app driver's start and tool-call checks; Codex keeps `--ignore-user-config` and `computer_use` off.
 - [x] 4.4 `apps` in `start_evaluation`; the refusal of desktop runs lifted.
 - [x] 4.5 The Start card between taking the screen lock and starting (screen 3): Start now, Later and Skip these runs; a desktop run at its limit ends.

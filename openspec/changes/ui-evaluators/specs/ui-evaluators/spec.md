@@ -179,7 +179,12 @@ App-only runs SHALL run side by side. Full-desktop runs SHALL share one queue fo
 
 ### Requirement: Only Wiffletree Evaluator holds the screen permissions
 
-A full-desktop run SHALL drive the screen through Wiffletree Evaluator, a helper app bundled in Wiffletree with its own bundle ID, signed with Wiffletree's identity and the hardened runtime, which the host starts per run through LaunchServices so that macOS charges its own grants. Before the provider starts, the host SHALL read the helper's Screen Recording and Accessibility grants, as the helper sees them, and whether it can hear Esc, and SHALL fail the run, naming the System Settings pane to open, when any is missing. The helper SHALL listen on a socket of the run's own with mode 600 and quit when the run ends or the host's connection closes; the host SHALL kill it if it stays. Settings › Screen control (ticket 5) SHALL describe the helper's permissions and no provider's computer use.
+A full-desktop run SHALL drive the screen through Wiffletree Evaluator, a helper app shipped in Wiffletree with its own bundle ID, signed with Wiffletree's identity and the hardened runtime. Because macOS charges Screen Recording to the outermost bundle, the host SHALL install it outside Wiffletree's bundle, in its data folder, and SHALL start that copy per run through LaunchServices, so that macOS charges the helper's own grants and never Wiffletree's. Before the provider starts, the host SHALL read the helper's Screen Recording and Accessibility grants, as the helper sees them, and whether it can hear Esc, and SHALL fail the run, naming the System Settings pane to open, when any is missing. The helper SHALL listen on a socket of the run's own with mode 600 and quit when the run ends or the host's connection closes; the host SHALL kill it if it stays. Settings › Screen control (ticket 5) SHALL describe the helper's permissions and no provider's computer use.
+
+#### Scenario: The helper is charged as itself
+
+- **WHEN** the host starts and the shipped helper differs from its installed copy, or there is none
+- **THEN** it installs the helper in its data folder, and a run's helper is checked for Screen Recording and Accessibility as `com.vyttle.wiffletree.evaluator`, never as Wiffletree
 
 #### Scenario: A missing grant
 

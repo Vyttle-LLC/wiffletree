@@ -55,7 +55,12 @@ pub fn grants(escape: bool) -> Grants {
     }
 }
 
-/// Asks macOS for both grants, which shows its prompts for this helper by name.
+/// How long `request` stays for the human to answer macOS's prompts.
+const REQUEST_WAIT: Duration = Duration::from_secs(120);
+
+/// Asks macOS for both grants, which shows its prompts for this helper by name, and stays
+/// until both are given or `REQUEST_WAIT` passes: macOS shows a prompt on behalf of a live
+/// process, so one that quits at once leaves the human nothing to answer.
 pub fn request_grants() -> Grants {
     CGRequestScreenCaptureAccess();
     let key = NSString::from_str("AXTrustedCheckOptionPrompt");
@@ -63,7 +68,14 @@ pub fn request_grants() -> Grants {
     let options = NSDictionary::from_slices(&[&*key], &[&*prompt]);
     // SAFETY: the options are an NSDictionary, toll-free bridged to the CFDictionary it takes.
     unsafe { AXIsProcessTrustedWithOptions(Retained::as_ptr(&options).cast()) };
-    grants(false)
+    let deadline = std::time::Instant::now() + REQUEST_WAIT;
+    loop {
+        let now = grants(false);
+        if (now.screen_recording && now.accessibility) || std::time::Instant::now() >= deadline {
+            return now;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
 }
 
 pub struct Mac;

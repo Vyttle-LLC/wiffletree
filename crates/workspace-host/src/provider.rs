@@ -15,7 +15,8 @@ use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
 pub use app_target::AppLaunch;
 pub use desktop_helper::{
-    DesktopLaunch, EVALUATOR_APP, STOPPED_BY_ESCAPE, STOPPED_FROM_MENU, helper_app, helper_beside,
+    DesktopLaunch, EVALUATOR_APP, STOPPED_BY_ESCAPE, STOPPED_FROM_MENU, bundle_of, bundled_helper,
+    helper_app, install_helper,
 };
 pub use evaluator::{EvaluatorLaunch, prepare_codex_home};
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};

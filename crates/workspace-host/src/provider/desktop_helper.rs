@@ -50,23 +50,84 @@ impl DesktopLaunch {
     }
 }
 
-/// Names the helper app. `serve` sets it to the one bundled with the app; a development build
-/// may name another.
+/// Names another helper for runs to start, such as a development build's; otherwise they start
+/// the copy `serve` installs (`install_helper`).
 pub const EVALUATOR_APP: &str = "WORKSPACE_EVALUATOR_APP";
+const HELPER_NAME: &str = "Wiffletree Evaluator.app";
 
-/// The helper `EVALUATOR_APP` names, or the one bundled beside the running host.
-pub fn helper_app() -> PathBuf {
+/// The helper `EVALUATOR_APP` names, or else the installed copy's usual place under `data`.
+pub fn helper_app(data: &Path) -> PathBuf {
     match std::env::var_os(EVALUATOR_APP) {
         Some(app) => app.into(),
-        None => helper_beside(&std::env::current_exe().unwrap_or_default()),
+        None => installed_helper(data),
     }
 }
 
-/// The helper in the bundle whose `Contents/MacOS` holds `executable`:
-/// `Contents/Helpers/Wiffletree Evaluator.app`.
-pub fn helper_beside(executable: &Path) -> PathBuf {
-    let contents = (executable.parent().and_then(Path::parent)).unwrap_or(Path::new("/"));
-    contents.join("Helpers/Wiffletree Evaluator.app")
+/// The helper Wiffletree ships in `bundle`, `Wiffletree.app`.
+pub fn bundled_helper(bundle: &Path) -> PathBuf {
+    bundle.join("Contents/Helpers").join(HELPER_NAME)
+}
+
+/// The app bundle whose `Contents/MacOS` holds `executable`.
+pub fn bundle_of(executable: &Path) -> Option<&Path> {
+    executable.ancestors().nth(3)
+}
+
+fn installed_helper(data: &Path) -> PathBuf {
+    data.join("evaluator").join(HELPER_NAME)
+}
+
+/// Installs the helper shipped in the app as `<data>/evaluator/Wiffletree Evaluator.app`, and
+/// returns that path. macOS charges Screen Recording to the outermost bundle, so a helper
+/// launched inside `Wiffletree.app` would be charged as Wiffletree itself; the copy is its own
+/// outermost bundle. Its grants stay with its bundle ID and signature, so replacing it with an
+/// update signed by the same team keeps them. An unchanged copy is left in place.
+pub fn install_helper(bundled: &Path, data: &Path) -> Result<PathBuf> {
+    let installed = installed_helper(data);
+    if same_helper(bundled, &installed) {
+        return Ok(installed);
+    }
+    let folder = installed.parent().context("No evaluator folder")?;
+    fs::create_dir_all(folder)?;
+    ensure!(
+        !fs::symlink_metadata(folder)?.file_type().is_symlink(),
+        "{} is a link",
+        folder.display()
+    );
+    let staged = folder.join(format!(".{HELPER_NAME}.new"));
+    let _ = fs::remove_dir_all(&staged);
+    // `ditto` keeps the bundle's files, modes and links exactly, so its signature holds.
+    let copied = ProcessCommand::new("/usr/bin/ditto")
+        .arg(bundled)
+        .arg(&staged)
+        .output()
+        .context("Could not run ditto")?;
+    ensure!(
+        copied.status.success(),
+        "Could not copy Wiffletree Evaluator: {}",
+        String::from_utf8_lossy(&copied.stderr).trim()
+    );
+    let _ = fs::remove_dir_all(&installed);
+    fs::rename(&staged, &installed)?;
+    Ok(installed)
+}
+
+/// Whether the installed copy is the bundled helper: the same executable, `Info.plist` and
+/// sealed resources.
+fn same_helper(bundled: &Path, installed: &Path) -> bool {
+    [
+        "MacOS/wiffletree-evaluator",
+        "Info.plist",
+        "_CodeSignature/CodeResources",
+    ]
+    .iter()
+    .all(|file| {
+        let (a, b) = (
+            bundled.join("Contents").join(file),
+            installed.join("Contents").join(file),
+        );
+        matches!((fs::read(a), fs::read(b)), (Ok(a), Ok(b)) if a == b)
+    })
 }
 
 /// A running helper. Dropping it closes the control connection, which quits the helper, and
@@ -95,7 +156,7 @@ impl RunningHelper {
             .context("Could not start Wiffletree Evaluator")?;
         ensure!(
             opened.status.success(),
-            "macOS could not open Wiffletree Evaluator at {}: {}. A packaged Wiffletree has it in Contents/Helpers; a development build names it with WORKSPACE_EVALUATOR_APP (docs/DEVELOPMENT.md).",
+            "macOS could not open Wiffletree Evaluator at {}: {}. Wiffletree installs it there from its app when the host starts; a development build names it with WORKSPACE_EVALUATOR_APP (docs/DEVELOPMENT.md).",
             launch.helper.display(),
             String::from_utf8_lossy(&opened.stderr).trim()
         );
@@ -263,16 +324,55 @@ mod tests {
     }
 
     #[test]
-    fn the_helper_is_found_in_the_bundle_of_the_app_or_the_host() {
-        for executable in [
-            "/Applications/Wiffletree.app/Contents/MacOS/wiffletree",
-            "/Applications/Wiffletree.app/Contents/MacOS/wiffletree-host",
+    fn the_helper_ships_in_the_bundle_of_the_app_or_the_host() {
+        let host = Path::new("/Applications/Wiffletree.app/Contents/MacOS/wiffletree-host");
+        let bundle = bundle_of(host).unwrap();
+        assert_eq!(bundle, Path::new("/Applications/Wiffletree.app"));
+        assert_eq!(
+            bundled_helper(bundle),
+            Path::new("/Applications/Wiffletree.app/Contents/Helpers/Wiffletree Evaluator.app")
+        );
+    }
+
+    /// A stand-in bundle with the three files `same_helper` compares.
+    fn fake_helper(at: &Path, binary: &[u8]) {
+        for (file, bytes) in [
+            ("MacOS/wiffletree-evaluator", binary),
+            ("Info.plist", b"plist".as_slice()),
+            ("_CodeSignature/CodeResources", b"sealed".as_slice()),
         ] {
-            assert_eq!(
-                helper_beside(Path::new(executable)),
-                Path::new("/Applications/Wiffletree.app/Contents/Helpers/Wiffletree Evaluator.app")
-            );
+            let path = at.join("Contents").join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
         }
+    }
+
+    /// macOS only: it copies with `ditto`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_helper_is_installed_outside_the_app_bundle_and_replaced_only_when_it_changed() {
+        let root = tempfile::tempdir().unwrap();
+        let bundled = root
+            .path()
+            .join("Wiffletree.app/Contents/Helpers/Wiffletree Evaluator.app");
+        let data = root.path().join("data");
+        fake_helper(&bundled, b"v1");
+        let installed = install_helper(&bundled, &data).unwrap();
+        assert_eq!(installed, data.join("evaluator/Wiffletree Evaluator.app"));
+        assert!(!installed.starts_with(root.path().join("Wiffletree.app")));
+        let binary = installed.join("Contents/MacOS/wiffletree-evaluator");
+        assert_eq!(fs::read(&binary).unwrap(), b"v1");
+        // An unchanged copy is kept as it is.
+        let kept = fs::metadata(&binary).unwrap().modified().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        install_helper(&bundled, &data).unwrap();
+        assert_eq!(fs::metadata(&binary).unwrap().modified().unwrap(), kept);
+        // An update replaces it whole, leaving nothing staged.
+        fake_helper(&bundled, b"v2");
+        install_helper(&bundled, &data).unwrap();
+        assert_eq!(fs::read(&binary).unwrap(), b"v2");
+        assert_eq!(fs::read_dir(data.join("evaluator")).unwrap().count(), 1);
+        assert_eq!(helper_app(&data), installed);
     }
 
     #[test]
