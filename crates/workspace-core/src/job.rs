@@ -445,6 +445,12 @@ fn reads(command: &str, words: &[&str]) -> bool {
 /// since nothing a recipe supplies is run by the host. An MCP server lists the tools it may
 /// call.
 pub fn validate_source(source: &Source) -> Result<()> {
+    ensure!(
+        source.acts().is_empty() && *source == source.read_only(),
+        "A loop only reads: {} lists act tools or commands ({}), which only the Assistant may ask for",
+        source.name(),
+        source.acts().join(", ")
+    );
     match source {
         Source::Mcp { server, tools, .. } => {
             ensure!(
@@ -746,6 +752,8 @@ mod tests {
         Source::Cli {
             command: "gh".into(),
             prefixes: prefixes.iter().map(|p| p.to_string()).collect(),
+            act: vec![],
+            without_asking: vec![],
             check: None,
             extra: Default::default(),
         }
@@ -774,6 +782,8 @@ mod tests {
         Source::Cli {
             command: command.into(),
             prefixes: vec![prefix.into()],
+            act: vec![],
+            without_asking: vec![],
             check: None,
             extra: Default::default(),
         }
@@ -828,6 +838,8 @@ mod tests {
                 "aws --profile readonly logs filter-log-events".into(),
                 "aws --profile admin ecs list-tasks".into(),
             ],
+            act: vec![],
+            without_asking: vec![],
             check: None,
             extra: Default::default(),
         };

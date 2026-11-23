@@ -103,9 +103,13 @@ pub enum Role {
     /// One UI evaluator run: blind, on the model it was started with, outside every agent tree,
     /// reading and writing only its run folder. Only `start_evaluation` starts one.
     Evaluator,
+    /// The Assistant's one conversation: the session this install owns, in YOLO mode, with the
+    /// Assistant's tools and none of the coordination tools. It parents the coordinators of the
+    /// work it starts.
+    Conversation,
 }
 impl Role {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::ProjectOrchestrator,
         Self::TaskOrchestrator,
         Self::Implementer,
@@ -117,6 +121,7 @@ impl Role {
         Self::JobRun,
         Self::Compiler,
         Self::Evaluator,
+        Self::Conversation,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -131,6 +136,7 @@ impl Role {
             Self::JobRun => "Job run",
             Self::Compiler => "Brain compiler",
             Self::Evaluator => "UI evaluator",
+            Self::Conversation => "Assistant",
         }
     }
     pub fn is_worker(self) -> bool {
@@ -142,6 +148,7 @@ impl Role {
                 | Self::JobRun
                 | Self::Compiler
                 | Self::Evaluator
+                | Self::Conversation
         )
     }
     /// A thread of the assistant or a job's run: owned by a Space, read-only but for its
@@ -185,7 +192,7 @@ impl Skill {
             Role::Implementer | Role::Maintenance => Self::Implementing,
             Role::Tester | Role::Reviewer => Self::Reviewing,
             Role::Keeper => Self::KeepingAPr,
-            Role::Assistant | Role::JobRun => Self::Assisting,
+            Role::Assistant | Role::JobRun | Role::Conversation => Self::Assisting,
             Role::Compiler | Role::Evaluator => return None,
         })
     }
@@ -402,6 +409,42 @@ pub struct Project {
     /// The coordinator whose `create_project` call made this project; `None` when the human did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<ProjectCreator>,
+    /// Set when the Assistant's `start_work` made this project: its coordinator's parent is the
+    /// Assistant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_work: Option<AssistantWork>,
+}
+/// A project the Assistant started for the human, as its work item.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistantWork {
+    /// The fast path: one implementer on the small-work line and the lightest review.
+    #[serde(default)]
+    pub small: bool,
+    pub state: WorkState,
+    /// When it became Stopped or Done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<i64>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkState {
+    Running,
+    /// Its turns stopped and its deliveries held until `resume_work`.
+    Paused,
+    /// Stopped by `stop_work` or the human's Stop; nothing more is delivered to it.
+    Stopped,
+    /// Its coordinator reported `completed` to the Assistant.
+    Done,
+}
+impl WorkState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Running => "Running",
+            Self::Paused => "Paused",
+            Self::Stopped => "Stopped",
+            Self::Done => "Done",
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectCreator {
@@ -2749,10 +2792,14 @@ const MIGRATION_PREFIX: &str = "migration:";
 /// The id prefix of the brief a coordinator's `create_project` hands the new coordinator. It
 /// carries another coordinator's words, never the human's.
 pub const PROJECT_BRIEF_PREFIX: &str = "project-brief:";
+/// The id prefix of Wiffletree's messages about the Assistant's work and cards: a work item's
+/// brief, an approval waiting for the human, an action's result, a moved message.
+pub const ASSISTANT_NOTICE_PREFIX: &str = "assistant:";
 /// The id prefixes of the host's other messages without a sender: verification results, kept
 /// worktrees, migration notices, publish, merge, retarget and repository request results, process
-/// notices, project briefs and evaluator runs. Inbox answers (`answer:`) carry the human's words.
-const HOST_NOTICE_PREFIXES: [&str; 10] = [
+/// notices, project briefs, evaluator runs and the Assistant's notices. Inbox answers
+/// (`answer:`) carry the human's words.
+const HOST_NOTICE_PREFIXES: [&str; 11] = [
     VERIFICATION_NOTICE_PREFIX,
     WORKTREE_KEPT_PREFIX,
     MIGRATION_PREFIX,
@@ -2763,6 +2810,7 @@ const HOST_NOTICE_PREFIXES: [&str; 10] = [
     PROCESS_NOTICE_PREFIX,
     PROJECT_BRIEF_PREFIX,
     EVALUATION_PREFIX,
+    ASSISTANT_NOTICE_PREFIX,
 ];
 /// A ticket's latest verification cycle: rounds of concurrent, commit-pinned verifier turns.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3556,6 +3604,60 @@ pub enum Command {
     /// Names the assistant, a shared setting.
     SetAssistantName {
         name: String,
+    },
+    /// The human's message to the Assistant's one conversation, which starts its session the
+    /// first time. `space_id` is the Space picked in the composer: in the turn it starts, a tool
+    /// naming another Space is refused. Answered with the `Message`.
+    SendToAssistant {
+        id: String,
+        body: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space_id: Option<SpaceId>,
+    },
+    /// Read-only: the conversation's session, cards and routing tags, as
+    /// `{session, cards, routes}`.
+    ConversationCards,
+    /// The human's answer on a decision card; it reaches the Assistant as their message.
+    /// Answered with the card.
+    AnswerDecision {
+        card_id: String,
+        answer: String,
+    },
+    /// Apply on a loop card a held turn raised. Answered with the card.
+    ApplyLoopCard {
+        card_id: String,
+    },
+    /// Decline on a loop card a held turn raised; nothing changes. Answered with the card.
+    DeclineLoopCard {
+        card_id: String,
+    },
+    /// Undo on an applied loop change: the loop as it was before. Answered with the card.
+    UndoLoopChange {
+        card_id: String,
+    },
+    /// Run on an action card: the host runs it as shown, then tells the Assistant. Answered
+    /// with the card once it ran.
+    RunAction {
+        card_id: String,
+    },
+    /// Decline on an action card: nothing runs, and the Assistant is told. Answered with the
+    /// card.
+    DeclineAction {
+        card_id: String,
+    },
+    /// Stop on a work card, as the human's command: the work's turns stop, nothing more is
+    /// delivered to it, and it is Stopped. Answered with the `Project`.
+    StopWork {
+        project_id: String,
+    },
+    /// Change on a message the Assistant passed to its work: sends it to `project_id`, another
+    /// of its work items, or with none to no work. Answered with the `Route`.
+    MoveRoutedMessage {
+        message_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
     },
     /// Sends `body` where the router decides, from the thread open in the assistant, if any.
     /// Unsure, the message is held unsent and the user asked. Answered with `null`.
@@ -4407,6 +4509,7 @@ impl Command {
             | Self::IssueProjectDefaults { .. }
             | Self::IssuePeople { .. }
             | Self::SearchThreads { .. }
+            | Self::ConversationCards
             | Self::ScratchFiles { .. }
             | Self::Proposals { .. }
             | Self::Evaluations { .. }
@@ -4455,6 +4558,15 @@ impl Command {
             | Self::ApplyProposal { .. }
             | Self::DiscardProposal { .. }
             | Self::SetAssistantName { .. }
+            | Self::SendToAssistant { .. }
+            | Self::AnswerDecision { .. }
+            | Self::ApplyLoopCard { .. }
+            | Self::DeclineLoopCard { .. }
+            | Self::UndoLoopChange { .. }
+            | Self::RunAction { .. }
+            | Self::DeclineAction { .. }
+            | Self::StopWork { .. }
+            | Self::MoveRoutedMessage { .. }
             | Self::RouteMessage { .. }
             | Self::AnswerHeld { .. }
             | Self::ChangeRoute { .. }
@@ -4585,6 +4697,16 @@ impl Command {
                 | Self::ApplyProposal { .. }
                 | Self::DiscardProposal { .. }
                 | Self::SetAssistantName { .. }
+                | Self::SendToAssistant { .. }
+                | Self::ConversationCards
+                | Self::AnswerDecision { .. }
+                | Self::ApplyLoopCard { .. }
+                | Self::DeclineLoopCard { .. }
+                | Self::UndoLoopChange { .. }
+                | Self::RunAction { .. }
+                | Self::DeclineAction { .. }
+                | Self::StopWork { .. }
+                | Self::MoveRoutedMessage { .. }
                 | Self::RouteMessage { .. }
                 | Self::AnswerHeld { .. }
                 | Self::ChangeRoute { .. }

@@ -115,7 +115,8 @@ fn current(role: Role) -> Value {
         | Role::Assistant
         | Role::JobRun
         | Role::Compiler
-        | Role::Evaluator => codex_fixed(role),
+        | Role::Evaluator
+        | Role::Conversation => codex_fixed(role),
     }
 }
 

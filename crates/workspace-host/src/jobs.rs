@@ -177,6 +177,25 @@ pub(crate) fn read_recipe(content: &[u8], space: &SpaceId, id: &str) -> Result<R
     Ok(recipe)
 }
 
+/// A loop may list a source's read entries alone, never what its Space lists as an act.
+pub(crate) fn refuse_acts_as_reads(space: &Space, recipe: &Recipe) -> Result<()> {
+    for source in &recipe.sources {
+        let listed = (space.sources.iter()).find(|s| s.name() == source.name());
+        let acts = listed.map(Source::acts).unwrap_or_default();
+        let named: Vec<&str> = (source.reads().iter())
+            .filter(|read| acts.contains(read))
+            .map(String::as_str)
+            .collect();
+        ensure!(
+            named.is_empty(),
+            "A loop only reads, and {} lists {} as acting in the app",
+            space.name,
+            named.join(", ")
+        );
+    }
+    Ok(())
+}
+
 /// The recipe's own checks, and that its timezone is an IANA name.
 pub(crate) fn validate(recipe: &Recipe) -> Result<()> {
     workspace_core::job::validate(recipe)?;
@@ -333,7 +352,7 @@ impl SourceEnv {
             mcp_limit: CHECK_LIMIT,
         }
     }
-    fn find(&self, command: &str) -> Option<PathBuf> {
+    pub(crate) fn find(&self, command: &str) -> Option<PathBuf> {
         (self.path.iter())
             .map(|folder| folder.join(command))
             .find(|path| path.is_file())
@@ -378,17 +397,39 @@ fn aws_profile(prefixes: &[String]) -> Option<String> {
 /// its provider would start it, it must answer `initialize` and list every tool the recipe
 /// names, within the limit. A server reached by URL cannot be checked, so it is refused.
 fn mcp_problem(env: &SourceEnv, definition: &Value, tools: &[String]) -> Option<String> {
+    let list = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"});
+    let offered = match mcp_exchange(env, definition, list) {
+        Ok(listed) => listed,
+        Err(why) => return Some(why),
+    };
+    let names: Vec<&str> = (offered["tools"].as_array().into_iter().flatten())
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    let missing: Vec<&str> = (tools.iter().map(String::as_str))
+        .filter(|tool| !names.contains(tool))
+        .collect();
+    (!missing.is_empty()).then(|| format!("does not offer {}", missing.join(", ")))
+}
+
+/// Starts the MCP server `definition` names as its provider would, finishes its handshake and
+/// sends it `request`, whose id is 2, within the limit; answers the request's result, or in
+/// words with none of the server's output why there is none. The server is stopped either way.
+pub(crate) fn mcp_exchange(
+    env: &SourceEnv,
+    definition: &Value,
+    request: Value,
+) -> std::result::Result<Value, String> {
     use std::io::{BufRead, Write};
     use std::os::unix::process::CommandExt;
     let Some(command) = definition["command"].as_str().filter(|c| !c.is_empty()) else {
-        return Some("is not a command Wiffletree can start to check it; a job can use only a command-line MCP server".into());
+        return Err("is not a command Wiffletree can start; only a command-line MCP server can be used this way".into());
     };
     let program = match command.contains('/') {
         true => Some(PathBuf::from(command)),
         false => env.find(command),
     };
     let Some(program) = program else {
-        return Some(format!(
+        return Err(format!(
             "names {command}, which is not installed on this Mac"
         ));
     };
@@ -407,10 +448,12 @@ fn mcp_problem(env: &SourceEnv, definition: &Value, tools: &[String]) -> Option<
         }
     }
     let Ok(mut child) = start.spawn() else {
-        return Some("could not be started".into());
+        return Err("could not be started".into());
     };
     let group = child.id() as libc::pid_t;
-    let (mut stdin, stdout) = (child.stdin.take()?, child.stdout.take()?);
+    let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        return Err("could not be started".into());
+    };
     let (lines, answers) = std::sync::mpsc::channel::<Value>();
     std::thread::spawn(move || {
         for line in std::io::BufReader::new(stdout).lines() {
@@ -455,22 +498,11 @@ fn mcp_problem(env: &SourceEnv, definition: &Value, tools: &[String]) -> Option<
     };
     let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"wiffletree","version":"1"}}});
     let initialized = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
-    let list = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"});
-    let checked = answer(1, initialize, &[initialized]).and_then(|_| answer(2, list, &[]));
+    let answered = answer(1, initialize, &[initialized]).and_then(|_| answer(2, request, &[]));
     // SAFETY: `killpg` only sends a signal; the group is the server's own.
     unsafe { libc::killpg(group, libc::SIGKILL) };
     let _ = child.wait();
-    let offered = match checked {
-        Ok(listed) => listed,
-        Err(why) => return Some(why),
-    };
-    let names: Vec<&str> = (offered["tools"].as_array().into_iter().flatten())
-        .filter_map(|tool| tool["name"].as_str())
-        .collect();
-    let missing: Vec<&str> = (tools.iter().map(String::as_str))
-        .filter(|tool| !names.contains(tool))
-        .collect();
-    (!missing.is_empty()).then(|| format!("does not offer {}", missing.join(", ")))
+    answered
 }
 
 /// Checks one source as a run on `provider` would use it. An MCP server must be in that
@@ -567,7 +599,7 @@ impl Host {
             .optional()?
             .context("Job not found")
     }
-    fn source_env(&self) -> SourceEnv {
+    pub(crate) fn source_env(&self) -> SourceEnv {
         (self.source_env.clone()).unwrap_or_else(SourceEnv::of_host)
     }
     pub(crate) fn source_checks(&self, provider: Provider, sources: &[Source]) -> SourceChecks {
@@ -695,6 +727,7 @@ impl Host {
             record.space.name
         );
         validate(&recipe)?;
+        refuse_acts_as_reads(&record.space, &recipe)?;
         let stored = !matches!(
             record.space.storage.repository,
             StorageRepository::Local { .. }
@@ -1765,6 +1798,8 @@ mod tests {
         Source::Cli {
             command: "gh".into(),
             prefixes: vec!["gh pr list".into(), "gh pr view".into()],
+            act: vec![],
+            without_asking: vec![],
             check: None,
             extra: Default::default(),
         }
@@ -1773,6 +1808,8 @@ mod tests {
         Source::Mcp {
             server: "linear".into(),
             tools: vec!["list_issues".into()],
+            act: vec![],
+            without_asking: vec![],
             extra: Default::default(),
         }
     }
@@ -1993,6 +2030,8 @@ mod tests {
             write.sources = vec![Source::Cli {
                 command: prefix.split(' ').next().unwrap().into(),
                 prefixes: vec![prefix.into()],
+                act: vec![],
+                without_asking: vec![],
                 check: check.map(str::to_owned),
                 extra: Default::default(),
             }];
@@ -2037,6 +2076,8 @@ mod tests {
             let source = Source::Mcp {
                 server: server.into(),
                 tools: vec!["list_issues".into()],
+                act: vec![],
+                without_asking: vec![],
                 extra: Default::default(),
             };
             s.host
@@ -2680,6 +2721,33 @@ mod tests {
                 }),
                 ..dashboard(sage)
             }
+        }
+
+        #[test]
+        fn undo_deletes_a_loop_the_assistant_created_in_a_space_stored_on_github() {
+            use crate::conversation::TurnGuard;
+            let mut s = shared(false);
+            let sage = s.sage.id.clone();
+            let guard = crate::work::tests::human_turn(&mut s.host, "m1", "a sweep please");
+            let mut held = guard.clone();
+            held.note("Sage's brain".into());
+            let card = |host: &mut Host, name: &str, guard: &TurnGuard| {
+                let args = json!({"space": sage, "name": name, "prompt": "List open PRs", "cron": "0 16 * * 5", "timezone": "UTC", "sources": []});
+                let made = host.loop_tool("create_loop", &args, guard).unwrap();
+                made["card"].as_str().unwrap().to_owned()
+            };
+            let saved = card(&mut s.host, "Open PRs sweep", &guard);
+            let key = JobKey::recipe(&sage, "open-prs-sweep");
+            assert!(
+                s.host.recipe(&key).unwrap().runner.is_some(),
+                "one runner: this Mac"
+            );
+            s.host.undo_loop_change(&saved).unwrap();
+            assert!(s.host.recipe(&key).is_err());
+            let applied = card(&mut s.host, "Open PRs sweep", &held);
+            s.host.apply_loop_card(&applied).unwrap();
+            s.host.undo_loop_change(&applied).unwrap();
+            assert!(s.host.recipe(&key).is_err());
         }
 
         #[test]

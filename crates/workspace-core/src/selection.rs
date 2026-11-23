@@ -128,7 +128,7 @@ impl Job {
             Role::Tester => Some(Job::Tester),
             Role::Reviewer => Some(first_reviewer(verification).unwrap_or(Job::Tester)),
             Role::Keeper => Some(Job::Keeper),
-            Role::Assistant => Some(Job::Assistant),
+            Role::Assistant | Role::Conversation => Some(Job::Assistant),
             Role::JobRun => Some(Job::Job),
             Role::Compiler => Some(Job::Compiler),
             Role::TaskOrchestrator | Role::Maintenance | Role::Evaluator => None,

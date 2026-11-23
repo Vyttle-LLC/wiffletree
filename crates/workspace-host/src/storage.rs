@@ -2848,6 +2848,8 @@ repository_settings:
             Source::Mcp {
                 server: "notion".into(),
                 tools: vec!["search".into()],
+                act: vec![],
+                without_asking: vec![],
                 extra: Extra::new(),
             },
         );

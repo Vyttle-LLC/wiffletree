@@ -348,15 +348,18 @@ pub(crate) fn validate(space: &Space) -> Result<()> {
         );
     }
     for source in &space.sources {
-        let (name, allowed) = match source {
-            Source::Mcp { server, tools, .. } => (server, tools),
-            Source::Cli {
-                command, prefixes, ..
-            } => (command, prefixes),
-        };
+        let mut entries = source.reads().iter().chain(source.acts());
         ensure!(
-            !name.trim().is_empty() && allowed.iter().all(|a| !a.trim().is_empty()),
+            !source.name().trim().is_empty() && entries.all(|a| !a.trim().is_empty()),
             "Name each source and what it may call"
+        );
+        let (Source::Mcp { without_asking, .. } | Source::Cli { without_asking, .. }) = source;
+        ensure!(
+            without_asking
+                .iter()
+                .all(|marked| source.acts().contains(marked)),
+            "Only an act tool or command of {} can be done without asking",
+            source.name()
         );
     }
     Ok(())
@@ -822,7 +825,7 @@ impl Host {
     fn project_archived(&self, project: &str) -> Result<bool> {
         Ok(self.db.query_row(
             &format!(
-                "SELECT EXISTS(SELECT 1 FROM sessions WHERE project_id=?1 AND parent_id IS NULL AND role=?2 AND {ARCHIVED_FLAG}=1)"
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE project_id=?1 AND role=?2 AND {ARCHIVED_FLAG}=1)"
             ),
             params![project, tag(&Role::ProjectOrchestrator)?],
             |r| r.get(0),

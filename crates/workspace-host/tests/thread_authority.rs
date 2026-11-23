@@ -105,6 +105,7 @@ fn launched_turn(
         instructions: provider::skill(role),
         thread: Some(launch),
         evaluator: None,
+        conversation: None,
     };
     let mut reply = String::new();
     let mut failure = None;
@@ -264,6 +265,8 @@ fn a_claude_job_run_runs_its_listed_command_and_is_denied_another() {
         sources: vec![Source::Cli {
             command: "touch".into(),
             prefixes: vec!["touch listed.txt".into()],
+            act: vec![],
+            without_asking: vec![],
             check: None,
             extra: Default::default(),
         }],
@@ -292,6 +295,8 @@ fn a_claude_job_runs_listed_command_cannot_redirect_or_chain_out_of_scratch() {
         sources: vec![Source::Cli {
             command: "gh".into(),
             prefixes: vec!["gh pr list".into()],
+            act: vec![],
+            without_asking: vec![],
             check: None,
             extra: Default::default(),
         }],

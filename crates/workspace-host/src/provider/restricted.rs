@@ -406,7 +406,7 @@ pub(super) fn configure_codex(cmd: &mut ProcessCommand, turn: &Turn, launch: &Th
 }
 
 /// A JSON value as a TOML inline value, as Codex's `-c` reads one.
-fn toml_inline(value: &Value) -> String {
+pub(super) fn toml_inline(value: &Value) -> String {
     match value {
         Value::Object(fields) => {
             let fields: Vec<String> = fields
@@ -498,6 +498,8 @@ mod tests {
         Source::Mcp {
             server: "linear".into(),
             tools: vec!["list_issues".into()],
+            act: vec![],
+            without_asking: vec![],
             extra: Default::default(),
         }
     }
@@ -505,6 +507,8 @@ mod tests {
         Source::Cli {
             command: "gh".into(),
             prefixes: vec!["gh pr list".into(), "gh pr view".into()],
+            act: vec![],
+            without_asking: vec![],
             check: None,
             extra: Default::default(),
         }
@@ -523,6 +527,32 @@ mod tests {
         assert!(allowed.contains(&"Bash(gh pr list:*)".into()));
         assert!(allowed.contains(&"mcp__linear__list_issues".into()));
         assert!(sourced.claude_tools().contains(&"Bash"));
+    }
+
+    #[test]
+    fn a_loop_run_is_never_given_a_sources_act_tools_or_commands() {
+        let acting = |source: Value| -> Source { serde_json::from_value(source).unwrap() };
+        let run = ThreadLaunch {
+            job_run: true,
+            ..launch(vec![
+                acting(
+                    json!({"kind":"mcp","server":"linear","tools":["list_issues"],"act":["create_issue"],"without_asking":["create_issue"]}),
+                ),
+                acting(
+                    json!({"kind":"cli","command":"gh","prefixes":["gh pr list"],"act":["gh pr comment"]}),
+                ),
+            ])
+        };
+        let allowed = run.claude_allowed();
+        assert!(allowed.contains(&"mcp__linear__list_issues".into()));
+        assert!(allowed.contains(&"Bash(gh pr list:*)".into()));
+        assert!(
+            !allowed
+                .iter()
+                .any(|rule| rule.contains("create_issue") || rule.contains("comment"))
+        );
+        let call = json!({"type":"mcp_tool_call","server":"linear","tool":"create_issue"});
+        assert!(run.check_codex_item(&call).is_err());
     }
 
     #[test]

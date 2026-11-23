@@ -760,7 +760,7 @@ impl Host {
             thread.job.is_none(),
             "propose_job is not one of a job run's tools"
         );
-        let recipe = proposed_recipe(&thread, args)?;
+        let recipe = proposed_recipe(&thread.space_id, args)?;
         self.refuse_taken_job(&recipe)?;
         let preview = self.preview_job(&recipe)?;
         Ok((recipe, preview))
@@ -881,9 +881,9 @@ pub(crate) fn store_output_in(
     Ok((file, folder::saves(repository, root, &metadata)?))
 }
 
-/// The recipe a thread's `propose_job` describes, in the thread's own Space, for its card.
+/// The recipe a thread's `propose_job` or the Assistant's `create_loop` describes, in `space`.
 /// A recipe names its own sources; none are taken from elsewhere.
-fn proposed_recipe(thread: &Thread, args: &Value) -> Result<Recipe> {
+pub(crate) fn proposed_recipe(space: &SpaceId, args: &Value) -> Result<Recipe> {
     let name = card_text(args, "name", 200)?.to_owned();
     let prompt = card_text(args, "prompt", MAX_CARD_TEXT)?.to_owned();
     let cron = card_text(args, "cron", 200)?.to_owned();
@@ -910,7 +910,7 @@ fn proposed_recipe(thread: &Thread, args: &Value) -> Result<Recipe> {
     let recipe = Recipe {
         id: job_id(&name),
         name,
-        space_id: thread.space_id.clone(),
+        space_id: space.clone(),
         prompt,
         schedule: workspace_core::job::Schedule { cron, timezone },
         model: None,

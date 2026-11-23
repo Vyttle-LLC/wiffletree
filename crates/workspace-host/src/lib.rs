@@ -13,6 +13,9 @@ mod checkout;
 pub mod compaction;
 mod compile;
 pub mod context;
+mod conversation;
+mod conversation_actions;
+mod conversation_loops;
 pub mod detection;
 mod diffs;
 mod evaluations;
@@ -77,6 +80,7 @@ mod updates;
 pub mod usage;
 mod verification;
 mod verify_refs;
+mod work;
 mod worktrees;
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -130,7 +134,8 @@ fn sessions_where(live: bool) -> String {
 }
 /// SQL condition on `sessions` for a session that is not an assistant thread or a brain
 /// compile, which belong to no project.
-const NOT_THREAD: &str = "role NOT IN ('assistant','job_run','compiler','evaluator')";
+const NOT_THREAD: &str =
+    "role NOT IN ('assistant','job_run','compiler','evaluator','conversation')";
 pub struct Host {
     pub(crate) db: Connection,
     /// Files remote devices are uploading, kept while the host runs.
@@ -376,6 +381,7 @@ impl Host {
         // Before anything attaches this connection's temporary triggers to the tables it
         // rebuilds, which a rebuild would drop.
         assistant::migrate(&db)?;
+        conversation::migrate(&db)?;
         router::migrate(&db)?;
         jobs::migrate(&db)?;
         compile::migrate(&db)?;
@@ -652,7 +658,9 @@ impl Host {
         turning.sort();
         for id in turning {
             let session = self.session(id)?;
-            if !session.role.is_thread() && session.role != Role::Evaluator {
+            if !session.role.is_thread()
+                && !matches!(session.role, Role::Evaluator | Role::Conversation)
+            {
                 sessions.push(session);
             }
         }
@@ -714,6 +722,10 @@ impl Host {
         ensure!(
             creator.role == Role::ProjectOrchestrator,
             "Only a project coordinator creates projects"
+        );
+        ensure!(
+            creator.parent_id.is_none(),
+            "This project is the Assistant's work, and only the Assistant starts work: ask it with report or ask_user instead"
         );
         let from = self.project(&creator.project_id)?;
         ensure!(
@@ -780,8 +792,20 @@ impl Host {
         space: &SpaceId,
         created_by: Option<ProjectCreator>,
     ) -> Result<(Project, Session)> {
+        self.insert_project_under(name, space, created_by, None)
+    }
+    /// A project and its coordinator; with `assistant`, the Assistant's session and the work
+    /// item, a project the Assistant started, whose coordinator's parent it is.
+    pub(crate) fn insert_project_under(
+        &mut self,
+        name: &str,
+        space: &SpaceId,
+        created_by: Option<ProjectCreator>,
+        assistant: Option<(&str, AssistantWork)>,
+    ) -> Result<(Project, Session)> {
         text(name, 128)?;
         self.space(space)?;
+        let (parent, assistant_work) = assistant.unzip();
         let project = Project {
             id: new_id(),
             name: name.trim().into(),
@@ -790,6 +814,7 @@ impl Host {
             home: Some(self.new_project_home(name)?),
             slug: None,
             created_by,
+            assistant_work,
         };
         let selection = self.model_selection()?;
         ensure!(selection.is_saved(), policies::NO_SETUP);
@@ -797,7 +822,7 @@ impl Host {
         let session = Session {
             id: new_id(),
             project_id: project.id.clone(),
-            parent_id: None,
+            parent_id: parent.map(str::to_owned),
             repository_id: None,
             name: project.name.clone(),
             role: Role::ProjectOrchestrator,
@@ -837,7 +862,7 @@ impl Host {
         let mut root: Session = self
             .db
             .query_row(
-                "SELECT data FROM sessions WHERE project_id=?1 AND parent_id IS NULL AND role=?2",
+                "SELECT data FROM sessions WHERE project_id=?1 AND role=?2",
                 params![id, tag(&Role::ProjectOrchestrator)?],
                 |row| decode(row, 0),
             )
@@ -873,8 +898,8 @@ impl Host {
             SessionOwner::Project(project) => {
                 self.create_session(project, parent, repository, name, role, provider)
             }
-            SessionOwner::Space(_) | SessionOwner::Brain(_) => bail!(
-                "{} cannot run outside a project: only assistant threads run under a Space",
+            SessionOwner::Space(_) | SessionOwner::Brain(_) | SessionOwner::Install => bail!(
+                "{} cannot run outside a project: only assistant threads run under a Space, and only the Assistant under the install",
                 role.label()
             ),
         }
@@ -1297,8 +1322,15 @@ impl Host {
             target.name
         );
         if let Some(sender) = sender {
+            let from = self.session(sender)?;
+            // The Assistant and the coordinators of its work are in no project together.
+            let assistant_and_work = |parent: &Session, child: &Session| {
+                parent.role == Role::Conversation && child.parent_id.as_ref() == Some(&parent.id)
+            };
             ensure!(
-                self.session(sender)?.project_id == target.project_id,
+                from.project_id == target.project_id
+                    || assistant_and_work(&from, &target)
+                    || assistant_and_work(&target, &from),
                 "Cross-project message forbidden"
             );
         }
@@ -1341,7 +1373,9 @@ impl Host {
             self.insert_message(id, &target, sender, body, &[], uploads, quiet)?;
         } else {
             let directory = match target.role {
-                Role::Assistant | Role::JobRun => assistant::attachments_folder(&self.home, id)?,
+                Role::Assistant | Role::JobRun | Role::Conversation => {
+                    assistant::attachments_folder(&self.home, id)?
+                }
                 _ => attachments::directory(&self.home, &target.project_id, id)?,
             };
             let stored = attachments::store(&directory, files)?;
@@ -1513,6 +1547,9 @@ impl Host {
             operation,
         )?;
         tx.commit()?;
+        if attention.is_permission() {
+            self.tell_assistant_of_approval(&attention)?;
+        }
         Ok(attention)
     }
     pub fn resolve_attention(&mut self, id: &str, answer: &str) -> Result<Attention> {
@@ -1794,6 +1831,47 @@ impl Host {
                 proposal_id,
             } => serde_json::to_value(self.discard_proposal(&thread_id, &proposal_id)?)?,
             Command::SetAssistantName { name } => json!(self.set_assistant_name(&name)?),
+            Command::SendToAssistant {
+                id,
+                body,
+                attachments,
+                space_id,
+            } => serde_json::to_value(self.send_to_assistant(
+                &id,
+                &body,
+                &attachments,
+                space_id.as_ref(),
+            )?)?,
+            Command::ConversationCards => json!({
+                "session": self.assistant_session()?,
+                "cards": self.conversation_cards()?,
+                "routes": self.conversation_routes()?,
+            }),
+            Command::AnswerDecision { card_id, answer } => {
+                serde_json::to_value(self.answer_decision(&card_id, &answer)?)?
+            }
+            Command::ApplyLoopCard { card_id } => {
+                serde_json::to_value(self.apply_loop_card(&card_id)?)?
+            }
+            Command::DeclineLoopCard { card_id } => {
+                serde_json::to_value(self.decline_loop_card(&card_id)?)?
+            }
+            Command::UndoLoopChange { card_id } => {
+                serde_json::to_value(self.undo_loop_change(&card_id)?)?
+            }
+            Command::DeclineAction { card_id } => {
+                serde_json::to_value(self.decline_action(&card_id)?)?
+            }
+            Command::MoveRoutedMessage {
+                message_id,
+                project_id,
+            } => {
+                serde_json::to_value(self.move_routed_message(&message_id, project_id.as_deref())?)?
+            }
+            // Both stop or start work off the host's own state, so the service runs them.
+            Command::RunAction { .. } | Command::StopWork { .. } => {
+                bail!("The service runs this command")
+            }
             Command::RouteMessage {
                 id,
                 thread_id,
