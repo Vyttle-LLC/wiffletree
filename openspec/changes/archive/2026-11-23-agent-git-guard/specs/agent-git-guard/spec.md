@@ -43,7 +43,7 @@ At each turn's launch the host SHALL give the guard the real `git` and `gh` it u
 - **THEN** the guard says `gh` is not installed and exits 127
 
 ### Requirement: git passes everything but a push outside the agent's branch
-The guard SHALL find `git`'s subcommand after its global options, `-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`, `--config-env`, `--exec-path` and `--super-prefix` with their values in either spelling, and flags such as `-P` and `--no-pager`. A subcommand that is an alias SHALL be judged as what it expands to, with the same global options. `send-pack` and `http-push` SHALL be refused. A `push` SHALL be allowed only when the agent may push (see above), its remote is `origin`, it names at least one refspec, every refspec's destination is the agent's branch, as `<src>:<branch>`, `<src>:refs/heads/<branch>` or `<branch>`, with no `+` and a source, and every option is one of `--force-with-lease` with or without a value, `--force-if-includes`, `-u`, `--set-upstream`, `--no-verify`, `-q`, `-v`, `-n`, `--dry-run`, `--porcelain`, `--progress`, `--no-follow-tags` and `--atomic`, where a lease names the agent's branch if it names a ref. An allowed push SHALL run with `--no-follow-tags --recurse-submodules=no`, and with each destination and lease spelled `refs/heads/<branch>`, so a tag of the same name is never reached. Every other `git` call SHALL run unchanged.
+The guard SHALL find `git`'s subcommand after its global options, `-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`, `--config-env`, `--exec-path` and `--super-prefix` with their values in either spelling, and flags such as `-P` and `--no-pager`. A subcommand that is an alias SHALL be judged as what it expands to, with the same global options, and a `!` shell alias SHALL be refused, since the `git` its shell runs is the real one. `send-pack` and `http-push` SHALL be refused. A `push` SHALL be allowed only when the agent may push (see above), its remote is `origin`, it names at least one refspec, every refspec's destination is the agent's branch, as `<src>:<branch>`, `<src>:refs/heads/<branch>` or `<branch>`, with no `+` and a source, and every option is one of `--force-with-lease` with or without a value, `--force-if-includes`, `-u`, `--set-upstream`, `--no-verify`, `-q`, `-v`, `-n`, `--dry-run`, `--porcelain`, `--progress`, `--no-follow-tags` and `--atomic`, where a lease names the agent's branch if it names a ref. An allowed push SHALL run with `--no-follow-tags --recurse-submodules=no`, and with each destination and lease spelled `refs/heads/<branch>`, so a tag of the same name is never reached. Every other `git` call SHALL run unchanged.
 
 #### Scenario: A tag with the branch's name
 - **WHEN** origin has the tag `wiffletree/fix-x` and no such branch, and the implementer runs `git push origin HEAD:wiffletree/fix-x`, or the same with `--force-with-lease=refs/tags/wiffletree/fix-x:<sha>`
@@ -80,6 +80,10 @@ The guard SHALL find `git`'s subcommand after its global options, `-C`, `-c`, `-
 #### Scenario: An alias
 - **WHEN** `alias.p` is `push` and it runs `git p origin main`
 - **THEN** it is refused as a push to `main`
+
+#### Scenario: A shell alias
+- **WHEN** `alias.sh` is `!git push origin main` and any agent runs `git sh`
+- **THEN** it is refused, saying the guard cannot check a shell alias
 
 #### Scenario: Reads and local work
 - **WHEN** any agent runs `git status`, `git -C dir log`, `git fetch origin`, `git commit` or `git rebase origin/main`

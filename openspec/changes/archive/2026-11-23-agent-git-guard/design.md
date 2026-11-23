@@ -39,7 +39,7 @@ The real binaries are passed rather than searched for, so a shim elsewhere on `P
 
 ### Parsing `git`
 
-The guard skips global options to find the subcommand: `-C <dir>`, `-c <k=v>`, `--git-dir`, `--work-tree`, `--namespace`, `--config-env`, `--exec-path`, `--super-prefix` in both spellings, and flags such as `-P` and `--no-pager`. A subcommand that is not a Git command is resolved as an alias with the real `git config --get alias.<name>` under the same global options, repeatedly, so an alias of `push` is judged as a push. A `!` shell alias runs its shell, whose `git` is guarded again.
+The guard skips global options to find the subcommand: `-C <dir>`, `-c <k=v>`, `--git-dir`, `--work-tree`, `--namespace`, `--config-env`, `--exec-path`, `--super-prefix` in both spellings, and flags such as `-P` and `--no-pager`. A subcommand that is not a Git command is resolved as an alias with the real `git config --get alias.<name>` under the same global options, repeatedly, so an alias of `push` is judged as a push. A `!` shell alias is refused: Git runs its shell with its own exec folder first on `PATH`, so the `git` inside it is the real one and the guard could not judge it.
 
 Refused subcommands: `push` (unless allowed below), `send-pack` and `http-push`, which push without `push`. Everything else is executed as given.
 
@@ -93,7 +93,7 @@ Once a ticket's pull request is open, the host gives no push branch, so the guar
 
 ## Risks / Trade-offs
 
-- **A guardrail, not a sandbox.** An agent can run `/usr/bin/git`, change the variables, use `curl` with the token, or push from a Git hook, whose `PATH` Git prefixes with its own exec folder. The page, the README and the contract say so; the follow-up removes the credentials.
+- **A guardrail, not a sandbox.** An agent can run `/usr/bin/git`, change the variables or use `curl` with the token. And any `git` that Git itself starts runs the real binary, since Git puts its own exec folder first on `PATH`: hooks, `rebase -x`, `submodule foreach` and `bisect run` can push unguarded. The page, the README and the contract say so; the follow-up removes the credentials.
 - **Shell environments differ per provider version.** Mitigated by the live check during implementation and a test that the launch carries the settings.
 - **`allow_login_shell=false` changes Codex's shells.** They no longer read the human's login files, but they inherit the same login `PATH` the host read at start.
 - **Allow-lists refuse some harmless commands,** such as `gh pr checkout` or `gh api graphql` for a read. Agents read the same data with the allowed commands or `gh api` GETs; adding to the list later is cheap.

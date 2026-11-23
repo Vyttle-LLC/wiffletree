@@ -293,13 +293,19 @@ fn git(
         if GIT_COMMANDS.contains(&name) {
             return Verdict::Run;
         }
-        // A shell alias runs its own shell, whose `git` is this guard again.
+        // A shell alias runs its shell with Git's exec folder first on `PATH`, so its `git` is
+        // the real one, which the guard could not judge.
         match alias(&args[..at], name) {
-            Some(expansion) if !expansion.starts_with('!') => {
+            Some(expansion) if expansion.starts_with('!') => {
+                return Verdict::Refuse(format!(
+                    "Wiffletree refused `git {name}`: it is a shell alias, which the guard cannot check. Run its commands yourself."
+                ));
+            }
+            Some(expansion) => {
                 let words = expansion.split_whitespace().map(str::to_owned);
                 args.splice(at..=at, words);
             }
-            _ => return Verdict::Run,
+            None => return Verdict::Run,
         }
     }
     Verdict::Refuse("Wiffletree refused this `git` call: its aliases go too deep to check.".into())
@@ -731,8 +737,9 @@ mod tests {
         refused(judge("pp origin HEAD:wiffletree/fix-x"));
         refused(judge("-c alias.co=push co origin main"));
         assert_eq!(judge("co origin main"), Verdict::Run);
-        // A shell alias's own `git push` meets the guard again.
-        assert_eq!(judge("sh"), Verdict::Run);
+        // A shell alias's own `git` is the real one, so the alias is refused, whatever it runs.
+        assert!(refused(judge("sh")).contains("shell alias"));
+        assert!(refused(git(&words("sh"), None, aliases)).contains("shell alias"));
         let looping = |_: &[String], _: &str| Some("loop".to_owned());
         refused(git(&words("loop"), Some(BRANCH), looping));
     }
