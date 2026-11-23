@@ -2,8 +2,18 @@
 //! the Assistant's tools and every Space's MCP sources offered for their read tools alone. An
 //! act tool is never offered: the host calls it itself, after the human's Run (see
 //! `conversation_actions`).
+//!
+//! Claude offers every tool a server lists. A command-line server is started through the
+//! helper's `mcp-filter`, which lists only its read tools. A server reached by URL (HTTP or SSE)
+//! is given to Claude as configured, since Claude holds its sign-in: its act tools and every
+//! other tool Claude has reported for it are denied by name, and a call to a tool not yet
+//! reported stops the turn as it is made.
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Claude's tools that read a server's resources, which no source allows; a resource is text
+/// written by others that no read list names.
+const RESOURCE_TOOLS: [&str; 2] = ["ListMcpResourcesTool", "ReadMcpResourceTool"];
 
 /// An MCP server some Space lists as a source, with what the Spaces listing it allow.
 #[derive(Clone, Debug, Default)]
@@ -12,6 +22,8 @@ pub struct SourceServer {
     pub definition: Value,
     pub reads: BTreeSet<String>,
     pub acts: BTreeSet<String>,
+    /// Every tool Claude reported the server offers, at an earlier turn's start.
+    pub reported: BTreeSet<String>,
 }
 impl SourceServer {
     /// Its tools the provider is offered: read tools no Space lists as an act.
@@ -33,23 +45,55 @@ impl ConversationLaunch {
         entry.reads.extend(reads.iter().cloned());
         entry.acts.extend(acts.iter().cloned());
     }
-    /// Claude's tools denied by name: working outside the folder Wiffletree assigned, and every
-    /// source's act tools, so they are never offered.
+    /// Records the tools Claude reported a source's server offers.
+    pub fn reported(&mut self, server: &str, tools: impl IntoIterator<Item = String>) {
+        if let Some(source) = self.servers.get_mut(server) {
+            source.reported.extend(tools);
+        }
+    }
+    /// Claude's tools denied by name: working outside the folder Wiffletree assigned, reading a
+    /// server's resources, and every source tool but its read tools: its acts and each other
+    /// tool Claude reported for it.
     fn claude_denied(&self) -> Vec<String> {
-        let acts = (self.servers.iter())
-            .flat_map(|(server, source)| (source.acts.iter()).map(move |t| (server, t)))
-            .map(|(server, tool)| format!("mcp__{server}__{tool}"));
-        ["EnterWorktree".to_owned(), "ExitWorktree".to_owned()]
+        let sources = (self.servers.iter()).flat_map(|(server, source)| {
+            let offered: BTreeSet<&String> = source.offered().collect();
+            (source.acts.iter().chain(&source.reported))
+                .filter(move |tool| !offered.contains(tool))
+                .map(move |tool| format!("mcp__{server}__{tool}"))
+        });
+        ["EnterWorktree", "ExitWorktree"]
             .into_iter()
-            .chain(acts)
+            .chain(RESOURCE_TOOLS)
+            .map(str::to_owned)
+            .chain(sources.collect::<BTreeSet<_>>())
             .collect()
     }
-    /// Each source's server as Claude starts it: through the helper's `mcp-filter`, which lists
-    /// and passes on only its read tools. A server reached by URL cannot be filtered, so Claude
-    /// is not given it.
+    /// The source tools Claude's start reports, by server: every `mcp__‹server›__‹tool›` of a
+    /// source's server, to deny the ones not read by name from the next turn on.
+    pub(crate) fn reported_by_claude(&self, init: &Value) -> BTreeMap<String, BTreeSet<String>> {
+        let mut reported: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let names = (init["tools"].as_array().into_iter().flatten()).filter_map(Value::as_str);
+        for name in names {
+            if let Some((server, tool)) =
+                name.strip_prefix("mcp__").and_then(|n| n.split_once("__"))
+                && self.servers.contains_key(server)
+            {
+                reported
+                    .entry(server.into())
+                    .or_default()
+                    .insert(tool.into());
+            }
+        }
+        reported
+    }
+    /// Each source's server as Claude starts it: a command-line server through the helper's
+    /// `mcp-filter`, which lists and passes on only its read tools; a server reached by URL as
+    /// configured, held to its read tools by `claude_denied` and `check_call`.
     fn claude_servers(&self, helper: &Path) -> Vec<(&str, Value)> {
-        let filtered = |source: &SourceServer| -> Option<Value> {
-            let command = source.definition["command"].as_str()?;
+        let filtered = |source: &SourceServer| -> Value {
+            let Some(command) = source.definition["command"].as_str() else {
+                return source.definition.clone();
+            };
             let offered: Vec<&String> = source.offered().collect();
             let mut args = vec![
                 json!("mcp-filter"),
@@ -67,15 +111,16 @@ impl ConversationLaunch {
             if let Some(env) = source.definition.get("env") {
                 wrapped["env"] = env.clone();
             }
-            Some(wrapped)
+            wrapped
         };
         (self.servers.iter())
-            .filter_map(|(server, source)| Some((server.as_str(), filtered(source)?)))
+            .map(|(server, source)| (server.as_str(), filtered(source)))
             .collect()
     }
     /// Refuses a call to an MCP tool the provider was not offered, as it is made: only the
-    /// workspace's tools and the sources' read tools. Claude's filter and Codex's enabled tools
-    /// already offer no others; this stops a turn that reaches one anyway.
+    /// workspace's tools and the sources' read tools. Claude's filter and denials and Codex's
+    /// enabled tools offer no others; this stops a turn that reaches one anyway, such as a tool
+    /// of a URL server Claude had not reported before.
     pub(crate) fn check_call(&self, call: &ToolCall) -> Result<()> {
         let ToolCall::Mcp { server, tool } = call else {
             return Ok(());
@@ -291,6 +336,48 @@ mod tests {
             launch.others_text(&call("agent_workspace", "list_work")),
             None
         );
+    }
+
+    #[test]
+    fn a_url_server_is_given_to_claude_with_every_tool_but_its_reads_denied_once_reported() {
+        let mut launch = gmail();
+        let calendar = json!({"type": "http", "url": "https://calendar.example/mcp", "headers": {"X-Key": "k"}});
+        let (reads, acts) = (["list_events".into()], ["create_event".into()]);
+        launch.add("calendar", calendar.clone(), &reads, &acts);
+        let servers = launch.claude_servers(Path::new("/app/wiffletree-host"));
+        assert_eq!(
+            servers[0],
+            ("calendar", calendar),
+            "as configured: Claude holds its sign-in"
+        );
+        let denied = launch.claude_denied();
+        for tool in [
+            "mcp__calendar__create_event",
+            "ListMcpResourcesTool",
+            "ReadMcpResourceTool",
+        ] {
+            assert!(denied.iter().any(|d| d == tool), "{tool}");
+        }
+        // Claude's start reports every tool the server offers; from then on each but the
+        // reads is denied by name, and until then a call to one stops the turn.
+        let init = json!({"tools": ["Bash", "mcp__agent_workspace__act", "mcp__calendar__list_events", "mcp__calendar__delete_calendar", "mcp__other__x"]});
+        let reported = launch.reported_by_claude(&init);
+        assert_eq!(reported.keys().collect::<Vec<_>>(), ["calendar"]);
+        let unseen = ToolCall::Mcp {
+            server: "calendar".into(),
+            tool: "delete_calendar".into(),
+        };
+        assert!(launch.check_call(&unseen).is_err());
+        assert!(
+            !launch
+                .claude_denied()
+                .iter()
+                .any(|d| d == "mcp__calendar__delete_calendar")
+        );
+        launch.reported("calendar", reported["calendar"].clone());
+        let denied = launch.claude_denied();
+        assert!(denied.iter().any(|d| d == "mcp__calendar__delete_calendar"));
+        assert!(!denied.iter().any(|d| d == "mcp__calendar__list_events"));
     }
 
     #[test]

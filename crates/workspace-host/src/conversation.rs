@@ -15,7 +15,8 @@ pub(crate) fn migrate(db: &Connection) -> Result<()> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS conversation_cards (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, data TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS conversation_routes (message_id TEXT PRIMARY KEY, data TEXT NOT NULL);
-         CREATE TABLE IF NOT EXISTS conversation_picks (message_id TEXT PRIMARY KEY, space_id TEXT NOT NULL);",
+         CREATE TABLE IF NOT EXISTS conversation_picks (message_id TEXT PRIMARY KEY, space_id TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS conversation_source_tools (server TEXT NOT NULL, tool TEXT NOT NULL, PRIMARY KEY(server,tool));",
     )?;
     Ok(())
 }
@@ -325,7 +326,30 @@ impl Host {
                 }
             }
         }
+        let reported: Vec<(String, String)> = (self.db)
+            .prepare("SELECT server,tool FROM conversation_source_tools")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (server, tool) in reported {
+            launch.reported(&server, [tool]);
+        }
         Ok(launch)
+    }
+    /// Keeps the tools the Assistant's Claude reported each source's server offers, so the ones
+    /// that are not read tools are denied by name from the next turn on.
+    pub(crate) fn record_source_tools(
+        &self,
+        reported: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    ) -> Result<()> {
+        for (server, tools) in reported {
+            for tool in tools {
+                self.db.execute(
+                    "INSERT OR IGNORE INTO conversation_source_tools VALUES (?1,?2)",
+                    params![server, tool],
+                )?;
+            }
+        }
+        Ok(())
     }
     /// The Space a tool call names with `space`: one this Mac has, and the one the human
     /// picked in the composer for this turn's message, when they picked one.

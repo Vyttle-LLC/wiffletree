@@ -62,6 +62,8 @@ pub enum ProviderEvent {
     /// The Assistant's turn read text written by others through a call the host sees, such
     /// as "gmail search_threads" or "a web page".
     ReadOthers(String),
+    /// The tools the Assistant's Claude reported each source's server offers, at its start.
+    SourceTools(std::collections::BTreeMap<String, std::collections::BTreeSet<String>>),
     Finished {
         error: Option<String>,
         usage: Value,
@@ -844,6 +846,14 @@ fn run_turn(
                     }
                     if let Some(launch) = &turn.thread {
                         launch.check_claude_start(&value)?;
+                    }
+                    // What each source's server offers, so its other tools are denied by name
+                    // from the next turn on.
+                    if let Some(launch) = &turn.conversation {
+                        let reported = launch.reported_by_claude(&value);
+                        if !reported.is_empty() {
+                            emit(ProviderEvent::SourceTools(reported));
+                        }
                     }
                     // An evaluator has no workspace server to connect.
                     if let Some(launch) = &turn.evaluator {

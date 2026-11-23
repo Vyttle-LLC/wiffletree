@@ -446,10 +446,23 @@ for line in sys.stdin:
     fn the_assistants_provider_is_offered_only_read_tools_of_the_sources_it_can_start() {
         let (home, mut host, assistant, space) = assistant_with_space();
         with_sources(&mut host, &space, home.path());
+        // A server reached by URL is a source too, and what Claude reported it offers is kept.
+        let config = json!({"mcpServers": {"calendar": {"type": "http", "url": "https://calendar.example/mcp"}}});
+        fs::write(home.path().join(".claude.json"), config.to_string()).unwrap();
+        let reported = [(
+            "calendar".to_owned(),
+            ["list_events".to_owned(), "delete_calendar".to_owned()].into(),
+        )];
+        host.record_source_tools(&reported.into()).unwrap();
         let launch = host.conversation_launch(&assistant).unwrap();
         let calendar = &launch.servers["calendar"];
+        assert_eq!(calendar.definition["url"], "https://calendar.example/mcp");
         assert_eq!(calendar.reads.iter().collect::<Vec<_>>(), ["list_events"]);
         assert!(calendar.acts.contains("create_event"));
-        assert!(launch.servers.contains_key("gmail"));
+        assert!(calendar.reported.contains("delete_calendar"));
+        assert!(
+            !launch.servers.contains_key("gmail"),
+            "not configured for Claude here"
+        );
     }
 }
