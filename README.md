@@ -142,6 +142,7 @@ The full explanation of everything below is in **[docs/FEATURES.md](docs/FEATURE
 - The assistant takes quick questions in threads, and a router picks each message's thread and Space.
 - A thread is read-only plus a scratch folder, and it stays on your Mac.
 - Recurring work is a job only you can save, and Boards keeps what threads and jobs produce.
+- Coming next, approved in [assistant-does-the-work](openspec/changes/assistant-does-the-work/proposal.md): one conversation that acts on your Mac, starts and steers work for you without project upkeep, and makes loops directly with Undo.
 
 [More on the assistant](docs/FEATURES.md#assistant-recurring-jobs-and-boards)
 

@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Assistant rethink study</title>
+<!--
+  Static study for rethinking the assistant. No script, no network. Names, times and figures are drawn by hand.
+  1. One conversation with two pieces of work inside it, and the Work and Loops rail.
+  2. A decision brought up from work, and a message routed to work with Change.
+  3. A loop created in chat with Undo, and a small change on the fast path.
+  4. Open details on a piece of work.
+  5. The sidebar: Assistant work leaves Projects.
+-->
+<style>
+.light,:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}}
+body:has(#force-light:checked){--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074;color-scheme:light}
+body:has(#force-dark:checked),.dark{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;--magenta:#CFADD0;color-scheme:dark}
+body:has(#force-dark:checked) .light{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;--magenta:#765074}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+h2{font-size:15px;font-weight:600;margin:0 0 2px}
+h3{font-size:13px;font-weight:600;margin:0}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.intro{max-width:880px;margin-bottom:22px}
+.intro p{color:var(--subtle);font-size:12px;margin-top:4px}
+.pending{display:inline-block;margin:6px 0 4px;padding:3px 10px;border-radius:9px;font-size:11.5px;font-weight:600;color:var(--yellow);background:color-mix(in srgb,var(--yellow) 16%,transparent)}
+.switch{display:flex;gap:6px;margin:10px 0 0;font-size:12px;color:var(--subtle)}
+.switch input{display:none}
+.switch label{padding:3px 10px;border:1px solid var(--edge);border-radius:7px;cursor:pointer}
+.switch input:checked+label{background:var(--overlay);color:var(--text)}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:26px;align-items:start}
+.wide{grid-column:1/-1}
+.study>.eyebrow{margin-bottom:6px}
+.caption{margin:10px 2px 0;font-size:11.5px;color:var(--subtle)}
+.caption b{color:var(--text);font-weight:600}
+.frame{background:var(--surface);border:1px solid var(--edge);border-radius:12px;overflow:hidden;color:var(--text)}
+.window{display:grid;grid-template-columns:200px 1fr;min-height:420px}
+.side{background:var(--base);border-right:1px solid var(--edge);display:flex;flex-direction:column;padding:12px 10px;gap:3px}
+.logo{font-weight:600;font-size:16px;letter-spacing:-.03em;margin:0 4px 10px}
+.logo span{color:var(--focus)}
+.label{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--subtle);margin:8px 6px 2px}
+.row{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:7px;font-size:13px}
+.row.sel{background:var(--overlay)}
+.row .r{margin-left:auto;font-size:11px;color:var(--subtle)}
+.row .ico{width:16px;text-align:center;color:var(--subtle)}
+.pinned{border-bottom:1px solid var(--edge);padding-bottom:6px;margin-bottom:2px}
+.spin{width:10px;height:10px;border-radius:50%;border:1.6px solid var(--accent);border-right-color:transparent;flex:none}
+.count{font-size:10.5px;padding:0 6px;border-radius:9px;background:color-mix(in srgb,var(--yellow) 18%,transparent);color:var(--yellow);font-weight:600}
+.main{display:flex;flex-direction:column;min-width:0}
+.tabs{display:flex;align-items:flex-end;gap:2px;padding:8px 10px 0;border-bottom:1px solid var(--edge);background:var(--base)}
+.tab{display:flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid transparent;border-bottom:0;border-radius:8px 8px 0 0;font-size:12px;color:var(--subtle);max-width:170px;white-space:nowrap;overflow:hidden}
+.tab.on{background:var(--surface);border-color:var(--edge);color:var(--text);margin-bottom:-1px}
+.tab .x{margin-left:4px;color:var(--muted)}
+.tab.add{color:var(--muted)}
+.sp{width:8px;height:8px;border-radius:2px;flex:none}
+.sage{background:var(--focus)}.personal{background:var(--magenta)}.vyttle{background:var(--blue)}
+.search{margin-left:auto;margin-bottom:6px;font-size:11.5px;color:var(--muted);border:1px solid var(--edge);border-radius:7px;padding:2px 10px;background:var(--surface)}
+.convo{flex:1;padding:14px 18px;display:flex;flex-direction:column;gap:10px}
+.msg{max-width:88%}
+.msg.me{align-self:flex-end;background:var(--overlay);padding:7px 11px;border-radius:10px}
+.msg.ai p+p{margin-top:6px}
+.who{font-size:11px;color:var(--subtle);margin-bottom:2px}
+.route{align-self:flex-end;font-size:11px;color:var(--subtle);display:flex;gap:6px;align-items:center}
+.route a{color:var(--accent);text-decoration:none}
+.worked{font-size:11px;color:var(--muted)}
+.composer{margin:0 14px 14px;border:1px solid var(--edge);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:6px;background:var(--surface)}
+.composer .ph{color:var(--muted)}
+.composer .bar{display:flex;gap:6px;align-items:center;font-size:11.5px;color:var(--subtle)}
+.chip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--edge);border-radius:7px;padding:1px 8px;font-size:11.5px;color:var(--subtle)}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--edge);border-radius:7px;padding:4px 11px;font-size:12px;background:var(--surface);color:var(--text)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.btn.quiet{border-color:transparent;color:var(--subtle)}
+.question{border:1px solid var(--edge);border-left:3px solid var(--focus);border-radius:9px;padding:10px 12px;background:var(--base);display:flex;flex-direction:column;gap:8px}
+.question .q{font-weight:600}
+.question .why{font-size:11.5px;color:var(--subtle)}
+.choices{display:flex;gap:6px;flex-wrap:wrap}
+.held{font-size:11px;color:var(--muted)}
+.card{border:1px solid var(--edge);border-radius:10px;background:var(--base);padding:12px 14px;display:flex;flex-direction:column;gap:9px}
+.kv{display:grid;grid-template-columns:110px 1fr;gap:5px 12px;font-size:12px}
+.kv dt{color:var(--subtle)}
+.kv dd{margin:0}
+code{font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--overlay);padding:0 4px;border-radius:4px}
+.src{display:flex;gap:6px;align-items:center;font-size:12px}
+.ok{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--yellow)}
+.note{font-size:11.5px;color:var(--subtle)}
+.actions{display:flex;gap:8px;justify-content:flex-end}
+.page{padding:16px 18px;display:flex;flex-direction:column;gap:12px}
+.filters{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.seg{display:inline-flex;border:1px solid var(--edge);border-radius:7px;overflow:hidden;font-size:11.5px}
+.seg span{padding:3px 10px;color:var(--subtle)}
+.seg span.on{background:var(--overlay);color:var(--text)}
+.boards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.board{border:1px solid var(--edge);border-radius:10px;overflow:hidden;background:var(--surface);display:flex;flex-direction:column}
+.thumb{height:92px;background:var(--base);border-bottom:1px solid var(--edge);padding:10px;display:flex;align-items:flex-end;gap:5px}
+.thumb.md{flex-direction:column;align-items:stretch;justify-content:flex-start;gap:5px}
+.thumb.md i{display:block;height:6px;border-radius:3px;background:var(--overlay)}
+.thumb.md i.h{width:55%;height:8px;background:var(--edge)}
+.thumb .bar{flex:1;background:var(--focus);border-radius:3px 3px 0 0;opacity:.8}
+.board .meta{padding:9px 10px;display:flex;flex-direction:column;gap:3px}
+.board .meta .t{font-weight:600;font-size:12.5px}
+.board .meta .s{font-size:11px;color:var(--subtle);display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.pill{font-size:10.5px;padding:0 7px;border-radius:9px;background:var(--overlay);color:var(--subtle)}
+.pill.stale{background:color-mix(in srgb,var(--yellow) 16%,transparent);color:var(--yellow)}
+.pill.wait{background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent)}
+.viewer-head{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--edge)}
+.viewer-head .r{margin-left:auto;display:flex;gap:6px;align-items:center}
+.sandbox{font-size:11px;color:var(--subtle);display:flex;gap:8px;padding:6px 14px;border-bottom:1px solid var(--edge);background:var(--base)}
+.web{padding:16px;background:#fff;color:#1A262D;min-height:300px;font-family:-apple-system,system-ui,sans-serif}
+.dark .web,body:has(#force-dark:checked) .web{background:#0f1a1f;color:#e9eef0}
+.web h4{margin:0 0 2px;font-size:16px}
+.web .kpis{display:flex;gap:10px;margin:12px 0}
+.web .kpi{flex:1;border:1px solid rgba(120,140,140,.35);border-radius:8px;padding:8px 10px}
+.web .kpi b{display:block;font-size:20px}
+.web .kpi span{font-size:11px;opacity:.7}
+.web .chart{display:flex;align-items:flex-end;gap:8px;height:120px;border-bottom:1px solid rgba(120,140,140,.5);padding:0 4px}
+.web .chart i{flex:1;background:#2D5A5A;border-radius:3px 3px 0 0}
+.web .chart i.r{background:#902818}
+.web .axis{display:flex;gap:8px;padding:3px 4px 0;font-size:10px;opacity:.6}
+.web .axis span{flex:1;text-align:center}
+.versions{width:190px;border-left:1px solid var(--edge);padding:10px;font-size:11.5px;display:flex;flex-direction:column;gap:4px}
+.versions .v{padding:4px 6px;border-radius:6px}
+.versions .v.on{background:var(--overlay)}
+.versions .v small{display:block;color:var(--subtle)}
+.form{display:grid;grid-template-columns:150px 1fr;gap:10px 16px;font-size:12.5px;align-items:start}
+.form>label{color:var(--subtle);padding-top:5px}
+.field{border:1px solid var(--edge);border-radius:7px;padding:5px 9px;background:var(--surface)}
+.field.area{min-height:58px;color:var(--text)}
+.field small{color:var(--subtle)}
+.banner{border:1px solid color-mix(in srgb,var(--yellow) 45%,var(--edge));background:color-mix(in srgb,var(--yellow) 9%,transparent);border-radius:9px;padding:8px 11px;font-size:12px}
+.banner b{color:var(--yellow)}
+.split{display:grid;grid-template-columns:180px 1fr}
+.spaces{border-right:1px solid var(--edge);padding:12px 8px;display:flex;flex-direction:column;gap:2px;background:var(--base)}
+.longrun{display:flex;align-items:center;gap:6px;padding:0 8px 0 30px;font-size:11px;color:var(--subtle)}
+.longrun .btn{padding:0 7px;font-size:11px}
+.jobbar{display:flex;gap:8px;align-items:center}
+.runs{display:flex;flex-direction:column;gap:8px}
+.run{border:1px solid var(--edge);border-radius:9px;background:var(--base);padding:8px 11px;display:flex;flex-direction:column;gap:3px;font-size:12px}
+.run .line{display:flex;align-items:center;gap:8px}
+.pill.ok{background:color-mix(in srgb,var(--green) 14%,transparent);color:var(--green)}
+.pill.bad{background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red)}
+.pill.live{background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent)}
+.pill.paused{background:color-mix(in srgb,var(--yellow) 16%,transparent);color:var(--yellow);font-weight:600}
+.btn.danger{color:var(--red);border-color:color-mix(in srgb,var(--red) 45%,var(--edge))}
+.btn.danger.fill{background:var(--red);border-color:var(--red);color:var(--on-accent);font-weight:600}
+.btn.off{opacity:.45}
+.jobhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.jobhead h2{margin:0;font-size:16px}
+.run.long{border-color:color-mix(in srgb,var(--yellow) 55%,var(--edge));background:color-mix(in srgb,var(--yellow) 7%,var(--base))}
+.old{color:var(--muted)}
+.dialog{border:1px solid var(--edge);border-radius:12px;background:var(--surface);box-shadow:0 8px 24px rgba(0,0,0,.18);padding:14px 16px;display:flex;flex-direction:column;gap:8px;max-width:420px}
+/* 8. Issue threads: the issue page, the Issues list and the thread docked beside them. */
+.issue{display:grid;grid-template-columns:minmax(0,1fr) 168px 310px;min-height:470px}
+.issues{display:grid;grid-template-columns:minmax(0,1fr) 310px;min-height:400px}
+.ihead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.crumbs{font-size:11.5px;color:var(--muted)}
+.ititle{font:400 21px/1.2 Georgia,"Times New Roman",serif;letter-spacing:-.02em;margin:0}
+.prose{font-size:12.5px;display:flex;flex-direction:column;gap:5px}
+.prose ul{margin:0;padding-left:18px}
+.timeline{display:flex;flex-direction:column;gap:7px}
+.comment{border:1px solid var(--edge);background:var(--surface);border-radius:9px;padding:7px 10px;font-size:12px}
+.comment .by{display:flex;gap:6px;align-items:center;font-size:11px;color:var(--subtle);margin-bottom:2px}
+.comment .by b{color:var(--text);font-weight:600}
+.comment.asst{border-color:color-mix(in srgb,var(--magenta) 42%,var(--edge));background:color-mix(in srgb,var(--magenta) 6%,var(--surface))}
+.comment.asst .by b{color:var(--magenta)}
+.event{font-size:11px;color:var(--muted);display:flex;gap:6px;align-items:center}
+.event::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--edge)}
+.props{border-left:1px solid var(--edge);padding:14px 12px;display:flex;flex-direction:column;gap:10px;font-size:12px;background:var(--base)}
+.props .k{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:2px}
+.ilist{display:flex;flex-direction:column}
+.irow{display:grid;grid-template-columns:22px 70px 1fr auto;gap:8px;align-items:center;padding:6px 4px;border-bottom:1px solid var(--edge);font-size:12px}
+.irow .id,.mono{font:11px ui-monospace,SFMono-Regular,monospace;color:var(--subtle)}
+.group{font-size:10.5px;color:var(--subtle);text-transform:uppercase;letter-spacing:.08em;padding:8px 4px 3px}
+.prio{font:600 10.5px ui-monospace,monospace;color:var(--muted)}
+.prio.urgent{color:var(--red)}
+.dock{border-left:1px solid var(--edge);display:flex;flex-direction:column;background:var(--base);min-width:0}
+.dock-head{padding:9px 12px;border-bottom:1px solid var(--edge);display:flex;flex-direction:column;gap:4px}
+.dock-head .t{display:flex;align-items:center;gap:6px}
+.dock-head .t b{font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dock .convo{padding:11px 12px;gap:9px;font-size:12px}
+.dock .composer{margin:0 10px 10px}
+.attached{display:flex;gap:6px;align-items:center;font-size:11px;color:var(--subtle)}
+.tool{font:10.5px ui-monospace,SFMono-Regular,monospace;color:var(--muted)}
+.notice{font-size:11px;color:var(--subtle);border-left:2px solid var(--yellow);padding:2px 8px}
+.proposal{border:1px solid color-mix(in srgb,var(--focus) 45%,var(--edge));background:color-mix(in srgb,var(--focus) 6%,var(--surface));border-radius:10px;padding:9px 10px;display:flex;flex-direction:column;gap:7px;font-size:12px}
+.proposal .kind{font-size:11px;color:var(--subtle)}
+.proposal .kind b{color:var(--text)}
+.proposal.applied{border-color:var(--edge);background:var(--surface)}
+.proposal.moved{border-color:color-mix(in srgb,var(--yellow) 55%,var(--edge))}
+.diff{font:11px/1.55 ui-monospace,SFMono-Regular,monospace;background:var(--surface);border:1px solid var(--edge);border-radius:6px;padding:6px 8px;overflow-wrap:anywhere}
+.diff .add{color:var(--green)}.diff .del{color:var(--red);text-decoration:line-through}.diff .ctx{color:var(--muted)}
+.diff .theirs{color:var(--blue)}
+.draft{border:1px solid var(--edge);border-radius:7px;background:var(--surface);padding:6px 8px;display:flex;flex-direction:column;gap:3px}
+.kinds{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;padding:14px;align-items:start}
+@media(max-width:1100px){.kinds{grid-template-columns:repeat(2,minmax(0,1fr))}.issue{grid-template-columns:1fr}.issues{grid-template-columns:1fr}}
+ul.legend{margin:6px 0 0;padding-left:18px;color:var(--subtle);font-size:12px;max-width:900px}
+ul.legend li{margin:3px 0}
+@media(max-width:1100px){.grid{grid-template-columns:1fr}.boards{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.celadon{background:var(--focus)}
+.window.three{grid-template-columns:190px 1fr 250px;min-height:560px}
+.rail{border-left:1px solid var(--edge);background:var(--base);padding:12px;display:flex;flex-direction:column;gap:6px;font-size:12px}
+.rail .label{margin:10px 0 2px}
+.rail .label:first-child{margin-top:0}
+.ri{display:flex;flex-direction:column;gap:1px;padding:6px 8px;border-radius:8px;background:var(--surface);border:1px solid var(--edge)}
+.ri .t{display:flex;gap:6px;align-items:center;font-weight:600}
+.ri .s{color:var(--subtle);font-size:11px}
+.ri.need{border-left:3px solid var(--accent)}
+.work{border:1px solid var(--edge);border-radius:10px;background:var(--base);padding:10px 12px;display:flex;flex-direction:column;gap:6px;max-width:88%}
+.work .head{display:flex;align-items:center;gap:8px}
+.work .head .r{margin-left:auto;display:flex;gap:6px}
+.steps{display:flex;gap:4px;font-size:11px;color:var(--subtle);flex-wrap:wrap}
+.steps span{padding:0 7px;border-radius:9px;background:var(--overlay)}
+.steps span.done{color:var(--green);background:color-mix(in srgb,var(--green) 14%,transparent)}
+.steps span.now{color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,transparent);font-weight:600}
+.tag{align-self:flex-end;font-size:11px;color:var(--subtle);display:flex;gap:6px;align-items:center}
+.tag a,.link{color:var(--accent);text-decoration:none}
+.fold{font-size:11px;color:var(--muted);padding:2px 8px}
+.detail{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:14px 16px}
+.box{border:1px solid var(--edge);border-radius:9px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;background:var(--base)}
+.box ul{margin:0;padding-left:16px;font-size:12px}
+.mini{font-size:11.5px;color:var(--subtle)}
+.before{opacity:.75}
+</style>
+</head>
+<body>
+<div class="intro">
+  <div class="eyebrow">Wiffletree · design study</div>
+  <h1>The assistant does the work</h1>
+  <span class="pending">Approved by Michael, November 23, 2026</span>
+  <p>One conversation is your front door. A question gets answered, a request becomes <b>work</b> the assistant runs for you, and a recurring ask becomes a <b>loop</b>. Projects and their coordinators still exist behind each piece of work, but you never manage them. Nothing here runs. Celadon and Personal are sample Spaces; names, times and figures are drawn by hand.</p>
+  <div class="switch">
+    <span>Appearance:</span>
+    <input type="radio" name="theme" id="force-system" checked><label for="force-system">System</label>
+    <input type="radio" name="theme" id="force-light"><label for="force-light">Light</label>
+    <input type="radio" name="theme" id="force-dark"><label for="force-dark">Dark</label>
+  </div>
+</div>
+
+<div class="grid">
+
+<!-- 1 -->
+<section class="study wide">
+  <div class="eyebrow">1 · One conversation, two pieces of work</div>
+  <div class="frame">
+    <div class="window three">
+      <aside class="side">
+        <div class="logo">wiffle<span>tree</span></div>
+        <div class="pinned">
+          <div class="row sel"><span class="spin"></span>Assistant<span class="r"><span class="count">1</span></span></div>
+          <div class="row"><span class="ico">▦</span>Boards</div>
+        </div>
+        <div class="label">Projects</div>
+        <div class="row">Website redesign</div>
+        <div class="fold">Work the assistant runs is under Assistant</div>
+      </aside>
+      <div class="main">
+        <div class="convo">
+          <div class="msg me">What's the contrast ratio of our comment colour on the dark background?</div>
+          <div class="worked">Worked 9s · read celadon-theme, ran a contrast check</div>
+          <div class="msg ai"><div class="who">Assistant · <span class="sp celadon" style="display:inline-block"></span> Celadon</div><p>4.1 to 1. That is just under WCAG AA for body text (4.5). The nvim and Chrome ports use the same value.</p></div>
+
+          <div class="msg me">Bump it to pass AA everywhere we ship it.</div>
+          <div class="work">
+            <div class="head"><span class="spin"></span><h3>Comment colour passes AA</h3><span class="chip"><span class="sp celadon"></span>Celadon</span><span class="r"><span class="btn quiet">Stop</span><span class="btn">Open details</span></span></div>
+            <div class="steps"><span class="done">Planned</span><span class="now">Building 2 of 3</span><span>Review</span><span>PRs</span></div>
+            <p class="mini">celadon-theme, nvim and google-chrome · I'll tell you when the PRs are ready.</p>
+          </div>
+
+          <div class="msg me">Also, the docs site footer still says 2025.</div>
+          <div class="work">
+            <div class="head"><span style="color:var(--green)">✓</span><h3>Docs footer year</h3><span class="chip"><span class="sp celadon"></span>Celadon</span><span class="r"><span class="btn">Open details</span></span></div>
+            <div class="steps"><span class="done">Fixed</span><span class="done">Light review</span><span class="done">PR #88 open</span></div>
+            <p class="mini">Small change, so it took the fast path. <a class="link" href="#">celadon-docs #88</a> is ready for you to merge.</p>
+          </div>
+        </div>
+        <div class="composer">
+          <span class="ph">Ask, or tell me what to do…</span>
+          <div class="bar"><span class="chip">Space · auto</span><span class="chip">Goes to · auto</span><span style="margin-left:auto">Can act on this Mac · repositories change through work</span></div>
+        </div>
+      </div>
+      <aside class="rail">
+        <div class="label">Needs you</div>
+        <div class="ri need"><span class="t">Comment colour passes AA</span><span class="s">Pick a shade · 1 question</span></div>
+        <div class="label">Running</div>
+        <div class="ri"><span class="t"><span class="spin"></span>Comment colour passes AA</span><span class="s">Building 2 of 3 · Celadon</span></div>
+        <div class="label">Loops</div>
+        <div class="ri"><span class="t">Morning brief</span><span class="s">Weekdays 8:00 · next tomorrow · last ✓</span></div>
+        <div class="ri"><span class="t">Open PRs sweep</span><span class="s">Fridays 16:00 · next in 3 days</span></div>
+        <div class="label">Done recently</div>
+        <div class="ri"><span class="t">Docs footer year</span><span class="s">PR #88 waiting for your merge</span></div>
+      </aside>
+    </div>
+  </div>
+  <p class="caption"><b>Two requests in one chat, two pieces of work.</b> The question gets a direct answer: the assistant ran the check itself. "Bump it" starts work across three repositories without a brief to confirm, and Stop is right there. The footer fix is small, so it takes the fast path and ends at a PR. There are no tabs and no router question. The rail shows what needs you, what is running, your loops and what finished.</p>
+</section>
+
+<!-- 2 -->
+<section class="study">
+  <div class="eyebrow">2 · A decision from work, and routing</div>
+  <div class="frame">
+    <div class="convo">
+      <div class="question">
+        <span class="eyebrow">Comment colour passes AA · needs you</span>
+        <span class="q">Which shade should comments use?</span>
+        <span class="why">Both pass 4.5 to 1. The lighter one is closer to today's look; the warmer one matches the website. I'd go with the lighter one.</span>
+        <div class="choices"><span class="btn primary">#8FA6A3, lighter (recommended)</span><span class="btn">#A39B86, warmer</span><span class="btn quiet">Show me both</span></div>
+      </div>
+      <div class="msg me">and make sure the Chrome theme's tab text still reads OK</div>
+      <div class="tag">→ Comment colour passes AA · <a href="#">Change</a></div>
+      <div class="msg ai"><div class="who">Assistant</div><p>Added to that work: the Chrome port's tab text gets the same check.</p></div>
+    </div>
+  </div>
+  <p class="caption"><b>Only real decisions reach you.</b> The coordinator behind the work asked; the assistant answered what it could and brought you this one. A follow-up goes to the work it is about, with a tag and Change in case it guessed wrong.</p>
+</section>
+
+<!-- 3 -->
+<section class="study">
+  <div class="eyebrow">3 · A loop, made in chat</div>
+  <div class="frame">
+    <div class="convo">
+      <div class="msg me">every friday afternoon tell me which PRs across Celadon are still open and why</div>
+      <div class="card" style="gap:6px">
+        <h3>Loop created: Open PRs sweep</h3>
+        <dl class="kv"><dt>When</dt><dd>Fridays 16:00, America/Chicago</dd><dt>Reads</dt><dd>GitHub PRs for celadon-theme (7 repositories), read-only</dd><dt>Result</dt><dd>A short note here and on Boards</dd></dl>
+        <div class="actions"><span class="btn quiet">Undo</span><span class="btn">Edit</span><span class="btn">Run now</span></div>
+      </div>
+      <div class="msg ai"><div class="who">Assistant</div><p>Done. It's under Loops on the right. The first run is this Friday.</p></div>
+    </div>
+  </div>
+  <p class="caption"><b>No recipe card to confirm.</b> The assistant creates the loop, shows exactly what it made, and offers Undo. Loops still only read from other apps.</p>
+</section>
+
+<!-- 4 -->
+<section class="study wide">
+  <div class="eyebrow">4 · Open details</div>
+  <div class="frame">
+    <div class="viewer-head"><h2>Comment colour passes AA</h2><span class="chip"><span class="sp celadon"></span>Celadon</span><span class="r"><span class="btn quiet">Stop work</span><span class="btn">Back to chat</span></span></div>
+    <div class="detail">
+      <div class="box"><h3>Plan</h3><ul><li>celadon-theme: new comment colour in the palette source <span class="ok">✓ built</span></li><li>nvim: regenerate highlight groups <span class="warn">building</span></li><li>google-chrome: regenerate theme and check tab text <span class="mini">waiting</span></li></ul></div>
+      <div class="box"><h3>Reviews and PRs</h3><p class="mini">Full review of celadon-theme passed: Tests, Claude, Codex and Style. PRs open once all three pass review.</p></div>
+      <div class="box" style="grid-column:1/-1"><h3>Behind the scenes</h3><p class="mini">One project, one coordinator and three implementers. Everything they said to the assistant is here if you want it; you never need to reply to them.</p></div>
+    </div>
+  </div>
+  <p class="caption"><b>Details only when you want them.</b> The plan, reviews and PRs of one piece of work. The project and agents are visible here but you never need to manage them.</p>
+</section>
+
+<!-- 5 -->
+<section class="study">
+  <div class="eyebrow">5 · Sidebar today</div>
+  <div class="frame before">
+    <aside class="side" style="min-height:220px">
+      <div class="logo">wiffle<span>tree</span></div>
+      <div class="pinned"><div class="row">Assistant</div><div class="row"><span class="ico">▦</span>Boards</div></div>
+      <div class="label">Projects</div>
+      <div class="row">Website redesign</div>
+      <div class="row">Comment colour (from thread)</div>
+      <div class="row">Docs footer (from thread)</div>
+      <div class="row">Contrast question (from thread)</div>
+    </aside>
+  </div>
+  <p class="caption">Today every request that needs action becomes another project for you to run.</p>
+</section>
+<section class="study">
+  <div class="eyebrow">5 · Sidebar proposed</div>
+  <div class="frame">
+    <aside class="side" style="min-height:220px">
+      <div class="logo">wiffle<span>tree</span></div>
+      <div class="pinned"><div class="row sel"><span class="spin"></span>Assistant<span class="r"><span class="count">1</span></span></div><div class="row"><span class="ico">▦</span>Boards</div></div>
+      <div class="label">Projects</div>
+      <div class="row">Website redesign</div>
+    </aside>
+  </div>
+  <p class="caption"><b>Projects is only what you started yourself.</b> The assistant's work lives in its rail. The badge counts decisions waiting for you.</p>
+</section>
+
+</div>
+</body>
+</html>
