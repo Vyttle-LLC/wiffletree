@@ -32,7 +32,7 @@ A job SHALL be a recipe with a name, a prompt, a schedule with an IANA timezone,
 - **THEN** a new restricted run starts in Personal with the recipe's prompt and no earlier run's conversation, and its result shows under Loops
 
 ### Requirement: Jobs only read from other apps
-A job run SHALL NOT send, post, create, change or delete anything in another app. A source's tools and command prefixes SHALL be read operations, checked when the Assistant or the human saves the loop, and the loop's card SHALL list them. A run SHALL be offered only those tools and commands. A recipe whose sources include a CLI SHALL run only on a provider that can hold that CLI to its listed commands; when the job's model cannot, the run SHALL use the next choice that can, or SHALL NOT start, saying why.
+A job run SHALL NOT send, post, create, change or delete anything in another app, even though the Assistant may act through the same sources with action cards (see assistant). A run SHALL be offered only a source's read tools and command prefixes, never its act lists or its "Do without asking" marks, and a recipe SHALL be refused when it names an act tool or command. The read lists SHALL be checked when the Assistant or the human saves the loop, and the loop's card SHALL list them. A run SHALL be offered only those tools and commands. A recipe whose sources include a CLI SHALL run only on a provider that can hold that CLI to its listed commands; when the job's model cannot, the run SHALL use the next choice that can, or SHALL NOT start, saying why.
 
 #### Scenario: A brief that tries to comment
 - **WHEN** a Claude run of a job listing `gh pr list` and `gh pr view` tries `gh pr comment`
@@ -41,6 +41,10 @@ A job run SHALL NOT send, post, create, change or delete anything in another app
 #### Scenario: A CLI source on Codex
 - **WHEN** a job lists gh and its model is a Codex model, before Codex command limits are validated
 - **THEN** the run starts on the next choice that is a Claude model, or, with none, does not start and says Codex cannot yet hold gh to read commands
+
+#### Scenario: A morning brief reads mail and calendar
+- **WHEN** the human asks for a weekday brief of today's calendar and unread mail, and Personal lists Gmail and Google Calendar sources with read and act tools
+- **THEN** the loop is saved with only their read tools, each run reads mail and calendar, and no run can send, accept or create anything
 
 #### Scenario: A write command asked for
 - **WHEN** the human asks for a loop that posts a summary with `gh pr comment`

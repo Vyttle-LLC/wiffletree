@@ -13,6 +13,7 @@ The human wants one conversation where they ask questions, start work and see th
 - **Follow-ups go to the work they are about,** with a visible tag (`→ Sign-in fix`) and Change. There is no router and no confidence threshold.
 - **Real power on this Mac.** The Assistant runs commands and edits files like any agent in YOLO mode, with one exception: repositories and folders Wiffletree manages change only through work. The host enforces the exception with a macOS sandbox profile around the provider process, for Claude and Codex alike; what it cannot enforce is listed in design.md.
 - **Direct actions, no confirmation cards.** The Assistant creates, edits, pauses, deletes and runs loops (the UI's name for scheduled jobs) and shows what it did with Undo; it files, edits and comments on issues directly, marked as written by the assistant. **BREAKING:** the recipe card and Make this a project go away. Loops still only read from other apps, sources are still checked before each run, and only a turn the human's own message started can change a loop.
+- **A true personal assistant.** The Assistant reaches email, calendar and similar apps through each Space's sources (MCP servers and CLIs the human installed and signed in to); Wiffletree builds no connectors and runs no app sign-in. The Space page makes adding one a single form. Reading is free; anything that sends, posts, creates, changes or deletes in another app shows an action card with its exact target and content and runs on one click, unless the human marked that kind "Do without asking". An instruction inside an email, invite or page never acts by itself: a turn that read others' text, or was not started by the human, can at most raise a card. Loops stay read-only. (Decided by Michael on November 23, 2026.)
 - **What stays:** issue threads keep their restricted mode; text written by others is context, never instructions; Boards, the brain and Spaces are unchanged.
 - **Migration:** existing threads become read-only history; projects already made from threads stay in Projects; a saved Router row and router threshold are ignored.
 
@@ -24,16 +25,16 @@ None. The work stays inside existing capabilities.
 
 ### Modified Capabilities
 
-- `assistant`: one conversation instead of threads in tabs; Space inference; the Assistant's authority and the managed-repository exception; work items, their cards, routing and Change; decision and approval cards; direct loop and issue actions; the rail; history from earlier threads. Issue threads keep their restricted mode.
+- `assistant`: one conversation instead of threads in tabs; Space inference; the Assistant's authority and the managed-repository exception; apps through Space sources, action cards and text written by others; work items, their cards, routing and Change; decision and approval cards; direct loop and issue actions; the rail; history from earlier threads. Issue threads keep their restricted mode.
 - `assistant-router`: removed entirely.
-- `scheduled-jobs`: loops are created and changed directly by the Assistant on the human's word, shown with Undo; the UI calls them Loops; the recipe card goes; read-only sources and the pre-run check stay.
+- `scheduled-jobs`: loops are created and changed directly by the Assistant on the human's word, shown with Undo; the UI calls them Loops; the recipe card goes; loops use only sources' read tools, and the pre-run check stays.
 - `workspace-host`: the Assistant is a session owned by the install, and the parent of the coordinators of its work; check-ins and `ask_user` of those coordinators go to it; they cannot create projects.
 - `model-routing`: the Router row goes.
 - `skills`: Assisting serves the Assistant, issue threads and loop runs; the router's instructions go.
 - `native-workspace`: the sidebar's Projects list leaves out Assistant work; the Assistant row counts what needs the human.
 - `settings-repository`: the router threshold is no longer a shared setting.
 - `settings-cascade`: the conversation and the Brain compiler resolve their rows on this Mac only; the Router row leaves the Models page.
-- `spaces`: the Assistant may not create or change a Space; it reads every Space's sources.
+- `spaces`: the Assistant may not create or change a Space; sources gain act lists and "Do without asking" marks, and Add source is one form.
 
 ## Impact
 

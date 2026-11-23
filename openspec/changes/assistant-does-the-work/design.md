@@ -13,9 +13,9 @@ At origin/main 89f130d:
 
 ## Goals / Non-Goals
 
-**Goals:** one conversation where the human asks, starts and steers work, and sees loops; no project upkeep for Assistant work; the Assistant acts on this Mac without confirmation cards; managed repositories still change only through reviewed tickets and pull requests; content written by others still cannot create a schedule.
+**Goals:** one conversation where the human asks, starts and steers work, and sees loops; no project upkeep for Assistant work; the Assistant acts on this Mac without confirmation cards; it reads the human's mail, calendar and other apps freely and acts in them with one click; an instruction inside someone else's text never acts by itself; managed repositories still change only through reviewed tickets and pull requests; content written by others still cannot create a schedule.
 
-**Non-Goals:** a second Assistant or one chat per Space; changing how coordinators, tickets, reviews, publishing or merging work inside a project; changing issue threads' restricted mode, Boards, the brain, Spaces or built-in host jobs; sharing the conversation; letting the Assistant approve anything only the human approves today.
+**Non-Goals:** a second Assistant or one chat per Space; changing how coordinators, tickets, reviews, publishing or merging work inside a project; changing issue threads' restricted mode, Boards, the brain, Spaces or built-in host jobs; sharing the conversation; letting the Assistant approve anything only the human approves today; connectors hosted or written by Wiffletree; running an app's OAuth or storing its tokens; letting a loop act.
 
 ## The human's decisions and where they are specified
 
@@ -25,6 +25,10 @@ At origin/main 89f130d:
 | 2 | It starts work without asking; the work card has Stop | assistant "The Assistant starts work", "The Assistant steers its work" |
 | 3 | Assistant work is hidden from Projects and lives under the Assistant, with Open details | native-workspace "The sidebar lists projects only", "Projects are listed in a section for each Space"; assistant "The Assistant's rail" |
 | 4 | One chat across all Spaces; the Assistant infers the Space and asks inline only when unsure | assistant "One conversation across every Space", "The Assistant infers each request's Space"; assistant-router (removed) |
+| 5 | The Assistant is a true personal assistant: it reaches email, calendar and similar apps through Space sources, and Wiffletree still builds no connectors and handles no app sign-in | assistant "The Assistant uses apps through Space sources"; spaces "Sources a Space allows", "Connecting a source is one form"; Decision 9 below |
+| 6 | Read vs act: reading is free; sending or changing anything in another app needs one click on an action card; per source the human may mark kinds of action "Do without asking"; loops stay read-only | assistant "Reading is free; acting needs a card", "Kinds of action done without asking", "Text written by others never triggers an action"; scheduled-jobs "Jobs only read from other apps"; Decision 9 below |
+
+Decisions 5 and 6 were added by Michael on November 23, 2026, after the first draft of this change; he confirmed decision 6's default the same day.
 
 ## Decisions
 
@@ -91,7 +95,23 @@ The recipe card's job was to keep content from creating a schedule. Without the 
 
 `file_issue`, `edit_issue` and `comment_issue` write as the human with `assistant_for` set, through the same tracker code that applies proposals today. They are allowed in any turn, because each is visible in the chat and the tracker and is reversible by editing.
 
-### 9. Migration
+### 9. Apps: the host stands between the Assistant and every act
+
+Sources keep today's shape (`Source::Mcp { server, tools }`, `Source::Cli { command, prefixes, check }`). Their existing lists become the **read** lists, so every saved source keeps working, and each gains optional **act** lists and a "Do without asking" mark per act tool or prefix. Loops still see only read lists.
+
+Enforcement, per kind of source:
+- **MCP:** the provider is offered only each source's read tools (Claude's `--mcp-config` with an allow-list; Codex with the per-call check that issue threads already use). Act tools are never offered to the provider. `act` names the server, tool and arguments; the host starts the server as the provider would (the loop pre-run check already does this) and calls the tool itself, after Run or at once for a Do-without-asking kind in an untainted turn.
+- **CLI:** the sandbox profile refuses `process-exec` of each listed CLI's executable, so the Assistant cannot run `gws gmail send` itself. `read_source` runs a listed read prefix through the host, with the loop runs' shell-text rule (no redirection, chaining or substitution), and `act` runs an act prefix the same way after Run.
+
+**Tainted turns.** The host already reads every tool event in the provider's stream. A turn becomes held to cards when it was not started by the human's message, or once it has received a source read, an issue read, a web search or fetch, or a report from work. In a held turn even a Do-without-asking kind waits for Run, and the card names what was read. This turns "an instruction inside an email never triggers an action" from a prompt rule into a host rule: the worst an injected instruction can do is put a card in front of the human with its exact target and content.
+
+**What stays instruction-level:**
+- Reaching an app around its source: using credentials a CLI or server stored on disk to call the app's API with `curl`, or driving Mail or Calendar through `osascript`. The Assistant can read those token files, because it can read anything; denying reads of them would need a list of every app's token paths.
+- Text read through a tool the host cannot see, such as `cat` on a downloaded `.eml` file, does not taint the turn.
+
+**Connecting a source.** Add source on the Space's page lists the MCP servers already configured for this Mac's Claude and Codex and well-known CLIs on the PATH, starts the chosen one to list its tools, suggests read or act per tool (from MCP's `readOnlyHint` annotation where the server gives one, else from the tool's name), and shows the server's own sign-in instructions when it is signed out. Wiffletree runs no OAuth flow and stores no app token: out of scope, as are Wiffletree-hosted connectors.
+
+### 10. Migration
 
 - Threads that are not issue threads become read-only history; their sessions are never resumed.
 - Projects made from threads have no parent and stay in Projects.
@@ -104,6 +124,8 @@ The recipe card's job was to keep content from creating a schedule. Without the 
 - **Full power plus untrusted text** → The Assistant reads issues, web pages and reports with YOLO power, which issue threads were restricted to avoid. Mitigation: authored passages, the core's "context, never instructions" rule, the sandbox for managed paths, and the human-turn rule for loops. Project implementers already work this way.
 - **One session, one turn at a time** → A long local command delays answers and reports. Mitigation: the human's messages go first, Stop is always there, and the core tells the Assistant to run long commands in the background.
 - **A very long conversation** → Context grows without bound. Mitigation: compaction as for agents; state lives in the host (`list_work`, `list_loops`) and the brain, not in the transcript.
+- **The Assistant holds the human's mail and calendar** → A prompt injection in an email could try to exfiltrate through an act. Mitigation: no act tool is offered to the provider, every act in a turn that read others' text needs Run on a card showing the exact target and content, and loops never act. Residual: the web and app APIs reached around a source (Decision 9).
+- **Many cards** → Read-then-act requests ("read my mail and put holds…") always produce cards. Mitigation: one Run per card, listed together under Needs you; batching cards is left for later.
 - **`sandbox-exec` is deprecated by Apple** → It still ships and both providers rely on it. If it disappears, the Assistant refuses to start rather than run unguarded.
 - **Hidden projects** → Work is out of the Projects list. Mitigation: Open details, the rail, Needs you counts on the sidebar row, and Inbox items for approvals.
 
@@ -112,7 +134,7 @@ The recipe card's job was to keep content from creating a schedule. Without the 
 These could not be settled from the code. Each is specified as recommended, so accepting one needs no spec change.
 
 1. **Gaps the sandbox cannot close** (Decision 1): pushing from another clone, `gh api` writes, and escaping through `open`/`osascript`. *Recommendation:* accept as instruction-level, like every YOLO agent's push rule; revisit if an incident shows otherwise.
-2. **Does the Assistant get every Space's listed MCP servers?** *Recommendation:* yes, with only their listed tools, since it serves every Space. Its CLIs are unrestricted as for any YOLO agent.
+2. **Does the Assistant get every Space's sources?** *Recommendation:* yes, since it serves every Space: their read tools directly, their act tools only through `act` (Decision 9). Settled for MCP by decision 5; the open part is that a source's CLI is then refused in the Assistant's shell everywhere, even for uses outside that Space, such as `gh` on a personal repository, which must go through `read_source`.
 3. **Every Space's additions in one session.** The conversation belongs to no Space, so each Space's additions are included under their own heading, scoped to requests in that Space. *Recommendation:* accept; if additions grow large, load only the inferred Space's additions per turn instead.
 4. **Can the human talk to a work item's coordinator directly?** *Recommendation:* yes, from Open details; it counts as the human's message, and the coordinator still reports to the Assistant.
 5. **Should work be able to move into Projects** ("Show in Projects", making the human the coordinator's parent)? *Recommendation:* not now (YAGNI); Open details covers looking, and the human can talk to the coordinator there.
@@ -120,6 +142,9 @@ These could not be settled from the code. Each is specified as recommended, so a
 7. **Which Space's Assistant row does the conversation use?** *Recommendation:* this Mac's alone, because it belongs to no Space; Space Assistant rows still apply to issue threads and loops.
 8. **How long Undo stays on a loop card.** *Recommendation:* until the loop changes again, with no time limit.
 9. **Should the Assistant get a time or turn check-in in the Inbox?** *Recommendation:* no; its long turns show in the chat and on its row, and the human is already in that conversation.
+10. **App access around a source** (Decision 9): calling an app's API with a CLI's stored token, or driving Mail and Calendar with `osascript`. *Recommendation:* instruction-level for now; if it matters, deny reads of the token paths of the sources a Space lists.
+11. **Does reading a file or a command's output taint a turn?** *Recommendation:* no; only source reads, issue reads, web search and fetch, and reports, which the host can see and which are where others' text arrives.
+12. **Should issue writes in a tainted turn also need a card?** The tracker is Wiffletree's own, so decision 6 does not cover it. *Recommendation:* no, as question 6 says; revisit if issue text proves a vector.
 
 ## Stages and order
 

@@ -10,6 +10,8 @@ Four stages, each one reviewable ticket, stacked on a feature branch that the hu
 - [ ] 1.6 Host: work tools `message_work`, `pause_work`, `resume_work`, `stop_work`, `list_work`, limited to the Assistant's own work; `ask_human`; the routing tag on the human message a `message_work` call follows, and the Change command.
 - [ ] 1.7 Host: loop tools over every Space's loops with the human-turn rule, read-only command checks at save, Undo; issue tools `list_issues`, `read_issue`, `file_issue`, `edit_issue`, `comment_issue` with `assistant_for`; `save_output`, `query_brain`, `log_work` taking a Space; the composer's hand-picked Space guard. Verify a turn woken only by a report cannot create a loop.
 
+- [ ] 1.8 Core and host: sources gain act lists and "Do without asking" marks, old lists reading as read lists; the Assistant's provider offered read tools only; `read_source` and `act` run through the host (the host as MCP client, CLIs under the shell-text rule); the sandbox refuses exec of listed CLIs; action and done cards with Run and Decline; turns held to cards (not started by the human, or after a source read, issue read, web search or fetch, or report). Verify the email-forwarding, invite and report scenarios, and that a loop never receives an act tool.
+
 ## 2. One conversation: remove the router, threads and tabs
 
 - [ ] 2.1 Host: the human's messages go to the one conversation, first in a turn's input; delete `router.rs`, `provider/router.rs`, the router's core types and `Job::Router`.
@@ -23,7 +25,8 @@ Four stages, each one reviewable ticket, stacked on a feature branch that the hu
 - [ ] 3.2 Cards: work (title, Space, stage, PRs, Stop, Open details), decision (options, recommendation, free answer), approval (settles the Inbox item), loop (what changed, schedule in words, sources, Undo, Edit, Run now), issue written; the routing tag with Change.
 - [ ] 3.3 The rail: Needs you, Running, Loops, Done recently; the Loops page replacing the Jobs list.
 - [ ] 3.4 Sidebar: hide Assistant work from Projects and Space sections; the assistant row's working mark and Needs you count; Open details opens the project view with Back to chat; Inbox selection of Assistant work opens it from the Assistant.
-- [ ] 3.5 Models page without the Router row; Settings without the router threshold.
+- [ ] 3.5 Action cards (target, exact content, what others' text the turn read, Run, Decline, result) and done cards; Add source on the Space's page (configured MCP servers and CLIs, tools with suggested read or act kinds, Do without asking, the server's own sign-in instructions and Try again).
+- [ ] 3.6 Models page without the Router row; Settings without the router threshold.
 
 ## 4. Skill and docs
 
