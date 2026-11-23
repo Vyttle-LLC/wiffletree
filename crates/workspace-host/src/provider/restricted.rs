@@ -406,7 +406,7 @@ pub(super) fn configure_codex(cmd: &mut ProcessCommand, turn: &Turn, launch: &Th
 }
 
 /// A JSON value as a TOML inline value, as Codex's `-c` reads one.
-fn toml_inline(value: &Value) -> String {
+pub(super) fn toml_inline(value: &Value) -> String {
     match value {
         Value::Object(fields) => {
             let fields: Vec<String> = fields

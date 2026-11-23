@@ -2,6 +2,7 @@
 //! sorting and assistant threads, which the provider holds to what they are given.
 mod codex_compaction;
 mod constrained;
+mod conversation;
 mod evaluator;
 mod output;
 mod restricted;
@@ -11,6 +12,8 @@ use crate::processes::{self, Sighting, Watch};
 use crate::runtime::LowPriority as _;
 use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
+pub use conversation::ConversationLaunch;
+use conversation::tool_calls;
 pub use evaluator::{EvaluatorLaunch, prepare_codex_home};
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
 use output::{Next, Output, StopReading};
@@ -56,6 +59,9 @@ pub enum ProviderEvent {
     Compaction(CompactionRecord),
     /// The model a UI evaluator's provider said it runs, once, before it is checked.
     Model(String),
+    /// The Assistant's turn read text written by others through a call the host sees, such
+    /// as "gmail search_threads" or "a web page".
+    ReadOthers(String),
     Finished {
         error: Option<String>,
         usage: Value,
@@ -97,6 +103,8 @@ pub struct Turn {
     pub thread: Option<ThreadLaunch>,
     /// A UI evaluator run's launch, which has no workspace server, credential or instructions.
     pub evaluator: Option<EvaluatorLaunch>,
+    /// The Assistant conversation's launch: YOLO with its tools and its sources' read tools.
+    pub conversation: Option<ConversationLaunch>,
 }
 pub fn executable(provider: Provider) -> Result<PathBuf> {
     let name = match provider {
@@ -344,6 +352,12 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
             Provider::Claude => restricted::configure_claude(cmd, turn, launch),
             Provider::Codex => restricted::configure_codex(cmd, turn, launch),
         }
+        return;
+    }
+    if let Some(launch) = &turn.conversation
+        && matches!(turn.kind, TurnKind::Prompt)
+    {
+        conversation::configure(cmd, turn, launch);
         return;
     }
     let instructions = &turn.instructions;
@@ -755,6 +769,16 @@ fn run_turn(
                 launch.check_model(&turn.profile, &model)?;
             }
         }
+        // The Assistant's calls of a source's other tools stop its turn, and what it reads that
+        // others wrote holds the rest of the turn to cards.
+        if let Some(launch) = &turn.conversation {
+            for call in tool_calls(turn.session.provider, &value) {
+                launch.check_call(&call)?;
+                if let Some(read) = launch.others_text(&call) {
+                    emit(ProviderEvent::ReadOthers(read));
+                }
+            }
+        }
         match turn.session.provider {
             Provider::Codex => match value["type"].as_str().unwrap_or_default() {
                 "thread.started" => {
@@ -1056,6 +1080,7 @@ mod tests {
             instructions: String::new(),
             thread: None,
             evaluator: None,
+            conversation: None,
         };
         let mut cmd = ProcessCommand::new("claude");
         configure(&mut cmd, &turn);
@@ -1224,6 +1249,7 @@ mod tests {
             instructions: skill(Role::ProjectOrchestrator),
             thread: None,
             evaluator: None,
+            conversation: None,
         }
     }
 

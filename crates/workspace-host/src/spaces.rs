@@ -822,7 +822,7 @@ impl Host {
     fn project_archived(&self, project: &str) -> Result<bool> {
         Ok(self.db.query_row(
             &format!(
-                "SELECT EXISTS(SELECT 1 FROM sessions WHERE project_id=?1 AND parent_id IS NULL AND role=?2 AND {ARCHIVED_FLAG}=1)"
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE project_id=?1 AND role=?2 AND {ARCHIVED_FLAG}=1)"
             ),
             params![project, tag(&Role::ProjectOrchestrator)?],
             |r| r.get(0),

@@ -73,6 +73,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::IssueProjectDefaults { .. }
         | Command::IssuePeople { .. }
         | Command::SearchThreads { .. }
+        | Command::ConversationCards
         | Command::Proposals { .. }
         | Command::Evaluations { .. }
         | Command::ScratchFiles { .. } => Row::Read,
@@ -120,6 +121,15 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::ApplyProposal { .. }
         | Command::DiscardProposal { .. }
         | Command::SetAssistantName { .. }
+        | Command::SendToAssistant { .. }
+        | Command::AnswerDecision { .. }
+        | Command::ApplyLoopCard { .. }
+        | Command::DeclineLoopCard { .. }
+        | Command::UndoLoopChange { .. }
+        | Command::RunAction { .. }
+        | Command::DeclineAction { .. }
+        | Command::StopWork { .. }
+        | Command::MoveRoutedMessage { .. }
         | Command::RouteMessage { .. }
         | Command::AnswerHeld { .. }
         | Command::ChangeRoute { .. }
@@ -227,7 +237,9 @@ pub(crate) fn check(command: &Command, level: AccessLevel, host: &str) -> Result
         (Row::Read | Row::HostPath, _) => Ok(()),
         (Row::Scan | Row::Change, AccessLevel::ViewOnly) => Err(view_only()),
         (Row::Change, AccessLevel::Control) => match command {
-            Command::Send { attachments, .. } | Command::StartThread { attachments, .. }
+            Command::Send { attachments, .. }
+            | Command::StartThread { attachments, .. }
+            | Command::SendToAssistant { attachments, .. }
                 if !attachments.is_empty() =>
             {
                 Err("Remote devices attach files by uploading them".into())

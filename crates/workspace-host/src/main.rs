@@ -13,6 +13,9 @@ fn main() -> Result<()> {
             .and_then(|role| serde_json::from_value(serde_json::Value::String(role.clone())).ok());
         return workspace_host::mcp::serve_stdio(workspace_host::mcp::tools_for(role));
     }
+    if args.first().map(String::as_str) == Some("assistant-mcp") {
+        return workspace_host::mcp::serve_stdio(workspace_host::mcp::assistant_tools());
+    }
     if args.first().map(String::as_str) == Some("thread-mcp") {
         return workspace_host::mcp::serve_stdio(workspace_host::mcp::thread_tools());
     }

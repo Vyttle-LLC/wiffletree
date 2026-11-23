@@ -646,7 +646,7 @@ impl Host {
         Ok(created)
     }
     /// One ticket of the caller's project in full, whatever its state.
-    fn ticket_record(&self, caller: &Session, ticket_id: &str) -> Result<Value> {
+    pub(crate) fn ticket_record(&self, caller: &Session, ticket_id: &str) -> Result<Value> {
         let ticket = self.shown_ticket(self.ticket(ticket_id)?);
         ensure!(
             self.session(&ticket.coordinator_id)?.project_id == caller.project_id,
@@ -1008,6 +1008,12 @@ impl Host {
                     string("message_id")?,
                     &findings,
                 )?;
+                // The Assistant's work is done when its coordinator reports it completed.
+                if kind == "completed"
+                    && let Some(work) = self.work_of(&session)?
+                {
+                    self.set_work_state(&work.id, WorkState::Done)?;
+                }
                 let ticket = self.session_runtime(id)?.ticket_id;
                 match ticket {
                     Some(ticket) if kind == "ready_for_testing" => {
@@ -1066,11 +1072,20 @@ impl Host {
                     "Escalate to your coordinator first"
                 );
                 ensure_unreserved(string("request_id")?)?;
-                let options = match args.get("options") {
+                let options: Vec<String> = match args.get("options") {
                     Some(options) => serde_json::from_value(options.clone())
                         .context("options must be a list of strings")?,
                     None => vec![],
                 };
+                // The coordinator of the Assistant's work asks the Assistant, never the Inbox.
+                if self.work_of(&session)?.is_some() {
+                    return self.ask_assistant(
+                        &session,
+                        string("request_id")?,
+                        string("question")?,
+                        &options,
+                    );
+                }
                 Ok(serde_json::to_value(self.request_attention(
                     id,
                     "local",

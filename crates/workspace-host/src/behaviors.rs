@@ -422,6 +422,9 @@ impl Host {
         if session.role.is_thread() {
             text.push_str(&self.attached_section(session)?);
         }
+        if session.role == Role::Conversation {
+            text.push_str(&self.conversation_section()?);
+        }
         // Who changed them comes from Git, asked only when there are additions to name.
         let changed_by = (layers.space.as_ref())
             .filter(|_| layers.has_additions())

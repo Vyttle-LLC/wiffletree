@@ -105,6 +105,7 @@ fn launched_turn(
         instructions: provider::skill(role),
         thread: Some(launch),
         evaluator: None,
+        conversation: None,
     };
     let mut reply = String::new();
     let mut failure = None;

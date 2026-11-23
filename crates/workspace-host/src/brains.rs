@@ -250,7 +250,7 @@ impl Host {
         Ok(self
             .db
             .query_row(
-                "SELECT id FROM sessions WHERE project_id=?1 AND parent_id IS NULL AND role=?2",
+                "SELECT id FROM sessions WHERE project_id=?1 AND role=?2",
                 params![project, tag(&Role::ProjectOrchestrator)?],
                 |r| r.get(0),
             )

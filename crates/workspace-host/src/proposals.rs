@@ -295,6 +295,50 @@ impl Host {
         self.save_thread(&thread)?;
         Ok(thread)
     }
+    /// The Assistant's `file_issue`, `edit_issue` or `comment_issue` on `space`'s tracker,
+    /// written at once as the human and marked as their assistant's, through the same writes a
+    /// proposal's Apply makes. Returns the issue and what was done to it.
+    pub(crate) fn write_for_assistant(
+        &mut self,
+        space: &Space,
+        name: &str,
+        args: &Value,
+    ) -> Result<(IssueId, &'static str)> {
+        let prefix = (self.tracker(space))
+            .with_context(|| format!("{} has no issues", space.name))?
+            .prefix;
+        let issue_id = || -> Result<IssueId> {
+            let id = IssueId::parse(args["id"].as_str().context("Missing id")?)?;
+            ensure!(
+                id.prefix() == prefix,
+                "{id} is not in {}'s tracker, whose issues are {prefix}-…",
+                space.name
+            );
+            Ok(id)
+        };
+        match name {
+            "file_issue" => {
+                service::only_arguments(name, args, &NEW_FIELDS)?;
+                let filed = self.file_issue(&space.id, new_issue(args)?, true)?;
+                Ok((filed.id, "Filed"))
+            }
+            "edit_issue" => {
+                let fields: Vec<&str> = NEW_FIELDS.iter().copied().chain(["id"]).collect();
+                service::only_arguments(name, args, &fields)?;
+                let id = issue_id()?;
+                let current = self.parsed_issue(&id)?;
+                self.write_change(&current, changes(args)?.apply(&current))?;
+                Ok((id, "Edited"))
+            }
+            "comment_issue" => {
+                service::only_arguments(name, args, &["id", "body"])?;
+                let id = issue_id()?;
+                self.post_comment(&id, args["body"].as_str().unwrap_or_default(), true)?;
+                Ok((id, "Commented"))
+            }
+            _ => bail!("{name} is not an issue write"),
+        }
+    }
     /// Discards a pending proposal; nothing is written to the tracker.
     pub fn discard_proposal(&mut self, thread_id: &str, proposal_id: &str) -> Result<Thread> {
         let mut thread = self.thread(thread_id)?;

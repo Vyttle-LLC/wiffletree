@@ -3605,6 +3605,60 @@ pub enum Command {
     SetAssistantName {
         name: String,
     },
+    /// The human's message to the Assistant's one conversation, which starts its session the
+    /// first time. `space_id` is the Space picked in the composer: in the turn it starts, a tool
+    /// naming another Space is refused. Answered with the `Message`.
+    SendToAssistant {
+        id: String,
+        body: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space_id: Option<SpaceId>,
+    },
+    /// Read-only: the conversation's session, cards and routing tags, as
+    /// `{session, cards, routes}`.
+    ConversationCards,
+    /// The human's answer on a decision card; it reaches the Assistant as their message.
+    /// Answered with the card.
+    AnswerDecision {
+        card_id: String,
+        answer: String,
+    },
+    /// Apply on a loop card a held turn raised. Answered with the card.
+    ApplyLoopCard {
+        card_id: String,
+    },
+    /// Decline on a loop card a held turn raised; nothing changes. Answered with the card.
+    DeclineLoopCard {
+        card_id: String,
+    },
+    /// Undo on an applied loop change: the loop as it was before. Answered with the card.
+    UndoLoopChange {
+        card_id: String,
+    },
+    /// Run on an action card: the host runs it as shown, then tells the Assistant. Answered
+    /// with the card once it ran.
+    RunAction {
+        card_id: String,
+    },
+    /// Decline on an action card: nothing runs, and the Assistant is told. Answered with the
+    /// card.
+    DeclineAction {
+        card_id: String,
+    },
+    /// Stop on a work card, as the human's command: the work's turns stop, nothing more is
+    /// delivered to it, and it is Stopped. Answered with the `Project`.
+    StopWork {
+        project_id: String,
+    },
+    /// Change on a message the Assistant passed to its work: sends it to `project_id`, another
+    /// of its work items, or with none to no work. Answered with the `Route`.
+    MoveRoutedMessage {
+        message_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
+    },
     /// Sends `body` where the router decides, from the thread open in the assistant, if any.
     /// Unsure, the message is held unsent and the user asked. Answered with `null`.
     RouteMessage {
@@ -4455,6 +4509,7 @@ impl Command {
             | Self::IssueProjectDefaults { .. }
             | Self::IssuePeople { .. }
             | Self::SearchThreads { .. }
+            | Self::ConversationCards
             | Self::ScratchFiles { .. }
             | Self::Proposals { .. }
             | Self::Evaluations { .. }
@@ -4503,6 +4558,15 @@ impl Command {
             | Self::ApplyProposal { .. }
             | Self::DiscardProposal { .. }
             | Self::SetAssistantName { .. }
+            | Self::SendToAssistant { .. }
+            | Self::AnswerDecision { .. }
+            | Self::ApplyLoopCard { .. }
+            | Self::DeclineLoopCard { .. }
+            | Self::UndoLoopChange { .. }
+            | Self::RunAction { .. }
+            | Self::DeclineAction { .. }
+            | Self::StopWork { .. }
+            | Self::MoveRoutedMessage { .. }
             | Self::RouteMessage { .. }
             | Self::AnswerHeld { .. }
             | Self::ChangeRoute { .. }
@@ -4633,6 +4697,16 @@ impl Command {
                 | Self::ApplyProposal { .. }
                 | Self::DiscardProposal { .. }
                 | Self::SetAssistantName { .. }
+                | Self::SendToAssistant { .. }
+                | Self::ConversationCards
+                | Self::AnswerDecision { .. }
+                | Self::ApplyLoopCard { .. }
+                | Self::DeclineLoopCard { .. }
+                | Self::UndoLoopChange { .. }
+                | Self::RunAction { .. }
+                | Self::DeclineAction { .. }
+                | Self::StopWork { .. }
+                | Self::MoveRoutedMessage { .. }
                 | Self::RouteMessage { .. }
                 | Self::AnswerHeld { .. }
                 | Self::ChangeRoute { .. }

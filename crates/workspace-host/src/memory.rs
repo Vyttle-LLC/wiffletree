@@ -398,24 +398,43 @@ impl Host {
             .context("This project has no coordinator to log as")?;
         input.session_id = coordinator.clone();
         let coordinator = self.session(&coordinator)?;
-        self.capture(&coordinator, input)
+        self.capture(&coordinator, input, None)
     }
 
     /// `log_work`: one entry for the calling coordinator or implementer.
     pub(crate) fn log_work(&mut self, session: &Session, args: &Value) -> Result<Value> {
-        let log = self.capture(session, log_work_input(session, args)?)?;
+        let log = self.capture(session, log_work_input(session, args)?, None)?;
         Ok(json!({"id": log.id, "path": log.path, "ref": log.reference}))
     }
 
-    /// The one capture path. The brain is the caller's Space's; the host mints the id and date,
-    /// computes `ref`, takes the author from gh's login or, in a local repository, this Mac's
-    /// account, and records the provider, model and machine. A milestone repeated with the same
-    /// content returns its first entry. Refused, storing nothing, for a GitHub repository with
-    /// no login, or without room under the cap.
-    fn capture(&mut self, session: &Session, input: LogInput) -> Result<WorkLog> {
+    /// The Assistant's `log_work`, in the brain of the Space it named, with `space` taken out
+    /// of `args`.
+    pub(crate) fn log_work_in(
+        &mut self,
+        session: &Session,
+        space: &SpaceId,
+        args: &Value,
+    ) -> Result<Value> {
+        let input = log_work_input(session, args)?;
+        let log = self.capture(session, input, Some(space.clone()))?;
+        Ok(json!({"id": log.id, "path": log.path, "ref": log.reference}))
+    }
+
+    /// The one capture path. The brain is the caller's Space's, or for the Assistant the
+    /// `named` Space's; the host mints the id and date, computes `ref`, takes the author from
+    /// gh's login or, in a local repository, this Mac's account, and records the provider,
+    /// model and machine. A milestone repeated with the same content returns its first entry.
+    /// Refused, storing nothing, for a GitHub repository with no login, or without room under
+    /// the cap.
+    fn capture(
+        &mut self,
+        session: &Session,
+        input: LogInput,
+        named: Option<SpaceId>,
+    ) -> Result<WorkLog> {
         ensure!(
-            logs_work(session.role) || session.role == Role::Assistant,
-            "log_work is for the project coordinator and implementers, and for assistant threads"
+            logs_work(session.role) || matches!(session.role, Role::Assistant | Role::Conversation),
+            "log_work is for the project coordinator and implementers, the Assistant and assistant threads"
         );
         let input = folded(input)?;
         if let Some(milestone) = &input.milestone
@@ -441,6 +460,10 @@ impl Host {
         // A thread logs in its own Space's brain, for no project, repository or ticket.
         let (project, space_id) = match session.role {
             Role::Assistant => (None, self.thread(&session.id)?.space_id),
+            Role::Conversation => (
+                None,
+                named.context("Name the Space whose brain this entry goes to, with space")?,
+            ),
             _ => {
                 let project = self.project(&session.project_id)?;
                 (Some(project.clone()), project.space)
@@ -450,10 +473,10 @@ impl Host {
         let author = self.entry_author(&space.storage.repository)?;
         let project_id = project.as_ref().map(|p| p.id.clone()).unwrap_or_default();
         let ticket = match session.role {
-            Role::Assistant => {
+            Role::Assistant | Role::Conversation => {
                 ensure!(
                     input.repository.is_none() && input.ticket_id.is_none(),
-                    "A thread's entry names no repository or ticket; leave them out"
+                    "The Assistant's entry names no repository or ticket; leave them out"
                 );
                 None
             }

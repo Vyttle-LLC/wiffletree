@@ -2076,11 +2076,37 @@ impl Host {
     /// the project's scope unless `scope` is `brain`. The agent never names the brain. Refused
     /// for other roles, and before the brain's first index build.
     pub(crate) fn query_brain(&self, session: &Session, args: &Value) -> Result<Value> {
-        service::only_arguments("query_brain", args, &QUERY_BRAIN_ARGUMENTS)?;
         ensure!(
             queries_brain(session.role),
             "query_brain is for the project coordinator, implementers, testers and reviewers, and for assistant threads and job runs"
         );
+        // A thread has no project, so it reads its own Space's whole brain.
+        let (owner, project) = match session.role {
+            Role::Assistant | Role::JobRun => {
+                let space = self.thread(&session.id)?.space_id;
+                (SessionOwner::Space(space), None)
+            }
+            _ => (
+                SessionOwner::Project(session.project_id.clone()),
+                Some(session.project_id.as_str()),
+            ),
+        };
+        self.ask_brain(&owner, project, args)
+    }
+    /// The Assistant's `query_brain`: the whole brain of the Space it named, with `space`
+    /// taken out of `args`.
+    pub(crate) fn query_space_brain(&self, space: &SpaceId, args: &Value) -> Result<Value> {
+        self.ask_brain(&SessionOwner::Space(space.clone()), None, args)
+    }
+    /// The ladder over `owner`'s brain, in `project`'s scope when the question asks for it, or
+    /// else the whole brain.
+    fn ask_brain(
+        &self,
+        owner: &SessionOwner,
+        project: Option<&str>,
+        args: &Value,
+    ) -> Result<Value> {
+        service::only_arguments("query_brain", args, &QUERY_BRAIN_ARGUMENTS)?;
         let question = args["question"]
             .as_str()
             .map(str::trim)
@@ -2095,21 +2121,11 @@ impl Host {
             Some(Some("brain")) => true,
             _ => bail!("scope is project or brain"),
         };
-        // A thread has no project, so it reads its own Space's whole brain.
-        let (owner, whole) = match session.role {
-            Role::Assistant | Role::JobRun => {
-                let space = self.thread(&session.id)?.space_id;
-                (SessionOwner::Space(space), true)
-            }
-            _ => (
-                SessionOwner::Project(session.project_id.clone()),
-                asked_whole,
-            ),
-        };
-        let (brain, db) = self.brain_reader(&self.owner_brain(&owner)?)?;
+        let whole = asked_whole || project.is_none();
+        let (brain, db) = self.brain_reader(&self.owner_brain(owner)?)?;
         let scope = match whole {
             true => None,
-            false => self.brain_scope(&brain, Some(&session.project_id))?,
+            false => self.brain_scope(&brain, project)?,
         };
         let results = ladder(&db, scope.as_ref(), &question_terms(question))?;
         let nothing = results.is_empty();

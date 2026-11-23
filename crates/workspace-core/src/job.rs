@@ -445,6 +445,12 @@ fn reads(command: &str, words: &[&str]) -> bool {
 /// since nothing a recipe supplies is run by the host. An MCP server lists the tools it may
 /// call.
 pub fn validate_source(source: &Source) -> Result<()> {
+    ensure!(
+        source.acts().is_empty() && *source == source.read_only(),
+        "A loop only reads: {} lists act tools or commands ({}), which only the Assistant may ask for",
+        source.name(),
+        source.acts().join(", ")
+    );
     match source {
         Source::Mcp { server, tools, .. } => {
             ensure!(

@@ -1,0 +1,255 @@
+//! The Assistant's loop tools over every Space's loops (jobs, as their recipes still call them).
+//! A change applies at once in a turn that is not held, with a card offering Undo; in a held
+//! turn it waits on a loop card for the human's Apply (scheduled-jobs, "Only the human's word
+//! saves a loop").
+use crate::conversation::{TurnGuard, without_space};
+use crate::*;
+use workspace_core::assistant::conversation::{
+    CardKind, ConversationCard, LoopCard, LoopCardState, LoopChange,
+};
+use workspace_core::job::{JobKey, Recipe};
+
+/// The recipe fields `create_loop` and `edit_loop` take.
+const RECIPE_FIELDS: [&str; 8] = [
+    "name",
+    "prompt",
+    "cron",
+    "timezone",
+    "sources",
+    "output_title",
+    "output_type",
+    "sharing",
+];
+
+impl Host {
+    /// `list_loops`: every Space's loops with their schedule, next runs and last result.
+    pub(crate) fn list_loops(&self) -> Result<Value> {
+        let loops = (self.job_states()?.into_iter())
+            .filter(|state| !state.recipe.key().is_built_in())
+            .map(|state| {
+                let last = state
+                    .runs
+                    .first()
+                    .map(|run| json!({"outcome": run.outcome, "started_at": run.started_at}));
+                json!({
+                    "space": state.recipe.space_id,
+                    "job_id": state.recipe.id,
+                    "name": state.recipe.name,
+                    "schedule": state.schedule,
+                    "enabled": state.recipe.enabled,
+                    "next_runs": state.next_runs,
+                    "sources": state.recipe.sources,
+                    "last_run": last,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({"loops": loops}))
+    }
+    /// A loop tool: the change applied at once with a card offering Undo, or in a held turn a
+    /// card waiting for the human's Apply, naming what the turn read.
+    pub(crate) fn loop_tool(
+        &mut self,
+        name: &str,
+        args: &Value,
+        guard: &TurnGuard,
+    ) -> Result<Value> {
+        let space = self.named_space(args, guard)?;
+        let args = without_space(args);
+        let existing = |host: &Self| -> Result<Recipe> {
+            let id = args["job_id"].as_str().context("Missing job_id")?;
+            host.recipe(&JobKey::recipe(&space.id, id))
+        };
+        let (change, before, after) = match name {
+            "create_loop" => {
+                service::only_arguments(name, &args, &RECIPE_FIELDS)?;
+                let recipe = assistant::proposed_recipe(&space.id, &args)?;
+                self.refuse_taken_job(&recipe)?;
+                (LoopChange::Create, None, Some(recipe))
+            }
+            "edit_loop" => {
+                let fields: Vec<&str> = RECIPE_FIELDS.iter().copied().chain(["job_id"]).collect();
+                service::only_arguments(name, &args, &fields)?;
+                let before = existing(self)?;
+                (
+                    LoopChange::Edit,
+                    Some(before.clone()),
+                    Some(edited(&before, &args)?),
+                )
+            }
+            "pause_loop" | "resume_loop" => {
+                service::only_arguments(name, &args, &["job_id"])?;
+                let before = existing(self)?;
+                let after = Recipe {
+                    enabled: name == "resume_loop",
+                    ..before.clone()
+                };
+                let change = match after.enabled {
+                    true => LoopChange::Resume,
+                    false => LoopChange::Pause,
+                };
+                (change, Some(before), Some(after))
+            }
+            "delete_loop" => {
+                service::only_arguments(name, &args, &["job_id"])?;
+                (LoopChange::Delete, Some(existing(self)?), None)
+            }
+            _ => {
+                service::only_arguments(name, &args, &["job_id"])?;
+                let recipe = existing(self)?;
+                (LoopChange::Run, Some(recipe.clone()), Some(recipe))
+            }
+        };
+        if let Some(after) = &after {
+            jobs::validate(after)?;
+            self.refuse_acts_as_reads(&space, after)?;
+        }
+        let job_id = (after.as_ref().or(before.as_ref()))
+            .map(|recipe| recipe.id.clone())
+            .unwrap_or_default();
+        let mut card = LoopCard {
+            space_id: space.id,
+            job_id,
+            change,
+            before: before.map(Box::new),
+            after: after.map(Box::new),
+            state: LoopCardState::Waiting,
+        };
+        if guard.held() {
+            let card = self.raise_card(CardKind::Loop(card), guard)?;
+            return Ok(json!({
+                "card": card.id,
+                "applied": false,
+                "note": format!("Nothing changed: this turn read text written by others ({}), so the human sees a loop card and applies it with Apply.", guard.read.join("; ")),
+            }));
+        }
+        let applied = self.apply_loop_change(&card)?;
+        card.state = LoopCardState::Applied;
+        let card = self.raise_card(CardKind::Loop(card), guard)?;
+        Ok(json!({"card": card.id, "applied": true, "loop": applied}))
+    }
+    /// A recipe may list a source's read entries alone, never what its Space lists as an act.
+    fn refuse_acts_as_reads(&self, space: &Space, recipe: &Recipe) -> Result<()> {
+        for source in &recipe.sources {
+            let listed = (space.sources.iter()).find(|s| s.name() == source.name());
+            let acts = listed.map(Source::acts).unwrap_or_default();
+            let named: Vec<&str> = (source.reads().iter())
+                .filter(|read| acts.contains(read))
+                .map(String::as_str)
+                .collect();
+            ensure!(
+                named.is_empty(),
+                "A loop only reads, and {} lists {} as acting in the app",
+                space.name,
+                named.join(", ")
+            );
+        }
+        Ok(())
+    }
+    fn apply_loop_change(&mut self, card: &LoopCard) -> Result<Value> {
+        let recipe = || card.after.as_deref().cloned().context("No loop to save");
+        Ok(match card.change {
+            LoopChange::Create | LoopChange::Edit | LoopChange::Pause | LoopChange::Resume => {
+                serde_json::to_value(self.save_job(recipe()?)?)?
+            }
+            LoopChange::Delete => {
+                self.delete_job(&card.space_id, &card.job_id)?;
+                Value::Null
+            }
+            LoopChange::Run => {
+                let key = JobKey::recipe(&card.space_id, &card.job_id);
+                serde_json::to_value(self.run_job_now(&key)?)?
+            }
+        })
+    }
+    fn loop_card(&self, id: &str) -> Result<(ConversationCard, LoopCard)> {
+        let card = self.conversation_card(id)?;
+        let CardKind::Loop(change) = &card.kind else {
+            bail!("This card changes no loop");
+        };
+        let change = change.clone();
+        Ok((card, change))
+    }
+    fn set_loop_card(
+        &self,
+        mut card: ConversationCard,
+        change: LoopCard,
+    ) -> Result<ConversationCard> {
+        card.kind = CardKind::Loop(change);
+        self.save_card(&card)?;
+        Ok(card)
+    }
+    /// The human's Apply on a loop card a held turn raised.
+    pub fn apply_loop_card(&mut self, id: &str) -> Result<ConversationCard> {
+        let (card, mut change) = self.loop_card(id)?;
+        ensure!(
+            change.state == LoopCardState::Waiting,
+            "This loop change is not waiting"
+        );
+        self.apply_loop_change(&change)?;
+        change.state = LoopCardState::Applied;
+        self.set_loop_card(card, change)
+    }
+    /// The human's Decline on a loop card a held turn raised: nothing changes.
+    pub fn decline_loop_card(&mut self, id: &str) -> Result<ConversationCard> {
+        let (card, mut change) = self.loop_card(id)?;
+        ensure!(
+            change.state == LoopCardState::Waiting,
+            "This loop change is not waiting"
+        );
+        change.state = LoopCardState::Declined;
+        self.set_loop_card(card, change)
+    }
+    /// Undo on an applied loop change: the loop as it was before, or none for a loop it
+    /// created. Offered until the loop changes again; a run cannot be undone.
+    pub fn undo_loop_change(&mut self, id: &str) -> Result<ConversationCard> {
+        let (card, mut change) = self.loop_card(id)?;
+        ensure!(
+            change.state == LoopCardState::Applied && change.change != LoopChange::Run,
+            "This loop change cannot be undone"
+        );
+        let key = JobKey::recipe(&change.space_id, &change.job_id);
+        let now_saved = self.recipe(&key).ok();
+        ensure!(
+            now_saved.as_ref() == change.after.as_deref(),
+            "The loop changed since; change it on its page"
+        );
+        match change.before.as_deref() {
+            Some(before) => {
+                self.save_job(before.clone())?;
+            }
+            None => self.delete_job(&change.space_id, &change.job_id)?,
+        }
+        change.state = LoopCardState::Undone;
+        self.set_loop_card(card, change)
+    }
+}
+
+/// `before` with the fields `args` gives, keeping its id, model, runner and state.
+fn edited(before: &Recipe, args: &Value) -> Result<Recipe> {
+    let mut fields = json!({
+        "name": before.name,
+        "prompt": before.prompt,
+        "cron": before.schedule.cron,
+        "timezone": before.schedule.timezone,
+        "sources": before.sources,
+        "sharing": before.sharing,
+    });
+    if let Some(output) = &before.output {
+        fields["output_title"] = json!(output.title);
+        fields["output_type"] = json!(output.file_type);
+    }
+    for key in RECIPE_FIELDS {
+        if let Some(value) = args.get(key).filter(|value| !value.is_null()) {
+            fields[key] = value.clone();
+        }
+    }
+    let parsed = assistant::proposed_recipe(&before.space_id, &fields)?;
+    Ok(Recipe {
+        id: before.id.clone(),
+        model: before.model.clone(),
+        runner: before.runner.clone(),
+        enabled: before.enabled,
+        extra: before.extra.clone(),
+        ..parsed
+    })
+}

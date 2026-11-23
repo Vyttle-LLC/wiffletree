@@ -333,7 +333,7 @@ impl SourceEnv {
             mcp_limit: CHECK_LIMIT,
         }
     }
-    fn find(&self, command: &str) -> Option<PathBuf> {
+    pub(crate) fn find(&self, command: &str) -> Option<PathBuf> {
         (self.path.iter())
             .map(|folder| folder.join(command))
             .find(|path| path.is_file())
@@ -378,17 +378,39 @@ fn aws_profile(prefixes: &[String]) -> Option<String> {
 /// its provider would start it, it must answer `initialize` and list every tool the recipe
 /// names, within the limit. A server reached by URL cannot be checked, so it is refused.
 fn mcp_problem(env: &SourceEnv, definition: &Value, tools: &[String]) -> Option<String> {
+    let list = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"});
+    let offered = match mcp_exchange(env, definition, list) {
+        Ok(listed) => listed,
+        Err(why) => return Some(why),
+    };
+    let names: Vec<&str> = (offered["tools"].as_array().into_iter().flatten())
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    let missing: Vec<&str> = (tools.iter().map(String::as_str))
+        .filter(|tool| !names.contains(tool))
+        .collect();
+    (!missing.is_empty()).then(|| format!("does not offer {}", missing.join(", ")))
+}
+
+/// Starts the MCP server `definition` names as its provider would, finishes its handshake and
+/// sends it `request`, whose id is 2, within the limit; answers the request's result, or in
+/// words with none of the server's output why there is none. The server is stopped either way.
+pub(crate) fn mcp_exchange(
+    env: &SourceEnv,
+    definition: &Value,
+    request: Value,
+) -> std::result::Result<Value, String> {
     use std::io::{BufRead, Write};
     use std::os::unix::process::CommandExt;
     let Some(command) = definition["command"].as_str().filter(|c| !c.is_empty()) else {
-        return Some("is not a command Wiffletree can start to check it; a job can use only a command-line MCP server".into());
+        return Err("is not a command Wiffletree can start; only a command-line MCP server can be used this way".into());
     };
     let program = match command.contains('/') {
         true => Some(PathBuf::from(command)),
         false => env.find(command),
     };
     let Some(program) = program else {
-        return Some(format!(
+        return Err(format!(
             "names {command}, which is not installed on this Mac"
         ));
     };
@@ -407,10 +429,12 @@ fn mcp_problem(env: &SourceEnv, definition: &Value, tools: &[String]) -> Option<
         }
     }
     let Ok(mut child) = start.spawn() else {
-        return Some("could not be started".into());
+        return Err("could not be started".into());
     };
     let group = child.id() as libc::pid_t;
-    let (mut stdin, stdout) = (child.stdin.take()?, child.stdout.take()?);
+    let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        return Err("could not be started".into());
+    };
     let (lines, answers) = std::sync::mpsc::channel::<Value>();
     std::thread::spawn(move || {
         for line in std::io::BufReader::new(stdout).lines() {
@@ -455,22 +479,11 @@ fn mcp_problem(env: &SourceEnv, definition: &Value, tools: &[String]) -> Option<
     };
     let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"wiffletree","version":"1"}}});
     let initialized = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
-    let list = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"});
-    let checked = answer(1, initialize, &[initialized]).and_then(|_| answer(2, list, &[]));
+    let answered = answer(1, initialize, &[initialized]).and_then(|_| answer(2, request, &[]));
     // SAFETY: `killpg` only sends a signal; the group is the server's own.
     unsafe { libc::killpg(group, libc::SIGKILL) };
     let _ = child.wait();
-    let offered = match checked {
-        Ok(listed) => listed,
-        Err(why) => return Some(why),
-    };
-    let names: Vec<&str> = (offered["tools"].as_array().into_iter().flatten())
-        .filter_map(|tool| tool["name"].as_str())
-        .collect();
-    let missing: Vec<&str> = (tools.iter().map(String::as_str))
-        .filter(|tool| !names.contains(tool))
-        .collect();
-    (!missing.is_empty()).then(|| format!("does not offer {}", missing.join(", ")))
+    answered
 }
 
 /// Checks one source as a run on `provider` would use it. An MCP server must be in that
@@ -567,7 +580,7 @@ impl Host {
             .optional()?
             .context("Job not found")
     }
-    fn source_env(&self) -> SourceEnv {
+    pub(crate) fn source_env(&self) -> SourceEnv {
         (self.source_env.clone()).unwrap_or_else(SourceEnv::of_host)
     }
     pub(crate) fn source_checks(&self, provider: Provider, sources: &[Source]) -> SourceChecks {
