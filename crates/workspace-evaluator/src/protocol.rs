@@ -38,10 +38,13 @@ pub trait Desktop: Send + Sync {
     fn windows(&self) -> Result<Vec<Window>>;
     /// The frontmost app's bundle id and process id.
     fn frontmost(&self) -> Option<(String, i32)>;
-    fn click(&self, at: Point, button: Button, count: u32) -> Result<()>;
+    /// Moves the pointer and lets the app under it see it.
     fn move_to(&self, at: Point) -> Result<()>;
+    /// Presses or releases `button` at `at`, as the `click`th click of a series.
+    fn button(&self, at: Point, button: Button, click: u32, down: bool) -> Result<()>;
+    /// Moves the pointer with the left button held, a step of a drag.
+    fn drag_to(&self, at: Point) -> Result<()>;
     fn scroll(&self, at: Point, dy: i32) -> Result<()>;
-    fn drag(&self, from: Point, to: Point) -> Result<()>;
     /// Posts to `pid`'s app alone.
     fn type_text(&self, pid: i32, text: &str) -> Result<()>;
     fn key(&self, pid: i32, keystroke: Keystroke) -> Result<()>;
@@ -74,6 +77,8 @@ pub struct Grants {
 pub struct Control {
     stream: Mutex<Option<UnixStream>>,
     stopped: AtomicBool,
+    /// A stop made before the host held the control connection, told once it does.
+    pending: Mutex<Option<StopSource>>,
 }
 impl Control {
     /// Tells the host the run must stop, and refuses every later request. Esc, the menu bar's
@@ -82,8 +87,12 @@ impl Control {
         if self.stopped.swap(true, Ordering::SeqCst) {
             return;
         }
-        if let Some(stream) = self.stream.lock().unwrap().as_mut() {
-            let _ = writeln!(stream, "{}", json!({"event": source.event()}));
+        let mut held = self.stream.lock().unwrap();
+        match held.as_mut() {
+            Some(stream) => {
+                let _ = writeln!(stream, "{}", json!({"event": source.event()}));
+            }
+            None => *self.pending.lock().unwrap() = Some(source),
         }
     }
     pub fn stopped(&self) -> bool {
@@ -159,6 +168,10 @@ fn hold_control(
             return;
         }
         let _ = writeln!(stream, "{}", json!({"ok": true, "result": hello}));
+        // Esc or Stop before the host attached still ends the run, with its reason.
+        if let Some(source) = control.pending.lock().unwrap().take() {
+            let _ = writeln!(stream, "{}", json!({"event": source.event()}));
+        }
         *held = stream.try_clone().ok();
     }
     let _ = stream.set_read_timeout(None);
@@ -170,6 +183,20 @@ fn hold_control(
     }
     control.stopped.store(true, Ordering::SeqCst);
     gone();
+}
+
+/// Releases a pressed button, and fails with `check`, the hit test made just before. A button
+/// is released even over a window that is no longer the run's, so it is never left held down;
+/// the request is refused all the same.
+fn release_checked(
+    desktop: &dyn Desktop,
+    at: Point,
+    button: Button,
+    click: u32,
+    check: Result<()>,
+) -> Result<()> {
+    desktop.button(at, button, click, false)?;
+    check
 }
 
 /// One driver request, checked against the run's apps and the screen as it is now.
@@ -215,7 +242,13 @@ pub fn answer(
             let count = request["count"].as_u64().unwrap_or(1);
             ensure!((1..=2).contains(&count), "Give count as 1 or 2");
             on_allowed_window(at)?;
-            desktop.click(at, button, count as u32)?;
+            desktop.move_to(at)?;
+            for click in 1..=count as u32 {
+                // The screen may have changed since the move: checked before each press.
+                on_allowed_window(at)?;
+                desktop.button(at, button, click, true)?;
+                release_checked(desktop, at, button, click, on_allowed_window(at))?;
+            }
         }
         "move" => {
             let at = point("x", "y")?;
@@ -235,7 +268,16 @@ pub fn answer(
             let (from, to) = (point("x1", "y1")?, point("x2", "y2")?);
             on_allowed_window(from)?;
             on_allowed_window(to)?;
-            desktop.drag(from, to)?;
+            desktop.move_to(from)?;
+            on_allowed_window(from)?;
+            desktop.button(from, Button::Left, 1, true)?;
+            for part in [0.1, 0.5, 0.9, 1.0] {
+                desktop.drag_to(Point {
+                    x: from.x + (to.x - from.x) * part,
+                    y: from.y + (to.y - from.y) * part,
+                })?;
+            }
+            release_checked(desktop, to, Button::Left, 1, on_allowed_window(to))?;
         }
         "type" => {
             let text = text("text")?;
@@ -314,6 +356,9 @@ mod tests {
         done: Mutex<Vec<String>>,
         /// Stopped as the first text is typed, as when the human presses Esc mid-request.
         stops_while_typing: Mutex<Option<Arc<Control>>>,
+        /// After this many looks at the window list, a banner covers the whole screen.
+        covered_after: Mutex<Option<usize>>,
+        looks: Mutex<usize>,
     }
     impl Screen {
         fn front(app: &str) -> Self {
@@ -331,6 +376,17 @@ mod tests {
     }
     impl Desktop for Screen {
         fn windows(&self) -> Result<Vec<Window>> {
+            let mut looks = self.looks.lock().unwrap();
+            *looks += 1;
+            let banner = window("com.apple.notificationcenterui", 23, (0., 0., 3000., 2000.));
+            if self
+                .covered_after
+                .lock()
+                .unwrap()
+                .is_some_and(|after| *looks > after)
+            {
+                return Ok(vec![banner]);
+            }
             let mut calculator = window("com.apple.calculator", 0, (0., 0., 230., 400.));
             calculator.title = Some("Calculator".into());
             Ok(vec![
@@ -341,8 +397,12 @@ mod tests {
         fn frontmost(&self) -> Option<(String, i32)> {
             self.frontmost.lock().unwrap().clone()
         }
-        fn click(&self, at: Point, button: Button, count: u32) -> Result<()> {
-            self.record(format!("click {} {} {button:?} {count}", at.x, at.y))
+        fn button(&self, at: Point, button: Button, click: u32, down: bool) -> Result<()> {
+            let what = if down { "press" } else { "release" };
+            self.record(format!("{what} {} {} {button:?} {click}", at.x, at.y))
+        }
+        fn drag_to(&self, at: Point) -> Result<()> {
+            self.record(format!("drag to {:.1} {:.1}", at.x, at.y))
         }
         fn move_to(&self, at: Point) -> Result<()> {
             self.record(format!("move {} {}", at.x, at.y))
@@ -350,9 +410,7 @@ mod tests {
         fn scroll(&self, at: Point, dy: i32) -> Result<()> {
             self.record(format!("scroll {} {} {dy}", at.x, at.y))
         }
-        fn drag(&self, from: Point, to: Point) -> Result<()> {
-            self.record(format!("drag {} {} {} {}", from.x, from.y, to.x, to.y))
-        }
+
         fn type_text(&self, pid: i32, text: &str) -> Result<()> {
             if let Some(control) = self.stops_while_typing.lock().unwrap().take() {
                 control.stop(StopSource::Escape);
@@ -432,13 +490,60 @@ mod tests {
         assert_eq!(
             screen.done(),
             [
-                "click 50 60 Left 1",
-                "click 50 60 Right 2",
+                "move 50 60",
+                "press 50 60 Left 1",
+                "release 50 60 Left 1",
+                "move 50 60",
+                "press 50 60 Right 1",
+                "release 50 60 Right 1",
+                "press 50 60 Right 2",
+                "release 50 60 Right 2",
                 "move 5 6",
                 "scroll 5 6 -300",
-                "drag 5 6 100 200"
+                "move 5 6",
+                "press 5 6 Left 1",
+                "drag to 14.5 25.4",
+                "drag to 52.5 103.0",
+                "drag to 90.5 180.6",
+                "drag to 100.0 200.0",
+                "release 100 200 Left 1"
             ]
         );
+    }
+
+    /// The screen can change between the hit test and the gesture: each press and release is
+    /// checked again, just before, and a click over a window that is no longer the run's is
+    /// refused. A pressed button is still released, so it is never left held down.
+    #[test]
+    fn each_press_and_release_is_checked_against_the_screen_as_it_is_then() {
+        let click = |count: u64, covered_after: usize| {
+            let screen = Screen::front("com.apple.calculator");
+            *screen.covered_after.lock().unwrap() = Some(covered_after);
+            let control = started();
+            let request = json!({"do":"click","x":50,"y":60,"count":count});
+            let refused = ask(&screen, &control, request).unwrap_err();
+            assert!(refused.to_string().starts_with("Refused"), "{refused}");
+            screen.done()
+        };
+        // Covered after the first look, made before the move: the press is refused.
+        assert_eq!(click(1, 1), ["move 50 60"]);
+        // Covered between the press and its release: released, and refused.
+        assert_eq!(
+            click(1, 2),
+            ["move 50 60", "press 50 60 Left 1", "release 50 60 Left 1"]
+        );
+        // Covered after the first click of a double-click: the second press never happens.
+        assert_eq!(
+            click(2, 3),
+            ["move 50 60", "press 50 60 Left 1", "release 50 60 Left 1"]
+        );
+        // A drag whose end is covered by the time it lets go is released and refused.
+        let screen = Screen::front("com.apple.calculator");
+        *screen.covered_after.lock().unwrap() = Some(3);
+        let control = started();
+        let drag = json!({"do":"drag","x1":5,"y1":6,"x2":100,"y2":200});
+        assert!(ask(&screen, &control, drag).is_err());
+        assert_eq!(screen.done().last().unwrap(), "release 100 200 Left 1");
     }
 
     #[test]
@@ -555,6 +660,43 @@ mod tests {
         let refused = ask(&screen, &control, json!({"do":"click","x":50,"y":60})).unwrap_err();
         assert!(refused.to_string().contains("stopped"), "{refused}");
         assert!(screen.done().is_empty());
+    }
+
+    /// Esc pressed before the host opened the control connection is not lost: the host hears it
+    /// right after the hello, so the run ends as stopped, with its reason.
+    #[test]
+    fn a_stop_before_the_host_attaches_is_told_when_it_does() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("h.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let control = Arc::new(Control::default());
+        control.stop(StopSource::Escape);
+        let screen: Arc<dyn Desktop> = Arc::new(Screen::front("com.apple.calculator"));
+        {
+            let control = control.clone();
+            std::thread::spawn(move || {
+                serve(
+                    listener,
+                    screen,
+                    calculator(),
+                    json!({"pid": 7}),
+                    control,
+                    || {},
+                )
+            });
+        }
+        let mut host = UnixStream::connect(&path).unwrap();
+        writeln!(host, "{}", json!({"do":"control"})).unwrap();
+        let mut events = BufReader::new(host);
+        let mut line = String::new();
+        events.read_line(&mut line).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["ok"], true);
+        line.clear();
+        events.read_line(&mut line).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&line).unwrap(),
+            json!({"event":"escape"})
+        );
     }
 
     /// The socket end to end: the control connection gets the hello and later the stop, a

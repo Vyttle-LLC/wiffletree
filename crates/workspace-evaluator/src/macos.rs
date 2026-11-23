@@ -161,32 +161,34 @@ impl Desktop for Mac {
         Some((app.bundleIdentifier()?.to_string(), app.processIdentifier()))
     }
 
-    fn click(&self, at: Point, button: Button, count: u32) -> Result<()> {
-        let (down, up, button) = match button {
-            Button::Left => (
-                CGEventType::LeftMouseDown,
-                CGEventType::LeftMouseUp,
-                CGMouseButton::Left,
-            ),
-            Button::Right => (
-                CGEventType::RightMouseDown,
-                CGEventType::RightMouseUp,
-                CGMouseButton::Right,
-            ),
+    fn button(&self, at: Point, button: Button, click: u32, down: bool) -> Result<()> {
+        let (kind, button) = match (button, down) {
+            (Button::Left, true) => (CGEventType::LeftMouseDown, CGMouseButton::Left),
+            (Button::Left, false) => (CGEventType::LeftMouseUp, CGMouseButton::Left),
+            (Button::Right, true) => (CGEventType::RightMouseDown, CGMouseButton::Right),
+            (Button::Right, false) => (CGEventType::RightMouseUp, CGMouseButton::Right),
         };
-        self.move_to(at)?;
-        for click in 1..=count {
-            for kind in [down, up] {
-                let event = mouse(kind, at, button)?;
-                CGEvent::set_integer_value_field(
-                    Some(&event),
-                    CGEventField::MouseEventClickState,
-                    i64::from(click),
-                );
-                post(&event);
-            }
+        let event = mouse(kind, at, button)?;
+        CGEvent::set_integer_value_field(
+            Some(&event),
+            CGEventField::MouseEventClickState,
+            i64::from(click),
+        );
+        post(&event);
+        // The app draws the release before the next step looks at the screen.
+        if !down {
+            std::thread::sleep(BEAT);
         }
+        Ok(())
+    }
+
+    fn drag_to(&self, at: Point) -> Result<()> {
         std::thread::sleep(BEAT);
+        post(&*mouse(
+            CGEventType::LeftMouseDragged,
+            at,
+            CGMouseButton::Left,
+        )?);
         Ok(())
     }
 
@@ -202,30 +204,6 @@ impl Desktop for Mac {
             .context("macOS could not make the scroll event")?;
         CGEvent::set_location(Some(&event), CGPoint::new(at.x, at.y));
         post(&event);
-        std::thread::sleep(BEAT);
-        Ok(())
-    }
-
-    fn drag(&self, from: Point, to: Point) -> Result<()> {
-        self.move_to(from)?;
-        post(&*mouse(
-            CGEventType::LeftMouseDown,
-            from,
-            CGMouseButton::Left,
-        )?);
-        for part in [0.1, 0.5, 0.9, 1.0] {
-            std::thread::sleep(BEAT);
-            let at = Point {
-                x: from.x + (to.x - from.x) * part,
-                y: from.y + (to.y - from.y) * part,
-            };
-            post(&*mouse(
-                CGEventType::LeftMouseDragged,
-                at,
-                CGMouseButton::Left,
-            )?);
-        }
-        post(&*mouse(CGEventType::LeftMouseUp, to, CGMouseButton::Left)?);
         std::thread::sleep(BEAT);
         Ok(())
     }
