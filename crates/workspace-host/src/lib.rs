@@ -77,6 +77,7 @@ mod updates;
 pub mod usage;
 mod verification;
 mod verify_refs;
+mod worktree_deletions;
 mod worktrees;
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -215,6 +216,8 @@ pub struct Host {
     pub(crate) source_env: Option<jobs::SourceEnv>,
     /// Runs whose sources wait to be checked, for the service to check off the host thread.
     source_checks: Vec<(String, jobs::SourceChecks)>,
+    /// Removed worktrees' folders being deleted off the host thread.
+    worktree_deletions: worktree_deletions::Running,
     /// Compile runs whose pending entries wait to be read and verified, for the service to do
     /// off the host thread.
     pub(crate) compile_preparations: Vec<compile::Prepare>,
@@ -392,6 +395,7 @@ impl Host {
         updates::migrate(&db)?;
         revisions::migrate(&db)?;
         worktrees::migrate(&db)?;
+        worktree_deletions::migrate(&db)?;
         checkout::migrate(&db)?;
         agent_processes::migrate(&db)?;
         flatten::migrate(&home, &db, version)?;
@@ -443,6 +447,7 @@ impl Host {
             built_ins: vec![],
             source_env: None,
             source_checks: vec![],
+            worktree_deletions: Default::default(),
             compile_preparations: vec![],
             run_now_pulls: Default::default(),
             compile_tip_reads: vec![],
