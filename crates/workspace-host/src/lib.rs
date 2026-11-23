@@ -9,6 +9,7 @@ mod brain_index;
 mod brain_sync;
 mod brains;
 pub mod build_gate;
+pub mod build_output;
 mod checkout;
 pub mod compaction;
 mod compile;

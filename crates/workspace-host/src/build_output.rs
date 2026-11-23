@@ -1,0 +1,585 @@
+//! A ticket's build output: folders in its worktree that hold only what a build or install made,
+//! and Xcode's DerivedData folders for the worktree's path, each with its size on disk.
+//!
+//! A folder in the worktree is a candidate when its name is a default for a common ecosystem,
+//! it holds a `CACHEDIR.TAG`, or the repository's `.wiffletree/build-output` names it. It counts
+//! as build output only when Git ignores everything in it and tracks nothing in it. Any other
+//! candidate is left alone and reported as ambiguous. This module only finds and measures: it
+//! deletes nothing.
+
+use std::collections::{BTreeMap, HashSet};
+use std::fs;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
+
+use anyhow::Result;
+
+use crate::runtime;
+
+/// Build output folder names: Rust; Node; Apple; Python; JVM (with Apple's `build`); Terraform.
+const DEFAULT_NAMES: &[&str] = &[
+    "target",
+    "node_modules",
+    ".next",
+    "dist",
+    ".turbo",
+    ".expo",
+    "Pods",
+    ".build",
+    "build",
+    ".venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".gradle",
+    ".terraform",
+];
+
+/// The file in which a repository declares more build output folders, in addition to the
+/// defaults: one path or glob per line, relative to the repository's root. `*` and `?` match
+/// within one path segment, `**` any number of segments, and a line starting with `#` is a
+/// comment.
+pub const DECLARATION: &str = ".wiffletree/build-output";
+
+/// The marker file that tools such as Cargo put in a folder that only holds a cache.
+const CACHE_DIR_TAG: &str = "CACHEDIR.TAG";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildOutput {
+    pub found: Vec<Found>,
+    pub ambiguous: Vec<Ambiguous>,
+}
+
+/// A build output folder and the bytes it holds on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    pub path: PathBuf,
+    pub source: Source,
+    pub size: u64,
+}
+
+/// Why a folder was a candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    DefaultName,
+    CacheDirTag,
+    Declared,
+    /// Xcode's DerivedData folder for a project in the worktree, outside the worktree.
+    DerivedData,
+}
+
+/// A candidate folder in the worktree that is not build output, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ambiguous {
+    pub path: PathBuf,
+    pub reason: Reason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reason {
+    /// Git tracks a file in it.
+    HoldsTracked,
+    /// It is, or holds, an untracked file that Git does not ignore.
+    NotIgnored,
+}
+
+/// Xcode's DerivedData folder in the user's home, where it would be.
+pub fn xcode_derived_data() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join("Library/Developer/Xcode/DerivedData"))
+}
+
+/// The build output of the worktree whose root is `worktree`, with DerivedData folders from
+/// `derived_data` when given, such as `xcode_derived_data()`.
+///
+/// It runs Git and walks every folder it finds, which can take seconds for a large build, so
+/// call it on a worker thread, never on the host's own thread.
+///
+/// A declared folder is found when Git lists it, or a path inside it, as ignored or untracked; a
+/// folder inside a larger folder that Git ignores as a whole is not.
+pub fn scan(worktree: &Path, derived_data: Option<&Path>) -> Result<BuildOutput> {
+    let status = Status::read(worktree)?;
+    let tracked = tracked_paths(worktree)?;
+    let declared = declared_patterns(worktree);
+    let mut found = Vec::new();
+    let mut ambiguous = Vec::new();
+    let mut taken: Vec<String> = Vec::new();
+    for (folder, source) in candidates(worktree, &status, &declared) {
+        if taken.iter().any(|outer| within(&folder, outer)) {
+            continue;
+        }
+        let path = worktree.join(&folder);
+        match status.why_not(&folder, &tracked) {
+            None => {
+                taken.push(folder);
+                found.push(Found {
+                    path,
+                    source,
+                    size: 0,
+                });
+            }
+            Some(reason) => ambiguous.push(Ambiguous { path, reason }),
+        }
+    }
+    if let Some(root) = derived_data {
+        found.extend(
+            derived_data_for(worktree, root)
+                .into_iter()
+                .map(|path| Found {
+                    path,
+                    source: Source::DerivedData,
+                    size: 0,
+                }),
+        );
+    }
+    let mut counted = HashSet::new();
+    for output in &mut found {
+        output.size = allocated_size(&output.path, &mut counted);
+    }
+    Ok(BuildOutput { found, ambiguous })
+}
+
+/// The paths `git status` lists as ignored or untracked, relative to the root. An untracked or
+/// ignored folder as a whole is listed once, as `name/`; the slash is dropped here.
+struct Status {
+    ignored: Vec<String>,
+    untracked: Vec<String>,
+}
+impl Status {
+    fn read(worktree: &Path) -> Result<Self> {
+        // `matching` lists an ignored folder without walking it, which matters for node_modules.
+        let args = [
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--ignored=matching",
+            "--untracked-files=normal",
+        ];
+        let output = runtime::git_bytes_large(worktree, &args, &[])?;
+        let mut status = Self {
+            ignored: Vec::new(),
+            untracked: Vec::new(),
+        };
+        let mut records = output.split(|byte| *byte == 0);
+        while let Some(record) = records.next() {
+            let Some((code, path)) = record.split_at_checked(3) else {
+                continue;
+            };
+            let path = String::from_utf8_lossy(path)
+                .trim_end_matches('/')
+                .to_owned();
+            match code {
+                b"!! " => status.ignored.push(path),
+                b"?? " => status.untracked.push(path),
+                // A rename or copy is followed by its source path.
+                [b'R' | b'C', ..] | [_, b'R' | b'C', ..] => {
+                    records.next();
+                }
+                _ => {}
+            }
+        }
+        Ok(status)
+    }
+
+    /// Why `folder` is not build output, or `None` when every file in it is ignored and none is
+    /// tracked. Untracked files are listed by themselves or by a folder holding them, so one in
+    /// or above `folder` shows a file in it that Git does not ignore.
+    fn why_not(&self, folder: &str, tracked: &HashSet<String>) -> Option<Reason> {
+        if tracked.contains(folder) {
+            Some(Reason::HoldsTracked)
+        } else if self
+            .untracked
+            .iter()
+            .any(|path| within(path, folder) || within(folder, path))
+        {
+            Some(Reason::NotIgnored)
+        } else {
+            None
+        }
+    }
+}
+
+/// Every tracked path and every folder above one, relative to the root.
+fn tracked_paths(worktree: &Path) -> Result<HashSet<String>> {
+    let output = runtime::git_bytes_large(worktree, &["ls-files", "-z"], &[])?;
+    let mut paths = HashSet::new();
+    for path in output
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let mut path = String::from_utf8_lossy(path).into_owned();
+        while paths.insert(path.clone()) {
+            match path.rsplit_once('/') {
+                Some((parent, _)) => path = parent.to_owned(),
+                None => break,
+            }
+        }
+    }
+    Ok(paths)
+}
+
+/// The candidate folders among the ignored and untracked paths and the folders above them, in
+/// path order, so a folder comes before those inside it.
+fn candidates(
+    worktree: &Path,
+    status: &Status,
+    declared: &[Vec<String>],
+) -> BTreeMap<String, Source> {
+    let mut considered = HashSet::new();
+    let mut candidates = BTreeMap::new();
+    for path in status.ignored.iter().chain(&status.untracked) {
+        let is_folder = worktree.join(path).is_dir();
+        let mut folder = if is_folder {
+            Some(path.as_str())
+        } else {
+            path.rsplit_once('/').map(|(parent, _)| parent)
+        };
+        while let Some(current) = folder {
+            if !considered.insert(current.to_owned()) {
+                break;
+            }
+            if let Some(source) = source_of(worktree, current, declared) {
+                candidates.insert(current.to_owned(), source);
+            }
+            folder = current.rsplit_once('/').map(|(parent, _)| parent);
+        }
+    }
+    candidates
+}
+
+fn source_of(worktree: &Path, folder: &str, declared: &[Vec<String>]) -> Option<Source> {
+    let segments: Vec<&str> = folder.split('/').collect();
+    let name = segments.last()?;
+    if declared
+        .iter()
+        .any(|pattern| glob_matches(pattern, &segments))
+    {
+        Some(Source::Declared)
+    } else if DEFAULT_NAMES.contains(name) {
+        Some(Source::DefaultName)
+    } else if worktree.join(folder).join(CACHE_DIR_TAG).is_file() {
+        Some(Source::CacheDirTag)
+    } else {
+        None
+    }
+}
+
+/// The repository's declared patterns, each split into path segments.
+fn declared_patterns(worktree: &Path) -> Vec<Vec<String>> {
+    let Ok(text) = fs::read_to_string(worktree.join(DECLARATION)) else {
+        return Vec::new();
+    };
+    text.lines()
+        .map(|line| line.trim().trim_matches('/'))
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| line.split('/').map(str::to_owned).collect())
+        .collect()
+}
+
+fn glob_matches(pattern: &[String], path: &[&str]) -> bool {
+    match (pattern.split_first(), path.split_first()) {
+        (None, None) => true,
+        (Some((any, rest)), _) if any == "**" => {
+            glob_matches(rest, path) || (!path.is_empty() && glob_matches(pattern, &path[1..]))
+        }
+        (Some((segment, rest)), Some((name, tail))) => {
+            segment_matches(segment.as_bytes(), name.as_bytes()) && glob_matches(rest, tail)
+        }
+        _ => false,
+    }
+}
+
+fn segment_matches(pattern: &[u8], name: &[u8]) -> bool {
+    match (pattern.split_first(), name.split_first()) {
+        (None, None) => true,
+        (Some((b'*', rest)), _) => {
+            segment_matches(rest, name)
+                || (!name.is_empty() && segment_matches(pattern, &name[1..]))
+        }
+        (Some((b'?', rest)), Some((_, tail))) => segment_matches(rest, tail),
+        (Some((wanted, rest)), Some((byte, tail))) => wanted == byte && segment_matches(rest, tail),
+        _ => false,
+    }
+}
+
+/// Whether the relative path `path` is `folder` or inside it.
+fn within(path: &str, folder: &str) -> bool {
+    path.strip_prefix(folder)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// The folders under `root` whose `info.plist` names a workspace or project in the worktree.
+/// Xcode keys each by the project's path, so every worktree of a repository gets its own.
+fn derived_data_for(worktree: &Path, root: &Path) -> Vec<PathBuf> {
+    let resolved = worktree.canonicalize().unwrap_or_else(|_| worktree.into());
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut folders: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|folder| {
+            fs::read_to_string(folder.join("info.plist"))
+                .ok()
+                .and_then(|plist| workspace_path(&plist))
+                .is_some_and(|path| {
+                    let path = Path::new(&path);
+                    path.starts_with(worktree) || path.starts_with(&resolved)
+                })
+        })
+        .collect();
+    folders.sort();
+    folders
+}
+
+/// The `WorkspacePath` string in an XML property list, the format Xcode writes it in.
+fn workspace_path(plist: &str) -> Option<String> {
+    let (_, after) = plist.split_once("<key>WorkspacePath</key>")?;
+    let (value, _) = after
+        .trim_start()
+        .strip_prefix("<string>")?
+        .split_once("</string>")?;
+    Some(
+        value
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&amp;", "&"),
+    )
+}
+
+/// The bytes allocated on disk to `path` and everything under it, without following symbolic
+/// links. A file with several hard links counts once across a scan. APFS clones share blocks
+/// with the file they were cloned from, but each is counted in full, so a folder seeded with
+/// `cp -c` may be over-counted. Entries that cannot be read count as nothing.
+fn allocated_size(path: &Path, counted: &mut HashSet<(u64, u64)>) -> u64 {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if metadata.nlink() > 1
+        && !metadata.is_dir()
+        && !counted.insert((metadata.dev(), metadata.ino()))
+    {
+        return 0;
+    }
+    let own = metadata.blocks() * 512;
+    if !metadata.is_dir() {
+        return own;
+    }
+    let inside: u64 = fs::read_dir(path)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| allocated_size(&entry.path(), counted))
+        .sum();
+    own + inside
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::git;
+
+    fn write(root: &Path, path: &str, content: &str) {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+
+    /// A repository committed with `files`, and a ticket worktree checked out from it.
+    fn worktree(files: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf) {
+        let folder = tempfile::tempdir().unwrap();
+        let main = folder.path().join("main");
+        fs::create_dir(&main).unwrap();
+        git(&main, &["init", "-q", "-b", "main"]);
+        for (path, content) in files {
+            write(&main, path, content);
+        }
+        git(&main, &["add", "-A"]);
+        git(&main, &["commit", "-q", "-m", "start"]);
+        let worktree = folder.path().join("ticket");
+        git(
+            &main,
+            &["worktree", "add", "-q", "-b", "ticket", "../ticket"],
+        );
+        (folder, worktree)
+    }
+
+    fn relative(root: &Path, path: &Path) -> String {
+        path.strip_prefix(root)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn found(root: &Path, output: &BuildOutput) -> Vec<(String, Source)> {
+        output
+            .found
+            .iter()
+            .map(|found| (relative(root, &found.path), found.source))
+            .collect()
+    }
+
+    fn ambiguous(root: &Path, output: &BuildOutput) -> Vec<(String, Reason)> {
+        output
+            .ambiguous
+            .iter()
+            .map(|ambiguous| (relative(root, &ambiguous.path), ambiguous.reason))
+            .collect()
+    }
+
+    #[test]
+    fn only_ignored_untracked_folders_are_build_output_and_user_work_is_left_alone() {
+        let (_folder, root) = worktree(&[
+            (".gitignore", "/target/\nnode_modules/\n*.pyc\ndist/\n"),
+            ("README.md", "readme\n"),
+            ("src/main.rs", "fn main() {}\n"),
+        ]);
+        write(&root, "README.md", "an uncommitted change\n");
+        write(&root, "notes.txt", "untracked\n");
+        write(
+            &root,
+            "build/notes.txt",
+            "untracked, named like build output\n",
+        );
+        write(&root, "target/debug/app", "binary");
+        write(&root, "node_modules/left-pad/index.js", "module");
+        write(&root, "app/__pycache__/main.pyc", "bytecode");
+        write(&root, "dist/keep.txt", "tracked though ignored");
+        git(&root, &["add", "-f", "dist/keep.txt"]);
+        git(&root, &["commit", "-q", "-m", "keep"]);
+        write(&root, "dist/bundle.js", "bundle");
+
+        let output = scan(&root, None).unwrap();
+
+        assert_eq!(
+            found(&root, &output),
+            [
+                ("app/__pycache__".into(), Source::DefaultName),
+                ("node_modules".into(), Source::DefaultName),
+                ("target".into(), Source::DefaultName),
+            ]
+        );
+        assert_eq!(
+            ambiguous(&root, &output),
+            [
+                ("build".into(), Reason::NotIgnored),
+                ("dist".into(), Reason::HoldsTracked),
+            ]
+        );
+        for work in [
+            "README.md",
+            "src/main.rs",
+            "notes.txt",
+            "build/notes.txt",
+            "dist/keep.txt",
+        ] {
+            assert!(
+                !output
+                    .found
+                    .iter()
+                    .any(|found| root.join(work).starts_with(&found.path)),
+                "{work} is not build output"
+            );
+        }
+        assert!(output.found.iter().all(|found| found.size > 0));
+    }
+
+    #[test]
+    fn an_ignored_folder_with_a_cachedir_tag_is_build_output_and_an_unignored_one_is_reported() {
+        let (_folder, root) = worktree(&[(".gitignore", "/cache/\n/other/\n")]);
+        write(
+            &root,
+            "cache/CACHEDIR.TAG",
+            "Signature: 8a477f597d28d172789f06886806bc55",
+        );
+        write(&root, "cache/blob", "cached");
+        write(&root, "other/blob", "ignored, but neither named nor tagged");
+        write(
+            &root,
+            "tagged/CACHEDIR.TAG",
+            "Signature: 8a477f597d28d172789f06886806bc55",
+        );
+
+        let output = scan(&root, None).unwrap();
+
+        assert_eq!(
+            found(&root, &output),
+            [("cache".into(), Source::CacheDirTag)]
+        );
+        assert_eq!(
+            ambiguous(&root, &output),
+            [("tagged".into(), Reason::NotIgnored)]
+        );
+    }
+
+    #[test]
+    fn the_repository_file_declares_more_folders_by_path_and_glob() {
+        let (_folder, root) = worktree(&[
+            (
+                DECLARATION,
+                "# Generated by codegen\n/generated/\nout/**/cache\n\nreports\n",
+            ),
+            (".gitignore", "generated/\ncache/\n"),
+        ]);
+        write(&root, "generated/api.rs", "generated");
+        write(&root, "out/a/b/cache/blob", "cached");
+        write(&root, "reports/today.html", "untracked");
+
+        let output = scan(&root, None).unwrap();
+
+        assert_eq!(
+            found(&root, &output),
+            [
+                ("generated".into(), Source::Declared),
+                ("out/a/b/cache".into(), Source::Declared),
+            ]
+        );
+        assert_eq!(
+            ambiguous(&root, &output),
+            [("reports".into(), Reason::NotIgnored)]
+        );
+    }
+
+    #[test]
+    fn derived_data_is_found_for_projects_under_the_worktree_only() {
+        let (folder, root) = worktree(&[("README.md", "readme\n")]);
+        let derived_data = folder.path().join("DerivedData");
+        let plist = |workspace: &Path| {
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\">\n<dict>\n\t<key>LastAccessedDate</key>\n\t<date>2026-11-23T10:00:00Z</date>\n\t<key>WorkspacePath</key>\n\t<string>{}</string>\n</dict>\n</plist>\n",
+                workspace.display()
+            )
+        };
+        let sibling = folder.path().join("ticket-2/App.xcodeproj");
+        write(
+            &derived_data,
+            "App-ours/info.plist",
+            &plist(&root.join("ios/App.xcworkspace")),
+        );
+        write(&derived_data, "App-ours/Build/Products/App", "binary");
+        write(&derived_data, "App-sibling/info.plist", &plist(&sibling));
+        write(&derived_data, "ModuleCache.noindex/blob", "shared");
+
+        let output = scan(&root, Some(&derived_data)).unwrap();
+
+        assert_eq!(output.found.len(), 1);
+        assert_eq!(output.found[0].path, derived_data.join("App-ours"));
+        assert_eq!(output.found[0].source, Source::DerivedData);
+        assert!(output.found[0].size > 0);
+    }
+
+    #[test]
+    fn a_hard_linked_file_counts_once() {
+        let folder = tempfile::tempdir().unwrap();
+        write(folder.path(), "a/file", &"x".repeat(64 * 1024));
+        let once = allocated_size(&folder.path().join("a"), &mut HashSet::new());
+        fs::hard_link(folder.path().join("a/file"), folder.path().join("a/link")).unwrap();
+
+        assert_eq!(
+            allocated_size(&folder.path().join("a"), &mut HashSet::new()),
+            once
+        );
+    }
+}
