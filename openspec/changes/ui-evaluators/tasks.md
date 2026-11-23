@@ -34,7 +34,8 @@ The spike ruled out each provider's own computer use; the human chose Wiffletree
 - [x] 4.4 `apps` in `start_evaluation`; the refusal of desktop runs lifted.
 - [x] 4.5 The Start card between taking the screen lock and starting (screen 3): Start now, Later and Skip these runs; a desktop run at its limit ends.
 - [x] 4.6 The helper's grants checked before the provider starts; Esc, the menu bar item's Stop and the helper quitting stop the run; the helper quits, or is killed, when the turn ends.
-- [ ] 4.7 On-screen check with the human: the signed helper's grants, a Calculator run for Claude and for Codex, Esc and Stop.
+- [x] 4.7 On-screen check with the human (design, "Live check"): grants, the Start gate, Calculator-only screenshots and input for Claude and Codex, cleanup.
+- [ ] 4.8 On-screen check of Esc and the menu bar's Stop, which the first check did not observe.
 
 ## 5. Ticket 5 · UI
 

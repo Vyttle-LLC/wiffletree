@@ -66,10 +66,10 @@ The provider's one MCP server is the desktop driver, `wiffletree-host desktop-dr
 
 A desktop run names its apps, one to ten bundle IDs, and no target. Nothing is allowed that the coordinator does not name, and the helper itself never is; the Start card calls out Wiffletree, terminals, System Settings and Finder when they are named. The helper decides each request from what is on the screen at that moment, with pure functions it tests without a screen:
 
-- A screenshot captures the main display through a ScreenCaptureKit content filter that includes only the allowed apps, so no other app appears in an image.
+- A screenshot captures each allowed window on its own, with a ScreenCaptureKit filter for that one window, and draws it into a white image of the main display at its frame from the window list, back to front. No other app's window is ever captured, and a pixel divided by the scale is the screen point `list_windows` and the input checks use. (A display filter that included the allowed apps drew Calculator at the image's top left at twice its size on the live check, so its screenshots could not be used to aim.)
 - A click, move, scroll or drag goes through only when the topmost on-screen window at the point, at any layer, belongs to an allowed app, so a notification or menu of another app over it refuses the input; a drag checks both ends. Another app's name is never given back.
 - Keys and text go through only while an allowed app is frontmost, checked again before every piece of typed text, and are posted to that app's process alone, so no global shortcut such as Spotlight's receives them.
-- open_app opens only an allowed app; list_windows lists only theirs.
+- open_app opens only an allowed app, and waits up to five seconds for it to come to the front, since Stage Manager shows an app in the background only as a thumbnail in its strip; list_windows lists only theirs.
 
 The helper shows "Evaluator using this Mac" in the menu bar, with Stop, for the whole run. A listen-only event tap hears Esc anywhere; the helper's own posted events carry a mark the tap ignores. Either reports on the control connection, after which the helper refuses every request. The host's reader sets the turn's cancel flag at once and the turn tells the service why, so the run ends as stopped, "Stopped: you pressed Esc." or "Stopped from the menu bar.", as `stop_evaluation` ends it. A helper that quits during the run stops it the same way. Windows of other processes, such as the system's open and save panels, are not the app's and stay out of reach.
 
@@ -86,3 +86,16 @@ The app captures its own window with `CGWindowListCreateImage` on its own window
 ### The coordinator hears only the outcome
 
 When a run ends, Wiffletree messages its coordinator: `Run <id> <state> · model <model> · folder <folder> · <duration>`, naming the model the provider reported, or the one asked for when none was. `list_evaluations` gives state, mode, the model asked for and the one reported, folder and times, and a waiting run's reset time. A failure's reason is shown to the human only, since a provider's error can quote the model's text.
+
+### Live check, November 23, 2026
+
+On this Mac (macOS 27, one 3008×1692-point display at 2×, Stage Manager on), with the helper signed by an Apple Development identity and granted Screen Recording and Accessibility, through a development host on its own data folder and only Calculator allowed:
+
+- **Grants.** The installed copy's `check` read both grants; replacing it with a new build signed the same way kept them.
+- **The Start gate.** Each run held the screen behind its card and started only when the human pressed Start now; the next run raised its own card when the one before ended. A run parked behind its card survived restarts of the app and host.
+- **Calculator only.** Every screenshot showed Calculator and nothing else. Every click outside Calculator's windows was refused, as were keys while Calculator was not frontmost; nothing else was touched.
+- **Keys and clicks reached Calculator.** Typed text and a click aimed from a screenshot changed Calculator as expected, for Claude and for Codex.
+- **Screenshots match the screen**, once captured window by window (above): Calculator appeared at its `list_windows` frame, and a click on its "7" key from the image pressed 7.
+- **Cleanup.** After every run the helper had quit, and pgrep found no helper.
+- **Not yet observed: Esc and the menu bar's Stop.** Three runs ended on their own, the longest after 131 seconds, without either reaching the run. `tccd` allowed the helper's key listening (`kTCCServiceListenEvent`), no secure keyboard entry was on, and AppKit created the status item; whether the human pressed either in time is unknown. The helper now writes "Listening for Esc", "Esc heard", "Stop chosen from the menu bar" and "control connection closed" to the unified log, so the next check can tell a missed key from one never pressed.
+

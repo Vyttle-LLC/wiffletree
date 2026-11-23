@@ -14,17 +14,18 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBitmapImageFileType, NSBitmapImageRep, NSMenu,
     NSMenuItem, NSRunningApplication, NSStatusBar, NSStatusItem, NSWorkspace,
 };
-use objc2_core_foundation::{CFMachPort, CFRetained, CFRunLoop, CGPoint, kCFRunLoopCommonModes};
+use objc2_core_foundation::{
+    CFMachPort, CFRetained, CFRunLoop, CGPoint, CGRect, CGSize, kCFRunLoopCommonModes,
+};
 use objc2_core_graphics::{
-    CGEvent, CGEventField, CGEventFlags, CGEventTapLocation, CGEventTapOptions,
-    CGEventTapPlacement, CGEventTapProxy, CGEventType, CGImage, CGMainDisplayID, CGMouseButton,
-    CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess, CGScrollEventUnit,
+    CGColorSpace, CGContext, CGEvent, CGEventField, CGEventFlags, CGEventTapLocation,
+    CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy, CGEventType, CGImage, CGMainDisplayID,
+    CGMouseButton, CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess, CGScrollEventUnit,
     CGWindowListCopyWindowInfo, CGWindowListOption,
 };
 use objc2_foundation::{NSArray, NSDictionary, NSError, NSNumber, NSString};
 use objc2_screen_capture_kit::{
-    SCContentFilter, SCRunningApplication, SCScreenshotManager, SCShareableContent,
-    SCStreamConfiguration,
+    SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration, SCWindow,
 };
 use std::{
     ffi::c_void,
@@ -41,6 +42,8 @@ unsafe extern "C" {
 
 /// How long ScreenCaptureKit may take to answer.
 const CAPTURE_WAIT: Duration = Duration::from_secs(15);
+/// How long open_app waits for the app to come to the front.
+const OPEN_WAIT: Duration = Duration::from_secs(5);
 /// A pause between the parts of one gesture, so the app sees each.
 const BEAT: Duration = Duration::from_millis(40);
 
@@ -253,40 +256,66 @@ impl Desktop for Mac {
 
     fn capture(&self, apps: &Allowed, native: bool) -> Result<Capture> {
         let content = shareable_content()?;
-        // SAFETY: plain reads of the content macOS returned.
+        // Front to back, so they are drawn back to front.
+        let windows = self.windows()?;
+        let allowed = policy::allowed_windows(&windows, apps);
+        // SAFETY: plain reads of the content macOS returned, and drawing into a context this
+        // function owns.
         unsafe {
             let main = CGMainDisplayID();
             let display = (content.displays().iter())
                 .find(|display| display.displayID() == main)
                 .context("The main display is not available to capture")?;
-            let included: Vec<Retained<SCRunningApplication>> = (content.applications().iter())
-                .filter(|app| apps.contains(&app.bundleIdentifier().to_string()))
-                .collect();
-            ensure!(
-                !included.is_empty(),
-                "None of this run's apps is open. Open one with open_app."
-            );
-            let included = NSArray::from_retained_slice(&included);
-            let filter = SCContentFilter::initWithDisplay_includingApplications_exceptingWindows(
+            let frame = display.frame();
+            let screen = Rect {
+                x: frame.origin.x,
+                y: frame.origin.y,
+                width: frame.size.width,
+                height: frame.size.height,
+            };
+            let probe = SCContentFilter::initWithDisplay_excludingWindows(
                 SCContentFilter::alloc(),
                 &display,
-                &included,
                 &NSArray::new(),
             );
-            let frame = display.frame();
             let scale = match native {
-                true => f64::from(filter.pointPixelScale()),
+                true => f64::from(probe.pointPixelScale()),
                 false => 1.,
             };
             let (width, height) = (
-                (frame.size.width * scale).round() as usize,
-                (frame.size.height * scale).round() as usize,
+                (screen.width * scale).round() as usize,
+                (screen.height * scale).round() as usize,
             );
-            let config = SCStreamConfiguration::new();
-            config.setWidth(width);
-            config.setHeight(height);
-            config.setShowsCursor(true);
-            let image = screenshot(&filter, &config)?;
+            let shareable: Vec<Retained<SCWindow>> = content.windows().iter().collect();
+            let canvas = Canvas::new(width, height)?;
+            let mut drawn = 0;
+            for window in allowed.iter().rev() {
+                let Some(found) = shareable.iter().find(|w| w.windowID() == window.id) else {
+                    continue;
+                };
+                let at = policy::placement(window.bounds, screen, scale);
+                if at.width < 1. || at.height < 1. {
+                    continue;
+                }
+                // Each window alone, so nothing of another app can be in its image.
+                let filter = SCContentFilter::initWithDesktopIndependentWindow(
+                    SCContentFilter::alloc(),
+                    found,
+                );
+                let config = SCStreamConfiguration::new();
+                config.setWidth(at.width.round() as usize);
+                config.setHeight(at.height.round() as usize);
+                config.setIgnoreShadowsSingleWindow(true);
+                config.setShowsCursor(false);
+                let image = screenshot(&filter, &config)?;
+                canvas.draw(&image, at);
+                drawn += 1;
+            }
+            ensure!(
+                drawn > 0,
+                "None of this run's apps has a window on screen. Open one with open_app."
+            );
+            let image = canvas.image()?;
             let bitmap = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &image);
             let png = bitmap
                 .representationUsingType_properties(
@@ -299,12 +328,7 @@ impl Desktop for Mac {
                 width,
                 height,
                 scale,
-                display: Rect {
-                    x: frame.origin.x,
-                    y: frame.origin.y,
-                    width: frame.size.width,
-                    height: frame.size.height,
-                },
+                display: screen,
             })
         }
     }
@@ -315,7 +339,22 @@ impl Desktop for Mac {
             .status()
             .context("Could not run open")?;
         ensure!(status.success(), "macOS could not open {app}");
-        Ok(())
+        // Stage Manager may show it only once it is frontmost, so the next step sees its window.
+        let deadline = std::time::Instant::now() + OPEN_WAIT;
+        while std::time::Instant::now() < deadline {
+            if self
+                .frontmost()
+                .is_some_and(|(front, _)| front.eq_ignore_ascii_case(app))
+            {
+                std::thread::sleep(Duration::from_millis(300));
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        bail!(
+            "{app} opened but did not come to the front within {} s",
+            OPEN_WAIT.as_secs()
+        )
     }
 }
 
@@ -328,6 +367,57 @@ fn post_to(pid: i32, event: &CGEvent) {
         policy::POSTED_MARK,
     );
     CGEvent::post_to_pid(pid, Some(event));
+}
+
+unsafe extern "C-unwind" {
+    fn CGBitmapContextCreate(
+        data: *mut c_void,
+        width: usize,
+        height: usize,
+        bits_per_component: usize,
+        bytes_per_row: usize,
+        space: Option<&CGColorSpace>,
+        bitmap_info: u32,
+    ) -> Option<NonNull<CGContext>>;
+}
+/// kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little.
+const BGRA: u32 = 2 | (2 << 12);
+
+/// A white image of the display, that windows are drawn into.
+struct Canvas(CFRetained<CGContext>);
+impl Canvas {
+    fn new(width: usize, height: usize) -> Result<Self> {
+        let space = CGColorSpace::new_device_rgb().context("No RGB color space")?;
+        // SAFETY: Core Graphics allocates the pixels itself when given none.
+        let context = unsafe {
+            CGBitmapContextCreate(
+                std::ptr::null_mut(),
+                width,
+                height,
+                8,
+                0,
+                Some(&space),
+                BGRA,
+            )
+        }
+        .context("macOS could not make the screenshot's canvas")?;
+        // SAFETY: a context made by a Create function is ours to release.
+        let context = unsafe { CFRetained::from_raw(context) };
+        CGContext::set_rgb_fill_color(Some(&context), 1., 1., 1., 1.);
+        CGContext::fill_rect(
+            Some(&context),
+            CGRect::new(CGPoint::ZERO, CGSize::new(width as f64, height as f64)),
+        );
+        Ok(Self(context))
+    }
+    fn draw(&self, image: &CGImage, at: Rect) {
+        let rect = CGRect::new(CGPoint::new(at.x, at.y), CGSize::new(at.width, at.height));
+        CGContext::draw_image(Some(&self.0), rect, Some(image));
+    }
+    fn image(&self) -> Result<CFRetained<CGImage>> {
+        objc2_core_graphics::CGBitmapContextCreateImage(Some(&self.0))
+            .context("macOS could not finish the screenshot")
+    }
 }
 
 fn shareable_content() -> Result<Retained<SCShareableContent>> {
@@ -393,6 +483,17 @@ fn error_text(error: *mut NSError) -> String {
     }
 }
 
+/// Writes `message` to the unified log, as `wiffletree-evaluator`, so a run's Esc and Stop can be
+/// traced afterwards with `/usr/bin/log show --predicate 'process == "wiffletree-evaluator"'`.
+/// It never names a key but Esc.
+pub fn note(message: &str) {
+    let Ok(message) = std::ffi::CString::new(message) else {
+        return;
+    };
+    // SAFETY: a constant format string with one C string argument.
+    unsafe { libc::syslog(libc::LOG_NOTICE, c"%s".as_ptr(), message.as_ptr()) };
+}
+
 /// Where Escape and the menu's Stop report.
 static CONTROL: OnceLock<Arc<Control>> = OnceLock::new();
 
@@ -422,6 +523,7 @@ pub fn listen_for_escape(control: Arc<Control>) -> bool {
     // SAFETY: the common modes constant is set by Core Foundation.
     main.add_source(Some(&source), unsafe { kCFRunLoopCommonModes });
     CGEvent::tap_enable(&tap, true);
+    note("Listening for Esc");
     // The tap lives as long as the helper.
     std::mem::forget(tap);
     true
@@ -441,6 +543,7 @@ unsafe extern "C-unwind" fn heard(
         if policy::stops_run(key, mark)
             && let Some(control) = CONTROL.get()
         {
+            note("Esc heard: stopping the run");
             control.stop("escape");
         }
     }
@@ -458,6 +561,7 @@ define_class!(
         #[unsafe(method(stop:))]
         fn stop(&self, _sender: Option<&AnyObject>) {
             if let Some(control) = CONTROL.get() {
+                note("Stop chosen from the menu bar: stopping the run");
                 control.stop("stop");
             }
         }

@@ -157,7 +157,7 @@ App-only runs SHALL run side by side. Full-desktop runs SHALL share one queue fo
 
 `start_evaluation` in desktop mode SHALL take `apps`, one to ten bundle IDs, and no target, and SHALL refuse an empty list, a malformed ID and Wiffletree Evaluator itself. Nothing SHALL be allowed that the coordinator does not name. The run's only MCP server SHALL be the desktop driver, named `desktop`, for Claude and Codex alike, with the tools screenshot, click, double_click, right_click, move, type_text, key, scroll, drag, open_app and list_windows, in screen points; every screenshot SHALL report its scale and be saved inside the run folder by the app driver's rules. The helper, not the model, SHALL enforce:
 
-- a screenshot captures only the allowed apps' windows, through a ScreenCaptureKit content filter limited to them, never the whole display;
+- a screenshot draws only the allowed apps' windows, each captured alone, at their screen frames, so its pixels divided by its scale are screen points; never the whole display;
 - a click, move, scroll or drag is refused unless the topmost on-screen window at its point, at that moment, belongs to an allowed app;
 - keys and text are refused unless an allowed app is frontmost, and go to that app's process alone;
 - open_app opens only an allowed app, and list_windows lists only their windows.

@@ -71,6 +71,7 @@ fn serve(socket: &std::path::Path, run: &str, apps: &[String]) -> Result<()> {
     let control = Arc::new(protocol::Control::default());
     let socket = socket.to_owned();
     let quit = move || {
+        macos::note("The run's control connection closed: quitting");
         let _ = std::fs::remove_file(&socket);
         std::process::exit(0);
     };

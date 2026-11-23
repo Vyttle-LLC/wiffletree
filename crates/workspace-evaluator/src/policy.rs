@@ -132,6 +132,18 @@ pub fn allowed_windows<'a>(windows: &'a [Window], allowed: &Allowed) -> Vec<&'a 
         .collect()
 }
 
+/// Where a screenshot draws `window`, in the pixels of an image of `display` at `scale` with
+/// its origin at the bottom left, as Core Graphics draws: so a pixel divided by the scale is the
+/// screen point `list_windows` and the input checks use.
+pub fn placement(window: Rect, display: Rect, scale: f64) -> Rect {
+    Rect {
+        x: (window.x - display.x) * scale,
+        y: (display.y + display.height - (window.y + window.height)) * scale,
+        width: window.width * scale,
+        height: window.height * scale,
+    }
+}
+
 /// Escape's virtual key code.
 pub const ESCAPE: u16 = 53;
 /// Marks every event the helper posts, so its own Escape never stops the run.
@@ -350,6 +362,57 @@ pub(crate) mod tests {
         ];
         let listed = allowed_windows(&windows, &calculator());
         assert_eq!(listed, [&windows[1]]);
+    }
+
+    /// Measured on a 3008×1692-point display at 2×: Calculator, 230×408 points at (1418, 838),
+    /// was drawn at the image's top left at twice its size by a display-wide capture.
+    #[test]
+    fn a_window_is_drawn_where_it_is_on_the_screen() {
+        let display = Rect {
+            x: 0.,
+            y: 0.,
+            width: 3008.,
+            height: 1692.,
+        };
+        let calculator = Rect {
+            x: 1418.,
+            y: 838.,
+            width: 230.,
+            height: 408.,
+        };
+        let at = |scale| placement(calculator, display, scale);
+        // From the bottom: 1692 − (838 + 408) = 446 points.
+        assert_eq!(
+            at(1.),
+            Rect {
+                x: 1418.,
+                y: 446.,
+                width: 230.,
+                height: 408.
+            }
+        );
+        assert_eq!(
+            at(2.),
+            Rect {
+                x: 2836.,
+                y: 892.,
+                width: 460.,
+                height: 816.
+            }
+        );
+        // A display that does not start at the origin.
+        let right = Rect {
+            x: 3008.,
+            y: -200.,
+            ..display
+        };
+        let there = Rect {
+            x: 3108.,
+            y: -100.,
+            ..calculator
+        };
+        assert_eq!(placement(there, right, 1.).x, 100.);
+        assert_eq!(placement(there, right, 1.).y, 1692. - 100. - 408.);
     }
 
     #[test]
