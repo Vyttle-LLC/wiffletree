@@ -136,12 +136,7 @@ pub fn run_if_called() {
             std::process::exit(1);
         }
         Verdict::Run => exec(&real, args),
-        Verdict::Push(at) => {
-            let mut args = args;
-            let pinned = ["--no-follow-tags", "--recurse-submodules=no"];
-            args.splice(at + 1..at + 1, pinned.map(OsString::from));
-            exec(&real, args)
-        }
+        Verdict::Push(args) => exec(&real, args.into_iter().map(OsString::from).collect()),
     }
 }
 
@@ -185,8 +180,9 @@ impl Program {
 #[derive(Debug, PartialEq)]
 enum Verdict {
     Run,
-    /// A push it allows, whose `push` is the argument at this index.
-    Push(usize),
+    /// A push it allows, run with these arguments: every ref it names spelled out under
+    /// `refs/heads/`, so none can resolve to a tag, and tags and submodules left out.
+    Push(Vec<String>),
     Refuse(String),
 }
 
@@ -271,7 +267,7 @@ const PUSH_OPTIONS: [&str; 15] = [
     "--no-follow-tags",
     "--atomic",
 ];
-const NO_PUSH: &str = "Wiffletree refused `git push`: this agent may not push. publish_ticket pushes a ticket's branch and opens its pull request, the coordinator creates a branch with create_branch, and anything else goes to your coordinator.";
+const NO_PUSH: &str = "Wiffletree refused `git push`: this agent may not push now, and once a ticket's pull request is open no agent pushes its branch. publish_ticket pushes a ticket's branch and opens or updates its pull request, the coordinator creates a branch with create_branch, and anything else goes to your coordinator.";
 
 /// Judges a `git` call. `alias` reads `alias.<name>` under the call's global options.
 fn git(
@@ -287,7 +283,7 @@ fn git(
         let name = args[at].as_str();
         if name == "push" {
             return match push_branch {
-                Some(branch) => push(&args[at + 1..], branch, at),
+                Some(branch) => push(&args, at, branch),
                 None => Verdict::Refuse(NO_PUSH.into()),
             };
         }
@@ -325,23 +321,39 @@ fn git_subcommand(args: &[String]) -> Option<usize> {
     None
 }
 
-/// Judges a push's arguments, after `push`, for an agent that may push `branch`.
-fn push(args: &[String], branch: &str, at: usize) -> Verdict {
+/// Judges a push, whose `push` is `args[at]`, for an agent that may push `branch`, and spells
+/// out the branch as `refs/heads/<branch>` wherever the push names it.
+fn push(args: &[String], at: usize, branch: &str) -> Verdict {
     let only = |why: &str| {
         Verdict::Refuse(format!(
             "Wiffletree refused this push: {why}You may push only your ticket's branch, as `git push origin HEAD:{branch}`, with --force-with-lease to replace it; publish_ticket opens the pull request."
         ))
     };
+    let names_branch = |name: &str| name.strip_prefix("refs/heads/").unwrap_or(name) == branch;
+    let full = format!("refs/heads/{branch}");
+    let mut sent = args[..=at].to_vec();
+    sent.extend(["--no-follow-tags", "--recurse-submodules=no"].map(str::to_owned));
     let mut positionals = vec![];
     let mut options_end = false;
-    for arg in args {
+    for arg in &args[at + 1..] {
         if options_end || !arg.starts_with('-') || arg == "-" {
             positionals.push(arg.as_str());
         } else if arg == "--" {
             options_end = true;
         } else if matches!(arg.as_str(), "-f" | "--force") {
             return only("plain force is refused. ");
-        } else if !PUSH_OPTIONS.contains(&arg.as_str()) && !arg.starts_with("--force-with-lease=") {
+        } else if let Some(lease) = arg.strip_prefix("--force-with-lease=") {
+            let (name, expected) = match lease.split_once(':') {
+                Some((name, expected)) => (name, format!(":{expected}")),
+                None => (lease, String::new()),
+            };
+            if !names_branch(name) {
+                return only(&format!("{arg} names a ref that is not your branch. "));
+            }
+            sent.push(format!("--force-with-lease={full}{expected}"));
+        } else if PUSH_OPTIONS.contains(&arg.as_str()) {
+            sent.push(arg.clone());
+        } else {
             return only(&format!("{arg} is not allowed. "));
         }
     }
@@ -354,24 +366,22 @@ fn push(args: &[String], branch: &str, at: usize) -> Verdict {
     if refspecs.is_empty() {
         return only("name what to push. ");
     }
+    sent.extend(["--".to_owned(), "origin".to_owned()]);
     for refspec in refspecs {
         if refspec.starts_with('+') {
             return only("plain force is refused. ");
         }
-        let destination = match refspec.split_once(':') {
+        let (source, destination) = match refspec.split_once(':') {
             Some(("", _)) => return only("deleting a branch is refused. "),
-            Some((_, destination)) => destination,
-            None => refspec,
+            Some(pair) => pair,
+            None => (*refspec, *refspec),
         };
-        if destination
-            .strip_prefix("refs/heads/")
-            .unwrap_or(destination)
-            != branch
-        {
+        if !names_branch(destination) {
             return only(&format!("{refspec} is not your branch. "));
         }
+        sent.push(format!("{source}:{full}"));
     }
-    Verdict::Push(at)
+    Verdict::Push(sent)
 }
 
 /// `gh`'s reads: a command, and its subcommands, or `None` for any.
@@ -384,7 +394,8 @@ const GH_READS: [(&str, Option<&[&str]>); 13] = [
     ("workflow", Some(&["view", "list"])),
     ("label", Some(&["list"])),
     ("ruleset", Some(&["view", "list"])),
-    ("auth", Some(&["status"])),
+    // Git's credential helper, as `gh auth setup-git` configures it, reads the sign-in.
+    ("auth", Some(&["status", "git-credential"])),
     ("search", None),
     ("help", None),
     ("--help", None),
@@ -398,8 +409,12 @@ fn gh(args: &[String]) -> Verdict {
     let Some(first) = first else {
         return Verdict::Run;
     };
+    // `api` takes no `-R`, so its own arguments are read as given.
     if first == "api" {
-        return api(&words[1..]);
+        return match args.split_first() {
+            Some((api_word, rest)) if api_word == "api" => api(rest),
+            _ => Verdict::Refuse("Wiffletree refused this `gh api` call: name api first.".into()),
+        };
     }
     let allowed = GH_READS.iter().any(|(command, subcommands)| {
         *command == first
@@ -447,32 +462,99 @@ fn without_repository(args: &[String]) -> Vec<&str> {
     words
 }
 
-/// Judges `gh api`'s arguments: only a GET of a REST endpoint passes.
-fn api(args: &[&str]) -> Verdict {
-    let mut method = None;
-    let mut body = false;
+/// `gh api`'s options that take a value, by their short and long names; its other options,
+/// `API_SWITCHES`, take none. An option on neither list is refused, since its arity is unknown.
+const API_VALUED: [(Option<char>, &str); 10] = [
+    (Some('X'), "method"),
+    (Some('f'), "raw-field"),
+    (Some('F'), "field"),
+    (Some('H'), "header"),
+    (Some('q'), "jq"),
+    (Some('t'), "template"),
+    (Some('p'), "preview"),
+    (None, "input"),
+    (None, "hostname"),
+    (None, "cache"),
+];
+const API_SWITCHES: [(Option<char>, &str); 6] = [
+    (Some('i'), "include"),
+    (Some('h'), "help"),
+    (None, "paginate"),
+    (None, "silent"),
+    (None, "slurp"),
+    (None, "verbose"),
+];
+
+/// `gh api`'s options, by long name with their values, and its first positional argument, read
+/// as gh's flag parser reads them: a long option's value after `=` or as the next argument, and
+/// short switches clustered, the last letter able to take the rest of the word, after an
+/// optional `=`, or the next argument as its value. The error is an argument it cannot read.
+fn api_arguments(args: &[String]) -> Result<ApiCall<'_>, &str> {
+    let switch_named = |name: &str| API_SWITCHES.iter().any(|(_, long)| *long == name);
+    let mut options = vec![];
     let mut endpoint = None;
-    let mut args = args.iter();
-    while let Some(&arg) = args.next() {
-        match arg {
-            "-X" | "--method" => method = args.next().map(|m| m.to_uppercase()),
-            "-f" | "-F" | "--field" | "--raw-field" | "--input" => {
-                body = true;
-                args.next();
+    let mut options_end = false;
+    let mut args = args.iter().map(String::as_str);
+    while let Some(arg) = args.next() {
+        if options_end || !arg.starts_with('-') || arg == "-" {
+            endpoint = endpoint.or(Some(arg));
+        } else if arg == "--" {
+            options_end = true;
+        } else if let Some(long) = arg.strip_prefix("--") {
+            let (name, value) = match long.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None => (long, None),
+            };
+            if switch_named(name) {
+                continue;
             }
-            a if a.starts_with("--method=") => method = Some(a["--method=".len()..].to_uppercase()),
-            a if a.starts_with("-X") => method = Some(a[2..].to_uppercase()),
-            a if ["--field=", "--raw-field=", "--input="]
-                .iter()
-                .any(|p| a.starts_with(p)) =>
-            {
-                body = true
+            let Some((_, name)) = API_VALUED.iter().find(|(_, long)| *long == name) else {
+                return Err(arg);
+            };
+            options.push((*name, value.or_else(|| args.next()).ok_or(arg)?));
+        } else {
+            for (at, letter) in arg.char_indices().skip(1) {
+                if API_SWITCHES.iter().any(|(short, _)| *short == Some(letter)) {
+                    continue;
+                }
+                let Some((_, name)) = API_VALUED.iter().find(|(short, _)| *short == Some(letter))
+                else {
+                    return Err(arg);
+                };
+                let rest = &arg[at + letter.len_utf8()..];
+                let rest = rest.strip_prefix('=').unwrap_or(rest);
+                let value = match rest {
+                    "" => args.next().ok_or(arg)?,
+                    rest => rest,
+                };
+                options.push((*name, value));
+                break;
             }
-            a if (a.starts_with("-f") || a.starts_with("-F")) && a.len() > 2 => body = true,
-            a if !a.starts_with('-') && endpoint.is_none() => endpoint = Some(a),
-            _ => {}
         }
     }
+    Ok(ApiCall { options, endpoint })
+}
+
+/// A `gh api` call as gh reads it: its valued options by long name, and its endpoint.
+struct ApiCall<'a> {
+    options: Vec<(&'static str, &'a str)>,
+    endpoint: Option<&'a str>,
+}
+
+/// Judges `gh api`'s arguments: only a GET of a REST endpoint passes.
+fn api(args: &[String]) -> Verdict {
+    let ApiCall { options, endpoint } = match api_arguments(args) {
+        Ok(read) => read,
+        Err(option) => {
+            return Verdict::Refuse(format!(
+                "Wiffletree refused this `gh api` call: it cannot read {option}, so it cannot tell the method."
+            ));
+        }
+    };
+    let body = (options.iter()).any(|(name, _)| matches!(*name, "raw-field" | "field" | "input"));
+    let method = (options.iter().rev())
+        .find(|(name, _)| *name == "method")
+        .map(|(_, method)| method.to_uppercase());
     let method = method.unwrap_or_else(|| if body { "POST" } else { "GET" }.into());
     if endpoint == Some("graphql") {
         return Verdict::Refuse(
@@ -509,26 +591,64 @@ mod tests {
         }
     }
 
+    /// What a push runs, given the words before it and its options and refspecs as sent.
+    fn sent(before: &str, options: &str, refspecs: &str) -> Verdict {
+        let mut sent = words(before);
+        sent.extend(words("push --no-follow-tags --recurse-submodules=no"));
+        sent.extend(words(options));
+        sent.extend(words("-- origin"));
+        sent.extend(words(refspecs));
+        Verdict::Push(sent)
+    }
+    const FULL: &str = "HEAD:refs/heads/wiffletree/fix-x";
+
     #[test]
     fn an_implementer_pushes_its_own_branch() {
-        for line in [
-            "push origin HEAD:wiffletree/fix-x",
-            "push origin HEAD:refs/heads/wiffletree/fix-x",
-            "push origin wiffletree/fix-x",
-            "push -u origin HEAD:wiffletree/fix-x",
-            "push --force-with-lease origin HEAD:wiffletree/fix-x",
-            "push --force-with-lease=wiffletree/fix-x:abc1234 --force-if-includes origin HEAD:wiffletree/fix-x",
+        for (line, options, refspec) in [
+            ("push origin HEAD:wiffletree/fix-x", "", FULL),
+            ("push origin HEAD:refs/heads/wiffletree/fix-x", "", FULL),
+            (
+                "push origin wiffletree/fix-x",
+                "",
+                "wiffletree/fix-x:refs/heads/wiffletree/fix-x",
+            ),
+            ("push -u origin HEAD:wiffletree/fix-x", "-u", FULL),
+            (
+                "push --force-with-lease origin HEAD:wiffletree/fix-x",
+                "--force-with-lease",
+                FULL,
+            ),
+            (
+                "push --force-with-lease=wiffletree/fix-x:abc1234 --force-if-includes origin HEAD:wiffletree/fix-x",
+                "--force-with-lease=refs/heads/wiffletree/fix-x:abc1234 --force-if-includes",
+                FULL,
+            ),
         ] {
-            assert_eq!(implementer(line), Verdict::Push(0), "{line}");
+            assert_eq!(implementer(line), sent("", options, refspec), "{line}");
         }
+    }
+
+    #[test]
+    fn a_push_never_reaches_a_tag_of_the_branchs_name() {
+        let line = "push --force-with-lease=refs/tags/wiffletree/fix-x:55180e1 origin HEAD:wiffletree/fix-x";
+        refused(implementer(line));
+        let line = "push --force-with-lease=wiffletree/fix-x origin HEAD:wiffletree/fix-x";
+        let options = "--force-with-lease=refs/heads/wiffletree/fix-x";
+        assert_eq!(implementer(line), sent("", options, FULL));
     }
 
     #[test]
     fn global_options_before_push_are_skipped() {
         let line = "-C ../fix-x push --force-with-lease origin HEAD:refs/heads/wiffletree/fix-x";
-        assert_eq!(implementer(line), Verdict::Push(2));
+        assert_eq!(
+            implementer(line),
+            sent("-C ../fix-x", "--force-with-lease", FULL)
+        );
         let line = "-c push.default=current --no-pager push origin HEAD:wiffletree/fix-x";
-        assert_eq!(implementer(line), Verdict::Push(3));
+        assert_eq!(
+            implementer(line),
+            sent("-c push.default=current --no-pager", "", FULL)
+        );
         let why = refused(implementer("-c push.default=current push origin HEAD:main"));
         assert!(
             why.contains("git push origin HEAD:wiffletree/fix-x"),
@@ -607,7 +727,7 @@ mod tests {
         };
         let judge = |line: &str| git(&words(line), Some(BRANCH), aliases);
         refused(judge("p origin main"));
-        assert_eq!(judge("p origin HEAD:wiffletree/fix-x"), Verdict::Push(0));
+        assert_eq!(judge("p origin HEAD:wiffletree/fix-x"), sent("", "", FULL));
         refused(judge("pp origin HEAD:wiffletree/fix-x"));
         refused(judge("-c alias.co=push co origin main"));
         assert_eq!(judge("co origin main"), Verdict::Run);
@@ -650,12 +770,17 @@ mod tests {
             "issue view 3",
             "repo view",
             "auth status",
+            "auth git-credential get",
             "--version",
             "",
             "api repos/o/r/pulls/1/comments",
             "api -X GET search/issues -f q=x",
             "api --method=get repos/o/r --input body.json -XGET",
             "api --hostname github.com repos/o/r",
+            "api -iXGET repos/o/r",
+            "api -X=GET repos/o/r -f q=x",
+            "api --paginate --jq .[].id repos/o/r/pulls",
+            "api repos/o/r --template -XPOST",
         ] {
             assert_eq!(gh_line(line), Verdict::Run, "{line}");
         }
@@ -691,6 +816,14 @@ mod tests {
             "api -X GET repos/o/r -X POST",
             "api graphql -f query=x",
             "api -X GET graphql",
+            // A template's value that looks like a method, and a method clustered after a
+            // switch, are read as gh reads them.
+            "api repos/o/r --template -XGET -f title=x",
+            "api repos/o/r -iXPOST",
+            "api repos/o/r -ifXGET",
+            "api repos/o/r --unknown-flag -XGET",
+            "api repos/o/r -z",
+            "-R o/r api repos/o/r",
         ] {
             refused(gh_line(line));
         }

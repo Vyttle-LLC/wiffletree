@@ -305,7 +305,7 @@ When the fetched head and the worktree's HEAD each have a commit the other lacks
 - **THEN** the worktree and GitHub's branch are unchanged, and the coordinator gets one message naming `aa11bb2` and `5f2e7a0`
 
 #### Scenario: The implementer pushed and then amended
-- **WHEN** the implementer pushed `c3d4e5f` to its open pull request's branch and then amended it locally to `9a8b7c6`
+- **WHEN** the open pull request's head is `c3d4e5f`, once the tip of the ticket's branch here, and the implementer amended it locally to `9a8b7c6`
 - **THEN** the keeper fetches nothing, changes nothing and sends no message, and GitHub's branch stays at `c3d4e5f` until the ticket is published again
 
 ### Requirement: The comments trigger needs a Claude model

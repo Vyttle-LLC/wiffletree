@@ -270,7 +270,7 @@ Keep commits small, with messages in the imperative.<span class="caret"></span><
 
         <div class="enforced">
           <div><b><svg class="i"><use href="#shield"/></svg>The app enforces, whatever this says</b>
-            <ul><li>One ticket, in its own worktree and branch</li><li>“Ready for testing” is refused with uncommitted files</li><li>The shell’s git pushes only the ticket’s own branch, where you allowed the owner, and gh only reads</li><li>Pull requests open and update only through Wiffletree’s publishing, which checks the review and the owners you allowed</li><li>Only the coordinator merges, through Wiffletree, never into a protected branch</li></ul>
+            <ul><li>One ticket, in its own worktree and branch</li><li>“Ready for testing” is refused with uncommitted files</li><li>The shell’s git pushes only the ticket’s own branch, where you allowed the owner and until its pull request opens, and gh only reads</li><li>Pull requests open and update only through Wiffletree’s publishing, which checks the review and the owners you allowed</li><li>Only the coordinator merges, through Wiffletree, never into a protected branch</li></ul>
             <p class="small" style="margin:6px 0 0;color:var(--yellow)">A guardrail, not a sandbox: an agent’s shell still runs as you, so a full path to <span class="mono">git</span> or <span class="mono">gh</span>, or a direct call to GitHub with your token, isn’t stopped.</p></div>
           <div><b><svg class="i"><use href="#pen"/></svg>This text decides</b>
             <ul><li>How to work and which checks to run</li><li>How big a fix is</li><li>When to object to a finding</li><li>How to write commits and pull requests</li></ul></div>
@@ -431,7 +431,7 @@ Name every ticket after its outcome, not its files.</div>
 </div>
 
 <ul class="notes">
-  <li><b>What changes when you edit.</b> How agents work, from each one’s next turn. Not what Wiffletree’s own tools allow: its publishing, review rules and limits are enforced by the app. Wiffletree’s guard refuses an agent’s pull request writes and every push but an implementer’s to its own branch, whatever a skill says; it is a guardrail, not a sandbox, so a full path to <span class="mono">git</span> or <span class="mono">gh</span> still runs with your credentials.</li>
+  <li><b>What changes when you edit.</b> How agents work, from each one’s next turn. Not what Wiffletree’s own tools allow: its publishing, review rules and limits are enforced by the app. Wiffletree’s guard refuses an agent’s pull request writes and every push but an implementer’s to its own branch before its pull request opens, whatever a skill says; it is a guardrail, not a sandbox, so a full path to <span class="mono">git</span> or <span class="mono">gh</span> still runs with your credentials.</li>
   <li><b>Wiffletree doesn’t judge an edit.</b> Any text up to 32,000 characters is accepted, even an empty rewrite, because the fixed core reaches every agent either way.</li>
   <li><b>Where skills are kept.</b> In a <span class="mono">skills</span> folder in Wiffletree’s data folder, as plain text with one file per history entry, ready to move into a settings repository later. Agents’ shells can write that folder, as they can write the settings file.</li>
   <li><b>No model is used</b> for any of this. Showing what changed between stock versions is a plain line comparison.</li>

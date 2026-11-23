@@ -101,7 +101,7 @@ fn about(skill: Skill) -> About {
             enforced: &[
                 "One ticket, in its own worktree and branch",
                 "\u{201c}Ready for testing\u{201d} is refused with uncommitted files",
-                "The shell's git pushes only the ticket's own branch, where you allowed the owner, and gh only reads",
+                "The shell's git pushes only the ticket's own branch, where you allowed the owner and until its pull request opens, and gh only reads",
                 "Pull requests open and update only through Wiffletree's publishing, which checks the review and the owners you allowed",
                 "Only the coordinator merges, through Wiffletree, never into a protected branch",
             ],

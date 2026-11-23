@@ -31,7 +31,7 @@ At turn start the host sets three variables. Names avoid `KEY`, `SECRET` and `TO
 | Variable | Value |
 |---|---|
 | `WIFFLETREE_REAL_GIT`, `WIFFLETREE_REAL_GH` | The host's own `git` and `gh`, resolved once on its `PATH`. Absent when not installed; the guard then says so and exits 127. |
-| `WIFFLETREE_PUSH_BRANCH` | Set only for an implementer of a ticket, to the ticket's branch, when the branch is not protected (`ProtectedBranches::of(repository).protects`) and the repository's owner is one the human allowed to publish without asking. |
+| `WIFFLETREE_PUSH_BRANCH` | Set only for an implementer of a ticket, to the ticket's branch, when the branch is not protected (`ProtectedBranches::of(repository).protects`) and the repository's owner is one the human allowed to publish without asking, and only while the ticket has no open pull request: GitHub's pull request follows its branch, so a push then would add unreviewed commits to it, notifying reviewers and running CI. |
 
 The guard never reads branch rules itself: the host decides whether any push is allowed and names the one branch, so pattern matching, rulesets and owner rules stay in one place. An absent variable means no push. Coordinators, verifiers, keeper sessions and threads never get it. The guard is a guardrail, so a variable the agent's shell could change is enough; the host's own checks behind `publish_ticket` and `merge_ticket` are what hold.
 
@@ -50,7 +50,7 @@ A push is allowed only when all hold:
 - Every refspec's destination is the ticket's branch: `<src>:<branch>`, `<src>:refs/heads/<branch>`, or `<branch>` alone. No `+`, no empty source (a delete), no `refs/tags/`.
 - Every option is on an allow-list: `--force-with-lease[=…]`, `--force-if-includes`, `-u`/`--set-upstream`, `--no-verify`, `-q`, `-v`, `-n`/`--dry-run`, `--porcelain`, `--progress`, `--no-follow-tags`, `--atomic`. So `-f`, `--force`, `--tags`, `--follow-tags`, `--all`, `--mirror`, `-d`/`--delete`, `--prune`, `--repo` and `--recurse-submodules` are refused.
 
-An allowed push runs with `--no-follow-tags --recurse-submodules=no` added after `push`, so configuration cannot send tags or submodules along.
+An allowed push runs with `--no-follow-tags --recurse-submodules=no` added after `push`, so configuration cannot send tags or submodules along, and with every destination and lease rewritten to `refs/heads/<branch>`: an unqualified `wiffletree/fix-x` would otherwise resolve to a tag of that name on origin. A lease that names another ref is refused.
 
 ### Parsing `gh`
 
@@ -67,7 +67,9 @@ An allowed push runs with `--no-follow-tags --recurse-submodules=no` added after
 | alone | `--version`, `--help`, `help` |
 | `api` | only as a GET, below |
 
-`gh api`'s method is the last `-X`/`--method` given, in any spelling. Without one it is POST when `-f`, `-F`, `--field`, `--raw-field` or `--input` is present, and GET otherwise. Only GET passes, and `gh api graphql` is refused, since it is always a POST and may hold a mutation.
+`auth git-credential` is allowed too: Git's credential helper, as `gh auth setup-git` configures it, runs it to read the sign-in.
+
+`gh api` must come first, and its arguments are read as gh's flag parser (pflag) reads them: a valued option takes the next argument whatever it looks like (`--template -XGET` is a template), short switches cluster with the last letter taking the rest of the word (`-iXPOST` is `-i -X POST`), and an option `api` does not have is refused rather than guessed at. Its method is the last `-X`/`--method` so read. Without one it is POST when `-f`, `-F`, `--field`, `--raw-field` or `--input` is present, and GET otherwise. Only GET passes, and `gh api graphql` is refused, since it is always a POST and may hold a mutation.
 
 ### The refusal
 
@@ -87,7 +89,7 @@ Publishing needs no change in behavior. GitHub's branch at the commit being publ
 
 The keeper changes one thing. When a PR's head is not in the worktree's HEAD, `fetch_due` fetches it and, if the two diverged, tells the coordinator. After an implementer pushes a WIP commit and then amends it locally, that notice would be wrong: the head is the branch's own earlier tip. `fetch_due` skips a head the ticket's branch reflog holds, as `was_branch_tip` does for publishing. The next publish replaces it with a lease.
 
-A pushed WIP commit on an open pull request makes its head differ from the verified commit, so `may_change_branch` is false and the keeper does not rebase it until the ticket is verified and published again. Nothing is undone.
+Once a ticket's pull request is open, the host gives no push branch, so the guard refuses the implementer's push and only `publish_ticket` updates the pull request, after a review. A turn that started before the pull request opened keeps the branch it was given until it ends.
 
 ## Risks / Trade-offs
 

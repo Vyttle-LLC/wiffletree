@@ -25,7 +25,11 @@ Every provider launch that receives the workspace's credentials, on Claude and C
 - **THEN** its launch has no guard folder on `PATH` and no guard variables
 
 ### Requirement: The host tells the guard what an agent may push
-At each turn's launch the host SHALL give the guard the real `git` and `gh` it uses itself and, only for an implementer session of a ticket, that ticket's branch, through the launch's environment. It SHALL give the branch only when the branch is not protected for the ticket's repository (see protected-branches) and the human allowed the repository's owner to publish without asking. With no branch given, the guard SHALL refuse every push. The guard SHALL NOT decide protection or owners itself.
+At each turn's launch the host SHALL give the guard the real `git` and `gh` it uses itself and, only for an implementer session of a ticket, that ticket's branch, through the launch's environment. It SHALL give the branch only when the branch is not protected for the ticket's repository (see protected-branches), the human allowed the repository's owner to publish without asking, and the ticket has no open pull request, which a push would update with unreviewed commits. With no branch given, the guard SHALL refuse every push. The guard SHALL NOT decide protection or owners itself.
+
+#### Scenario: The pull request is open
+- **WHEN** a published ticket's review fails and its implementer runs `git push origin HEAD:<its branch>` to save a fix
+- **THEN** it is refused, saying no agent pushes a branch whose pull request is open, and the pull request is unchanged until `publish_ticket` pushes the reviewed commit
 
 #### Scenario: A verifier
 - **WHEN** a verifier of a ticket runs `git push origin HEAD:<the ticket's branch>`
@@ -44,7 +48,11 @@ At each turn's launch the host SHALL give the guard the real `git` and `gh` it u
 - **THEN** the guard says `gh` is not installed and exits 127
 
 ### Requirement: git passes everything but a push outside the agent's branch
-The guard SHALL find `git`'s subcommand after its global options, `-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`, `--config-env`, `--exec-path` and `--super-prefix` with their values in either spelling, and flags such as `-P` and `--no-pager`. A subcommand that is an alias SHALL be judged as what it expands to, with the same global options. `send-pack` and `http-push` SHALL be refused. A `push` SHALL be allowed only when the agent may push (see above), its remote is `origin`, it names at least one refspec, every refspec's destination is the agent's branch, as `<src>:<branch>`, `<src>:refs/heads/<branch>` or `<branch>`, with no `+` and a source, and every option is one of `--force-with-lease` with or without a value, `--force-if-includes`, `-u`, `--set-upstream`, `--no-verify`, `-q`, `-v`, `-n`, `--dry-run`, `--porcelain`, `--progress`, `--no-follow-tags` and `--atomic`. An allowed push SHALL run with `--no-follow-tags --recurse-submodules=no`. Every other `git` call SHALL run unchanged.
+The guard SHALL find `git`'s subcommand after its global options, `-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`, `--config-env`, `--exec-path` and `--super-prefix` with their values in either spelling, and flags such as `-P` and `--no-pager`. A subcommand that is an alias SHALL be judged as what it expands to, with the same global options. `send-pack` and `http-push` SHALL be refused. A `push` SHALL be allowed only when the agent may push (see above), its remote is `origin`, it names at least one refspec, every refspec's destination is the agent's branch, as `<src>:<branch>`, `<src>:refs/heads/<branch>` or `<branch>`, with no `+` and a source, and every option is one of `--force-with-lease` with or without a value, `--force-if-includes`, `-u`, `--set-upstream`, `--no-verify`, `-q`, `-v`, `-n`, `--dry-run`, `--porcelain`, `--progress`, `--no-follow-tags` and `--atomic`, where a lease names the agent's branch if it names a ref. An allowed push SHALL run with `--no-follow-tags --recurse-submodules=no`, and with each destination and lease spelled `refs/heads/<branch>`, so a tag of the same name is never reached. Every other `git` call SHALL run unchanged.
+
+#### Scenario: A tag with the branch's name
+- **WHEN** origin has the tag `wiffletree/fix-x` and no such branch, and the implementer runs `git push origin HEAD:wiffletree/fix-x`, or the same with `--force-with-lease=refs/tags/wiffletree/fix-x:<sha>`
+- **THEN** the first creates the branch `refs/heads/wiffletree/fix-x` and leaves the tag as it was, and the second is refused
 
 #### Scenario: The implementer pushes its branch
 - **WHEN** an implementer whose ticket branch is `wiffletree/fix-x` runs `git push origin HEAD:wiffletree/fix-x`
@@ -83,7 +91,7 @@ The guard SHALL find `git`'s subcommand after its global options, `-C`, `-c`, `-
 - **THEN** the real `git` runs them unchanged
 
 ### Requirement: gh passes reads only
-The guard SHALL remove `-R`/`--repo` and `--hostname` with their values wherever they appear, and judge `gh` by its first two remaining words. It SHALL allow only `pr view|list|diff|checks|status`, `issue view|list|status`, `run view|list|watch`, `repo view`, `release view|list`, `workflow view|list`, `label list`, `ruleset view|list`, `search`, `auth status`, `--version`, `--help` and `help`, and `api` as a GET. For `api`, the method SHALL be the last `-X` or `--method` given in any spelling; without one, it SHALL be POST when `-f`, `-F`, `--field`, `--raw-field` or `--input` is given and GET otherwise. Only GET SHALL pass, and `api graphql` SHALL be refused. Everything else, including aliases and extensions, SHALL be refused. A refused pull request write SHALL name `publish_ticket` for creating or updating a pull request, `merge_ticket` for merging, and asking the coordinator, or for the coordinator the human, for anything else.
+The guard SHALL remove `-R`/`--repo` and `--hostname` with their values wherever they appear, and judge `gh` by its first two remaining words. It SHALL allow only `pr view|list|diff|checks|status`, `issue view|list|status`, `run view|list|watch`, `repo view`, `release view|list`, `workflow view|list`, `label list`, `ruleset view|list`, `search`, `auth status`, `auth git-credential`, which Git's credential helper runs to read the sign-in, `--version`, `--help` and `help`, and `api` as a GET, named first. `api`'s arguments SHALL be read as gh's flag parser reads them: an option's value after `=` or as the next argument whatever it looks like, and short switches clustered with the last letter taking the rest of the word as its value; an option `api` does not have SHALL be refused. The method SHALL be the last `-X` or `--method` so read; without one, it SHALL be POST when `-f`, `-F`, `--field`, `--raw-field` or `--input` is given and GET otherwise. Only GET SHALL pass, and `api graphql` SHALL be refused. Everything else, including aliases and extensions, SHALL be refused. A refused pull request write SHALL name `publish_ticket` for creating or updating a pull request, `merge_ticket` for merging, and asking the coordinator, or for the coordinator the human, for anything else.
 
 #### Scenario: Pull request writes
 - **WHEN** an agent runs `gh pr close 1`, `gh pr merge 1`, `gh -R o/r pr close 1`, `gh pr create`, `gh pr comment 1 -b hi`, `gh pr review 1 --approve`, `gh pr edit 1`, `gh pr ready 1` or `gh pr reopen 1`
@@ -92,6 +100,14 @@ The guard SHALL remove `-R`/`--repo` and `--hostname` with their values wherever
 #### Scenario: API writes
 - **WHEN** an agent runs `gh api -X POST repos/o/r/issues`, `gh api --method=PATCH repos/o/r`, `gh api repos/o/r/issues -f title=x` or `gh api graphql -f query=…`
 - **THEN** each is refused
+
+#### Scenario: Options that hide a method
+- **WHEN** an agent runs `gh api repos/o/r --template -XGET -f title=x` or `gh api repos/o/r -iXPOST`
+- **THEN** each is refused, since gh reads the first as a template and a POST and the second as `-i` and `-X POST`
+
+#### Scenario: Git's credential helper
+- **WHEN** Git runs `gh auth git-credential get` as its credential helper for an HTTPS GitHub origin
+- **THEN** the real `gh` answers with the sign-in
 
 #### Scenario: API reads
 - **WHEN** an agent runs `gh api repos/o/r/pulls/1/comments` or `gh api -X GET search/issues -f q=x`

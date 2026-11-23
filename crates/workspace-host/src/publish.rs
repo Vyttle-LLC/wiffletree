@@ -446,7 +446,8 @@ pub(crate) fn check_with_size(
 }
 impl Host {
     /// The branch the guard lets a session's shell push: an implementer's own ticket branch,
-    /// when it is not protected and the human allowed the repository's owner (see `guard`).
+    /// when it is not protected, the human allowed the repository's owner (see `guard`) and
+    /// the ticket has no open pull request, which a push would update with unreviewed commits.
     pub(crate) fn push_branch(
         &self,
         session: &Session,
@@ -457,7 +458,8 @@ impl Host {
         };
         let ticket = self.ticket(ticket)?;
         let repository = self.ticket_repository(&ticket)?;
-        let may_push = is_allowed(&repository, &self.settings().allowed_owners)
+        let may_push = ticket.open_pull_request().is_none()
+            && is_allowed(&repository, &self.settings().allowed_owners)
             && !ProtectedBranches::of(&repository).protects(&ticket.branch);
         Ok(may_push.then_some(ticket.branch))
     }
@@ -2544,6 +2546,13 @@ pub(crate) mod tests {
             assert_eq!(may_push(&f, &verifier), None);
         }
         assert_eq!(may_push(&f, &f.coordinator), None);
+        // Once its pull request is open, a push would add unreviewed commits to it.
+        watch_open_pr(&mut f, 45);
+        assert_eq!(may_push(&f, &f.implementer), None);
+        let mut ticket_record = f.ticket();
+        ticket_record.pull_request = None;
+        f.host.save_ticket(&ticket_record).unwrap();
+        assert_eq!(may_push(&f, &f.implementer), Some(branch.clone()));
         let repository = f.ticket().repository_id;
         f.host
             .set_protected_branch(&repository, &branch, true)
