@@ -923,6 +923,11 @@ impl Host {
     /// Replaces the issue's fields, keeping its ID, state, author, creation and the fields this
     /// release does not know; a changed priority or assignee is also an event.
     pub fn edit_issue(&mut self, edited: Issue) -> Result<Issue> {
+        self.edit_issue_as(edited, false)
+    }
+    /// `edit_issue`; `for_assistant` marks it written by the human's assistant with an
+    /// `edited` event naming the fields it changed, and its other events too.
+    pub(crate) fn edit_issue_as(&mut self, edited: Issue, for_assistant: bool) -> Result<Issue> {
         let id = edited.id.clone();
         let (by, space, store, current) = self.writable(&id)?;
         let issue = Issue {
@@ -956,6 +961,25 @@ impl Host {
                 json!(issue.assignee),
             ));
         }
+        if for_assistant {
+            let changed: Vec<&str> = [
+                ("title", issue.title != current.title),
+                ("description", issue.description != current.description),
+                ("priority", issue.priority != current.priority),
+                ("assignee", issue.assignee != current.assignee),
+                ("labels", issue.labels != current.labels),
+                ("repositories", issue.repositories != current.repositories),
+            ]
+            .into_iter()
+            .filter_map(|(field, changed)| changed.then_some(field))
+            .collect();
+            let mut edited = event(&by, &at, "edited", Value::Null, Value::Null);
+            edited.fields = serde_json::Map::from_iter([("fields".into(), json!(changed))]);
+            events.push(edited);
+            for event in &mut events {
+                event.fields.insert(FILED_FOR.into(), json!(by));
+            }
+        }
         let mut files = vec![(issue_file(&id), issue_md(&issue)?)];
         if !events.is_empty() {
             let content = with_events(store.read(&events_file(&id)), &events)?;
@@ -969,6 +993,15 @@ impl Host {
     /// work derived when the move overrides it; the issue follows its work again once that
     /// changes.
     pub fn move_issue(&mut self, id: &IssueId, state: IssueState) -> Result<Issue> {
+        self.move_issue_as(id, state, false)
+    }
+    /// `move_issue`; `for_assistant` marks the move written by the human's assistant.
+    pub(crate) fn move_issue_as(
+        &mut self,
+        id: &IssueId,
+        state: IssueState,
+        for_assistant: bool,
+    ) -> Result<Issue> {
         let (by, space, store, current) = self.writable(id)?;
         if current.state == state {
             return Ok(current);
@@ -978,6 +1011,9 @@ impl Host {
         let derived = self.derived_state(&space.storage.repository.key(), id)?;
         if let Some(derived) = derived.filter(|derived| *derived != state) {
             moved.fields.insert("overrode".into(), json!(derived));
+        }
+        if for_assistant {
+            moved.fields.insert(FILED_FOR.into(), json!(by));
         }
         let issue = Issue { state, ..current };
         let files = vec![

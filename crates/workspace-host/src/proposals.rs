@@ -327,7 +327,7 @@ impl Host {
                 service::only_arguments(name, args, &fields)?;
                 let id = issue_id()?;
                 let current = self.parsed_issue(&id)?;
-                self.write_change(&current, changes(args)?.apply(&current))?;
+                self.write_change_as(&current, changes(args)?.apply(&current), true)?;
                 Ok((id, "Edited"))
             }
             "comment_issue" => {
@@ -352,16 +352,26 @@ impl Host {
     /// Writes `after` over `current` with the human's edit, then its move when the state
     /// changes, as the issue page would.
     fn write_change(&mut self, current: &Issue, after: Issue) -> Result<()> {
+        self.write_change_as(current, after, false)
+    }
+    /// `write_change`; `for_assistant` marks the edit and the move written by the human's
+    /// assistant.
+    fn write_change_as(
+        &mut self,
+        current: &Issue,
+        after: Issue,
+        for_assistant: bool,
+    ) -> Result<()> {
         let state = after.state;
         let edited = Issue {
             state: current.state,
             ..after
         };
         if edited != *current {
-            self.edit_issue(edited)?;
+            self.edit_issue_as(edited, for_assistant)?;
         }
         if state != current.state {
-            self.move_issue(&current.id, state)?;
+            self.move_issue_as(&current.id, state, for_assistant)?;
         }
         Ok(())
     }
@@ -515,7 +525,17 @@ mod tests {
         let commented =
             json!({"space": sage.id, "id": issue.id.to_string(), "body": "Seen on watchOS 12"});
         tool(&mut host, "comment_issue", commented, &mut guard).unwrap();
+        let edited = json!({"space": sage.id, "id": issue.id.to_string(), "title": "Webhook retries forever", "priority": "high", "state": "todo"});
+        tool(&mut host, "edit_issue", edited, &mut guard).unwrap();
         assert!(!guard.held(), "writing reads nothing written by others");
+        let events = host.read_issue(&issue.id).unwrap().events;
+        let marked: Vec<&str> = (events.iter())
+            .filter(|e| e.fields.get(FILED_FOR) == Some(&json!("jlin")))
+            .map(|e| e.kind.as_str())
+            .collect();
+        assert_eq!(marked, ["priority", "edited", "state"]);
+        let edit = events.iter().find(|e| e.kind == "edited").unwrap();
+        assert_eq!(edit.fields["fields"], json!(["title", "priority"]));
 
         let record = host.read_issue(&filed).unwrap();
         assert_eq!(filed_for(&record.issue.unwrap()), Some("jlin"));
@@ -530,7 +550,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(written, ["Filed", "Commented"]);
+        assert_eq!(written, ["Filed", "Commented", "Edited"]);
         // An issue of another Space's tracker is refused.
         let elsewhere = json!({"space": sage.id, "id": "OTHER-1", "body": "x"});
         assert!(tool(&mut host, "comment_issue", elsewhere, &mut guard).is_err());
