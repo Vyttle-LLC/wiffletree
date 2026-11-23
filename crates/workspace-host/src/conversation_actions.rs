@@ -147,6 +147,15 @@ impl Host {
                     "{name} in {} lists no act tool {tool}",
                     space.name
                 );
+                // The host calls an act tool itself and holds no app's sign-in, so it can call
+                // one only on a server it starts; one reached by URL is refused before a card.
+                let home = self.source_env().home;
+                let definition = provider::server_definition(assistant.provider, &home, name);
+                ensure!(
+                    definition.is_none_or(|definition| definition["command"].is_string()),
+                    "{name} in {} is reached by URL, and Wiffletree can run an app's act tools only on an MCP server it starts on this Mac, since it holds no app's sign-in. Read with its read tools, and tell the human what to do in the app",
+                    space.name
+                );
                 let arguments = args.get("arguments").cloned().unwrap_or(json!({}));
                 ensure!(arguments.is_object(), "arguments is an object");
                 let call = ActCall::Mcp {
@@ -464,5 +473,15 @@ for line in sys.stdin:
             !launch.servers.contains_key("gmail"),
             "not configured for Claude here"
         );
+        // Its act tools cannot run through the host, so act is refused before any card.
+        let guard = human_turn(&mut host, "m1", "add a hold on Friday");
+        let hold = json!({"space": space, "source": "calendar", "tool": "create_event", "arguments": {"title": "Hold"}});
+        let refused = host
+            .act(&assistant, &hold, &guard)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(refused.contains("reached by URL"), "{refused}");
+        assert!(host.conversation_cards().unwrap().is_empty());
     }
 }
