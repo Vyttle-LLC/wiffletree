@@ -4961,6 +4961,8 @@ impl Actor {
             profile,
             provider_session: runtime.provider_session_id,
             cwd,
+            // A compaction runs no tools.
+            scratch: None,
             prompt: String::new(),
             attachments: vec![],
             socket: self.socket.clone(),
@@ -5273,6 +5275,14 @@ impl Actor {
             }
             fs::create_dir_all(&cwd)?;
         }
+        let scratch = match runtime.ticket_id.as_deref().filter(|_| !sorting) {
+            Some(ticket) => {
+                let scratch = crate::scratch::ticket_scratch(&self.host.home, ticket);
+                fs::create_dir_all(&scratch)?;
+                Some(scratch)
+            }
+            None => None,
+        };
         let run = new_id();
         let cancel = Arc::new(AtomicBool::new(false));
         let token = format!("{}{}", new_id(), new_id());
@@ -5325,6 +5335,7 @@ impl Actor {
             profile,
             provider_session: runtime.provider_session_id.filter(|_| !sorting),
             cwd,
+            scratch,
             prompt,
             attachments: input.iter().flat_map(|m| m.attachments.clone()).collect(),
             socket: self.socket.clone(),

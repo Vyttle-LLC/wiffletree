@@ -55,7 +55,7 @@ static HOOKS: OnceLock<Vec<(String, OsString)>> = OnceLock::new();
 /// Go's flags need, one per data folder so restarts reuse it, and records the hooks agents get.
 /// A hook the host's own environment already sets is the user's and is left alone.
 pub fn install(data: &Path, binary: &Path) -> io::Result<()> {
-    let folder = std::env::temp_dir().join(format!("wiffletree-{:016x}", fnv(data)));
+    let folder = temp_folder(data);
     fs::create_dir_all(&folder)?;
     let gate = folder.join(GATE_NAME);
     let staged = folder.join(format!(".{GATE_NAME}-{}", std::process::id()));
@@ -64,6 +64,11 @@ pub fn install(data: &Path, binary: &Path) -> io::Result<()> {
     fs::rename(&staged, &gate)?;
     let _ = HOOKS.set(hooks(data, &gate, |name| std::env::var_os(name)));
     Ok(())
+}
+
+/// The data folder's own folder in the system's temporary folder, whose path has no spaces.
+pub(crate) fn temp_folder(data: &Path) -> PathBuf {
+    std::env::temp_dir().join(format!("wiffletree-{:016x}", fnv(data)))
 }
 
 /// A stable name for a path, so each data folder keeps one gate folder.

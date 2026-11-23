@@ -56,6 +56,7 @@ mod router;
 pub mod runtime;
 mod scan;
 pub(crate) mod schedules;
+pub mod scratch;
 pub use schedules::TimerPass;
 pub mod service;
 mod settings;

@@ -68,6 +68,7 @@ fn sort(folder: &std::path::Path, body: &str) -> (Vec<ProviderEvent>, anyhow::Re
         },
         provider_session: Some("earlier".into()),
         cwd: folder.into(),
+        scratch: None,
         prompt: comments.to_string(),
         attachments: vec![],
         socket: "/tmp/socket".into(),
