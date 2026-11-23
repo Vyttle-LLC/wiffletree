@@ -1414,9 +1414,28 @@ fn format_sources(sources: &[Source]) -> String {
         .join("\n")
 }
 
-/// The Sources field read back; a source named as before keeps its sign-in check and the keys
-/// this release does not know.
+/// The Sources field read back, as read lists; a source named as before keeps its act lists, its
+/// Do-without-asking marks, its sign-in check and the keys this release does not know.
 fn parse_sources(text: &str, before: &[Source]) -> Result<Vec<Source>, String> {
+    let kept = |kind: &str, name: &str| {
+        (before.iter())
+            .find(|source| {
+                source.name() == name && matches!(source, Source::Mcp { .. }) == (kind == "mcp")
+            })
+            .map(|source| match source {
+                Source::Mcp {
+                    act,
+                    without_asking,
+                    ..
+                }
+                | Source::Cli {
+                    act,
+                    without_asking,
+                    ..
+                } => (act.clone(), without_asking.clone()),
+            })
+            .unwrap_or_default()
+    };
     let mut sources = vec![];
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         let wrong = || format!("“{line}” isn’t a source. {SOURCES_FORMAT}");
@@ -1438,9 +1457,12 @@ fn parse_sources(text: &str, before: &[Source]) -> Result<Vec<Source>, String> {
                         _ => None,
                     })
                     .unwrap_or_default();
+                let (act, without_asking) = kept(kind, &name);
                 Source::Mcp {
                     server: name,
                     tools: items,
+                    act,
+                    without_asking,
                     extra,
                 }
             }
@@ -1456,9 +1478,12 @@ fn parse_sources(text: &str, before: &[Source]) -> Result<Vec<Source>, String> {
                         _ => None,
                     })
                     .unwrap_or_default();
+                let (act, without_asking) = kept(kind, &name);
                 Source::Cli {
                     command: name,
                     prefixes: items,
+                    act,
+                    without_asking,
                     check,
                     extra,
                 }
@@ -1944,6 +1969,8 @@ mod tests {
         let before = vec![Source::Cli {
             command: "gh".into(),
             prefixes: vec!["gh pr view".into()],
+            act: vec!["gh pr comment".into()],
+            without_asking: vec![],
             check: Some("gh auth status".into()),
             extra: Extra::new(),
         }];
@@ -1953,6 +1980,7 @@ mod tests {
         assert!(
             matches!(&sources[1], Source::Cli { check: Some(check), .. } if check == "gh auth status")
         );
+        assert_eq!(sources[1].acts(), ["gh pr comment"]);
         assert!(parse_sources("linear", &[]).is_err());
         assert!(parse_sources("ftp x: y", &[]).is_err());
         assert_eq!(parse_sources("\n  \n", &[]).unwrap(), vec![]);

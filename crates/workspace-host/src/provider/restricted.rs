@@ -498,6 +498,8 @@ mod tests {
         Source::Mcp {
             server: "linear".into(),
             tools: vec!["list_issues".into()],
+            act: vec![],
+            without_asking: vec![],
             extra: Default::default(),
         }
     }
@@ -505,6 +507,8 @@ mod tests {
         Source::Cli {
             command: "gh".into(),
             prefixes: vec!["gh pr list".into(), "gh pr view".into()],
+            act: vec![],
+            without_asking: vec![],
             check: None,
             extra: Default::default(),
         }

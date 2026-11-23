@@ -746,6 +746,8 @@ mod tests {
         Source::Cli {
             command: "gh".into(),
             prefixes: prefixes.iter().map(|p| p.to_string()).collect(),
+            act: vec![],
+            without_asking: vec![],
             check: None,
             extra: Default::default(),
         }
@@ -774,6 +776,8 @@ mod tests {
         Source::Cli {
             command: command.into(),
             prefixes: vec![prefix.into()],
+            act: vec![],
+            without_asking: vec![],
             check: None,
             extra: Default::default(),
         }
@@ -828,6 +832,8 @@ mod tests {
                 "aws --profile readonly logs filter-log-events".into(),
                 "aws --profile admin ecs list-tasks".into(),
             ],
+            act: vec![],
+            without_asking: vec![],
             check: None,
             extra: Default::default(),
         };

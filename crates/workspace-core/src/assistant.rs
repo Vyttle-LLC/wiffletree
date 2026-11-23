@@ -2,6 +2,7 @@
 //! thread is a provider session of role `Assistant` owned by its Space, read-only but for its
 //! scratch folder, kept only on this Mac. The router sends each message to its thread. An issue
 //! thread (stage 6) has an issue or its tracker's list attached, and proposes changes to it.
+pub mod conversation;
 pub mod proposal;
 pub mod router;
 

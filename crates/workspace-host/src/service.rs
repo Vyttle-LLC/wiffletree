@@ -9079,6 +9079,8 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
             sources: vec![Source::Mcp {
                 server: "linear".into(),
                 tools: vec!["list_issues".into()],
+                act: vec![],
+                without_asking: vec![],
                 extra: Default::default(),
             }],
             output: None,

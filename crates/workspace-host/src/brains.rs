@@ -216,6 +216,7 @@ impl Host {
             }
             SessionOwner::Space(space) => self.space(space)?.space.storage.repository.key(),
             SessionOwner::Brain(repository) => repository.clone(),
+            SessionOwner::Install => bail!("The Assistant names the Space whose brain it uses"),
         })
     }
 

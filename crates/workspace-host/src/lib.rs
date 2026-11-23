@@ -790,6 +790,7 @@ impl Host {
             home: Some(self.new_project_home(name)?),
             slug: None,
             created_by,
+            assistant_work: None,
         };
         let selection = self.model_selection()?;
         ensure!(selection.is_saved(), policies::NO_SETUP);
@@ -873,8 +874,8 @@ impl Host {
             SessionOwner::Project(project) => {
                 self.create_session(project, parent, repository, name, role, provider)
             }
-            SessionOwner::Space(_) | SessionOwner::Brain(_) => bail!(
-                "{} cannot run outside a project: only assistant threads run under a Space",
+            SessionOwner::Space(_) | SessionOwner::Brain(_) | SessionOwner::Install => bail!(
+                "{} cannot run outside a project: only assistant threads run under a Space, and only the Assistant under the install",
                 role.label()
             ),
         }

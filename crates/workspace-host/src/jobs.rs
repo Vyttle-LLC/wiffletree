@@ -1765,6 +1765,8 @@ mod tests {
         Source::Cli {
             command: "gh".into(),
             prefixes: vec!["gh pr list".into(), "gh pr view".into()],
+            act: vec![],
+            without_asking: vec![],
             check: None,
             extra: Default::default(),
         }
@@ -1773,6 +1775,8 @@ mod tests {
         Source::Mcp {
             server: "linear".into(),
             tools: vec!["list_issues".into()],
+            act: vec![],
+            without_asking: vec![],
             extra: Default::default(),
         }
     }
@@ -1993,6 +1997,8 @@ mod tests {
             write.sources = vec![Source::Cli {
                 command: prefix.split(' ').next().unwrap().into(),
                 prefixes: vec![prefix.into()],
+                act: vec![],
+                without_asking: vec![],
                 check: check.map(str::to_owned),
                 extra: Default::default(),
             }];
@@ -2037,6 +2043,8 @@ mod tests {
             let source = Source::Mcp {
                 server: server.into(),
                 tools: vec!["list_issues".into()],
+                act: vec![],
+                without_asking: vec![],
                 extra: Default::default(),
             };
             s.host

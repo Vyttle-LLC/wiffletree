@@ -127,8 +127,9 @@ pub fn executable(provider: Provider) -> Result<PathBuf> {
         .with_context(|| format!("Install {name} CLI and sign in before starting live work"))
 }
 /// The fixed core's parts, each with who gets it: the contract, then each role's core, then the
-/// contract's thread version, the assistant's core and a job run's.
-pub const CORE: [(&str, &str); 8] = [
+/// contract's thread version, the assistant's core, a job run's, and the Assistant
+/// conversation's contract and core.
+pub const CORE: [(&str, &str); 10] = [
     (
         "every agent",
         include_str!("../skills/core/communication.md"),
@@ -155,6 +156,14 @@ pub const CORE: [(&str, &str); 8] = [
         include_str!("../skills/core/assistant.md"),
     ),
     ("job runs", include_str!("../skills/core/job-run.md")),
+    (
+        "the Assistant",
+        include_str!("../skills/core/conversation-communication.md"),
+    ),
+    (
+        "the Assistant",
+        include_str!("../skills/core/conversation.md"),
+    ),
 ];
 /// The core's parts with their names and versions, for clients.
 pub fn core_instructions() -> Vec<workspace_core::skills::CoreInstructions> {
@@ -180,6 +189,7 @@ fn core(role: Role) -> &'static str {
         Role::Keeper => 4,
         Role::Assistant => 6,
         Role::JobRun => 7,
+        Role::Conversation => 9,
         Role::Compiler => return compile::PROCEDURE,
         // An evaluator is blind: Wiffletree gives it no instructions at all.
         Role::Evaluator => return "",
@@ -190,6 +200,7 @@ fn core(role: Role) -> &'static str {
 fn contract(role: Role) -> &'static str {
     match role {
         Role::Assistant | Role::JobRun => CORE[5].1,
+        Role::Conversation => CORE[8].1,
         _ => CORE[0].1,
     }
 }

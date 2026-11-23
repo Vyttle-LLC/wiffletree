@@ -138,6 +138,7 @@ mod tests {
             name: "Pica onboarding".into(),
             space: SpaceId(space.into()),
             added_repositories: added.iter().map(|a| a.to_string()).collect(),
+            assistant_work: None,
             home: None,
             slug: None,
             created_by: None,

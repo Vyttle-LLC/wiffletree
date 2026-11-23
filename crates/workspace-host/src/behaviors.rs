@@ -377,7 +377,8 @@ impl Host {
         let space = match &session.owner {
             _ if session.role.is_thread() => Some(self.thread(&session.id)?.space_id),
             Some(SessionOwner::Space(space)) => Some(space.clone()),
-            Some(SessionOwner::Brain(_)) => None,
+            // The Assistant serves every Space, so it resolves the Workspace layer alone.
+            Some(SessionOwner::Brain(_) | SessionOwner::Install) => None,
             Some(SessionOwner::Project(project)) => Some(self.project(project)?.space),
             None => Some(self.project(&session.project_id)?.space),
         };
