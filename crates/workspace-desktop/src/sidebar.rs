@@ -283,7 +283,7 @@ impl Sidebar {
             self.name_new_project(window, cx);
         }
         if selection {
-            self.reveal_selected();
+            self.reveal_selected(cx);
         }
         let host_version = self.bridge.host_version();
         let host_moved = host_version != self.host_version;
@@ -302,7 +302,7 @@ impl Sidebar {
     }
     /// Opens the collapsed Space and parent of a project selected from elsewhere, such as the
     /// Inbox, so its row shows.
-    fn reveal_selected(&mut self) {
+    fn reveal_selected(&mut self, cx: &App) {
         let Some(project_id) = self.shared.selected_session().map(|s| s.project_id.clone()) else {
             return;
         };
@@ -310,14 +310,15 @@ impl Sidebar {
         if self.shared.assistant_work_open() {
             return;
         }
-        self.reveal(&project_id);
+        self.reveal(&project_id, cx);
     }
-    /// Opens what hides the project's row, in every lens.
-    fn reveal(&mut self, project_id: &str) {
+    /// Opens what hides the project's row in the lens shown; the other lenses keep their folds.
+    fn reveal(&mut self, project_id: &str, cx: &App) {
+        let lens = cx.global::<Preferences>().lens;
         let Some(index) = &self.shared.index else {
             return;
         };
-        for folds in self.folds.values_mut() {
+        if let Some(folds) = self.folds.get_mut(&lens) {
             folds.reveal(index, project_id);
         }
     }
@@ -372,7 +373,7 @@ impl Sidebar {
         self.pending_project_selection = None;
         self.creating_project = false;
         // Its row shows, even under a collapsed parent.
-        self.reveal(&root.project_id);
+        self.reveal(&root.project_id, cx);
         cx.emit(Intent::Select(root.id.clone()));
         self.tree_scroll.set_offset(point(px(0.), px(0.)));
         if let Some(body) = self.pending_first_message.take() {
@@ -1620,6 +1621,10 @@ impl Sidebar {
         let Some(target) = drag.and_then(|drag| drag.read(cx).target.clone()) else {
             return;
         };
+        // A drag the human switched lens during lands nowhere: only the Outcome lens drags.
+        if cx.global::<Preferences>().lens != Lens::Outcome {
+            return;
+        }
         let Some(index) = self.shared.index.clone() else {
             return;
         };
