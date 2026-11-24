@@ -39,8 +39,6 @@ const CHECK_MS: i64 = 3 * 60_000;
 const SURVEY_MS: i64 = 5 * 60_000;
 /// How old a ticket's scan may be when its build output is moved; an older one is redone.
 const FRESH_SCAN_MS: i64 = 5_000;
-/// The inbox operation of the card saying builds wait for space, followed by when it began.
-const BUILDS_HELD: &str = "builds-held:";
 
 /// A disk's free and total bytes, or `None` when it cannot be read.
 pub type Space = Arc<dyn Fn(&Path) -> Option<(u64, u64)> + Send + Sync>;
@@ -887,7 +885,7 @@ impl Host {
         if self.session(&coordinator)?.archived {
             return Ok(());
         }
-        let id = format!("reclaim:{}:{at}", ticket.id);
+        let id = format!("{RECLAIM_NOTICE_PREFIX}{}:{at}", ticket.id);
         self.send_quietly(&id, None, &coordinator, &notice)?;
         Ok(())
     }
@@ -901,7 +899,7 @@ impl Host {
                 "SELECT id FROM attention WHERE operation_id LIKE ?1 || '%'
                  AND json_extract(data,'$.answer') IS NULL",
             )?
-            .query_map([BUILDS_HELD], |r| r.get(0))?
+            .query_map([BUILDS_HELD_OPERATION], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         if !under {
             self.build_output.held = None;
@@ -923,7 +921,7 @@ impl Host {
             label(free.unwrap_or(0)),
             disk.hard_floor_gb
         );
-        let told = self.tell_inbox(None, &format!("{BUILDS_HELD}{at}"), &notice)?;
+        let told = self.tell_inbox(None, &format!("{BUILDS_HELD_OPERATION}{at}"), &notice)?;
         self.build_output.held = Some(told);
         Ok(())
     }
@@ -1440,7 +1438,7 @@ mod tests {
         let open = |host: &Host| -> Vec<String> {
             let project = host.sessions().unwrap()[0].project_id.clone();
             (host.open_attention(&project).unwrap().into_iter())
-                .filter(|a| a.operation_id.starts_with(BUILDS_HELD))
+                .filter(|a| a.operation_id.starts_with(BUILDS_HELD_OPERATION))
                 .map(|a| a.prompt)
                 .collect()
         };

@@ -2314,6 +2314,10 @@ impl Host {
                 self.reclaim_build_output(ticket_id.as_deref())?;
                 serde_json::to_value(self.disk_use()?)?
             }
+            Command::RetryDelete { path } => {
+                self.retry_delete(Path::new(&path))?;
+                serde_json::to_value(self.disk_use()?)?
+            }
             Command::SetCheckIns {
                 child_turns,
                 human_turns,

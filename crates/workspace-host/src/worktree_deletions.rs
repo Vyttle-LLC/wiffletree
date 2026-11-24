@@ -22,8 +22,6 @@ use std::{
 pub(crate) const REMOVING_PREFIX: &str = ".removing-";
 /// Failed attempts after which the human is told.
 const REPORT_AFTER: i64 = 3;
-/// The inbox operation of a delete's failure notice, followed by what tells it apart.
-const FAILED_NOTICE: &str = "worktree-delete-failed:";
 /// The next attempt of a held delete; see `hold_deletion`.
 const HELD: i64 = i64::MAX;
 /// The wait after the first failed attempt; it doubles with each further one.
@@ -263,6 +261,21 @@ impl Host {
         self.worktree_deletions.due_at = 0;
         Ok(())
     }
+    /// Makes the waiting delete of `folder` due now, as the human asked. A held delete stays
+    /// held until its folder has moved.
+    pub fn retry_delete(&mut self, folder: &Path) -> Result<()> {
+        let changed = self.db.execute(
+            "UPDATE worktree_deletions SET next_attempt_at=?2 WHERE path=?1 AND next_attempt_at<?3",
+            params![folder.to_string_lossy(), now(), HELD],
+        )?;
+        ensure!(
+            changed == 1,
+            "{} is not waiting to be deleted",
+            folder.display()
+        );
+        self.worktree_deletions.due_at = 0;
+        Ok(())
+    }
     /// The folders waiting to be deleted, oldest first.
     pub(crate) fn pending_deletes(&self) -> Result<Vec<PendingDelete>> {
         Ok(self
@@ -407,7 +420,7 @@ impl Host {
         );
         let name = folder.file_name().unwrap_or_default().to_string_lossy();
         let name = &name[..steps::floor_boundary(&name, name.len().min(80))];
-        let id = format!("{FAILED_NOTICE}{recorded_at}:{name}");
+        let id = format!("{DELETE_FAILED_OPERATION}{recorded_at}:{name}");
         let project = ticket
             .and_then(|id| self.ticket(&id).ok())
             .and_then(|ticket| self.session(&ticket.coordinator_id).ok())
@@ -631,6 +644,28 @@ mod tests {
         archive(&host, &second);
         assert_eq!(told(&host, Some(&first)), None);
         assert!(!host.tell_inbox(None, "notice:1", "Nobody to tell").unwrap());
+    }
+
+    #[test]
+    fn a_retry_makes_a_waiting_delete_due_now_but_leaves_a_held_one_held() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let waiting = home.path().join("web/.removing-1");
+        host.record_worktree_deletion(&waiting, None).unwrap();
+        let later = now() + LONGEST_RETRY_MS;
+        (host.db)
+            .execute("UPDATE worktree_deletions SET next_attempt_at=?1", [later])
+            .unwrap();
+        host.retry_delete(&waiting).unwrap();
+        let next = |host: &Host| host.pending_deletes().unwrap()[0].next_attempt_at;
+        assert!(next(&host) < later);
+
+        let held = host.hold_deletion(&home.path().join("web"), "t").unwrap();
+        assert!(host.retry_delete(&held).is_err());
+        assert!(
+            host.retry_delete(&home.path().join("web/.removing-9"))
+                .is_err()
+        );
     }
 
     #[test]
