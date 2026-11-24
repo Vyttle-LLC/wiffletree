@@ -2,6 +2,56 @@
 //! coordinator starts with a prompt and a run folder, and the human allows per project.
 use crate::ModelProfile;
 use serde::{Deserialize, Serialize};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
+
+/// Names another Wiffletree Evaluator helper for runs to start, such as a development build's;
+/// otherwise they start the copy the host installs in its data folder.
+pub const EVALUATOR_APP: &str = "WORKSPACE_EVALUATOR_APP";
+pub const HELPER_NAME: &str = "Wiffletree Evaluator.app";
+
+/// Where the host installs the helper in the data folder `data`. macOS charges Screen Recording
+/// to the outermost bundle, so runs, and the human granting by hand, use this copy rather than
+/// the one inside Wiffletree.app.
+pub fn installed_helper(data: &Path) -> PathBuf {
+    data.join("evaluator").join(HELPER_NAME)
+}
+
+/// The helper `EVALUATOR_APP` names, or else the installed copy.
+pub fn helper_app(data: &Path) -> PathBuf {
+    match std::env::var_os(EVALUATOR_APP) {
+        Some(app) => app.into(),
+        None => installed_helper(data),
+    }
+}
+
+/// Why the human should look twice before a full-desktop run may use `app`: these reach far
+/// beyond their own windows.
+pub fn sensitive_app(app: &str) -> Option<&'static str> {
+    let app = app.to_ascii_lowercase();
+    let terminals = [
+        "com.apple.terminal",
+        "com.googlecode.iterm2",
+        "com.mitchellh.ghostty",
+        "dev.warp.warp-stable",
+        "net.kovidgoyal.kitty",
+        "org.alacritty",
+        "com.github.wez.wezterm",
+    ];
+    if app.starts_with("com.vyttle.wiffletree") {
+        Some("Wiffletree itself: it can drive your agents")
+    } else if terminals.contains(&app.as_str()) {
+        Some("a terminal: it can run any command")
+    } else if app == "com.apple.systempreferences" {
+        Some("System Settings")
+    } else if app == "com.apple.finder" {
+        Some("Finder: it can open and move your files")
+    } else {
+        None
+    }
+}
 
 /// How a run drives the screen: only the app under test, or the whole desktop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,7 +105,7 @@ impl EvaluatorPermission {
 pub enum EvaluationState {
     /// Waiting for the screen. Full desktop only.
     Queued,
-    /// Waiting for the human's choice, or for its pinned model's limit to reset.
+    /// Waiting for the human's choice or Start, or for its pinned model's limit to reset.
     Waiting,
     Running,
     /// It stopped on its own. Whether its report is valid is the coordinator's call.
@@ -80,6 +130,28 @@ impl EvaluationState {
     }
 }
 
+/// The copy of the app under test that an app run drives. The host starts it for each of the
+/// run's turns, on a socket of the run's own, and stops it and all it started when the turn
+/// ends.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvaluationTarget {
+    /// Absolute.
+    pub executable: String,
+    /// They name its data folder with `--data-dir`; the host adds `--automation-socket`.
+    #[serde(default)]
+    pub arguments: Vec<String>,
+    /// Added to an otherwise clean environment. A `PATH` given here goes before the host's.
+    #[serde(default)]
+    pub environment: BTreeMap<String, String>,
+}
+impl EvaluationTarget {
+    /// The folder given to `--data-dir`, as given.
+    pub fn data_folder(&self) -> Option<&str> {
+        let at = self.arguments.iter().position(|arg| arg == "--data-dir")?;
+        self.arguments.get(at + 1).map(String::as_str)
+    }
+}
+
 /// One evaluator run. Its transcript is its session's, which only the human reads.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Evaluation {
@@ -99,6 +171,17 @@ pub struct Evaluation {
     pub mode: EvaluationMode,
     /// Absolute and canonical; it holds `prompt.md`.
     pub folder: String,
+    /// What an app run drives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<EvaluationTarget>,
+    /// The apps a full-desktop run may see and touch, by bundle id; its helper refuses every
+    /// other app.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<String>,
+    /// A full-desktop run holds the screen from when it reaches the front of the queue, through
+    /// the wait for the human's Start, until it ends.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub holds_screen: bool,
     pub state: EvaluationState,
     /// Why it waits, failed or stopped, for the human. A failure's reason never reaches the
     /// coordinator: a provider's error can quote the model.

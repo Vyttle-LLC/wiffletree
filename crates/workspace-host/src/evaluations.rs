@@ -8,8 +8,22 @@ use crate::*;
 /// Where an evaluator's Codex keeps its home, under the data folder.
 const CODEX_HOME: &str = "evaluators/codex-home";
 const PROMPT_FILE: &str = "prompt.md";
+/// Where each app run's test copy writes its output, under the data folder, for the human.
+const TARGET_LOGS: &str = "evaluators/logs";
 /// Why a run waits before the human has chosen for its project.
 const ASKED: &str = "Waiting for the human to allow UI evaluators in this project.";
+/// Why a full-desktop run at the front of the queue waits: nothing touches the screen before.
+const AWAITING_START: &str = "Waiting for the human to press Start.";
+/// The Start card's answers.
+const START_NOW: &str = "Start now";
+const LATER: &str = "Later";
+const SKIP: &str = "Skip these runs";
+pub(crate) const SKIPPED: &str = "Skipped by you.";
+/// Why a full-desktop run that reached its provider's limit ended: going on after the reset
+/// would take the screen without a fresh Start.
+pub(crate) const DESKTOP_AT_LIMIT: &str = "Stopped at the provider's usage limit. A full-desktop run never goes on without your Start; the coordinator can start it again.";
+/// The most apps one full-desktop run may name.
+const MOST_APPS: usize = 10;
 /// Why a run the human stopped ended.
 pub(crate) const STOPPED_BY_YOU: &str = "Stopped by you.";
 pub(crate) const STOPPED_BY_COORDINATOR: &str = "Stopped by its coordinator.";
@@ -52,6 +66,7 @@ pub(crate) fn ended_message(run: &Evaluation) -> String {
 /// What the coordinator sees of a run: never its transcript or a failure's reason.
 fn summary(run: &Evaluation) -> Value {
     let waiting = (run.state == EvaluationState::Waiting).then(|| match run.session_id {
+        None if run.holds_screen => AWAITING_START.to_owned(),
         None => ASKED.to_owned(),
         Some(_) => match run.resets_at {
             Some(at) => format!(
@@ -70,6 +85,7 @@ fn summary(run: &Evaluation) -> Value {
         "reported_model": run.reported_model,
         "effort": run.profile.effort,
         "folder": run.folder,
+        "apps": run.apps,
         "created_at": run.created_at,
         "started_at": run.started_at,
         "ended_at": run.ended_at,
@@ -147,6 +163,9 @@ impl Host {
     /// Answers the Inbox card with one of its choices, as `set_evaluator_permission` does, and
     /// tells the coordinator that asked. Any other answer is refused, so the card stays.
     pub(crate) fn answer_evaluator_card(&mut self, item: &Attention, answer: &str) -> Result<()> {
+        if let Some(run) = item.operation_id.strip_prefix(START_CARD) {
+            return self.answer_start_card(item, run, answer);
+        }
         let permission = EvaluatorPermission::from_answer(answer).with_context(|| {
             format!(
                 "Answer with one of: {}",
@@ -173,6 +192,51 @@ impl Host {
         Ok(())
     }
 
+    /// The Start card of the full-desktop run `id`, which holds the screen. Start now begins
+    /// it, unless its provider is at its limit, when the card stays; Later leaves the card and
+    /// the run first in line; Skip stops it and the project's desktop runs queued after it.
+    fn answer_start_card(&mut self, item: &Attention, id: &str, answer: &str) -> Result<()> {
+        let run = self.evaluation(id)?;
+        if run.state.ended() || run.session_id.is_some() {
+            self.resolve_attention(&item.id, answer)?;
+            return Ok(());
+        }
+        match answer {
+            START_NOW => {
+                if let Some(spent) = self.limit_reached(run.profile.provider, now())? {
+                    let until = match spent.until {
+                        Some(at) => format!(" until {}", policies::reset_time(at)),
+                        None => String::new(),
+                    };
+                    bail!(
+                        "{} is at its usage limit{until}. Press Start now once it resets.",
+                        run.profile.provider.label()
+                    );
+                }
+                self.resolve_attention(&item.id, answer)?;
+                if let Err(error) = self.begin_evaluation(run) {
+                    let run = self.evaluation(id)?;
+                    let reason = format!("Could not start: {error:#}");
+                    self.end_evaluation(run, EvaluationState::Failed, &reason)?;
+                    self.admit_evaluations()?;
+                }
+            }
+            LATER => {}
+            SKIP => {
+                self.resolve_attention(&item.id, answer)?;
+                let queued = (self.evaluations(&run.project_id)?.into_iter()).filter(|other| {
+                    other.mode == EvaluationMode::Desktop && other.state == EvaluationState::Queued
+                });
+                for skipped in std::iter::once(run.clone()).chain(queued.collect::<Vec<_>>()) {
+                    self.end_evaluation(skipped, EvaluationState::Stopped, SKIPPED)?;
+                }
+                self.admit_evaluations()?;
+            }
+            _ => bail!("Answer with one of: {START_NOW}, {LATER}, {SKIP}"),
+        }
+        Ok(())
+    }
+
     /// Closing the project, by archiving its coordinator, turns evaluators off and stops the
     /// runs that have not ended; the service stops those in a turn (`evaluations_in_turn`).
     pub(crate) fn close_evaluations(&mut self, project: &str) -> Result<()> {
@@ -183,7 +247,8 @@ impl Host {
         for run in self.evaluations(project)? {
             self.stop_evaluation_with(run, PROJECT_CLOSED)?;
         }
-        Ok(())
+        // A desktop run of another project may take the screen this project held.
+        self.admit_evaluations()
     }
     /// The sessions in a turn of `project`'s runs that what it allows now no longer allows,
     /// each with its run's mode, for the service to stop.
@@ -239,6 +304,44 @@ impl Host {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The snapshot's runs: every run that has not ended, then each project's latest ended
+    /// ones, up to `RECENT_EVALUATIONS` in all per project; newest first.
+    pub(crate) fn listed_evaluations(&self) -> Result<Vec<Evaluation>> {
+        let all: Vec<Evaluation> = self
+            .db
+            .prepare("SELECT data FROM evaluations ORDER BY created_at DESC, rowid DESC")?
+            .query_map([], |r| decode(r, 0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut listed: std::collections::HashMap<&str, usize> = Default::default();
+        for run in all.iter().filter(|run| !run.state.ended()) {
+            *listed.entry(&run.project_id).or_default() += 1;
+        }
+        let mut kept = vec![];
+        for run in &all {
+            let room = listed.entry(&run.project_id).or_default();
+            if !run.state.ended() {
+                kept.push(run.clone());
+            } else if *room < RECENT_EVALUATIONS {
+                *room += 1;
+                kept.push(run.clone());
+            }
+        }
+        Ok(kept)
+    }
+    /// What the human allows in each project that has a choice.
+    pub(crate) fn evaluator_permissions(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, EvaluatorPermission>> {
+        let rows: Vec<(String, String)> = self
+            .db
+            .prepare("SELECT project_id, permission FROM evaluator_permissions")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        (rows.into_iter())
+            .map(|(project, permission)| Ok((project, serde_json::from_value(json!(permission))?)))
+            .collect()
+    }
+
     /// `start_evaluation`: checks everything a run needs, then creates it. A refusal creates
     /// nothing and says why.
     pub(crate) fn start_evaluation(&mut self, caller: &Session, args: &Value) -> Result<Value> {
@@ -249,7 +352,15 @@ impl Host {
         service::only_arguments(
             "start_evaluation",
             args,
-            &["run_folder", "provider", "model", "effort", "mode"],
+            &[
+                "run_folder",
+                "provider",
+                "model",
+                "effort",
+                "mode",
+                "target",
+                "apps",
+            ],
         )?;
         let string = |key: &str| -> Result<&str> {
             let value = args[key].as_str().map(str::trim).unwrap_or_default();
@@ -278,11 +389,23 @@ impl Host {
             }
             _ => {}
         }
-        ensure!(
-            mode == EvaluationMode::App,
-            "Full desktop evaluators are not available yet. Start an app run instead."
-        );
         let folder = self.run_folder(string("run_folder")?)?;
+        let (target, apps) = match mode {
+            EvaluationMode::App => {
+                ensure!(
+                    args["apps"].is_null(),
+                    "Leave apps out of an app run: it drives only its target"
+                );
+                (Some(self.app_target(&args["target"])?), vec![])
+            }
+            EvaluationMode::Desktop => {
+                ensure!(
+                    args["target"].is_null(),
+                    "Leave target out of a desktop run: it uses the apps you name in apps"
+                );
+                (None, desktop_apps(&args["apps"])?)
+            }
+        };
         self.check_model(&profile)?;
         let at = now();
         let run = Evaluation {
@@ -294,6 +417,9 @@ impl Host {
             reported_model: None,
             mode,
             folder: folder.to_string_lossy().into_owned(),
+            target,
+            apps,
+            holds_screen: false,
             state: match permission {
                 Some(_) => EvaluationState::Queued,
                 None => EvaluationState::Waiting,
@@ -318,8 +444,11 @@ impl Host {
         self.admit_evaluations()?;
         let run = self.evaluation(&run.id)?;
         let next = match run.state {
-            EvaluationState::Waiting if run.session_id.is_none() => {
+            EvaluationState::Waiting if run.session_id.is_none() && !run.holds_screen => {
                 "The human decides whether this project allows UI evaluators. Finish your turn: Wiffletree messages you their answer, and when the run ends."
+            }
+            _ if run.mode == EvaluationMode::Desktop => {
+                "Full-desktop runs take turns at the screen, and each starts only when the human presses Start. Finish your turn: Wiffletree messages you when the run ends, also if the human skips it. Read its report from the folder then."
             }
             _ => {
                 "Finish your turn or carry on: Wiffletree messages you when the run ends. Read its report from the folder then."
@@ -409,6 +538,94 @@ impl Host {
         Ok(folder)
     }
 
+    /// An app run's test copy, as it will start: an absolute executable on a test data folder
+    /// of its own, which no other run that has not ended uses, and given no Wiffletree session
+    /// variable or credential.
+    fn app_target(&self, given: &Value) -> Result<EvaluationTarget> {
+        ensure!(
+            given.is_object(),
+            "Give target: the app under test's executable, its arguments with --data-dir <test data folder>, and the environment it needs"
+        );
+        service::only_arguments("target", given, &["executable", "arguments", "environment"])?;
+        let mut target: EvaluationTarget = serde_json::from_value(given.clone()).context(
+            "Give target as {executable, arguments: [strings], environment: {NAME: value}}",
+        )?;
+        let executable = Path::new(&target.executable);
+        ensure!(
+            executable.is_absolute() && executable.is_file(),
+            "The app under test {} is not an absolute path to an executable",
+            target.executable
+        );
+        ensure!(
+            !target
+                .arguments
+                .iter()
+                .any(|arg| arg == "--automation-socket"),
+            "Leave --automation-socket out of the target's arguments: Wiffletree gives the app a socket of the run's own"
+        );
+        if let Some(name) = (target.environment.keys()).find(|name| session_variable(name)) {
+            bail!(
+                "The app under test may not be given {name}: no Wiffletree session variable or token reaches it"
+            );
+        }
+        // The app reads the last --data-dir it is given; the checks read the only one.
+        ensure!(
+            !(target.arguments.iter()).any(|arg| arg.starts_with("--data-dir=")),
+            "Give --data-dir and its folder as two arguments"
+        );
+        ensure!(
+            (target.arguments.iter())
+                .filter(|arg| *arg == "--data-dir")
+                .count()
+                <= 1,
+            "Give the app under test one --data-dir"
+        );
+        let given_data = target
+            .data_folder()
+            .filter(|folder| Path::new(folder).is_absolute())
+            .context("Give the app under test a test data folder of its own with --data-dir <absolute path>")?;
+        // Canonical, so links and `..` cannot hide an overlap or a shared folder.
+        let data = fs::canonicalize(given_data)
+            .ok()
+            .filter(|data| data.is_dir())
+            .with_context(|| {
+                format!("The test data folder {given_data} does not exist. Create it before starting the run")
+            })?;
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        for own in [
+            self.home.clone(),
+            workspace_core::data_dir::default_directory(&home),
+        ] {
+            let own = fs::canonicalize(&own).unwrap_or(own);
+            ensure!(
+                !data.starts_with(&own) && !own.starts_with(&data),
+                "The test data folder {given_data} overlaps Wiffletree's own data folder {}",
+                own.display()
+            );
+        }
+        let data_text = data.to_string_lossy().into_owned();
+        for run in self.unended_evaluations()? {
+            if run.target.as_ref().and_then(EvaluationTarget::data_folder) == Some(&data_text) {
+                bail!(
+                    "The run {} still drives a copy on the data folder {given_data}. Give each run its own data folder",
+                    run.id
+                );
+            }
+        }
+        let at = target.arguments.iter().position(|arg| arg == "--data-dir");
+        target.arguments[at.expect("data_folder found it") + 1] = data_text;
+        Ok(target)
+    }
+    fn unended_evaluations(&self) -> Result<Vec<Evaluation>> {
+        Ok(self
+            .db
+            .prepare("SELECT data FROM evaluations WHERE json_extract(data,'$.state') NOT IN ('finished','failed','stopped')")?
+            .query_map([], |r| decode(r, 0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Refuses a provider not signed in here, a model its CLI did not list, full IDs and aliases
     /// alike, and an effort the model does not offer. Until the CLI has listed its models
     /// nothing is checked against a guess: the run is refused, and the service reads the list.
@@ -492,6 +709,7 @@ impl Host {
             run.state.name()
         );
         let in_turn = self.stop_evaluation_with(run, STOPPED_BY_COORDINATOR)?;
+        self.admit_evaluations()?;
         let result = summary(&self.evaluation(id)?);
         Ok((result, in_turn))
     }
@@ -504,7 +722,10 @@ impl Host {
             "The run {id} has already {}",
             run.state.name()
         );
-        self.stop_evaluation_with(run, STOPPED_BY_YOU)
+        let in_turn = self.stop_evaluation_with(run, STOPPED_BY_YOU)?;
+        // A run stopped while it waited for Start frees the screen for the next.
+        self.admit_evaluations()?;
+        Ok(in_turn)
     }
 
     /// Ends a run that has not ended as stopped, or returns its session when it is in a turn,
@@ -520,8 +741,8 @@ impl Host {
         Ok(None)
     }
 
-    /// Starts every queued run its project allows: each app run at once, and the oldest
-    /// desktop run whenever no run holds the screen.
+    /// Starts every queued run its project allows: each app run at once. The oldest desktop
+    /// run takes the screen whenever no run holds it, and waits there for the human's Start.
     pub(crate) fn admit_evaluations(&mut self) -> Result<()> {
         let queued: Vec<Evaluation> = self
             .db
@@ -529,12 +750,20 @@ impl Host {
             .query_map([], |r| decode(r, 0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut screen_taken = self.screen_holder()?.is_some();
-        for run in queued {
+        for mut run in queued {
             if run.mode == EvaluationMode::Desktop {
                 if screen_taken {
                     continue;
                 }
                 screen_taken = true;
+                run.holds_screen = true;
+                run.state = EvaluationState::Waiting;
+                run.reason = Some(AWAITING_START.into());
+                self.atomically(|host| {
+                    host.save_evaluation(&run)?;
+                    host.ask_to_start(&run)
+                })?;
+                continue;
             }
             let id = run.id.clone();
             // One run's failure to start must never stop the others.
@@ -550,16 +779,45 @@ impl Host {
         Ok(())
     }
 
-    /// The desktop run that holds the screen: the one admitted and not ended. One at a time.
+    /// The desktop run that holds the screen, from the front of the queue until it ends,
+    /// whether or not the human has pressed Start. One at a time.
     pub(crate) fn screen_holder(&self) -> Result<Option<String>> {
         Ok(self
             .db
             .query_row(
-                "SELECT id FROM evaluations WHERE json_extract(data,'$.mode')='desktop' AND session_id IS NOT NULL AND json_extract(data,'$.state') NOT IN ('finished','failed','stopped')",
+                "SELECT id FROM evaluations WHERE json_extract(data,'$.holds_screen')=1 AND json_extract(data,'$.state') NOT IN ('finished','failed','stopped')",
                 [],
                 |r| r.get(0),
             )
             .optional()?)
+    }
+
+    /// The Inbox card a desktop run at the front of the queue waits on. Nothing touches the
+    /// screen without its Start now.
+    fn ask_to_start(&mut self, run: &Evaluation) -> Result<()> {
+        let apps: Vec<String> = (run.apps.iter())
+            .map(|app| match sensitive_app(app) {
+                Some(why) => format!("{app} ({why})"),
+                None => app.clone(),
+            })
+            .collect();
+        let prompt = format!(
+            "Ready to use your screen\nUI evaluator run {} on {} · {} is next for the screen. It may see and use only {}; every other app stays out of its screenshots and its reach.\nDon't use this Mac until it finishes. Press Esc anywhere, or Stop in the menu bar, to stop it.\nNothing touches the screen until you press {START_NOW}. {LATER} keeps it first in line. {SKIP} stops it and this project's full-desktop runs queued after it, and tells the coordinator they didn't run.",
+            run.id,
+            run.profile.provider.label(),
+            run.profile.model,
+            apps.join(", ")
+        );
+        let options = [START_NOW, LATER, SKIP].map(String::from);
+        self.raise_attention(
+            &run.coordinator_id,
+            "local",
+            &format!("{START_CARD}{}", run.id),
+            &prompt,
+            &options,
+            None,
+        )?;
+        Ok(())
     }
 
     /// Gives an admitted run its own session, pinned to its model, with `prompt.md` as its
@@ -624,10 +882,46 @@ impl Host {
         if session.provider == Provider::Codex {
             provider::prepare_codex_home(&codex_home)?;
         }
+        let app = run.target.map(|target| provider::AppLaunch {
+            target,
+            socket: std::env::temp_dir().join(format!("wiffletree-{}.sock", run.id)),
+            log: self.home.join(TARGET_LOGS).join(format!("{}.log", run.id)),
+        });
+        let desktop = (run.mode == EvaluationMode::Desktop).then(|| provider::DesktopLaunch {
+            helper: provider::helper_app(&self.home),
+            socket: std::env::temp_dir().join(format!("wiffletree-{}-desktop.sock", run.id)),
+            run: run.id.clone(),
+            apps: run.apps.clone(),
+            model: self.model_label(&run.profile),
+            queued: self.queued_desktop_runs().unwrap_or_default(),
+        });
         Ok(provider::EvaluatorLaunch {
             folder: fs::canonicalize(&run.folder)?,
             codex_home,
+            app,
+            desktop,
         })
+    }
+
+    /// A run's model as the human reads it: its provider and the label its CLI lists it under.
+    fn model_label(&self, profile: &ModelProfile) -> String {
+        let listed = (self
+            .listed_models
+            .get(&profile.provider)
+            .into_iter()
+            .flatten())
+        .find(|option| option.model == profile.model);
+        let model = listed.map_or(profile.model.as_str(), |option| option.label.as_str());
+        format!("{} {model}", profile.provider.label())
+    }
+    /// The full-desktop runs that wait for the screen, across every project.
+    fn queued_desktop_runs(&self) -> Result<usize> {
+        let count: i64 = self.db.query_row(
+            "SELECT count(*) FROM evaluations WHERE json_extract(data,'$.mode')='desktop' AND json_extract(data,'$.state')='queued'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(usize::try_from(count)?)
     }
 
     /// A run's turn has started: it runs, whether for the first time or after its limit reset.
@@ -646,8 +940,9 @@ impl Host {
         self.save_evaluation(&run)
     }
 
-    /// A run's turn has ended: at a usage limit it waits for the reset in the same session;
-    /// otherwise the run ends as stopped, failed or finished.
+    /// A run's turn has ended: at a usage limit an app run waits for the reset in the same
+    /// session, and a desktop run fails (`DESKTOP_AT_LIMIT`); otherwise the run ends as
+    /// stopped, failed or finished.
     pub(crate) fn evaluation_turn_ended(
         &mut self,
         session: &str,
@@ -660,6 +955,10 @@ impl Host {
             return Ok(());
         }
         if let (Some(resets_at), None) = (waits_until, stopped) {
+            if run.mode == EvaluationMode::Desktop {
+                self.end_evaluation(run, EvaluationState::Failed, DESKTOP_AT_LIMIT)?;
+                return self.admit_evaluations();
+            }
             run.state = EvaluationState::Waiting;
             run.resets_at = resets_at;
             return self.save_evaluation(&run);
@@ -722,6 +1021,18 @@ impl Host {
         run.ended_at = Some(now());
         self.atomically(|host| {
             host.save_evaluation(&run)?;
+            // A desktop run that ends before its Start closes its card.
+            let card: Option<String> = host
+                .db
+                .query_row(
+                    "SELECT id FROM attention WHERE operation_id=?1 AND json_extract(data,'$.answer') IS NULL",
+                    [format!("{START_CARD}{}", run.id)],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(card) = card {
+                host.resolve_attention(&card, "The run ended")?;
+            }
             if let Some(id) = &run.session_id {
                 host.db.execute(
                     "UPDATE messages SET receipt='completed' WHERE recipient=?1 AND receipt IN ('queued','held')",
@@ -752,6 +1063,13 @@ impl Host {
     }
 }
 
+/// A variable that could carry a Wiffletree session or a credential into the test copy. Only
+/// the provider stubs are passed among Wiffletree's own.
+fn session_variable(name: &str) -> bool {
+    name.ends_with("_TOKEN")
+        || (name.starts_with("WORKSPACE_")
+            && !["WORKSPACE_CLAUDE_BIN", "WORKSPACE_CODEX_BIN"].contains(&name))
+}
 /// Why a run ended when what its project allows no longer allows it.
 pub(crate) fn not_allowed(mode: EvaluationMode) -> String {
     format!("Stopped: {} is not allowed in this project.", mode.label())
@@ -759,6 +1077,53 @@ pub(crate) fn not_allowed(mode: EvaluationMode) -> String {
 /// The start of the operation ids of `project`'s Inbox cards; each ends with the run that asked.
 fn card_prefix(project: &str) -> String {
     format!("{EVALUATION_PREFIX}allow:{project}:")
+}
+/// The start of a Start card's operation id, which ends with its run.
+const START_CARD: &str = "evaluation:start:";
+/// Whether an Inbox item is a Start card, which only its answers close.
+pub(crate) fn is_start_card(item: &Attention) -> bool {
+    item.operation_id.starts_with(START_CARD)
+}
+
+/// A desktop run's apps: one to `MOST_APPS` bundle ids, never Wiffletree Evaluator itself.
+/// Nothing is allowed that the coordinator does not name.
+fn desktop_apps(given: &Value) -> Result<Vec<String>> {
+    let apps: Vec<String> = serde_json::from_value(given.clone()).unwrap_or_default();
+    ensure!(
+        !apps.is_empty(),
+        "Name the apps a desktop run may use in apps, by bundle id, such as [\"com.apple.calculator\"]. It sees and touches no other app."
+    );
+    ensure!(
+        apps.len() <= MOST_APPS,
+        "Name at most {MOST_APPS} apps for one run"
+    );
+    let mut named: Vec<String> = vec![];
+    for app in apps {
+        let app = app.trim().to_owned();
+        ensure!(
+            is_bundle_id(&app),
+            "{app} is not a bundle id, such as com.apple.calculator"
+        );
+        ensure!(
+            !app.eq_ignore_ascii_case(HELPER_BUNDLE_ID),
+            "A run may not use Wiffletree Evaluator itself"
+        );
+        if !named.iter().any(|other| other.eq_ignore_ascii_case(&app)) {
+            named.push(app);
+        }
+    }
+    Ok(named)
+}
+/// The helper's bundle id, which the helper also refuses.
+const HELPER_BUNDLE_ID: &str = "com.vyttle.wiffletree.evaluator";
+/// A reverse-DNS bundle id: at least two parts of letters, digits, `-` and `_`, no wildcard.
+fn is_bundle_id(text: &str) -> bool {
+    text.len() <= 155
+        && text.split('.').count() >= 2
+        && text.split('.').all(|part| {
+            !part.is_empty()
+                && (part.chars()).all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
 }
 fn permission_label(permission: EvaluatorPermission) -> &'static str {
     (EvaluatorPermission::CHOICES.iter())
@@ -812,7 +1177,17 @@ pub(crate) mod tests {
             folder.to_string_lossy().into_owned()
         }
         fn start(&mut self, folder: &str, mode: &str) -> Result<Value> {
-            let args = json!({"run_folder":folder,"provider":"claude","model":"opus","effort":"high","mode":mode});
+            let data = format!("{folder}-data");
+            self.start_with(folder, mode, self.target(&data))
+        }
+        /// An app under test on the test data folder `data`.
+        /// Creates `data`, as a coordinator does before it starts a run.
+        fn target(&self, data: &str) -> Value {
+            fs::create_dir_all(data).unwrap();
+            json!({"executable":"/usr/bin/true","arguments":["--data-dir",data],"environment":{"WORKSPACE_CLAUDE_BIN":"/stubs/claude"}})
+        }
+        fn start_with(&mut self, folder: &str, mode: &str, target: Value) -> Result<Value> {
+            let args = json!({"run_folder":folder,"provider":"claude","model":"opus","effort":"high","mode":mode,"target":target});
             let coordinator = self.coordinator.clone();
             self.host.start_evaluation(&coordinator, &args)
         }
@@ -828,31 +1203,133 @@ pub(crate) mod tests {
                 .filter(|m| m.id.starts_with(EVALUATION_PREFIX))
                 .collect()
         }
-        /// A desktop run as `start_evaluation` will create one once ticket 4 allows it.
-        fn queue_desktop(&mut self, name: &str) -> String {
-            let id = self.app_run(name);
-            let mut run = self.host.evaluation(&id).unwrap();
-            run.id = format!("desktop-{id}");
-            run.mode = EvaluationMode::Desktop;
-            run.session_id = None;
-            run.state = EvaluationState::Queued;
-            run.ended_at = None;
-            self.host.save_evaluation(&run).unwrap();
-            run.id
-        }
-        /// An ended app run, as a source for `queue_desktop`.
-        fn app_run(&mut self, name: &str) -> String {
+        /// A desktop run on Calculator, in a folder of its own.
+        fn start_desktop(&mut self, name: &str) -> String {
             let folder = self.folder(name);
-            let id = self.start(&folder, "app").unwrap()["run_id"]
-                .as_str()
-                .unwrap()
-                .to_owned();
-            let session = self.host.evaluation(&id).unwrap().session_id.unwrap();
-            self.host
-                .evaluation_turn_ended(&session, None, None, None)
-                .unwrap();
-            id
+            let args = json!({"run_folder":folder,"provider":"claude","model":"opus","effort":"high","mode":"desktop","apps":["com.apple.calculator"]});
+            let coordinator = self.coordinator.clone();
+            let started = self.host.start_evaluation(&coordinator, &args).unwrap();
+            started["run_id"].as_str().unwrap().to_owned()
         }
+        /// The open Start card of `run`.
+        fn start_card(&self, run: &str) -> Option<Attention> {
+            (self
+                .host
+                .open_attention(&self.coordinator.project_id)
+                .unwrap())
+            .into_iter()
+            .find(|item| item.operation_id == format!("{START_CARD}{run}"))
+        }
+        fn answer_start(&mut self, run: &str, answer: &str) -> Result<Attention> {
+            let card = self.start_card(run).expect("the run's Start card is open");
+            self.host.answer_attention(&card.id, answer)
+        }
+        fn state(&self, run: &str) -> EvaluationState {
+            self.host.evaluation(run).unwrap().state
+        }
+    }
+
+    #[test]
+    fn an_app_run_needs_a_test_copy_on_a_data_folder_of_its_own_with_no_session_variable() {
+        let mut f = fixture();
+        f.allow(EvaluatorPermission::App);
+        let folder = f.folder("run-a");
+        let data = f.runs.path().join("profile").to_string_lossy().into_owned();
+        let refused = |f: &mut Fixture, target: Value| {
+            let error = f.start_with(&folder, "app", target).unwrap_err();
+            assert!(
+                f.host
+                    .evaluations(&f.coordinator.project_id)
+                    .unwrap()
+                    .is_empty()
+            );
+            error.to_string()
+        };
+        assert!(refused(&mut f, Value::Null).contains("Give target"));
+        let mut relative = f.target(&data);
+        relative["executable"] = json!("workspace-desktop");
+        assert!(refused(&mut f, relative).contains("absolute path to an executable"));
+        let mut no_data = f.target(&data);
+        no_data["arguments"] = json!(["--demo-repository", "/tmp/demo"]);
+        assert!(refused(&mut f, no_data).contains("--data-dir"));
+        let own = f.host.home.to_string_lossy().into_owned();
+        let mut twice = f.target(&data);
+        twice["arguments"] = json!(["--data-dir", data, "--data-dir", own]);
+        assert!(refused(&mut f, twice).contains("one --data-dir"));
+        let mut joined = f.target(&data);
+        joined["arguments"] = json!([format!("--data-dir={data}"), "--data-dir", own]);
+        assert!(refused(&mut f, joined).contains("two arguments"));
+        let mut missing = f.target(&data);
+        let absent = f.runs.path().join("not-created/profile");
+        missing["arguments"] = json!(["--data-dir", absent]);
+        assert!(refused(&mut f, missing).contains("does not exist"));
+        let mut socket = f.target(&data);
+        socket["arguments"] = json!(["--data-dir", data, "--automation-socket", "/tmp/s"]);
+        assert!(refused(&mut f, socket).contains("--automation-socket"));
+        for variable in [
+            "WORKSPACE_TOKEN",
+            "WORKSPACE_SOCKET",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+        ] {
+            let mut secret = f.target(&data);
+            secret["environment"][variable] = json!("x");
+            assert!(refused(&mut f, secret).contains(variable), "{variable}");
+        }
+        let own = f
+            .host
+            .home
+            .join("test-profile")
+            .to_string_lossy()
+            .into_owned();
+        let own = f.target(&own);
+        assert!(refused(&mut f, own).contains("Wiffletree's own data folder"));
+
+        let started = f.start_with(&folder, "app", f.target(&data)).unwrap();
+        let run = f
+            .host
+            .evaluation(started["run_id"].as_str().unwrap())
+            .unwrap();
+        let target = run.target.unwrap();
+        assert_eq!(target.environment["WORKSPACE_CLAUDE_BIN"], "/stubs/claude");
+        // Stored canonical, as the copy will use it.
+        let canonical = fs::canonicalize(&data)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(target.data_folder(), Some(canonical.as_str()));
+    }
+
+    #[test]
+    fn a_second_live_run_on_the_same_data_folder_is_refused() {
+        let mut f = fixture();
+        f.allow(EvaluatorPermission::App);
+        let data = f.runs.path().join("profile").to_string_lossy().into_owned();
+        let first = f.folder("run-a");
+        let id = f.start_with(&first, "app", f.target(&data)).unwrap()["run_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let second = f.folder("run-b");
+        let refused = f.start_with(&second, "app", f.target(&data)).unwrap_err();
+        assert!(refused.to_string().contains(&id), "{refused}");
+        // The same folder through another path is the same folder.
+        let other_path = format!(
+            "{}/../{}/profile",
+            f.runs.path().display(),
+            f.runs.path().file_name().unwrap().to_string_lossy()
+        );
+        assert!(f.start_with(&second, "app", f.target(&other_path)).is_err());
+        // And through a link.
+        let link = f.runs.path().join("profile-link");
+        std::os::unix::fs::symlink(&data, &link).unwrap();
+        let linked = f.target(&link.to_string_lossy());
+        assert!(f.start_with(&second, "app", linked).is_err());
+        let session = f.host.evaluation(&id).unwrap().session_id.unwrap();
+        f.host
+            .evaluation_turn_ended(&session, None, None, None)
+            .unwrap();
+        f.start_with(&second, "app", f.target(&data)).unwrap();
     }
 
     #[test]
@@ -920,10 +1397,11 @@ pub(crate) mod tests {
                 f.host.start_evaluation(&coordinator, &args).unwrap_err()
             )
         };
-        let args = |folder: &str, model: &str, effort: &str, mode: &str| json!({"run_folder":folder,"provider":"claude","model":model,"effort":effort,"mode":mode});
-        // Desktop is not available until ticket 4, and raises no card.
+        let target = f.target(&format!("{folder}-data"));
+        let args = |folder: &str, model: &str, effort: &str, mode: &str| json!({"run_folder":folder,"provider":"claude","model":model,"effort":effort,"mode":mode,"target":target});
+        // A desktop run names its apps and no target, and raises no card when refused.
         let desktop = refused(&mut f, args(&folder, "opus", "high", "desktop"));
-        assert!(desktop.contains("not available yet"), "{desktop}");
+        assert!(desktop.contains("Leave target out"), "{desktop}");
         let unknown = refused(&mut f, args(&folder, "gpt-9", "high", "app"));
         assert!(
             unknown.contains("does not offer the model gpt-9"),
@@ -1071,7 +1549,8 @@ pub(crate) mod tests {
         let mut f = fixture();
         f.allow(EvaluatorPermission::App);
         let folder = f.folder("run-a");
-        let args = json!({"run_folder":folder,"provider":"claude","model":"claude-opus-5-5","effort":"high","mode":"app"});
+        let target = f.target(&format!("{folder}-data"));
+        let args = json!({"run_folder":folder,"provider":"claude","model":"claude-opus-5-5","effort":"high","mode":"app","target":target});
         let coordinator = f.coordinator.clone();
         let started = f.host.start_evaluation(&coordinator, &args).unwrap();
         assert_eq!(started["state"], "running");
@@ -1167,9 +1646,9 @@ pub(crate) mod tests {
     fn desktop_runs_take_turns_at_the_screen_while_app_runs_go_side_by_side() {
         let mut f = fixture();
         f.allow(EvaluatorPermission::Desktop);
-        let first = f.queue_desktop("d1");
-        let second = f.queue_desktop("d2");
-        f.host.admit_evaluations().unwrap();
+        let first = f.start_desktop("d1");
+        let second = f.start_desktop("d2");
+        f.answer_start(&first, START_NOW).unwrap();
         let run = f.host.evaluation(&first).unwrap();
         assert_eq!(run.state, EvaluationState::Running, "{:?}", run.reason);
         assert_eq!(f.host.screen_holder().unwrap(), Some(first.clone()));
@@ -1196,11 +1675,229 @@ pub(crate) mod tests {
             Some(not_allowed(EvaluationMode::Desktop).as_str())
         );
         assert_eq!(f.host.screen_holder().unwrap(), None);
+        assert!(f.start_card(&second).is_none(), "its Start card closed");
         let project = f.coordinator.project_id.clone();
         let running = (f.host.evaluations(&project).unwrap().into_iter())
             .filter(|run| run.state == EvaluationState::Running)
             .count();
         assert_eq!(running, 2);
+    }
+
+    #[test]
+    fn a_desktop_run_names_the_apps_it_may_use_and_no_other() {
+        let mut f = fixture();
+        f.allow(EvaluatorPermission::Desktop);
+        let folder = f.folder("d1");
+        let mut refused = |apps: Value| {
+            let args = json!({"run_folder":folder,"provider":"claude","model":"opus","effort":"high","mode":"desktop","apps":apps});
+            let coordinator = f.coordinator.clone();
+            let error = f.host.start_evaluation(&coordinator, &args).unwrap_err();
+            assert!(
+                f.host
+                    .evaluations(&coordinator.project_id)
+                    .unwrap()
+                    .is_empty()
+            );
+            error.to_string()
+        };
+        assert!(refused(Value::Null).contains("Name the apps"));
+        assert!(refused(json!([])).contains("Name the apps"));
+        assert!(refused(json!(["Calculator"])).contains("not a bundle id"));
+        assert!(refused(json!(["com.apple.*"])).contains("not a bundle id"));
+        assert!(refused(json!(["com.vyttle.wiffletree.evaluator"])).contains("Evaluator itself"));
+        let many: Vec<String> = (0..11).map(|n| format!("com.example.app{n}")).collect();
+        assert!(refused(json!(many)).contains("at most"));
+        // An app run names a target and no apps.
+        let app_folder = f.folder("a1");
+        let mut app = json!({"run_folder":app_folder,"provider":"claude","model":"opus","effort":"high","mode":"app","target":f.target(&format!("{app_folder}-data")),"apps":["com.apple.calculator"]});
+        let coordinator = f.coordinator.clone();
+        let error = f.host.start_evaluation(&coordinator, &app).unwrap_err();
+        assert!(error.to_string().contains("Leave apps out"), "{error}");
+        app["apps"] = Value::Null;
+        f.host.start_evaluation(&coordinator, &app).unwrap();
+
+        let id = f.start_desktop("d2");
+        let run = f.host.evaluation(&id).unwrap();
+        assert_eq!(run.apps, ["com.apple.calculator"]);
+        assert_eq!(run.target, None);
+        let listed = f.host.list_evaluations(&coordinator, &json!({})).unwrap();
+        assert_eq!(listed["runs"][0]["apps"], json!(["com.apple.calculator"]));
+    }
+
+    #[test]
+    fn nothing_touches_the_screen_until_the_human_presses_start() {
+        let mut f = fixture();
+        f.allow(EvaluatorPermission::Desktop);
+        let folder = f.folder("d1");
+        let args = json!({"run_folder":folder,"provider":"claude","model":"opus","effort":"high","mode":"desktop","apps":["com.apple.calculator","com.apple.Terminal"]});
+        let coordinator = f.coordinator.clone();
+        let started = f.host.start_evaluation(&coordinator, &args).unwrap();
+        assert_eq!(started["state"], "waiting");
+        assert_eq!(started["waiting"], AWAITING_START);
+        assert!(started["next"].as_str().unwrap().contains("presses Start"));
+        let first = started["run_id"].as_str().unwrap().to_owned();
+        let second = f.start_desktop("d2");
+        // The first holds the screen with no session; the second waits behind it.
+        let run = f.host.evaluation(&first).unwrap();
+        assert_eq!(
+            (run.state, run.session_id.as_deref()),
+            (EvaluationState::Waiting, None)
+        );
+        assert_eq!(f.host.screen_holder().unwrap(), Some(first.clone()));
+        assert_eq!(f.state(&second), EvaluationState::Queued);
+        let card = f.start_card(&first).unwrap();
+        assert_eq!(card.options, [START_NOW, LATER, SKIP]);
+        assert!(
+            card.prompt.contains("com.apple.Terminal (a terminal"),
+            "{}",
+            card.prompt
+        );
+        assert!(f.start_card(&second).is_none());
+        // The card cannot be dismissed or answered with anything else, and Later leaves it.
+        assert!(f.host.dismiss_attention(&card.id).is_err());
+        assert!(f.answer_start(&first, "sure").is_err());
+        f.answer_start(&first, LATER).unwrap();
+        assert!(f.start_card(&first).is_some());
+        assert_eq!(f.host.evaluation(&first).unwrap().session_id, None);
+        // Start now gives it its session, and only then.
+        f.answer_start(&first, START_NOW).unwrap();
+        assert!(f.start_card(&first).is_none());
+        let run = f.host.evaluation(&first).unwrap();
+        assert_eq!(run.state, EvaluationState::Running);
+        assert!(run.session_id.is_some());
+        // When it ends, the next one waits for its own Start.
+        f.host
+            .evaluation_turn_ended(run.session_id.as_deref().unwrap(), None, None, None)
+            .unwrap();
+        assert_eq!(f.host.screen_holder().unwrap(), Some(second.clone()));
+        assert_eq!(f.state(&second), EvaluationState::Waiting);
+        assert!(f.start_card(&second).is_some());
+        assert_eq!(f.host.evaluation(&second).unwrap().session_id, None);
+    }
+
+    #[test]
+    fn skip_stops_the_run_at_the_screen_and_the_projects_desktop_runs_behind_it() {
+        let mut f = fixture();
+        f.allow(EvaluatorPermission::Desktop);
+        let first = f.start_desktop("d1");
+        let second = f.start_desktop("d2");
+        let app = f.folder("a1");
+        f.start(&app, "app").unwrap();
+        f.answer_start(&first, SKIP).unwrap();
+        for run in [&first, &second] {
+            let run = f.host.evaluation(run).unwrap();
+            assert_eq!(run.state, EvaluationState::Stopped);
+            assert_eq!(run.reason.as_deref(), Some(SKIPPED));
+            assert_eq!(run.session_id, None);
+        }
+        assert_eq!(f.host.screen_holder().unwrap(), None);
+        // The coordinator hears that each ended, and the app run goes on.
+        let told = f.messages_to_coordinator();
+        assert!(
+            told.iter()
+                .any(|m| m.body.starts_with(&format!("Run {first} stopped")))
+        );
+        assert!(
+            told.iter()
+                .any(|m| m.body.starts_with(&format!("Run {second} stopped")))
+        );
+        let project = f.coordinator.project_id.clone();
+        let running = (f.host.evaluations(&project).unwrap().into_iter())
+            .filter(|run| run.state == EvaluationState::Running)
+            .count();
+        assert_eq!(running, 1);
+    }
+
+    #[test]
+    fn a_stop_while_it_waits_for_start_closes_the_card_and_passes_the_screen_on() {
+        let mut f = fixture();
+        f.allow(EvaluatorPermission::Desktop);
+        let first = f.start_desktop("d1");
+        let second = f.start_desktop("d2");
+        assert_eq!(f.host.stop_evaluation(&first).unwrap(), None);
+        assert_eq!(f.state(&first), EvaluationState::Stopped);
+        assert!(f.start_card(&first).is_none());
+        assert_eq!(f.host.screen_holder().unwrap(), Some(second.clone()));
+        assert!(f.start_card(&second).is_some());
+        let coordinator = f.coordinator.clone();
+        f.host
+            .coordinator_stops_evaluation(&coordinator, &json!({"run_id": second}))
+            .unwrap();
+        assert_eq!(f.host.screen_holder().unwrap(), None);
+    }
+
+    #[test]
+    fn a_desktop_run_never_goes_on_after_a_limit_without_a_fresh_start() {
+        let mut f = fixture();
+        f.allow(EvaluatorPermission::Desktop);
+        let first = f.start_desktop("d1");
+        let second = f.start_desktop("d2");
+        f.answer_start(&first, START_NOW).unwrap();
+        // Its turn reached the limit: it fails, rather than wait to take the screen later.
+        let session = f.host.evaluation(&first).unwrap().session_id.unwrap();
+        f.host
+            .evaluation_turn_ended(&session, None, Some("limit"), Some(None))
+            .unwrap();
+        let run = f.host.evaluation(&first).unwrap();
+        assert_eq!(run.state, EvaluationState::Failed);
+        assert_eq!(run.reason.as_deref(), Some(DESKTOP_AT_LIMIT));
+        assert_eq!(f.host.screen_holder().unwrap(), Some(second.clone()));
+        // At the limit, Start now is refused and the card stays.
+        let at = now();
+        f.host
+            .record_quota(QuotaReading {
+                provider: Provider::Claude,
+                account: None,
+                observed_at: at,
+                source: "Claude stream".into(),
+                windows: vec![QuotaWindow {
+                    key: "five_hour".into(),
+                    label: "Session".into(),
+                    used_percent: Some(100.),
+                    observed_at: at,
+                    duration_mins: Some(300),
+                    resets_at: Some(at + 3_600_000),
+                    status: None,
+                }],
+                error: None,
+            })
+            .unwrap();
+        let refused = f.answer_start(&second, START_NOW).unwrap_err();
+        assert!(refused.to_string().contains("usage limit"), "{refused}");
+        assert!(f.start_card(&second).is_some());
+        assert_eq!(f.host.evaluation(&second).unwrap().session_id, None);
+    }
+
+    #[test]
+    fn a_desktop_runs_turn_starts_its_helper_on_the_runs_apps() {
+        let mut f = fixture();
+        f.allow(EvaluatorPermission::Desktop);
+        let id = f.start_desktop("d1");
+        f.answer_start(&id, START_NOW).unwrap();
+        let session = f.host.evaluation(&id).unwrap().session_id.unwrap();
+        let launch = f
+            .host
+            .evaluator_launch(&f.host.session(&session).unwrap())
+            .unwrap();
+        assert!(launch.app.is_none());
+        let desktop = launch.desktop.unwrap();
+        assert_eq!(desktop.apps, ["com.apple.calculator"]);
+        // The panel shows the model as the CLI lists it, here the label "opus".
+        assert_eq!(desktop.model, "Claude opus");
+        assert_eq!(desktop.queued, 0);
+        assert_eq!(desktop.run, id);
+        assert!(
+            desktop
+                .helper
+                .ends_with("evaluator/Wiffletree Evaluator.app")
+                || std::env::var_os("WORKSPACE_EVALUATOR_APP").is_some()
+        );
+        assert!(
+            desktop
+                .socket
+                .to_string_lossy()
+                .ends_with(&format!("wiffletree-{id}-desktop.sock"))
+        );
     }
 
     #[test]
@@ -1299,6 +1996,40 @@ pub(crate) mod tests {
         assert_eq!(
             f.host.evaluation(&id).unwrap().state,
             EvaluationState::Stopped
+        );
+    }
+
+    #[test]
+    fn the_snapshot_lists_every_unended_run_and_a_projects_latest_ended_ones() {
+        let mut f = fixture();
+        let project = f.coordinator.project_id.clone();
+        assert!(f.host.snapshot().unwrap().evaluator_permissions.is_empty());
+        let folder = f.folder("held");
+        let held = f.start(&folder, "app").unwrap()["run_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut ended = f.host.evaluation(&held).unwrap();
+        ended.state = EvaluationState::Finished;
+        for at in 0..RECENT_EVALUATIONS as i64 + 3 {
+            ended.id = format!("ended-{at}");
+            ended.created_at = at;
+            f.host.save_evaluation(&ended).unwrap();
+        }
+        let snapshot = f.host.snapshot().unwrap();
+        let listed: Vec<&str> = (snapshot.evaluations.iter())
+            .map(|run| run.id.as_str())
+            .collect();
+        assert_eq!(listed.len(), RECENT_EVALUATIONS);
+        // The held run is the newest; the oldest ended runs make room for it.
+        assert_eq!(listed[0], held);
+        assert_eq!(listed[1], format!("ended-{}", RECENT_EVALUATIONS + 2));
+        assert!(!listed.contains(&"ended-3"));
+        f.allow(EvaluatorPermission::Desktop);
+        let snapshot = f.host.snapshot().unwrap();
+        assert_eq!(
+            snapshot.evaluator_permissions[&project],
+            EvaluatorPermission::Desktop
         );
     }
 }

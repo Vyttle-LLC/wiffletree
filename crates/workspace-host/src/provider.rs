@@ -1,10 +1,12 @@
 //! Noninteractive provider turns with the user's YOLO execution policy, apart from comment
 //! sorting and assistant threads, which the provider holds to what they are given.
 mod act_run;
+mod app_target;
 mod codex_compaction;
 mod connectors;
 mod constrained;
 mod conversation;
+mod desktop_helper;
 mod evaluator;
 mod output;
 mod restricted;
@@ -14,9 +16,14 @@ use crate::runtime::LowPriority as _;
 use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
 pub use act_run::{UrlAct, act_call_refused, act_run};
+pub use app_target::AppLaunch;
 pub use connectors::{Connector, claude_ai_connectors};
 use conversation::tool_calls;
 pub use conversation::{ConversationLaunch, SourceTools, is_claude_ai};
+pub use desktop_helper::{
+    DesktopLaunch, EVALUATOR_APP, STOPPED_BY_ESCAPE, STOPPED_FROM_MENU, bundle_of, bundled_helper,
+    helper_app, install_helper,
+};
 pub use evaluator::{EvaluatorLaunch, prepare_codex_home};
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
 use output::{Next, Output, StopReading};
@@ -67,6 +74,9 @@ pub enum ProviderEvent {
     /// What the Assistant's Claude reported at its start: the tools each source's server
     /// offers, and the servers no Space lists.
     SourceTools(SourceTools),
+    /// The human stopped a full-desktop run on the screen, with Esc or the menu bar's Stop; the
+    /// turn is already cancelled, and this is why.
+    StoppedOnScreen(String),
     Finished {
         error: Option<String>,
         usage: Value,
@@ -584,16 +594,7 @@ impl Process {
         if self.status.is_some() {
             return Ok(true);
         }
-        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        let options = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
-        if unsafe { libc::waitid(libc::P_PID, self.child.id(), &mut info, options) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        #[cfg(target_os = "macos")]
-        let pid = info.si_pid;
-        #[cfg(not(target_os = "macos"))]
-        let pid = unsafe { info.si_pid() };
-        Ok(pid != 0)
+        exited_unreaped(&self.child)
     }
     /// Stops the provider's group, after the watcher's last look at it, and only then reaps
     /// the leader. Later calls return its status without signalling again.
@@ -606,6 +607,20 @@ impl Process {
         self.status = Some(status);
         Ok(status)
     }
+}
+/// Whether `child` has exited, without reaping it: until it is reaped, neither its id nor its
+/// group's can be given to another process.
+fn exited_unreaped(child: &Child) -> Result<bool> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let options = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
+    if unsafe { libc::waitid(libc::P_PID, child.id(), &mut info, options) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    #[cfg(target_os = "macos")]
+    let pid = info.si_pid;
+    #[cfg(not(target_os = "macos"))]
+    let pid = unsafe { info.si_pid() };
+    Ok(pid != 0)
 }
 /// The error a running turn stops with when its cancel flag is set. Callers recognise it by
 /// type, so provider output with the same text cannot pass for it.
@@ -628,8 +643,9 @@ fn check_running(cancel: &AtomicBool) -> Result<()> {
 /// to an end of its own, `Finished` last. Whichever way it ends, the host hears of every
 /// process the watcher saw before it hears of the end.
 pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEvent)) -> Result<()> {
-    let mut watch = None;
-    let finished = run_turn(turn, cancel, &mut emit, &mut watch);
+    let (mut watch, mut desktop) = (None, None);
+    let finished = run_turn(turn, cancel, &mut emit, &mut watch, &mut desktop);
+    settle_desktop(desktop, &mut emit);
     if let Some(watch) = watch {
         // A turn that ended on its own may leave processes running, so those still exiting
         // with the provider get a moment first. A turn cut short has everything stopped.
@@ -640,6 +656,18 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
     }
     emit(finished?);
     Ok(())
+}
+/// Tells the host why a full-desktop run's helper stopped the turn, when the human stopped it on
+/// the screen, and then lets the helper quit. Read once the turn has ended, however it ended:
+/// the helper stores its reason before it cancels the turn, so a turn its stop cut short always
+/// ends as stopped, with the reason, never as failed.
+fn settle_desktop(
+    desktop: Option<desktop_helper::RunningHelper>,
+    emit: &mut impl FnMut(ProviderEvent),
+) {
+    if let Some(reason) = desktop.as_ref().and_then(|helper| helper.take_stop()) {
+        emit(ProviderEvent::StoppedOnScreen(reason));
+    }
 }
 /// Sends the host what the watcher has seen of the run's tree since it was last asked.
 fn report_seen(watching: &Watch, emit: &mut impl FnMut(ProviderEvent)) {
@@ -654,6 +682,7 @@ fn run_turn(
     cancel: Arc<AtomicBool>,
     emit: &mut impl FnMut(ProviderEvent),
     watch: &mut Option<Watch>,
+    desktop: &mut Option<desktop_helper::RunningHelper>,
 ) -> Result<ProviderEvent> {
     let quota_account = if turn.session.provider == Provider::Claude {
         crate::runtime::claude_account(&turn.cwd).ok().flatten()
@@ -663,6 +692,28 @@ fn run_turn(
     // A stop that lands before launch is a cancellation like any other.
     check_running(&cancel)?;
     let input = input(&turn)?;
+    // An app run's test copy runs for the turn and is stopped with it, however it ends.
+    let _target = match turn
+        .evaluator
+        .as_ref()
+        .and_then(|launch| launch.app.as_ref())
+    {
+        Some(app) => Some(app_target::RunningTarget::start(
+            app,
+            app_target::SOCKET_WAIT,
+            &cancel,
+        )?),
+        None => None,
+    };
+    // A full-desktop run's helper runs for the turn; `run` settles it once the turn has ended.
+    *desktop = match turn
+        .evaluator
+        .as_ref()
+        .and_then(|launch| launch.desktop.as_ref())
+    {
+        Some(launch) => Some(desktop_helper::RunningHelper::start(launch, &cancel)?),
+        None => None,
+    };
     let mut process = Process {
         child: command(&turn)?
             .spawn()

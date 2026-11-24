@@ -14,6 +14,16 @@ fn main() -> Result<()> {
             .and_then(|role| serde_json::from_value(serde_json::Value::String(role.clone())).ok());
         return workspace_host::mcp::serve_stdio(workspace_host::mcp::tools_for(role));
     }
+    if let [command, socket, folder] = args.as_slice()
+        && command == "app-driver-mcp"
+    {
+        return workspace_host::app_driver::serve_stdio(socket.as_ref(), folder.as_ref());
+    }
+    if let [command, socket, folder] = args.as_slice()
+        && command == "desktop-driver-mcp"
+    {
+        return workspace_host::desktop_driver::serve_stdio(socket.as_ref(), folder.as_ref());
+    }
     // An MCP source the Assistant's Claude is offered for its read tools alone.
     if let [first, allowed, command, server_args @ ..] = &args[..]
         && first == "mcp-filter"
@@ -190,8 +200,12 @@ fn install_agent_tools(data: &std::path::Path, binary: &std::path::Path) {
 /// removes the copies no host uses.
 fn serve(args: &[String]) -> Result<()> {
     let mut stops = catch_stop_signals()?;
-    // SAFETY: no other thread has started yet.
-    unsafe { workspace_host::login_env::adopt() };
+    // A test copy of the app that a UI evaluator drives keeps the PATH and provider stubs it
+    // was started with.
+    if std::env::var_os(workspace_host::login_env::SKIP).is_none() {
+        // SAFETY: no other thread has started yet.
+        unsafe { workspace_host::login_env::adopt() };
+    }
     let mut data = None;
     let mut child = false;
     let mut app = None;
@@ -208,6 +222,21 @@ fn serve(args: &[String]) -> Result<()> {
     ensure!(!(child && app.is_some()), "A child host takes no --app");
     std::fs::create_dir_all(&data)?;
     let data = std::fs::canonicalize(&data)?;
+    // Full-desktop UI evaluators run in the helper the app ships, installed outside the app's
+    // bundle so that macOS charges its grants to it alone. A launchd host is given the bundle
+    // with --app; a child host runs from inside it.
+    if std::env::var_os(workspace_host::provider::EVALUATOR_APP).is_none() {
+        let exe = std::env::current_exe()?;
+        let bundle = app.clone().or_else(|| {
+            workspace_host::provider::bundle_of(&exe).map(std::path::Path::to_path_buf)
+        });
+        let bundled = bundle.map(|bundle| workspace_host::provider::bundled_helper(&bundle));
+        if let Some(bundled) = bundled.filter(|bundled| bundled.is_dir())
+            && let Err(error) = workspace_host::provider::install_helper(&bundled, &data)
+        {
+            eprintln!("Installing Wiffletree Evaluator: {error:#}");
+        }
+    }
     workspace_host::socket::socket_path(&data)?;
     let binary = std::env::current_exe()?;
     install_agent_tools(&data, &binary);

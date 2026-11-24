@@ -56,6 +56,14 @@ pub struct Space {
     /// The code repositories this Space covers, as GitHub `owner/name`, never by path.
     #[serde(default)]
     pub repositories: Vec<String>,
+    /// The apps and layers the Space's repositories can have, in the order the lenses list them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<String>,
+    /// The app and layer of each repository it lists that has either, by `owner/name`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub repository_tags: BTreeMap<String, crate::RepositoryTags>,
     #[serde(default)]
     pub models: SpaceModels,
     /// What the Space sets about its tickets' reviews.

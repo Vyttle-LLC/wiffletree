@@ -1697,6 +1697,9 @@ impl Sidebar {
             stuck_label(agents.stuck).map_or(String::new(), |stuck| format!(" · {stuck}")),
         );
         let project = self.shared.progress.project(&project_id);
+        let allowed = (self.shared.snapshot())
+            .and_then(|s| s.evaluator_permissions.get(&project_id))
+            .copied();
         let archived = root.archived;
         let archive_id = id.clone();
         let rename_id = project_id.clone();
@@ -1787,6 +1790,8 @@ impl Sidebar {
                             let archive_id = archive_id.clone();
                             let filed = weak.clone();
                             let filing = filing.clone();
+                            let (evaluators, evaluators_project) =
+                                (weak.clone(), rename_id.clone());
                             menu.item(PopupMenuItem::new("Rename").icon(icon("rename")).on_click(
                                 move |_, window, cx| {
                                     let _ = rename.update(cx, |view, cx| {
@@ -1820,6 +1825,14 @@ impl Sidebar {
                             )
                             .when_some(filing, |menu, filing| {
                                 filing_items(menu, filed, filing, window, cx)
+                            })
+                            .submenu("UI evaluators", window, cx, move |menu, _, _| {
+                                evaluator_choices(
+                                    menu,
+                                    evaluators.clone(),
+                                    evaluators_project.clone(),
+                                    allowed,
+                                )
                             })
                             .separator()
                             .item(
@@ -1857,7 +1870,17 @@ impl Sidebar {
                     p,
                 ))
             })
-            .children(agents_line(&agents, p));
+            .children(agents_line(&agents, p))
+            .children(
+                evaluations::sidebar_line(self.shared.evaluations(), &project_id).map(|line| {
+                    div()
+                        .w_full()
+                        .pl(px(22.))
+                        .text_size(px(font::CAPTION))
+                        .text_color(p.focus)
+                        .child(format!("◐ {line}"))
+                }),
+            );
         if editing {
             row
         } else {
@@ -2073,6 +2096,34 @@ fn agents_line(agents: &tree::AgentCounts, p: Palette) -> Option<Div> {
             .children(working)
             .when(agents.stuck > 0, |d| d.child(stuck_pill(agents.stuck, p))),
     )
+}
+
+/// The project menu's UI evaluators submenu: the human's three choices, the current one checked,
+/// and a note while none is made. Only the human changes it, here or on the Inbox card.
+fn evaluator_choices(
+    mut menu: PopupMenu,
+    sidebar: WeakEntity<Sidebar>,
+    project_id: String,
+    allowed: Option<EvaluatorPermission>,
+) -> PopupMenu {
+    if allowed.is_none() {
+        menu = menu.label("Not chosen: the first run asks");
+    }
+    for (label, permission) in EvaluatorPermission::CHOICES {
+        let (sidebar, project_id) = (sidebar.clone(), project_id.clone());
+        menu = menu.item(
+            PopupMenuItem::new(label)
+                .checked(allowed == Some(permission))
+                .on_click(move |_, window, cx| {
+                    let command = Command::SetEvaluatorPermission {
+                        project_id: project_id.clone(),
+                        permission,
+                    };
+                    let _ = sidebar.update(cx, |view, cx| view.request(command, window, cx));
+                }),
+        );
+    }
+    menu
 }
 
 /// An idle coordinator shows its team's work, so a quiet parent never hides it.

@@ -38,6 +38,7 @@ pub mod skills;
 mod space;
 mod steps;
 mod suggestion;
+mod tags;
 mod usage;
 use anyhow::{Context, Result, bail, ensure};
 pub use brain::*;
@@ -69,6 +70,7 @@ use std::{
 };
 pub use steps::*;
 pub use suggestion::*;
+pub use tags::*;
 pub use usage::*;
 
 pub const MAX_PAGE: usize = 100;
@@ -1079,7 +1081,22 @@ pub struct Snapshot {
     /// in `sessions`: no project, panel or tree lists it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<assistant::conversation::ConversationState>,
+    /// The UI evaluator runs that have not ended, then each project's latest that have, up to
+    /// `RECENT_EVALUATIONS` in all per project, newest first. Like `Command::Evaluations`, the
+    /// human's alone: a failure's reason can quote the model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evaluations: Vec<Evaluation>,
+    /// What each project allows UI evaluators, once the human has chosen. A project not listed
+    /// is off and asks at its first run.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub evaluator_permissions: BTreeMap<String, EvaluatorPermission>,
+    /// Each project's apps and layers, by project id, derived from its tickets' repositories.
+    /// Older hosts leave it out.
+    #[serde(default)]
+    pub project_tags: BTreeMap<String, ProjectTags>,
 }
+/// How many of a project's runs a snapshot lists, the ended ones as room allows.
+pub const RECENT_EVALUATIONS: usize = 20;
 fn assistant_name() -> String {
     assistant::DEFAULT_NAME.into()
 }

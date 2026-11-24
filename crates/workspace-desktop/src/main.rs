@@ -1,5 +1,6 @@
 mod activity;
 mod agents_panel;
+mod app_names;
 mod assets;
 mod assistant_view;
 mod attachment_chips;
@@ -22,6 +23,8 @@ mod conversation;
 mod conversation_header;
 mod creation;
 mod effective_view;
+mod evaluation_page;
+mod evaluations;
 mod events_view;
 mod file_links;
 mod files_view;
@@ -250,6 +253,8 @@ enum Page {
     Assistant,
     /// Every output threads and jobs saved, and the jobs.
     Boards,
+    /// One UI evaluator run, opened from the Agents panel's Evaluations group or a band.
+    Evaluation,
 }
 
 struct Workspace {
@@ -278,6 +283,7 @@ struct Workspace {
     issues: Entity<issues_view::IssuesPage>,
     assistant: Entity<assistant_view::AssistantPage>,
     boards: Entity<boards_view::BoardsPage>,
+    run_page: Entity<evaluation_page::RunPage>,
     usage: Entity<usage_view::UsagePage>,
     sidebar: Entity<sidebar::Sidebar>,
     inspector: Entity<Inspector>,
@@ -344,6 +350,8 @@ impl Workspace {
         Self::adopt(&assistant, window, cx);
         let boards = cx.new(|cx| boards_view::BoardsPage::new(bridge.clone(), window, cx));
         Self::adopt(&boards, window, cx);
+        let run_page = cx.new(|_| evaluation_page::RunPage::new(bridge.clone()));
+        Self::adopt(&run_page, window, cx);
         let sidebar = cx.new(|cx| sidebar::Sidebar::new(bridge.clone(), window, cx));
         Self::adopt(&sidebar, window, cx);
         let usage = cx.new(|_| usage_view::UsagePage::new(bridge.clone()));
@@ -372,6 +380,7 @@ impl Workspace {
             issues,
             assistant,
             boards,
+            run_page,
             usage,
             sidebar,
             inspector,
@@ -562,6 +571,10 @@ impl Workspace {
                     assistant.open_job(job.clone(), window, cx)
                 });
             }
+            Intent::OpenEvaluation(run) => {
+                (self.run_page).update(cx, |page, cx| page.open(run.clone(), window, cx));
+                self.open_page(Page::Evaluation, window, cx);
+            }
             Intent::StopJobRun(run) => self.assistant.update(cx, |assistant, cx| {
                 assistant.stop_run(run.clone(), window, cx)
             }),
@@ -605,6 +618,8 @@ impl Workspace {
             .update(cx, |issues, cx| issues.share(shared.clone(), window, cx));
         self.boards
             .update(cx, |boards, cx| boards.share(shared.clone(), window, cx));
+        self.run_page
+            .update(cx, |page, cx| page.share(shared.clone(), window, cx));
         self.assistant.update(cx, |assistant, cx| {
             assistant.share(shared.clone(), window, cx)
         });
@@ -784,6 +799,12 @@ impl Workspace {
                             let transcript = view.conversation.read(cx).transcript.clone();
                             transcript
                                 .update(cx, |transcript, cx| transcript.fetch_steps(window, cx));
+                        }
+                        let run_session = view.run_page.read(cx).session_id().map(str::to_owned);
+                        if view.shared.page == Page::Evaluation
+                            && run_session.is_some_and(|session| changed.includes(&session))
+                        {
+                            (view.run_page).update(cx, |page, cx| page.fetch_steps(window, cx));
                         }
                         if shows_files_of(&view.shared, &changed) {
                             view.inspector
@@ -1671,6 +1692,7 @@ fn main() -> anyhow::Result<()> {
         cx.set_global(preferences);
         cx.set_global(attachment_chips::HostImages::new());
         cx.set_global(staging);
+        cx.set_global(settings::DataFolder(home.clone()));
         boards_view::watch_tooltips(cx);
         cx.set_global(themes::Themes::new(home.join("themes")));
         themes::reload(cx);

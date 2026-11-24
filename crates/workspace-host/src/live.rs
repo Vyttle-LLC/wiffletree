@@ -565,6 +565,7 @@ impl Host {
         if session.role == Role::ProjectOrchestrator {
             context["model_selection"] = self.model_context(&session.project_id)?;
             context["behaviors"] = self.behaviors_context(&session.project_id)?;
+            context["project"]["tags"] = json!(self.tags_of(&session.project_id)?);
             let created = self.created_projects(&session)?;
             if !created.is_empty() {
                 context["created_projects"] = Value::Array(created);

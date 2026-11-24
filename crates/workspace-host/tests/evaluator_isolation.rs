@@ -57,6 +57,8 @@ fn evaluate(
         evaluator: Some(EvaluatorLaunch {
             folder: folder.into(),
             codex_home: codex_home.into(),
+            app: None,
+            desktop: None,
         }),
         conversation: None,
         push_branch: None,

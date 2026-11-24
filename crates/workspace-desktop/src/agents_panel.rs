@@ -205,10 +205,10 @@ fn waiting_line(
 }
 
 /// The elapsed-time timer runs only while the Agents panel is open and an agent it lists under
-/// a ticket is working; `sync_agents_clock` starts it on this and each tick stops it when this
-/// ends.
-fn clock_runs(panel: Option<Panel>, agents: &[&AgentProgress]) -> bool {
-    panel == Some(Panel::Agents) && agents.iter().any(|agent| agent.working)
+/// a ticket is working, or one of its UI evaluator runs has not ended; `sync_agents_clock`
+/// starts it on this and each tick stops it when this ends.
+fn clock_runs(panel: Option<Panel>, agents: &[&AgentProgress], live_runs: bool) -> bool {
+    panel == Some(Panel::Agents) && (live_runs || agents.iter().any(|agent| agent.working))
 }
 
 /// A fold's one subtle line, with its chevron.
@@ -237,7 +237,15 @@ impl Inspector {
         let (Some(roster), Some(index)) = (self.shared.roster(), self.shared.index.as_ref()) else {
             return div();
         };
-        if roster.tickets.is_empty() && roster.finished.is_empty() && roster.previous.is_empty() {
+        let project = self.shared.project_id().unwrap_or_default();
+        let runs: Vec<&Evaluation> = (self.shared.evaluations().iter())
+            .filter(|run| run.project_id == project)
+            .collect();
+        if roster.tickets.is_empty()
+            && roster.finished.is_empty()
+            && roster.previous.is_empty()
+            && runs.is_empty()
+        {
             return empty_state(
                 "team",
                 "No tickets yet",
@@ -252,7 +260,8 @@ impl Inspector {
             };
             body = body.child(self.ticket_card(index, ticket, ticket_card, p, cx));
         }
-        body.children(self.finished_tickets(&roster.finished, p, cx))
+        body.children(self.evaluations_group(&runs, p, cx))
+            .children(self.finished_tickets(&roster.finished, p, cx))
             .children(self.previous_agents(index, &roster.previous, p, cx))
     }
 
@@ -399,6 +408,94 @@ impl Inspector {
                 })
                 .child(progress_bar(agent.position(), agent.state, 3., p)),
         )
+    }
+
+    /// The project's UI evaluator runs, beside its tickets and in none of them (screen 4): one
+    /// row each with its mode, pinned model, state and time or reason. A row opens the run.
+    fn evaluations_group(
+        &self,
+        runs: &[&Evaluation],
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        if runs.is_empty() {
+            return None;
+        }
+        let (catalog, all, now) = (&self.shared.catalog, self.shared.evaluations(), ui::now());
+        let head = div()
+            .flex()
+            .items_baseline()
+            .gap_2()
+            .child(
+                div()
+                    .flex_1()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Evaluations"),
+            )
+            .child(hint(wording::counted(runs.len(), "run"), p).flex_none());
+        let rows = runs.iter().map(|run| {
+            let id = run.id.clone();
+            let mode = div()
+                .flex_none()
+                .px(px(5.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(p.edge)
+                .text_size(px(font::META))
+                .text_color(p.subtle)
+                .child(run.mode.label());
+            let model = div()
+                .flex()
+                .gap_1()
+                .min_w_0()
+                .text_size(px(font::CAPTION))
+                .child(div().flex_none().text_color(p.magenta).child("Pinned"))
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .text_color(p.subtle)
+                        .child(evaluations::pinned_model(catalog, run)),
+                );
+            // Waiting needs the human or a reset, so its line takes the state's color.
+            let when_color = match run.state {
+                EvaluationState::Waiting => p.yellow,
+                _ => p.subtle,
+            };
+            div()
+                .id(SharedString::from(format!("evaluation-{id}")))
+                .flex()
+                .flex_col()
+                .px_1()
+                .py(px(3.))
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|d| d.bg(p.overlay.opacity(0.7)))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .text_size(px(font::SMALL))
+                        .child(div().flex_none().child(run.id.clone()))
+                        .child(mode)
+                        .child(div().flex_1())
+                        .child(evaluations::state_pill(run.state, p)),
+                )
+                .child(model)
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .text_size(px(font::CAPTION))
+                        .text_color(when_color)
+                        .child(evaluations::when_line(run, all, now)),
+                )
+                .on_click(
+                    cx.listener(move |_, _, _, cx| cx.emit(Intent::OpenEvaluation(id.clone()))),
+                )
+        });
+        Some(card(p).child(head).children(rows))
     }
 
     /// The folded "Finished tickets (N)" section: each ticket's title and how it ended, on one
@@ -551,11 +648,15 @@ impl Inspector {
 
     fn agents_working(&self) -> bool {
         let agents = self.shared.roster().map(|roster| roster.ticket_agents());
-        clock_runs(self.shared.panel, &agents.unwrap_or_default())
+        let project = self.shared.project_id();
+        let live_runs = (self.shared.evaluations().iter())
+            .any(|run| Some(&run.project_id) == project.as_ref() && !run.state.ended());
+        clock_runs(self.shared.panel, &agents.unwrap_or_default(), live_runs)
     }
 
     /// Redraws the elapsed times every half minute, only while the panel is open and a
-    /// listed agent works.
+    /// listed agent works or a listed run has not ended. The bands and a run's page are drawn
+    /// uncached, so the window's minute redraw keeps theirs current.
     pub(super) fn sync_agents_clock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.agents_clock || !self.agents_working() {
             return;
@@ -652,13 +753,15 @@ mod tests {
     #[test]
     fn the_agents_timer_runs_only_while_the_panel_is_open_and_a_listed_agent_works() {
         let (working, idle) = (agent(true), agent(false));
-        assert!(clock_runs(Some(Panel::Agents), &[&idle, &working]));
-        // An idle panel: open, with no listed agent working.
-        assert!(!clock_runs(Some(Panel::Agents), &[&idle]));
-        assert!(!clock_runs(Some(Panel::Agents), &[]));
-        // Closed, or another panel shown, while an agent works.
-        assert!(!clock_runs(None, &[&working]));
-        assert!(!clock_runs(Some(Panel::Team), &[&working]));
+        assert!(clock_runs(Some(Panel::Agents), &[&idle, &working], false));
+        // An idle panel: open, with no listed agent working and no run that has not ended.
+        assert!(!clock_runs(Some(Panel::Agents), &[&idle], false));
+        assert!(!clock_runs(Some(Panel::Agents), &[], false));
+        // A running, waiting or queued evaluator run keeps its row's minutes current.
+        assert!(clock_runs(Some(Panel::Agents), &[], true));
+        // Closed, or another panel shown, while an agent works or a run goes on.
+        assert!(!clock_runs(None, &[&working], true));
+        assert!(!clock_runs(Some(Panel::Team), &[&working], true));
     }
 
     #[test]
@@ -698,7 +801,7 @@ mod tests {
         // another project changes whether the timer runs.
         let runs = |project: &str| {
             let roster = Roster::new(&board, &index, project, &format!("{project}-coordinator"));
-            clock_runs(Some(Panel::Agents), &roster.ticket_agents())
+            clock_runs(Some(Panel::Agents), &roster.ticket_agents(), false)
         };
         assert!(runs("working") && !runs("quiet"));
     }
