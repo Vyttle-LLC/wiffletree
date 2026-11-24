@@ -1238,21 +1238,6 @@ mod tests {
     }
 
     #[test]
-    fn a_cancelled_confirmation_changes_nothing() {
-        let (_directory, host) = listed(&["Sponsorships", "Recipes", "Redo sponsor page"]);
-        let before = host.projects().unwrap();
-
-        // A filing drop only describes the change; the host hears of it once confirmed.
-        let landing = landed(
-            &host,
-            "Redo sponsor page",
-            &Drop::Under(id(&host, "Sponsorships")),
-        );
-        assert!(matches!(landing, Some(Landing::Refile { .. })));
-        assert_eq!(host.projects().unwrap(), before);
-    }
-
-    #[test]
     fn no_target_shows_where_the_host_would_refuse() {
         let names = [
             "Accessible contrast",

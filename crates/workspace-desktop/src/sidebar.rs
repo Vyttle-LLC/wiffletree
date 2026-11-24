@@ -1608,9 +1608,12 @@ impl Sidebar {
         let depth = usize::from(child);
         let collapsed = (children.filter(|_| self.collapsed_parents.contains(&project_id)))
             .map(|children| (children.len(), self.parent_rollup(root, children, p)));
-        let standing = (self.shared.index.as_ref())
-            .and_then(|index| index.project(&project_id))
-            .is_some_and(|project| project.standing);
+        let index = self.shared.index.as_ref();
+        let own = index.and_then(|index| index.project(&project_id));
+        let standing = own.is_some_and(|project| project.standing);
+        let parent_name = (own.and_then(|project| project.parent_id.as_deref()))
+            .and_then(|parent| Some(index?.project(parent)?.name.clone()))
+            .unwrap_or_default();
         let with_parent = (self.shared.snapshot())
             .and_then(|s| s.questions_with_parent.get(&project_id).copied())
             .unwrap_or(0) as usize;
@@ -1847,7 +1850,15 @@ impl Sidebar {
                 project.map(|project| project.state),
                 p,
             ))
-            .when(with_parent > 0, |d| d.child(hollow_badge(with_parent, p)))
+            .when(with_parent > 0, |d| {
+                let handling = format!("{parent_name} is handling it");
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("with-parent-{project_id}")))
+                        .child(hollow_badge(with_parent, p))
+                        .tooltip(move |w, c| Tooltip::new(handling.clone()).build(w, c)),
+                )
+            })
             .when_some(collapsed.as_ref(), |d, (count, _)| {
                 d.child(
                     div()
