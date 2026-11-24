@@ -27,7 +27,34 @@ const SURVEY_MS: i64 = 5 * 60_000;
 const BUILDS_HELD: &str = "builds-held:";
 
 /// A disk's free and total bytes, or `None` when it cannot be read.
-type Space = Arc<dyn Fn(&Path) -> Option<(u64, u64)> + Send + Sync>;
+pub type Space = Arc<dyn Fn(&Path) -> Option<(u64, u64)> + Send + Sync>;
+
+/// Where the watch looks: Xcode's DerivedData folder, the folder holding each ticket's scratch
+/// folder, and a disk's free space. Tests give their own, so nothing reads the machine's.
+#[derive(Clone)]
+pub struct DiskRoots {
+    pub derived_data: Option<PathBuf>,
+    pub scratch_root: PathBuf,
+    pub space: Space,
+}
+impl DiskRoots {
+    /// This machine's.
+    pub fn machine() -> Self {
+        Self {
+            derived_data: build_output::xcode_derived_data(),
+            scratch_root: std::env::temp_dir(),
+            space: Arc::new(disk::space),
+        }
+    }
+    /// Scratch folders in `folder`, no DerivedData, and a disk with 1,000 GB free of 2,000 GB.
+    pub fn isolated(folder: &Path) -> Self {
+        Self {
+            derived_data: None,
+            scratch_root: folder.join("scratch"),
+            space: Arc::new(|_| Some((1_000 * GB, 2_000 * GB))),
+        }
+    }
+}
 
 /// Why a ticket's build output is reclaimed, as its notice says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,14 +92,9 @@ struct Survey {
 /// nothing may be reclaimed now.
 type Inspected = Result<Vec<(PathBuf, u64)>, String>;
 
-/// A folder moved aside to reclaim: where it was, where it waits, and its size.
-type Moved = (PathBuf, PathBuf, u64);
-
 enum Finished {
     Survey(Survey),
     Inspected(String, Why, Inspected),
-    /// The folders moved aside, and whether a process uses one of them since.
-    Moved(String, Why, Vec<Moved>, Result<(), String>),
     /// A removed ticket's build output outside its worktree.
     Outside(String, Vec<PathBuf>),
 }
@@ -99,7 +121,7 @@ pub(crate) struct Watch {
     check_at: i64,
     survey: Option<Survey>,
     surveying: bool,
-    /// The tickets whose build output is being scanned to reclaim it, or checked once moved.
+    /// The tickets whose build output is being scanned to reclaim it.
     inspecting: HashSet<String>,
     /// The removed tickets whose build output outside their worktree is being found.
     cleaning: HashSet<String>,
@@ -112,19 +134,16 @@ pub(crate) struct Watch {
 }
 impl Default for Watch {
     fn default() -> Self {
-        // Tests never reach the user's real DerivedData or temporary folder.
-        let (derived_data, scratch_root) = if cfg!(test) {
-            (
-                None,
-                std::env::temp_dir().join("wiffletree-test-scratch-unused"),
-            )
+        // Unit tests never reach the user's real DerivedData, temporary folder or disk.
+        let roots = if cfg!(test) {
+            DiskRoots::isolated(&std::env::temp_dir().join("wiffletree-test-unused"))
         } else {
-            (build_output::xcode_derived_data(), std::env::temp_dir())
+            DiskRoots::machine()
         };
         Self {
-            derived_data,
-            scratch_root,
-            space: Arc::new(disk::space),
+            derived_data: roots.derived_data,
+            scratch_root: roots.scratch_root,
+            space: roots.space,
             started: false,
             check_at: 0,
             survey: None,
@@ -271,7 +290,8 @@ fn inspect(folders: &Folders) -> Inspected {
 struct Candidate {
     ticket: String,
     size: u64,
-    last_turn: Option<i64>,
+    /// When it was created or an agent of it last had a turn, whichever is later.
+    last_active: i64,
     /// Accepted or closed.
     done: bool,
 }
@@ -286,11 +306,11 @@ fn choose(
     disk: &DiskSettings,
     at: i64,
 ) -> Vec<(String, Why)> {
-    candidates.sort_by_key(|c| c.last_turn.unwrap_or(0));
+    candidates.sort_by_key(|c| c.last_active);
     let (mut chosen, mut rest) = (vec![], vec![]);
     let mut left = total;
     for candidate in candidates {
-        let idle = at - candidate.last_turn.unwrap_or(0) >= disk.idle_ms();
+        let idle = at - candidate.last_active >= disk.idle_ms();
         match (candidate.done, idle) {
             (true, _) => chosen.push((candidate.ticket, Why::Done)),
             (false, true) => chosen.push((candidate.ticket, Why::Idle)),
@@ -319,9 +339,15 @@ fn choose(
 }
 
 impl Host {
-    /// Starts watching disk use, telling `notify` as each measurement or scan finishes.
-    pub(crate) fn watch_build_output(&mut self, notify: impl Fn() + Send + Sync + 'static) {
+    /// Starts watching disk use in `roots`, telling `notify` as each measurement or scan finishes.
+    pub(crate) fn watch_build_output(
+        &mut self,
+        roots: DiskRoots,
+        notify: impl Fn() + Send + Sync + 'static,
+    ) {
         let watch = &mut self.build_output;
+        (watch.derived_data, watch.scratch_root, watch.space) =
+            (roots.derived_data, roots.scratch_root, roots.space);
         watch.notify = Some(Arc::new(notify));
         watch.started = true;
         watch.check_at = 0;
@@ -373,6 +399,14 @@ impl Host {
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?)
     }
+    /// When each ticket was created, as its activity recorded it.
+    fn ticket_creations(&self) -> Result<HashMap<String, i64>> {
+        Ok(self
+            .db
+            .prepare("SELECT detail,MAX(created_at) FROM activity WHERE kind='ticket_created' GROUP BY detail")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
     fn last_reclaims(&self) -> Result<HashMap<String, (i64, u64)>> {
         Ok(self
             .db
@@ -402,11 +436,7 @@ impl Host {
                 }
                 Finished::Inspected(ticket, why, inspected) => {
                     self.build_output.inspecting.remove(&ticket);
-                    self.move_reclaimed(&ticket, why, inspected)
-                }
-                Finished::Moved(ticket, why, moved, used) => {
-                    self.build_output.inspecting.remove(&ticket);
-                    self.finish_reclaim(&ticket, why, moved, used, at)
+                    self.finish_reclaim(&ticket, why, inspected, at)
                 }
                 Finished::Outside(ticket, folders) => {
                     self.build_output.cleaning.remove(&ticket);
@@ -469,6 +499,7 @@ impl Host {
         };
         let disk = self.settings().disk;
         let (turns, reclaims) = (self.last_turns()?, self.last_reclaims()?);
+        let creations = self.ticket_creations()?;
         let mut total = 0;
         let mut tickets = HashMap::new();
         let mut candidates = vec![];
@@ -491,7 +522,11 @@ impl Host {
             candidates.push(Candidate {
                 ticket: ticket.id.clone(),
                 size,
-                last_turn: turns.get(&ticket.id).copied(),
+                last_active: [&turns, &creations]
+                    .iter()
+                    .filter_map(|times| times.get(&ticket.id).copied())
+                    .max()
+                    .unwrap_or(0),
                 done: !ticket.state.is_open(),
             });
             tickets.insert(ticket.id.clone(), ticket);
@@ -534,10 +569,11 @@ impl Host {
         Ok(())
     }
 
-    /// Moves aside each folder a scan found to reclaim, with its delete recorded and held,
-    /// unless an agent of the ticket started a turn meanwhile. Whether a process started using
-    /// one since the scan is then checked off the host thread; see `finish_reclaim`.
-    fn move_reclaimed(&mut self, id: &str, why: Why, inspected: Inspected) -> Result<()> {
+    /// Moves aside and records the delete of each folder a scan found to reclaim, then tells
+    /// the ticket's project. Nothing moves if an agent of the ticket started a turn, or a
+    /// process started using one of the folders, since the scan: both are looked at again here,
+    /// on the host thread, just before the move.
+    fn finish_reclaim(&mut self, id: &str, why: Why, inspected: Inspected, at: i64) -> Result<()> {
         let ticket = self.ticket(id)?;
         let folders = match inspected {
             Ok(folders) => folders,
@@ -553,8 +589,23 @@ impl Host {
             eprintln!("Reclaim build output of {id}: kept, an agent started a turn");
             return Ok(());
         }
+        let canonical: Vec<PathBuf> = (folders.iter())
+            .filter_map(|(folder, _)| fs::canonicalize(folder).ok())
+            .collect();
+        match worktree_deletions::holders(&canonical) {
+            Ok(holders) if holders.is_empty() => {}
+            Ok(holders) => {
+                let holders = holders.join(", ");
+                eprintln!("Reclaim build output of {id}: kept, processes use it: {holders}");
+                return Ok(());
+            }
+            Err(reason) => {
+                eprintln!("Reclaim build output of {id}: kept, {reason}");
+                return Ok(());
+            }
+        }
         let worktree = Path::new(&ticket.worktree);
-        let mut moved = vec![];
+        let mut freed = 0;
         for (folder, size) in folders {
             // Build output in the worktree waits beside the worktree, never in it.
             let beside = match folder.starts_with(worktree) {
@@ -562,55 +613,14 @@ impl Host {
                 false => folder.parent(),
             };
             let Some(beside) = beside else { continue };
-            match self.delete_durably(&folder, beside, id, true) {
-                Ok(aside) => moved.push((folder, aside, size)),
+            match self.delete_durably(&folder, beside, id) {
+                Ok(()) => freed += size,
                 Err(error) => eprintln!("Reclaim build output of {id}: {error:#}"),
             }
         }
-        if moved.is_empty() {
+        if freed == 0 {
             return Ok(());
         }
-        self.build_output.inspecting.insert(id.to_owned());
-        let id = id.to_owned();
-        self.build_output.spawn(move || {
-            let asides: Vec<PathBuf> = (moved.iter())
-                .filter_map(|(_, aside, _)| fs::canonicalize(aside).ok())
-                .collect();
-            let used = worktree_deletions::holders(&asides).and_then(|holders| match holders[..] {
-                [] => Ok(()),
-                _ => Err(format!("processes use files in it: {}", holders.join(", "))),
-            });
-            Finished::Moved(id, why, moved, used)
-        });
-        Ok(())
-    }
-    /// Lets the moved folders' deletes start, records the reclaim and tells the ticket's project.
-    /// If a process uses one of them, every folder is moved back instead.
-    fn finish_reclaim(
-        &mut self,
-        id: &str,
-        why: Why,
-        moved: Vec<Moved>,
-        used: Result<(), String>,
-        at: i64,
-    ) -> Result<()> {
-        if let Err(reason) = used {
-            eprintln!("Reclaim build output of {id}: moved back, {reason}");
-            for (folder, aside, _) in moved {
-                match fs::rename(&aside, &folder) {
-                    Ok(()) => self.forget_worktree_deletion(&aside)?,
-                    // Its place was taken: the delete waits out the process instead.
-                    Err(_) => self.release_deletion(&aside)?,
-                }
-            }
-            return Ok(());
-        }
-        let mut freed = 0;
-        for (_, aside, size) in moved {
-            self.release_deletion(&aside)?;
-            freed += size;
-        }
-        let ticket = self.ticket(id)?;
         self.db.execute(
             "INSERT INTO build_output_reclaims VALUES (?1,?2,?3)
              ON CONFLICT(ticket_id) DO UPDATE SET reclaimed_at=excluded.reclaimed_at,bytes=excluded.bytes",
@@ -804,7 +814,7 @@ impl Host {
             let Some(beside) = folder.parent() else {
                 continue;
             };
-            if let Err(error) = self.delete_durably(&folder, beside, ticket, false) {
+            if let Err(error) = self.delete_durably(&folder, beside, ticket) {
                 eprintln!("Delete {} of {ticket}: {error:#}", folder.display());
             }
         }
@@ -864,11 +874,12 @@ mod tests {
         /// Starts the watch on the test's own folders and free space, as the service starts it.
         fn watch(&mut self) {
             let reading = self.free.clone();
-            self.host.watch_build_output(|| {});
-            let watch = &mut self.host.build_output;
-            watch.derived_data = Some(self.folder.path().join("DerivedData"));
-            watch.scratch_root = self.folder.path().join("scratch");
-            watch.space = Arc::new(move |_| Some((reading.load(Ordering::SeqCst), 500 * GB)));
+            let roots = DiskRoots {
+                derived_data: Some(self.folder.path().join("DerivedData")),
+                scratch_root: self.folder.path().join("scratch"),
+                space: Arc::new(move |_| Some((reading.load(Ordering::SeqCst), 500 * GB))),
+            };
+            self.host.watch_build_output(roots, || {});
         }
         /// The host as a new start opens it.
         fn reopen(&mut self) {
@@ -1043,9 +1054,14 @@ mod tests {
             .unwrap();
         let recent = f.ticket("Recent", 4096);
         f.turn(&recent, start + 30 * HOUR, false);
+        // A ticket no agent has had a turn on is idle from its creation.
+        let fresh = f.ticket("Fresh", 4096);
+        f.check(start + HOUR);
+        assert!(f.has_build_output(&fresh) && f.has_build_output(&idle));
 
         f.check(start + 30 * HOUR);
 
+        assert!(!f.has_build_output(&fresh));
         assert!(!f.has_build_output(&idle));
         assert!(!f.has_build_output(&done));
         assert!(f.has_build_output(&recent));
@@ -1140,10 +1156,10 @@ mod tests {
     #[test]
     fn over_the_budget_the_least_recently_used_idle_tickets_go_until_it_is_under() {
         let disk = DiskSettings::default();
-        let candidate = |ticket: &str, size: u64, last_turn: i64, done: bool| Candidate {
+        let candidate = |ticket: &str, size: u64, last_active: i64, done: bool| Candidate {
             ticket: ticket.into(),
             size,
-            last_turn: Some(last_turn),
+            last_active,
             done,
         };
         let at = 100 * HOUR;

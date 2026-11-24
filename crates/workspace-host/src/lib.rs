@@ -57,6 +57,7 @@ mod proposals;
 pub mod provider;
 mod publish;
 mod reclaim;
+pub use reclaim::DiskRoots;
 pub mod remote;
 mod repos;
 mod repositories;

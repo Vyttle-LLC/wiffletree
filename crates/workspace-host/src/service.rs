@@ -1033,8 +1033,17 @@ impl Service {
     pub fn start(home: PathBuf, helper: PathBuf) -> Result<Self> {
         Self::start_with(home, helper, remote::Options::default())
     }
-    /// Starts the host thread with `remote` for its remote access.
+    /// Starts the host thread with `remote` for its remote access, watching this machine's disk.
     pub fn start_with(home: PathBuf, helper: PathBuf, remote: remote::Options) -> Result<Self> {
+        Self::start_with_disk(home, helper, remote, DiskRoots::machine())
+    }
+    /// `start_with`, watching build output and free space in `disk`, as tests give their own.
+    pub fn start_with_disk(
+        home: PathBuf,
+        helper: PathBuf,
+        remote: remote::Options,
+        disk: DiskRoots,
+    ) -> Result<Self> {
         ensure!(
             helper.is_file(),
             "wiffletree-host helper is missing; rebuild the app bundle"
@@ -1061,7 +1070,7 @@ impl Service {
                         let _ = deleted.send_blocking(Event::Wake(0));
                     });
                     let measured = worker.clone();
-                    host.watch_build_output(move || {
+                    host.watch_build_output(disk, move || {
                         let _ = measured.send_blocking(Event::Wake(0));
                     });
                     host.delete_removed_worktrees()?;

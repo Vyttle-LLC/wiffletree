@@ -586,7 +586,10 @@ mod tests {
     #[test]
     fn a_connection_from_another_user_is_closed_before_any_request_is_read() {
         let data = tempfile::tempdir().unwrap();
-        let service = Service::start(data.path().into(), std::env::current_exe().unwrap()).unwrap();
+        let disk = crate::DiskRoots::isolated(data.path());
+        let helper = std::env::current_exe().unwrap();
+        let service =
+            Service::start_with_disk(data.path().into(), helper, Default::default(), disk).unwrap();
         // SAFETY: getuid cannot fail.
         let me = unsafe { libc::getuid() };
         let options = Options {

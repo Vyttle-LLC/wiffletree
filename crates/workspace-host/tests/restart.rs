@@ -263,9 +263,11 @@ fn a_live_project_resumes_after_a_restart_except_for_the_session_it_interrupted(
     drop(service);
     let mut restarted = None;
     until("the stopped host to release the store", || {
-        restarted = Service::start(
+        restarted = Service::start_with_disk(
             home.path().to_path_buf(),
             env!("CARGO_BIN_EXE_wiffletree-host").into(),
+            Default::default(),
+            workspace_host::DiskRoots::isolated(home.path()),
         )
         .ok();
         restarted.is_some()
