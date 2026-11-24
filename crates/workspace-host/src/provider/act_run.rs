@@ -12,11 +12,10 @@
 //! marker, so no later attempt, retry or Run of the same card can call it again.
 //!
 //! A claude.ai connector cannot be named in `--mcp-config`, and Claude loads connectors only
-//! without `--strict-mcp-config` and with the human's user settings, so its run starts with
-//! `--setting-sources user` and loads the human's other servers too. Each of those is denied
-//! whole by name, and a start that offers one not yet denied starts again with it denied, so
-//! the run is still offered only the act tool. The human's own hooks run as well; act-check
-//! runs beside them, and the host still stops the run at any other call.
+//! without `--strict-mcp-config`, so its run loads the human's other connectors too, still
+//! with none of the human's settings. Each of those is denied whole by name, and a start that
+//! offers one not yet denied starts again with it denied, so the run is still offered only the
+//! act tool.
 use super::conversation::{SourceTools, claude_server_name, is_claude_ai};
 use super::*;
 use anyhow::anyhow;
@@ -98,22 +97,16 @@ impl UrlAct {
             .env_remove("WORKSPACE_TOKEN")
             .args(["-p", "--tools", "", "--no-session-persistence"])
             // Overrides a bypass mode in the human's settings: only the act tool is allowed.
-            .args(["--permission-mode", "dontAsk"]);
-        match is_claude_ai(&self.server) {
-            // Claude loads the connector with the human's user settings, after its start
-            // unless connecting is blocking.
-            true => cmd
-                .args(["--setting-sources", "user"])
-                .env("MCP_CONNECTION_NONBLOCKING", "false"),
+            .args(["--permission-mode", "dontAsk"])
             // Leaves out the human's own settings, whose hooks could change the call's input
             // after act-check allowed it; the run's folder is empty, so no other source loads.
+            .args(["--setting-sources", "local"]);
+        match is_claude_ai(&self.server) {
+            // Claude loads connectors itself, after its start unless connecting is blocking.
+            true => cmd.env("MCP_CONNECTION_NONBLOCKING", "false"),
             false => {
                 let servers = json!({"mcpServers": {&self.server: self.definition}});
-                cmd.args(["--setting-sources", "local"]).args([
-                    "--strict-mcp-config",
-                    "--mcp-config",
-                    &servers.to_string(),
-                ])
+                cmd.args(["--strict-mcp-config", "--mcp-config", &servers.to_string()])
             }
         };
         cmd.args(["--allowedTools", &self.name()])
@@ -484,10 +477,10 @@ mod tests {
         (send_message().configure(&mut cmd, folder.path(), Path::new("/h"))).unwrap();
         let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into()).collect();
         let after = |flag: &str| &args[args.iter().position(|a| a == flag).unwrap() + 1];
-        // A connector cannot be named in an MCP configuration, and loads only with the user's
-        // settings and without a strict one.
+        // A connector cannot be named in an MCP configuration and loads only without a strict
+        // one; the human's own settings still stay out.
         assert!(!args.iter().any(|a| a.contains("mcp-config")));
-        assert_eq!(after("--setting-sources"), "user");
+        assert_eq!(after("--setting-sources"), "local");
         assert!(
             (cmd.get_envs()).any(|(name, value)| name == "MCP_CONNECTION_NONBLOCKING"
                 && value == Some("false".as_ref()))

@@ -895,7 +895,7 @@ say({'type': 'result', 'subtype': 'success', 'result': 'I sent your password too
         assert_eq!(started.len(), 2);
         for args in &started {
             assert!(!args.iter().any(|a| a.contains("mcp-config")), "{args:?}");
-            assert_eq!(after(args, "--setting-sources"), "user");
+            assert_eq!(after(args, "--setting-sources"), "local");
             assert_eq!(after(args, "--allowedTools"), name("create_event"));
         }
         let denied = after(&started[1], "--disallowedTools");

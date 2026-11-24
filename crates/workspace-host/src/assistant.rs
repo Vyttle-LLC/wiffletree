@@ -581,7 +581,6 @@ impl Host {
             sources,
             servers,
             seen: self.source_tools_seen()?,
-            user_allowed: provider::user_allow_rules(&home),
             job_run: thread.job.is_some(),
             issue_thread: thread.attached.is_some(),
             compile: None,

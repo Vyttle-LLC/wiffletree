@@ -3,11 +3,10 @@
 //! folder, and a compile to reading and its worktree, where Claude writes only the wiki.
 //!
 //! A loop run on Claude may read a claude.ai connector its recipe lists. Claude loads
-//! connectors only without `--strict-mcp-config` and with the human's user settings, so such a
-//! run also loads the human's other servers and permission rules: each server no source lists
-//! is denied whole once Claude has reported it (a start that offers one not yet denied stops
-//! and starts again with it denied), the connector's tools but its reads are denied by name,
-//! and each allow rule of the human's that the run is not given is denied, so it grants nothing.
+//! connectors only without `--strict-mcp-config`, so such a run also loads the human's other
+//! connectors, still with none of the human's settings: each server no source lists is denied
+//! whole once Claude has reported it (a start that offers one not yet denied stops and starts
+//! again with it denied), and the connector's tools but its reads are denied by name.
 use super::conversation::{SourceTools, claude_server_name, is_claude_ai};
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -92,9 +91,6 @@ pub struct ThreadLaunch {
     pub servers: BTreeMap<String, Value>,
     /// What earlier Claude starts that loaded connectors reported, to deny from the first start.
     pub seen: SourceTools,
-    /// The allow rules in the human's own Claude settings, which a run that loads connectors
-    /// loads too; each the run is not given is denied.
-    pub user_allowed: Vec<String>,
     /// A job's run, which has only `JOB_RUN_TOOLS` and its recipe's sources.
     pub job_run: bool,
     /// An issue thread, which has `ISSUE_THREAD_TOOLS`, no source and no web.
@@ -212,7 +208,7 @@ impl ThreadLaunch {
         allowed
     }
     /// Whether a source is a claude.ai connector, which Claude loads only without
-    /// `--strict-mcp-config` and with the human's user settings.
+    /// `--strict-mcp-config`.
     pub(crate) fn loads_connectors(&self) -> bool {
         self.mcp_sources().any(|(server, _)| is_claude_ai(server))
     }
@@ -363,8 +359,7 @@ impl ThreadLaunch {
 /// What Claude may never do, whatever else allows it: write its own folder under the home
 /// folder, where `dontAsk` still lets the session write its auto memory, and for an issue
 /// thread reach the web. A run that loads connectors also may not use a connector's tools but
-/// its reads, any server no source lists, or anything the human's own allow rules allow that
-/// the run is not given.
+/// its reads, or any server no source lists.
 fn claude_denied(launch: &ThreadLaunch) -> Vec<String> {
     let mut denied = claude_home_denied();
     if !launch.web() {
@@ -387,28 +382,7 @@ fn claude_denied(launch: &ThreadLaunch) -> Vec<String> {
             .filter(|server| !given.contains(server.as_str()))
             .map(|server| format!("mcp__{}", claude_server_name(server))),
     );
-    let allowed = launch.claude_allowed();
-    denied.extend(
-        (launch.user_allowed.iter())
-            .filter(|rule| !allowed.contains(rule))
-            .cloned(),
-    );
     denied
-}
-
-/// The allow rules in the human's own Claude settings under `home`.
-pub fn user_allow_rules(home: &Path) -> Vec<String> {
-    let path = home.join(".claude").join("settings.json");
-    let settings: Value = (fs::read(path).ok())
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default();
-    (settings["permissions"]["allow"]
-        .as_array()
-        .into_iter()
-        .flatten())
-    .filter_map(Value::as_str)
-    .map(str::to_owned)
-    .collect()
 }
 /// Writes to Claude's own folder under the home folder, where `dontAsk` still lets a session
 /// write its auto memory.
@@ -444,17 +418,11 @@ pub(super) fn configure_claude(cmd: &mut ProcessCommand, turn: &Turn, launch: &T
         "--include-partial-messages",
         "--no-chrome",
     ]);
-    // Claude loads connectors itself, with the user's settings and only from a configuration
-    // that is not strict, and reports them at its start only when connecting blocks.
-    let setting_sources = match launch.loads_connectors() {
-        true => {
-            cmd.env("MCP_CONNECTION_NONBLOCKING", "false");
-            "user"
-        }
-        false => {
-            cmd.arg("--strict-mcp-config");
-            ""
-        }
+    // Claude loads connectors itself, only from a configuration that is not strict, and
+    // reports them at its start only when connecting blocks.
+    match launch.loads_connectors() {
+        true => cmd.env("MCP_CONNECTION_NONBLOCKING", "false"),
+        false => cmd.arg("--strict-mcp-config"),
     };
     cmd.args([
         "--model",
@@ -464,7 +432,7 @@ pub(super) fn configure_claude(cmd: &mut ProcessCommand, turn: &Turn, launch: &T
     ])
     .args(["--append-system-prompt", &turn.instructions])
     .args(["--system-prompt-snapshot", "off"])
-    .args(["--setting-sources", setting_sources])
+    .args(["--setting-sources", ""])
     // Auto memory would load and invite writes to a folder outside scratch; the setting and
     // the variable each turn it off in Claude Code 2.1.310.
     .args([
@@ -619,8 +587,7 @@ mod tests {
             "claude.ai Gmail".into(),
             ["search_threads".into(), "send_message".into()].into(),
         );
-        run.seen.other_servers = ["claude.ai Slack".into(), "termic".into()].into();
-        run.user_allowed = vec!["Edit".into(), "mcp__linear__list_issues".into()];
+        run.seen.other_servers = ["claude.ai Slack".into(), "claude.ai Notion".into()].into();
         run
     }
 
@@ -633,9 +600,10 @@ mod tests {
         configure_claude(&mut cmd, &turn, &run);
         let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into()).collect();
         let after = |flag: &str| &args[args.iter().position(|a| a == flag).unwrap() + 1];
-        // Claude loads the connector itself, with the user's settings and not strictly.
+        // Claude loads the connector itself, not strictly, and still with no settings of the
+        // human's.
         assert!(!args.contains(&"--strict-mcp-config".into()));
-        assert_eq!(after("--setting-sources"), "user");
+        assert_eq!(after("--setting-sources"), "");
         assert!((cmd.get_envs()).any(|(name, value)| {
             name == "MCP_CONNECTION_NONBLOCKING" && value == Some("false".as_ref())
         }));
@@ -650,9 +618,7 @@ mod tests {
         for rule in [
             "mcp__claude_ai_Gmail__send_message",
             "mcp__claude_ai_Slack",
-            "mcp__termic",
-            // The human's own allow rule would let the run write anywhere.
-            "Edit",
+            "mcp__claude_ai_Notion",
         ] {
             assert!(denied.contains(&rule), "{rule}: {denied:?}");
         }
@@ -682,7 +648,7 @@ mod tests {
                 connected("linear"),
                 connected("claude.ai Gmail"),
                 connected("claude.ai Slack"),
-                connected("termic"),
+                connected("claude.ai Notion"),
             ]
         };
         let reads = json!([

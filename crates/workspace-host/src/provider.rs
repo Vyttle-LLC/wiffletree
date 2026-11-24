@@ -18,7 +18,7 @@ pub use conversation::{ConversationLaunch, SourceTools, is_claude_ai};
 pub use evaluator::{EvaluatorLaunch, prepare_codex_home};
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
 use output::{Next, Output, StopReading};
-pub use restricted::{ThreadLaunch, server_definition, shell_text_refused, user_allow_rules};
+pub use restricted::{ThreadLaunch, server_definition, shell_text_refused};
 use std::os::unix::process::CommandExt;
 use std::{
     io::{Read, Write},
