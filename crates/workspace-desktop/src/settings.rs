@@ -7,6 +7,8 @@
 mod appearance;
 mod remote_access;
 mod repository;
+mod screen_control;
+pub(super) use screen_control::DataFolder;
 
 use super::*;
 use gpui_component::{ActiveTheme, Disableable, button::ButtonVariants, switch::Switch};
@@ -49,6 +51,10 @@ pub(super) struct Settings {
     assistant_input: Entity<InputState>,
     renaming_assistant: bool,
     assistant_error: Option<String>,
+    /// The evaluator helper's grants, as Screen control last read them.
+    screen: screen_control::Reading,
+    /// Request access waits for the human to answer macOS.
+    requesting: bool,
 }
 
 /// The router thresholds Settings offers; the host accepts any from 0.5 to 1.0.
@@ -187,8 +193,11 @@ impl Settings {
                         assistant_input,
                         renaming_assistant: false,
                         assistant_error: None,
+                        screen: screen_control::Reading::Checking,
+                        requesting: false,
                     };
                     view.ask_host(ask::settings(), cx);
+                    view.check_grants(cx);
                     view.ask_remote_here(cx);
                     view.refresh_sync(cx);
                     cx.observe_global::<repository::SyncByHost>(|view, cx| view.sync_shown(cx))
@@ -308,7 +317,7 @@ impl Settings {
                 };
                 return part(
                     &title,
-                    "Workspace folder · builds at once · remote access. Who runs what, repositories and their checks, and allowed owners open in the main window.",
+                    "Workspace folder · builds at once · screen control · remote access. Who runs what, repositories and their checks, and allowed owners open in the main window.",
                     p,
                 )
                 .children(self.driving.changes_refused().map(|reason| hint(reason, p)));
@@ -322,6 +331,7 @@ impl Settings {
             Block::Paired => self.paired_section(p, cx),
             Block::Folder => self.folder_section(p, cx),
             Block::Builds => self.builds_section(p, cx),
+            Block::ScreenControl => self.screen_control_section(p, cx),
             Block::RemoteAccess => match self.driving.name() {
                 None => self.remote_access_section(p, cx),
                 Some(host) => hint(
@@ -783,9 +793,10 @@ enum Block {
     Host,
     Folder,
     Builds,
+    ScreenControl,
     RemoteAccess,
 }
-const BLOCKS: [Block; 13] = [
+const BLOCKS: [Block; 14] = [
     Block::Shared,
     Block::Assistant,
     Block::CheckIns,
@@ -798,6 +809,7 @@ const BLOCKS: [Block; 13] = [
     Block::Host,
     Block::Folder,
     Block::Builds,
+    Block::ScreenControl,
     Block::RemoteAccess,
 ];
 impl Block {
@@ -862,6 +874,7 @@ fn sidebar_groups(spaces: &[(SpaceId, String)]) -> Vec<(&'static str, Vec<(Strin
                 ),
                 entry("Workspace folder", Go::Section(Block::Folder)),
                 entry("Builds & remote access", Go::Section(Block::Builds)),
+                entry("Screen control", Go::Section(Block::ScreenControl)),
                 entry("Appearance", Go::Section(Block::Appearance)),
             ],
         ),

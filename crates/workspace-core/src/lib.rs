@@ -1035,7 +1035,18 @@ pub struct Snapshot {
     /// no Space and not listed.
     #[serde(default)]
     pub jobs: Vec<job::JobState>,
+    /// The UI evaluator runs that have not ended, then each project's latest that have, up to
+    /// `RECENT_EVALUATIONS` in all per project, newest first. Like `Command::Evaluations`, the
+    /// human's alone: a failure's reason can quote the model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evaluations: Vec<Evaluation>,
+    /// What each project allows UI evaluators, once the human has chosen. A project not listed
+    /// is off and asks at its first run.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub evaluator_permissions: BTreeMap<String, EvaluatorPermission>,
 }
+/// How many of a project's runs a snapshot lists, the ended ones as room allows.
+pub const RECENT_EVALUATIONS: usize = 20;
 fn assistant_name() -> String {
     assistant::DEFAULT_NAME.into()
 }

@@ -105,6 +105,13 @@ impl Shared {
             .filter(|a| Some(&a.project_id) == project.as_ref())
             .collect()
     }
+    /// Every project's UI evaluator runs the snapshot lists, newest first.
+    pub(super) fn evaluations(&self) -> &[Evaluation] {
+        self.snapshot().map_or(&[], |s| &s.evaluations)
+    }
+    pub(super) fn evaluation(&self, id: &str) -> Option<&Evaluation> {
+        self.evaluations().iter().find(|run| run.id == id)
+    }
     /// The notes about the whole workspace, which every project's Inbox lists first.
     pub(super) fn workspace_notes(&self) -> &[WorkspaceNote] {
         self.index
@@ -228,6 +235,8 @@ impl RepositoriesCard {
 pub(super) enum Intent {
     Select(String),
     OpenPage(Page),
+    /// Opens one UI evaluator run's page.
+    OpenEvaluation(String),
     /// Opens the Issues page filtered to a Space, or to every Space.
     OpenIssues(Option<SpaceId>),
     /// Opens one issue on the Issues page, which marks it read and settles its Inbox news.

@@ -320,11 +320,11 @@ impl CodexSteps {
                 step
             }
             "mcp_tool_call" => {
-                let mut step = StepUpdate::new(
-                    id,
-                    StepKind::Tool,
-                    tool_title(item["server"].as_str()?, item["tool"].as_str()?),
-                );
+                let (server, tool) = (item["server"].as_str()?, item["tool"].as_str()?);
+                let mut step =
+                    driver_step(id, server, tool, &item["arguments"]).unwrap_or_else(|| {
+                        StepUpdate::new(id, StepKind::Tool, tool_title(server, tool))
+                    });
                 step.detail = item["error"]["message"].as_str().map(str::to_owned);
                 step
             }
@@ -350,6 +350,10 @@ fn blocks(value: &Value) -> impl Iterator<Item = &Value> {
 }
 
 fn claude_tool(id: &str, name: &str, input: &Value, cwd: &str) -> StepUpdate {
+    let mcp = name.strip_prefix("mcp__").and_then(|n| n.split_once("__"));
+    if let Some(step) = mcp.and_then(|(server, tool)| driver_step(id, server, tool, input)) {
+        return step;
+    }
     let text = |key: &str| input[key].as_str().unwrap_or_default();
     let path = |key: &str| relative(text(key), cwd);
     let (kind, title) = match name {
@@ -415,6 +419,61 @@ pub(crate) fn plan<'a>(id: &str, todos: impl Iterator<Item = (bool, &'a str)>) -
             .join("\n"),
     );
     step
+}
+
+/// An evaluator driver's step, for the human's run page: what the tool did, such as
+/// "click 1182, 64", and a screenshot's file in the run folder as its path, which the page
+/// shows as a thumbnail. `None` for any other server's tool.
+fn driver_step(id: &str, server: &str, tool: &str, input: &Value) -> Option<StepUpdate> {
+    if !matches!(server, "app" | "desktop") {
+        return None;
+    }
+    let number = |key: &str| input[key].as_f64().map_or("?".into(), |n| n.to_string());
+    let text = |key: &str| input[key].as_str().unwrap_or_default().to_owned();
+    let saved = (tool == "screenshot")
+        .then(|| crate::app_driver::screenshot_path(Path::new(""), &text("name")).ok())
+        .flatten()
+        .map(|path| path.to_string_lossy().into_owned());
+    let title = match tool {
+        "screenshot" => format!("screenshot · {}", saved.as_deref().unwrap_or("?")),
+        "click" | "double_click" | "right_click" | "move" => {
+            format!(
+                "{} {}, {}",
+                tool.replace('_', " "),
+                number("x"),
+                number("y")
+            )
+        }
+        "scroll" => format!(
+            "scroll {} at {}, {}",
+            number("dy"),
+            number("x"),
+            number("y")
+        ),
+        "drag" => format!(
+            "drag {}, {} to {}, {}",
+            number("x1"),
+            number("y1"),
+            number("x2"),
+            number("y2")
+        ),
+        "type_text" => format!("type {}", text("text")),
+        "key" => format!("key {}", text("keystroke")),
+        "resize_window" => format!(
+            "resize window to {} × {}",
+            number("width"),
+            number("height")
+        ),
+        "open_app" => format!("open {}", text("bundle_id")),
+        other => other.replace('_', " "),
+    };
+    let mut step = StepUpdate::new(
+        id,
+        StepKind::Tool,
+        crate::steps::clip(&title, MAX_STEP_TITLE),
+    );
+    step.paths = saved.into_iter().collect();
+    Some(step)
 }
 
 /// The workspace's own tools read as plain verbs; other servers keep their name.
@@ -784,6 +843,38 @@ mod tests {
         }]}});
         let sharpened = claude.event(&full);
         assert_eq!(sharpened[0].paths, ["a.rs"]);
+    }
+
+    #[test]
+    fn an_evaluator_drivers_steps_say_what_they_did_and_keep_the_screenshots_file() {
+        let shot = claude_tool(
+            "t",
+            "mcp__app__screenshot",
+            &json!({"name": "shots/models-dark", "scale": "native"}),
+            CWD,
+        );
+        assert_eq!(shot.title, "screenshot · shots/models-dark.png");
+        assert_eq!(shot.paths, ["shots/models-dark.png"]);
+        let click = claude_tool(
+            "t",
+            "mcp__desktop__click",
+            &json!({"x": 1182, "y": 64}),
+            CWD,
+        );
+        assert_eq!(click.title, "click 1182, 64");
+        assert!(click.paths.is_empty());
+        // A name the driver refuses saves nothing, so there is no file to show.
+        let outside = claude_tool("t", "mcp__app__screenshot", &json!({"name": "../x"}), CWD);
+        assert!(outside.paths.is_empty());
+        // Another server's tools keep their plain title.
+        let other = claude_tool("t", "mcp__github__screenshot", &json!({"name": "a"}), CWD);
+        assert_eq!(other.title, "github · screenshot");
+        let mut codex = CodexSteps::new(Path::new(CWD));
+        let typed = codex.event(&json!({"type": "item.started", "item": {
+            "id": "i1", "type": "mcp_tool_call", "server": "desktop", "tool": "type_text",
+            "arguments": {"text": "7+8="}, "status": "in_progress"
+        }}));
+        assert_eq!(typed[0].title, "type 7+8=");
     }
 
     /// A Claude edit tool's call and result, as the decoder sees them.

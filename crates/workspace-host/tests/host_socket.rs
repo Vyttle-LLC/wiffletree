@@ -736,15 +736,29 @@ fn space_commands_need_the_apps_credential_and_reads_do_not() {
     let project = std::cell::OnceCell::new();
     let fixture = Fixture::new(|host| {
         let calls = host.create_project("Calls").unwrap();
+        (host.set_evaluator_permission(&calls.id, EvaluatorPermission::App)).unwrap();
         project.set(calls).unwrap();
     });
     let project = project.get().unwrap();
     let mut agent = fixture.welcomed(None);
-    // A Space's machine-local facts, such as where its brain is, are left out.
+    // A Space's machine-local facts, such as where its brain is, are left out, and so is what
+    // the human allows UI evaluators.
     let read = agent.result(Command::Snapshot);
-    for human_only in ["space_locals", "threads", "held", "jobs"] {
+    for human_only in [
+        "space_locals",
+        "threads",
+        "held",
+        "jobs",
+        "evaluations",
+        "evaluator_permissions",
+    ] {
         assert!(read.get(human_only).is_none(), "{human_only}");
     }
+    let mut app = fixture.welcomed(Some(fixture.credential()));
+    assert_eq!(
+        snapshot(&mut app).evaluator_permissions[&project.id],
+        EvaluatorPermission::App
+    );
     let spaces = snapshot(&mut agent).spaces;
     let personal = spaces[0].clone();
     let instructed = Space {

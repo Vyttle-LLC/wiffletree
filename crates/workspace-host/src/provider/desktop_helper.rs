@@ -9,6 +9,8 @@ use std::{
     os::unix::net::UnixStream,
     sync::Mutex,
 };
+pub use workspace_core::{EVALUATOR_APP, helper_app};
+use workspace_core::{HELPER_NAME, installed_helper};
 
 /// How long the helper may take to open its socket after LaunchServices starts it.
 pub(crate) const HELPER_WAIT: Duration = Duration::from_secs(20);
@@ -57,19 +59,6 @@ impl DesktopLaunch {
     }
 }
 
-/// Names another helper for runs to start, such as a development build's; otherwise they start
-/// the copy `serve` installs (`install_helper`).
-pub const EVALUATOR_APP: &str = "WORKSPACE_EVALUATOR_APP";
-const HELPER_NAME: &str = "Wiffletree Evaluator.app";
-
-/// The helper `EVALUATOR_APP` names, or else the installed copy's usual place under `data`.
-pub fn helper_app(data: &Path) -> PathBuf {
-    match std::env::var_os(EVALUATOR_APP) {
-        Some(app) => app.into(),
-        None => installed_helper(data),
-    }
-}
-
 /// The helper Wiffletree ships in `bundle`, `Wiffletree.app`.
 pub fn bundled_helper(bundle: &Path) -> PathBuf {
     bundle.join("Contents/Helpers").join(HELPER_NAME)
@@ -78,10 +67,6 @@ pub fn bundled_helper(bundle: &Path) -> PathBuf {
 /// The app bundle whose `Contents/MacOS` holds `executable`.
 pub fn bundle_of(executable: &Path) -> Option<&Path> {
     executable.ancestors().nth(3)
-}
-
-fn installed_helper(data: &Path) -> PathBuf {
-    data.join("evaluator").join(HELPER_NAME)
 }
 
 /// Installs the helper shipped in the app as `<data>/evaluator/Wiffletree Evaluator.app`, and

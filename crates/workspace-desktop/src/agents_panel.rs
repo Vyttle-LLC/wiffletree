@@ -237,7 +237,15 @@ impl Inspector {
         let (Some(roster), Some(index)) = (self.shared.roster(), self.shared.index.as_ref()) else {
             return div();
         };
-        if roster.tickets.is_empty() && roster.finished.is_empty() && roster.previous.is_empty() {
+        let project = self.shared.project_id().unwrap_or_default();
+        let runs: Vec<&Evaluation> = (self.shared.evaluations().iter())
+            .filter(|run| run.project_id == project)
+            .collect();
+        if roster.tickets.is_empty()
+            && roster.finished.is_empty()
+            && roster.previous.is_empty()
+            && runs.is_empty()
+        {
             return empty_state(
                 "team",
                 "No tickets yet",
@@ -252,7 +260,8 @@ impl Inspector {
             };
             body = body.child(self.ticket_card(index, ticket, ticket_card, p, cx));
         }
-        body.children(self.finished_tickets(&roster.finished, p, cx))
+        body.children(self.evaluations_group(&runs, p, cx))
+            .children(self.finished_tickets(&roster.finished, p, cx))
             .children(self.previous_agents(index, &roster.previous, p, cx))
     }
 
@@ -399,6 +408,94 @@ impl Inspector {
                 })
                 .child(progress_bar(agent.position(), agent.state, 3., p)),
         )
+    }
+
+    /// The project's UI evaluator runs, beside its tickets and in none of them (screen 4): one
+    /// row each with its mode, pinned model, state and time or reason. A row opens the run.
+    fn evaluations_group(
+        &self,
+        runs: &[&Evaluation],
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        if runs.is_empty() {
+            return None;
+        }
+        let (catalog, all, now) = (&self.shared.catalog, self.shared.evaluations(), ui::now());
+        let head = div()
+            .flex()
+            .items_baseline()
+            .gap_2()
+            .child(
+                div()
+                    .flex_1()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Evaluations"),
+            )
+            .child(hint(wording::counted(runs.len(), "run"), p).flex_none());
+        let rows = runs.iter().map(|run| {
+            let id = run.id.clone();
+            let mode = div()
+                .flex_none()
+                .px(px(5.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(p.edge)
+                .text_size(px(font::META))
+                .text_color(p.subtle)
+                .child(run.mode.label());
+            let model = div()
+                .flex()
+                .gap_1()
+                .min_w_0()
+                .text_size(px(font::CAPTION))
+                .child(div().flex_none().text_color(p.magenta).child("Pinned"))
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .text_color(p.subtle)
+                        .child(evaluations::pinned_model(catalog, run)),
+                );
+            // Waiting needs the human or a reset, so its line takes the state's color.
+            let when_color = match run.state {
+                EvaluationState::Waiting => p.yellow,
+                _ => p.subtle,
+            };
+            div()
+                .id(SharedString::from(format!("evaluation-{id}")))
+                .flex()
+                .flex_col()
+                .px_1()
+                .py(px(3.))
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|d| d.bg(p.overlay.opacity(0.7)))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .text_size(px(font::SMALL))
+                        .child(div().flex_none().child(run.id.clone()))
+                        .child(mode)
+                        .child(div().flex_1())
+                        .child(evaluations::state_pill(run.state, p)),
+                )
+                .child(model)
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .text_size(px(font::CAPTION))
+                        .text_color(when_color)
+                        .child(evaluations::when_line(run, all, now)),
+                )
+                .on_click(
+                    cx.listener(move |_, _, _, cx| cx.emit(Intent::OpenEvaluation(id.clone()))),
+                )
+        });
+        Some(card(p).child(head).children(rows))
     }
 
     /// The folded "Finished tickets (N)" section: each ticket's title and how it ended, on one

@@ -31,6 +31,9 @@ pub(super) struct Inbox {
     held: held_entry::HeldForm,
     /// The reason line of the alert being marked.
     alert: scan_alert::AlertForm,
+    /// The choice selected on each open "Allow UI evaluators" card, by item id; App only until
+    /// the human picks another.
+    allow_choices: HashMap<String, EvaluatorPermission>,
 }
 impl Inbox {
     pub(super) fn new(bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -51,6 +54,7 @@ impl Inbox {
                 .new(|cx| InputState::new(window, cx).placeholder("One line that scopes both")),
             held: held_entry::HeldForm::new(window, cx),
             alert: scan_alert::AlertForm::new(window, cx),
+            allow_choices: HashMap::new(),
         }
     }
     /// A held log entry's card.
@@ -234,19 +238,27 @@ impl Inbox {
             .shared
             .session(&item.session_id)
             .map_or("Agent".to_owned(), |s| s.name.clone());
+        let evaluator = evaluations::EvaluatorCard::of(item);
         let header = div()
             .flex()
             .items_center()
             .justify_between()
             .gap_2()
             .child(hint(asker, p).text_ellipsis())
-            .child(if item.is_permission() {
+            .child(if evaluator.is_some() {
+                pill("UI evaluators", p.focus)
+            } else if item.is_permission() {
                 pill("Approval", p.yellow)
             } else {
                 pill("Question", p.focus)
             });
-        let (body, actions) = match (self.approval_card(item), &item.repository_request) {
-            (Some(approval), _) => {
+        let approval = evaluator
+            .is_none()
+            .then(|| self.approval_card(item))
+            .flatten();
+        let (body, actions) = match (approval, &item.repository_request, &evaluator) {
+            (_, _, Some(card)) => self.evaluator_card(item, card, p, cx),
+            (Some(approval), _, _) => {
                 let findings = self.findings.get(&item.id).map_or(&[][..], Vec::as_slice);
                 approval_card(
                     item.id.clone(),
@@ -257,9 +269,9 @@ impl Inbox {
                     cx,
                 )
             }
-            (None, Some(request)) => self.repository_request(item, request, p, cx),
-            (None, None) if item.is_permission() => self.permission(item, p, cx),
-            (None, None) => self.question(item, answering, max_height.is_none(), p, cx),
+            (None, Some(request), None) => self.repository_request(item, request, p, cx),
+            (None, None, None) if item.is_permission() => self.permission(item, p, cx),
+            (None, None, None) => self.question(item, answering, max_height.is_none(), p, cx),
         };
         let body = body.flex().flex_col().gap_2();
         let entry = card(p).child(header);
@@ -272,6 +284,177 @@ impl Inbox {
             None => entry.child(body),
         }
         .child(actions)
+    }
+    /// The host's UI evaluator cards, as screens 1 and 3 of the study draw them: the title on
+    /// its own line, what the runs are, and the card's own choices. Only the Allow card offers
+    /// a way out, Ask me later; the host refuses to dismiss a Start card, which holds the screen.
+    fn evaluator_card(
+        &self,
+        item: &Attention,
+        card: &evaluations::EvaluatorCard,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> (Div, Div) {
+        use evaluations::*;
+        let (catalog, runs) = (&self.shared.catalog, self.shared.evaluations());
+        let title = div()
+            .text_size(px(font::HEADING_SMALL))
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(card.title());
+        let id = item.id.clone();
+        let actions = div().flex().justify_end().gap_2();
+        match card {
+            EvaluatorCard::Allow { .. } => {
+                let chosen =
+                    (self.allow_choices.get(&item.id).copied()).unwrap_or(EvaluatorPermission::App);
+                let mut choices = div().flex().flex_col().gap_1p5();
+                for (label, permission) in EvaluatorPermission::CHOICES {
+                    choices =
+                        choices.child(self.allow_choice(item, label, permission, chosen, p, cx));
+                }
+                let body = div()
+                    .child(title)
+                    .child(hint(
+                        allow_summary(catalog, runs, &item.project_id),
+                        p,
+                    ))
+                    .child(choices)
+                    .child(hint(
+                        "One choice per project, kept until you change it on the project's menu › UI evaluators. Closing the project turns it off. A coordinator can never change it.",
+                        p,
+                    ));
+                let later = id.clone();
+                let actions = actions
+                    .child(
+                        button(SharedString::from(format!("later-{id}")))
+                            .ghost()
+                            .label("Ask me later")
+                            .map(|b| ui::gated(b, &self.shared.host))
+                            .on_click(cx.listener(move |v, _, w, c| {
+                                let id = later.clone();
+                                v.request(Command::DismissAttention { id }, w, c)
+                            })),
+                    )
+                    .child(
+                        self.answer_button(
+                            &id,
+                            allow_button(chosen),
+                            permission_answer(chosen),
+                            cx,
+                        )
+                        .primary(),
+                    );
+                (body, actions)
+            }
+            EvaluatorCard::Start { run_id } => {
+                let run = self.shared.evaluation(run_id);
+                let summary = match run {
+                    Some(run) => start_summary(catalog, run, runs),
+                    // Not in the snapshot yet: the host's own words, under the title.
+                    None => (item.prompt.split_once('\n'))
+                        .map_or(item.prompt.clone(), |(_, rest)| rest.to_owned()),
+                };
+                let apps = run.map_or(&[][..], |run| &run.apps);
+                let body = div()
+                    .child(title)
+                    .child(hint(summary, p))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .children(apps.iter().map(|app| app_line(app, p))),
+                    )
+                    .child(hint(
+                        "Don't use this Mac until it finishes. Press Esc anywhere, or Stop on the evaluator's panel or in the menu bar, to stop it. Nothing touches the screen until you press Start now.",
+                        p,
+                    ));
+                let actions = actions
+                    .child(
+                        self.answer_button(&id, "Skip these runs", "Skip these runs", cx)
+                            .ghost(),
+                    )
+                    .child(self.answer_button(&id, "Later", "Later", cx))
+                    .child(
+                        self.answer_button(&id, "Start now", "Start now", cx)
+                            .primary(),
+                    );
+                (body, actions)
+            }
+        }
+    }
+    /// A button that answers the item `id` with `answer`.
+    fn answer_button(
+        &self,
+        id: &str,
+        label: &'static str,
+        answer: &'static str,
+        cx: &mut Context<Self>,
+    ) -> Button {
+        let id = id.to_owned();
+        button(SharedString::from(format!("{label}-{id}")))
+            .label(label)
+            .map(|b| ui::gated(b, &self.shared.host))
+            .on_click(cx.listener(move |v, _, w, c| v.resolve_attention(&id, answer, w, c)))
+    }
+    /// One choice on the Allow card: a radio dot, its name and what it means.
+    fn allow_choice(
+        &self,
+        item: &Attention,
+        label: &'static str,
+        permission: EvaluatorPermission,
+        chosen: EvaluatorPermission,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let selected = permission == chosen;
+        let id = item.id.clone();
+        let dot = div()
+            .flex_none()
+            .mt(px(3.))
+            .size(px(12.))
+            .rounded_full()
+            .border_1()
+            .border_color(if selected { p.focus } else { p.subtle })
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(selected, |d| {
+                d.child(div().size(px(6.)).rounded_full().bg(p.focus))
+            });
+        div()
+            .id(SharedString::from(format!("allow-{label}-{id}")))
+            .flex()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .border_1()
+            .border_color(if selected {
+                p.focus
+            } else {
+                p.edge.opacity(edge::HALF)
+            })
+            .bg(p.surface)
+            .cursor_pointer()
+            .hover(|s| s.border_color(p.focus))
+            .child(dot)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(font::TEXT))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(label),
+                    )
+                    .child(hint(evaluations::permission_detail(permission), p)),
+            )
+            .on_click(cx.listener(move |v, _, _, c| {
+                v.allow_choices.insert(id.clone(), permission);
+                c.notify();
+            }))
     }
     /// A permission request's operation, then Deny and Approve once.
     fn permission(&self, item: &Attention, p: Palette, cx: &mut Context<Self>) -> (Div, Div) {

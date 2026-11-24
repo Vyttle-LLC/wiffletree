@@ -92,6 +92,7 @@ def main():
     shooting = commands.add_parser("shot")
     shooting.add_argument("output")
     shooting.add_argument("--native", action="store_true", help="at the display's scale")
+    commands.add_parser("target").add_argument("title", nargs="?", help="a window's title; none for the main window")
     resize = commands.add_parser("resize")
     resize.add_argument("width", type=float)
     resize.add_argument("height", type=float)
