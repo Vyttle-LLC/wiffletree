@@ -423,7 +423,8 @@ mod tests {
     };
     use crate::wording;
     use workspace_core::{
-        Attention, Evaluation, EvaluationMode, EvaluationState, ModelOption, ModelProfile, Provider,
+        Attention, Evaluation, EvaluationMode, EvaluationState, ModelOption, ModelProfile,
+        Provider, QuestionRoute,
     };
 
     fn run(id: &str, state: EvaluationState) -> Evaluation {
@@ -646,6 +647,7 @@ mod tests {
             options: vec![],
             answer: None,
             repository_request: None,
+            route: QuestionRoute::Human,
         };
         let allow = EvaluatorCard::of(&item("evaluation:allow:project-1:run-a")).unwrap();
         assert_eq!(
