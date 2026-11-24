@@ -8,6 +8,8 @@ use workspace_core::{DiskSettings, DiskUse, GB, PendingDelete, TicketDiskState, 
 /// How often the reading is refreshed while the app runs. The host measures at most every
 /// five minutes, so reading more often finds nothing new.
 const REFRESH: Duration = Duration::from_secs(3 * 60);
+/// How soon the reading is refreshed while a reclaim is under way, so its row settles.
+const FOLLOW_RECLAIM: Duration = Duration::from_secs(5);
 
 /// The last disk use the selected host answered.
 #[derive(Default)]
@@ -15,6 +17,8 @@ pub(crate) struct DiskReading {
     /// The paired host it came from, or `None` for This Mac's.
     host: Option<String>,
     disk: Option<DiskUse>,
+    /// A read to follow a reclaim is on its way.
+    following: bool,
 }
 impl Global for DiskReading {}
 
@@ -57,14 +61,34 @@ pub(crate) fn ask(request: Ask<DiskUse>, window: Option<AnyWindowHandle>, cx: &m
             shared::replied(&command, answer.is_ok(), cx);
             match answer {
                 Ok(disk) => {
-                    cx.set_global(DiskReading {
+                    let reclaiming =
+                        (disk.tickets.iter()).any(|t| t.state == TicketDiskState::Reclaiming);
+                    let reading = cx.default_global::<DiskReading>();
+                    let follow = reclaiming && !reading.following;
+                    *reading = DiskReading {
                         host,
                         disk: Some(disk),
-                    });
+                        following: reading.following || follow,
+                    };
+                    if follow {
+                        follow_reclaim(cx);
+                    }
                     cx.refresh_windows();
                 }
                 Err(error) => report(error, window, cx),
             }
+        });
+    })
+    .detach();
+}
+
+/// Reads again shortly, while a reclaim the last reading showed is under way.
+fn follow_reclaim(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(FOLLOW_RECLAIM).await;
+        cx.update(|cx| {
+            cx.default_global::<DiskReading>().following = false;
+            ask(ask::disk_use(), None, cx);
         });
     })
     .detach();

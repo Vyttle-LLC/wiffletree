@@ -138,6 +138,8 @@ impl Settings {
         }
     }
     fn open_at(at: Option<Block>, cx: &mut App) {
+        // Disk use changes with every build, so the Disk section shows a fresh reading.
+        crate::disk_use::ask(ask::disk_use(), None, cx);
         if let Some(SettingsWindow(handle, view)) = cx.try_global::<SettingsWindow>().cloned()
             && handle
                 .update(cx, |_, window, _| window.activate_window())

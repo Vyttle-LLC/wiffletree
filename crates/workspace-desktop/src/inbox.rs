@@ -280,10 +280,13 @@ impl Inbox {
             (None, None, None) => self.question(item, answering, max_height.is_none(), p, cx),
         };
         let body = body.flex().flex_col().gap_2();
+        let edge = |color| {
+            let strip = div().absolute().left_0().top_0().bottom_0().w(px(3.));
+            strip.rounded_l_lg().bg(color)
+        };
         let entry = card(p)
-            .when_some(disk_edge, |card, color| {
-                card.border_l_3().border_color(color)
-            })
+            .relative()
+            .children(disk_edge.map(edge))
             .child(header);
         match max_height {
             // Keyed by item, so stepping to another decision starts at its top.
@@ -479,7 +482,8 @@ impl Inbox {
         let on_this_mac = self.bridge.remote().is_none();
         let offered = disk_use::card_actions(card, disk_use::current(cx), on_this_mac);
         let last = offered.len() - 1;
-        let mut actions = div().flex().justify_end().gap_2();
+        // Wrapped, so the hard floor's two long buttons fit the Inbox panel.
+        let mut actions = div().flex().flex_wrap().justify_end().gap_2();
         for (at, action) in offered.into_iter().enumerate() {
             let label = match &action {
                 CardAction::OpenSettings => "Open Settings › Disk",

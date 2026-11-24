@@ -31,7 +31,7 @@ const FIELDS: [(&str, &str, &str); 4] = [
 ];
 const SOURCE_WIDTH: f32 = 64.;
 const OUTPUT_WIDTH: f32 = 112.;
-const TURN_WIDTH: f32 = 64.;
+const TURN_WIDTH: f32 = 96.;
 const STATE_WIDTH: f32 = 104.;
 const ACTION_WIDTH: f32 = 104.;
 /// The widest build output bar, for the largest ticket.
@@ -127,7 +127,7 @@ impl Settings {
         let handle = window.window_handle();
         let reclaim_all = button("reclaim-idle-now")
             .xsmall()
-            .ghost()
+            .outline()
             .label("Reclaim idle build output now")
             .map(|b| ui::gated(b, &self.driving))
             .on_click(move |_, _, cx| {
@@ -231,7 +231,7 @@ impl Settings {
         let action = disk_use::can_reclaim(disk).then(|| {
             button(SharedString::from(format!("reclaim-{ticket_id}")))
                 .xsmall()
-                .ghost()
+                .outline()
                 .label("Reclaim")
                 .map(|b| ui::gated(b, &self.driving))
                 .on_click(move |_, _, cx| {
@@ -264,18 +264,8 @@ impl Settings {
             .child(title)
             .child(number(SOURCE_WIDTH).child(disk_use::size(disk.source)))
             .child(number(OUTPUT_WIDTH).child(output))
-            .child(
-                div()
-                    .w(px(TURN_WIDTH))
-                    .flex_none()
-                    .child(disk.last_turn_at.map_or("—".into(), wording::age)),
-            )
-            .child(
-                div()
-                    .w(px(STATE_WIDTH))
-                    .flex_none()
-                    .child(pill(state, tone_color(tone, p))),
-            )
+            .child(column(TURN_WIDTH).child(disk.last_turn_at.map_or("—".into(), wording::age)))
+            .child(column(STATE_WIDTH).child(pill(state, tone_color(tone, p))))
             .child(cell(ACTION_WIDTH).children(action))
     }
 }
@@ -408,8 +398,12 @@ fn row(p: Palette) -> Div {
         .border_color(p.edge.opacity(edge::HAIRLINE))
         .text_size(px(font::SMALL))
 }
+fn column(width: f32) -> Div {
+    div().w(px(width)).flex_none().flex()
+}
+/// A right-aligned column.
 fn cell(width: f32) -> Div {
-    div().w(px(width)).flex_none().flex().justify_end()
+    column(width).justify_end()
 }
 fn number(width: f32) -> Div {
     cell(width).whitespace_nowrap()
@@ -422,8 +416,8 @@ fn header_row(p: Palette) -> Div {
         .child(div().flex_1().child(head("Ticket")))
         .child(cell(SOURCE_WIDTH).child(head("Source")))
         .child(cell(OUTPUT_WIDTH).child(head("Build output")))
-        .child(div().w(px(TURN_WIDTH)).flex_none().child(head("Last turn")))
-        .child(div().w(px(STATE_WIDTH)).flex_none().child(head("State")))
+        .child(column(TURN_WIDTH).child(head("Last agent turn")))
+        .child(column(STATE_WIDTH).child(head("State")))
         .child(cell(ACTION_WIDTH))
 }
 
@@ -471,7 +465,7 @@ fn delete_row(delete: &PendingDelete, on_this_mac: bool, p: Palette) -> Div {
     let finder = on_this_mac.then(|| {
         button(SharedString::from(format!("show-{}", delete.path)))
             .xsmall()
-            .ghost()
+            .outline()
             .label("Show in Finder")
             .on_click(move |_, _, cx| cx.reveal_path(&path))
     });
@@ -485,13 +479,8 @@ fn delete_row(delete: &PendingDelete, on_this_mac: bool, p: Palette) -> Div {
         )
         .child(number(SOURCE_WIDTH).child("—"))
         .child(number(OUTPUT_WIDTH).child("—"))
-        .child(div().w(px(TURN_WIDTH)).flex_none().child("—"))
-        .child(
-            div()
-                .w(px(STATE_WIDTH))
-                .flex_none()
-                .child(pill(state, color)),
-        )
+        .child(column(TURN_WIDTH).child("—"))
+        .child(column(STATE_WIDTH).child(pill(state, color)))
         .child(cell(ACTION_WIDTH).children(finder))
 }
 
