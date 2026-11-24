@@ -136,9 +136,31 @@ pub(super) struct AddSource {
 }
 
 impl AddSource {
+    /// Picks a source, and whether it must be started to list its tools: a connector's tools
+    /// came with it from Claude's start, so it is not started again. Any earlier probe's reply
+    /// is then dropped.
+    fn pick(&mut self, picked: SourceCandidate) -> bool {
+        // Choices carry over only to Try again on the same source, never to another one.
+        if !same_source(self.picked.as_ref(), &picked) {
+            self.tools.clear();
+        }
+        self.picked = Some(picked.clone());
+        if picked.tools.is_empty() {
+            self.probing = true;
+            self.probe = None;
+            return true;
+        }
+        self.listed(Ok(SourceProbe {
+            tools: picked.tools,
+            claude_ai: picked.claude_ai,
+            ..Default::default()
+        }));
+        false
+    }
     /// Shows what the picked source offers, and marks it as the probe found it: a server typed
     /// by hand may turn out to be reached by URL or a claude.ai connector.
     fn listed(&mut self, probe: Result<SourceProbe, String>) {
+        self.probing = false;
         if let Ok(found) = &probe {
             self.picked = self.picked.take().map(|picked| as_probed(picked, found));
             // A tool the human already chose keeps its choice when Try again lists it.
@@ -197,24 +219,10 @@ impl SpacesPage {
         let Some(adding) = &mut self.adding else {
             return;
         };
-        // Choices carry over only to Try again on the same source, never to another one.
-        if !same_source(adding.picked.as_ref(), &picked) {
-            adding.tools.clear();
-        }
-        adding.picked = Some(picked.clone());
-        // A connector's tools came with it from Claude's start, so it is not started again.
-        if !picked.tools.is_empty() {
-            let found = SourceProbe {
-                tools: picked.tools.clone(),
-                claude_ai: picked.claude_ai,
-                ..Default::default()
-            };
-            adding.listed(Ok(found));
+        if !adding.pick(picked.clone()) {
             cx.notify();
             return;
         }
-        adding.probing = true;
-        adding.probe = None;
         let ask = ask::probe_source(picked.kind, picked.name.clone());
         self.ask(ask, window, cx, move |view, probe, _, cx| {
             let Some(adding) = &mut view.adding else {
@@ -223,7 +231,6 @@ impl SpacesPage {
             if adding.picked.as_ref() != Some(&picked) {
                 return;
             }
-            adding.probing = false;
             adding.listed(probe);
             cx.notify();
         });
@@ -609,6 +616,51 @@ mod tests {
         ));
         assert!(!same_source(Some(&gh), &candidate(SourceKind::Mcp, "gh")));
         assert!(!same_source(None, &gh));
+    }
+
+    #[gpui::test]
+    fn a_connector_picked_while_another_source_starts_shows_its_tools(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use super::{AddSource, InputState};
+        use gpui::AppContext as _;
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let mut adding = cx.update(|window, cx| {
+            let input = cx.new(|cx| InputState::new(window, cx));
+            AddSource {
+                space: Default::default(),
+                candidates: None,
+                picked: None,
+                probe: None,
+                probing: false,
+                tools: vec![],
+                by_hand: input.clone(),
+                by_hand_kind: SourceKind::Mcp,
+                extra_tool: input,
+                saving: false,
+            }
+        });
+        let source = |name: &str, tools: Vec<workspace_core::SuggestedTool>| SourceCandidate {
+            kind: SourceKind::Mcp,
+            name: name.into(),
+            configured_for: vec![],
+            by_url: false,
+            claude_ai: !tools.is_empty(),
+            tools,
+        };
+        assert!(adding.pick(source("calendar", vec![])));
+        assert!(adding.probing);
+        let search = workspace_core::SuggestedTool {
+            name: "search_threads".into(),
+            act: false,
+            description: String::new(),
+        };
+        // The calendar's reply, when it comes, is dropped: Gmail is picked.
+        assert!(!adding.pick(source("claude.ai Gmail", vec![search])));
+        assert!(!adding.probing);
+        assert_eq!(adding.tools.len(), 1);
+        assert!(adding.picked.is_some_and(|picked| picked.claude_ai));
     }
 
     #[test]
