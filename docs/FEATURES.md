@@ -55,6 +55,8 @@ Agents can still run any command on your Mac with your credentials. Wiffletree's
 
 **Blocked is not the same as needs-you.** Workers report blockers to the coordinator, which resolves most of them. Only the coordinator escalates to you, and it gathers its questions in one Inbox so you answer them once.
 
+**Projects can have a parent.** A project a coordinator creates is a child of its project, or its sibling under the same parent, one level deep and in the same Space. Parent and child coordinators can message each other, and a child's reports reach its parent's coordinator; siblings cannot talk. You file projects with **Move under…** in the project menu, and you close a parent only once its children are closed. Mark a project that never finishes, such as Platform, as **Standing**.
+
 **Software does the routine work; models do the thinking.** Git state, status, polling and usage tracking are ordinary deterministic code. Models are woken only for decisions that need reasoning, so coordinators sleep between events instead of polling.
 
 **You can see how far along the work is.** The app derives the progress bars from each agent's checklist, each ticket's stage and its review results. The coordinator's strip shows the project's phase, one segment per ticket and how many tickets are accepted. The Agents panel, opened from any of the project's conversations, lists every ticket with its agents, their models and their progress, and marks an agent that is stuck.

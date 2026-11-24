@@ -402,6 +402,13 @@ pub struct Project {
     /// The coordinator whose `create_project` call made this project; `None` when the human did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<ProjectCreator>,
+    /// The project this one is filed under, in the same Space; `None` for a loose project or a
+    /// parent. One level deep: a parent never has a parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// Keeps the project out of Ready to close; only the human sets it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub standing: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectCreator {
@@ -1215,6 +1222,10 @@ impl Snapshot {
     /// The Space `project` belongs to; none for a project from a host older than Spaces.
     pub fn space_of(&self, project: &Project) -> Option<&Space> {
         self.spaces.iter().find(|s| s.id == project.space)
+    }
+    /// The projects filed under `project`, in the stored order.
+    pub fn child_projects<'a>(&'a self, project: &'a str) -> impl Iterator<Item = &'a Project> {
+        (self.projects.iter()).filter(move |p| p.parent_id.as_deref() == Some(project))
     }
     pub fn questions_waiting(&self, session_id: &str) -> u32 {
         self.questions_waiting
@@ -2749,10 +2760,13 @@ const MIGRATION_PREFIX: &str = "migration:";
 /// The id prefix of the brief a coordinator's `create_project` hands the new coordinator. It
 /// carries another coordinator's words, never the human's.
 pub const PROJECT_BRIEF_PREFIX: &str = "project-brief:";
+/// The id prefix of the notice a parent's coordinator gets when its child creates a sibling.
+pub const CHILD_PROJECT_PREFIX: &str = "child-project:";
 /// The id prefixes of the host's other messages without a sender: verification results, kept
 /// worktrees, migration notices, publish, merge, retarget and repository request results, process
-/// notices, project briefs and evaluator runs. Inbox answers (`answer:`) carry the human's words.
-const HOST_NOTICE_PREFIXES: [&str; 10] = [
+/// notices, project briefs, child project notices and evaluator runs. Inbox answers (`answer:`)
+/// carry the human's words.
+const HOST_NOTICE_PREFIXES: [&str; 11] = [
     VERIFICATION_NOTICE_PREFIX,
     WORKTREE_KEPT_PREFIX,
     MIGRATION_PREFIX,
@@ -2762,6 +2776,7 @@ const HOST_NOTICE_PREFIXES: [&str; 10] = [
     REPOSITORY_REQUEST_PREFIX,
     PROCESS_NOTICE_PREFIX,
     PROJECT_BRIEF_PREFIX,
+    CHILD_PROJECT_PREFIX,
     EVALUATION_PREFIX,
 ];
 /// A ticket's latest verification cycle: rounds of concurrent, commit-pinned verifier turns.
@@ -3881,6 +3896,18 @@ pub enum Command {
         project_id: String,
         space_id: SpaceId,
     },
+    /// Files a project under `parent_id`, a loose project of its Space, or makes it loose with
+    /// none; answered with the project.
+    SetProjectParent {
+        project_id: String,
+        #[serde(default)]
+        parent_id: Option<String>,
+    },
+    /// Marks a project standing, which keeps it out of Ready to close; answered with the project.
+    SetProjectStanding {
+        project_id: String,
+        standing: bool,
+    },
     /// The Space New project starts in, `space_id` or else the one last used for a new project,
     /// with its repositories on this Mac; answered with `SpaceRepositories`.
     NewProjectDefaults {
@@ -4474,6 +4501,8 @@ impl Command {
             | Self::UpdateSpace { .. }
             | Self::RemoveSpace { .. }
             | Self::MoveProjectToSpace { .. }
+            | Self::SetProjectParent { .. }
+            | Self::SetProjectStanding { .. }
             | Self::SetRepositorySpaces { .. }
             | Self::SetFollowedRoots { .. }
             | Self::ConfirmRepositorySuggestions { .. }
@@ -4618,6 +4647,8 @@ impl Command {
                 | Self::UpdateSpace { .. }
                 | Self::RemoveSpace { .. }
                 | Self::MoveProjectToSpace { .. }
+                | Self::SetProjectParent { .. }
+                | Self::SetProjectStanding { .. }
                 | Self::SetAddedRepositories { .. }
                 | Self::SetRepositorySpaces { .. }
                 | Self::SetFollowedRoots { .. }

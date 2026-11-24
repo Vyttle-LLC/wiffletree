@@ -11,18 +11,18 @@ Six slices, one ticket each. Dependencies:
 
 ## 1. Slice (a) — Host: parent link, child creation, messaging, close guard, Move under
 
-- [ ] 1.1 `workspace-core`: `Project.parent_id` and `Project.standing`, both defaulting to empty and left out of the store when empty; the snapshot carries both.
-- [ ] 1.2 Host checks for every write of the link: same Space, one level, not onto itself, not onto a child, not for a project with children; a refusal names the rule.
-- [ ] 1.3 A command to set or clear a project's parent, with `project_moved_under` and `project_moved_out` activity on the project and each parent; questions with a parent go to the human, in the same change, when its child is made loose or filed under another parent.
-- [ ] 1.4 Move to another Space clears the project's link and its children's; the Move dialog's wording names the children that become loose.
-- [ ] 1.5 `create_project` makes a child or a sibling, with the notice to the parent for a sibling; parents' messages do not count as the human's for the briefed-project rule.
-- [ ] 1.6 `send_message` between a parent's and its children's coordinators; a child coordinator's `report` delivered to its parent's coordinator; siblings refused with the reason.
-- [ ] 1.7 `workspace_context`: `parent_project` and `child_projects`; `created_projects` leaves out the caller's children.
-- [ ] 1.8 Archive refuses a parent with an unarchived child; restore refuses a child of an archived parent.
-- [ ] 1.9 A command to set `standing`, for the human only.
-- [ ] 1.10 `coordinator.md`: the naming and filing rules and the parent's escalation duty; bump its version.
-- [ ] 1.11 Desktop: "Move under…" and "Standing" in the project menu, Standing in Overview, the confirmation, the refusals' words.
-- [ ] 1.12 Tests: each refused link, an older store loose with `created_by` kept, a child and a sibling created, messages allowed and refused, reports reaching the parent, the archive and restore guards, a Space move clearing links.
+- [x] 1.1 `workspace-core`: `Project.parent_id` and `Project.standing`, both defaulting to empty and left out of the store when empty; the snapshot carries both.
+- [x] 1.2 Host checks for every write of the link: same Space, one level, not onto itself, not onto a child, not for a project with children; a refusal names the rule.
+- [x] 1.3 A command to set or clear a project's parent, with `project_moved_under` and `project_moved_out` activity on the project and each parent; questions with a parent go to the human, in the same change, when its child is made loose or filed under another parent.
+- [x] 1.4 Move to another Space clears the project's link and its children's; the Move dialog's wording names the children that become loose.
+- [x] 1.5 `create_project` makes a child or a sibling, with the notice to the parent for a sibling; parents' messages do not count as the human's for the briefed-project rule.
+- [x] 1.6 `send_message` between a parent's and its children's coordinators; a child coordinator's `report` delivered to its parent's coordinator; siblings refused with the reason.
+- [x] 1.7 `workspace_context`: `parent_project` and `child_projects`; `created_projects` leaves out the caller's children.
+- [x] 1.8 Archive refuses a parent with an unarchived child; restore refuses a child of an archived parent.
+- [x] 1.9 A command to set `standing`, for the human only.
+- [x] 1.10 `coordinator.md`: the naming and filing rules and the parent's escalation duty; bump its version.
+- [x] 1.11 Desktop: "Move under…" and "Standing" in the project menu, Standing in Overview, the confirmation, the refusals' words.
+- [x] 1.12 Tests: each refused link, an older store loose with `created_by` kept, a child and a sibling created, messages allowed and refused, reports reaching the parent, the archive and restore guards, a Space move clearing links.
 
 ## 2. Slice (b) — Host: questions routed through the parent
 

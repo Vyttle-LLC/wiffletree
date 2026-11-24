@@ -365,7 +365,18 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = core(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator core — v17"));
+    assert!(coordinator.contains("Project coordinator core — v18"));
+    // Naming and filing rules, and the parent's duty to escalate what it has no decision for.
+    for rule in [
+        "Prefer adding a ticket to your own project",
+        "Create a project only for a separate outcome",
+        "Name a parent after an outcome, never after an app or a layer",
+        "a child after one deliverable, without repeating its parent's name",
+        "answer a child's question only from decisions already made, such as the brain or the human's earlier answers",
+        "escalate every product, security and approval question to the human",
+    ] {
+        assert!(coordinator.contains(rule), "{rule}");
+    }
     // UI evaluators: the coordinator writes the whole prompt and hears only the end.
     for told in [
         "call start_evaluation",

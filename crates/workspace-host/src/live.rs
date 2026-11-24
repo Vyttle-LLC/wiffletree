@@ -563,10 +563,11 @@ impl Host {
         if session.role == Role::ProjectOrchestrator {
             context["model_selection"] = self.model_context(&session.project_id)?;
             context["behaviors"] = self.behaviors_context(&session.project_id)?;
-            let created = self.created_projects(id)?;
+            let created = self.created_projects(&session)?;
             if !created.is_empty() {
                 context["created_projects"] = Value::Array(created);
             }
+            self.family_context(&session, &mut context)?;
         }
         let child_reports = self.child_reports(id)?;
         if !child_reports.is_empty() {
@@ -597,7 +598,7 @@ impl Host {
         }
         Ok(overview)
     }
-    fn short_ticket(ticket: &Ticket, repositories: &[Repository]) -> Value {
+    pub(crate) fn short_ticket(ticket: &Ticket, repositories: &[Repository]) -> Value {
         let mut short = json!({"id":ticket.id,"title":ticket.title,"state":ticket.state,
             "repository":Self::repository_name(repositories, ticket),"branch":ticket.branch});
         if let Some(parent) = &ticket.stacked_on {
@@ -613,16 +614,15 @@ impl Host {
     }
     /// The projects this coordinator created with `create_project`, each with its tickets as
     /// short entries, so it can follow that work. Read only: it cannot act on those projects.
-    fn created_projects(&self, coordinator: &str) -> Result<Vec<Value>> {
+    /// Its own project's children are listed under `child_projects` instead.
+    fn created_projects(&self, coordinator: &Session) -> Result<Vec<Value>> {
         let repositories = self.repositories()?;
         let tickets = self.shown_tickets()?;
         let mut created = vec![];
         for project in self.projects()? {
-            if project
-                .created_by
-                .as_ref()
-                .is_none_or(|by| by.session_id != coordinator)
-            {
+            let by_caller =
+                (project.created_by.as_ref()).is_some_and(|by| by.session_id == coordinator.id);
+            if !by_caller || project.parent_id.as_ref() == Some(&coordinator.project_id) {
                 continue;
             }
             let created_at: Option<i64> = self
@@ -875,8 +875,10 @@ impl Host {
                 let recipient = self.session(string("recipient")?)?;
                 ensure!(
                     session.parent_id.as_deref() == Some(&recipient.id)
-                        || recipient.parent_id.as_deref() == Some(id),
-                    "Messages must follow coordinator ownership"
+                        || recipient.parent_id.as_deref() == Some(id)
+                        || self.linked_coordinators(&session, &recipient)?,
+                    "Messages must follow coordinator ownership: you may message {}",
+                    self.who_may_be_messaged(&session)?
                 );
                 ensure!(
                     recipient.role != Role::Keeper,
