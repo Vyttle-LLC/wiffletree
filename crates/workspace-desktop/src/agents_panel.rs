@@ -204,6 +204,33 @@ fn waiting_line(
         .flatten()
 }
 
+/// A ticket's quiet disk line, "12 GB build output · 151 MB source · Reclaim", once the host
+/// has measured it. Reclaim shows only while the ticket is idle with at least 1 GB.
+fn disk_line(ticket_id: &str, p: Palette, cx: &App) -> Option<Div> {
+    let disk = disk_use::current(cx)?;
+    let ticket = disk.tickets.iter().find(|t| t.ticket_id == ticket_id)?;
+    let id = ticket_id.to_owned();
+    let reclaim = disk_use::can_reclaim(ticket).then(|| {
+        div()
+            .id(SharedString::from(format!("panel-reclaim-{id}")))
+            .text_color(p.focus)
+            .cursor_pointer()
+            .hover(|d| d.underline())
+            .child("Reclaim")
+            .on_click(move |_, window, cx| {
+                let ask = ask::reclaim_build_output(Some(id.clone()));
+                disk_use::ask(ask, Some(window.window_handle()), cx)
+            })
+    });
+    Some(
+        hint(disk_use::panel_line(ticket), p)
+            .text_size(px(font::CAPTION))
+            .flex()
+            .gap_1()
+            .when_some(reclaim, |line, reclaim| line.child("·").child(reclaim)),
+    )
+}
+
 /// The elapsed-time timer runs only while the Agents panel is open and an agent it lists under
 /// a ticket is working, or one of its UI evaluator runs has not ended; `sync_agents_clock`
 /// starts it on this and each tick stops it when this ends.
@@ -337,7 +364,8 @@ impl Inspector {
                 .into_iter()
                 .flatten()
                 .map(|note| hint(note, p).text_color(p.yellow).text_ellipsis()),
-            );
+            )
+            .children(disk_line(&ticket.id, p, cx));
         for agent in agents {
             drawn = drawn.children(self.agent_row(index, ticket, agent, p, cx));
         }
@@ -551,6 +579,7 @@ impl Inspector {
                     wording::waiver_note(ticket)
                         .map(|note| hint(note, p).text_color(p.yellow).text_ellipsis()),
                 )
+                .children(disk_line(&ticket.id, p, cx))
         });
         Some(div().flex().flex_col().gap_1().child(toggle).children(rows))
     }

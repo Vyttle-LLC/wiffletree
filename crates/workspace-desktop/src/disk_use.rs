@@ -250,19 +250,52 @@ impl DiskCard {
 }
 
 /// The waiting delete a failing-delete card names, while it still waits.
-pub(crate) fn failing_delete<'a>(disk: &'a DiskUse, name: &str) -> Option<&'a PendingDelete> {
+fn failing_delete<'a>(disk: &'a DiskUse, name: &str) -> Option<&'a PendingDelete> {
     (disk.deletes.iter()).find(|delete| {
         let folder = std::path::Path::new(&delete.path).file_name();
         folder.is_some_and(|folder| folder.to_string_lossy().starts_with(name))
     })
 }
 
+/// A button on a disk card, in the order drawn; the last is the primary one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CardAction {
+    OpenSettings,
+    ReclaimAll,
+    Dismiss,
+    /// The folder waiting to be deleted.
+    ShowInFinder(String),
+    RetryNow(String),
+}
+
+/// What a disk card offers. The hard floor's card opens Settings › Disk or reclaims all but
+/// running builds; the host answers it once space returns. A failing delete's card can be
+/// dismissed, and while its folder still waits, shown in Finder on This Mac or retried now.
+pub(crate) fn card_actions(
+    card: &DiskCard,
+    disk: Option<&DiskUse>,
+    on_this_mac: bool,
+) -> Vec<CardAction> {
+    let name = match card {
+        DiskCard::BuildsHeld => return vec![CardAction::OpenSettings, CardAction::ReclaimAll],
+        DiskCard::DeleteFailed(name) => name,
+    };
+    let mut actions = vec![CardAction::Dismiss];
+    if let Some(waiting) = disk.and_then(|disk| failing_delete(disk, name)) {
+        if on_this_mac {
+            actions.push(CardAction::ShowInFinder(waiting.path.clone()));
+        }
+        actions.push(CardAction::RetryNow(waiting.path.clone()));
+    }
+    actions
+}
+
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
     use super::{
-        DiskCard, budget_line, can_reclaim, delete_line, failing_delete, groups, panel_line, size,
-        where_line,
+        CardAction, DiskCard, budget_line, can_reclaim, card_actions, delete_line, groups,
+        panel_line, size, where_line,
     };
     use workspace_core::{
         DiskPart, DiskSettings, DiskUse, GB, PendingDelete, TicketDiskState, TicketDiskUse,
@@ -396,17 +429,18 @@ mod tests {
     }
 
     #[test]
-    fn disk_cards_are_known_by_their_operation_and_find_their_folder() {
-        assert_eq!(DiskCard::of("builds-held:17"), Some(DiskCard::BuildsHeld));
-        let failed = DiskCard::of("worktree-delete-failed:17:.removing-cf62");
-        assert_eq!(
-            failed,
-            Some(DiskCard::DeleteFailed(".removing-cf62".into()))
-        );
+    fn disk_cards_are_known_by_their_operation_and_offer_their_actions() {
+        use CardAction::*;
+        let held = DiskCard::of("builds-held:17").unwrap();
+        assert_eq!(held, DiskCard::BuildsHeld);
+        assert_eq!(card_actions(&held, None, true), [OpenSettings, ReclaimAll]);
+        let failed = DiskCard::of("worktree-delete-failed:17:.removing-cf62").unwrap();
+        assert_eq!(failed, DiskCard::DeleteFailed(".removing-cf62".into()));
         assert_eq!(DiskCard::of("permission:1"), None);
+        let folder = "/w/tasks/p/r/.removing-cf6255af".to_owned();
         let disk = DiskUse {
             deletes: vec![PendingDelete {
-                path: "/w/tasks/p/r/.removing-cf6255af".into(),
+                path: folder.clone(),
                 ticket_id: None,
                 attempts: 4,
                 last_error: Some("Permission denied".into()),
@@ -416,10 +450,22 @@ mod tests {
             ..DiskUse::default()
         };
         assert_eq!(
-            failing_delete(&disk, ".removing-cf62").map(|d| d.attempts),
-            Some(4)
+            card_actions(&failed, Some(&disk), true),
+            [
+                Dismiss,
+                ShowInFinder(folder.clone()),
+                RetryNow(folder.clone())
+            ]
         );
-        assert!(failing_delete(&disk, ".removing-other").is_none());
+        // A paired host's folder is not on this Mac to show.
+        assert_eq!(
+            card_actions(&failed, Some(&disk), false),
+            [Dismiss, RetryNow(folder)]
+        );
+        // Once the folder is gone, or before the host answered, there is nothing to retry.
+        let other = DiskCard::DeleteFailed(".removing-other".into());
+        assert_eq!(card_actions(&other, Some(&disk), true), [Dismiss]);
+        assert_eq!(card_actions(&failed, None, true), [Dismiss]);
         assert!(delete_line(&disk.deletes[0]).starts_with("Permission denied · 4 attempts · next"));
     }
 }
