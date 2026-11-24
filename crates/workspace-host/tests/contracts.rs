@@ -369,7 +369,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = core(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator core — v18"));
+    assert!(coordinator.contains("Project coordinator core — v19"));
     // Naming and filing rules, and the parent's duty to escalate what it has no decision for.
     for rule in [
         "Prefer adding a ticket to your own project",
