@@ -60,6 +60,7 @@ fn evaluate(
             app: None,
             desktop: None,
         }),
+        conversation: None,
         push_branch: None,
     };
     let (mut reply, mut failure, mut reported) = (String::new(), None, None);

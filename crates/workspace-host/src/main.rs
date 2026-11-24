@@ -24,8 +24,15 @@ fn main() -> Result<()> {
     {
         return workspace_host::desktop_driver::serve_stdio(socket.as_ref(), folder.as_ref());
     }
-    if args.first().map(String::as_str) == Some("thread-mcp") {
-        return workspace_host::mcp::serve_stdio(workspace_host::mcp::thread_tools());
+    // An MCP source the Assistant's Claude is offered for its read tools alone.
+    if let [first, allowed, command, server_args @ ..] = &args[..]
+        && first == "mcp-filter"
+    {
+        let allowed: Vec<String> = serde_json::from_str(allowed)?;
+        return workspace_host::mcp::filter_stdio(&allowed, command, server_args);
+    }
+    if args.first().map(String::as_str) == Some("assistant-mcp") {
+        return workspace_host::mcp::serve_stdio(workspace_host::mcp::assistant_tools());
     }
     if args.first().map(String::as_str) == Some("issue-thread-mcp") {
         return workspace_host::mcp::serve_stdio(workspace_host::mcp::issue_thread_tools());
@@ -43,6 +50,21 @@ fn main() -> Result<()> {
             input.clear();
         }
         if let Some(why) = workspace_host::provider::shell_text_refused(&input) {
+            let _ = writeln!(io::stderr(), "{why}");
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
+    // Claude's hook before every call of a host-started act run, refusing as job-bash-check
+    // does: exit 2 for anything but the action card's call, made once.
+    if let [first, folder] = &args[..]
+        && first == "act-check"
+    {
+        let mut input = vec![];
+        if io::stdin().read_to_end(&mut input).is_err() {
+            input.clear();
+        }
+        if let Some(why) = workspace_host::provider::act_call_refused(folder.as_ref(), &input) {
             let _ = writeln!(io::stderr(), "{why}");
             std::process::exit(2);
         }

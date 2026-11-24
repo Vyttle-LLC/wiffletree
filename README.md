@@ -68,11 +68,11 @@ The full explanation of everything below is in **[docs/FEATURES.md](docs/FEATURE
   </tr>
   <tr>
     <td><img src="docs/images/issues.png" alt="The Issues page as a board, with demo issues in Triage, Backlog, Todo and In progress columns"></td>
-    <td><img src="docs/images/assistant.png" alt="An Assistant thread in the Tidepool Space answering a status question, then saving two outputs to Boards"></td>
+    <td><img src="docs/images/assistant.png" alt="The Assistant's one conversation: it answers a contrast question, starts work in the Celadon Space with a work card, brings up a decision from that work, and the rail lists Needs you, Running, Loops and Done recently"></td>
   </tr>
   <tr>
     <td align="center"><sub>Issues are plain files in your repository.</sub></td>
-    <td align="center"><sub>The Assistant answers in read-only threads.</sub></td>
+    <td align="center"><sub>The Assistant answers, runs work for you and asks only what needs you.</sub></td>
   </tr>
   <tr>
     <td><img src="docs/images/models.png" alt="The Models page's Who runs what table, with a first choice, a next choice, a small-work line and a Right now column for each job"></td>
@@ -112,7 +112,7 @@ The full explanation of everything below is in **[docs/FEATURES.md](docs/FEATURE
 
 ### Spaces
 
-- A Space answers "where does this go?" for projects, threads, jobs and issues.
+- A Space answers "where does this go?" for projects, the Assistant's requests, loops and issues.
 - It holds code repositories, instructions for every role and its own model rows.
 - One repository holds everything a Space shares in its `wiffletree/` folder: the Space, its issues and its brain.
 - A local repository is never pushed. To share a Space, keep it in a private GitHub repository.
@@ -137,13 +137,14 @@ The full explanation of everything below is in **[docs/FEATURES.md](docs/FEATURE
 
 [More on issues](docs/FEATURES.md#issues)
 
-### Assistant, recurring jobs and Boards
+### Assistant, loops and Boards
 
-- The assistant takes quick questions in threads, and a router picks each message's thread and Space.
-- A thread is read-only plus a scratch folder, and it stays on your Mac.
-- Recurring work is a job only you can save, and Boards keeps what threads and jobs produce.
+- The Assistant is one conversation across every Space that acts on your Mac and stays on it.
+- It starts and steers work for you, so code changes still land as reviewed pull requests without project upkeep.
+- It reads your apps through each Space's sources, and anything that sends or changes something there waits on a card you run.
+- It makes recurring loops directly, with Undo, and Boards keeps what it and its loops produce.
 
-[More on the assistant](docs/FEATURES.md#assistant-recurring-jobs-and-boards)
+[More on the assistant](docs/FEATURES.md#assistant-loops-and-boards)
 
 ### Models and usage
 

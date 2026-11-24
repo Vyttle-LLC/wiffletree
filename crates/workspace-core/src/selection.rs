@@ -4,7 +4,7 @@
 use crate::cascade::{self, Layer, Resolved, ResolvedRow, Setting};
 use crate::{
     ModelProfile, Provider, QuotaReading, QuotaWindow, Role, VerificationSettings, model_name,
-    same_name, smallest_model,
+    same_name,
 };
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -70,10 +70,12 @@ pub enum Job {
         focus: String,
     },
     Keeper,
-    /// The assistant's threads.
+    /// The Assistant's conversation, issue threads and, without a Job row, loop runs.
     Assistant,
-    /// The router, which decides where each message to the assistant goes. It never waits.
-    Router,
+    /// A Router row an earlier release saved (migration, `assistant-does-the-work`). This Mac's
+    /// table drops it at load and save; a Space's `space.yaml` keeps it, ignored, until removed.
+    #[serde(rename = "router")]
+    RetiredRouter,
     /// Scheduled jobs' runs. The row is optional: without one, runs resolve the Assistant row.
     Job,
     /// Brain compile runs. The row is optional, with no small-work line: without one, no
@@ -90,7 +92,7 @@ impl Job {
             Self::Verifier { focus } => focus.clone(),
             Self::Keeper => "PR keeper".into(),
             Self::Assistant => "Assistant".into(),
-            Self::Router => "Router".into(),
+            Self::RetiredRouter => "Router".into(),
             Self::Job => "Job".into(),
             Self::Compiler => "Brain compiler".into(),
         }
@@ -102,10 +104,10 @@ impl Job {
             _ => self == other,
         }
     }
-    /// Whether a Space may set this job's row. Routing happens before a message has a Space and a
-    /// brain can belong to several Spaces, so the Router and Brain compiler rows are this Mac's.
+    /// Whether a Space may set this job's row. A brain can belong to several Spaces, so the Brain
+    /// compiler row is this Mac's; a retired row is set nowhere.
     pub fn space_may_set(&self) -> bool {
-        !matches!(self, Self::Router | Self::Compiler)
+        !matches!(self, Self::RetiredRouter | Self::Compiler)
     }
     /// The job an agent of `role` does: a configured verifier's when `focus` names one, and for
     /// any other reviewer the first configured reviewer's, else the tester's.
@@ -128,7 +130,7 @@ impl Job {
             Role::Tester => Some(Job::Tester),
             Role::Reviewer => Some(first_reviewer(verification).unwrap_or(Job::Tester)),
             Role::Keeper => Some(Job::Keeper),
-            Role::Assistant => Some(Job::Assistant),
+            Role::Assistant | Role::Conversation => Some(Job::Assistant),
             Role::JobRun => Some(Job::Job),
             Role::Compiler => Some(Job::Compiler),
             Role::TaskOrchestrator | Role::Maintenance | Role::Evaluator => None,
@@ -322,9 +324,8 @@ impl ModelSelection {
     /// its row, and one without a row gets a copy, named in `copied`: a reviewer the first
     /// reviewer's row, and a tester, or a reviewer with no reviewer row to copy, the Tester
     /// row. A table saved before the Assistant row existed gets one copied from the
-    /// Implementer row's small-work line, or its main line without one, and a Router row on
-    /// Haiku at low effort when the table uses Claude, else on Codex's smallest model, both
-    /// named in `copied`. Rows are put in the page's order.
+    /// Implementer row's small-work line, or its main line without one, named in `copied`. A
+    /// Router row an earlier release saved is dropped. Rows are put in the page's order.
     pub fn fit(&mut self, verification: &VerificationSettings) {
         self.copied.clear();
         if self.row(&Job::Assistant).is_none()
@@ -338,31 +339,7 @@ impl ModelSelection {
             });
             self.copied.push(Job::Assistant.name());
         }
-        if self.row(&Job::Router).is_none() && self.row(&Job::Assistant).is_some() {
-            // Codex cannot route, so a table with Codex only gets a row that always asks.
-            let claude = (self.jobs.iter())
-                .flat_map(|row| std::iter::once(&row.main).chain(&row.small))
-                .flat_map(Line::choices)
-                .any(|p| p.provider == Provider::Claude);
-            let provider = match claude {
-                true => Provider::Claude,
-                false => Provider::Codex,
-            };
-            let first = ModelProfile {
-                provider,
-                model: smallest_model(provider).into(),
-                effort: "low".into(),
-            };
-            self.jobs.push(JobRow {
-                job: Job::Router,
-                main: Line {
-                    first,
-                    then: Then::Wait,
-                },
-                small: None,
-            });
-            self.copied.push(Job::Router.name());
-        }
+        self.jobs.retain(|row| row.job != Job::RetiredRouter);
         let tester = self.row(&Job::Tester).cloned();
         let reviewer = (verification.verifiers.iter())
             .filter(|v| v.role == Role::Reviewer)
@@ -405,7 +382,6 @@ impl ModelSelection {
         }
         fitted.extend(take(&mut rest, &Job::Keeper));
         fitted.extend(take(&mut rest, &Job::Assistant));
-        fitted.extend(take(&mut rest, &Job::Router));
         fitted.extend(take(&mut rest, &Job::Job));
         fitted.extend(take(&mut rest, &Job::Compiler));
         self.jobs = fitted;
@@ -416,7 +392,6 @@ impl ModelSelection {
             Job::Implementer,
             Job::Tester,
             Job::Assistant,
-            Job::Router,
         ] {
             let rows = self.jobs.iter().filter(|row| row.job == job).count();
             ensure!(rows == 1, "Choose who runs the {} job", job.name());
@@ -517,7 +492,8 @@ fn validate_rows(rows: &[JobRow]) -> Result<()> {
 }
 
 /// A Space's overrides, saved over `saved`: at most one row a job, each kept to the table's
-/// rules. A Router or Brain compiler row `saved` does not hold is refused; one it holds is ignored
+/// rules. A Brain compiler row, or a Router row an earlier release allowed, that `saved` does not
+/// hold is refused; one it holds is ignored
 /// at read, so it stays out of the rules and blocks nothing.
 pub fn validate_space_rows(rows: &[JobRow], saved: &[JobRow]) -> Result<()> {
     if let Some(row) = (rows.iter()).find(|row| !row.job.space_may_set() && !saved.contains(row)) {
@@ -760,7 +736,7 @@ fn refused(
 
 /// Why this Mac can run none of the choices on `row`'s line in use, its small-work line for
 /// `small` work when it has one, else its main line, such as "Claude is not signed in on this
-/// Mac", or what `held` says of a provider; the router never runs on Codex.
+/// Mac", or what `held` says of a provider.
 fn not_runnable(
     row: &JobRow,
     small: bool,
@@ -768,11 +744,7 @@ fn not_runnable(
     held: &BTreeMap<Provider, String>,
 ) -> Option<String> {
     let line = row.line(small);
-    let runs = |p: &ModelProfile| {
-        !unusable.contains(&p.provider)
-            && !(row.job == Job::Router && p.provider == Provider::Codex)
-    };
-    if line.choices().any(runs) {
+    if line.choices().any(|p| !unusable.contains(&p.provider)) {
         return None;
     }
     let mut providers: Vec<Provider> = line.choices().map(|p| p.provider).collect();
@@ -886,11 +858,8 @@ pub struct Pick {
     pub reason: String,
 }
 
-/// Why a Router row of Codex choices only never runs.
-pub const CODEX_ROUTER: &str = "The router cannot run on Codex: Codex cannot be started with every tool off, so it asks you where each message goes.";
-
-/// First unless it is spent, then `then` unless that is spent; choices this machine cannot run,
-/// and for the router Codex, are left out. When every remaining choice is spent, the one that resets first is pinned and
+/// First unless it is spent, then `then` unless that is spent; choices this machine cannot run
+/// are left out. When every remaining choice is spent, the one that resets first is pinned and
 /// waits. A line whose then is skip skips once its first choice is spent or not signed in, when
 /// `may_skip`; otherwise it waits.
 pub fn resolve(
@@ -902,26 +871,6 @@ pub fn resolve(
 ) -> Result<Pick> {
     let line = row.line(small);
     let small = small && row.small.is_some();
-    // The router runs with every tool off, which Codex cannot be started with.
-    let router_unusable;
-    let router_limits;
-    let limits = match row.job {
-        Job::Router => {
-            ensure!(
-                line.choices().any(|p| p.provider != Provider::Codex),
-                "{CODEX_ROUTER}"
-            );
-            let mut without_codex = limits.unusable.clone();
-            without_codex.insert(Provider::Codex);
-            router_unusable = without_codex;
-            router_limits = Limits {
-                unusable: &router_unusable,
-                ..*limits
-            };
-            &router_limits
-        }
-        _ => limits,
-    };
     if may_skip && line.then == Then::Skip {
         let provider = line.first.provider;
         let skipped = match limits.usable(provider) {

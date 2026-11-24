@@ -1,5 +1,6 @@
 //! Commands paired with the type the host answers each with, so a client decodes a reply as
 //! what it is and a mismatch fails to compile. Only this module pairs them.
+use crate::assistant::conversation::ConversationCard;
 use crate::{skills::Line, *};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -491,19 +492,6 @@ pub fn list_folder(path: PathBuf) -> Ask<FolderListing> {
 pub fn core_instructions() -> Ask<Vec<crate::skills::CoreText>> {
     Ask::new(Command::CoreInstructions)
 }
-pub fn start_thread(
-    space_id: SpaceId,
-    body: String,
-    profile: Option<ModelProfile>,
-) -> Ask<assistant::Thread> {
-    Ask::new(Command::StartThread {
-        id: new_id(),
-        space_id,
-        body,
-        attachments: vec![],
-        profile,
-    })
-}
 pub fn rename_thread(thread_id: String, title: String) -> Ask<assistant::Thread> {
     Ask::new(Command::RenameThread { thread_id, title })
 }
@@ -518,25 +506,6 @@ pub fn delete_thread(thread_id: String) -> Ask<()> {
 }
 pub fn search_threads(query: String, space_id: Option<SpaceId>) -> Ask<Vec<assistant::ThreadHit>> {
     Ask::new(Command::SearchThreads { query, space_id })
-}
-pub fn draft_project_brief(thread_id: String) -> Ask<Message> {
-    Ask::new(Command::DraftProjectBrief { thread_id })
-}
-pub fn make_project(
-    thread_id: String,
-    name: String,
-    brief: String,
-    files: Vec<String>,
-) -> Ask<Project> {
-    Ask::new(Command::MakeProject {
-        thread_id,
-        name,
-        brief,
-        files,
-    })
-}
-pub fn scratch_files(thread_id: String) -> Ask<Vec<String>> {
-    Ask::new(Command::ScratchFiles { thread_id })
 }
 pub fn dismiss_thread_card(thread_id: String, card_id: String) -> Ask<assistant::Thread> {
     Ask::new(Command::DismissThreadCard { thread_id, card_id })
@@ -571,28 +540,54 @@ pub fn discard_proposal(thread_id: String, proposal_id: String) -> Ask<assistant
 pub fn set_assistant_name(name: String) -> Ask<String> {
     Ask::new(Command::SetAssistantName { name })
 }
-pub fn set_router_threshold(threshold: f64) -> Ask<HostSettings> {
-    Ask::new(Command::SetRouterThreshold { threshold })
+pub fn conversation_cards() -> Ask<assistant::conversation::ConversationRead> {
+    Ask::new(Command::ConversationCards)
 }
-pub fn route_message(id: String, thread_id: Option<String>, body: String) -> Ask<()> {
-    Ask::new(Command::RouteMessage {
-        id,
-        thread_id,
-        body,
+pub fn answer_decision(card_id: String, answer: String) -> Ask<ConversationCard> {
+    Ask::new(Command::AnswerDecision { card_id, answer })
+}
+pub fn apply_loop_card(card_id: String) -> Ask<ConversationCard> {
+    Ask::new(Command::ApplyLoopCard { card_id })
+}
+pub fn decline_loop_card(card_id: String) -> Ask<ConversationCard> {
+    Ask::new(Command::DeclineLoopCard { card_id })
+}
+pub fn undo_loop_change(card_id: String) -> Ask<ConversationCard> {
+    Ask::new(Command::UndoLoopChange { card_id })
+}
+pub fn run_action(card_id: String) -> Ask<ConversationCard> {
+    Ask::new(Command::RunAction { card_id })
+}
+pub fn decline_action(card_id: String) -> Ask<ConversationCard> {
+    Ask::new(Command::DeclineAction { card_id })
+}
+pub fn stop_work(project_id: String) -> Ask<Project> {
+    Ask::new(Command::StopWork { project_id })
+}
+/// Change on a message's routing tag: to another work item, or with `None` to no work.
+pub fn move_routed_message(
+    message_id: String,
+    project_id: Option<String>,
+) -> Ask<assistant::conversation::Route> {
+    Ask::new(Command::MoveRoutedMessage {
+        message_id,
+        project_id,
     })
 }
-pub fn answer_held(id: String, destination: assistant::router::Destination) -> Ask<()> {
-    Ask::new(Command::AnswerHeld { id, destination })
+pub fn source_candidates() -> Ask<Vec<SourceCandidate>> {
+    Ask::new(Command::SourceCandidates)
 }
-pub fn change_route(
-    thread_id: String,
-    message_id: String,
-    destination: assistant::router::Destination,
-) -> Ask<()> {
-    Ask::new(Command::ChangeRoute {
-        thread_id,
-        message_id,
-        destination,
+pub fn probe_source(kind: SourceKind, name: String) -> Ask<SourceProbe> {
+    Ask::new(Command::ProbeSource { kind, name })
+}
+/// The human's message to the Assistant's one conversation; `space_id` is the Space picked in
+/// the composer, if any.
+pub fn send_to_assistant(id: String, body: String, space_id: Option<SpaceId>) -> Ask<Message> {
+    Ask::new(Command::SendToAssistant {
+        id,
+        body,
+        attachments: vec![],
+        space_id,
     })
 }
 /// With `new`, from a recipe card, refused when a job of that name exists.

@@ -59,9 +59,11 @@ impl Host {
             session.role != Role::Keeper,
             "A PR keeper agent takes its model from the PR keeper's row in Models → Who runs what"
         );
+        // A turn reads its model when it starts, so a new model chosen during one applies from
+        // the next; a new provider would also change the turn running now.
         ensure!(
-            session.status != Status::Working,
-            "Stop the current turn before changing its runtime"
+            session.status != Status::Working || session.provider == profile.provider,
+            "Stop the current turn before changing its provider"
         );
         let mut runtime = self.session_runtime(id)?;
         ensure!(
@@ -647,7 +649,7 @@ impl Host {
         Ok(created)
     }
     /// One ticket of the caller's project in full, whatever its state.
-    fn ticket_record(&self, caller: &Session, ticket_id: &str) -> Result<Value> {
+    pub(crate) fn ticket_record(&self, caller: &Session, ticket_id: &str) -> Result<Value> {
         let ticket = self.shown_ticket(self.ticket(ticket_id)?);
         ensure!(
             self.session(&ticket.coordinator_id)?.project_id == caller.project_id,
@@ -761,10 +763,10 @@ impl Host {
             Err(error) => json!({"cannot_start": format!("{error:#}")}),
         };
         let space_name = self.find_space(&space)?.map(|r| r.space.name);
-        // Only the human starts the assistant's threads, only their messages run the router, and
-        // no coordinator starts a compile.
+        // Only the human starts the Assistant and its issue threads, and no coordinator starts a
+        // compile.
         let jobs: Vec<Value> = (table.rows.iter())
-            .filter(|row| !matches!(row.job, Job::Assistant | Job::Router | Job::Compiler))
+            .filter(|row| !matches!(row.job, Job::Assistant | Job::Compiler))
             .map(|resolved| {
                 let row = &resolved.resolved.value;
                 let mut entry = json!({"job": row.job, "name": row.job.name(),
@@ -1011,6 +1013,15 @@ impl Host {
                     string("message_id")?,
                     &findings,
                 )?;
+                // The Assistant's work is done when its coordinator reports it completed, unless
+                // the human stopped it first; the report is already stored either way.
+                if kind == "completed"
+                    && let Some(work) = self.work_of(&session)?
+                    && (work.assistant_work.as_ref())
+                        .is_some_and(|item| item.state != WorkState::Stopped)
+                {
+                    self.set_work_state(&work.id, WorkState::Done)?;
+                }
                 let ticket = self.session_runtime(id)?.ticket_id;
                 match ticket {
                     Some(ticket) if kind == "ready_for_testing" => {
@@ -1069,11 +1080,20 @@ impl Host {
                     "Escalate to your coordinator first"
                 );
                 ensure_unreserved(string("request_id")?)?;
-                let options = match args.get("options") {
+                let options: Vec<String> = match args.get("options") {
                     Some(options) => serde_json::from_value(options.clone())
                         .context("options must be a list of strings")?,
                     None => vec![],
                 };
+                // The coordinator of the Assistant's work asks the Assistant, never the Inbox.
+                if self.work_of(&session)?.is_some() {
+                    return self.ask_assistant(
+                        &session,
+                        string("request_id")?,
+                        string("question")?,
+                        &options,
+                    );
+                }
                 Ok(serde_json::to_value(self.request_attention(
                     id,
                     "local",

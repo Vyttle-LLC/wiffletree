@@ -422,6 +422,25 @@ fn plain(name: &str) -> bool {
         && (name.chars()).all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// Whether a name is a claude.ai connector's as Claude lists it, such as `claude.ai Google
+/// Calendar`: the prefix, then words of letters, digits, `-`, `_`, `.` and parentheses.
+fn claude_ai_connector(name: &str) -> bool {
+    let Some(display) = name.strip_prefix("claude.ai ") else {
+        return false;
+    };
+    !display.trim().is_empty()
+        && name.len() <= 64
+        && (display.chars()).all(|c| c.is_ascii_alphanumeric() || " -_.()".contains(c))
+}
+
+/// The read operations a loop may run with `command`, one of `JOB_CLIS`, as the words after
+/// its name.
+pub fn cli_reads(command: &str) -> &'static [&'static str] {
+    (READS.iter())
+        .find(|(cli, _)| *cli == command)
+        .map_or(&[], |(_, operations)| operations)
+}
+
 /// Whether the words after a CLI's name start one of its operations in `READS` (design,
 /// decision 9); an aws command first names its profile.
 fn reads(command: &str, words: &[&str]) -> bool {
@@ -445,11 +464,17 @@ fn reads(command: &str, words: &[&str]) -> bool {
 /// since nothing a recipe supplies is run by the host. An MCP server lists the tools it may
 /// call.
 pub fn validate_source(source: &Source) -> Result<()> {
+    ensure!(
+        source.acts().is_empty() && *source == source.read_only(),
+        "A loop only reads: {} lists act tools or commands ({}), which only the Assistant may ask for",
+        source.name(),
+        source.acts().join(", ")
+    );
     match source {
         Source::Mcp { server, tools, .. } => {
             ensure!(
-                plain(server),
-                "Name the MCP server as its configuration does"
+                plain(server) || claude_ai_connector(server),
+                "Name the MCP server as its configuration does, or a claude.ai connector as `claude mcp list` shows it"
             );
             ensure!(
                 !tools.is_empty() && tools.iter().all(|tool| plain(tool)),
@@ -742,10 +767,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_loop_may_read_a_claude_ai_connector_named_as_claude_lists_it() {
+        let mcp = |server: &str| Source::Mcp {
+            server: server.into(),
+            tools: vec!["list_events".into()],
+            act: vec![],
+            without_asking: vec![],
+            extra: Default::default(),
+        };
+        for server in ["linear", "claude.ai Google Calendar", "claude.ai Gmail (2)"] {
+            validate_source(&mcp(server)).unwrap();
+        }
+        for server in [
+            "claude.ai ",
+            "claude.ai Gmail; rm",
+            "my server",
+            "claude.ai Gmail,x",
+        ] {
+            assert!(validate_source(&mcp(server)).is_err(), "{server}");
+        }
+    }
+
     fn gh(prefixes: &[&str]) -> Source {
         Source::Cli {
             command: "gh".into(),
             prefixes: prefixes.iter().map(|p| p.to_string()).collect(),
+            act: vec![],
+            without_asking: vec![],
             check: None,
             extra: Default::default(),
         }
@@ -774,6 +823,8 @@ mod tests {
         Source::Cli {
             command: command.into(),
             prefixes: vec![prefix.into()],
+            act: vec![],
+            without_asking: vec![],
             check: None,
             extra: Default::default(),
         }
@@ -828,6 +879,8 @@ mod tests {
                 "aws --profile readonly logs filter-log-events".into(),
                 "aws --profile admin ecs list-tasks".into(),
             ],
+            act: vec![],
+            without_asking: vec![],
             check: None,
             extra: Default::default(),
         };

@@ -94,6 +94,7 @@ fn run(home: &Path, prompt: &str, hold_until_closed: bool) -> Outcome {
         instructions: String::new(),
         thread: None,
         evaluator: None,
+        conversation: None,
         push_branch: None,
     };
     let mut outcome = Outcome {

@@ -295,6 +295,50 @@ impl Host {
         self.save_thread(&thread)?;
         Ok(thread)
     }
+    /// The Assistant's `file_issue`, `edit_issue` or `comment_issue` on `space`'s tracker,
+    /// written at once as the human and marked as their assistant's, through the same writes a
+    /// proposal's Apply makes. Returns the issue and what was done to it.
+    pub(crate) fn write_for_assistant(
+        &mut self,
+        space: &Space,
+        name: &str,
+        args: &Value,
+    ) -> Result<(IssueId, &'static str)> {
+        let prefix = (self.tracker(space))
+            .with_context(|| format!("{} has no issues", space.name))?
+            .prefix;
+        let issue_id = || -> Result<IssueId> {
+            let id = IssueId::parse(args["id"].as_str().context("Missing id")?)?;
+            ensure!(
+                id.prefix() == prefix,
+                "{id} is not in {}'s tracker, whose issues are {prefix}-…",
+                space.name
+            );
+            Ok(id)
+        };
+        match name {
+            "file_issue" => {
+                service::only_arguments(name, args, &NEW_FIELDS)?;
+                let filed = self.file_issue(&space.id, new_issue(args)?, true)?;
+                Ok((filed.id, "Filed"))
+            }
+            "edit_issue" => {
+                let fields: Vec<&str> = NEW_FIELDS.iter().copied().chain(["id"]).collect();
+                service::only_arguments(name, args, &fields)?;
+                let id = issue_id()?;
+                let current = self.parsed_issue(&id)?;
+                self.write_change_as(&current, changes(args)?.apply(&current), true)?;
+                Ok((id, "Edited"))
+            }
+            "comment_issue" => {
+                service::only_arguments(name, args, &["id", "body"])?;
+                let id = issue_id()?;
+                self.post_comment(&id, args["body"].as_str().unwrap_or_default(), true)?;
+                Ok((id, "Commented"))
+            }
+            _ => bail!("{name} is not an issue write"),
+        }
+    }
     /// Discards a pending proposal; nothing is written to the tracker.
     pub fn discard_proposal(&mut self, thread_id: &str, proposal_id: &str) -> Result<Thread> {
         let mut thread = self.thread(thread_id)?;
@@ -308,16 +352,26 @@ impl Host {
     /// Writes `after` over `current` with the human's edit, then its move when the state
     /// changes, as the issue page would.
     fn write_change(&mut self, current: &Issue, after: Issue) -> Result<()> {
+        self.write_change_as(current, after, false)
+    }
+    /// `write_change`; `for_assistant` marks the edit and the move written by the human's
+    /// assistant.
+    fn write_change_as(
+        &mut self,
+        current: &Issue,
+        after: Issue,
+        for_assistant: bool,
+    ) -> Result<()> {
         let state = after.state;
         let edited = Issue {
             state: current.state,
             ..after
         };
         if edited != *current {
-            self.edit_issue(edited)?;
+            self.edit_issue_as(edited, for_assistant)?;
         }
         if state != current.state {
-            self.move_issue(&current.id, state)?;
+            self.move_issue_as(&current.id, state, for_assistant)?;
         }
         Ok(())
     }
@@ -448,6 +502,73 @@ mod tests {
     }
 
     #[test]
+    fn the_assistant_writes_issues_at_once_as_the_human_and_reading_one_holds_its_turn() {
+        use crate::conversation::TurnGuard;
+        use workspace_core::assistant::conversation::{CardKind, LoopCardState};
+        let (_home, mut host, sage, issue) = sage_here();
+        let assistant = host.assistant().unwrap();
+        let mut guard = TurnGuard {
+            human_message: Some("m1".into()),
+            ..TurnGuard::default()
+        };
+        let tool = |host: &mut Host, name: &str, args: Value, guard: &mut TurnGuard| {
+            host.conversation_tool(&assistant, name, &args, guard)
+        };
+        let filed = tool(
+            &mut host,
+            "file_issue",
+            json!({"space": sage.id, "title": "Watch crash on call end"}),
+            &mut guard,
+        )
+        .unwrap();
+        let filed = IssueId::parse(filed["issue"].as_str().unwrap()).unwrap();
+        let commented =
+            json!({"space": sage.id, "id": issue.id.to_string(), "body": "Seen on watchOS 12"});
+        tool(&mut host, "comment_issue", commented, &mut guard).unwrap();
+        let edited = json!({"space": sage.id, "id": issue.id.to_string(), "title": "Webhook retries forever", "priority": "high", "state": "todo"});
+        tool(&mut host, "edit_issue", edited, &mut guard).unwrap();
+        assert!(!guard.held(), "writing reads nothing written by others");
+        let events = host.read_issue(&issue.id).unwrap().events;
+        let marked: Vec<&str> = (events.iter())
+            .filter(|e| e.fields.get(FILED_FOR) == Some(&json!("jlin")))
+            .map(|e| e.kind.as_str())
+            .collect();
+        assert_eq!(marked, ["priority", "edited", "state"]);
+        let edit = events.iter().find(|e| e.kind == "edited").unwrap();
+        assert_eq!(edit.fields["fields"], json!(["title", "priority"]));
+
+        let record = host.read_issue(&filed).unwrap();
+        assert_eq!(filed_for(&record.issue.unwrap()), Some("jlin"));
+        let comment = host.read_issue(&issue.id).unwrap().comments.pop().unwrap();
+        assert_eq!(
+            (comment.author.as_str(), comment.assistant_for.as_deref()),
+            ("jlin", Some("jlin"))
+        );
+        let written: Vec<String> = (host.conversation_cards().unwrap().into_iter())
+            .filter_map(|card| match card.kind {
+                CardKind::IssueWritten { written, .. } => Some(written),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(written, ["Filed", "Commented", "Edited"]);
+        // An issue of another Space's tracker is refused.
+        let elsewhere = json!({"space": sage.id, "id": "OTHER-1", "body": "x"});
+        assert!(tool(&mut host, "comment_issue", elsewhere, &mut guard).is_err());
+
+        let read = json!({"space": sage.id, "id": issue.id.to_string()});
+        tool(&mut host, "read_issue", read, &mut guard).unwrap();
+        assert_eq!(guard.read, [format!("issue {}", issue.id)]);
+        let new_loop = json!({"space": sage.id, "name": "Issue sweep", "prompt": "List open bugs", "cron": "0 9 * * 1", "timezone": "UTC", "sources": []});
+        let made = tool(&mut host, "create_loop", new_loop, &mut guard).unwrap();
+        assert_eq!(made["applied"], false);
+        assert!(host.recipes().unwrap().is_empty());
+        let card = host.conversation_cards().unwrap().pop().unwrap();
+        assert!(
+            matches!(card.kind, CardKind::Loop(change) if change.state == LoopCardState::Waiting)
+        );
+    }
+
+    #[test]
     fn an_issue_thread_opens_once_per_space_and_a_shared_tracker_has_one_in_each() {
         let folder = tempfile::tempdir().unwrap();
         let github = shared_storage(folder.path(), Some("SAGE"));
@@ -554,23 +675,6 @@ mod tests {
             "{told}"
         );
         assert!(!told.contains(&issue.title));
-        // A thread with nothing attached may propose an issue, and nothing else of these.
-        let plain = host
-            .start_thread("plain", &sage.id, "Hi", &[], None)
-            .unwrap();
-        let plain = host.session(&plain.id).unwrap();
-        for tool in ["list_issues", "propose_edit", "search_repositories"] {
-            let args = json!({"id": issue.id, "title": "x", "query": "x"});
-            assert!(call(&mut host, &plain, tool, args).is_err(), "{tool}");
-        }
-        call(
-            &mut host,
-            &plain,
-            "propose_issue",
-            json!({"title": "Track the retry"}),
-        )
-        .unwrap();
-        assert!(!host.thread_launch(&plain).unwrap().issue_thread);
     }
 
     #[test]

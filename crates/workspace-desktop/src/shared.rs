@@ -141,6 +141,13 @@ impl Shared {
             .map(|s| s.name.clone())
             .unwrap_or_default()
     }
+    /// Whether the project view open is one of the Assistant's work items, opened from it.
+    pub(super) fn assistant_work_open(&self) -> bool {
+        self.page == Page::Conversation
+            && (self.project_id())
+                .and_then(|id| self.index.as_ref()?.project(&id))
+                .is_some_and(|project| project.assistant_work.is_some())
+    }
     pub(super) fn project_name(&self) -> String {
         let project = self.project_id().unwrap_or_default();
         (self.index.as_ref())
@@ -306,12 +313,14 @@ pub(super) enum Intent {
     OpenJob(Option<workspace_core::job::JobKey>),
     /// Stop on a job's long run, by its id.
     StopJobRun(String),
+    /// Stop on the Assistant's long turn, from its sidebar row.
+    StopAssistantTurn,
 }
 
 /// A change to the snapshot the host has confirmed.
 #[derive(Clone)]
 pub(super) enum Amendment {
-    Project(Project),
+    Project(Box<Project>),
     Projects(Vec<Project>),
     Skill(Box<SkillState>),
 }

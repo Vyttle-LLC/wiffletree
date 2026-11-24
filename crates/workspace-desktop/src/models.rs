@@ -277,8 +277,6 @@ pub(crate) enum Now {
     /// Its first choice is spent and its row says skip: skips reviews until this time, if known.
     Skips(Option<String>),
     Cannot,
-    /// The router cannot run or would wait, so it asks you where each message goes.
-    AsksYou,
     /// A provider's sign-in is still being checked, so the pick is not known.
     Checking,
 }
@@ -293,8 +291,6 @@ pub(crate) fn now_of(
     }
     let line = row.line(small);
     match pick {
-        Ok(pick) if pick.waits && row.job == Job::Router => Now::AsksYou,
-        Err(_) if row.job == Job::Router => Now::AsksYou,
         Ok(pick) if pick.waits => Now::Waits(pick.until.map(reset_time)),
         Ok(pick) if pick.skip.is_some() => Now::Skips(pick.until.map(reset_time)),
         Ok(pick) if pick.profile == line.first => Now::First(pick.profile.provider),
@@ -507,18 +503,17 @@ pub(crate) fn space_rows(selection: &ModelSelection, overrides: &[JobRow]) -> Ve
     rows
 }
 
-/// What a Space is told about the rows in `rows` that no Space may set, if it holds any.
+/// What a Space is told about the rows in `rows` that no Space may set, if it holds any: a Brain
+/// compiler row, or a Router row an earlier release allowed.
 pub(crate) fn ignored_line(rows: &[JobRow], space: &str) -> Option<String> {
     let holds = |job: Job| rows.iter().any(|row| row.job == job);
-    Some(match (holds(Job::Router), holds(Job::Compiler)) {
+    let router = "an earlier release's Router row, which changes nothing";
+    let compiler = "a Brain compiler row, which doesn't belong to a Space, so this Mac's runs";
+    Some(match (holds(Job::RetiredRouter), holds(Job::Compiler)) {
         (false, false) => return None,
-        (true, true) => format!(
-            "{space} also sets Router and Brain compiler rows. Neither belongs to a Space, so this Mac's rows run."
-        ),
-        (router, _) => format!(
-            "{space} also sets a {} row. It doesn't belong to a Space, so this Mac's row runs.",
-            if router { "Router" } else { "Brain compiler" }
-        ),
+        (true, true) => format!("{space} also holds {router}, and {compiler}."),
+        (true, false) => format!("{space} also holds {router}."),
+        (false, true) => format!("{space} also sets {compiler}."),
     })
 }
 
@@ -857,18 +852,6 @@ mod tests {
             pick(Job::Implementer, &spent, &both),
             Now::Moved(Provider::Codex)
         );
-        // The router asks you rather than waiting, and on Codex alone it always asks.
-        assert_eq!(pick(Job::Router, &[], &both), Now::First(Provider::Claude));
-        assert_eq!(pick(Job::Router, &spent, &both), Now::AsksYou);
-        let mut codex = row(Job::Router);
-        codex.main.first = workspace_core::ModelProfile {
-            provider: Provider::Codex,
-            model: "gpt-6-luna".into(),
-            effort: "low".into(),
-        };
-        let refused = right_now(&selection, &codex, false, &[], &both, now);
-        assert_eq!(refused.clone().unwrap_err(), workspace_core::CODEX_ROUTER);
-        assert_eq!(now_of(&codex, false, &refused, &both), Now::AsksYou);
         let correctness = Job::Verifier {
             focus: "Correctness".into(),
         };
@@ -1012,7 +995,7 @@ mod tests {
         assert_eq!(space_rows(&table, &overrides).last(), Some(&(job, true)));
     }
     #[test]
-    fn the_table_at_a_space_leaves_out_the_router_and_compiler_and_notes_a_row_held_for_them() {
+    fn the_table_at_a_space_leaves_out_the_compiler_and_notes_a_row_held_for_it_or_the_router() {
         let opus = ModelProfile {
             provider: Provider::Claude,
             model: "opus".into(),
@@ -1021,12 +1004,11 @@ mod tests {
         let table = ModelSelection {
             jobs: vec![
                 job_row(Job::Implementer, &opus, Then::Wait),
-                job_row(Job::Router, &opus, Then::Wait),
                 job_row(Job::Compiler, &opus, Then::Wait),
             ],
             ..ModelSelection::default()
         };
-        let router = job_row(Job::Router, &opus, Then::Wait);
+        let router = job_row(Job::RetiredRouter, &opus, Then::Wait);
         let compiler = job_row(Job::Compiler, &opus, Then::Wait);
         let jobs = |shown: Vec<(JobRow, bool)>| -> Vec<Job> {
             shown.into_iter().map(|(row, _)| row.job).collect()
@@ -1040,11 +1022,15 @@ mod tests {
         assert_eq!(ignored_line(&[implementer], "Sage"), None);
         assert_eq!(
             ignored_line(&held, "Sage").unwrap(),
-            "Sage also sets Router and Brain compiler rows. Neither belongs to a Space, so this Mac's rows run."
+            "Sage also holds an earlier release's Router row, which changes nothing, and a Brain compiler row, which doesn't belong to a Space, so this Mac's runs."
+        );
+        assert_eq!(
+            ignored_line(&[router], "Sage").unwrap(),
+            "Sage also holds an earlier release's Router row, which changes nothing."
         );
         assert_eq!(
             ignored_line(&[compiler], "Sage").unwrap(),
-            "Sage also sets a Brain compiler row. It doesn't belong to a Space, so this Mac's row runs."
+            "Sage also sets a Brain compiler row, which doesn't belong to a Space, so this Mac's runs."
         );
     }
     #[test]

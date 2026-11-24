@@ -77,6 +77,7 @@ fn sort(folder: &std::path::Path, body: &str) -> (Vec<ProviderEvent>, anyhow::Re
         instructions: String::new(),
         thread: None,
         evaluator: None,
+        conversation: None,
         push_branch: None,
     };
     let mut events = vec![];

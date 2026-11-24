@@ -1,13 +1,13 @@
 //! The assistant's threads (OpenSpec change `assistant-spaces-jobs-boards`, stages 1 and 2). A
-//! thread is a provider session of role `Assistant` owned by its Space, read-only but for its
-//! scratch folder, kept only on this Mac. The router sends each message to its thread. An issue
-//! thread (stage 6) has an issue or its tracker's list attached, and proposes changes to it.
+//! thread is a provider session owned by its Space, read-only but for its scratch folder, kept
+//! only on this Mac. An issue thread (stage 6) has an issue or its tracker's list attached, and
+//! proposes changes to it; a job run's thread runs a loop. Since the one conversation
+//! (`assistant-does-the-work`), every other thread is read-only history, never resumed.
+pub mod conversation;
 pub mod proposal;
-pub mod router;
 
 use crate::{ModelProfile, Selection, SpaceId, Status};
 use proposal::{Attached, Proposal};
-use router::{Destination, Question};
 use serde::{Deserialize, Serialize};
 
 /// What the assistant is called until the user names it.
@@ -37,22 +37,16 @@ pub struct Thread {
     /// Its place in the tab strip; lower comes first.
     #[serde(default)]
     pub position: i64,
-    /// The project Make this a project created from it; the thread is read-only after.
+    /// The project an earlier release's Make this a project created from it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
     /// What the thread's tools asked to show, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cards: Vec<ThreadCard>,
-    /// The messages sent from this thread that went to another one, oldest first.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub routed: Vec<RoutedLine>,
-    /// Its messages that Change moved to another thread, with their replies.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub moved: Vec<MovedMessage>,
     /// The job run this thread is; such a thread takes no message but its prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job: Option<JobRunOf>,
-    /// What an issue thread works on; such a thread takes its messages without the router.
+    /// What an issue thread works on; such a thread takes the human's messages in its pane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attached: Option<Attached>,
     /// The changes it proposed to its Space's tracker, oldest first.
@@ -67,57 +61,16 @@ impl Thread {
             && !self.closed
             && now - self.last_message_at.max(self.opened_at) < IDLE_AFTER_MS
     }
+    /// Whether it is read-only history: neither an issue thread nor a job's run.
+    pub fn is_history(&self) -> bool {
+        self.attached.is_none() && self.job.is_none()
+    }
 }
 /// The job and run a job run's thread belongs to.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobRunOf {
     pub job: crate::job::JobKey,
     pub run_id: String,
-}
-
-/// A message the router holds unsent, while it decides and then until the user answers. It
-/// is kept in the store, so it survives a restart.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HeldMessage {
-    pub id: String,
-    /// The thread open when the user sent it; `None` from an empty tab.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin: Option<String>,
-    pub body: String,
-    pub created_at: i64,
-    /// What the user is asked; `None` while the router decides.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub question: Option<Question>,
-    /// The router's title for a new thread, when it gave one.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub title: String,
-}
-/// The line a message leaves in the thread it was sent from when it went to another thread:
-/// "New thread in Personal · Change".
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RoutedLine {
-    /// The message's id in the thread it went to.
-    pub message_id: String,
-    pub body: String,
-    pub created_at: i64,
-    /// The thread it went to, with its Space and its title then, so the line still names it
-    /// once that thread's tab is closed.
-    pub to: String,
-    #[serde(default)]
-    pub to_space: SpaceId,
-    #[serde(default)]
-    pub to_title: String,
-    /// It started that thread.
-    pub new: bool,
-    /// What Change offers before "Somewhere else…".
-    pub choices: Vec<Destination>,
-}
-/// A message Change moved out of this thread; it and its reply show as moved.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MovedMessage {
-    pub message_id: String,
-    /// The thread it went to.
-    pub to: String,
 }
 
 /// A card a thread's tool put in its conversation.
@@ -134,7 +87,7 @@ pub enum CardKind {
     /// `suggest_space`: opens Settings › Spaces filled in; nothing is created until the user
     /// saves there.
     SuggestSpace { name: String, description: String },
-    /// `project_brief`: the brief Make this a project shows, for the user to edit and confirm.
+    /// An earlier release's `project_brief`, kept readable in history.
     ProjectBrief { name: String, brief: String },
     /// `save_output`: a file copied to this Mac's private board store.
     SavedOutput {
@@ -144,8 +97,8 @@ pub enum CardKind {
         /// 1 for the first save under this title.
         version: u32,
     },
-    /// `propose_job`: a recipe for the user to check and save; nothing is scheduled until
-    /// they press Save.
+    /// An earlier release's `propose_job`: a recipe for the user to check and save, kept
+    /// readable in history; nothing is scheduled until they press Save.
     Recipe {
         recipe: Box<crate::job::Recipe>,
         preview: crate::job::RecipePreview,
@@ -243,8 +196,6 @@ mod tests {
             position: 0,
             project_id: None,
             cards: vec![],
-            routed: vec![],
-            moved: vec![],
             job: None,
             attached: None,
             proposals: vec![],

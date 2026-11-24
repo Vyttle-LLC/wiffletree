@@ -387,25 +387,173 @@ impl From<ModelProfile> for SpaceModel {
     }
 }
 
-/// A source a Space's threads may use, in the format job recipes use.
+/// A source a Space's loops and the Assistant may use, in the format job recipes use. `tools`
+/// and `prefixes` are its read lists, as every source saved before act lists has them; `act`
+/// lists what sends, posts, creates, changes or deletes in the app, which only the Assistant
+/// asks for, through an action card, and `without_asking` the act entries the human marked
+/// "Do without asking". A loop's recipe has no act entries.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Source {
     Mcp {
         server: String,
         tools: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        act: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        without_asking: Vec<String>,
         #[serde(flatten)]
         extra: Extra,
     },
     Cli {
         command: String,
         prefixes: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        act: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        without_asking: Vec<String>,
         /// How to check that the CLI is signed in, such as `gh auth status`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         check: Option<String>,
         #[serde(flatten)]
         extra: Extra,
     },
+}
+impl Source {
+    /// The MCP server or the CLI's command.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Mcp { server, .. } => server,
+            Self::Cli { command, .. } => command,
+        }
+    }
+    /// Its read tools or command prefixes.
+    pub fn reads(&self) -> &[String] {
+        match self {
+            Self::Mcp { tools, .. } => tools,
+            Self::Cli { prefixes, .. } => prefixes,
+        }
+    }
+    /// Its act tools or command prefixes.
+    pub fn acts(&self) -> &[String] {
+        match self {
+            Self::Mcp { act, .. } | Self::Cli { act, .. } => act,
+        }
+    }
+    /// Whether the human marked `entry`, one of its act tools or prefixes, Do without asking.
+    pub fn without_asking(&self, entry: &str) -> bool {
+        match self {
+            Self::Mcp { without_asking, .. } | Self::Cli { without_asking, .. } => {
+                without_asking.iter().any(|marked| marked == entry)
+            }
+        }
+    }
+    /// The source as a loop may use it: its read lists alone.
+    pub fn read_only(&self) -> Self {
+        let mut source = self.clone();
+        match &mut source {
+            Self::Mcp {
+                act,
+                without_asking,
+                ..
+            }
+            | Self::Cli {
+                act,
+                without_asking,
+                ..
+            } => {
+                act.clear();
+                without_asking.clear();
+            }
+        }
+        source
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceKind {
+    Mcp,
+    Cli,
+}
+/// What Add source offers: an MCP server configured for this Mac's Claude or Codex, a claude.ai
+/// connector this Mac's Claude loads, or a well-known CLI installed on this Mac.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceCandidate {
+    pub kind: SourceKind,
+    pub name: String,
+    /// The providers whose configuration names this MCP server; empty for a CLI.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub configured_for: Vec<crate::Provider>,
+    /// An MCP server reached by URL (HTTP or SSE), whose act tools only Claude runs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub by_url: bool,
+    /// A claude.ai connector, such as "claude.ai Gmail", which only Claude reaches.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub claude_ai: bool,
+    /// A connector's tools as Claude's start reported them, so it needs no start of its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<SuggestedTool>,
+}
+/// One tool or command prefix Add source lists, with the kind it suggests.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuggestedTool {
+    pub name: String,
+    /// Act: it sends, posts, creates, changes or deletes. Read otherwise.
+    pub act: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+}
+/// What Add source found when it started a source: its tools, or why it could not list them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceProbe {
+    #[serde(default)]
+    pub tools: Vec<SuggestedTool>,
+    /// What is wrong, such as not being signed in, in words with none of its output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+    /// The sign-in command the source's own tool gives, when Wiffletree knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<String>,
+    /// What a failing MCP server itself said, its error or the end of its standard error,
+    /// which is where it names its own sign-in command or link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_said: Option<String>,
+    /// The MCP server is reached by URL, as `SourceCandidate::by_url`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub by_url: bool,
+    /// The MCP server is a claude.ai connector, as `SourceCandidate::claude_ai`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub claude_ai: bool,
+}
+/// The kind Add source suggests for an MCP tool: its `readOnlyHint` when the server gives
+/// one, else read only when its name starts with a word that only reads.
+pub fn suggests_act(name: &str, read_only_hint: Option<bool>) -> bool {
+    const READ_WORDS: [&str; 12] = [
+        "list", "get", "read", "search", "find", "fetch", "query", "show", "view", "describe",
+        "lookup", "count",
+    ];
+    if let Some(read_only) = read_only_hint {
+        return !read_only;
+    }
+    let first = name.split(['_', '-', '.']).next().unwrap_or(name);
+    !READ_WORDS
+        .iter()
+        .any(|word| first.eq_ignore_ascii_case(word))
+}
+
+/// The entry of `entries`, command prefixes, that `command` starts with: the prefix alone or
+/// followed by a space.
+pub fn matching_prefix<'a>(entries: &'a [String], command: &str) -> Option<&'a str> {
+    let command = command.trim();
+    (entries.iter())
+        .map(String::as_str)
+        .filter(|prefix| {
+            command == *prefix
+                || command
+                    .strip_prefix(*prefix)
+                    .is_some_and(|rest| rest.starts_with(' '))
+        })
+        .max_by_key(|prefix| prefix.len())
 }
 
 /// What this Mac keeps about a Space and never writes to its storage repository.
@@ -759,8 +907,8 @@ pub struct StorageStatus {
     pub wiki_behind: Option<String>,
 }
 
-/// The owner of a session: a project, or, for sessions that are not project work, a Space or a
-/// brain. No role runs outside projects yet.
+/// The owner of a session: a project, or, for sessions that are not project work, a Space, a
+/// brain or this install, which owns the Assistant's one conversation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
 pub enum SessionOwner {
@@ -768,10 +916,11 @@ pub enum SessionOwner {
     Space(SpaceId),
     /// A brain, by its identity, such as `owner/name`.
     Brain(String),
+    Install,
 }
 impl SessionOwner {
-    /// Only project work coordinates: a Space's or a brain's session gets none of
-    /// `create_ticket`, `assign_ticket`, `send_message`, `report`, `schedule` and the others.
+    /// Only project work coordinates: a Space's, a brain's or the install's session gets none
+    /// of `create_ticket`, `assign_ticket`, `send_message`, `report`, `schedule` and the others.
     pub fn offers_coordination_tools(&self) -> bool {
         matches!(self, Self::Project(_))
     }
@@ -839,6 +988,17 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn add_source_suggests_act_unless_the_server_or_the_name_says_it_only_reads() {
+        assert!(!suggests_act("list_events", None));
+        assert!(!suggests_act("search-threads", None));
+        assert!(suggests_act("create_event", None));
+        assert!(suggests_act("respond_to_invite", None));
+        // The server's own annotation wins over the name.
+        assert!(suggests_act("get_or_create_label", Some(false)));
+        assert!(!suggests_act("summarize_day", Some(true)));
+    }
+
+    #[test]
     fn a_prefix_comes_from_the_name_and_avoids_those_taken() {
         assert_eq!(propose_prefix("Sage", &[]), "SAGE");
         assert_eq!(propose_prefix("Personal", &[]), "PERS");
@@ -850,6 +1010,31 @@ mod tests {
         for name in ["Sage", "x", "a b c d e f g", "Wood Working"] {
             validate_prefix(&propose_prefix(name, &[])).unwrap();
         }
+    }
+
+    #[test]
+    fn a_source_saved_before_act_lists_reads_as_reads_and_saves_unchanged() {
+        let old = serde_json::json!({"kind":"mcp","server":"gmail","tools":["search_threads"],"note":"kept"});
+        let source: Source = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(source.reads(), ["search_threads"]);
+        assert!(source.acts().is_empty());
+        assert_eq!(serde_json::to_value(&source).unwrap(), old);
+        let marked: Source = serde_json::from_value(serde_json::json!({
+            "kind":"cli","command":"gws","prefixes":["gws gmail list"],
+            "act":["gws gmail send","gws calendar create"],"without_asking":["gws calendar create"]
+        }))
+        .unwrap();
+        assert!(marked.without_asking("gws calendar create"));
+        assert!(!marked.without_asking("gws gmail send"));
+        let loop_source = marked.read_only();
+        assert!(
+            loop_source.acts().is_empty() && !loop_source.without_asking("gws calendar create")
+        );
+        assert_eq!(
+            matching_prefix(marked.acts(), "gws gmail send --to sam"),
+            Some("gws gmail send")
+        );
+        assert_eq!(matching_prefix(marked.acts(), "gws gmail sender"), None);
     }
 
     #[test]

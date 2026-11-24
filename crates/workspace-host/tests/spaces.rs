@@ -291,6 +291,8 @@ fn space_names_and_prefixes_are_unique() {
     edited.sources = vec![Source::Cli {
         command: "gh".into(),
         prefixes: vec!["gh pr view".into()],
+        act: vec![],
+        without_asking: vec![],
         check: Some("gh auth status".into()),
         extra: Extra::new(),
     }];

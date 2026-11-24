@@ -1938,6 +1938,61 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_approval_for_the_assistants_work_stays_in_the_inbox_and_the_assistant_is_told() {
+        use workspace_core::assistant::conversation::CardKind;
+        let mut f = fixture();
+        // The fixture's project, made the Assistant's work: its coordinator's parent is the
+        // Assistant.
+        let assistant = f.host.assistant().unwrap();
+        let mut project = f.host.project(&f.coordinator.project_id).unwrap();
+        project.assistant_work = Some(AssistantWork {
+            small: true,
+            state: WorkState::Running,
+            ended_at: None,
+        });
+        let coordinator = Session {
+            parent_id: Some(assistant.id.clone()),
+            ..f.coordinator.clone()
+        };
+        for (table, id, data) in [
+            ("projects", &project.id, encode(&project).unwrap()),
+            ("sessions", &coordinator.id, encode(&coordinator).unwrap()),
+        ] {
+            let sql = format!("UPDATE {table} SET data=?2 WHERE id=?1");
+            f.host.db.execute(&sql, params![id, data]).unwrap();
+        }
+        f.host
+            .db
+            .execute(
+                "UPDATE sessions SET parent_id=?2 WHERE id=?1",
+                params![coordinator.id, assistant.id],
+            )
+            .unwrap();
+
+        let item = asks(&mut f, "allowed-org is not an allowed owner");
+        let told = f
+            .host
+            .messages(&assistant.id, None, 10)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(!told.from_human());
+        assert!(
+            told.body
+                .contains("waits for the human's approval in the Inbox")
+        );
+        assert!(told.body.contains("Push this branch to allowed-org/app?"));
+        let cards = f.host.conversation_cards().unwrap();
+        assert_eq!(
+            cards[0].kind,
+            CardKind::Approval {
+                project_id: project.id,
+                attention_id: item.id
+            }
+        );
+    }
+
+    #[test]
     fn an_owner_that_is_not_allowed_asks_and_the_item_names_what_would_be_sent() {
         let mut f = fixture();
         let item = asks(&mut f, "allowed-org is not an allowed owner");

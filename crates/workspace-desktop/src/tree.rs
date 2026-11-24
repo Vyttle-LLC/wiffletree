@@ -123,7 +123,8 @@ fn entries<'a>(
 ) -> Vec<Entry<'a>> {
     let mut groups: Vec<Group> = vec![];
     for project in &index.snapshot().projects {
-        if section_of(index, project) != *space {
+        // The Assistant's work is listed in its rail, never as a project row.
+        if project.assistant_work.is_some() || section_of(index, project) != *space {
             continue;
         }
         let Some(root) = (index.roots(&project.id)).find(|s| show_archived || !s.archived) else {
@@ -520,6 +521,19 @@ mod tests {
                 ["PERSONAL (1)", "Calls"]
             );
         }
+    }
+
+    #[test]
+    fn the_assistants_work_is_never_a_project_row() {
+        let (_directory, host, _, _) = store();
+        let mut snapshot = host.snapshot().unwrap();
+        snapshot.projects[0].assistant_work = Some(AssistantWork {
+            small: true,
+            state: WorkState::Running,
+            ended_at: None,
+        });
+        let index = WorkspaceIndex::new(snapshot, Default::default());
+        assert!(drawn(&index, true, true).is_empty());
     }
 
     /// The store's index with `agent` in `status`, and its last turn failed when `failed`.

@@ -179,7 +179,7 @@ struct ArchiveDemand<'a> {
 
 /// The archive is out of date and something shown needs it: Show archived, the Tickets, Agents or
 /// Events panel, the Repositories page, the Issues page, whose Work box lists accepted and closed
-/// tickets, the brain browser, a ticket table's done list or a publish or merge request, or a
+/// tickets, the Assistant, whose work shows its accepted tickets' PRs, the brain browser, a ticket table's done list or a publish or merge request, or a
 /// selected session or message sender that the snapshot does not list, which only the archive
 /// holds.
 fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
@@ -192,7 +192,8 @@ fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
                 shown.panel,
                 Some(Panel::Team | Panel::Agents | Panel::Events)
             )
-            || matches!(shown.page, Page::Repositories | Page::Issues)
+            // The Assistant's work cards and rail name the PRs of accepted tickets.
+            || matches!(shown.page, Page::Repositories | Page::Issues | Page::Assistant)
             // Logs links this Mac's entries to their tickets and conversations, finished ones too.
             || shown.page == Page::BrainBrowser
             || shown.done_tickets
@@ -577,6 +578,9 @@ impl Workspace {
             Intent::StopJobRun(run) => self.assistant.update(cx, |assistant, cx| {
                 assistant.stop_run(run.clone(), window, cx)
             }),
+            Intent::StopAssistantTurn => self
+                .assistant
+                .update(cx, |assistant, cx| assistant.stop_turn(window, cx)),
             Intent::AskAssistant { attached, space } => {
                 self.assistant.update(cx, |assistant, cx| {
                     assistant.ask_about(attached.clone(), space.clone(), window, cx)
@@ -684,7 +688,7 @@ impl Workspace {
         self.amend_snapshot(|snapshot| match amendment {
             Amendment::Project(project) => {
                 if let Some(saved) = snapshot.projects.iter_mut().find(|p| p.id == project.id) {
-                    *saved = project.clone();
+                    *saved = (**project).clone();
                 }
                 for session in &mut snapshot.sessions {
                     if session.project_id == project.id && session.role == Role::ProjectOrchestrator
@@ -1874,6 +1878,11 @@ mod tests {
             // The Work box lists a linked project's accepted and closed tickets.
             ArchiveDemand {
                 page: Page::Issues,
+                ..shown("live")
+            },
+            // Done recently lists finished work with its accepted tickets' PRs.
+            ArchiveDemand {
+                page: Page::Assistant,
                 ..shown("live")
             },
             // An archived session already in the held archive, whose status may have moved.

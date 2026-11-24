@@ -1,19 +1,25 @@
 //! Noninteractive provider turns with the user's YOLO execution policy, apart from comment
 //! sorting and assistant threads, which the provider holds to what they are given.
+mod act_run;
 mod app_target;
 mod codex_compaction;
+mod connectors;
 mod constrained;
+mod conversation;
 mod desktop_helper;
 mod evaluator;
 mod output;
 mod restricted;
-mod router;
 use crate::compaction::CompactionRecord;
 use crate::processes::{self, Sighting, Watch};
 use crate::runtime::LowPriority as _;
 use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
+pub use act_run::{UrlAct, act_call_refused, act_run};
 pub use app_target::AppLaunch;
+pub use connectors::{Connector, claude_ai_connectors};
+use conversation::tool_calls;
+pub use conversation::{ConversationLaunch, SourceTools, is_claude_ai};
 pub use desktop_helper::{
     DesktopLaunch, EVALUATOR_APP, STOPPED_BY_ESCAPE, STOPPED_FROM_MENU, bundle_of, bundled_helper,
     helper_app, install_helper,
@@ -21,8 +27,7 @@ pub use desktop_helper::{
 pub use evaluator::{EvaluatorLaunch, prepare_codex_home};
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
 use output::{Next, Output, StopReading};
-pub use restricted::{ThreadLaunch, server_definition, shell_text_refused};
-pub use router::{ROUTER_LIMIT, RouterProvider};
+pub use restricted::{ThreadLaunch, configured_servers, server_definition, shell_text_refused};
 use std::os::unix::process::CommandExt;
 use std::{
     io::{Read, Write},
@@ -63,6 +68,12 @@ pub enum ProviderEvent {
     Compaction(CompactionRecord),
     /// The model a UI evaluator's provider said it runs, once, before it is checked.
     Model(String),
+    /// The Assistant's turn read text written by others through a call the host sees, such
+    /// as "gmail search_threads" or "a web page".
+    ReadOthers(String),
+    /// What the Assistant's Claude reported at its start: the tools each source's server
+    /// offers, and the servers no Space lists.
+    SourceTools(SourceTools),
     /// The human stopped a full-desktop run on the screen, with Esc or the menu bar's Stop; the
     /// turn is already cancelled, and this is why.
     StoppedOnScreen(String),
@@ -74,6 +85,10 @@ pub enum ProviderEvent {
         cancelled: bool,
     },
 }
+/// Why the Assistant's turn stopped at its start: a source's server offered tools Wiffletree
+/// had not seen. The host starts the same input again at once, with them denied.
+pub(crate) const NEW_SOURCE_TOOLS: &str =
+    "Stopped before acting: a source offered tools Wiffletree had not seen";
 /// What a run asks of the provider.
 pub enum TurnKind {
     /// A turn: `prompt` and the delivered messages' attachments.
@@ -109,6 +124,8 @@ pub struct Turn {
     pub thread: Option<ThreadLaunch>,
     /// A UI evaluator run's launch, which has no workspace server, credential or instructions.
     pub evaluator: Option<EvaluatorLaunch>,
+    /// The Assistant conversation's launch: YOLO with its tools and its sources' read tools.
+    pub conversation: Option<ConversationLaunch>,
     /// The one branch the guard lets this turn's shell push, an implementer's own; see `guard`.
     pub push_branch: Option<String>,
 }
@@ -141,8 +158,9 @@ pub fn executable(provider: Provider) -> Result<PathBuf> {
         .with_context(|| format!("Install {name} CLI and sign in before starting live work"))
 }
 /// The fixed core's parts, each with who gets it: the contract, then each role's core, then the
-/// contract's thread version, the assistant's core and a job run's.
-pub const CORE: [(&str, &str); 8] = [
+/// contract's thread version, the Assistant conversation's contract, the Assistant core, which
+/// the conversation and issue threads share, and a job run's core.
+pub const CORE: [(&str, &str); 9] = [
     (
         "every agent",
         include_str!("../skills/core/communication.md"),
@@ -165,7 +183,11 @@ pub const CORE: [(&str, &str); 8] = [
         include_str!("../skills/core/thread-communication.md"),
     ),
     (
-        "assistant threads",
+        "the Assistant",
+        include_str!("../skills/core/conversation-communication.md"),
+    ),
+    (
+        "the Assistant and issue threads",
         include_str!("../skills/core/assistant.md"),
     ),
     ("job runs", include_str!("../skills/core/job-run.md")),
@@ -192,8 +214,8 @@ fn core(role: Role) -> &'static str {
         Role::Implementer | Role::Maintenance => 2,
         Role::Tester | Role::Reviewer => 3,
         Role::Keeper => 4,
-        Role::Assistant => 6,
-        Role::JobRun => 7,
+        Role::Assistant | Role::Conversation => 7,
+        Role::JobRun => 8,
         Role::Compiler => return compile::PROCEDURE,
         // An evaluator is blind: Wiffletree gives it no instructions at all.
         Role::Evaluator => return "",
@@ -204,6 +226,7 @@ fn core(role: Role) -> &'static str {
 fn contract(role: Role) -> &'static str {
     match role {
         Role::Assistant | Role::JobRun => CORE[5].1,
+        Role::Conversation => CORE[6].1,
         _ => CORE[0].1,
     }
 }
@@ -313,7 +336,7 @@ pub fn command(turn: &Turn) -> Result<ProcessCommand> {
     ensure!(
         turn.session.provider != Provider::Codex
             || turn.thread.as_ref().is_none_or(ThreadLaunch::codex_may_run),
-        "A job with a CLI source runs only on Claude: Codex cannot yet hold a CLI to its listed commands"
+        "A job with a CLI source or a claude.ai connector runs only on Claude: Codex cannot yet hold a CLI to its listed commands, and cannot reach a connector"
     );
     let mut cmd = ProcessCommand::new(executable(turn.session.provider)?);
     configure(&mut cmd, turn);
@@ -351,6 +374,12 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
             Provider::Claude => restricted::configure_claude(cmd, turn, launch),
             Provider::Codex => restricted::configure_codex(cmd, turn, launch),
         }
+        return;
+    }
+    if let Some(launch) = &turn.conversation
+        && matches!(turn.kind, TurnKind::Prompt)
+    {
+        conversation::configure(cmd, turn, launch);
         return;
     }
     let instructions = &turn.instructions;
@@ -435,7 +464,8 @@ pub fn merge_run(
             profile,
             skills::model::MERGING,
             skills::model::ANSWER_SCHEMA,
-        )
+        );
+        Ok(())
     };
     let mut run = constrained::Run::new("merge");
     answer_run(claude, configure, input, limit, |value| {
@@ -465,11 +495,11 @@ impl std::fmt::Display for TookTooLong {
 impl std::error::Error for TookTooLong {}
 
 /// Runs Claude at `program`, set up by `configure`, of no session and in an empty temporary
-/// folder, with `input` on stdin, until `answer` finds the answer in its events and it exits,
-/// or until `limit`, when it is stopped.
+/// folder, with `input` on stdin, until `answer` finds the answer in its events or refuses one,
+/// or until `limit`; then it is stopped. A setup that fails starts nothing.
 fn answer_run<T>(
     program: &Path,
-    configure: impl FnOnce(&mut ProcessCommand, &Path),
+    configure: impl FnOnce(&mut ProcessCommand, &Path) -> Result<()>,
     input: Vec<u8>,
     limit: Duration,
     mut answer: impl FnMut(&Value) -> Result<Option<T>>,
@@ -484,7 +514,7 @@ fn answer_run<T>(
         .process_group(0)
         .at_low_priority()
         .own_descriptors_only();
-    configure(&mut cmd, folder.path());
+    configure(&mut cmd, folder.path())?;
     let mut child = cmd
         .spawn()
         .with_context(|| format!("{who} could not be started"))?;
@@ -514,7 +544,6 @@ fn answer_run<T>(
         true => Ok(()),
         false => Err(TookTooLong),
     };
-    let mut answered = None;
     loop {
         if process.exited()? {
             output.provider_exited();
@@ -522,15 +551,11 @@ fn answer_run<T>(
         in_time()?;
         match output.next(Duration::from_millis(20)) {
             Next::Event(Ok(value)) => {
-                if answered.is_none() {
-                    answered = answer(&value)?;
+                if let Some(answered) = answer(&value)? {
+                    return Ok(answered);
                 }
             }
-            Next::Event(Err(error))
-                if answered.is_none() && error == "Provider event exceeds bound" =>
-            {
-                bail!("{error}")
-            }
+            Next::Event(Err(error)) if error == "Provider event exceeds bound" => bail!("{error}"),
             Next::Event(Err(_)) => {}
             Next::Waiting => {}
             Next::Finished => break,
@@ -541,9 +566,6 @@ fn answer_run<T>(
         std::thread::sleep(Duration::from_millis(20));
     }
     let status = process.stop()?;
-    if let Some(answered) = answered {
-        return Ok(answered);
-    }
     let stderr = errors.finish();
     let said = stderr.trim().chars().take(1500).collect::<String>();
     let ended = format!("{who} ended without an answer ({status}). {said}");
@@ -805,6 +827,16 @@ fn run_turn(
                 launch.check_model(&turn.profile, &model)?;
             }
         }
+        // The Assistant's calls of a source's other tools stop its turn, and what it reads that
+        // others wrote holds the rest of the turn to cards.
+        if let Some(launch) = &turn.conversation {
+            for call in tool_calls(turn.session.provider, &value) {
+                launch.check_call(&call)?;
+                if let Some(read) = launch.others_text(&call) {
+                    emit(ProviderEvent::ReadOthers(read));
+                }
+            }
+        }
         match turn.session.provider {
             Provider::Codex => match value["type"].as_str().unwrap_or_default() {
                 "thread.started" => {
@@ -868,8 +900,37 @@ fn run_turn(
                     if let Some(id) = value["session_id"].as_str() {
                         emit(ProviderEvent::Session(id.into()));
                     }
+                    // A loop run that loads a claude.ai connector also loads the human's other
+                    // servers: what its start offers that is not yet denied is recorded, and the
+                    // run starts again with it denied, as the Assistant's turn does below.
                     if let Some(launch) = &turn.thread {
+                        if launch.loads_connectors() {
+                            let reported = launch.reported_by_claude(&value);
+                            if !reported.is_empty() {
+                                emit(ProviderEvent::SourceTools(reported));
+                            }
+                            let unseen = launch.unseen_by_claude(&value);
+                            ensure!(
+                                unseen.is_empty(),
+                                "{NEW_SOURCE_TOOLS} ({})",
+                                unseen.join(", ")
+                            );
+                        }
                         launch.check_claude_start(&value)?;
+                    }
+                    // What each source's server offers, so its other tools are denied by name
+                    // from the next turn on.
+                    if let Some(launch) = &turn.conversation {
+                        let reported = launch.reported_by_claude(&value);
+                        if !reported.is_empty() {
+                            emit(ProviderEvent::SourceTools(reported));
+                        }
+                        let unseen = launch.unseen_by_claude(&value);
+                        ensure!(
+                            unseen.is_empty(),
+                            "{NEW_SOURCE_TOOLS} ({})",
+                            unseen.join(", ")
+                        );
                     }
                     // An evaluator has no workspace server to connect.
                     if let Some(launch) = &turn.evaluator {
@@ -1107,6 +1168,7 @@ mod tests {
             instructions: String::new(),
             thread: None,
             evaluator: None,
+            conversation: None,
             push_branch: None,
         };
         let mut cmd = ProcessCommand::new("claude");
@@ -1295,6 +1357,7 @@ mod tests {
             instructions: skill(Role::ProjectOrchestrator),
             thread: None,
             evaluator: None,
+            conversation: None,
             push_branch: None,
         }
     }
@@ -1505,10 +1568,18 @@ mod tests {
     }
 
     #[test]
-    fn codex_shells_keep_the_guard_first_on_path_in_turns_and_compactions() {
+    fn codex_shells_keep_the_guard_first_on_path_in_turns_compactions_and_the_conversation() {
         let mut compaction = turn(Provider::Codex, Some("thread"), vec![]);
         compaction.kind = TurnKind::CodexCompaction { before: None };
-        for turn in [turn(Provider::Codex, None, vec![]), compaction] {
+        // The Assistant's conversation launches its own way, and keeps the guard first too.
+        let mut conversation = turn(Provider::Codex, None, vec![]);
+        conversation.session.role = Role::Conversation;
+        conversation.conversation = Some(ConversationLaunch::default());
+        for turn in [
+            turn(Provider::Codex, None, vec![]),
+            compaction,
+            conversation,
+        ] {
             let args = arguments(&turn);
             let at = args.iter().position(|a| a == "allow_login_shell=false");
             assert!(at.is_some_and(|at| args[at - 1] == "-c"), "{args:?}");

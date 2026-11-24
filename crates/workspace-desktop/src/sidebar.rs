@@ -283,6 +283,10 @@ impl Sidebar {
         let Some(project_id) = self.shared.selected_session().map(|s| s.project_id.clone()) else {
             return;
         };
+        // Assistant work opens from the Assistant, which has no section to expand.
+        if self.shared.assistant_work_open() {
+            return;
+        }
         let index = self.shared.index.as_ref();
         let root = index.and_then(|index| index.roots(&project_id).next());
         let word = root.map(|root| tree::group_key(&root.name));
@@ -660,16 +664,39 @@ impl Sidebar {
     }
 
     /// The assistant and Boards, pinned above Projects. The assistant goes by the name the user
-    /// gave it, with a working mark while any thread is in a turn, a count of job runs that
-    /// failed or did not start, which opens the job's page, and a note with Stop for each run
-    /// past 30 minutes. Dragging projects never moves them.
+    /// gave it, with a working mark while it, its work, an issue thread or a loop run is in a
+    /// turn, the count of what its rail lists under Needs you, and a note with Stop for its own
+    /// turn and each loop run past 30 minutes. It shows as selected while one of its work
+    /// items' details is open. Dragging projects never moves them.
     fn assistant_row(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        use assistant_view::work;
         let snapshot = self.shared.snapshot();
-        let working = snapshot.is_some_and(|s| assistant_view::any_working(&s.threads));
-        let selected = self.shared.page == Page::Assistant;
+        let index = self.shared.index.as_deref();
+        let working = index.is_some_and(work::assistant_working);
+        let selected = self.shared.page == Page::Assistant || self.shared.assistant_work_open();
         let jobs = snapshot.map_or(&[][..], |s| &s.jobs);
-        let (attention, failed_job) = assistant_view::jobs::attention(jobs);
+        let (needs_you, long_turn) = assistant_marks(snapshot, ui::now());
         let mut notes = div().flex().flex_col();
+        if let Some(long_turn) = long_turn {
+            notes = notes.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .pl(px(30.))
+                    .pr_2()
+                    .text_size(px(font::META))
+                    .text_color(p.subtle)
+                    .child(div().flex_1().child(long_turn))
+                    .child(
+                        button("stop-assistant-long-turn")
+                            .ghost()
+                            .xsmall()
+                            .label("Stop")
+                            .on_click(cx.listener(|_, _, _, c| c.emit(Intent::StopAssistantTurn))),
+                    ),
+            );
+        }
         for (name, run, minutes) in assistant_view::jobs::long_runs(jobs) {
             notes = notes.child(
                 div()
@@ -720,17 +747,7 @@ impl Sidebar {
                     .when(working, |d| {
                         d.child(ui::Spinner::new().xsmall().color(p.accent))
                     })
-                    .when(attention > 0, |d| {
-                        d.child(
-                            div()
-                                .id("assistant-jobs-attention")
-                                .child(needs_you_badge(attention, p))
-                                .on_click(cx.listener(move |_, _, _, c| {
-                                    c.stop_propagation();
-                                    c.emit(Intent::OpenJob(failed_job.clone()))
-                                })),
-                        )
-                    }),
+                    .when(needs_you > 0, |d| d.child(needs_you_badge(needs_you, p))),
             )
             .child(notes)
             .child({
@@ -2185,9 +2202,20 @@ pub(crate) fn restart_host(bridge: Bridge, when: RestartWhen, window: &mut Windo
         .detach();
 }
 
+/// The Assistant row's Needs-you count, what its rail lists there, and the note for its own
+/// turn once that has run 30 minutes.
+fn assistant_marks(snapshot: Option<&Snapshot>, now: i64) -> (usize, Option<String>) {
+    use assistant_view::work;
+    let needs_you = snapshot.map_or(0, |s| work::needs_you(s).len());
+    let long_turn = (snapshot.and_then(|s| s.conversation.as_ref()))
+        .and_then(|c| work::long_turn_minutes(c, now))
+        .map(assistant_view::long_turn_text);
+    (needs_you, long_turn)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{needs_you, shown_status};
+    use super::{assistant_marks, needs_you, shown_status};
     use workspace_core::{
         Attention, Paused, Provider, Role, Session, Snapshot, Status, WorkspaceIndex, WorkspaceNote,
     };
@@ -2303,5 +2331,43 @@ mod tests {
         };
         let ruled = WorkspaceNote::Conflict(ruled);
         assert_eq!(needs_you(&[], std::slice::from_ref(&ruled), "a"), 0);
+    }
+
+    #[test]
+    fn the_assistant_row_counts_what_needs_you_and_notes_a_long_turn() {
+        use workspace_core::assistant::conversation::{
+            CardKind, ConversationCard, ConversationState, Decision,
+        };
+        let minute = 60_000;
+        let decision = ConversationCard {
+            id: "shade".into(),
+            created_at: 0,
+            read: vec![],
+            kind: CardKind::Decision(Decision {
+                project_id: None,
+                question: "Which shade?".into(),
+                recommendation: "The lighter one".into(),
+                options: vec!["Lighter".into(), "Warmer".into()],
+                answer: None,
+            }),
+        };
+        let snapshot = Snapshot {
+            conversation: Some(ConversationState {
+                session_id: "assistant".into(),
+                status: Status::Working,
+                turn_started_at: Some(0),
+                message_revision: 0,
+                profile: None,
+                cards: vec![decision],
+                routes: vec![],
+            }),
+            ..Default::default()
+        };
+        assert_eq!(assistant_marks(None, 0), (0, None));
+        assert_eq!(assistant_marks(Some(&snapshot), 29 * minute), (1, None));
+        assert_eq!(
+            assistant_marks(Some(&snapshot), 31 * minute),
+            (1, Some("Working 30 min".into()))
+        );
     }
 }

@@ -112,12 +112,14 @@ impl Host {
         check_keeper_needs(&settings.keeper, selection, &settings.verification)?;
         let row = self.saved_selection()?.unwrap_or_default();
         let model_changed = row.sorting_model() != selection.sorting_model();
-        let saved = ModelSelection {
+        let mut saved = ModelSelection {
             revision: row.revision + 1,
             notes: row.notes.clone(),
             copied: vec![],
             ..selection.clone()
         };
+        // A Router row an earlier release saved is dropped here as at load.
+        saved.jobs.retain(|row| row.job != Job::RetiredRouter);
         let unchanged_guide = ModelSelection {
             guide: row.guide,
             ..saved.clone()
@@ -643,8 +645,8 @@ pub(crate) mod legacy {
         pub provider_profiles: Vec<Profiles>,
     }
     impl Policy {
-        /// What the old router gave an unassigned session of this provider; `None` when it
-        /// would have refused the provider.
+        /// The model this policy gave a session of this provider that had none; `None` when
+        /// the policy refused the provider. The migration pins it on such sessions.
         pub(crate) fn standard(&self, provider: Provider) -> Option<ModelProfile> {
             let profile = match self.mode {
                 Mode::Fixed => self.default.clone(),

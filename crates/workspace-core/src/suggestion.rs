@@ -90,7 +90,6 @@ pub enum Seed {
     Reviewer,
     Keeper,
     Assistant,
-    Router,
 }
 /// Each provider's model and effort for a line, and which provider comes first.
 struct Pair {
@@ -124,10 +123,6 @@ impl Seed {
             Self::Keeper | Self::Assistant => {
                 (pair(("sonnet", "medium"), SOL_MEDIUM, claude_first), None)
             }
-            Self::Router => (
-                pair(("haiku", "low"), ("gpt-6-luna", "low"), claude_first),
-                None,
-            ),
         }
     }
     /// The seed of a configured verifier: a tester is seeded as the Tester job, and a reviewer
@@ -149,8 +144,8 @@ pub fn seed_row(
     usable: &[Provider],
     available: &[ModelOption],
 ) -> Option<JobRow> {
-    // A lens waits for its provider, and the router has no then: Codex cannot route.
-    let waits = matches!(seed, Seed::Lens(_) | Seed::Router);
+    // A lens waits for its provider.
+    let waits = matches!(seed, Seed::Lens(_));
     let line = |pair: Pair| {
         let order = match pair.first {
             Provider::Claude => [Provider::Claude, Provider::Codex],
@@ -246,12 +241,8 @@ pub fn seed_jobs(
         (job, Seed::of_verifier(verifier, *lens))
     });
     let keeper = keeper.then_some((Job::Keeper, Seed::Keeper));
-    let assistant = [
-        (Job::Assistant, Seed::Assistant),
-        (Job::Router, Seed::Router),
-    ];
     (fixed.into_iter().chain(verifiers).chain(keeper))
-        .chain(assistant)
+        .chain([(Job::Assistant, Seed::Assistant)])
         .filter_map(|(job, seed)| seed_row(job, seed, usable, available))
         .collect()
 }

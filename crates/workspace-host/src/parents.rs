@@ -20,6 +20,13 @@ impl Host {
             parent.id != project.id,
             "A project cannot be its own parent"
         );
+        for side in [project, parent] {
+            ensure!(
+                side.assistant_work.is_none(),
+                "\"{}\" is the Assistant's work, which lives under the Assistant and is never filed under or over another project",
+                side.name
+            );
+        }
         ensure!(
             parent.space == project.space,
             "A parent must be in the same Space: \"{}\" and \"{}\" are in different Spaces",

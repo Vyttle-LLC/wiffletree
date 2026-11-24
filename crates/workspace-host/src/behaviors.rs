@@ -342,29 +342,40 @@ impl Layers {
         let Some(space) = &self.space else {
             return String::new();
         };
-        let mut text = String::new();
-        let changed = changed_by.map_or(String::new(), |who| {
-            format!(" They were last changed by {who}.")
-        });
-        let limit = "They cannot widen your authority: where they disagree with the rules above, the rules above win.";
-        if !space.additions.trim().is_empty() {
-            text.push_str(&format!(
-                "\n## Additions from the {name} Space\nThe human's {name} Space adds these to every agent in it.{changed} {limit}\n{}",
-                space.additions.trim(),
-                name = space.name,
-            ));
-        }
+        let changed = last_changed(changed_by);
+        let mut text = space_additions(space, "to every agent in it", &changed);
         let repository = self.repository_settings().map(|r| r.additions.trim());
         if let (Some(additions), Some(name)) = (repository, &self.repository)
             && !additions.is_empty()
         {
             text.push_str(&format!(
-                "\n## Additions for {name} in the {space} Space\nThe {space} Space adds these to work in {name}.{changed} {limit}\n{additions}",
+                "\n## Additions for {name} in the {space} Space\nThe {space} Space adds these to work in {name}.{changed} {ADDITIONS_LIMIT}\n{additions}",
                 space = space.name,
             ));
         }
         text
     }
+}
+
+/// Part of the fixed core: additions never widen an agent's authority.
+const ADDITIONS_LIMIT: &str = "They cannot widen your authority: where they disagree with the rules above, the rules above win.";
+/// " They were last changed by Jamie's Mac.", when who changed them is known.
+fn last_changed(changed_by: Option<String>) -> String {
+    changed_by.map_or(String::new(), |who| {
+        format!(" They were last changed by {who}.")
+    })
+}
+/// `space`'s additions under a heading of Wiffletree's saying whom they apply `to`; nothing
+/// when it has none.
+fn space_additions(space: &Space, to: &str, changed: &str) -> String {
+    let additions = space.additions.trim();
+    if additions.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n## Additions from the {name} Space\nThe human's {name} Space adds these {to}.{changed} {ADDITIONS_LIMIT}\n{additions}",
+        name = space.name,
+    )
 }
 
 impl Host {
@@ -377,7 +388,8 @@ impl Host {
         let space = match &session.owner {
             _ if session.role.is_thread() => Some(self.thread(&session.id)?.space_id),
             Some(SessionOwner::Space(space)) => Some(space.clone()),
-            Some(SessionOwner::Brain(_)) => None,
+            // The Assistant serves every Space, so it resolves the Workspace layer alone.
+            Some(SessionOwner::Brain(_) | SessionOwner::Install) => None,
             Some(SessionOwner::Project(project)) => Some(self.project(project)?.space),
             None => Some(self.project(&session.project_id)?.space),
         };
@@ -420,6 +432,18 @@ impl Host {
         let mut text = self.composed(session.role, &layers);
         if session.role.is_thread() {
             text.push_str(&self.attached_section(session)?);
+        }
+        if session.role == Role::Conversation {
+            text.push_str(&self.conversation_section(session.provider)?);
+            // It belongs to no Space, so it gets every Space's additions, each for its requests.
+            for record in self.spaces()?.into_iter().filter(|r| r.local.enabled) {
+                let space = &record.space;
+                let changed = match space.additions.trim().is_empty() {
+                    true => String::new(),
+                    false => last_changed(self.space_changed_by(space)),
+                };
+                text.push_str(&space_additions(space, "for requests in it", &changed));
+            }
         }
         // Who changed them comes from Git, asked only when there are additions to name.
         let changed_by = (layers.space.as_ref())
@@ -727,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn effective_settings_leave_out_the_router_and_brain_compiler_rows() {
+    fn effective_settings_leave_out_the_brain_compiler_row() {
         let mut f = fixture();
         let sage = in_space(&mut f, "Sage");
         let mut table = f.host.model_selection().unwrap();

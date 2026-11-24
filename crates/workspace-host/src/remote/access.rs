@@ -73,9 +73,9 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::IssueProjectDefaults { .. }
         | Command::IssuePeople { .. }
         | Command::SearchThreads { .. }
+        | Command::ConversationCards
         | Command::Proposals { .. }
-        | Command::Evaluations { .. }
-        | Command::ScratchFiles { .. } => Row::Read,
+        | Command::Evaluations { .. } => Row::Read,
         Command::ResolvePaths { .. } | Command::ReadFile { .. } | Command::ListFolder { .. } => {
             Row::HostPath
         }
@@ -108,24 +108,29 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::ResolveAttention { .. }
         | Command::DismissAttention { .. }
         | Command::AppendLog { .. }
-        | Command::StartThread { .. }
         | Command::RenameThread { .. }
         | Command::SetThreadOpen { .. }
         | Command::OrderThreads { .. }
         | Command::DeleteThread { .. }
-        | Command::DraftProjectBrief { .. }
-        | Command::MakeProject { .. }
         | Command::DismissThreadCard { .. }
         | Command::OpenIssueThread { .. }
         | Command::ApplyProposal { .. }
         | Command::DiscardProposal { .. }
         | Command::SetAssistantName { .. }
-        | Command::RouteMessage { .. }
-        | Command::AnswerHeld { .. }
-        | Command::ChangeRoute { .. }
-        | Command::SetRouterThreshold { .. }
+        | Command::SendToAssistant { .. }
+        | Command::AnswerDecision { .. }
+        | Command::ApplyLoopCard { .. }
+        | Command::DeclineLoopCard { .. }
+        | Command::UndoLoopChange { .. }
+        | Command::RunAction { .. }
+        | Command::DeclineAction { .. }
+        | Command::StopWork { .. }
+        | Command::MoveRoutedMessage { .. }
         | Command::SaveJob { .. }
         | Command::PreviewJob { .. }
+        // Each starts a provider or a source: listing candidates starts Claude for its connectors.
+        | Command::SourceCandidates
+        | Command::ProbeSource { .. }
         | Command::SetJobEnabled { .. }
         | Command::RunJobNow { .. }
         | Command::DeleteJob { .. }
@@ -229,7 +234,7 @@ pub(crate) fn check(command: &Command, level: AccessLevel, host: &str) -> Result
         (Row::Read | Row::HostPath, _) => Ok(()),
         (Row::Scan | Row::Change, AccessLevel::ViewOnly) => Err(view_only()),
         (Row::Change, AccessLevel::Control) => match command {
-            Command::Send { attachments, .. } | Command::StartThread { attachments, .. }
+            Command::Send { attachments, .. } | Command::SendToAssistant { attachments, .. }
                 if !attachments.is_empty() =>
             {
                 Err("Remote devices attach files by uploading them".into())
@@ -318,6 +323,9 @@ mod tests {
         ] {
             assert!(check(&command, AccessLevel::Control, host).is_err());
         }
+        // Listing sources starts Claude to find its connectors.
+        assert!(check(&Command::SourceCandidates, AccessLevel::ViewOnly, host).is_err());
+        assert!(check(&Command::SourceCandidates, AccessLevel::Control, host).is_ok());
         let scan = Command::DiscoverRepositories { folders: vec![] };
         assert!(check(&scan, AccessLevel::ViewOnly, host).is_err());
         assert!(check(&scan, AccessLevel::Control, host).is_ok());

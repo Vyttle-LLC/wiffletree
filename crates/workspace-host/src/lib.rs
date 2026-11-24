@@ -16,6 +16,9 @@ mod checkout;
 pub mod compaction;
 mod compile;
 pub mod context;
+mod conversation;
+mod conversation_actions;
+mod conversation_loops;
 pub mod desktop_driver;
 pub mod detection;
 mod diffs;
@@ -59,7 +62,6 @@ mod repository_reads;
 mod repository_requests;
 mod retarget;
 mod revisions;
-mod router;
 pub mod runtime;
 mod scan;
 pub(crate) mod schedules;
@@ -70,6 +72,7 @@ mod settings;
 pub(crate) mod shared;
 pub mod skills;
 pub mod socket;
+mod source_setup;
 mod spaces;
 mod stacks;
 mod steps;
@@ -85,6 +88,7 @@ mod updates;
 pub mod usage;
 mod verification;
 mod verify_refs;
+mod work;
 mod worktree_deletions;
 mod worktrees;
 use anyhow::{Context, Result, bail, ensure};
@@ -139,7 +143,8 @@ fn sessions_where(live: bool) -> String {
 }
 /// SQL condition on `sessions` for a session that is not an assistant thread or a brain
 /// compile, which belong to no project.
-const NOT_THREAD: &str = "role NOT IN ('assistant','job_run','compiler','evaluator')";
+const NOT_THREAD: &str =
+    "role NOT IN ('assistant','job_run','compiler','evaluator','conversation')";
 pub struct Host {
     pub(crate) db: Connection,
     /// Files remote devices are uploading, kept while the host runs.
@@ -206,8 +211,6 @@ pub struct Host {
     merge_tries: [Option<skills::Tried>; Skill::ALL.len()],
     /// Model runs of merges, for the service to start off the host thread.
     merge_runs: Vec<skills::MergeRun>,
-    /// Router runs, for the service to start off the host thread.
-    router_runs: Vec<router::RouterRun>,
     /// By provider, whether detection last found its CLI installed and signed in.
     pub(crate) detected: std::collections::BTreeMap<Provider, bool>,
     /// By provider, the models its CLI last listed, which a UI evaluator's model must be one of.
@@ -387,7 +390,7 @@ impl Host {
         // Before anything attaches this connection's temporary triggers to the tables it
         // rebuilds, which a rebuild would drop.
         assistant::migrate(&db)?;
-        router::migrate(&db)?;
+        conversation::migrate(&db)?;
         jobs::migrate(&db)?;
         compile::migrate(&db)?;
         evaluations::migrate(&db)?;
@@ -444,7 +447,6 @@ impl Host {
             merges_wait_for_sync: false,
             merge_tries: Default::default(),
             merge_runs: vec![],
-            router_runs: vec![],
             detected: Default::default(),
             listed_models: Default::default(),
             uploads: Default::default(),
@@ -566,8 +568,7 @@ impl Host {
         self.recover_steps()?;
         self.end_interrupted_job_runs()?;
         self.end_interrupted_compiles()?;
-        self.end_interrupted_evaluations()?;
-        self.ask_about_interrupted_routes()
+        self.end_interrupted_evaluations()
     }
     pub(crate) fn event(
         db: &Connection,
@@ -649,7 +650,7 @@ impl Host {
             .collect();
         let projects = self.projects()?;
         let project_tags = self.project_tags(&projects, &spaces)?;
-        Ok(Snapshot { project_tags, projects, spaces, space_locals, issue_trackers: self.issue_trackers()?, last_filed_space: self.last_filed_space()?, linear_import: self.linear.status.clone(), repositories: self.repositories()?, open_ticket_repositories: repositories::open_ticket_repositories(&self.db)?, sessions: self.live_sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} OR id IN (SELECT json_extract(data,'$.ticket_id') FROM runtimes WHERE session_id IN ({in_turn})) ORDER BY rowid", tickets_listed(true)), [&turning])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id IN (SELECT id FROM sessions WHERE {}) OR session_id IN ({in_turn}) ORDER BY rowid", sessions_where(true)), [&turning])?, archive_stamp: self.archive_stamp()?, message_revisions: self.message_revisions()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, core_instructions: provider::core_instructions(), still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held(), assistant_name: self.assistant_name(), threads: self.thread_tabs(now())?, held: self.held_messages()?, jobs: self.job_states()?, evaluations: self.listed_evaluations()?, evaluator_permissions: self.evaluator_permissions()? })
+        Ok(Snapshot { project_tags, projects, spaces, space_locals, issue_trackers: self.issue_trackers()?, last_filed_space: self.last_filed_space()?, linear_import: self.linear.status.clone(), repositories: self.repositories()?, open_ticket_repositories: repositories::open_ticket_repositories(&self.db)?, sessions: self.live_sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} OR id IN (SELECT json_extract(data,'$.ticket_id') FROM runtimes WHERE session_id IN ({in_turn})) ORDER BY rowid", tickets_listed(true)), [&turning])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id IN (SELECT id FROM sessions WHERE {}) OR session_id IN ({in_turn}) ORDER BY rowid", sessions_where(true)), [&turning])?, archive_stamp: self.archive_stamp()?, message_revisions: self.message_revisions()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, core_instructions: provider::core_instructions(), still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held(), assistant_name: self.assistant_name(), threads: self.thread_tabs(now())?, jobs: self.job_states()?, conversation: self.conversation_state()?, evaluations: self.listed_evaluations()?, evaluator_permissions: self.evaluator_permissions()? })
     }
     /// The snapshot's sessions: the live ones, then archived ones still in a turn, which show as
     /// working until it ends.
@@ -667,7 +668,9 @@ impl Host {
         turning.sort();
         for id in turning {
             let session = self.session(id)?;
-            if !session.role.is_thread() && session.role != Role::Evaluator {
+            if !session.role.is_thread()
+                && !matches!(session.role, Role::Evaluator | Role::Conversation)
+            {
                 sessions.push(session);
             }
         }
@@ -729,6 +732,10 @@ impl Host {
         ensure!(
             creator.role == Role::ProjectOrchestrator,
             "Only a project coordinator creates projects"
+        );
+        ensure!(
+            creator.parent_id.is_none(),
+            "This project is the Assistant's work, and only the Assistant starts work: ask it with report or ask_user instead"
         );
         let from = self.project(&creator.project_id)?;
         ensure!(
@@ -822,8 +829,20 @@ impl Host {
         space: &SpaceId,
         created_by: Option<ProjectCreator>,
     ) -> Result<(Project, Session)> {
+        self.insert_project_under(name, space, created_by, None)
+    }
+    /// A project and its coordinator; with `assistant`, the Assistant's session and the work
+    /// item, a project the Assistant started, whose coordinator's parent it is.
+    pub(crate) fn insert_project_under(
+        &mut self,
+        name: &str,
+        space: &SpaceId,
+        created_by: Option<ProjectCreator>,
+        assistant: Option<(&str, AssistantWork)>,
+    ) -> Result<(Project, Session)> {
         text(name, 128)?;
         self.space(space)?;
+        let (parent, assistant_work) = assistant.unzip();
         let project = Project {
             id: new_id(),
             name: name.trim().into(),
@@ -832,6 +851,7 @@ impl Host {
             home: Some(self.new_project_home(name)?),
             slug: None,
             created_by,
+            assistant_work,
             parent_id: None,
             standing: false,
         };
@@ -841,7 +861,7 @@ impl Host {
         let session = Session {
             id: new_id(),
             project_id: project.id.clone(),
-            parent_id: None,
+            parent_id: parent.map(str::to_owned),
             repository_id: None,
             name: project.name.clone(),
             role: Role::ProjectOrchestrator,
@@ -881,7 +901,7 @@ impl Host {
         let mut root: Session = self
             .db
             .query_row(
-                "SELECT data FROM sessions WHERE project_id=?1 AND parent_id IS NULL AND role=?2",
+                "SELECT data FROM sessions WHERE project_id=?1 AND role=?2",
                 params![id, tag(&Role::ProjectOrchestrator)?],
                 |row| decode(row, 0),
             )
@@ -917,8 +937,8 @@ impl Host {
             SessionOwner::Project(project) => {
                 self.create_session(project, parent, repository, name, role, provider)
             }
-            SessionOwner::Space(_) | SessionOwner::Brain(_) => bail!(
-                "{} cannot run outside a project: only assistant threads run under a Space",
+            SessionOwner::Space(_) | SessionOwner::Brain(_) | SessionOwner::Install => bail!(
+                "{} cannot run outside a project: only assistant threads run under a Space, and only the Assistant under the install",
                 role.label()
             ),
         }
@@ -1346,10 +1366,16 @@ impl Host {
             target.name
         );
         if let Some(sender) = sender {
-            let sender = self.session(sender)?;
+            let from = self.session(sender)?;
+            // The Assistant and the coordinators of its work are in no project together.
+            let assistant_and_work = |parent: &Session, child: &Session| {
+                parent.role == Role::Conversation && child.parent_id.as_ref() == Some(&parent.id)
+            };
             ensure!(
-                sender.project_id == target.project_id
-                    || self.linked_coordinators(&sender, &target)?,
+                from.project_id == target.project_id
+                    || assistant_and_work(&from, &target)
+                    || assistant_and_work(&target, &from)
+                    || self.linked_coordinators(&from, &target)?,
                 "Cross-project message forbidden"
             );
         }
@@ -1392,7 +1418,9 @@ impl Host {
             self.insert_message(id, &target, sender, body, &[], uploads, quiet)?;
         } else {
             let directory = match target.role {
-                Role::Assistant | Role::JobRun => assistant::attachments_folder(&self.home, id)?,
+                Role::Assistant | Role::JobRun | Role::Conversation => {
+                    assistant::attachments_folder(&self.home, id)?
+                }
                 _ => attachments::directory(&self.home, &target.project_id, id)?,
             };
             let stored = attachments::store(&directory, files)?;
@@ -1564,6 +1592,9 @@ impl Host {
             operation,
         )?;
         tx.commit()?;
+        if attention.is_permission() {
+            self.tell_assistant_of_approval(&attention)?;
+        }
         Ok(attention)
     }
     pub fn resolve_attention(&mut self, id: &str, answer: &str) -> Result<Attention> {
@@ -1786,19 +1817,6 @@ impl Host {
                 project_ids,
                 before,
             } => serde_json::to_value(self.move_projects(&project_ids, before.as_deref())?)?,
-            Command::StartThread {
-                id,
-                space_id,
-                body,
-                attachments,
-                profile,
-            } => serde_json::to_value(self.start_thread(
-                &id,
-                &space_id,
-                &body,
-                &attachments,
-                profile,
-            )?)?,
             Command::RenameThread { thread_id, title } => {
                 serde_json::to_value(self.rename_thread(&thread_id, &title)?)?
             }
@@ -1815,18 +1833,6 @@ impl Host {
             }
             Command::SearchThreads { query, space_id } => {
                 serde_json::to_value(self.search_threads(&query, space_id.as_ref())?)?
-            }
-            Command::DraftProjectBrief { thread_id } => {
-                serde_json::to_value(self.draft_project_brief(&thread_id)?)?
-            }
-            Command::MakeProject {
-                thread_id,
-                name,
-                brief,
-                files,
-            } => serde_json::to_value(self.make_project(&thread_id, &name, &brief, &files)?)?,
-            Command::ScratchFiles { thread_id } => {
-                serde_json::to_value(self.scratch_files(&thread_id)?)?
             }
             Command::DismissThreadCard { thread_id, card_id } => {
                 serde_json::to_value(self.dismiss_thread_card(&thread_id, &card_id)?)?
@@ -1850,28 +1856,47 @@ impl Host {
                 proposal_id,
             } => serde_json::to_value(self.discard_proposal(&thread_id, &proposal_id)?)?,
             Command::SetAssistantName { name } => json!(self.set_assistant_name(&name)?),
-            Command::RouteMessage {
+            Command::SendToAssistant {
                 id,
-                thread_id,
                 body,
-            } => {
-                self.route_message(&id, thread_id.as_deref(), &body)?;
-                Value::Null
+                attachments,
+                space_id,
+            } => serde_json::to_value(self.send_to_assistant(
+                &id,
+                &body,
+                &attachments,
+                space_id.as_ref(),
+            )?)?,
+            Command::ConversationCards => json!({
+                "session": self.assistant_session()?,
+                "cards": self.conversation_cards()?,
+                "routes": self.conversation_routes()?,
+                "draft": self.conversation_draft()?,
+            }),
+            Command::AnswerDecision { card_id, answer } => {
+                serde_json::to_value(self.answer_decision(&card_id, &answer)?)?
             }
-            Command::AnswerHeld { id, destination } => {
-                self.answer_held(&id, &destination)?;
-                Value::Null
+            Command::ApplyLoopCard { card_id } => {
+                serde_json::to_value(self.apply_loop_card(&card_id)?)?
             }
-            Command::ChangeRoute {
-                thread_id,
+            Command::DeclineLoopCard { card_id } => {
+                serde_json::to_value(self.decline_loop_card(&card_id)?)?
+            }
+            Command::UndoLoopChange { card_id } => {
+                serde_json::to_value(self.undo_loop_change(&card_id)?)?
+            }
+            Command::DeclineAction { card_id } => {
+                serde_json::to_value(self.decline_action(&card_id)?)?
+            }
+            Command::MoveRoutedMessage {
                 message_id,
-                destination,
+                project_id,
             } => {
-                self.change_route(&thread_id, &message_id, &destination)?;
-                Value::Null
+                serde_json::to_value(self.move_routed_message(&message_id, project_id.as_deref())?)?
             }
-            Command::SetRouterThreshold { threshold } => {
-                serde_json::to_value(self.set_router_threshold(threshold)?)?
+            // Both stop or start work off the host's own state, so the service runs them.
+            Command::RunAction { .. } | Command::StopWork { .. } => {
+                bail!("The service runs this command")
             }
             Command::SaveJob { recipe, new } => {
                 if new {
@@ -1882,6 +1907,11 @@ impl Host {
             // The service checks a preview's sources off the host thread instead.
             Command::PreviewJob { recipe } => {
                 serde_json::to_value(self.preview_job(&recipe)?.check())?
+            }
+            // The service lists and starts sources off the host thread instead.
+            Command::SourceCandidates => serde_json::to_value(self.source_candidates())?,
+            Command::ProbeSource { kind, name } => {
+                serde_json::to_value(source_setup::probe(&self.source_env(), kind, &name))?
             }
             Command::SetJobEnabled {
                 space_id,

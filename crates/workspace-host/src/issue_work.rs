@@ -456,7 +456,19 @@ impl Host {
             Some(project) => self.space(&project.space)?.space,
             None => self.space(&self.thread(&session.id)?.space_id)?.space,
         };
-        let prefix = (self.tracker(&space))
+        self.issue_tool_in(&space, project.as_ref(), &session.id, name, args)
+    }
+    /// An issue tool over `space`'s tracker, for `caller`, the coordinator of `project` when
+    /// it has one; the Assistant names the Space it reads.
+    pub(crate) fn issue_tool_in(
+        &mut self,
+        space: &Space,
+        project: Option<&Project>,
+        caller: &str,
+        name: &str,
+        args: &Value,
+    ) -> Result<Value> {
+        let prefix = (self.tracker(space))
             .context("This Space has no tracker")?
             .prefix;
         let issue_id = || -> Result<IssueId> {
@@ -504,7 +516,7 @@ impl Host {
                 let project = project.context("link_issue is a project coordinator's tool")?;
                 let id = issue_id()?;
                 let ticket = match args["ticket_id"].as_str() {
-                    Some(ticket) => Some(self.owned_ticket(&session.id, ticket)?.id),
+                    Some(ticket) => Some(self.owned_ticket(caller, ticket)?.id),
                     None => None,
                 };
                 let issue = self.link_issue(&id, &project.id, ticket.as_deref())?;

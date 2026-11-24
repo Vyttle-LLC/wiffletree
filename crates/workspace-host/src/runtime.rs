@@ -415,6 +415,62 @@ pub(crate) fn run_limited(mut command: Command, limit: Duration) -> Result<Optio
     Ok(status)
 }
 
+/// `run_limited` that keeps what the command printed, its output then its errors, at most
+/// `MAX_KEPT_OUTPUT` bytes of each. Returns `None` for its status when it ran out of time.
+pub(crate) fn output_limited(
+    mut command: Command,
+    limit: Duration,
+) -> Result<(Option<ExitStatus>, String)> {
+    const MAX_KEPT_OUTPUT: u64 = 64 * 1024;
+    let mut child = command
+        .own_descriptors_only()
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let group = child.id() as libc::pid_t;
+    let read = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut kept = Vec::new();
+            if let Some(pipe) = pipe {
+                let _ = pipe.take(MAX_KEPT_OUTPUT).read_to_end(&mut kept);
+            }
+            String::from_utf8_lossy(&kept).into_owned()
+        })
+    };
+    let stdout = read(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let stderr = read(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    // SAFETY: `killpg` only sends a signal; the group is the child's own.
+    unsafe { libc::killpg(group, libc::SIGKILL) };
+    if status.is_none() {
+        child.wait()?;
+    }
+    let mut output = stdout.join().unwrap_or_default();
+    output.push_str(&stderr.join().unwrap_or_default());
+    Ok((status, output))
+}
+
 pub fn models(provider: Provider) -> Result<Vec<ModelOption>> {
     match provider {
         Provider::Claude => claude_models(),

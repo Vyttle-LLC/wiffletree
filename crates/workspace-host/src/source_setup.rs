@@ -1,0 +1,442 @@
+//! Add source on a Space's page (OpenSpec change `assistant-does-the-work`, spaces "Connecting
+//! a source is one form"): the MCP servers this Mac's Claude and Codex are configured with, the
+//! claude.ai connectors its Claude loads and the well-known CLIs installed here, and what one of
+//! them offers once started. Wiffletree runs no app's sign-in itself; a signed-out source names
+//! the command its own tool gives. Connectors are found from a Claude start's report alone;
+//! none of their tools is ever called here.
+use crate::jobs::{SourceEnv, known_check, mcp_exchange_said};
+use crate::*;
+use workspace_core::job::{JOB_CLIS, cli_reads};
+use workspace_core::{SourceCandidate, SourceKind, SourceProbe, SuggestedTool, suggests_act};
+
+/// The act commands Add source suggests for a CLI it knows. Its reads are the loops' own.
+const CLI_ACTS: [(&str, &[&str]); 2] = [
+    (
+        "gh",
+        &[
+            "pr comment",
+            "pr create",
+            "pr review",
+            "issue create",
+            "issue comment",
+            "issue close",
+        ],
+    ),
+    (
+        "linctl",
+        &["issue create", "issue update", "comment create"],
+    ),
+];
+
+/// How long the Claude start that lists the claude.ai connectors may take to report them.
+const CONNECTORS_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A server reached by URL (HTTP or SSE) rather than started as a command.
+fn by_url(definition: &Value) -> bool {
+    definition["command"].as_str().is_none_or(str::is_empty)
+}
+
+/// The MCP servers configured for Claude and Codex, each once, the claude.ai connectors this
+/// Mac's Claude loads, then the well-known CLIs found on this Mac. Connectors Claude could not
+/// list are left out; typed by hand, their probe says why.
+pub(crate) fn candidates(env: &SourceEnv) -> Vec<SourceCandidate> {
+    let mut found: Vec<SourceCandidate> = vec![];
+    for provider in [Provider::Claude, Provider::Codex] {
+        for (name, definition) in provider::configured_servers(provider, &env.home) {
+            match found.iter_mut().find(|c| c.name == name) {
+                Some(known) => known.configured_for.push(provider),
+                None => found.push(SourceCandidate {
+                    kind: SourceKind::Mcp,
+                    by_url: by_url(&definition),
+                    name,
+                    configured_for: vec![provider],
+                    claude_ai: false,
+                    tools: vec![],
+                }),
+            }
+        }
+    }
+    let connectors = connectors(env).unwrap_or_default();
+    found.extend(connectors.into_iter().map(|connector| SourceCandidate {
+        kind: SourceKind::Mcp,
+        configured_for: vec![Provider::Claude],
+        by_url: false,
+        claude_ai: true,
+        tools: connector_tools(&connector),
+        name: connector.name,
+    }));
+    let clis = (JOB_CLIS.iter()).filter(|command| env.find(command).is_some());
+    found.extend(clis.map(|command| SourceCandidate {
+        kind: SourceKind::Cli,
+        name: (*command).into(),
+        configured_for: vec![],
+        by_url: false,
+        claude_ai: false,
+        tools: vec![],
+    }));
+    found
+}
+
+/// The claude.ai connectors the Claude on this Mac's `PATH` loads.
+fn connectors(env: &SourceEnv) -> Result<Vec<provider::Connector>> {
+    let claude = (env.find("claude")).context("Claude is not installed on this Mac")?;
+    provider::claude_ai_connectors(&claude, CONNECTORS_LIMIT)
+}
+
+/// A connector's tools with the kind each suggests, from its name alone: Claude's report gives
+/// no hint of what a tool does.
+fn connector_tools(connector: &provider::Connector) -> Vec<SuggestedTool> {
+    (connector.tools.iter())
+        .map(|tool| SuggestedTool {
+            name: tool.clone(),
+            act: suggests_act(tool, None),
+            description: String::new(),
+        })
+        .collect()
+}
+
+/// Starts the MCP server `name` as Claude, else Codex, would start it and lists its tools, or
+/// checks the CLI `name` is installed and signed in and lists the commands Wiffletree knows.
+pub(crate) fn probe(env: &SourceEnv, kind: SourceKind, name: &str) -> SourceProbe {
+    match kind {
+        SourceKind::Mcp => probe_server(env, name),
+        SourceKind::Cli => probe_cli(env, name),
+    }
+}
+
+fn probe_server(env: &SourceEnv, name: &str) -> SourceProbe {
+    if provider::is_claude_ai(name) {
+        return SourceProbe {
+            claude_ai: true,
+            ..probe_connector(env, name)
+        };
+    }
+    let definition = [Provider::Claude, Provider::Codex]
+        .into_iter()
+        .find_map(|provider| provider::server_definition(provider, &env.home, name));
+    let Some(definition) = definition else {
+        return problem(format!(
+            "The {name} MCP server is not configured for Claude or Codex on this Mac."
+        ));
+    };
+    if by_url(&definition) {
+        return SourceProbe {
+            by_url: true,
+            ..problem(format!(
+                "The {name} MCP server is reached by URL, which Wiffletree cannot start to list its tools. Type its tools by hand. Its read tools work; its act tools run only through Claude, which holds its sign-in."
+            ))
+        };
+    }
+    let list = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"});
+    match mcp_exchange_said(env, &definition, list) {
+        Ok(listed) => SourceProbe {
+            tools: server_tools(&listed),
+            ..Default::default()
+        },
+        Err((why, said)) => SourceProbe {
+            server_said: said,
+            ..problem(format!("The {name} MCP server {why}."))
+        },
+    }
+}
+
+/// The tools of the claude.ai connector `name`, as a Claude start reports them.
+fn probe_connector(env: &SourceEnv, name: &str) -> SourceProbe {
+    let found = match connectors(env) {
+        Ok(found) => found,
+        Err(error) => return problem(format!("Claude could not list its connectors: {error:#}")),
+    };
+    match found.into_iter().find(|connector| connector.name == name) {
+        None => problem(format!(
+            "Claude on this Mac has no connector named {name}. Add it at claude.ai/customize/connectors."
+        )),
+        Some(connector) if !connector.connected() => problem(format!(
+            "{name} is not connected for Claude ({}). Check it at claude.ai/customize/connectors.",
+            connector.status
+        )),
+        Some(connector) => SourceProbe {
+            tools: connector_tools(&connector),
+            ..Default::default()
+        },
+    }
+}
+
+/// A `tools/list` result's tools with the kind each suggests.
+fn server_tools(listed: &Value) -> Vec<SuggestedTool> {
+    (listed["tools"].as_array().into_iter().flatten())
+        .filter_map(|tool| {
+            let name = tool["name"].as_str()?;
+            let read_only = tool["annotations"]["readOnlyHint"].as_bool();
+            Some(SuggestedTool {
+                name: name.into(),
+                act: suggests_act(name, read_only),
+                description: tool["description"].as_str().unwrap_or_default().into(),
+            })
+        })
+        .collect()
+}
+
+fn probe_cli(env: &SourceEnv, command: &str) -> SourceProbe {
+    let Some(program) = env.find(command) else {
+        return problem(format!("{command} is not installed on this Mac."));
+    };
+    let as_tools = |operations: &[&str], act: bool| -> Vec<SuggestedTool> {
+        (operations.iter())
+            .map(|operation| SuggestedTool {
+                name: format!("{command} {operation}"),
+                act,
+                description: String::new(),
+            })
+            .collect()
+    };
+    let acts = (CLI_ACTS.iter()).find(|(cli, _)| *cli == command);
+    let mut tools = as_tools(cli_reads(command), false);
+    tools.extend(
+        acts.map(|(_, acts)| as_tools(acts, true))
+            .unwrap_or_default(),
+    );
+    let mut probe = SourceProbe {
+        tools,
+        ..Default::default()
+    };
+    // aws names its profile in each command, so it has no check before one is typed.
+    if let Some((args, fix)) = known_check(command, &[]) {
+        let mut check = std::process::Command::new(program);
+        check
+            .args(&args[1..])
+            .env("PATH", std::env::join_paths(&env.path).unwrap_or_default());
+        let passed = runtime::run_limited(check, jobs::CHECK_LIMIT)
+            .ok()
+            .flatten()
+            .is_some_and(|status| status.success());
+        if !passed {
+            probe.problem = Some(format!("{command} is not signed in on this Mac."));
+            probe.sign_in = Some(fix);
+        }
+    }
+    probe
+}
+
+fn problem(why: String) -> SourceProbe {
+    SourceProbe {
+        problem: Some(why),
+        ..Default::default()
+    }
+}
+
+impl Host {
+    pub(crate) fn source_candidates(&self) -> Vec<SourceCandidate> {
+        candidates(&self.source_env())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env(home: &Path, path: Vec<PathBuf>) -> SourceEnv {
+        SourceEnv {
+            path,
+            home: home.into(),
+            mcp_limit: std::time::Duration::from_secs(5),
+        }
+    }
+
+    #[test]
+    fn candidates_list_each_configured_server_once_and_the_clis_found() {
+        let home = tempfile::tempdir().unwrap();
+        let claude = json!({"mcpServers": {
+            "calendar": {"command": "calendar-mcp"},
+            "gmail": {"type": "http", "url": "https://example.com/mcp"},
+        }});
+        fs::write(home.path().join(".claude.json"), claude.to_string()).unwrap();
+        let codex = home.path().join(".codex");
+        fs::create_dir_all(&codex).unwrap();
+        fs::write(
+            codex.join("config.toml"),
+            "[mcp_servers.calendar]\ncommand = \"calendar-mcp\"\n",
+        )
+        .unwrap();
+        let bin = home.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("gh"), "").unwrap();
+        let found = candidates(&env(home.path(), vec![bin]));
+        let calendar = found.iter().find(|c| c.name == "calendar").unwrap();
+        assert_eq!(calendar.configured_for, [Provider::Claude, Provider::Codex]);
+        assert!(found.iter().any(|c| c.name == "gmail" && c.by_url));
+        assert!(
+            found
+                .iter()
+                .any(|c| c.name == "gh" && c.kind == SourceKind::Cli)
+        );
+        assert!(!found.iter().any(|c| c.name == "linctl"));
+    }
+
+    #[test]
+    fn a_server_lists_its_tools_with_suggested_kinds() {
+        let home = tempfile::tempdir().unwrap();
+        let server = home.path().join("calendar-mcp");
+        let tools = json!([
+            {"name": "list_events", "description": "Events in a range"},
+            {"name": "create_event"},
+            {"name": "summarize_day", "annotations": {"readOnlyHint": true}},
+        ]);
+        let script = format!(
+            "#!/usr/bin/env python3\nimport json, sys\nfor line in sys.stdin:\n    m = json.loads(line)\n    if 'id' not in m: continue\n    result = {{'tools': json.loads('{tools}')}} if m['method'] == 'tools/list' else {{}}\n    print(json.dumps({{'jsonrpc': '2.0', 'id': m['id'], 'result': result}}), flush=True)\n"
+        );
+        fs::write(&server, script).unwrap();
+        fs::set_permissions(&server, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let claude = json!({"mcpServers": {"calendar": {"command": server}}});
+        fs::write(home.path().join(".claude.json"), claude.to_string()).unwrap();
+        // The server's `python3` comes from the test's own PATH.
+        let path = std::env::split_paths(&std::env::var_os("PATH").unwrap()).collect();
+        let probe = probe(&env(home.path(), path), SourceKind::Mcp, "calendar");
+        assert_eq!(probe.problem, None);
+        let kinds: Vec<(&str, bool)> = (probe.tools.iter())
+            .map(|tool| (tool.name.as_str(), tool.act))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("list_events", false),
+                ("create_event", true),
+                ("summarize_day", false)
+            ]
+        );
+        assert_eq!(probe.tools[0].description, "Events in a range");
+    }
+
+    /// A command-line MCP server `calendar` at `home` running `script`, as Claude configures it.
+    fn server(home: &Path, script: &str) -> SourceEnv {
+        let server = home.join("calendar-mcp");
+        fs::write(&server, script).unwrap();
+        fs::set_permissions(&server, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let claude = json!({"mcpServers": {"calendar": {"command": server}}});
+        fs::write(home.join(".claude.json"), claude.to_string()).unwrap();
+        let path = std::env::split_paths(&std::env::var_os("PATH").unwrap()).collect();
+        env(home, path)
+    }
+
+    #[test]
+    fn a_signed_out_server_shows_what_it_said_about_signing_in() {
+        let home = tempfile::tempdir().unwrap();
+        let refusing = "#!/usr/bin/env python3\nimport json, sys\nfor line in sys.stdin:\n    m = json.loads(line)\n    if 'id' not in m: continue\n    print(json.dumps({'jsonrpc': '2.0', 'id': m['id'], 'error': {'code': -32001, 'message': 'Not signed in. Run calendar-mcp login.'}}), flush=True)\n";
+        let refused = probe(&server(home.path(), refusing), SourceKind::Mcp, "calendar");
+        assert!(refused.problem.is_some());
+        assert_eq!(
+            refused.server_said.as_deref(),
+            Some("Not signed in. Run calendar-mcp login.")
+        );
+        // A server that stops at once leaves its sign-in line on standard error.
+        let home = tempfile::tempdir().unwrap();
+        let stopping =
+            "#!/bin/sh\necho 'Visit https://example.com/device to sign in' >&2\nexit 1\n";
+        let stopped = probe(&server(home.path(), stopping), SourceKind::Mcp, "calendar");
+        assert_eq!(
+            stopped.server_said.as_deref(),
+            Some("Visit https://example.com/device to sign in")
+        );
+    }
+
+    #[test]
+    fn a_signed_out_cli_names_its_own_sign_in_command() {
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let gh = bin.join("gh");
+        fs::write(&gh, "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let probe = probe(&env(home.path(), vec![bin]), SourceKind::Cli, "gh");
+        assert_eq!(
+            probe.problem.as_deref(),
+            Some("gh is not signed in on this Mac.")
+        );
+        assert_eq!(probe.sign_in.as_deref(), Some("gh auth login"));
+        let act = probe.tools.iter().find(|t| t.name == "gh pr comment");
+        assert!(act.is_some_and(|tool| tool.act));
+        assert!(probe.tools.iter().any(|t| t.name == "gh pr list" && !t.act));
+    }
+
+    #[test]
+    fn a_server_reached_by_url_is_typed_by_hand() {
+        let home = tempfile::tempdir().unwrap();
+        let claude =
+            json!({"mcpServers": {"gmail": {"type": "http", "url": "https://example.com"}}});
+        fs::write(home.path().join(".claude.json"), claude.to_string()).unwrap();
+        let probe = probe(&env(home.path(), vec![]), SourceKind::Mcp, "gmail");
+        assert!(probe.tools.is_empty());
+        assert!(probe.by_url);
+        assert!(probe.problem.unwrap().contains("reached by URL"));
+    }
+
+    /// A stand-in for Claude whose start reports two claude.ai connectors, one signed out, and
+    /// a server of the human's own, then ends without answering.
+    const CLAUDE: &str = r#"#!/usr/bin/env python3
+import json
+servers = [{'name': 'claude.ai Gmail', 'status': 'connected'},
+           {'name': 'claude.ai Slack', 'status': 'needs-auth'},
+           {'name': 'termic', 'status': 'connected'}]
+tools = ['mcp__claude_ai_Gmail__search_threads', 'mcp__claude_ai_Gmail__send_message',
+         'mcp__termic__task_list']
+print(json.dumps({'type': 'system', 'subtype': 'init', 'permissionMode': 'dontAsk',
+                  'mcp_servers': servers, 'tools': tools}), flush=True)
+"#;
+
+    /// An environment whose `PATH` holds the stand-in Claude, and Python for it.
+    fn with_claude(home: &Path) -> SourceEnv {
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let claude = bin.join("claude");
+        fs::write(&claude, CLAUDE).unwrap();
+        fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let path = std::env::var_os("PATH").unwrap();
+        env(
+            home,
+            std::iter::once(bin)
+                .chain(std::env::split_paths(&path))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn add_source_lists_claude_ai_connectors_with_their_tools_for_claude_only() {
+        let home = tempfile::tempdir().unwrap();
+        let found = candidates(&with_claude(home.path()));
+        let gmail = found.iter().find(|c| c.name == "claude.ai Gmail").unwrap();
+        assert!(gmail.claude_ai && !gmail.by_url);
+        assert_eq!(gmail.configured_for, [Provider::Claude]);
+        let kinds: Vec<(&str, bool)> = (gmail.tools.iter())
+            .map(|tool| (tool.name.as_str(), tool.act))
+            .collect();
+        assert_eq!(kinds, [("search_threads", false), ("send_message", true)]);
+        // A signed-out connector is listed without tools; picking it says why.
+        let slack = found.iter().find(|c| c.name == "claude.ai Slack").unwrap();
+        assert!(slack.claude_ai && slack.tools.is_empty());
+        assert!(!found.iter().any(|c| c.name == "termic"));
+    }
+
+    #[test]
+    fn a_connector_typed_by_hand_lists_its_tools_or_says_why_not() {
+        let home = tempfile::tempdir().unwrap();
+        let env = with_claude(home.path());
+        let gmail = probe(&env, SourceKind::Mcp, "claude.ai Gmail");
+        assert_eq!(gmail.problem, None);
+        assert!(gmail.claude_ai);
+        assert_eq!(gmail.tools.len(), 2);
+        let slack = probe(&env, SourceKind::Mcp, "claude.ai Slack");
+        assert!(slack.claude_ai);
+        assert!(
+            slack
+                .problem
+                .unwrap()
+                .contains("not connected for Claude (needs-auth)")
+        );
+        let drive = probe(&env, SourceKind::Mcp, "claude.ai Drive");
+        assert!(
+            drive
+                .problem
+                .unwrap()
+                .contains("no connector named claude.ai Drive")
+        );
+    }
+}

@@ -1,27 +1,23 @@
 //! The launch of an assistant thread or a brain compile, the turn kinds besides comment sorting
 //! that do not run in YOLO mode. The provider holds a thread to reading, the web and its scratch
 //! folder, and a compile to reading and its worktree, where Claude writes only the wiki.
+//!
+//! A loop run on Claude may read a claude.ai connector its recipe lists. Claude loads
+//! connectors only without `--strict-mcp-config`, so such a run also loads the human's other
+//! connectors, still with none of the human's settings: each server no source lists is denied
+//! whole once Claude has reported it (a start that offers one not yet denied stops and starts
+//! again with it denied), and the connector's tools but its reads are denied by name.
+use super::conversation::{SourceTools, claude_server_name, is_claude_ai};
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 use workspace_core::Source;
 
-/// The thread tools, as MCP lists them.
-pub(crate) const THREAD_TOOLS: [&str; 7] = [
+/// An issue thread's tools, as MCP lists them: its outputs, cards and brain reads, its tracker's
+/// and repositories' reads, and its proposals. It has no `log_work`, as it writes to no
+/// repository. Issue threads are the only threads besides job runs that still run.
+pub(crate) const ISSUE_THREAD_TOOLS: [&str; 12] = [
     "save_output",
     "suggest_space",
-    "project_brief",
-    "propose_job",
-    "propose_issue",
-    "log_work",
-    "query_brain",
-];
-/// An issue thread's tools: a thread's but `log_work`, as it has no tool that writes to a
-/// repository, then its tracker's and repositories' reads and its proposals.
-pub(crate) const ISSUE_THREAD_TOOLS: [&str; 14] = [
-    "save_output",
-    "suggest_space",
-    "project_brief",
-    "propose_job",
     "propose_issue",
     "query_brain",
     "list_issues",
@@ -89,9 +85,12 @@ pub(super) const CODEX_FEATURES_OFF: [&str; 11] = [
 pub struct ThreadLaunch {
     pub scratch: PathBuf,
     pub sources: Vec<Source>,
-    /// Each MCP source's server as the provider's own configuration defines it, by name; a
-    /// source with no definition there is not offered.
+    /// Each MCP source's server as the provider's own configuration defines it, by name, and
+    /// on Claude each claude.ai connector, with no definition; a source not here is not
+    /// offered.
     pub servers: BTreeMap<String, Value>,
+    /// What earlier Claude starts that loaded connectors reported, to deny from the first start.
+    pub seen: SourceTools,
     /// A job's run, which has only `JOB_RUN_TOOLS` and its recipe's sources.
     pub job_run: bool,
     /// An issue thread, which has `ISSUE_THREAD_TOOLS`, no source and no web.
@@ -102,9 +101,12 @@ pub struct ThreadLaunch {
 }
 impl ThreadLaunch {
     /// Whether Codex may run it: not a job's run with a CLI source, since Codex's command rules
-    /// cannot hold a CLI to its listed commands (task 3.6).
+    /// cannot hold a CLI to its listed commands (task 3.6), or with a claude.ai connector,
+    /// which only Claude reaches.
     pub(crate) fn codex_may_run(&self) -> bool {
-        !self.job_run || self.cli_prefixes().next().is_none()
+        let connector = (self.sources.iter())
+            .any(|source| matches!(source, Source::Mcp { server, .. } if is_claude_ai(server)));
+        !self.job_run || (self.cli_prefixes().next().is_none() && !connector)
     }
     /// The settings a Claude run starts with: auto memory off and, for a job's run with a CLI
     /// source, a hook before every shell command that refuses any holding shell text (see
@@ -124,8 +126,7 @@ impl ThreadLaunch {
         match (self.compile.is_some(), self.job_run, self.issue_thread) {
             (true, _, _) => &COMPILE_TOOLS,
             (false, true, _) => &JOB_RUN_TOOLS,
-            (false, false, true) => &ISSUE_THREAD_TOOLS,
-            (false, false, false) => &THREAD_TOOLS,
+            (false, false, _) => &ISSUE_THREAD_TOOLS,
         }
     }
     /// The helper's argument that serves those tools.
@@ -133,8 +134,7 @@ impl ThreadLaunch {
         match (self.compile.is_some(), self.job_run, self.issue_thread) {
             (true, _, _) => "compile-mcp",
             (false, true, _) => "job-mcp",
-            (false, false, true) => "issue-thread-mcp",
-            (false, false, false) => "thread-mcp",
+            (false, false, _) => "issue-thread-mcp",
         }
     }
     /// Whether the run may search and fetch the web.
@@ -198,6 +198,7 @@ impl ThreadLaunch {
             (self.workspace_tools().iter()).map(|tool| format!("mcp__agent_workspace__{tool}")),
         );
         for (server, tools) in self.mcp_sources() {
+            let server = claude_server_name(server);
             allowed.extend(tools.iter().map(|tool| format!("mcp__{server}__{tool}")));
         }
         allowed.extend(
@@ -206,25 +207,107 @@ impl ThreadLaunch {
         );
         allowed
     }
-    /// Refuses a Claude run whose start reports a tool or an MCP server it was not given.
+    /// Whether a source is a claude.ai connector, which Claude loads only without
+    /// `--strict-mcp-config`.
+    pub(crate) fn loads_connectors(&self) -> bool {
+        self.mcp_sources().any(|(server, _)| is_claude_ai(server))
+    }
+    /// The connector sources and their read tools.
+    fn connectors(&self) -> impl Iterator<Item = (&str, &[String])> {
+        self.mcp_sources()
+            .filter(|(server, _)| is_claude_ai(server))
+    }
+    /// What a start that loads connectors reports: each connector's tools, by its source's
+    /// name, and every server besides the workspace's that no source lists.
+    pub(crate) fn reported_by_claude(&self, init: &Value) -> SourceTools {
+        let mut reported = SourceTools::default();
+        let names = (init["tools"].as_array().into_iter().flatten()).filter_map(Value::as_str);
+        for name in names {
+            let Some((server, tool)) = name.strip_prefix("mcp__").and_then(|n| n.split_once("__"))
+            else {
+                continue;
+            };
+            if let Some((source, _)) =
+                (self.connectors()).find(|(source, _)| claude_server_name(source) == server)
+            {
+                (reported.tools.entry(source.into()).or_default()).insert(tool.into());
+            }
+        }
+        let given = self.servers_given();
+        reported.other_servers = (init["mcp_servers"].as_array().into_iter().flatten())
+            .filter_map(|server| server["name"].as_str())
+            .filter(|server| !given.contains(server))
+            .map(str::to_owned)
+            .collect();
+        reported
+    }
+    /// What a start that loads connectors offers that is neither a read tool nor denied: a
+    /// connector's other tools and servers no source lists, not reported before.
+    pub(crate) fn unseen_by_claude(&self, init: &Value) -> Vec<String> {
+        let reported = self.reported_by_claude(init);
+        let tools = (reported.tools.into_iter())
+            .flat_map(|(server, tools)| tools.into_iter().map(move |tool| (server.clone(), tool)))
+            .filter(|(server, tool)| {
+                let reads = (self.connectors()).find(|(source, _)| source == server);
+                let seen = self.seen.tools.get(server);
+                !reads.is_some_and(|(_, reads)| reads.contains(tool))
+                    && !seen.is_some_and(|seen| seen.contains(tool))
+            })
+            .map(|(server, tool)| format!("{server} {tool}"));
+        let servers = (reported.other_servers.into_iter())
+            .filter(|server| !self.seen.other_servers.contains(server))
+            .map(|server| format!("the server {server}"));
+        tools.chain(servers).collect()
+    }
+    /// Refuses a Claude run whose start reports a tool or an MCP server it was not given, or a
+    /// connector it reads that is not connected. A server denied whole may be listed, with no
+    /// tools.
     pub(crate) fn check_claude_start(&self, init: &Value) -> Result<()> {
         let given = self.servers_given();
-        let reported: Vec<&str> = (init["mcp_servers"].as_array().into_iter().flatten())
+        let servers: Vec<&Value> = (init["mcp_servers"].as_array().into_iter().flatten()).collect();
+        let unlisted: Vec<&str> = (servers.iter())
             .filter_map(|server| server["name"].as_str())
-            .collect();
-        let unlisted: Vec<&str> = (reported.iter().copied())
             .filter(|server| !given.contains(server))
+            .filter(|server| !self.loads_connectors() || !self.seen.other_servers.contains(*server))
             .collect();
         ensure!(
             unlisted.is_empty(),
             "Stopped: the run was offered an MCP server its Space's sources do not list ({})",
             unlisted.join(", ")
         );
+        for (connector, _) in self.connectors() {
+            let status = (servers.iter())
+                .find(|server| server["name"] == connector)
+                .and_then(|server| server["status"].as_str())
+                .unwrap_or("missing");
+            ensure!(
+                status == "connected",
+                "The {connector} connector is not connected for Claude ({status}), such as when its sign-in has expired. Check it at claude.ai/customize/connectors."
+            );
+        }
         let tools = self.claude_tools();
+        let prefixes: Vec<String> = (given.iter())
+            .map(|server| format!("{}__", claude_server_name(server)))
+            .collect();
+        let connector_reads: BTreeSet<String> = (self.connectors())
+            .flat_map(|(server, reads)| {
+                let server = claude_server_name(server);
+                reads
+                    .iter()
+                    .map(move |tool| format!("mcp__{server}__{tool}"))
+            })
+            .collect();
+        let connector_prefixes: Vec<String> = (self.connectors())
+            .map(|(server, _)| format!("mcp__{}__", claude_server_name(server)))
+            .collect();
         let unexpected: Vec<&str> = (init["tools"].as_array().into_iter().flatten())
             .filter_map(Value::as_str)
             .filter(|tool| match tool.strip_prefix("mcp__") {
-                Some(rest) => !given.iter().any(|s| rest.starts_with(&format!("{s}__"))),
+                // A connector's other tools are denied, so none may be offered.
+                Some(_) if connector_prefixes.iter().any(|p| tool.starts_with(p)) => {
+                    !connector_reads.contains(*tool)
+                }
+                Some(rest) => !prefixes.iter().any(|prefix| rest.starts_with(prefix)),
                 None => !tools.contains(tool),
             })
             .collect();
@@ -275,12 +358,30 @@ impl ThreadLaunch {
 
 /// What Claude may never do, whatever else allows it: write its own folder under the home
 /// folder, where `dontAsk` still lets the session write its auto memory, and for an issue
-/// thread reach the web.
+/// thread reach the web. A run that loads connectors also may not use a connector's tools but
+/// its reads, or any server no source lists.
 fn claude_denied(launch: &ThreadLaunch) -> Vec<String> {
     let mut denied = claude_home_denied();
     if !launch.web() {
         denied.extend(WEB_TOOLS.map(String::from));
     }
+    if !launch.loads_connectors() {
+        return denied;
+    }
+    for (server, reads) in launch.connectors() {
+        let name = claude_server_name(server);
+        let seen = launch.seen.tools.get(server).into_iter().flatten();
+        denied.extend(
+            seen.filter(|tool| !reads.contains(tool))
+                .map(|tool| format!("mcp__{name}__{tool}")),
+        );
+    }
+    let given = launch.servers_given();
+    denied.extend(
+        (launch.seen.other_servers.iter())
+            .filter(|server| !given.contains(server.as_str()))
+            .map(|server| format!("mcp__{}", claude_server_name(server))),
+    );
     denied
 }
 /// Writes to Claude's own folder under the home folder, where `dontAsk` still lets a session
@@ -303,7 +404,10 @@ pub(super) fn configure_claude(cmd: &mut ProcessCommand, turn: &Turn, launch: &T
         "agent_workspace".into(),
         json!({"command":turn.helper,"args":[launch.helper_arg()]}),
     );
-    for (server, _) in launch.mcp_sources() {
+    for (server, _) in launch
+        .mcp_sources()
+        .filter(|(server, _)| !is_claude_ai(server))
+    {
         servers.insert(server.into(), launch.servers[server].clone());
     }
     cmd.args([
@@ -312,10 +416,15 @@ pub(super) fn configure_claude(cmd: &mut ProcessCommand, turn: &Turn, launch: &T
         "stream-json",
         "--verbose",
         "--include-partial-messages",
-        "--strict-mcp-config",
         "--no-chrome",
-    ])
-    .args([
+    ]);
+    // Claude loads connectors itself, only from a configuration that is not strict, and
+    // reports them at its start only when connecting blocks.
+    match launch.loads_connectors() {
+        true => cmd.env("MCP_CONNECTION_NONBLOCKING", "false"),
+        false => cmd.arg("--strict-mcp-config"),
+    };
+    cmd.args([
         "--model",
         &turn.profile.model,
         "--effort",
@@ -406,7 +515,7 @@ pub(super) fn configure_codex(cmd: &mut ProcessCommand, turn: &Turn, launch: &Th
 }
 
 /// A JSON value as a TOML inline value, as Codex's `-c` reads one.
-fn toml_inline(value: &Value) -> String {
+pub(super) fn toml_inline(value: &Value) -> String {
     match value {
         Value::Object(fields) => {
             let fields: Vec<String> = fields
@@ -427,21 +536,30 @@ fn toml_inline(value: &Value) -> String {
 /// The definition of the MCP server `name` in `provider`'s own configuration under `home`:
 /// Claude's `~/.claude.json`, Codex's `config.toml` in `$CODEX_HOME` or `~/.codex`.
 pub fn server_definition(provider: Provider, home: &Path, name: &str) -> Option<Value> {
-    match provider {
-        Provider::Claude => {
-            let config: Value =
-                serde_json::from_slice(&fs::read(home.join(".claude.json")).ok()?).ok()?;
-            config["mcpServers"].get(name).cloned()
-        }
+    configured_servers(provider, home).remove(name)
+}
+
+/// Every MCP server `provider`'s own configuration under `home` names, by name.
+pub fn configured_servers(provider: Provider, home: &Path) -> serde_json::Map<String, Value> {
+    let servers = match provider {
+        Provider::Claude => fs::read(home.join(".claude.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .map(|config| config["mcpServers"].clone()),
         Provider::Codex => {
             let folder = std::env::var_os("CODEX_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home.join(".codex"));
-            let text = fs::read_to_string(folder.join("config.toml")).ok()?;
-            let config: toml::Table = text.parse().ok()?;
-            let server = config.get("mcp_servers")?.get(name)?.clone();
-            serde_json::to_value(server).ok()
+            fs::read_to_string(folder.join("config.toml"))
+                .ok()
+                .and_then(|text| text.parse::<toml::Table>().ok())
+                .and_then(|config| config.get("mcp_servers").cloned())
+                .and_then(|servers| serde_json::to_value(servers).ok())
         }
+    };
+    match servers {
+        Some(Value::Object(servers)) => servers,
+        _ => serde_json::Map::new(),
     }
 }
 
@@ -458,7 +576,135 @@ mod tests {
             job_run: false,
             issue_thread: false,
             compile: None,
+            ..Default::default()
         }
+    }
+
+    /// A morning brief's run on Claude that reads Gmail through its claude.ai connector, after
+    /// an earlier start reported Gmail's other tools and the human's other servers.
+    fn morning_brief() -> ThreadLaunch {
+        let gmail: Source = serde_json::from_value(
+            json!({"kind":"mcp","server":"claude.ai Gmail","tools":["search_threads"]}),
+        )
+        .unwrap();
+        let mut run = ThreadLaunch {
+            job_run: true,
+            ..launch(vec![gmail, linear()])
+        };
+        run.servers.insert("claude.ai Gmail".into(), Value::Null);
+        run.seen.tools.insert(
+            "claude.ai Gmail".into(),
+            ["search_threads".into(), "send_message".into()].into(),
+        );
+        run.seen.other_servers = ["claude.ai Slack".into(), "claude.ai Notion".into()].into();
+        run
+    }
+
+    #[test]
+    fn a_loop_run_reads_a_connector_with_every_other_server_and_tool_denied() {
+        let run = morning_brief();
+        assert!(run.loads_connectors());
+        let turn = super::super::tests::turn(Provider::Claude, None, vec![]);
+        let mut cmd = ProcessCommand::new("claude");
+        configure_claude(&mut cmd, &turn, &run);
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into()).collect();
+        let after = |flag: &str| &args[args.iter().position(|a| a == flag).unwrap() + 1];
+        // Claude loads the connector itself, not strictly, and still with no settings of the
+        // human's.
+        assert!(!args.contains(&"--strict-mcp-config".into()));
+        assert_eq!(after("--setting-sources"), "");
+        assert!((cmd.get_envs()).any(|(name, value)| {
+            name == "MCP_CONNECTION_NONBLOCKING" && value == Some("false".as_ref())
+        }));
+        let servers: Value = serde_json::from_str(after("--mcp-config")).unwrap();
+        assert!(servers["mcpServers"].get("claude.ai Gmail").is_none());
+        assert!(servers["mcpServers"].get("linear").is_some());
+        // Only its read tools are allowed, never an act; the rest is denied by name.
+        let allowed: Vec<&str> = after("--allowedTools").split(',').collect();
+        assert!(allowed.contains(&"mcp__claude_ai_Gmail__search_threads"));
+        assert!(!allowed.iter().any(|rule| rule.contains("send_message")));
+        let denied: Vec<&str> = after("--disallowedTools").split(',').collect();
+        for rule in [
+            "mcp__claude_ai_Gmail__send_message",
+            "mcp__claude_ai_Slack",
+            "mcp__claude_ai_Notion",
+        ] {
+            assert!(denied.contains(&rule), "{rule}: {denied:?}");
+        }
+        for kept in [
+            "mcp__claude_ai_Gmail__search_threads",
+            "mcp__linear__list_issues",
+        ] {
+            assert!(!denied.contains(&kept), "{kept}");
+        }
+        // A run without a connector stays strict and loads no settings of the human's.
+        let strict = launch(vec![linear()]);
+        let mut cmd = ProcessCommand::new("claude");
+        configure_claude(&mut cmd, &turn, &strict);
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into()).collect();
+        assert!(args.contains(&"--strict-mcp-config".into()));
+        assert!(args.windows(2).any(|w| w == ["--setting-sources", ""]));
+    }
+
+    #[test]
+    fn a_loop_runs_start_that_offers_a_server_or_tool_not_yet_denied_starts_again() {
+        let run = morning_brief();
+        let connected = |name: &str| json!({"name": name, "status": "connected"});
+        let init = |servers: Vec<Value>, tools: Value| json!({"permissionMode": "dontAsk", "mcp_servers": servers, "tools": tools});
+        let ours = || {
+            vec![
+                connected("agent_workspace"),
+                connected("linear"),
+                connected("claude.ai Gmail"),
+                connected("claude.ai Slack"),
+                connected("claude.ai Notion"),
+            ]
+        };
+        let reads = json!([
+            "Read",
+            "mcp__agent_workspace__save_output",
+            "mcp__linear__list_issues",
+            "mcp__claude_ai_Gmail__search_threads"
+        ]);
+        let start = init(ours(), reads.clone());
+        assert!(run.unseen_by_claude(&start).is_empty());
+        run.check_claude_start(&start).unwrap();
+
+        // A new connector of the human's and a new Gmail tool stop the start, to be recorded.
+        let mut more = ours();
+        more.push(connected("claude.ai Google Drive"));
+        let mut tools = reads.as_array().unwrap().clone();
+        tools.push(json!("mcp__claude_ai_Gmail__trash_thread"));
+        let start = init(more, json!(tools));
+        assert_eq!(
+            run.unseen_by_claude(&start),
+            [
+                "claude.ai Gmail trash_thread",
+                "the server claude.ai Google Drive"
+            ]
+        );
+        let reported = run.reported_by_claude(&start);
+        assert!(reported.tools["claude.ai Gmail"].contains("trash_thread"));
+        assert!(reported.other_servers.contains("claude.ai Google Drive"));
+        assert!(!reported.other_servers.contains("linear"));
+
+        // A denied tool still offered, or a signed-out connector, fails the run.
+        let mut leaked = reads.as_array().unwrap().clone();
+        leaked.push(json!("mcp__claude_ai_Gmail__send_message"));
+        assert!(
+            run.check_claude_start(&init(ours(), json!(leaked)))
+                .is_err()
+        );
+        let mut signed_out = ours();
+        signed_out[2] = json!({"name": "claude.ai Gmail", "status": "needs-auth"});
+        let refused = run
+            .check_claude_start(&init(signed_out, reads))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("claude.ai/customize/connectors"),
+            "{refused}"
+        );
     }
 
     #[test]
@@ -498,6 +744,8 @@ mod tests {
         Source::Mcp {
             server: "linear".into(),
             tools: vec!["list_issues".into()],
+            act: vec![],
+            without_asking: vec![],
             extra: Default::default(),
         }
     }
@@ -505,6 +753,8 @@ mod tests {
         Source::Cli {
             command: "gh".into(),
             prefixes: vec!["gh pr list".into(), "gh pr view".into()],
+            act: vec![],
+            without_asking: vec![],
             check: None,
             extra: Default::default(),
         }
@@ -523,6 +773,32 @@ mod tests {
         assert!(allowed.contains(&"Bash(gh pr list:*)".into()));
         assert!(allowed.contains(&"mcp__linear__list_issues".into()));
         assert!(sourced.claude_tools().contains(&"Bash"));
+    }
+
+    #[test]
+    fn a_loop_run_is_never_given_a_sources_act_tools_or_commands() {
+        let acting = |source: Value| -> Source { serde_json::from_value(source).unwrap() };
+        let run = ThreadLaunch {
+            job_run: true,
+            ..launch(vec![
+                acting(
+                    json!({"kind":"mcp","server":"linear","tools":["list_issues"],"act":["create_issue"],"without_asking":["create_issue"]}),
+                ),
+                acting(
+                    json!({"kind":"cli","command":"gh","prefixes":["gh pr list"],"act":["gh pr comment"]}),
+                ),
+            ])
+        };
+        let allowed = run.claude_allowed();
+        assert!(allowed.contains(&"mcp__linear__list_issues".into()));
+        assert!(allowed.contains(&"Bash(gh pr list:*)".into()));
+        assert!(
+            !allowed
+                .iter()
+                .any(|rule| rule.contains("create_issue") || rule.contains("comment"))
+        );
+        let call = json!({"type":"mcp_tool_call","server":"linear","tool":"create_issue"});
+        assert!(run.check_codex_item(&call).is_err());
     }
 
     #[test]
@@ -615,10 +891,6 @@ mod tests {
 
     #[test]
     fn the_rules_allow_exactly_the_tools_a_thread_is_offered() {
-        let offered: Vec<String> = (crate::mcp::thread_tools().as_array().unwrap().iter())
-            .map(|tool| tool["name"].as_str().unwrap().to_owned())
-            .collect();
-        assert_eq!(offered, THREAD_TOOLS);
         let offered: Vec<String> = (crate::mcp::issue_thread_tools().as_array().unwrap().iter())
             .map(|tool| tool["name"].as_str().unwrap().to_owned())
             .collect();
@@ -676,7 +948,7 @@ mod tests {
         run.job_run = true;
         let allowed = run.claude_allowed();
         assert!(allowed.contains(&"mcp__agent_workspace__save_output".into()));
-        for tool in ["propose_job", "suggest_space", "project_brief"] {
+        for tool in ["propose_issue", "suggest_space", "read_issue"] {
             assert!(
                 !allowed.contains(&format!("mcp__agent_workspace__{tool}")),
                 "{tool}"
@@ -688,7 +960,8 @@ mod tests {
                 .iter()
                 .any(|rule| rule == "Bash" || rule == "Bash(gh:*)")
         );
-        let call = json!({"type":"mcp_tool_call","server":"agent_workspace","tool":"propose_job"});
+        let call =
+            json!({"type":"mcp_tool_call","server":"agent_workspace","tool":"propose_issue"});
         assert!(run.check_codex_item(&call).is_err());
         // Codex cannot hold gh to its commands, so a run with a CLI source never starts on it.
         assert!(!run.codex_may_run());

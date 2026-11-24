@@ -115,7 +115,8 @@ fn current(role: Role) -> Value {
         | Role::Assistant
         | Role::JobRun
         | Role::Compiler
-        | Role::Evaluator => codex_fixed(role),
+        | Role::Evaluator
+        | Role::Conversation => codex_fixed(role),
     }
 }
 
@@ -198,8 +199,7 @@ fn current_big_small_policies_become_the_approved_table() {
         "the selection's migration, then the table's"
     );
     // No PR keeper model was chosen, so there is no PR keeper row; the default reviewers were
-    // Claude's and Codex's second opinions, so they wait. The Assistant and Router rows are
-    // seeded too.
+    // Claude's and Codex's second opinions, so they wait. The Assistant row is seeded too.
     assert_eq!(
         rows(&selection),
         [
@@ -210,7 +210,6 @@ fn current_big_small_policies_become_the_approved_table() {
             "Correctness: claude · opus · high → wait",
             "Regressions: codex · gpt-6.1-sol · high → wait",
             "Assistant: claude · sonnet · medium → codex · gpt-6.1-sol · medium",
-            "Router: claude · haiku · low → wait",
         ]
     );
     let implementer = selection.row(&Job::Implementer).unwrap();
@@ -852,11 +851,13 @@ fn chat_override_is_unlimited_and_preserves_provider_identity() {
     let runtime = host.session_runtime(&root.id).unwrap();
     assert_eq!(runtime.profile, Some(unlisted.clone()));
     assert_eq!(runtime.selection.unwrap().chosen_by, Chooser::Human);
+    // During a turn the model may change for the next turn, but never the provider.
     host.set_status(&root.id, Status::Working).unwrap();
     assert!(
-        host.configure_session(&root.id, claude("opus", "high"))
+        host.configure_session(&root.id, codex("gpt-6.1-sol", "medium"))
             .is_err()
     );
+    host.configure_session(&root.id, unlisted.clone()).unwrap();
     host.set_status(&root.id, Status::Ready).unwrap();
     drop(host);
     let db = Connection::open(home.path().join("workspace.sqlite3")).unwrap();
