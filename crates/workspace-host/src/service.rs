@@ -5277,7 +5277,7 @@ impl Actor {
         }
         let scratch = match runtime.ticket_id.as_deref().filter(|_| !sorting) {
             Some(ticket) => {
-                let scratch = crate::scratch::ticket_scratch(&self.host.home, ticket);
+                let scratch = crate::scratch::ticket_scratch(ticket);
                 fs::create_dir_all(&scratch)?;
                 Some(scratch)
             }
