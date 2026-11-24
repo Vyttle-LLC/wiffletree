@@ -98,7 +98,8 @@ pub fn xcode_derived_data() -> Option<PathBuf> {
 /// `derived_data` when given, such as `xcode_derived_data()`.
 ///
 /// Candidates come from the paths Git lists as ignored, untracked or tracked, the folders above
-/// them, and the folders inside an ignored folder that is not a candidate itself. A folder inside
+/// them, and the folders inside an ignored folder that is not a candidate itself. That search
+/// stops at a nested Git repository or worktree, which is reported as ambiguous. A folder inside
 /// a candidate that counts as build output is not listed again. Symbolic links are never
 /// followed: a candidate must be a real folder at its own path in the worktree.
 ///
@@ -112,7 +113,12 @@ pub fn scan(worktree: &Path, derived_data: Option<&Path>) -> Result<BuildOutput>
     let mut outputs = Vec::new();
     let mut ambiguous = Vec::new();
     let mut taken: Vec<String> = Vec::new();
-    for (folder, source) in candidates(worktree, &status, &tracked, &declared) {
+    let (candidates, repositories) = candidates(worktree, &status, &tracked, &declared);
+    ambiguous.extend(repositories.into_iter().map(|folder| Ambiguous {
+        path: worktree.join(folder),
+        reason: Reason::HoldsRepository,
+    }));
+    for (folder, source) in candidates {
         if taken.iter().any(|outer| within(&folder, outer)) {
             continue;
         }
@@ -241,18 +247,20 @@ fn tracked_paths(worktree: &Path) -> Result<HashSet<String>> {
 
 /// The candidate folders in path order, so a folder comes before those inside it: the ignored,
 /// untracked and tracked paths' folders and those above them, and the folders inside an ignored
-/// folder that is not a candidate itself, which Git lists without what it holds.
+/// folder that is not a candidate itself, which Git lists without what it holds. Also the Git
+/// repositories found inside such folders, which are not searched.
 fn candidates(
     worktree: &Path,
     status: &Status,
     tracked: &HashSet<String>,
     declared: &[Vec<String>],
-) -> BTreeMap<String, Source> {
+) -> (BTreeMap<String, Source>, Vec<String>) {
     let mut search = Search {
         worktree,
         declared,
         considered: HashSet::new(),
         candidates: BTreeMap::new(),
+        repositories: Vec::new(),
     };
     for path in status.ignored.iter().chain(&status.untracked) {
         if is_real_folder(&worktree.join(path)) {
@@ -269,7 +277,7 @@ fn candidates(
             search.downward(path);
         }
     }
-    search.candidates
+    (search.candidates, search.repositories)
 }
 
 struct Search<'a> {
@@ -278,6 +286,8 @@ struct Search<'a> {
     /// Every folder looked at, each with all the folders above it.
     considered: HashSet<String>,
     candidates: BTreeMap<String, Source>,
+    /// The Git repositories met inside ignored folders, which are not searched.
+    repositories: Vec<String>,
 }
 impl Search<'_> {
     fn upward(&mut self, mut folder: Option<&str>) {
@@ -289,10 +299,15 @@ impl Search<'_> {
         }
     }
 
-    /// Looks at the folders inside `folder`, but not inside a candidate or a symbolic link.
+    /// Looks at the folders inside `folder`, but not inside a candidate, a symbolic link or a Git
+    /// repository, whose files the worktree's Git checks know nothing of.
     fn downward(&mut self, folder: &str) {
         let path = self.worktree.join(folder);
         if !is_real_folder(&path) {
+            return;
+        }
+        if fs::symlink_metadata(path.join(".git")).is_ok() {
+            self.repositories.push(folder.to_owned());
             return;
         }
         let Ok(entries) = fs::read_dir(path) else {
@@ -771,6 +786,37 @@ mod tests {
         assert_eq!(
             ambiguous(&root, &output),
             [("src/build".into(), Reason::HoldsTracked)]
+        );
+    }
+
+    #[test]
+    fn a_repository_inside_an_ignored_folder_is_reported_and_not_searched() {
+        let (_folder, root) = worktree(&[
+            (".gitignore", "/third_party/\n/.worktrees/\n"),
+            ("tools/build/run.sh", "tracked\n"),
+        ]);
+        let clone = root.join("third_party/lib");
+        fs::create_dir_all(&clone).unwrap();
+        git(&clone, &["init", "-q"]);
+        write(&clone, "build/config.cmake", "tracked by the clone");
+        git(&clone, &["add", "-A"]);
+        git(&clone, &["commit", "-q", "-m", "start"]);
+        git(
+            &root,
+            &["worktree", "add", "-q", "-b", "other", ".worktrees/other"],
+        );
+
+        let mut output = scan(&root, None).unwrap();
+        output.ambiguous.sort_by(|a, b| a.path.cmp(&b.path));
+
+        assert!(output.found.is_empty());
+        assert_eq!(
+            ambiguous(&root, &output),
+            [
+                (".worktrees/other".into(), Reason::HoldsRepository),
+                ("third_party/lib".into(), Reason::HoldsRepository),
+                ("tools/build".into(), Reason::HoldsTracked),
+            ]
         );
     }
 
