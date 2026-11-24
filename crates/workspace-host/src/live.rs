@@ -59,9 +59,11 @@ impl Host {
             session.role != Role::Keeper,
             "A PR keeper agent takes its model from the PR keeper's row in Models → Who runs what"
         );
+        // A turn reads its model when it starts, so a new model chosen during one applies from
+        // the next; a new provider would also change the turn running now.
         ensure!(
-            session.status != Status::Working,
-            "Stop the current turn before changing its runtime"
+            session.status != Status::Working || session.provider == profile.provider,
+            "Stop the current turn before changing its provider"
         );
         let mut runtime = self.session_runtime(id)?;
         ensure!(

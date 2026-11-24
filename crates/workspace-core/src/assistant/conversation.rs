@@ -1,9 +1,44 @@
 //! The Assistant's one conversation (OpenSpec change `assistant-does-the-work`): the cards its
 //! tools put in the chat, and the tag on a human message the Assistant passed to its work.
-use crate::SpaceId;
 use crate::job::Recipe;
+use crate::{ModelProfile, SpaceId, Status};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// What `conversation_cards` answers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationRead {
+    #[serde(default)]
+    pub session: Option<crate::Session>,
+    #[serde(default)]
+    pub cards: Vec<ConversationCard>,
+    #[serde(default)]
+    pub routes: Vec<Route>,
+    /// The human's unsent text, such as what an earlier release's router held at the upgrade;
+    /// their next message clears it.
+    #[serde(default)]
+    pub draft: Option<String>,
+}
+
+/// The conversation as the app draws it, once its first message started its session: whether
+/// it is in a turn and since when, its messages' revision, its cards and its routing tags.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationState {
+    pub session_id: String,
+    pub status: Status,
+    /// When the running turn started; `None` between turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_started_at: Option<i64>,
+    #[serde(default)]
+    pub message_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ModelProfile>,
+    /// Oldest first.
+    #[serde(default)]
+    pub cards: Vec<ConversationCard>,
+    #[serde(default)]
+    pub routes: Vec<Route>,
+}
 
 /// A card in the conversation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

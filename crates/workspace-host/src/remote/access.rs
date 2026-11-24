@@ -74,6 +74,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::IssuePeople { .. }
         | Command::SearchThreads { .. }
         | Command::ConversationCards
+        | Command::SourceCandidates
         | Command::Proposals { .. }
         | Command::Evaluations { .. } => Row::Read,
         Command::ResolvePaths { .. } | Command::ReadFile { .. } | Command::ListFolder { .. } => {
@@ -128,6 +129,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::MoveRoutedMessage { .. }
         | Command::SaveJob { .. }
         | Command::PreviewJob { .. }
+        | Command::ProbeSource { .. }
         | Command::SetJobEnabled { .. }
         | Command::RunJobNow { .. }
         | Command::DeleteJob { .. }

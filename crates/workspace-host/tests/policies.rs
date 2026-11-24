@@ -851,11 +851,13 @@ fn chat_override_is_unlimited_and_preserves_provider_identity() {
     let runtime = host.session_runtime(&root.id).unwrap();
     assert_eq!(runtime.profile, Some(unlisted.clone()));
     assert_eq!(runtime.selection.unwrap().chosen_by, Chooser::Human);
+    // During a turn the model may change for the next turn, but never the provider.
     host.set_status(&root.id, Status::Working).unwrap();
     assert!(
-        host.configure_session(&root.id, claude("opus", "high"))
+        host.configure_session(&root.id, codex("gpt-6.1-sol", "medium"))
             .is_err()
     );
+    host.configure_session(&root.id, unlisted.clone()).unwrap();
     host.set_status(&root.id, Status::Ready).unwrap();
     drop(host);
     let db = Connection::open(home.path().join("workspace.sqlite3")).unwrap();

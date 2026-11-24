@@ -1,6 +1,6 @@
 //! The workspace as views read it: the live snapshot and the archive joined once, when either
 //! arrives, so that looking something up never searches a list.
-use crate::{Archive, Project, Session, SessionRuntime, Snapshot, Status, Ticket};
+use crate::{Archive, Project, Role, Session, SessionRuntime, Snapshot, Status, Ticket};
 use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
@@ -74,7 +74,12 @@ impl WorkspaceIndex {
         for (position, &at) in index.sessions.iter().enumerate() {
             let session = index.at_session(at);
             session_at.insert(session.id.clone(), position);
-            let (siblings, key): (&mut HashMap<String, Vec<usize>>, _) = match &session.parent_id {
+            // A project's coordinator is its root even when the Assistant, which no snapshot
+            // lists, is its parent.
+            let parent = (session.role != Role::ProjectOrchestrator)
+                .then_some(session.parent_id.as_ref())
+                .flatten();
+            let (siblings, key): (&mut HashMap<String, Vec<usize>>, _) = match parent {
                 Some(parent) => (&mut children, parent),
                 None => (&mut roots, &session.project_id),
             };

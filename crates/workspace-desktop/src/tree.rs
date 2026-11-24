@@ -123,7 +123,8 @@ fn entries<'a>(
 ) -> Vec<Entry<'a>> {
     let mut groups: Vec<Group> = vec![];
     for project in &index.snapshot().projects {
-        if section_of(index, project) != *space {
+        // The Assistant's work is listed in its rail, never as a project row.
+        if project.assistant_work.is_some() || section_of(index, project) != *space {
             continue;
         }
         let Some(root) = (index.roots(&project.id)).find(|s| show_archived || !s.archived) else {

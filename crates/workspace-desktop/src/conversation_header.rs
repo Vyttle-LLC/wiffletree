@@ -108,6 +108,42 @@ impl ConversationHeader {
                     .child(format!("/  {ticket}"))
             }))
     }
+    /// For one of the Assistant's work items, opened from the Assistant: Stop work while it
+    /// runs, and Back to chat.
+    fn assistant_work_controls(&self, cx: &mut Context<Self>) -> Vec<Button> {
+        if !self.shared.assistant_work_open() {
+            return vec![];
+        }
+        let project = (self.shared.project_id())
+            .and_then(|id| self.shared.index.as_ref()?.project(&id).cloned());
+        let running = (project.as_ref())
+            .and_then(|p| p.assistant_work.as_ref())
+            .is_some_and(|work| matches!(work.state, WorkState::Running | WorkState::Paused));
+        let mut controls = vec![];
+        if let (true, Some(project)) = (running, project) {
+            controls.push(
+                button("stop-work")
+                    .outline()
+                    .small()
+                    .label("Stop work")
+                    .map(|b| ui::gated(b, &self.shared.host))
+                    .on_click(cx.listener(move |v, _, w, c| {
+                        v.ask(ask::stop_work(project.id.clone()), w, c, |_, done, w, c| {
+                            if let Err(error) = done {
+                                toast_error(error, w, c);
+                            }
+                        })
+                    })),
+            );
+        }
+        controls.push(
+            button("back-to-chat")
+                .small()
+                .label("Back to chat")
+                .on_click(cx.listener(|_, _, _, c| c.emit(Intent::OpenPage(Page::Assistant)))),
+        );
+        controls
+    }
     /// Opens and closes the Agents panel, with how many of the project's agents are working.
     fn agents_toggle(&self, cx: &mut Context<Self>) -> Option<Button> {
         let working = self.shared.roster()?.working();
@@ -154,6 +190,7 @@ impl ConversationHeader {
         )
         .px_6()
         .gap_3()
+        .children(self.assistant_work_controls(cx))
         .children(self.agents_toggle(cx))
         .children(self.settings_toggle(cx))
         .children((self.contexts.read(cx).chip(session, p)).map(|chip| {
@@ -210,7 +247,7 @@ impl ConversationHeader {
                         }
                     })),
             )
-        } else if live && self.project_working(session) {
+        } else if live && self.project_working(session) && !self.shared.assistant_work_open() {
             Some(
                 button("stop-project")
                     .outline()

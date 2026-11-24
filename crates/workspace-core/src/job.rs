@@ -433,6 +433,14 @@ fn claude_ai_connector(name: &str) -> bool {
         && (display.chars()).all(|c| c.is_ascii_alphanumeric() || " -_.()".contains(c))
 }
 
+/// The read operations a loop may run with `command`, one of `JOB_CLIS`, as the words after
+/// its name.
+pub fn cli_reads(command: &str) -> &'static [&'static str] {
+    (READS.iter())
+        .find(|(cli, _)| *cli == command)
+        .map_or(&[], |(_, operations)| operations)
+}
+
 /// Whether the words after a CLI's name start one of its operations in `READS` (design,
 /// decision 9); an aws command first names its profile.
 fn reads(command: &str, words: &[&str]) -> bool {

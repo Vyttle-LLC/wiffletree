@@ -486,9 +486,9 @@ impl AssistantPage {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .child(self.conversation(tab, p, cx).px_3()),
+                    .child(self.thread_conversation(tab, p, cx).px_3()),
             )
-            .child(self.composer_box(p, cx))
+            .child(self.thread_composer(p, cx))
     }
 }
 
