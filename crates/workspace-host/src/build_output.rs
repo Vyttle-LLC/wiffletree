@@ -127,7 +127,7 @@ pub fn scan(worktree: &Path, derived_data: Option<&Path>) -> Result<BuildOutput>
         if path.canonicalize().ok() != Some(resolved.join(&folder)) {
             continue;
         }
-        match status.why_not(&folder, &tracked) {
+        match status.why_not(worktree, &folder, &tracked) {
             None => {
                 taken.push(folder);
                 outputs.push((path, source));
@@ -210,19 +210,36 @@ impl Status {
 
     /// Why `folder` is not build output, or `None` when every file in it is ignored and none is
     /// tracked. Untracked files are listed by themselves or by a folder holding them, so one in
-    /// or above `folder` shows a file in it that Git does not ignore.
-    fn why_not(&self, folder: &str, tracked: &HashSet<String>) -> Option<Reason> {
+    /// `folder` is a file Git does not ignore. A folder inside an untracked folder is not
+    /// covered by that listing, which says nothing of it, so Git is asked about it.
+    fn why_not(&self, worktree: &Path, folder: &str, tracked: &HashSet<String>) -> Option<Reason> {
         if tracked.contains(folder) {
             Some(Reason::HoldsTracked)
-        } else if self
-            .untracked
-            .iter()
-            .any(|path| within(path, folder) || within(folder, path))
+        } else if self.untracked.iter().any(|path| within(path, folder))
+            || (self.untracked.iter().any(|path| within(folder, path))
+                && holds_unignored_file(worktree, folder))
         {
             Some(Reason::NotIgnored)
         } else {
             None
         }
+    }
+}
+
+/// Whether `folder` holds an untracked file that Git does not ignore. A query that fails counts
+/// as yes.
+fn holds_unignored_file(worktree: &Path, folder: &str) -> bool {
+    let pathspec = format!(":(literal){folder}");
+    let args = [
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "--",
+        &pathspec,
+    ];
+    match runtime::git_lines(worktree, &args, 1) {
+        Ok((Some(status), lines)) => !status.success() || !lines.is_empty(),
+        _ => true,
     }
 }
 
@@ -666,6 +683,94 @@ mod tests {
         assert_eq!(
             ambiguous(&root, &output),
             [("reports".into(), Reason::NotIgnored)]
+        );
+    }
+
+    #[test]
+    fn declared_patterns_match_one_segment_with_star_and_one_character_with_question_mark() {
+        let (_folder, root) = worktree(&[
+            (DECLARATION, "out/*-cache\nlogs/day-?\n"),
+            (".gitignore", "out/*/\nlogs/*/\n"),
+            ("out/keep.txt", "tracked\n"),
+            ("logs/keep.txt", "tracked\n"),
+        ]);
+        for folder in [
+            "out/a-cache",
+            "out/-cache",
+            "out/a-cache2",
+            "out/a/b-cache",
+            "logs/day-1",
+            "logs/day-",
+            "logs/day-10",
+        ] {
+            write(&root, &format!("{folder}/blob"), "generated");
+        }
+
+        let output = scan(&root, None).unwrap();
+
+        assert_eq!(
+            found(&root, &output),
+            [
+                ("logs/day-1".into(), Source::Declared),
+                ("out/-cache".into(), Source::Declared),
+                ("out/a-cache".into(), Source::Declared),
+            ]
+        );
+        assert!(output.ambiguous.is_empty());
+    }
+
+    #[test]
+    fn a_staged_rename_s_source_path_is_not_read_as_a_status_record() {
+        // Git lists a rename as `R  new`, then the old path on its own. Named like a status
+        // record, the old path would mark `build`, which Git ignores, as untracked.
+        let (_folder, root) = worktree(&[
+            (".gitignore", "/build/\n"),
+            ("?? build", "tracked under an odd name\n"),
+        ]);
+        git(&root, &["mv", "?? build", "moved.txt"]);
+        write(&root, "build/out/app", "binary");
+
+        let output = scan(&root, None).unwrap();
+
+        assert_eq!(
+            found(&root, &output),
+            [("build".into(), Source::DefaultName)]
+        );
+        assert!(output.ambiguous.is_empty());
+    }
+
+    #[test]
+    fn build_output_inside_a_new_untracked_folder_is_found_unless_it_holds_an_unignored_file() {
+        let (_folder, root) = worktree(&[
+            (".gitignore", "node_modules/\n*.log\n"),
+            ("packages/old/index.js", "tracked\n"),
+        ]);
+        write(&root, "packages/new/src/index.js", "untracked source");
+        write(&root, "packages/new/node_modules/x/index.js", "module");
+        write(
+            &root,
+            "packages/new/target/debug/app.log",
+            "ignored by *.log",
+        );
+        write(
+            &root,
+            "packages/other/target/debug/app.log",
+            "ignored by *.log",
+        );
+        write(&root, "packages/other/target/notes.txt", "not ignored");
+
+        let output = scan(&root, None).unwrap();
+
+        assert_eq!(
+            found(&root, &output),
+            [
+                ("packages/new/node_modules".into(), Source::DefaultName),
+                ("packages/new/target".into(), Source::DefaultName),
+            ]
+        );
+        assert_eq!(
+            ambiguous(&root, &output),
+            [("packages/other/target".into(), Reason::NotIgnored)]
         );
     }
 
