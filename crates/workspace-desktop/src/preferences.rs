@@ -28,9 +28,9 @@ pub(crate) struct Preferences {
     pub light_theme: Choice,
     #[serde(default)]
     pub dark_theme: Choice,
-    /// Show projects whose names share a first word under one group row.
-    #[serde(default = "on")]
-    pub group_projects: bool,
+    /// How the sidebar draws the project list. An older file's grouping choice is ignored.
+    #[serde(default, deserialize_with = "lens_or_outcome")]
+    pub lens: Lens,
     /// The hosts this device is paired with; they stay on this device.
     #[serde(default)]
     pub paired_hosts: Vec<PairedHost>,
@@ -64,7 +64,7 @@ impl Default for Preferences {
             appearance: Appearance::default(),
             light_theme: Choice::Tidal,
             dark_theme: Choice::Tidal,
-            group_projects: true,
+            lens: Lens::default(),
             paired_hosts: vec![],
             find_on_network: false,
             cascade_moves_seen: false,
@@ -74,8 +74,37 @@ impl Default for Preferences {
     }
 }
 
-fn on() -> bool {
-    true
+/// A way of drawing the sidebar's project list over the same projects.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Lens {
+    /// Parents with their children, and loose projects.
+    #[default]
+    Outcome,
+    App,
+    Layer,
+    Me,
+}
+
+impl Lens {
+    pub(crate) const ALL: [Lens; 4] = [Lens::Outcome, Lens::App, Lens::Layer, Lens::Me];
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Lens::Outcome => "Outcome",
+            Lens::App => "App",
+            Lens::Layer => "Layer",
+            Lens::Me => "Me",
+        }
+    }
+    /// Only the Outcome lens is drawn so far.
+    pub(crate) fn available(self) -> bool {
+        self == Lens::Outcome
+    }
+}
+
+/// A lens this version does not know reads as Outcome, as Appearance falls back to System.
+fn lens_or_outcome<'de, D: Deserializer<'de>>(input: D) -> Result<Lens, D::Error> {
+    Ok(Lens::deserialize(serde_json::Value::deserialize(input)?).unwrap_or_default())
 }
 
 /// A mode this version does not know, perhaps saved by a newer one, reads as System
@@ -124,29 +153,34 @@ mod tests {
     }
 
     #[test]
-    fn grouping_starts_on_and_the_choice_survives_a_relaunch() {
+    fn the_lens_starts_as_outcome_survives_a_relaunch_and_ignores_the_old_grouping_choice() {
         let home = tempfile::tempdir().unwrap();
         let file = home.path().join("desktop-preferences.json");
-        assert!(Preferences::load(home.path()).group_projects);
-        // A file saved before the choice existed, and one that cannot be read.
+        assert_eq!(Preferences::load(home.path()).lens, Lens::Outcome);
+        // A file saved before lenses, with the retired grouping choice, keeps its other choices.
         std::fs::write(
             &file,
-            r#"{ "minimize_activity": true, "appearance": "dark" }"#,
+            r#"{ "minimize_activity": true, "appearance": "dark", "group_projects": false }"#,
         )
         .unwrap();
         let older = Preferences::load(home.path());
-        assert!(older.group_projects && older.minimize_activity);
+        assert_eq!(older.lens, Lens::Outcome);
+        assert!(older.minimize_activity);
         assert_eq!(older.appearance, Appearance::Dark);
-        std::fs::write(&file, "not json").unwrap();
-        assert!(Preferences::load(home.path()).group_projects);
+        let saved = |preferences: &Preferences| {
+            preferences.save().unwrap();
+            std::fs::read_to_string(&file).unwrap()
+        };
+        assert!(!saved(&older).contains("group_projects"));
+        std::fs::write(&file, r#"{ "lens": "someday", "minimize_activity": true }"#).unwrap();
+        let unknown = Preferences::load(home.path());
+        assert_eq!(unknown.lens, Lens::Outcome);
+        assert!(unknown.minimize_activity);
 
         let mut preferences = Preferences::load(home.path());
-        preferences.group_projects = false;
-        preferences.save().unwrap();
-        assert!(!Preferences::load(home.path()).group_projects);
-        preferences.group_projects = true;
-        preferences.save().unwrap();
-        assert!(Preferences::load(home.path()).group_projects);
+        preferences.lens = Lens::Layer;
+        saved(&preferences);
+        assert_eq!(Preferences::load(home.path()).lens, Lens::Layer);
     }
 
     #[test]

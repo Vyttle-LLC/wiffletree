@@ -45,12 +45,12 @@ Six slices, one ticket each. Dependencies:
 
 ## 4. Slice (d) — Desktop: Outcome lens tree and reparent drag, groups retired
 
-- [ ] 4.1 Remove first-word groups: the Group button, group rows, shortened names and the grouping preference, which is ignored when read.
-- [ ] 4.2 The lens control with Outcome only enabled until (e) lands, saved in `desktop-preferences.json`, and ⌘1.
-- [ ] 4.3 The Outcome tree: parents with their children under them, loose projects, the "standing" pill, the hollow badge.
-- [ ] 4.4 The collapsed parent row with "+N" and the most urgent state; selecting a hidden child expands its parent.
-- [ ] 4.5 Dragging: parents as blocks, children among siblings, filing and unfiling drops with the confirmation, no target where the host would refuse.
-- [ ] 4.6 Tests: the tree from the stored order with a child above its parent, the roll-up, each drop kind, a cancelled confirmation, an older preferences file.
+- [x] 4.1 Remove first-word groups: the Group button, group rows, shortened names and the grouping preference, which is ignored when read.
+- [x] 4.2 The lens control with Outcome only enabled until (e) lands, saved in `desktop-preferences.json`, and ⌘1.
+- [x] 4.3 The Outcome tree: parents with their children under them, loose projects, the "standing" pill, the hollow badge.
+- [x] 4.4 The collapsed parent row with "+N" and the most urgent state; selecting a hidden child expands its parent.
+- [x] 4.5 Dragging: parents as blocks, children among siblings, filing and unfiling drops with the confirmation, no target where the host would refuse.
+- [x] 4.6 Tests: the tree from the stored order with a child above its parent, the roll-up, each drop kind, a cancelled confirmation, an older preferences file.
 
 ## 5. Slice (e) — Desktop: App, Layer and Me lenses
 

@@ -398,6 +398,12 @@ pub fn move_projects(project_ids: Vec<String>, before: Option<String>) -> Ask<Ve
         before,
     })
 }
+pub fn set_project_parent(project_id: String, parent_id: Option<String>) -> Ask<Project> {
+    Ask::new(Command::SetProjectParent {
+        project_id,
+        parent_id,
+    })
+}
 pub fn settings() -> Ask<HostSettings> {
     Ask::new(Command::Settings)
 }

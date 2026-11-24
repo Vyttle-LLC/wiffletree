@@ -441,24 +441,14 @@ impl Settings {
         appearance::section(p, cx)
     }
 
-    /// The sidebar's and the transcript's own layout toggles, here too, saved the same way.
+    /// The transcript's own layout toggle, here too, saved the same way.
     fn layout_section(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let preferences = cx.global::<Preferences>();
-        let (grouped, minimized) = (preferences.group_projects, preferences.minimize_activity);
+        let minimized = cx.global::<Preferences>().minimize_activity;
         div()
             .flex()
             .flex_col()
             .gap_2()
             .child(section("LAYOUT", p))
-            .child(switch_row(
-                Switch::new("group-projects")
-                    .checked(grouped)
-                    .on_click(|on: &bool, _, cx| {
-                        set_group_projects(*on, cx);
-                        cx.refresh_windows();
-                    }),
-                "Group projects that share a first word",
-            ))
             .child(switch_row(
                 Switch::new("minimize-activity")
                     .checked(minimized)
@@ -468,10 +458,7 @@ impl Settings {
                     }),
                 "Collapse a working agent's live work to its status line",
             ))
-            .child(hint(
-                "The same choices as the sidebar's and the transcript's own toggles.",
-                p,
-            ))
+            .child(hint("The same choice as the transcript's own toggle.", p))
     }
 
     /// Whether this Mac looks around the network for Wiffletree, which macOS asks about.

@@ -2,21 +2,21 @@
 use super::*;
 use crate::background::PendingUpdate;
 use gpui_component::{
-    Disableable, Selectable,
+    Disableable,
     button::ButtonVariants,
     menu::{DropdownMenu, PopupMenu, PopupMenuItem},
     tooltip::Tooltip,
 };
 use ui::{
-    bar_color, brand_image, card, eyebrow, hint, icon, needs_you_badge, now, pill, progress_bar,
-    status_glyph,
+    bar_color, brand_image, card, eyebrow, hint, hollow_badge, icon, needs_you_badge, now, pill,
+    progress_bar, status_glyph,
 };
 use wording::{counted, plural, status_label};
 
 const INDENT: f32 = 14.;
 
-fn inset(depth: usize, grouped: bool) -> Pixels {
-    px(8. + (depth + usize::from(grouped)) as f32 * INDENT)
+fn inset(depth: usize) -> Pixels {
+    px(8. + depth as f32 * INDENT)
 }
 
 const MOUSE_BUTTONS: [MouseButton; 5] = [
@@ -29,8 +29,8 @@ const MOUSE_BUTTONS: [MouseButton; 5] = [
 
 const SCROLL_TICK: std::time::Duration = std::time::Duration::from_millis(16);
 
-/// A project or group being dragged in the tree, drawn beside the pointer, and where it would
-/// land. It lives only as long as the drag.
+/// A project, a parent with its children, being dragged in the tree, drawn beside the pointer,
+/// and where it would land. It lives only as long as the drag.
 pub(super) struct ProjectDrag {
     moving: tree::Movable,
     target: Option<tree::Drop>,
@@ -38,7 +38,6 @@ pub(super) struct ProjectDrag {
     refused_space: Option<SpaceId>,
     /// The pointer has been off the dragged row, so a release back on it is not a click.
     left_row: bool,
-    glyph: &'static str,
     label: SharedString,
     palette: Palette,
 }
@@ -64,7 +63,7 @@ impl Render for ProjectDrag {
                 div()
                     .flex_none()
                     .text_color(p.subtle)
-                    .child(icon(self.glyph).size(px(14.))),
+                    .child(icon("project").size(px(14.))),
             )
             .child(
                 div()
@@ -79,18 +78,16 @@ impl Render for ProjectDrag {
 /// What a row needs to know about the drag in progress, if any.
 struct Reorder<'a> {
     sections: &'a [tree::Section<'a>],
+    collapsed_parents: &'a BTreeSet<String>,
     moving: Option<tree::Movable>,
 }
 
-/// Where the dragged row lands when released over the upper and the lower half of something in
-/// the tree; none where it may not land.
-type Halves = Option<(tree::Drop, tree::Drop)>;
-
 impl Reorder<'_> {
     /// For the row of `over` itself; nothing while no row is dragged.
-    fn onto(&self, over: &tree::Movable) -> Option<Halves> {
+    fn onto(&self, over: &tree::Movable) -> Option<Option<tree::Aims>> {
         let moving = self.moving.as_ref()?;
-        Some(tree::drops(self.sections, moving, over))
+        let aims = tree::aims(self.sections, moving, over, self.collapsed_parents);
+        Some(aims)
     }
     /// For the row of `space`, where nothing lands: the Space, when it is not the dragged row's
     /// own; nothing while no row is dragged.
@@ -100,15 +97,18 @@ impl Reorder<'_> {
         Some((!own).then(|| space.clone()))
     }
     /// For the space under the row of `over`, such as the spacer and New ticket button under a
-    /// project or the spacer under a collapsed group: it aims where the lower half of that row
-    /// does.
-    fn under(&self, over: &tree::Movable) -> Option<Halves> {
-        let halves = self.onto(over)?;
-        Some(halves.map(|(_, below)| (below.clone(), below)))
+    /// project: it aims where the bottom of that row does.
+    fn under(&self, over: &tree::Movable) -> Option<Option<tree::Aims>> {
+        let aims = self.onto(over)?;
+        Some(aims.map(|aims| tree::Aims {
+            above: aims.below.clone(),
+            onto: None,
+            below: aims.below,
+        }))
     }
 }
 
-/// Tells whatever a project or group is dragged over where the pointer is, as if it had moved.
+/// Tells whatever a project is dragged over where the pointer is, as if it had moved.
 fn repeat_pointer(window: &mut Window, cx: &mut App) {
     if cx.has_active_drag() {
         let moved = MouseMoveEvent {
@@ -120,7 +120,7 @@ fn repeat_pointer(window: &mut Window, cx: &mut App) {
     }
 }
 
-/// While a project or group is dragged over a Space's row `element`, hides the insertion line,
+/// While a project is dragged over a Space's row `element`, hides the insertion line,
 /// and shows why when `refused` names that Space because the dragged row belongs to another.
 fn refusing(element: Div, refused: Option<Option<SpaceId>>, cx: &mut Context<Sidebar>) -> Div {
     let Some(refused) = refused else {
@@ -136,14 +136,14 @@ fn refusing(element: Div, refused: Option<Option<SpaceId>>, cx: &mut Context<Sid
     )
 }
 
-/// While a project or group is dragged over `element`, aims the drop, or hides the insertion
-/// line where the dragged row may not land.
+/// While a project is dragged over `element`, aims the drop, or hides the insertion line where
+/// the dragged row may not land.
 fn aiming<E: InteractiveElement>(
     element: E,
-    halves: Option<Halves>,
+    aims: Option<Option<tree::Aims>>,
     cx: &mut Context<Sidebar>,
 ) -> E {
-    let Some(halves) = halves else {
+    let Some(aims) = aims else {
         return element;
     };
     element.on_drag_move(
@@ -151,11 +151,9 @@ fn aiming<E: InteractiveElement>(
             let pointer = event.event.position;
             // A row scrolled out of sight still has bounds, so ask the tree too.
             if event.bounds.contains(&pointer) && v.tree_scroll.bounds().contains(&pointer) {
-                let lower = pointer.y > event.bounds.center().y;
-                let target = halves
-                    .as_ref()
-                    .map(|(upper, below)| if lower { below } else { upper });
-                v.aim_project_drag(target.cloned(), c);
+                let fraction = (pointer.y - event.bounds.top()) / event.bounds.size.height;
+                let target = aims.as_ref().and_then(|aims| aims.at(fraction));
+                v.aim_project_drag(target, c);
             }
         }),
     )
@@ -192,14 +190,16 @@ pub(super) struct Sidebar {
     pub(super) project_edit: Option<project_name::NameEdit>,
     /// Collapsed Space sections, by their Space's id.
     collapsed_spaces: BTreeSet<SpaceId>,
-    /// Collapsed project groups, by their Space and first word in lowercase.
-    collapsed_groups: BTreeSet<tree::GroupKey>,
-    /// The project or group being dragged in the sidebar; gone once the drag ends.
+    /// Collapsed parents, by their project's id. Parents start expanded at app start.
+    collapsed_parents: BTreeSet<String>,
+    /// The project being dragged in the sidebar; gone once the drag ends.
     project_drag: Option<WeakEntity<ProjectDrag>>,
     /// The press in progress ended a rename, so it does not also start a drag.
     rename_press: bool,
     /// The click count of the latest press on a project row.
     press_clicks: usize,
+    /// The latest press on a project row was on a parent's chevron.
+    press_on_chevron: bool,
     /// The tree is scrolling under a row dragged to its edge.
     drag_scrolling: bool,
     tree_scroll: ScrollHandle,
@@ -233,10 +233,11 @@ impl Sidebar {
             project_name,
             project_edit: None,
             collapsed_spaces: BTreeSet::new(),
-            collapsed_groups: BTreeSet::new(),
+            collapsed_parents: BTreeSet::new(),
             project_drag: None,
             rename_press: false,
             press_clicks: 0,
+            press_on_chevron: false,
             drag_scrolling: false,
             tree_scroll: ScrollHandle::new(),
             checking_update: false,
@@ -277,7 +278,7 @@ impl Sidebar {
         let index = self.shared.index.as_ref()?;
         Some(tree::section_of(index, index.project(project_id)?))
     }
-    /// Opens the collapsed Space and group of a project selected from elsewhere, such as the
+    /// Opens the collapsed Space and parent of a project selected from elsewhere, such as the
     /// Inbox, so its row shows.
     fn reveal_selected(&mut self) {
         let Some(project_id) = self.shared.selected_session().map(|s| s.project_id.clone()) else {
@@ -287,11 +288,15 @@ impl Sidebar {
         if self.shared.assistant_work_open() {
             return;
         }
+        self.reveal(&project_id);
+    }
+    fn reveal(&mut self, project_id: &str) {
         let index = self.shared.index.as_ref();
-        let root = index.and_then(|index| index.roots(&project_id).next());
-        let word = root.map(|root| tree::group_key(&root.name));
-        if let (Some(space), Some(word)) = (self.section_of(&project_id), word) {
-            self.collapsed_groups.remove(&(space.clone(), word));
+        let parent = index.and_then(|index| index.project(project_id)?.parent_id.clone());
+        if let Some(parent) = parent {
+            self.collapsed_parents.remove(&parent);
+        }
+        if let Some(space) = self.section_of(project_id) {
             self.collapsed_spaces.remove(&space);
         }
     }
@@ -306,11 +311,8 @@ impl Sidebar {
         };
         self.pending_project_selection = None;
         self.creating_project = false;
-        // Its row shows, even in a collapsed group; selecting it opens its Space.
-        if let Some(space) = self.section_of(&root.project_id) {
-            let key = (space, tree::group_key(&root.name));
-            self.collapsed_groups.remove(&key);
-        }
+        // Its row shows, even under a collapsed parent.
+        self.reveal(&root.project_id);
         cx.emit(Intent::Select(root.id.clone()));
         self.tree_scroll.set_offset(point(px(0.), px(0.)));
         if let Some(body) = self.pending_first_message.take() {
@@ -508,7 +510,6 @@ impl Sidebar {
         // The snapshot lists every session that is not archived.
         let projects = self.shared.snapshot().map_or(0, |s| hosts::counts(s).0);
         let offers_new_project = self.shared.offers_new_project();
-        let grouped = cx.global::<Preferences>().group_projects;
         let archived = self.shared.snapshot().map_or(0, |s| s.archived_sessions);
         div()
             .size_full()
@@ -576,43 +577,26 @@ impl Sidebar {
                     .justify_between()
                     .items_center()
                     .child(eyebrow(self.shared.host.projects_heading(projects), p))
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(2.))
-                            .child(
-                                button("group-projects")
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(icon("folder").size(px(13.)))
-                                    .label("Group")
-                                    .selected(grouped)
-                                    .tooltip("Group projects by first word")
-                                    .on_click(cx.listener(move |_, _, _, c| {
-                                        set_group_projects(!grouped, c);
-                                        c.notify();
-                                    })),
-                            )
-                            .when(archived > 0, |d| {
-                                d.child(
-                                    button("show-archived")
-                                        .ghost()
-                                        .xsmall()
-                                        .icon(icon("archive").size(px(13.)))
-                                        .label(if self.shared.show_archived {
-                                            "Hide archived"
-                                        } else {
-                                            "Archived"
-                                        })
-                                        .tooltip(format!("{archived} archived sessions"))
-                                        .on_click(cx.listener(|v, _, _, c| {
-                                            c.emit(Intent::ShowArchived(!v.shared.show_archived));
-                                            c.notify();
-                                        })),
-                                )
-                            }),
-                    ),
+                    .child(div().flex().gap(px(2.)).when(archived > 0, |d| {
+                        d.child(
+                            button("show-archived")
+                                .ghost()
+                                .xsmall()
+                                .icon(icon("archive").size(px(13.)))
+                                .label(if self.shared.show_archived {
+                                    "Hide archived"
+                                } else {
+                                    "Archived"
+                                })
+                                .tooltip(format!("{archived} archived sessions"))
+                                .on_click(cx.listener(|v, _, _, c| {
+                                    c.emit(Intent::ShowArchived(!v.shared.show_archived));
+                                    c.notify();
+                                })),
+                        )
+                    })),
             )
+            .child(lens_control(p, cx))
             .child(
                 div()
                     .relative()
@@ -1103,8 +1087,7 @@ impl Sidebar {
             )));
         }
         let has_tickets = &index.snapshot().tickets_owned;
-        let grouping = cx.global::<Preferences>().group_projects;
-        let sections = tree::sections(index, self.shared.show_archived, grouping);
+        let sections = tree::sections(index, self.shared.show_archived);
         let drag = self.project_drag.as_ref().and_then(|drag| drag.upgrade());
         let (moving, target, refused_space) = match drag {
             Some(drag) => {
@@ -1116,39 +1099,35 @@ impl Sidebar {
         };
         let reorder = Reorder {
             sections: &sections,
+            collapsed_parents: &self.collapsed_parents,
             moving,
         };
-        let line = |drop: tree::Drop, grouped: bool| {
-            (target.as_ref() == Some(&drop)).then(|| insertion_line(grouped, p))
+        let line = |drop: tree::Drop, depth: usize| {
+            (target.as_ref() == Some(&drop)).then(|| insertion_line(depth, p))
         };
+        // The last project row, with its depth.
         let mut project = None;
         // Where a drag over the space under the last project row aims.
         let mut under = None;
-        // The Space and the group whose projects are being listed, and whether the last project
-        // row is in that group.
+        // The Space whose projects are being listed, and the expanded parent whose children are.
         let mut space = None;
-        let mut group = None;
-        let mut in_group = false;
+        let mut parent = None;
         let rows = tree::rows(
             index,
             self.shared.show_archived,
-            grouping,
             &self.collapsed_spaces,
-            &self.collapsed_groups,
+            &self.collapsed_parents,
         );
         for row in rows {
-            // Every row completes the project above it, a top-level row completes the group
+            // Every row completes the project above it, a top-level row completes the children
             // above it, and a Space's row completes the Space above it.
-            let top_level = match &row {
-                tree::Row::Space { .. } | tree::Row::Group(_) => true,
-                tree::Row::Project { grouped, .. } => !grouped,
-            };
-            if let Some(previous) = project.take() {
+            let top_level = !matches!(row, tree::Row::Project { child: true, .. });
+            if let Some((previous, depth)) = project.take() {
                 let under = under.take();
-                tree = self.close_project(tree, previous, in_group, under, has_tickets, cx);
+                tree = self.close_project(tree, previous, depth, under, has_tickets, cx);
             }
-            if let Some(key) = group.take_if(|_| top_level) {
-                tree = tree.children(line(tree::Drop::EndOfGroup(key), true));
+            if let Some(id) = parent.take_if(|_| top_level) {
+                tree = tree.children(line(tree::Drop::EndOfChildren(id), 1));
             }
             match row {
                 tree::Row::Space {
@@ -1158,13 +1137,13 @@ impl Sidebar {
                 } => {
                     let previous = space.replace(listed.clone());
                     let first = previous.is_none();
-                    let end = previous.and_then(|previous| line(tree::Drop::End(previous), false));
+                    let end = previous.and_then(|previous| line(tree::Drop::End(previous), 0));
                     let refused = reorder.refused(&listed);
                     let hint = (refused_space.as_ref() == Some(&listed)).then(|| {
                         hint("Projects move between Spaces from their Overview.", p)
                             .text_size(px(font::META))
                             .mt(px(4.))
-                            .ml(inset(0, false) + px(20.))
+                            .ml(inset(0) + px(20.))
                             .mr(px(6.))
                             .px_2()
                             .py(px(4.))
@@ -1177,41 +1156,36 @@ impl Sidebar {
                         .child(refusing(row, refused, cx))
                         .children(hint);
                 }
-                tree::Row::Group(listed) => {
-                    let movable = tree::Movable::Group(listed.key.clone());
+                tree::Row::Project { root, child } => {
+                    let depth = usize::from(child);
+                    under = reorder.under(&tree::Movable(root.project_id.clone()));
                     tree = tree
-                        .children(line(tree::Drop::Before(movable.clone()), false))
-                        .child(self.group_row(&listed, &reorder, p, cx));
-                    if self.collapsed_groups.contains(&listed.key) {
-                        tree = tree.child(aiming(div().h_2(), reorder.under(&movable), cx));
-                    }
-                    group = Some(listed.key);
+                        .children(line(tree::Drop::Before(root.project_id.clone()), depth))
+                        .child(self.project_row(root, child, None, &reorder, p, cx));
+                    project = Some((root, depth));
                 }
-                tree::Row::Project {
-                    root,
-                    label,
-                    grouped,
-                } => {
-                    let movable = tree::Movable::Project(root.project_id.clone());
-                    under = reorder.under(&movable);
+                tree::Row::Parent { root, children } => {
+                    under = reorder.under(&tree::Movable(root.project_id.clone()));
                     tree = tree
-                        .children(line(tree::Drop::Before(movable), grouped))
-                        .child(self.project_row(root, label, grouped, &reorder, p, cx));
-                    project = Some(root);
-                    in_group = grouped;
+                        .children(line(tree::Drop::Before(root.project_id.clone()), 0))
+                        .child(self.project_row(root, false, Some(&children[..]), &reorder, p, cx));
+                    if !self.collapsed_parents.contains(&root.project_id) {
+                        parent = Some(root.project_id.clone());
+                    }
+                    project = Some((root, 0));
                 }
             }
         }
-        if let Some(last) = project {
-            tree = self.close_project(tree, last, in_group, under, has_tickets, cx);
+        if let Some((last, depth)) = project {
+            tree = self.close_project(tree, last, depth, under, has_tickets, cx);
         }
-        if let Some(key) = group {
-            tree = tree.children(line(tree::Drop::EndOfGroup(key), true));
+        if let Some(id) = parent {
+            tree = tree.children(line(tree::Drop::EndOfChildren(id), 1));
         }
-        tree.children(space.and_then(|space| line(tree::Drop::End(space), false)))
+        tree.children(space.and_then(|space| line(tree::Drop::End(space), 0)))
     }
 
-    /// Makes a project or group row draggable, and a place other rows are dropped on.
+    /// Makes a project row draggable, and a place other rows are dropped on.
     fn reorderable(
         &self,
         row: Stateful<Div>,
@@ -1224,14 +1198,10 @@ impl Sidebar {
         if self.rename_press {
             return row;
         }
-        let glyph = match movable {
-            tree::Movable::Project(_) => "project",
-            tree::Movable::Group(_) => "folder",
-        };
         let own = movable.clone();
         let leaving = movable.clone();
         let dragged = reorder.moving.as_ref() == Some(&movable);
-        let halves = reorder.onto(&movable);
+        let aims = reorder.onto(&movable);
         let workspace = cx.weak_entity();
         let label = SharedString::from(label.to_owned());
         let row = row
@@ -1246,7 +1216,6 @@ impl Sidebar {
                     target: None,
                     refused_space: None,
                     left_row: false,
-                    glyph,
                     label: label.clone(),
                     palette: p,
                 });
@@ -1267,7 +1236,7 @@ impl Sidebar {
             .on_drop(cx.listener(move |v, moving: &tree::Movable, w, c| {
                 v.drop_on_row(moving, &own, w, c)
             }));
-        aiming(row, halves, cx)
+        aiming(row, aims, cx)
     }
 
     fn project_drag_left_row(&mut self, cx: &mut Context<Self>) {
@@ -1291,24 +1260,25 @@ impl Sidebar {
         let drag = self.project_drag.take().and_then(|drag| drag.upgrade());
         let left_row = drag.is_none_or(|drag| drag.read(cx).left_row);
         let release = tree::own_release(left_row, self.press_clicks);
-        match (row, release) {
-            (_, tree::OwnRelease::Nothing) => {}
-            (tree::Movable::Group(key), _) => self.toggle_group(key, cx),
-            (tree::Movable::Project(project_id), release) => {
-                let root = (self.shared.index.as_ref()).and_then(|i| i.roots(project_id).next());
-                if let Some(id) = root.map(|root| root.id.clone()) {
-                    cx.emit(Intent::Select(id));
-                    if release == tree::OwnRelease::Rename {
-                        self.begin_project_rename(project_id.clone(), window, cx);
-                    }
-                }
+        let project_id = &row.0;
+        if release == tree::OwnRelease::Nothing {
+            return;
+        }
+        if self.press_on_chevron {
+            return self.toggle_parent(project_id, cx);
+        }
+        let root = (self.shared.index.as_ref()).and_then(|i| i.roots(project_id).next());
+        if let Some(id) = root.map(|root| root.id.clone()) {
+            cx.emit(Intent::Select(id));
+            if release == tree::OwnRelease::Rename {
+                self.begin_project_rename(project_id.clone(), window, cx);
             }
         }
     }
 
-    fn toggle_group(&mut self, key: &tree::GroupKey, cx: &mut Context<Self>) {
-        if !self.collapsed_groups.remove(key) {
-            self.collapsed_groups.insert(key.clone());
+    fn toggle_parent(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        if !self.collapsed_parents.remove(project_id) {
+            self.collapsed_parents.insert(project_id.to_owned());
         }
         cx.notify();
     }
@@ -1408,7 +1378,8 @@ impl Sidebar {
         }
     }
 
-    /// Asks the host for the move the insertion line shows.
+    /// Asks the host for the move the insertion line shows, or first asks the human to confirm
+    /// filing or unfiling the project.
     fn drop_project(
         &mut self,
         moving: &tree::Movable,
@@ -1419,85 +1390,44 @@ impl Sidebar {
         let Some(target) = drag.and_then(|drag| drag.read(cx).target.clone()) else {
             return;
         };
-        let Some(index) = &self.shared.index else {
+        let Some(index) = self.shared.index.clone() else {
             return;
         };
-        let grouping = cx.global::<Preferences>().group_projects;
-        let sections = tree::sections(index, self.shared.show_archived, grouping);
-        if let Some(moved) = tree::project_move(&sections, moving, &target) {
-            let ask = ask::move_projects(moved.project_ids, moved.before);
-            self.ask(ask, window, cx, |_, projects, window, cx| match projects {
-                Ok(projects) => cx.emit(Intent::Amend(Amendment::Projects(projects))),
-                Err(error) => toast_error(error, window, cx),
-            });
+        let sections = tree::sections(&index, self.shared.show_archived);
+        match tree::landing(&index, &sections, moving, &target) {
+            Some(tree::Landing::Move(moved)) => self.move_projects(moved, window, cx),
+            Some(tree::Landing::Refile {
+                project,
+                parent,
+                then,
+            }) => {
+                let named = |id: String| {
+                    let name = index
+                        .project(&id)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_default();
+                    (id, name)
+                };
+                self.confirm_parent(&named(project), parent.map(named), then, window, cx)
+            }
+            None => {}
         }
     }
 
-    /// A group's row: activating it collapses or expands the group. Collapsed, it shows the most
-    /// urgent state among its projects.
-    fn group_row(
-        &self,
-        group: &tree::Group,
-        reorder: &Reorder,
-        p: Palette,
+    fn move_projects(
+        &mut self,
+        moved: tree::ProjectMove,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let key = group.key.clone();
-        let collapsed = self.collapsed_groups.contains(&key);
-        let count = group.members.len();
-        let detail = format!("{count} projects starting with “{}”", group.label);
-        let state = collapsed.then(|| self.rollup(&group.members, p)).flatten();
-        let toggle = key.clone();
-        let (space, word) = &key;
-        let row = self
-            .row(
-                SharedString::from(format!("group-{space}-{word}")),
-                false,
-                p,
-            )
-            .pl(inset(0, false) - px(4.))
-            .text_size(px(font::SMALL))
-            .text_color(p.subtle)
-            .tooltip(move |w, c| Tooltip::new(detail.clone()).build(w, c))
-            .on_click(cx.listener(move |v, _, _, c| v.toggle_group(&toggle, c)))
-            .child(
-                div()
-                    .flex_none()
-                    .size(px(18.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        icon(if collapsed {
-                            "chevron-right"
-                        } else {
-                            "chevron-down"
-                        })
-                        .size(px(12.)),
-                    ),
-            )
-            .child(div().flex_none().child(icon("folder").size(px(14.))))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_ellipsis()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(group.label.clone()),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .font_family(mono_font())
-                    .text_size(px(font::META))
-                    .child(count.to_string()),
-            )
-            .children(state.map(|state| div().flex_none().child(state)));
-        let movable = tree::Movable::Group(key);
-        self.reorderable(row, movable, &group.label, reorder, p, cx)
+    ) {
+        let ask = ask::move_projects(moved.project_ids, moved.before);
+        self.ask(ask, window, cx, |_, projects, window, cx| match projects {
+            Ok(projects) => cx.emit(Intent::Amend(Amendment::Projects(projects))),
+            Err(error) => toast_error(error, window, cx),
+        });
     }
 
-    /// The most urgent state among `projects`, for a collapsed group or Space.
+    /// The most urgent state among `projects`, for a collapsed parent or Space.
     fn rollup(&self, projects: &[&Session], p: Palette) -> Option<AnyElement> {
         let needs_you = (self.shared.snapshot().iter())
             .flat_map(|s| &s.attention)
@@ -1533,7 +1463,7 @@ impl Sidebar {
         let state = collapsed.then(|| self.rollup(projects, p)).flatten();
         let row = self
             .row(SharedString::from(format!("space-{space}")), false, p)
-            .pl(inset(0, false) - px(4.))
+            .pl(inset(0) - px(4.))
             .text_color(p.subtle)
             .on_click(cx.listener(move |v, _, _, c| v.toggle_space(&space, c)))
             .child(
@@ -1581,8 +1511,8 @@ impl Sidebar {
         &self,
         mut tree: Div,
         root: &Session,
-        grouped: bool,
-        under: Option<Halves>,
+        depth: usize,
+        under: Option<Option<tree::Aims>>,
         has_tickets: &BTreeMap<String, u32>,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -1591,7 +1521,7 @@ impl Sidebar {
                 .ghost()
                 .icon(icon("plus"))
                 .label("New ticket")
-                .ml(inset(1, grouped))
+                .ml(inset(1 + depth))
                 .on_click(cx.listener(|_, _, _, c| {
                     c.emit(Intent::Create {
                         kind: Creation::Ticket,
@@ -1644,7 +1574,7 @@ impl Sidebar {
             .flex()
             .items_center()
             .gap_2()
-            .pl(inset(0, false))
+            .pl(inset(0))
             .pr_2()
             .rounded_md()
             .text_size(px(font::MESSAGE))
@@ -1654,18 +1584,30 @@ impl Sidebar {
             .hover(move |d| d.bg(p.overlay.opacity(if selected { 1. } else { 0.6 })))
     }
 
-    /// `label` is the name the row shows; a grouped row's leaves out the group's word.
+    /// A project's row, indented with a branch icon for a `child`. A parent's row, which is given
+    /// its shown `children`, has a chevron that collapses them; collapsed, it shows how many and
+    /// the most urgent state among it and them.
     fn project_row(
         &self,
         root: &Session,
-        label: String,
-        grouped: bool,
+        child: bool,
+        children: Option<&[&Session]>,
         reorder: &Reorder,
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let id = root.id.clone();
         let project_id = root.project_id.clone();
+        let label = root.name.clone();
+        let depth = usize::from(child);
+        let collapsed = (children.filter(|_| self.collapsed_parents.contains(&project_id)))
+            .map(|children| (children.len(), self.parent_rollup(root, children, p)));
+        let standing = (self.shared.index.as_ref())
+            .and_then(|index| index.project(&project_id))
+            .is_some_and(|project| project.standing);
+        let with_parent = (self.shared.snapshot())
+            .and_then(|s| s.questions_with_parent.get(&project_id).copied())
+            .unwrap_or(0) as usize;
         // The coordinator or any of its agents being open selects the project.
         let selected = self.shared.page == Page::Conversation
             && self
@@ -1686,13 +1628,17 @@ impl Sidebar {
             needs_you(&s.attention, &s.workspace_notes, &project_id)
         });
         let detail = format!(
-            "{} · {}{}{}{}",
+            "{} · {}{}{}{}{}",
             root.name,
             self.status_detail(root),
             if live { " · Running" } else { " · Stopped" },
             match attention {
                 0 => String::new(),
                 n => format!(" · {n} {} you", plural(n, "item needs", "items need")),
+            },
+            match with_parent {
+                0 => String::new(),
+                n => format!(" · {} with its parent", counted(n, "question")),
             },
             stuck_label(agents.stuck).map_or(String::new(), |stuck| format!(" · {stuck}")),
         );
@@ -1704,15 +1650,8 @@ impl Sidebar {
         let archive_id = id.clone();
         let rename_id = project_id.clone();
         let click_project = project_id.clone();
-        let movable = tree::Movable::Project(project_id.clone());
-        let filing = (self.shared.snapshot()).and_then(|snapshot| {
-            let project = snapshot.projects.iter().find(|p| p.id == project_id)?;
-            Some(Rc::new(Filing {
-                project: (project.id.clone(), project.name.clone()),
-                move_under: filing::move_under(snapshot, project),
-                standing: project.standing,
-            }))
-        });
+        let toggled = project_id.clone();
+        let movable = tree::Movable(project_id.clone());
         let row = self
             .row(SharedString::from(format!("tree-{id}")), selected, p)
             // Its children wrap, so the progress track and the agents line added last each take
@@ -1721,13 +1660,18 @@ impl Sidebar {
             .py(px(5.))
             .flex_wrap()
             .gap_y(px(3.))
-            // The icon lines up with a group row's, past its chevron.
-            .pl(inset(0, grouped) + px(22.))
+            // The icon lines up past a parent's chevron.
+            .pl(if children.is_some() {
+                inset(0) - px(4.)
+            } else {
+                inset(depth) + px(22.)
+            })
             .text_size(px(font::TEXT))
             .when(root.archived, |d| d.opacity(0.55))
             .tooltip(move |w, c| Tooltip::new(detail.clone()).build(w, c))
             .capture_any_mouse_down(cx.listener(|v, event: &MouseDownEvent, _, _| {
                 v.press_clicks = event.click_count;
+                v.press_on_chevron = false;
             }))
             .on_click(cx.listener(move |v, event: &ClickEvent, w, c| {
                 if !editing {
@@ -1737,11 +1681,39 @@ impl Sidebar {
                     }
                 }
             }))
+            .when(children.is_some(), |row| {
+                row.child(
+                    div()
+                        .id(SharedString::from(format!("toggle-{project_id}")))
+                        .flex_none()
+                        .size(px(18.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(p.subtle)
+                        .child(
+                            icon(if collapsed.is_some() {
+                                "chevron-right"
+                            } else {
+                                "chevron-down"
+                            })
+                            .size(px(12.)),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|v, _, _, _| v.press_on_chevron = true),
+                        )
+                        .on_click(cx.listener(move |v, _, _, c| {
+                            c.stop_propagation();
+                            v.toggle_parent(&toggled, c);
+                        })),
+                )
+            })
             .child(
                 div()
                     .flex_none()
                     .text_color(if selected { p.text } else { p.subtle })
-                    .child(icon("project")),
+                    .child(icon(if child { "git" } else { "project" })),
             )
             .child(div().flex_1().min_w_0().child(if let Some(edit) = edit {
                 div()
@@ -1768,13 +1740,23 @@ impl Sidebar {
                     .into_any_element()
             } else {
                 div()
-                    .text_ellipsis()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(label.clone())
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_ellipsis()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(label.clone()),
+                    )
+                    .when(standing, |d| d.child(pill("standing", p.subtle)))
                     .into_any_element()
             }))
             .when(selected && !editing, |d| {
                 let weak = cx.weak_entity();
+                // Only the selected row has a menu, so Move under… is worked out once a render.
+                let filing = self.filing(&project_id);
                 d.child(
                     button(SharedString::from(format!("project-actions-{project_id}")))
                         .ghost()
@@ -1856,14 +1838,30 @@ impl Sidebar {
                 project.map(|project| project.state),
                 p,
             ))
-            // Needs you outranks every other state, so it takes the status slot.
-            .child(if attention > 0 {
-                needs_you_badge(attention, p)
-            } else {
-                div()
-                    .flex_none()
-                    .child(status_glyph(self.shared.shown_status(root), 12., p))
+            .when(with_parent > 0, |d| d.child(hollow_badge(with_parent, p)))
+            .when_some(collapsed.as_ref(), |d, (count, _)| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .font_family(mono_font())
+                        .text_size(px(font::META))
+                        .text_color(p.subtle)
+                        .child(format!("+{count}")),
+                )
             })
+            // Needs you outranks every other state, so it takes the status slot; a collapsed
+            // parent's slot holds the most urgent state among it and its children.
+            .child(
+                match (collapsed.and_then(|(_, rollup)| rollup), attention) {
+                    (Some(rollup), _) => div().flex_none().child(rollup),
+                    (None, 0) => div().flex_none().child(status_glyph(
+                        self.shared.shown_status(root),
+                        12.,
+                        p,
+                    )),
+                    (None, attention) => needs_you_badge(attention, p),
+                },
+            )
             .when(!root.archived, |row| {
                 row.child(track(
                     project.map(|project| (project.position, project.state)),
@@ -1886,6 +1884,31 @@ impl Sidebar {
         } else {
             self.reorderable(row, movable, &label, reorder, p, cx)
         }
+    }
+
+    /// What the project menu offers to file `project_id` and mark it standing.
+    fn filing(&self, project_id: &str) -> Option<Rc<Filing>> {
+        let snapshot = self.shared.snapshot()?;
+        let project = snapshot.projects.iter().find(|p| p.id == project_id)?;
+        Some(Rc::new(Filing {
+            project: (project.id.clone(), project.name.clone()),
+            move_under: filing::move_under(snapshot, project),
+            standing: project.standing,
+        }))
+    }
+
+    /// A collapsed parent's state: the most urgent among it and its shown children.
+    fn parent_rollup(
+        &self,
+        parent: &Session,
+        children: &[&Session],
+        p: Palette,
+    ) -> Option<AnyElement> {
+        let family: Vec<&Session> = [parent]
+            .into_iter()
+            .chain(children.iter().copied())
+            .collect();
+        self.rollup(&family, p)
     }
 
     fn agent_counts(&self, coordinator: &Session) -> tree::AgentCounts {
@@ -1976,7 +1999,7 @@ fn filing_items(
                             move |_, window, cx| {
                                 let parent = parent.clone();
                                 let _ = sidebar.update(cx, |view, cx| {
-                                    view.confirm_parent(&filing.project, parent, window, cx)
+                                    view.confirm_parent(&filing.project, parent, None, window, cx)
                                 });
                             },
                         ));
@@ -2002,42 +2025,107 @@ fn filing_items(
 
 impl Sidebar {
     /// Asks first, naming the project and its new parent or saying it becomes loose, then
-    /// files it; the host's refusal shows as a toast.
+    /// files it and, after a drag, places it where it was dropped with `then`. The host's
+    /// refusal shows as a toast; cancelling changes nothing.
     fn confirm_parent(
         &mut self,
         (project_id, project_name): &(String, String),
         parent: Option<(String, String)>,
+        then: Option<tree::ProjectMove>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let (title, line) = filing::confirmation(project_name, parent.as_ref().map(|p| &*p.1));
-        let command = Command::SetProjectParent {
-            project_id: project_id.clone(),
-            parent_id: parent.map(|p| p.0),
-        };
+        let (project_id, parent_id) = (project_id.clone(), parent.map(|p| p.0));
+        let then = Rc::new(std::cell::Cell::new(then));
         let weak = cx.weak_entity();
         window.open_alert_dialog(cx, move |dialog, _, _| {
-            let (weak, command) = (weak.clone(), command.clone());
+            let (weak, then) = (weak.clone(), then.clone());
+            let (project_id, parent_id) = (project_id.clone(), parent_id.clone());
             dialog
                 .title(title.clone())
                 .confirm()
                 .ok_text("Move")
                 .child(line.clone())
                 .on_ok(move |_, window, cx| {
-                    let command = command.clone();
-                    let _ = weak.update(cx, |view, cx| view.request(command, window, cx));
+                    let ask = ask::set_project_parent(project_id.clone(), parent_id.clone());
+                    let then = then.take();
+                    let _ = weak.update(cx, |view, cx| {
+                        view.ask(ask, window, cx, |view, filed, window, cx| match filed {
+                            Ok(_) => {
+                                if let Some(moved) = then {
+                                    view.move_projects(moved, window, cx);
+                                }
+                            }
+                            Err(error) => toast_error(error, window, cx),
+                        })
+                    });
                     true
                 })
         });
     }
 }
 
-fn insertion_line(grouped: bool, p: Palette) -> Div {
+/// The lenses under the PROJECTS header: Outcome, App, Layer and Me. Only the lenses this version
+/// draws can be chosen; the others wait, dimmed.
+fn lens_control(p: Palette, cx: &mut Context<Sidebar>) -> Div {
+    let saved = cx.global::<Preferences>().lens;
+    let current = if saved.available() {
+        saved
+    } else {
+        Lens::default()
+    };
+    let mut control = div()
+        .flex_none()
+        .mx_3()
+        .mb_1()
+        .p(px(2.))
+        .flex()
+        .gap(px(2.))
+        .rounded_lg()
+        .border_1()
+        .border_color(p.edge)
+        .bg(p.base);
+    for (at, lens) in Lens::ALL.into_iter().enumerate() {
+        let on = lens == current;
+        let tooltip = if lens.available() {
+            format!("{} · ⌘{}", lens.label(), at + 1)
+        } else {
+            format!("The {} lens is not available yet", lens.label())
+        };
+        let segment = div()
+            .id(SharedString::from(format!("lens-{}", lens.label())))
+            .flex_1()
+            .py(px(3.))
+            .flex()
+            .justify_center()
+            .rounded_md()
+            .text_size(px(font::META))
+            .text_color(if on { p.text } else { p.subtle })
+            .when(on, |d| {
+                d.bg(p.surface)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .shadow_sm()
+            })
+            .tooltip(move |w, c| Tooltip::new(tooltip.clone()).build(w, c))
+            .child(lens.label());
+        control = control.child(if lens.available() {
+            segment
+                .cursor_pointer()
+                .on_click(move |_, _, cx| set_lens(lens, cx))
+        } else {
+            segment.opacity(0.45)
+        });
+    }
+    control
+}
+
+fn insertion_line(depth: usize, p: Palette) -> Div {
     div().relative().h_0().mt(px(-1.)).child(
         div()
             .absolute()
             .top(px(-1.))
-            .left(inset(0, grouped) + px(20.))
+            .left(inset(depth) + px(20.))
             .right(px(6.))
             .h(px(2.))
             .rounded_full()

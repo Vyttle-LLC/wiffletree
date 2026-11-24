@@ -96,7 +96,7 @@ use gpui_component::{
 };
 use hosts::{HostChoice, HostView, Hosts};
 use palette::{Palette, mono_font, palette, ui_font};
-use preferences::{Appearance, Preferences};
+use preferences::{Appearance, Lens, Preferences};
 use serde_json::Value;
 use shared::{
     Amendment, HumanWrote, Intent, ModelsCard, RepositoriesCard, Requests, Shared, toast,
@@ -1336,9 +1336,11 @@ fn set_appearance(appearance: Appearance, cx: &mut App) {
     apply_theme(cx);
 }
 
-/// A view choice of this client, remembered for the next launch; the host's order is untouched.
-fn set_group_projects(grouped: bool, cx: &mut App) {
-    change_preferences(cx, |preferences| preferences.group_projects = grouped);
+/// A view choice of this client, remembered for the next launch; the host's order, the parent
+/// links and the selection are untouched.
+fn set_lens(lens: Lens, cx: &mut App) {
+    change_preferences(cx, |preferences| preferences.lens = lens);
+    cx.refresh_windows();
 }
 
 /// Shows a working agent's activity as one line, or as the full card.
@@ -1440,7 +1442,8 @@ actions!(
         OpenSettings,
         CheckForUpdates,
         OpenModels,
-        OpenRepositories
+        OpenRepositories,
+        ShowOutcomeLens
     ]
 );
 
@@ -1597,6 +1600,7 @@ fn register_window_actions(cx: &mut App) {
     cx.on_action(|_: &NewProject, cx| {
         with_workspace(cx, |view, window, cx| view.new_project(window, cx))
     });
+    cx.on_action(|_: &ShowOutcomeLens, cx| set_lens(Lens::Outcome, cx));
     cx.on_action(|_: &brain_search::OpenBrainSearch, cx| {
         with_workspace(cx, |view, window, cx| view.search_brain(None, window, cx))
     });
@@ -1718,6 +1722,7 @@ fn main() -> anyhow::Result<()> {
             KeyBinding::new("enter", SendMessage, Some("ChatComposer > Input")),
             KeyBinding::new("cmd-enter", SendMessage, Some("ChatComposer > Input")),
             KeyBinding::new("cmd-n", NewProject, None),
+            KeyBinding::new("cmd-1", ShowOutcomeLens, None),
             KeyBinding::new("cmd-,", OpenSettings, None),
             KeyBinding::new("cmd-q", Quit, None),
         ]);
