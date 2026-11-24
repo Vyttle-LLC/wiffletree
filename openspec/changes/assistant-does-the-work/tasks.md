@@ -30,6 +30,6 @@ Four stages, each one reviewable ticket, stacked on a feature branch that the hu
 
 ## 4. Skill and docs
 
-- [ ] 4.1 Assisting v3 (`skills/stock/assisting.md`): when to answer, act, start work or take the fast path; when to ask the human versus answer a coordinator; how to phrase decision cards; keeping turns short.
-- [ ] 4.2 Docs: rewrite `docs/FEATURES.md` "Assistant, recurring jobs and Boards" for the shipped behaviour (one conversation, work, loops, apps and action cards, and what is instruction-level), `docs/DEVELOPMENT.md` on the Assistant's launch, the README's Assistant bullets in the present tense, and refresh `docs/images/assistant.png`.
+- [x] 4.1 Assisting v3 (`skills/stock/assisting.md`): when to answer, act, start work or take the fast path; when to ask the human versus answer a coordinator; how to phrase decision cards; keeping turns short.
+- [x] 4.2 Docs: rewrite `docs/FEATURES.md` "Assistant, recurring jobs and Boards" for the shipped behaviour (one conversation, work, loops, apps and action cards, and what is instruction-level), `docs/DEVELOPMENT.md` on the Assistant's launch, the README's Assistant bullets in the present tense, and refresh `docs/images/assistant.png`.
 - [ ] 4.3 At archive: sync the deltas and delete `openspec/specs/assistant-router`, whose every requirement this change removes.

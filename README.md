@@ -112,7 +112,7 @@ The full explanation of everything below is in **[docs/FEATURES.md](docs/FEATURE
 
 ### Spaces
 
-- A Space answers "where does this go?" for projects, threads, jobs and issues.
+- A Space answers "where does this go?" for projects, the Assistant's requests, loops and issues.
 - It holds code repositories, instructions for every role and its own model rows.
 - One repository holds everything a Space shares in its `wiffletree/` folder: the Space, its issues and its brain.
 - A local repository is never pushed. To share a Space, keep it in a private GitHub repository.
@@ -137,14 +137,14 @@ The full explanation of everything below is in **[docs/FEATURES.md](docs/FEATURE
 
 [More on issues](docs/FEATURES.md#issues)
 
-### Assistant, recurring jobs and Boards
+### Assistant, loops and Boards
 
-- The assistant takes quick questions in threads, and a router picks each message's thread and Space.
-- A thread is read-only plus a scratch folder, and it stays on your Mac.
-- Recurring work is a job only you can save, and Boards keeps what threads and jobs produce.
-- Coming next, approved in [assistant-does-the-work](openspec/changes/assistant-does-the-work/proposal.md): one conversation that acts on your Mac, starts and steers work for you without project upkeep, and makes loops directly with Undo.
+- The Assistant is one conversation across every Space that acts on your Mac and stays on it.
+- It starts and steers work for you, so code changes still land as reviewed pull requests without project upkeep.
+- It reads your apps through each Space's sources, and anything that sends or changes something there waits on a card you run.
+- It makes recurring loops directly, with Undo, and Boards keeps what it and its loops produce.
 
-[More on the assistant](docs/FEATURES.md#assistant-recurring-jobs-and-boards)
+[More on the assistant](docs/FEATURES.md#assistant-loops-and-boards)
 
 ### Models and usage
 
