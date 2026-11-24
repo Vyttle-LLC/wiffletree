@@ -568,6 +568,24 @@ pub(super) fn needs_you_badge(count: usize, p: Palette) -> Div {
         .child(icon("attention").size(px(12.)))
         .child(count.to_string())
 }
+/// The needs-you badge's outline: questions waiting with someone other than the human.
+pub(super) fn hollow_badge(count: usize, p: Palette) -> Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(3.))
+        .pl(px(4.))
+        .pr(px(6.))
+        .rounded_full()
+        .border_1()
+        .border_color(p.yellow)
+        .text_color(p.yellow)
+        .text_size(px(font::META))
+        .font_weight(FontWeight::BOLD)
+        .child(icon("attention").size(px(12.)))
+        .child(count.to_string())
+}
 fn status_badge(status: Status, label: String, p: Palette) -> Div {
     let color = status_color(status, p);
     div()

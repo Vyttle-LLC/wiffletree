@@ -3,7 +3,7 @@
 //! keystroke in the composer or frame of another view's spinner.
 use super::*;
 use gpui_component::{Disableable, Selectable, button::ButtonVariants};
-use ui::{HEADER_HEIGHT, icon, page_header, progress_bar, segmented_bar};
+use ui::{HEADER_HEIGHT, icon, page_header, pill, progress_bar, segmented_bar};
 
 /// The progress strip never changes height, so the transcript below it never moves.
 const STRIP_HEIGHT: f32 = 36.;
@@ -15,6 +15,29 @@ pub(super) fn style() -> StyleRefinement {
         .flex_none()
         .w_full()
         .h(px(HEADER_HEIGHT + STRIP_HEIGHT))
+}
+
+/// A child project's parent and the parent's coordinator; none for a loose project.
+fn parent_link<'a>(
+    index: &'a WorkspaceIndex,
+    project_id: &str,
+) -> Option<(&'a Project, &'a Session)> {
+    let parent = index.project(index.project(project_id)?.parent_id.as_ref()?)?;
+    Some((parent, index.roots(&parent.id).next()?))
+}
+
+/// The project's apps, then its layers, for the coordinator's header; none before it has a
+/// ticket.
+fn tag_chips(snapshot: &Snapshot, project_id: &str) -> Vec<(TagKind, String)> {
+    let Some(tags) = snapshot.project_tags.get(project_id) else {
+        return vec![];
+    };
+    let apps = tags.apps.iter().map(|app| (TagKind::App, app.clone()));
+    let layers = tags
+        .layers
+        .iter()
+        .map(|layer| (TagKind::Layer, layer.clone()));
+    apps.chain(layers).collect()
 }
 
 pub(super) struct ConversationHeader {
@@ -71,21 +94,32 @@ impl ConversationHeader {
             .flat_map(|index| index.sessions())
             .any(|s| s.project_id == session.project_id && s.status == Status::Working)
     }
-    /// Where the session sits: the project and role for its coordinator, and for any other
-    /// agent a link back to the coordinator, then the agent's ticket.
+    /// Where the session sits: the project and role for its coordinator, or for a child's
+    /// coordinator a link back to the parent's, then the child; and for any other agent a link
+    /// back to the coordinator, then the agent's ticket.
     fn breadcrumb(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {
         let project = self.shared.project_name();
-        let Some(coordinator) = (self.shared.coordinator()).filter(|c| c.id != session.id) else {
-            let parts = [project.as_str(), session.role.label()];
-            return div()
-                .text_ellipsis()
-                .child(self.shared.host.breadcrumb(parts));
+        let index = self.shared.index.as_deref();
+        let (back, rest) = match (self.shared.coordinator()).filter(|c| c.id != session.id) {
+            Some(coordinator) => {
+                let snapshot = self.shared.snapshot();
+                let ticket = (self.shared.ticket_of(&session.id).zip(snapshot))
+                    .map(|(ticket, snapshot)| wording::ticket_label(snapshot, ticket));
+                ((coordinator.id.clone(), project), ticket)
+            }
+            None => match index.and_then(|index| parent_link(index, &session.project_id)) {
+                Some((parent, coordinator)) => {
+                    ((coordinator.id.clone(), parent.name.clone()), Some(project))
+                }
+                None => {
+                    let parts = [project.as_str(), session.role.label()];
+                    return div()
+                        .text_ellipsis()
+                        .child(self.shared.host.breadcrumb(parts));
+                }
+            },
         };
-        let id = coordinator.id.clone();
-        let host = self.shared.host.breadcrumb([]);
-        let snapshot = self.shared.snapshot();
-        let ticket = (self.shared.ticket_of(&session.id).zip(snapshot))
-            .map(|(ticket, snapshot)| wording::ticket_label(snapshot, ticket));
+        let ((id, name), host) = (back, self.shared.host.breadcrumb([]));
         div()
             .min_w_0()
             .flex()
@@ -99,28 +133,9 @@ impl ConversationHeader {
                     .text_color(p.focus)
                     .hover(|d| d.underline())
                     .on_click(cx.listener(move |_, _, _, c| c.emit(Intent::Select(id.clone()))))
-                    .child(format!("← {project}")),
+                    .child(format!("← {name}")),
             )
-            .children(ticket.map(|ticket| {
-                div()
-                    .min_w_0()
-                    .text_ellipsis()
-                    .child(format!("/  {ticket}"))
-            }))
-    }
-    /// Opens and closes the Agents panel, with how many of the project's agents are working.
-    fn agents_toggle(&self, cx: &mut Context<Self>) -> Option<Button> {
-        let working = self.shared.roster()?.working();
-        Some(
-            button("agents")
-                .outline()
-                .small()
-                .icon(icon("team"))
-                .label(wording::agents_label(working))
-                .selected(self.shared.panel == Some(Panel::Agents))
-                .tooltip("Every ticket and the agents working on it")
-                .on_click(cx.listener(|_, _, _, c| c.emit(Intent::TogglePanel(Panel::Agents)))),
-        )
+            .children(rest.map(|rest| div().min_w_0().text_ellipsis().child(format!("/  {rest}"))))
     }
     /// Opens and closes Effective settings: what a ticket's agents get, or the project's from
     /// its coordinator, and where each value came from.
@@ -147,14 +162,25 @@ impl ConversationHeader {
             (Some(_), Some(index)) => index.agent_label(session),
             _ => session.name.clone(),
         };
+        let chips = (self.shared.coordinator())
+            .filter(|c| c.id == session.id)
+            .zip(self.shared.snapshot())
+            .map_or_else(Vec::new, |(_, snapshot)| {
+                tag_chips(snapshot, &session.project_id)
+            });
         page_header(
             self.breadcrumb(session, p, cx),
-            div().text_ellipsis().child(title),
+            div()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().min_w_0().text_ellipsis().child(title))
+                .children(chips.into_iter().map(|(_, value)| pill(value, p.subtle))),
             p,
         )
         .px_6()
         .gap_3()
-        .children(self.agents_toggle(cx))
         .children(self.settings_toggle(cx))
         .children((self.contexts.read(cx).chip(session, p)).map(|chip| {
             chip.on_click(cx.listener(|_, _, _, c| c.emit(Intent::ShowPanel(Panel::Overview))))
@@ -273,11 +299,14 @@ impl ConversationHeader {
             let segments: Vec<_> = tickets.iter().map(|t| (t.position, t.state)).collect();
             segmented_bar(&segments, STRIP_BAR, p)
         };
-        (
-            project.phase.label().into(),
-            bar,
-            wording::project_summary(project),
-        )
+        // A child's strip says where its questions go instead of its phase.
+        let parent = (self.shared.index.as_deref())
+            .and_then(|index| parent_link(index, &project.project_id));
+        let label = match parent {
+            Some((parent, _)) => wording::child_strip(&parent.name),
+            None => project.phase.label().into(),
+        };
+        (label, bar, wording::project_summary(project))
     }
     /// An agent's own label and bar, or its ticket's stage and bar when it has nothing of
     /// its own to show.
@@ -334,5 +363,58 @@ impl Render for ConversationHeader {
             .flex_col()
             .child(self.header(session, p, cx))
             .child(self.progress_strip(session, p))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
+    use super::{parent_link, tag_chips};
+    use crate::test_support::ticket_store;
+    use std::rc::Rc;
+    use workspace_core::*;
+
+    #[test]
+    fn a_child_s_header_links_back_to_its_parent_s_coordinator() {
+        let (_directory, mut host, root, _) = ticket_store();
+        let child = host.create_project("Contrast warnings").unwrap();
+        let loose = host.create_project("Recipes").unwrap();
+        host.set_project_parent(&child.id, Some(&root.project_id))
+            .unwrap();
+        let index = WorkspaceIndex::new(host.snapshot().unwrap(), Rc::default());
+
+        let (parent, coordinator) = parent_link(&index, &child.id).unwrap();
+
+        assert_eq!(
+            (parent.name.as_str(), coordinator.id.as_str()),
+            ("Calls", root.id.as_str())
+        );
+        assert!(parent_link(&index, &loose.id).is_none());
+        assert!(parent_link(&index, &root.project_id).is_none());
+    }
+
+    #[test]
+    fn the_chips_name_the_apps_then_the_layers_and_none_before_a_ticket() {
+        let (_directory, host, root, _) = ticket_store();
+        let mut snapshot = host.snapshot().unwrap();
+        snapshot.project_tags.insert(
+            root.project_id.clone(),
+            ProjectTags {
+                started: true,
+                apps: vec!["nvim".into()],
+                layers: vec!["frontend".into(), "backend".into()],
+            },
+        );
+        let chips: Vec<(TagKind, String)> = tag_chips(&snapshot, &root.project_id);
+        let named: Vec<(TagKind, &str)> = chips.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        assert_eq!(
+            named,
+            [
+                (TagKind::App, "nvim"),
+                (TagKind::Layer, "frontend"),
+                (TagKind::Layer, "backend")
+            ]
+        );
+        assert!(tag_chips(&snapshot, "not-started").is_empty());
     }
 }

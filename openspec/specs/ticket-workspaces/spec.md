@@ -205,7 +205,7 @@ The open-branch check SHALL group a repository's open tickets by their base, `or
 - **THEN** the ticket on `release` is checked against `origin/release` in a check of its own
 
 ### Requirement: Ticket workspaces in the Agents panel
-The Agents panel SHALL show each counted ticket of a project as a card labelled "repository · ticket" with the repository name and ticket title, and under it the ticket's agents (see work-progress). A ticket accepted with a waiver SHALL say so in the warning color on its card, as "Accepted with waiver · N open findings", and SHALL never be shown only as passed or accepted. There SHALL be no repository-team row or "Add repository team" action.
+The Agents panel SHALL show each open ticket of a project, and each finished ticket with an unarchived agent, as a card labelled "repository · ticket" with the repository name and ticket title, and under it the ticket's agents, and every other finished ticket on a line in its "Finished tickets" section (see work-progress). A ticket accepted with a waiver SHALL say so in the warning color, under its card's bar or directly under its line, as "Accepted with waiver · N open findings", and SHALL never be shown only as passed or accepted. There SHALL be no repository-team row or "Add repository team" action.
 
 #### Scenario: Card shape
 - **WHEN** a project has a ticket "Fix inbound calls" in repository "sagechat-sms" with an implementer and two reviewers
@@ -213,7 +213,7 @@ The Agents panel SHALL show each counted ticket of a project as a card labelled 
 
 #### Scenario: Waived ticket
 - **WHEN** a project has one passed ticket, one blocked ticket and one ticket accepted with a waiver and one open entry
-- **THEN** the waived ticket's card reads "Accepted with waiver · 1 open finding", and the others' cards do not
+- **THEN** the waived ticket's line in "Finished tickets" is followed by "Accepted with waiver · 1 open finding" in the warning color, and the other tickets show no such note
 
 #### Scenario: New ticket picks a repository
 - **WHEN** the human opens New ticket for a project

@@ -664,12 +664,43 @@ pub(crate) fn project_summary(project: &ProjectProgress) -> String {
     parts.collect::<Vec<_>>().join(" · ")
 }
 
-/// The header's Agents toggle: "Agents · 3 working", or "Agents" while none works.
-pub(crate) fn agents_label(working: usize) -> String {
-    match working {
-        0 => "Agents".into(),
-        working => format!("Agents · {working} working"),
+/// A child project's card in its parent's Agents panel: what its coordinator waits on, then who
+/// else it has, such as "Coordinator waiting on Neovim · 1 implementer, 1 reviewer".
+pub(crate) fn child_line(
+    parent: &str,
+    with_parent: u32,
+    with_you: bool,
+    coordinator: Status,
+    others: &[Role],
+) -> String {
+    let coordinator = if with_parent > 0 {
+        format!("Coordinator waiting on {parent}")
+    } else if with_you {
+        "Coordinator waiting on you".into()
+    } else if coordinator == Status::Working {
+        "Coordinator working".into()
+    } else {
+        "Coordinator idle".into()
+    };
+    let mut roles: Vec<(Role, usize)> = vec![];
+    for &role in others {
+        match roles.iter_mut().find(|(r, _)| *r == role) {
+            Some((_, count)) => *count += 1,
+            None => roles.push((role, 1)),
+        }
     }
+    let roles: Vec<String> = (roles.into_iter())
+        .map(|(role, count)| counted(count, &role.label().to_lowercase()))
+        .collect();
+    match roles.is_empty() {
+        true => coordinator,
+        false => format!("{coordinator} · {}", roles.join(", ")),
+    }
+}
+
+/// A child coordinator's strip: "Child of Neovim · questions go to Neovim first".
+pub(crate) fn child_strip(parent: &str) -> String {
+    format!("Child of {parent} · questions go to {parent} first")
 }
 
 /// The coordinator's agents card, such as "3 agents working on 2 tickets · 1 stuck".
@@ -873,9 +904,32 @@ mod tests {
             "25%"
         );
         assert_eq!(project_summary(&project_at(Indeterminate, None, 0, 0)), "");
+    }
+
+    #[test]
+    fn a_child_card_says_what_its_coordinator_waits_on_and_who_else_it_has() {
+        use Role::*;
         assert_eq!(
-            (agents_label(3), agents_label(0)),
-            ("Agents · 3 working".into(), "Agents".into())
+            child_line("Neovim", 3, true, Status::Ready, &[Implementer]),
+            "Coordinator waiting on Neovim · 1 implementer"
+        );
+        assert_eq!(
+            child_line("Neovim", 0, true, Status::Ready, &[]),
+            "Coordinator waiting on you"
+        );
+        assert_eq!(
+            child_line(
+                "Neovim",
+                0,
+                false,
+                Status::Working,
+                &[Implementer, Reviewer, Implementer]
+            ),
+            "Coordinator working · 2 implementers, 1 reviewer"
+        );
+        assert_eq!(
+            child_strip("Neovim"),
+            "Child of Neovim · questions go to Neovim first"
         );
     }
 

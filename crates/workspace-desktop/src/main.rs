@@ -124,12 +124,11 @@ enum Panel {
     Git,
     Files,
     Processes,
-    /// Opened from the conversation header or the coordinator's agents card, not from the
-    /// rail. It lists the whole project, so it stays open whichever of the project's agents is
+    /// It lists the whole project, so it stays open whichever of the project's agents is
     /// selected.
     Agents,
-    /// Effective settings, opened from the conversation header: what the selected ticket's
-    /// agents get, or the project's from its coordinator.
+    /// Effective settings, opened from the conversation header rather than the rail: what the
+    /// selected ticket's agents get, or the project's from its coordinator.
     Settings,
 }
 

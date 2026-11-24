@@ -82,6 +82,15 @@ impl SpacesPage {
         self.tagging.take(draft);
     }
 
+    /// Keeps a value being typed within the host's limit, so Save never refuses it.
+    pub(super) fn clip_tag_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = self.tag_input.read(cx).value();
+        if typed.len() > MAX_TAG_BYTES {
+            let clipped = within_tag_limit(&typed).to_owned();
+            (self.tag_input).update(cx, |input, cx| input.set_value(clipped, window, cx));
+        }
+    }
+
     /// Gives the row being typed in the value typed, which joins the Space's values.
     pub(super) fn type_value(&mut self, space: &Space, cx: &mut Context<Self>) {
         let value = self.tag_input.read(cx).value().trim().to_owned();
@@ -231,8 +240,7 @@ impl SpacesPage {
             })
     }
 
-    /// What adding the repository suggested, with Use and Dismiss.
-    pub(super) fn suggestion_line(
+    pub(super) fn suggested_tags_prompt(
         &self,
         space: &Space,
         at: usize,
@@ -271,8 +279,7 @@ impl SpacesPage {
         )
     }
 
-    /// The Space's apps and layers, each with a button that removes it.
-    pub(super) fn values_line(
+    pub(super) fn removable_tag_values(
         &self,
         space: &Space,
         p: Palette,
@@ -309,6 +316,15 @@ impl SpacesPage {
         }
         Some(line)
     }
+}
+
+/// The longest start of `typed`, in whole characters, within `MAX_TAG_BYTES`.
+pub(super) fn within_tag_limit(typed: &str) -> &str {
+    let mut end = typed.len().min(MAX_TAG_BYTES);
+    while !typed.is_char_boundary(end) {
+        end -= 1;
+    }
+    &typed[..end]
 }
 
 /// What removing a value clears, naming the repositories that have it.

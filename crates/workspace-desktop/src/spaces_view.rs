@@ -141,11 +141,18 @@ impl SpacesPage {
         })
         .detach();
         let tag_input = input("frontend", window, cx);
-        cx.subscribe_in(&tag_input, window, |view, _, event: &InputEvent, _, cx| {
-            if let (InputEvent::PressEnter { .. }, Some(space)) = (event, view.shown_space()) {
-                view.type_value(&space.clone(), cx);
-            }
-        })
+        cx.subscribe_in(
+            &tag_input,
+            window,
+            |view, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    view.clip_tag_input(window, cx);
+                }
+                if let (InputEvent::PressEnter { .. }, Some(space)) = (event, view.shown_space()) {
+                    view.type_value(&space.clone(), cx);
+                }
+            },
+        )
         .detach();
         Self {
             bridge,
@@ -921,7 +928,7 @@ impl SpacesPage {
                             })),
                     ),
             );
-            field = field.children(self.suggestion_line(space, at, identity, p, cx));
+            field = field.children(self.suggested_tags_prompt(space, at, identity, p, cx));
         }
         let hidden = self.repositories.len().saturating_sub(rows);
         let more = (hidden > 0).then(|| {
@@ -937,7 +944,7 @@ impl SpacesPage {
         let shown = space.clone();
         field
             .children(more.map(|more| div().flex().child(more)))
-            .children(self.values_line(space, p, cx))
+            .children(self.removable_tag_values(space, p, cx))
             .child(
                 div().mt_1().flex().child(
                     button("choose-space-repositories")
@@ -1156,7 +1163,8 @@ fn holds_draft(shown: &Space, now: &Result<Space, String>, from: &Space, saved: 
 }
 
 /// `latest` with each field the form changed from `read`, how it read when filled, set to
-/// the form's value.
+/// the form's value. The tags and their values are one field, so a repository is never left
+/// with a value the other Mac removed.
 fn merged(read: &Space, form: &Space, latest: &Space) -> Space {
     fn pick<T: Clone + PartialEq>(read: &T, form: &T, latest: &T) -> T {
         match form == read {
@@ -1164,17 +1172,15 @@ fn merged(read: &Space, form: &Space, latest: &Space) -> Space {
             false => form.clone(),
         }
     }
+    let tags = |s: &Space| (s.apps.clone(), s.layers.clone(), s.repository_tags.clone());
+    let (apps, layers, repository_tags) = pick(&tags(read), &tags(form), &tags(latest));
     Space {
         name: pick(&read.name, &form.name, &latest.name),
         description: pick(&read.description, &form.description, &latest.description),
         repositories: merged_list(&read.repositories, &form.repositories, &latest.repositories),
-        apps: pick(&read.apps, &form.apps, &latest.apps),
-        layers: pick(&read.layers, &form.layers, &latest.layers),
-        repository_tags: pick(
-            &read.repository_tags,
-            &form.repository_tags,
-            &latest.repository_tags,
-        ),
+        apps,
+        layers,
+        repository_tags,
         sources: pick(&read.sources, &form.sources, &latest.sources),
         ..latest.clone()
     }
@@ -1582,7 +1588,7 @@ mod tests {
         brings_lines, compile_words, leaves_line, logs_line, not_on_github_line, plan_notes,
         where_line, wiki_line,
     };
-    use super::repository_tags::{Tagging, removal_sentence};
+    use super::repository_tags::{Tagging, removal_sentence, within_tag_limit};
     use super::setup::{
         Mark, check_lines, compiles_now, join_choices, owner_label, proposed_repository_name,
         repository_to_create,
@@ -2098,6 +2104,23 @@ mod tests {
     }
 
     #[test]
+    fn a_tag_edit_saves_the_values_with_it_over_another_macs_removal() {
+        let mut read = sage();
+        read.repositories = vec!["Sage-Social/api".into(), "Sage-Social/web".into()];
+        read.set_tag("Sage-Social/api", TagKind::Layer, Some("backend"));
+        // The other Mac removed "backend"; this one tagged web with it.
+        let mut latest = read.clone();
+        latest.remove_value(TagKind::Layer, "backend");
+        let mut form = read.clone();
+        form.set_tag("Sage-Social/web", TagKind::Layer, Some("backend"));
+
+        let saved = merged(&read, &form, &latest);
+
+        assert_eq!(saved.layers, ["backend"]);
+        assert_eq!(saved.repository_tags, form.repository_tags);
+    }
+
+    #[test]
     fn removing_a_value_names_every_repository_that_has_it() {
         let users = [
             "celadon-theme/palette-api".to_owned(),
@@ -2111,6 +2134,16 @@ mod tests {
             removal_sentence(&users[..1], "layer"),
             "celadon-theme/palette-api has it, and will have no layer."
         );
+    }
+
+    #[test]
+    fn a_value_being_typed_stops_at_the_hosts_limit_on_a_whole_character() {
+        assert_eq!(within_tag_limit("frontend"), "frontend");
+        let long = "a".repeat(MAX_TAG_BYTES + 5);
+        assert_eq!(within_tag_limit(&long).len(), MAX_TAG_BYTES);
+        // "é" is two bytes, so 63 of "a" and one "é" would end mid-character.
+        let accented = format!("{}é", "a".repeat(MAX_TAG_BYTES - 1));
+        assert_eq!(within_tag_limit(&accented), "a".repeat(MAX_TAG_BYTES - 1));
     }
 
     #[test]
