@@ -22,6 +22,7 @@ mod conversation_loops;
 pub mod desktop_driver;
 pub mod detection;
 mod diffs;
+mod disk;
 mod evaluations;
 pub mod events;
 mod files;
@@ -55,6 +56,7 @@ mod progress;
 mod proposals;
 pub mod provider;
 mod publish;
+mod reclaim;
 pub mod remote;
 mod repos;
 mod repositories;
@@ -229,6 +231,8 @@ pub struct Host {
     source_checks: Vec<(String, jobs::SourceChecks)>,
     /// Removed worktrees' folders being deleted off the host thread.
     worktree_deletions: worktree_deletions::Running,
+    /// Disk use and the build output being reclaimed; see `reclaim`.
+    pub(crate) build_output: reclaim::Watch,
     /// Compile runs whose pending entries wait to be read and verified, for the service to do
     /// off the host thread.
     pub(crate) compile_preparations: Vec<compile::Prepare>,
@@ -407,6 +411,7 @@ impl Host {
         revisions::migrate(&db)?;
         worktrees::migrate(&db)?;
         worktree_deletions::migrate(&db)?;
+        reclaim::migrate(&db)?;
         checkout::migrate(&db)?;
         agent_processes::migrate(&db)?;
         flatten::migrate(&home, &db, version)?;
@@ -458,6 +463,7 @@ impl Host {
             source_env: None,
             source_checks: vec![],
             worktree_deletions: Default::default(),
+            build_output: Default::default(),
             compile_preparations: vec![],
             run_now_pulls: Default::default(),
             compile_tip_reads: vec![],
@@ -2298,6 +2304,14 @@ impl Host {
             }
             Command::SetBuildsAtOnce { builds } => {
                 serde_json::to_value(self.set_builds_at_once(builds)?)?
+            }
+            Command::SetDiskSettings { disk } => {
+                serde_json::to_value(self.set_disk_settings(disk)?)?
+            }
+            Command::DiskUse => serde_json::to_value(self.disk_use()?)?,
+            Command::ReclaimBuildOutput { ticket_id } => {
+                self.reclaim_build_output(ticket_id.as_deref())?;
+                serde_json::to_value(self.disk_use()?)?
             }
             Command::SetCheckIns {
                 child_turns,

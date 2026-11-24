@@ -268,9 +268,11 @@ fn a_delete_that_keeps_failing_is_retried_then_reported_once_with_folder_reason_
             .unwrap()
             .contains("ermission denied")
     );
+    // The human's inbox, under the project's coordinator, is told.
     let notices: Vec<String> = store(directory.path())
         .prepare(
-            "SELECT body FROM messages WHERE id LIKE 'worktree-delete-failed:%' AND recipient=?1",
+            "SELECT json_extract(data,'$.prompt') FROM attention
+             WHERE operation_id LIKE 'worktree-delete-failed:%' AND session_id=?1",
         )
         .unwrap()
         .query_map([&coordinator.id], |r| r.get(0))

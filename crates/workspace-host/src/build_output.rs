@@ -409,7 +409,7 @@ fn within(path: &str, folder: &str) -> bool {
 
 /// The folders under `root` whose `info.plist` names a workspace or project in the worktree.
 /// Xcode keys each by the project's path, so every worktree of a repository gets its own.
-fn derived_data_for(worktree: &Path, root: &Path) -> Vec<PathBuf> {
+pub(crate) fn derived_data_for(worktree: &Path, root: &Path) -> Vec<PathBuf> {
     let resolved = worktree.canonicalize().unwrap_or_else(|_| worktree.into());
     let Ok(entries) = fs::read_dir(root) else {
         return Vec::new();

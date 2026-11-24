@@ -208,6 +208,18 @@ impl Host {
         self.save_settings(&settings)?;
         Ok(settings)
     }
+    /// Saves when build output is reclaimed and the free-space floors on this machine. The
+    /// build gate reads the hard floor as it next looks; the next disk check applies the rest.
+    pub fn set_disk_settings(&mut self, disk: DiskSettings) -> Result<HostSettings> {
+        disk.validate()?;
+        let settings = HostSettings {
+            disk,
+            ..self.settings()
+        };
+        self.save_settings(&settings)?;
+        self.build_output.check_now();
+        Ok(settings)
+    }
     /// Saves the check-in thresholds. An invalid pair is refused and the saved one stays.
     pub fn set_check_ins(&mut self, child_turns: u32, human_turns: u32) -> Result<HostSettings> {
         HostSettings::validate_check_ins(child_turns, human_turns)?;

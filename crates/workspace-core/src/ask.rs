@@ -407,6 +407,16 @@ pub fn set_workspaces_dir(path: String) -> Ask<HostSettings> {
 pub fn set_builds_at_once(builds: usize) -> Ask<HostSettings> {
     Ask::new(Command::SetBuildsAtOnce { builds })
 }
+pub fn set_disk_settings(disk: DiskSettings) -> Ask<HostSettings> {
+    Ask::new(Command::SetDiskSettings { disk })
+}
+pub fn disk_use() -> Ask<DiskUse> {
+    Ask::new(Command::DiskUse)
+}
+/// One ticket's build output, or with `None` every ticket's but those with an agent in a turn.
+pub fn reclaim_build_output(ticket_id: Option<String>) -> Ask<DiskUse> {
+    Ask::new(Command::ReclaimBuildOutput { ticket_id })
+}
 pub fn remote_access() -> Ask<RemoteAccess> {
     Ask::new(Command::RemoteAccess)
 }

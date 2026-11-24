@@ -198,7 +198,8 @@ impl Host {
     /// delete is recorded before the rename, so it resumes after a stop (see
     /// `worktree_deletions`). If Git fails, the folder is renamed back only when the worktree is
     /// as clean there as it was checked to be; otherwise the removal completes, losing nothing
-    /// because the folder was clean, and the next start prunes.
+    /// because the folder was clean, and the next start prunes. Once the worktree is aside, its
+    /// Xcode DerivedData folders and its scratch folder are deleted the same way.
     fn remove_worktree(&mut self, ticket: &Ticket) -> Result<bool> {
         let repository = self.ticket_repository(ticket)?;
         let repository = Path::new(&repository.path);
@@ -208,6 +209,8 @@ impl Host {
             return Ok(false);
         }
         let context = || format!("Remove \"{}\" ({})", ticket.title, ticket.id);
+        // Read while the worktree is at its path, which Xcode keyed its folders by.
+        let derived_data = self.derived_data_of(ticket);
         let aside = removal_folder(ticket);
         self.record_worktree_deletion(&aside, Some(&ticket.id))
             .with_context(context)?;
@@ -229,6 +232,7 @@ impl Host {
             }
             return Err(error);
         }
+        self.delete_outside_build_output(ticket, derived_data);
         self.settle_worktree_deletions(now());
         Ok(true)
     }
@@ -253,15 +257,18 @@ impl Host {
     /// host did not wait for and the next start could not confirm, or one it started itself.
     /// Archiving stops what an agent started before it asks, so only a group that could not be
     /// confirmed, or a recycled group id, keeps the worktree longer.
-    fn agent_in_turn(&self, ticket: &Ticket) -> Result<bool> {
-        let unfinished: bool = self.db.query_row(
+    pub(crate) fn agent_in_turn(&self, ticket: &Ticket) -> Result<bool> {
+        let mut groups = self.ticket_process_groups(&ticket.id)?.into_iter();
+        Ok(self.ticket_run_open(&ticket.id)? || groups.any(process_group_exists))
+    }
+    /// Whether a provider run of an agent on the ticket has started and not finished.
+    pub(crate) fn ticket_run_open(&self, ticket: &str) -> Result<bool> {
+        Ok(self.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM provider_runs r JOIN runtimes t ON t.session_id=r.session_id
              WHERE json_extract(t.data,'$.ticket_id')=?1 AND r.finished_at IS NULL)",
-            [&ticket.id],
+            [ticket],
             |r| r.get(0),
-        )?;
-        let mut groups = self.ticket_process_groups(&ticket.id)?.into_iter();
-        Ok(unfinished || groups.any(process_group_exists))
+        )?)
     }
     /// Worktrees left by finished tickets, and Wiffletree-made worktrees no ticket records, each
     /// with the one class that says whether it may be removed. Changes nothing.
