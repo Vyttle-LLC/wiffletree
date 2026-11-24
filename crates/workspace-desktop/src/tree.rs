@@ -255,13 +255,12 @@ impl Aims {
             below: Some(drop),
         }
     }
-    /// Where a release lands `fraction` of the way down the row: its halves, or with a middle to
-    /// drop onto, its top and bottom quarters.
+    /// Where a release lands `fraction` of the way down the row: its top and bottom quarters, or
+    /// its middle, where nothing lands when the dragged row may not drop onto it.
     pub(crate) fn at(&self, fraction: f32) -> Option<Drop> {
-        let edge = if self.onto.is_some() { 0.25 } else { 0.5 };
-        if fraction < edge {
+        if fraction < 0.25 {
             self.above.clone()
-        } else if fraction > 1. - edge {
+        } else if fraction > 0.75 {
             self.below.clone()
         } else {
             self.onto.clone()
@@ -1322,20 +1321,21 @@ mod tests {
     #[test]
     fn a_release_lands_by_where_on_the_row_it_is() {
         let drop = |name: &str| Some(Drop::Before(name.into()));
-        let halves = Aims {
+        let refused = Aims {
             above: drop("a"),
             onto: None,
             below: drop("b"),
         };
-        assert_eq!(halves.at(0.4), drop("a"));
-        assert_eq!(halves.at(0.6), drop("b"));
-        let thirds = Aims {
+        assert_eq!(refused.at(0.2), drop("a"));
+        assert_eq!(refused.at(0.8), drop("b"));
+        // A middle it may not drop onto lands nowhere, rather than beside the row.
+        assert_eq!(refused.at(0.4), None);
+        assert_eq!(refused.at(0.6), None);
+        let filing = Aims {
             onto: Some(Drop::Under("a".into())),
-            ..halves
+            ..refused
         };
-        assert_eq!(thirds.at(0.2), drop("a"));
-        assert_eq!(thirds.at(0.5), Some(Drop::Under("a".into())));
-        assert_eq!(thirds.at(0.8), drop("b"));
+        assert_eq!(filing.at(0.5), Some(Drop::Under("a".into())));
     }
 
     #[test]

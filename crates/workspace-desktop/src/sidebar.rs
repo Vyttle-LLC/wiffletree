@@ -80,6 +80,8 @@ struct Reorder<'a> {
     sections: &'a [tree::Section<'a>],
     collapsed_parents: &'a BTreeSet<String>,
     moving: Option<tree::Movable>,
+    /// Where the dragged row would land now.
+    target: Option<tree::Drop>,
 }
 
 impl Reorder<'_> {
@@ -97,12 +99,12 @@ impl Reorder<'_> {
         Some((!own).then(|| space.clone()))
     }
     /// For the space under the row of `over`, such as the spacer and New ticket button under a
-    /// project: it aims where the bottom of that row does.
+    /// project: all of it aims where the bottom of that row does.
     fn under(&self, over: &tree::Movable) -> Option<Option<tree::Aims>> {
         let aims = self.onto(over)?;
         Some(aims.map(|aims| tree::Aims {
             above: aims.below.clone(),
-            onto: None,
+            onto: aims.below.clone(),
             below: aims.below,
         }))
     }
@@ -1101,6 +1103,7 @@ impl Sidebar {
             sections: &sections,
             collapsed_parents: &self.collapsed_parents,
             moving,
+            target: target.clone(),
         };
         let line = |drop: tree::Drop, depth: usize| {
             (target.as_ref() == Some(&drop)).then(|| insertion_line(depth, p))
@@ -1429,10 +1432,13 @@ impl Sidebar {
 
     /// The most urgent state among `projects`, for a collapsed parent or Space.
     fn rollup(&self, projects: &[&Session], p: Palette) -> Option<AnyElement> {
-        let needs_you = (self.shared.snapshot().iter())
-            .flat_map(|s| &s.attention)
-            .filter(|a| projects.iter().any(|root| root.project_id == a.project_id))
-            .count();
+        let ids: Vec<&str> = projects
+            .iter()
+            .map(|root| root.project_id.as_str())
+            .collect();
+        let needs_you = self.shared.snapshot().map_or(0, |s| {
+            family_needs_you(&s.attention, &s.workspace_notes, &ids)
+        });
         let stuck = (projects.iter())
             .map(|root| self.agent_counts(root).stuck)
             .sum();
@@ -1652,8 +1658,11 @@ impl Sidebar {
         let click_project = project_id.clone();
         let toggled = project_id.clone();
         let movable = tree::Movable(project_id.clone());
+        let filing_target = reorder.target == Some(tree::Drop::Under(project_id.clone()));
         let row = self
             .row(SharedString::from(format!("tree-{id}")), selected, p)
+            // The dragged project would be filed under this one.
+            .when(filing_target, |d| d.bg(p.accent.opacity(0.18)))
             // Its children wrap, so the progress track and the agents line added last each take
             // their own line under the label.
             .min_h(px(36.))
@@ -1851,17 +1860,15 @@ impl Sidebar {
             })
             // Needs you outranks every other state, so it takes the status slot; a collapsed
             // parent's slot holds the most urgent state among it and its children.
-            .child(
-                match (collapsed.and_then(|(_, rollup)| rollup), attention) {
-                    (Some(rollup), _) => div().flex_none().child(rollup),
-                    (None, 0) => div().flex_none().child(status_glyph(
-                        self.shared.shown_status(root),
-                        12.,
-                        p,
-                    )),
-                    (None, attention) => needs_you_badge(attention, p),
-                },
-            )
+            .child(match (collapsed, attention) {
+                (Some((_, rollup)), _) => div().flex_none().children(rollup),
+                (None, 0) => {
+                    div()
+                        .flex_none()
+                        .child(status_glyph(self.shared.shown_status(root), 12., p))
+                }
+                (None, attention) => needs_you_badge(attention, p),
+            })
             .when(!root.archived, |row| {
                 row.child(track(
                     project.map(|project| (project.position, project.state)),
@@ -2272,6 +2279,14 @@ pub(super) fn needs_you(
             .count()
 }
 
+/// What the badges of `projects` count together, each item once however many of them it is for.
+fn family_needs_you(attention: &[Attention], notes: &[WorkspaceNote], projects: &[&str]) -> usize {
+    let attention = (attention.iter()).filter(|a| projects.contains(&a.project_id.as_str()));
+    let notes = (notes.iter())
+        .filter(|note| note.needs_you() && projects.iter().any(|project| note.is_for(project)));
+    attention.count() + notes.count()
+}
+
 /// The release the app has downloaded, waiting for it to exit.
 fn staged(cx: &App) -> Option<&update::Staged> {
     cx.global::<PendingUpdate>().0.as_ref()
@@ -2307,7 +2322,7 @@ fn assistant_marks(snapshot: Option<&Snapshot>, now: i64) -> (usize, Option<Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{assistant_marks, needs_you, shown_status};
+    use super::{assistant_marks, family_needs_you, needs_you, shown_status};
     use workspace_core::{
         Attention, Paused, Provider, Role, Session, Snapshot, Status, WorkspaceIndex, WorkspaceNote,
     };
@@ -2413,6 +2428,17 @@ mod tests {
         }));
         assert_eq!(needs_you(&[], std::slice::from_ref(&conflict), "a"), 1);
         assert_eq!(needs_you(&[], std::slice::from_ref(&conflict), "c"), 0);
+        // A collapsed parent counts its child's conflict, and a note for several of the family
+        // once.
+        let family = ["parent", "a"];
+        assert_eq!(
+            family_needs_you(&items, std::slice::from_ref(&conflict), &family),
+            2
+        );
+        assert_eq!(
+            family_needs_you(&[], std::slice::from_ref(&note), &family),
+            1
+        );
         // Once ruled it waits for a compile, not for you.
         let WorkspaceNote::Conflict(mut ruled) = conflict else {
             unreachable!()
