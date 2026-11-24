@@ -137,6 +137,10 @@ impl Host {
                 .query_row("SELECT data FROM attention WHERE id=?1", [id], |r| {
                     decode(r, 0)
                 })?;
+        ensure!(
+            item.answer.is_some() || item.route.is_with_human(),
+            WITH_PARENT
+        );
         // Answering sets the project's permission, which resolves the card.
         if item.operation_id.starts_with(EVALUATION_PREFIX) && item.answer.is_none() {
             self.answer_evaluator_card(&item, answer)?;

@@ -780,6 +780,34 @@ pub struct Attention {
     /// What a coordinator's repository request asks for; see `is_repository_request`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository_request: Option<RepositoryRequest>,
+    /// Where the item waits. An item from a store older than parent projects is the human's.
+    #[serde(default, skip_serializing_if = "QuestionRoute::is_direct")]
+    pub route: QuestionRoute,
+}
+/// Where a question waits: a child project's `ask_user` goes to its parent project first.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "with")]
+pub enum QuestionRoute {
+    /// With the human, as every item of a loose project or a parent is.
+    #[default]
+    Human,
+    /// With the parent project `parent_id`, whose coordinator answers or escalates it.
+    Parent { parent_id: String },
+    /// With the human, sent on by the parent project `parent_id` with its optional note.
+    Escalated {
+        parent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+}
+impl QuestionRoute {
+    fn is_direct(&self) -> bool {
+        *self == Self::Human
+    }
+    /// Whether the item is the human's to answer, directly or escalated.
+    pub fn is_with_human(&self) -> bool {
+        !matches!(self, Self::Parent { .. })
+    }
 }
 /// A repository a coordinator asked to add to its project, fixed when it was asked for: the Inbox
 /// card shows this and approving acts on it.
@@ -983,7 +1011,11 @@ pub struct Snapshot {
     /// The sessions that are not archived and open tickets' archived agents, in the order they
     /// were created, then archived sessions still in a turn.
     pub sessions: Vec<Session>,
+    /// The unanswered items with the human; a child's questions with its parent are left out.
     pub attention: Vec<Attention>,
+    /// By child project id, how many of its questions wait with its parent.
+    #[serde(default)]
+    pub questions_with_parent: BTreeMap<String, u32>,
     /// The open tickets, and accepted or closed ones an unarchived agent works on, in the order
     /// they were created.
     #[serde(default)]
@@ -2968,11 +3000,19 @@ pub const BUILDS_HELD_OPERATION: &str = "builds-held:";
 /// The operation prefix of the Inbox card saying a folder could not be deleted, followed by
 /// `<recorded at>:<the folder's name>`.
 pub const DELETE_FAILED_OPERATION: &str = "worktree-delete-failed:";
+/// The id prefix of the message that brings a child project's question to its parent's
+/// coordinator.
+pub const CHILD_QUESTION_PREFIX: &str = "child-question:";
+/// The id prefix of the one-line notice a parent's coordinator gets when the human answers or
+/// messages its child.
+pub const CHILD_HEARD_PREFIX: &str = "child-heard:";
+/// The id prefix of a parent coordinator's `answer_question` reply to its child.
+pub const PARENT_ANSWER_PREFIX: &str = "parent-answer:";
 /// The id prefixes of the host's other messages without a sender: verification results, kept
 /// worktrees, migration notices, publish, merge, retarget and repository request results, process
-/// notices, project briefs, child project notices, evaluator runs, the Assistant's notices and
-/// reclaim notices. Inbox answers (`answer:`) carry the human's words.
-const HOST_NOTICE_PREFIXES: [&str; 13] = [
+/// notices, project briefs, child project notices and questions, evaluator runs, the
+/// Assistant's notices and reclaim notices. Inbox answers (`answer:`) carry the human's words.
+const HOST_NOTICE_PREFIXES: [&str; 15] = [
     VERIFICATION_NOTICE_PREFIX,
     WORKTREE_KEPT_PREFIX,
     MIGRATION_PREFIX,
@@ -2983,6 +3023,8 @@ const HOST_NOTICE_PREFIXES: [&str; 13] = [
     PROCESS_NOTICE_PREFIX,
     PROJECT_BRIEF_PREFIX,
     CHILD_PROJECT_PREFIX,
+    CHILD_QUESTION_PREFIX,
+    CHILD_HEARD_PREFIX,
     EVALUATION_PREFIX,
     ASSISTANT_NOTICE_PREFIX,
     RECLAIM_NOTICE_PREFIX,

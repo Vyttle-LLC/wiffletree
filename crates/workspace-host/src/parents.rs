@@ -2,9 +2,16 @@
 //! deep. The link decides which coordinators may message each other, where a child
 //! coordinator's reports go and when a project may be archived or restored.
 use crate::*;
+use std::collections::BTreeMap;
 
 const MOVED_UNDER: &str = "project_moved_under";
 const MOVED_OUT: &str = "project_moved_out";
+/// The SQL condition for an unanswered Inbox item with the human, rather than with a parent.
+pub(crate) const WITH_THE_HUMAN: &str =
+    "json_extract(data,'$.answer') IS NULL AND json_extract(data,'$.route.with') IS NOT 'parent'";
+/// The refusal for the human's answer to a question still with a parent project.
+pub(crate) const WITH_PARENT: &str =
+    "This question is with its parent project's coordinator, which answers it or sends it to you";
 
 impl Host {
     /// The projects filed under `project`, in the stored order.
@@ -76,12 +83,17 @@ impl Host {
         Self::event(&self.db, &project.id, None, MOVED_UNDER, &parent.name)?;
         Self::event(&self.db, &parent.id, None, MOVED_UNDER, &project.name)
     }
-    /// Makes `project` loose, if it has a parent, and records it on both.
+    /// Makes `project` loose, if it has a parent, and records it on both. Its questions still
+    /// with the old parent go to the human in the same change.
     pub(crate) fn leave_parent(&self, project: &mut Project) -> Result<()> {
         let Some(old) = project.parent_id.take() else {
             return Ok(());
         };
         self.save_project(project)?;
+        for mut item in self.questions_with_parent_of(&project.id)? {
+            item.route = QuestionRoute::Human;
+            self.save_attention(&item)?;
+        }
         let old = self.project(&old)?;
         Self::event(&self.db, &project.id, None, MOVED_OUT, &old.name)?;
         Self::event(&self.db, &old.id, None, MOVED_OUT, &project.name)
@@ -137,11 +149,202 @@ impl Host {
                 whom.push("your child projects' coordinators");
             }
         }
-        let agents = "your own agents";
-        Ok(match whom.is_empty() {
-            true => agents.into(),
-            false => format!("{} and {agents}", whom.join(", ")),
+        // Only a coordinator owns agents; a worker answers to its parent alone.
+        if session.role == Role::ProjectOrchestrator {
+            whom.push("your own agents");
+        }
+        Ok(match whom.split_last() {
+            None => "no one".into(),
+            Some((only, [])) => (*only).into(),
+            Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
         })
+    }
+    /// A coordinator's `ask_user`. A child project's question waits with its parent, whose
+    /// coordinator is woken with it; any other, or one whose parent is not started and so
+    /// could not wake, reaches the human. A retried request returns the item it first made,
+    /// wherever it is now.
+    pub(crate) fn ask_user(
+        &mut self,
+        session: &Session,
+        request: &str,
+        question: &str,
+        options: &[String],
+    ) -> Result<Attention> {
+        let asked_before = (self.db)
+            .query_row(
+                "SELECT 1 FROM attention WHERE session_id=?1 AND operation_id=?2",
+                params![session.id, request],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        let parent = match self.parent_coordinator(session)? {
+            Some(coordinator) if !asked_before => Some(self.session(&coordinator)?),
+            _ => None,
+        };
+        let live = self.live_projects()?;
+        let Some(parent) = parent.filter(|p| live.contains(&p.project_id)) else {
+            return self.request_attention(&session.id, "local", request, question, options);
+        };
+        let child = self.project(&session.project_id)?;
+        self.atomically(|host| {
+            let mut item =
+                host.request_attention(&session.id, "local", request, question, options)?;
+            item.route = QuestionRoute::Parent {
+                parent_id: parent.project_id.clone(),
+            };
+            host.save_attention(&item)?;
+            let choices = match options.is_empty() {
+                true => String::new(),
+                false => format!("\nChoices: {}", options.join(" | ")),
+            };
+            host.send(
+                &format!("{CHILD_QUESTION_PREFIX}{}", item.id),
+                None,
+                &parent.id,
+                &format!(
+                    "Your child project \"{}\" asks, as question {}:\n{question}{choices}\nAnswer it with answer_question only from decisions already made, or send it to the human with escalate_question. Escalate every product, security and approval question.",
+                    child.name, item.id
+                ),
+            )?;
+            Ok(item)
+        })
+    }
+    /// The parent coordinator `caller`'s `answer_question`: closes its child's question and
+    /// resumes the child with the answer, from the parent.
+    pub(crate) fn answer_question(
+        &mut self,
+        caller: &Session,
+        question: &str,
+        answer: &str,
+    ) -> Result<Attention> {
+        text(answer, 4096)?;
+        let item = self.question_with(caller, question)?;
+        let parent = self.project(&caller.project_id)?;
+        self.atomically(|host| {
+            let item = host.resolve_attention(&item.id, answer)?;
+            host.send(
+                &format!("{PARENT_ANSWER_PREFIX}{}", item.id),
+                Some(&caller.id),
+                &item.session_id,
+                &format!(
+                    "Answer from your parent project \"{}\" to {}: {answer}",
+                    parent.name, item.prompt
+                ),
+            )?;
+            Ok(item)
+        })
+    }
+    /// The parent coordinator `caller`'s `escalate_question`: moves its child's question to the
+    /// human's Inbox, labelled as coming through the parent, with `note`.
+    pub(crate) fn escalate_question(
+        &mut self,
+        caller: &Session,
+        question: &str,
+        note: Option<&str>,
+    ) -> Result<Attention> {
+        if let Some(note) = note {
+            text(note, 1000)?;
+        }
+        let mut item = self.question_with(caller, question)?;
+        item.route = QuestionRoute::Escalated {
+            parent_id: caller.project_id.clone(),
+            note: note
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(Into::into),
+        };
+        self.save_attention(&item)?;
+        Ok(item)
+    }
+    /// The open question `id` waiting with `caller`'s project, or the refusal that says why it
+    /// is not: never the caller's, already answered or already with the human.
+    fn question_with(&self, caller: &Session, id: &str) -> Result<Attention> {
+        let item = self.attention_item(id).ok();
+        let routed_by = |item: &Attention| match &item.route {
+            QuestionRoute::Parent { parent_id } | QuestionRoute::Escalated { parent_id, .. } => {
+                Some(parent_id.clone())
+            }
+            QuestionRoute::Human => None,
+        };
+        let item = item
+            .filter(|item| {
+                is_project_coordinator(caller)
+                    && routed_by(item).as_ref() == Some(&caller.project_id)
+            })
+            .with_context(|| {
+                format!("Question {id} is not one of your child projects' questions")
+            })?;
+        ensure!(item.answer.is_none(), "Question {id} is already answered");
+        ensure!(
+            !item.route.is_with_human(),
+            "Question {id} is already with the human"
+        );
+        Ok(item)
+    }
+    /// Tells the parent's coordinator, without starting its turn, that the human answered or
+    /// messaged `child`, a session, with `words`; `id`, the answered item's or the message's,
+    /// keeps it to one notice per contact.
+    pub(crate) fn tell_parent_of_human(
+        &mut self,
+        child: &str,
+        contact: HumanContact,
+        id: &str,
+        words: &str,
+    ) -> Result<()> {
+        let child = self.session(child)?;
+        let Some(parent) = self.parent_coordinator(&child)? else {
+            return Ok(());
+        };
+        let project = self.project(&child.project_id)?;
+        let first_line = words.lines().map(str::trim).find(|l| !l.is_empty());
+        let line: String = first_line.unwrap_or("").chars().take(300).collect();
+        let what = match contact {
+            HumanContact::Answered => "answered a question of",
+            HumanContact::Messaged => "messaged",
+        };
+        // Past the cap: the human's answer is already saved, and a refused notice would stop
+        // the answer from reaching the child. Human clicks bound these.
+        self.queue(
+            &format!("{CHILD_HEARD_PREFIX}{id}"),
+            None,
+            &parent,
+            &format!(
+                "The human {what} your child project \"{}\": {line}",
+                project.name
+            ),
+            &[],
+            &[],
+            Delivery::QuietPastCap,
+        )?;
+        Ok(())
+    }
+    /// `project`'s open questions waiting with its parent.
+    fn questions_with_parent_of(&self, project: &str) -> Result<Vec<Attention>> {
+        self.list_data(
+            "SELECT data FROM attention WHERE project_id=?1 AND json_extract(data,'$.answer') IS NULL AND json_extract(data,'$.route.with')='parent' ORDER BY rowid",
+            [project],
+        )
+    }
+    /// By child project, how many of its questions wait with its parent.
+    pub(crate) fn questions_with_parents(&self) -> Result<BTreeMap<String, u32>> {
+        Ok(self.db.prepare("SELECT project_id,count(*) FROM attention WHERE json_extract(data,'$.answer') IS NULL AND json_extract(data,'$.route.with')='parent' GROUP BY project_id")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+    fn attention_item(&self, id: &str) -> Result<Attention> {
+        Ok(self
+            .db
+            .query_row("SELECT data FROM attention WHERE id=?1", [id], |r| {
+                decode(r, 0)
+            })?)
+    }
+    fn save_attention(&self, item: &Attention) -> Result<()> {
+        self.db.execute(
+            "UPDATE attention SET data=?2 WHERE id=?1",
+            params![item.id, encode(item)?],
+        )?;
+        Ok(())
     }
     /// Refuses to archive a project with an unarchived child, or to restore a child whose
     /// parent is archived, naming the projects to handle first. `coordinators` are the project
@@ -192,10 +395,7 @@ impl Host {
         for child in children {
             let coordinator = self.coordinator_of(&child.id)?;
             let tickets: Vec<Value> = (tickets.iter())
-                .filter(|t| {
-                    self.session(&t.coordinator_id)
-                        .is_ok_and(|s| s.project_id == child.id)
-                })
+                .filter(|t| self.ticket_in_project(t, &child.id))
                 .map(|t| Self::short_ticket(t, &repositories))
                 .collect();
             entries.push(
@@ -206,6 +406,12 @@ impl Host {
         context["child_projects"] = Value::Array(entries);
         Ok(())
     }
+}
+
+/// How the human reached a child project's coordinator, for its parent's notice.
+pub(crate) enum HumanContact {
+    Answered,
+    Messaged,
 }
 
 /// A project's own coordinator, which project links connect, rather than one of its workers.

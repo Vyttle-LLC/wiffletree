@@ -215,7 +215,10 @@ fn a_loose_coordinator_creates_a_child_and_a_child_creates_a_sibling() {
         sibling.created_by.map(|by| by.session_id),
         Some(child_coordinator.id.clone())
     );
-    let notices = f.received(&parent_coordinator);
+    // The human's message to the child left the parent its own notice.
+    let notices: Vec<Message> = (f.received(&parent_coordinator).into_iter())
+        .filter(|m| m.id.starts_with(CHILD_PROJECT_PREFIX))
+        .collect();
     assert_eq!(notices.len(), 1);
     assert_eq!(host_notice(&notices[0].id), Some("Wiffletree"));
     assert!(notices[0].body.contains("\"Contrast warnings\""));
@@ -482,4 +485,100 @@ fn a_project_name_is_not_checked_against_the_naming_rules() {
     let coordinator = f.coordinator(&calls.id);
     let created = f.create(&coordinator, "Backend: palette API");
     assert_eq!(created.name, "Backend: palette API");
+}
+
+#[test]
+fn refiling_moves_a_child_from_one_parent_to_another_and_the_same_parent_changes_nothing() {
+    let mut f = Fixture::new();
+    let contrast = f.project("Accessible contrast");
+    let light = f.project("Light themes");
+    let child = f.project("Contrast warnings");
+    f.file(&child, &contrast);
+    f.file(&child, &light);
+
+    assert_eq!(f.parent_of(&child).as_ref(), Some(&light.id));
+    assert_eq!(
+        f.activity(&contrast, "project_moved_out"),
+        ["Contrast warnings"]
+    );
+    assert_eq!(
+        f.activity(&light, "project_moved_under"),
+        ["Contrast warnings"]
+    );
+    assert_eq!(
+        f.activity(&child, "project_moved_out"),
+        ["Accessible contrast"]
+    );
+
+    let events = |f: &Fixture| f.host.activity(&child.id, None, 100).unwrap().len();
+    let before = events(&f);
+    f.file(&child, &light);
+    assert_eq!(events(&f), before);
+    assert_eq!(f.activity(&light, "project_moved_under").len(), 1);
+}
+
+#[test]
+fn filing_and_standing_run_as_commands() {
+    let mut f = Fixture::new();
+    let parent = f.project("Sponsorships");
+    let child = f.project("Redo sponsor page");
+    let filed: Project = serde_json::from_value(
+        f.host
+            .execute(Command::SetProjectParent {
+                project_id: child.id.clone(),
+                parent_id: Some(parent.id.clone()),
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(filed.parent_id.as_ref(), Some(&parent.id));
+    let standing: Project = serde_json::from_value(
+        f.host
+            .execute(Command::SetProjectStanding {
+                project_id: parent.id.clone(),
+                standing: true,
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(standing.standing);
+    let refused = f
+        .host
+        .execute(Command::SetProjectParent {
+            project_id: parent.id.clone(),
+            parent_id: Some(child.id.clone()),
+        })
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("a child cannot have children"),
+        "{refused}"
+    );
+}
+
+#[test]
+fn a_workers_refused_message_names_only_its_parent() {
+    let mut f = Fixture::new();
+    let project = f.project("Contrast warnings");
+    let other = f.project("Unrelated");
+    let coordinator = f.coordinator(&project.id);
+    let worker = f
+        .host
+        .create_session(
+            &project.id,
+            &coordinator.id,
+            None,
+            "Implementer",
+            Role::Implementer,
+            Provider::Claude,
+        )
+        .unwrap();
+    let refused = f
+        .message(&worker, &f.coordinator(&other.id), "out")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.ends_with("you may message your parent"),
+        "{refused}"
+    );
 }

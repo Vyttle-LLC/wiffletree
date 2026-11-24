@@ -234,10 +234,14 @@ impl Inbox {
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
-        let asker = self
-            .shared
-            .session(&item.session_id)
-            .map_or("Agent".to_owned(), |s| s.name.clone());
+        let projects = self.shared.snapshot().map_or(&[][..], |s| &s.projects);
+        let escalated = escalated_from(item, projects);
+        let asker = match &escalated {
+            Some(escalated) => escalated.label.clone(),
+            None => (self.shared.session(&item.session_id))
+                .map_or("Agent".to_owned(), |s| s.name.clone()),
+        };
+        let note = escalated.and_then(|e| e.note);
         let evaluator = evaluations::EvaluatorCard::of(item);
         let disk_card = disk_use::DiskCard::of(&item.operation_id);
         // The hard floor's card is red-edged and a failing delete's yellow, as the study draws them.
@@ -287,7 +291,8 @@ impl Inbox {
         let entry = card(p)
             .relative()
             .children(disk_edge.map(edge))
-            .child(header);
+            .child(header)
+            .when_some(note, |entry, note| entry.child(hint(note, p)));
         match max_height {
             // Keyed by item, so stepping to another decision starts at its top.
             Some(height) => entry.max_h(height).child(
@@ -948,6 +953,24 @@ impl Requests for Inbox {
     }
 }
 
+/// A question a parent project sent on to the human: its card's label and the parent's note.
+struct Escalated {
+    label: String,
+    note: Option<String>,
+}
+
+/// For an escalated question, "<child> · via <parent>" and the note; none for any other item.
+fn escalated_from(item: &Attention, projects: &[Project]) -> Option<Escalated> {
+    let QuestionRoute::Escalated { parent_id, note } = &item.route else {
+        return None;
+    };
+    let name = |id: &str| (projects.iter().find(|p| p.id == id)).map(|p| p.name.as_str());
+    Some(Escalated {
+        label: format!("{} · via {}", name(&item.project_id)?, name(parent_id)?),
+        note: note.clone(),
+    })
+}
+
 /// A repository or folder in full, wrapping rather than cut off: this is what approving adds.
 fn code(text: String, p: Palette) -> Div {
     div().flex().child(
@@ -1049,4 +1072,43 @@ fn approval_actions(
                     cx.listener(move |v, _, w, c| v.resolve_attention(&approved, "approved", w, c)),
                 ),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escalated_from;
+    use serde_json::json;
+    use workspace_core::{Attention, Project, QuestionRoute};
+
+    #[test]
+    fn an_escalated_question_names_its_child_via_its_parent_with_the_note() {
+        let projects: Vec<Project> = ["Contrast warnings", "Accessible contrast"]
+            .map(|name| {
+                serde_json::from_value(json!({"id": name, "name": name, "space": "s"})).unwrap()
+            })
+            .into();
+        let mut item: Attention = serde_json::from_value(json!({
+            "id": "q", "project_id": "Contrast warnings", "session_id": "s", "host": "local",
+            "operation_id": "copy", "prompt": "Which wording?", "answer": null,
+        }))
+        .unwrap();
+        assert!(
+            escalated_from(&item, &projects).is_none(),
+            "the human's own"
+        );
+
+        item.route = QuestionRoute::Escalated {
+            parent_id: "Accessible contrast".into(),
+            note: Some("Product call on user-facing copy".into()),
+        };
+        let escalated = escalated_from(&item, &projects).unwrap();
+        assert_eq!(
+            escalated.label,
+            "Contrast warnings · via Accessible contrast"
+        );
+        assert_eq!(
+            escalated.note.as_deref(),
+            Some("Product call on user-facing copy")
+        );
+    }
 }
