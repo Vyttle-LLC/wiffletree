@@ -43,6 +43,7 @@ mod merge;
 mod order;
 mod overlaps;
 mod parents;
+mod pixel_sampling;
 mod policies;
 pub mod power;
 mod pr_watch;

@@ -17,7 +17,7 @@ fn send(socket: &Path, request: &Value) -> Result<Value> {
 
 /// The server's name, so its tools reach Claude as `mcp__desktop__<tool>`.
 pub const SERVER: &str = "desktop";
-pub const TOOLS: [&str; 11] = [
+pub const TOOLS: [&str; 12] = [
     "screenshot",
     "click",
     "double_click",
@@ -29,6 +29,7 @@ pub const TOOLS: [&str; 11] = [
     "drag",
     "open_app",
     "list_windows",
+    "sample_pixels",
 ];
 
 pub fn tools() -> Value {
@@ -91,6 +92,7 @@ pub fn tools() -> Value {
             "The apps this run may use, and their on-screen windows front to back: each window's app, title, frame in screen points and whether its app is frontmost.",
             json!({"type":"object","properties":{},"additionalProperties":false})
         ),
+        crate::pixel_sampling::tool(),
     ])
 }
 
@@ -162,6 +164,9 @@ fn screenshot(socket: &Path, folder: &Path, args: &Value) -> Result<Value> {
 fn call(socket: &Path, folder: &Path, name: &str, args: &Value) -> Result<Value> {
     if name == "screenshot" {
         return screenshot(socket, folder, args);
+    }
+    if name == "sample_pixels" {
+        return crate::pixel_sampling::sample(folder, args);
     }
     let text = match send(socket, &request(name, args)?)? {
         Value::Null => "Done.".to_owned(),
@@ -244,8 +249,10 @@ mod tests {
         for (name, args, expected) in cases {
             assert_eq!(request(name, &args).unwrap(), expected, "{name}");
         }
-        // Every tool but screenshot, which captures, makes a request.
-        for tool in TOOLS.iter().filter(|tool| **tool != "screenshot") {
+        // Every tool but screenshot, which captures, and sample_pixels, which reads a file,
+        // makes a request.
+        for tool in (TOOLS.iter()).filter(|tool| !matches!(**tool, "screenshot" | "sample_pixels"))
+        {
             assert!(
                 request(tool, &json!({})).is_err() || *tool == "list_windows",
                 "{tool}"
@@ -303,6 +310,26 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn sample_pixels_reads_a_saved_screenshot_without_asking_the_helper() {
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::write(
+            folder.path().join("shot.png"),
+            crate::pixel_sampling::tests::one_white_pixel(),
+        )
+        .unwrap();
+        let args = json!({"screenshot":"shot.png","points":[{"x":0,"y":0}]});
+        // No helper is listening on this socket, so the call reads only the file.
+        let content = call(
+            Path::new("/nowhere.sock"),
+            folder.path(),
+            "sample_pixels",
+            &args,
+        )
+        .unwrap();
+        assert!(content[0]["text"].as_str().unwrap().contains("#FFFFFF"));
     }
 
     #[test]

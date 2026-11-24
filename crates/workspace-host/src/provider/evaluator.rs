@@ -628,7 +628,7 @@ mod tests {
             settings,
             [
                 r#"mcp_servers.app={required=true, default_tools_approval_mode="approve", command="/app/wiffletree-host", args=["app-driver-mcp","/tmp/wiffletree-run-1.sock","/eval/runs/run-1"]}"#,
-                r#"mcp_servers.app.enabled_tools=["screenshot","click","double_click","right_click","move","type_text","key","scroll","drag","resize_window","window"]"#,
+                r#"mcp_servers.app.enabled_tools=["screenshot","click","double_click","right_click","move","type_text","key","scroll","drag","resize_window","window","sample_pixels"]"#,
             ]
         );
         let call =
@@ -704,7 +704,7 @@ mod tests {
             servers,
             [
                 r#"mcp_servers.desktop={required=true, default_tools_approval_mode="approve", command="/app/wiffletree-host", args=["desktop-driver-mcp","/tmp/wiffletree-run-1-desktop.sock","/eval/runs/run-1"]}"#,
-                r#"mcp_servers.desktop.enabled_tools=["screenshot","click","double_click","right_click","move","type_text","key","scroll","drag","open_app","list_windows"]"#,
+                r#"mcp_servers.desktop.enabled_tools=["screenshot","click","double_click","right_click","move","type_text","key","scroll","drag","open_app","list_windows","sample_pixels"]"#,
             ]
         );
         // The user's config, with its `notify` hook and Sky's computer-use server, is never

@@ -13,7 +13,7 @@ use std::{
 
 /// The server's name, so its tools reach Claude as `mcp__app__<tool>`.
 pub const SERVER: &str = "app";
-pub const TOOLS: [&str; 11] = [
+pub const TOOLS: [&str; 12] = [
     "screenshot",
     "click",
     "double_click",
@@ -25,6 +25,7 @@ pub const TOOLS: [&str; 11] = [
     "drag",
     "resize_window",
     "window",
+    "sample_pixels",
 ];
 /// How long a step may take on the socket.
 const STEP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -91,6 +92,7 @@ pub fn tools() -> Value {
             "The window's size in points, its scale and the largest size the display allows.",
             json!({"type":"object","properties":{},"additionalProperties":false})
         ),
+        crate::pixel_sampling::tool(),
     ])
 }
 
@@ -205,6 +207,15 @@ pub(crate) fn ask(socket: &Path, step: &Value, who: &str) -> Result<Value> {
 
 /// Where `name` saves a screenshot: a relative `.png` path in `folder`, with no `..`.
 pub(crate) fn screenshot_path(folder: &Path, name: &str) -> Result<PathBuf> {
+    let mut path = path_inside(folder, name)?;
+    if path.extension().is_none_or(|extension| extension != "png") {
+        path.as_mut_os_string().push(".png");
+    }
+    Ok(path)
+}
+
+/// `name` as a relative path in `folder`, with no `..`, root or prefix.
+pub(crate) fn path_inside(folder: &Path, name: &str) -> Result<PathBuf> {
     let relative = Path::new(name.trim());
     ensure!(
         !relative.as_os_str().is_empty()
@@ -213,11 +224,7 @@ pub(crate) fn screenshot_path(folder: &Path, name: &str) -> Result<PathBuf> {
                 .all(|part| matches!(part, Component::Normal(_))),
         "Give name as a path inside your folder, such as screenshots/first-run.png"
     );
-    let mut path = folder.join(relative);
-    if path.extension().is_none_or(|extension| extension != "png") {
-        path.as_mut_os_string().push(".png");
-    }
-    Ok(path)
+    Ok(folder.join(relative))
 }
 
 /// Writes `bytes` to `path` in `folder`, creating its folders, without following a link: one
@@ -278,6 +285,9 @@ fn screenshot(socket: &Path, folder: &Path, args: &Value) -> Result<Value> {
 fn call(socket: &Path, folder: &Path, name: &str, args: &Value) -> Result<Value> {
     if name == "screenshot" {
         return screenshot(socket, folder, args);
+    }
+    if name == "sample_pixels" {
+        return crate::pixel_sampling::sample(folder, args);
     }
     let mut result = Value::Null;
     for (step, pause) in plan(name, args)? {
@@ -411,8 +421,10 @@ mod tests {
             ]
         );
         assert_eq!(steps("window", json!({})), [json!({"do":"window"})]);
-        // The schemas' every tool but screenshot, which captures, is planned.
-        for tool in TOOLS.iter().filter(|tool| **tool != "screenshot") {
+        // Every tool but screenshot, which captures, and sample_pixels, which reads a file, is
+        // planned.
+        for tool in (TOOLS.iter()).filter(|tool| !matches!(**tool, "screenshot" | "sample_pixels"))
+        {
             assert!(
                 plan(tool, &json!({})).is_err() || *tool == "window",
                 "{tool}"
@@ -457,6 +469,26 @@ mod tests {
         for outside in ["../x.png", "/tmp/x.png", "a/../../x.png", ""] {
             assert!(screenshot_path(folder, outside).is_err(), "{outside}");
         }
+    }
+
+    #[test]
+    fn sample_pixels_reads_a_saved_screenshot_without_asking_the_app() {
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::write(
+            folder.path().join("shot.png"),
+            crate::pixel_sampling::tests::one_white_pixel(),
+        )
+        .unwrap();
+        let args = json!({"screenshot":"shot.png","points":[{"x":0,"y":0}]});
+        // No app is listening on this socket, so the call reads only the file.
+        let content = call(
+            Path::new("/nowhere.sock"),
+            folder.path(),
+            "sample_pixels",
+            &args,
+        )
+        .unwrap();
+        assert!(content[0]["text"].as_str().unwrap().contains("#FFFFFF"));
     }
 
     /// A stand-in socket that records each step and answers as the app does.
