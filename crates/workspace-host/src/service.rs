@@ -3730,6 +3730,9 @@ impl Actor {
                     self.host.evaluation_model_reported(id, &model)?;
                 }
             }
+            // Esc or the menu bar's Stop cancelled a full-desktop run's turn, which ends the run
+            // as stopped, for this reason.
+            ProviderEvent::StoppedOnScreen(reason) => self.cancel_evaluation(id, &reason),
             ProviderEvent::Finished {
                 error,
                 usage,
@@ -3984,7 +3987,8 @@ impl Actor {
             ProviderEvent::Session(_)
             | ProviderEvent::Step(_)
             | ProviderEvent::Reply(_)
-            | ProviderEvent::Model(_) => Ok(()),
+            | ProviderEvent::Model(_)
+            | ProviderEvent::StoppedOnScreen(_) => Ok(()),
         }
     }
     /// Settles a compaction whose process has ended. Only the host's stopping cancels one, so
@@ -5740,6 +5744,131 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
             told[1].body
         );
     }
+    /// Two full-desktop runs on Calculator with their folders in `runs`, the first started by
+    /// the human's Start: the coordinator, the first's session and the two runs.
+    fn desktop_runs(host: &mut Host, runs: &Path) -> (Session, String, String, String) {
+        host.listed_models
+            .insert(Provider::Claude, crate::evaluations::tests::claude_listed());
+        let project = host.create_project("UX loop").unwrap();
+        let coordinator = host.coordinator_of(&project.id).unwrap().unwrap();
+        let coordinator = host.session(&coordinator).unwrap();
+        host.set_evaluator_permission(&project.id, EvaluatorPermission::Desktop)
+            .unwrap();
+        let mut start = |name: &str| {
+            let folder = runs.join(name);
+            fs::create_dir(&folder).unwrap();
+            fs::write(folder.join("prompt.md"), "Add 2 and 3 in Calculator.").unwrap();
+            let args = json!({"run_folder":folder,"provider":"claude","model":"opus","effort":"high","mode":"desktop","apps":["com.apple.calculator"]});
+            let started = host.start_evaluation(&coordinator, &args).unwrap();
+            started["run_id"].as_str().unwrap().to_owned()
+        };
+        let (first, second) = (start("d1"), start("d2"));
+        let card = (host.open_attention(&project.id).unwrap().into_iter())
+            .find(|item| item.operation_id.ends_with(&first))
+            .unwrap();
+        host.answer_attention(&card.id, "Start now").unwrap();
+        let session = host.evaluation(&first).unwrap().session_id.unwrap();
+        (coordinator, session, first, second)
+    }
+
+    #[test]
+    fn esc_or_the_menu_bars_stop_ends_a_desktop_run_as_stopped_and_passes_the_screen_on() {
+        for reason in [provider::STOPPED_BY_ESCAPE, provider::STOPPED_FROM_MENU] {
+            let home = tempfile::tempdir().unwrap();
+            let mut host = Host::open_set_up(home.path()).unwrap();
+            let runs = tempfile::tempdir().unwrap();
+            let (coordinator, session, first, second) = desktop_runs(&mut host, runs.path());
+            let run = new_id();
+            host.db
+                .execute(
+                    "INSERT INTO provider_runs(id,session_id,messages,started_at,detail) VALUES (?1,?2,'[]',?3,'{}')",
+                    params![run, session, now()],
+                )
+                .unwrap();
+            let (mut actor, _, _) = idle_actor(host);
+            actor
+                .active
+                .insert(session.clone(), active_turn(&run, vec![]));
+            // The helper's word reaches the host before the turn it cancelled ends.
+            for event in [
+                ProviderEvent::StoppedOnScreen(reason.into()),
+                ProviderEvent::Finished {
+                    error: Some(provider::Cancelled.to_string()),
+                    usage: Value::Null,
+                    cancelled: true,
+                },
+            ] {
+                actor.process(Event::Provider {
+                    session: session.clone(),
+                    run: run.clone(),
+                    event,
+                });
+            }
+            let ended = actor.host.evaluation(&first).unwrap();
+            assert_eq!(ended.state, EvaluationState::Stopped, "{:?}", ended.reason);
+            assert_eq!(ended.reason.as_deref(), Some(reason));
+            // The next run takes the screen, and waits for its own Start.
+            assert_eq!(actor.host.screen_holder().unwrap(), Some(second.clone()));
+            let next = actor.host.evaluation(&second).unwrap();
+            assert_eq!(
+                (next.state, next.session_id),
+                (EvaluationState::Waiting, None)
+            );
+            let told: Vec<Message> = (actor.host.messages(&coordinator.id, None, 100).unwrap())
+                .into_iter()
+                .filter(|m| m.id.starts_with(EVALUATION_PREFIX))
+                .collect();
+            assert!(
+                told.iter()
+                    .any(|m| m.body == crate::evaluations::ended_message(&ended))
+            );
+        }
+    }
+
+    #[test]
+    fn a_desktop_run_whose_helper_cannot_open_fails_before_its_provider_starts() {
+        // The provider would fail the run differently if it ran.
+        run_with_provider(
+            "service::tests::a_desktop_run_with_a_missing_helper",
+            Path::new("/usr/bin/false"),
+        );
+    }
+    #[test]
+    #[ignore = "run by a_desktop_run_whose_helper_cannot_open_fails_before_its_provider_starts, in a process of its own"]
+    fn a_desktop_run_with_a_missing_helper() {
+        assert!(
+            std::env::var_os("WORKSPACE_CLAUDE_BIN").is_some(),
+            "never a real provider"
+        );
+        let home = tempfile::tempdir().unwrap();
+        // SAFETY: this test runs alone in its own process, before any thread reads it.
+        unsafe {
+            std::env::set_var(
+                "WORKSPACE_EVALUATOR_APP",
+                home.path().join("Missing Evaluator.app"),
+            )
+        };
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let runs = tempfile::tempdir().unwrap();
+        let (_, session, first, _) = desktop_runs(&mut host, runs.path());
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(64);
+        actor.sender = sender;
+        actor.schedule().unwrap();
+        assert!(
+            actor.active.contains_key(&session),
+            "the run's turn started"
+        );
+        while !actor.active.is_empty() {
+            actor.process(events.recv_blocking().unwrap());
+        }
+        let run = actor.host.evaluation(&first).unwrap();
+        assert_eq!(run.state, EvaluationState::Failed);
+        let why = run.reason.unwrap();
+        // macOS's `open` names the missing helper; elsewhere there is no `open` to start it.
+        assert!(why.contains("Wiffletree Evaluator"), "{why}");
+    }
+
     #[test]
     fn other_work_runs_while_an_agent_waits_for_a_reset() {
         run_with_provider(

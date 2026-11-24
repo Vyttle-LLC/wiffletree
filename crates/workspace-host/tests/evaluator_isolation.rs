@@ -58,6 +58,7 @@ fn evaluate(
             folder: folder.into(),
             codex_home: codex_home.into(),
             app: None,
+            desktop: None,
         }),
         push_branch: None,
     };

@@ -21,7 +21,7 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"
 version="${WIFFLETREE_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)}"
 identity="${CODESIGN_IDENTITY:--}"
-cargo build --locked --release -p workspace-desktop -p workspace-host
+cargo build --locked --release -p workspace-desktop -p workspace-host -p workspace-evaluator
 # Cargo reads a relative CARGO_TARGET_DIR against the working directory, the repository root.
 target_dir="${CARGO_TARGET_DIR:-target}"
 case "$target_dir" in /*) ;; *) target_dir="$repo_root/$target_dir" ;; esac
@@ -69,7 +69,33 @@ cat > "$app_bundle/Contents/Info.plist" <<PLIST
 <key>NSBonjourServices</key><array><string>_wiffletree._tcp</string></array>
 </dict></plist>
 PLIST
+
+# Wiffletree Evaluator, the helper full-desktop UI evaluators run in. macOS grants Screen
+# Recording and Accessibility to its bundle ID and signature, so only it holds them, and they
+# survive updates signed by the same team.
+helper_bundle="$app_bundle/Contents/Helpers/Wiffletree Evaluator.app"
+mkdir -p "$helper_bundle/Contents/MacOS"
+cp "$target_dir/release/wiffletree-evaluator" "$helper_bundle/Contents/MacOS/wiffletree-evaluator"
+cat > "$helper_bundle/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleName</key><string>Wiffletree Evaluator</string>
+<key>CFBundleDisplayName</key><string>Wiffletree Evaluator</string>
+<key>CFBundleIdentifier</key><string>com.vyttle.wiffletree.evaluator</string>
+<key>CFBundleExecutable</key><string>wiffletree-evaluator</string>
+<key>CFBundleVersion</key><string>$version</string>
+<key>CFBundleShortVersionString</key><string>$version</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>LSUIElement</key><true/>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>NSHumanReadableCopyright</key><string>© 2026 Vyttle LLC · MIT License</string>
+</dict></plist>
+PLIST
+
+# Nested code is signed before the bundle that seals it.
 if [ "$identity" = "-" ]; then
+    codesign --force --sign - "$helper_bundle"
     codesign --force --sign - "$app_bundle"
 else
     # Notarization requires the hardened runtime and a timestamp on every executable.
@@ -77,6 +103,7 @@ else
         ${CODESIGN_KEYCHAIN:+--keychain "$CODESIGN_KEYCHAIN"})
     # Keychain items match the host by this identifier, so changing it locks upgraded hosts out.
     codesign "${signing[@]}" --identifier workspace-host "$app_bundle/Contents/MacOS/wiffletree-host"
+    codesign "${signing[@]}" "$helper_bundle"
     codesign "${signing[@]}" "$app_bundle"
 fi
 printf 'Development bundle: %s\n' "$app_bundle"

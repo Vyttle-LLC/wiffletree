@@ -1,9 +1,9 @@
 //! The launch of a UI evaluator run (OpenSpec change `ui-evaluators`): blind, on the model it
-//! was started with, with no shell, web or workspace tool, no MCP server but an app run's
-//! driver, and none of the human's provider instructions, settings or skills. The provider
-//! holds it to its run folder.
+//! was started with, with no shell, web or workspace tool, no MCP server but its driver, and
+//! none of the human's provider instructions, settings or skills. The provider holds it to its
+//! run folder.
 use super::*;
-use crate::app_driver;
+use crate::{app_driver, desktop_driver};
 
 /// The built-in Claude tools an evaluator has: reading and writing files, which its rules hold
 /// to the run folder.
@@ -31,8 +31,34 @@ pub struct EvaluatorLaunch {
     pub codex_home: PathBuf,
     /// An app run's test copy, which its turn starts, and the driver server that reaches it.
     pub app: Option<AppLaunch>,
+    /// A full-desktop run's helper, which its turn starts, and the driver server that reaches
+    /// it.
+    pub desktop: Option<DesktopLaunch>,
+}
+/// A run's one MCP server: its name, its tools and the host command that serves it.
+struct Driver {
+    server: &'static str,
+    tools: &'static [&'static str],
+    args: Value,
 }
 impl EvaluatorLaunch {
+    /// An app run's app driver on its copy's socket, or a full-desktop run's desktop driver on
+    /// its helper's.
+    fn driver(&self) -> Option<Driver> {
+        if let Some(app) = &self.app {
+            return Some(Driver {
+                server: app_driver::SERVER,
+                tools: &app_driver::TOOLS,
+                args: json!(["app-driver-mcp", app.socket, self.folder]),
+            });
+        }
+        let desktop = self.desktop.as_ref()?;
+        Some(Driver {
+            server: desktop_driver::SERVER,
+            tools: &desktop_driver::TOOLS,
+            args: json!(["desktop-driver-mcp", desktop.socket, self.folder]),
+        })
+    }
     /// The empty folder an evaluator's Codex runs with as `HOME`, beside its Codex home: Codex
     /// also finds the human's skills under `~/.agents/skills`, whatever its own home says.
     pub fn codex_user_home(&self) -> PathBuf {
@@ -40,7 +66,7 @@ impl EvaluatorLaunch {
     }
     /// `Read`, `Glob` and `Grep` of the folder and `Write`, `Edit` and `MultiEdit` in it;
     /// everything else is denied without asking.
-    /// An app run's driver tools too.
+    /// The driver's tools too.
     pub(crate) fn claude_allowed(&self) -> Vec<String> {
         // `//` makes a rule's path absolute.
         let folder = format!("/{}/**", self.folder.display());
@@ -48,22 +74,19 @@ impl EvaluatorLaunch {
             .map(|tool| format!("{tool}({folder})"));
         files.into_iter().chain(self.driver_tools()).collect()
     }
-    /// The driver's tools as Claude names them; none for a run without a test copy.
+    /// The driver's tools as Claude names them; none for a run without a driver.
     fn driver_tools(&self) -> Vec<String> {
-        match self.app {
-            Some(_) => (app_driver::TOOLS.iter())
-                .map(|tool| format!("mcp__{}__{tool}", app_driver::SERVER))
+        match self.driver() {
+            Some(driver) => (driver.tools.iter())
+                .map(|tool| format!("mcp__{}__{tool}", driver.server))
                 .collect(),
             None => vec![],
         }
     }
-    /// The run's MCP servers: an app run's driver, connected to its copy's socket, alone.
+    /// The run's MCP servers: its driver alone.
     fn servers(&self, helper: &Path) -> Value {
-        match &self.app {
-            Some(app) => json!({app_driver::SERVER: {
-                "command": helper,
-                "args": ["app-driver-mcp", app.socket, self.folder],
-            }}),
+        match self.driver() {
+            Some(driver) => json!({driver.server: {"command": helper, "args": driver.args}}),
             None => json!({}),
         }
     }
@@ -73,8 +96,10 @@ impl EvaluatorLaunch {
             .flatten()
             .map(|server| (&server["name"], &server["status"]))
             .collect();
-        let (name, connected) = (json!(app_driver::SERVER), json!("connected"));
-        let expected: Vec<(&Value, &Value)> = match self.app {
+        let driver = self.driver();
+        let name = json!(driver.as_ref().map(|driver| driver.server));
+        let connected = json!("connected");
+        let expected: Vec<(&Value, &Value)> = match driver {
             Some(_) => vec![(&name, &connected)],
             None => vec![],
         };
@@ -104,11 +129,12 @@ impl EvaluatorLaunch {
         );
         Ok(())
     }
-    /// Refuses any MCP call but to an app run's driver: anything else reached the run.
+    /// Refuses any MCP call but to the run's driver: anything else reached the run.
     pub(crate) fn check_codex_item(&self, item: &Value) -> Result<()> {
-        let to_driver = self.app.is_some()
-            && item["server"] == app_driver::SERVER
-            && (item["tool"].as_str()).is_some_and(|tool| app_driver::TOOLS.contains(&tool));
+        let to_driver = self.driver().is_some_and(|driver| {
+            item["server"] == driver.server
+                && (item["tool"].as_str()).is_some_and(|tool| driver.tools.contains(&tool))
+        });
         ensure!(
             item["type"] != "mcp_tool_call" || to_driver,
             "Stopped: the evaluator called an MCP tool it was not given ({} {})",
@@ -249,16 +275,16 @@ pub(super) fn configure_codex(cmd: &mut ProcessCommand, turn: &Turn, launch: &Ev
     ] {
         cmd.arg("-c").arg(setting);
     }
-    if let Some(app) = &launch.app {
-        let server = app_driver::SERVER;
+    if let Some(driver) = launch.driver() {
+        let server = driver.server;
         cmd.arg("-c").arg(format!(
             "mcp_servers.{server}={{required=true, default_tools_approval_mode=\"approve\", command={}, args={}}}",
             json!(turn.helper),
-            json!(["app-driver-mcp", app.socket, launch.folder])
+            driver.args
         ));
         cmd.arg("-c").arg(format!(
             "mcp_servers.{server}.enabled_tools={}",
-            json!(app_driver::TOOLS)
+            json!(driver.tools)
         ));
     }
     for feature in restricted::CODEX_FEATURES_OFF
@@ -301,6 +327,22 @@ mod tests {
             folder: "/eval/runs/run-1".into(),
             codex_home: "/data/evaluators/codex-home".into(),
             app: None,
+            desktop: None,
+        }
+    }
+    /// A full-desktop run's launch, with its helper.
+    fn desktop_launch() -> EvaluatorLaunch {
+        EvaluatorLaunch {
+            desktop: Some(DesktopLaunch {
+                helper: "/Applications/Wiffletree.app/Contents/Helpers/Wiffletree Evaluator.app"
+                    .into(),
+                socket: "/tmp/wiffletree-run-1-desktop.sock".into(),
+                run: "run-1".into(),
+                apps: vec!["com.apple.calculator".into()],
+                model: "Claude · opus".into(),
+                queued: 0,
+            }),
+            ..launch()
         }
     }
     /// An app run's launch, with its test copy.
@@ -601,6 +643,100 @@ mod tests {
         assert!(
             launch()
                 .check_codex_item(&call("app", "screenshot"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_desktop_runs_claude_gets_the_desktop_driver_alone_and_no_computer_use() {
+        let (args, _) = arguments_for(Provider::Claude, desktop_launch());
+        let config: Value = serde_json::from_str(after(&args, "--mcp-config")).unwrap();
+        assert_eq!(
+            config,
+            json!({"mcpServers":{"desktop":{"command":"/app/wiffletree-host","args":["desktop-driver-mcp","/tmp/wiffletree-run-1-desktop.sock","/eval/runs/run-1"]}}})
+        );
+        let allowed: Vec<&str> = after(&args, "--allowedTools").split(',').collect();
+        let driver: Vec<&str> = (allowed.iter().copied())
+            .filter(|tool| tool.starts_with("mcp__"))
+            .collect();
+        assert_eq!(
+            driver,
+            desktop_driver::TOOLS.map(|tool| format!("mcp__desktop__{tool}"))
+        );
+        // Claude's own computer-use server is never offered.
+        assert!(
+            !args.iter().any(|arg| arg.contains("computer-use")),
+            "{args:?}"
+        );
+        // Its start must show the desktop driver connected, and nothing else.
+        let init = |servers: Value, tools: Value| json!({"mcp_servers":servers,"tools":tools,"permissionMode":"dontAsk","memory_paths":null});
+        let desktop = desktop_launch();
+        let connected = json!([{"name":"desktop","status":"connected"}]);
+        let tools = json!(["Read", "mcp__desktop__screenshot", "mcp__desktop__open_app"]);
+        desktop
+            .check_claude_start(&init(connected.clone(), tools))
+            .unwrap();
+        for (servers, tools) in [
+            (
+                json!([{"name":"app","status":"connected"}]),
+                json!(["mcp__app__click"]),
+            ),
+            (
+                json!([{"name":"computer-use","status":"connected"}]),
+                json!([]),
+            ),
+            (connected.clone(), json!(["mcp__app__click"])),
+            (connected, json!(["mcp__computer-use__screenshot"])),
+        ] {
+            assert!(desktop.check_claude_start(&init(servers, tools)).is_err());
+        }
+    }
+
+    #[test]
+    fn a_desktop_runs_codex_gets_the_desktop_driver_alone_and_ignores_the_users_config() {
+        let (args, _) = arguments_for(Provider::Codex, desktop_launch());
+        let servers: Vec<&str> = (args.windows(2))
+            .filter(|pair| pair[0] == "-c")
+            .map(|pair| pair[1].as_str())
+            .filter(|setting| setting.starts_with("mcp_servers"))
+            .collect();
+        assert_eq!(
+            servers,
+            [
+                r#"mcp_servers.desktop={required=true, default_tools_approval_mode="approve", command="/app/wiffletree-host", args=["desktop-driver-mcp","/tmp/wiffletree-run-1-desktop.sock","/eval/runs/run-1"]}"#,
+                r#"mcp_servers.desktop.enabled_tools=["screenshot","click","double_click","right_click","move","type_text","key","scroll","drag","open_app","list_windows"]"#,
+            ]
+        );
+        // The user's config, with its `notify` hook and Sky's computer-use server, is never
+        // read, and Codex's computer use stays off.
+        assert!(args.contains(&"--ignore-user-config".into()));
+        assert!(!args.iter().any(|arg| arg.contains("notify")), "{args:?}");
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.contains("SkyComputerUse") || arg.contains("computer-use")),
+            "{args:?}"
+        );
+        let disabled: Vec<&str> = (args.windows(2))
+            .filter(|pair| pair[0] == "--disable")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert!(disabled.contains(&"computer_use"));
+        let call =
+            |server: &str, tool: &str| json!({"type":"mcp_tool_call","server":server,"tool":tool});
+        let desktop = desktop_launch();
+        desktop
+            .check_codex_item(&call("desktop", "open_app"))
+            .unwrap();
+        assert!(desktop.check_codex_item(&call("app", "click")).is_err());
+        assert!(
+            desktop
+                .check_codex_item(&call("computer-use", "click"))
+                .is_err()
+        );
+        assert!(
+            desktop
+                .check_codex_item(&call("desktop", "resize_window"))
                 .is_err()
         );
     }

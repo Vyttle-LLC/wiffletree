@@ -143,9 +143,14 @@ fn the_evaluator_tools_take_an_exact_model_and_no_agent_can_set_what_a_project_a
         json!(["executable", "arguments"])
     );
     assert_eq!(properties["provider"]["enum"], json!(["claude", "codex"]));
+    assert_eq!(properties["apps"]["items"]["type"], "string");
     assert_eq!(start["inputSchema"]["additionalProperties"], false);
     let described = start["description"].as_str().unwrap();
     for promise in [
+        "A desktop run needs apps",
+        "waits for the human to press Start",
+        // A desktop run at its limit fails rather than wait to take the screen again.
+        "a desktop run fails instead",
         "never another",
         "only its id, state, model, folder and duration",
         "a run whose provider names another model when it starts fails",
@@ -153,6 +158,10 @@ fn the_evaluator_tools_take_an_exact_model_and_no_agent_can_set_what_a_project_a
     ] {
         assert!(described.contains(promise), "{promise}");
     }
+    assert!(
+        !described.contains("At a usage limit the run waits for the reset"),
+        "desktop runs never wait at a limit"
+    );
     assert_eq!(
         tool("stop_evaluation")["inputSchema"]["required"],
         json!(["run_id"])
@@ -369,7 +378,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = core(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator core — v19"));
+    assert!(coordinator.contains("Project coordinator core — v20"));
     // Naming and filing rules, and the parent's duty to escalate what it has no decision for.
     for rule in [
         "Prefer adding a ticket to your own project",

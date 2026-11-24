@@ -3,6 +3,7 @@
 mod app_target;
 mod codex_compaction;
 mod constrained;
+mod desktop_helper;
 mod evaluator;
 mod output;
 mod restricted;
@@ -13,6 +14,10 @@ use crate::runtime::LowPriority as _;
 use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
 pub use app_target::AppLaunch;
+pub use desktop_helper::{
+    DesktopLaunch, EVALUATOR_APP, STOPPED_BY_ESCAPE, STOPPED_FROM_MENU, bundle_of, bundled_helper,
+    helper_app, install_helper,
+};
 pub use evaluator::{EvaluatorLaunch, prepare_codex_home};
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
 use output::{Next, Output, StopReading};
@@ -58,6 +63,9 @@ pub enum ProviderEvent {
     Compaction(CompactionRecord),
     /// The model a UI evaluator's provider said it runs, once, before it is checked.
     Model(String),
+    /// The human stopped a full-desktop run on the screen, with Esc or the menu bar's Stop; the
+    /// turn is already cancelled, and this is why.
+    StoppedOnScreen(String),
     Finished {
         error: Option<String>,
         usage: Value,
@@ -613,8 +621,9 @@ fn check_running(cancel: &AtomicBool) -> Result<()> {
 /// to an end of its own, `Finished` last. Whichever way it ends, the host hears of every
 /// process the watcher saw before it hears of the end.
 pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEvent)) -> Result<()> {
-    let mut watch = None;
-    let finished = run_turn(turn, cancel, &mut emit, &mut watch);
+    let (mut watch, mut desktop) = (None, None);
+    let finished = run_turn(turn, cancel, &mut emit, &mut watch, &mut desktop);
+    settle_desktop(desktop, &mut emit);
     if let Some(watch) = watch {
         // A turn that ended on its own may leave processes running, so those still exiting
         // with the provider get a moment first. A turn cut short has everything stopped.
@@ -625,6 +634,18 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
     }
     emit(finished?);
     Ok(())
+}
+/// Tells the host why a full-desktop run's helper stopped the turn, when the human stopped it on
+/// the screen, and then lets the helper quit. Read once the turn has ended, however it ended:
+/// the helper stores its reason before it cancels the turn, so a turn its stop cut short always
+/// ends as stopped, with the reason, never as failed.
+fn settle_desktop(
+    desktop: Option<desktop_helper::RunningHelper>,
+    emit: &mut impl FnMut(ProviderEvent),
+) {
+    if let Some(reason) = desktop.as_ref().and_then(|helper| helper.take_stop()) {
+        emit(ProviderEvent::StoppedOnScreen(reason));
+    }
 }
 /// Sends the host what the watcher has seen of the run's tree since it was last asked.
 fn report_seen(watching: &Watch, emit: &mut impl FnMut(ProviderEvent)) {
@@ -639,6 +660,7 @@ fn run_turn(
     cancel: Arc<AtomicBool>,
     emit: &mut impl FnMut(ProviderEvent),
     watch: &mut Option<Watch>,
+    desktop: &mut Option<desktop_helper::RunningHelper>,
 ) -> Result<ProviderEvent> {
     let quota_account = if turn.session.provider == Provider::Claude {
         crate::runtime::claude_account(&turn.cwd).ok().flatten()
@@ -659,6 +681,15 @@ fn run_turn(
             app_target::SOCKET_WAIT,
             &cancel,
         )?),
+        None => None,
+    };
+    // A full-desktop run's helper runs for the turn; `run` settles it once the turn has ended.
+    *desktop = match turn
+        .evaluator
+        .as_ref()
+        .and_then(|launch| launch.desktop.as_ref())
+    {
+        Some(launch) => Some(desktop_helper::RunningHelper::start(launch, &cancel)?),
         None => None,
     };
     let mut process = Process {

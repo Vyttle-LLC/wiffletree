@@ -56,7 +56,7 @@ impl EvaluatorPermission {
 pub enum EvaluationState {
     /// Waiting for the screen. Full desktop only.
     Queued,
-    /// Waiting for the human's choice, or for its pinned model's limit to reset.
+    /// Waiting for the human's choice or Start, or for its pinned model's limit to reset.
     Waiting,
     Running,
     /// It stopped on its own. Whether its report is valid is the coordinator's call.
@@ -125,6 +125,14 @@ pub struct Evaluation {
     /// What an app run drives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<EvaluationTarget>,
+    /// The apps a full-desktop run may see and touch, by bundle id; its helper refuses every
+    /// other app.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<String>,
+    /// A full-desktop run holds the screen from when it reaches the front of the queue, through
+    /// the wait for the human's Start, until it ends.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub holds_screen: bool,
     pub state: EvaluationState,
     /// Why it waits, failed or stopped, for the human. A failure's reason never reaches the
     /// coordinator: a provider's error can quote the model.

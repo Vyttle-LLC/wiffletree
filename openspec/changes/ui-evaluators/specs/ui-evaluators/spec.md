@@ -2,7 +2,7 @@
 
 ### Requirement: A coordinator starts an evaluator run
 
-The workspace SHALL offer `start_evaluation` with `run_folder`, `provider`, `model`, `effort` and `mode` (`app` or `desktop`) to the project coordinator only. The run folder SHALL be an absolute path to an existing folder holding a `prompt.md` file, and SHALL NOT be inside a Git repository or worktree, a workspace repository or Wiffletree's data folder. A valid call SHALL create a run of the caller's project and return its id; a refused call SHALL create nothing and SHALL name the reason.
+The workspace SHALL offer `start_evaluation` with `run_folder`, `provider`, `model`, `effort` and `mode` (`app` or `desktop`), with `target` for an app run and `apps` for a desktop run, to the project coordinator only. The run folder SHALL be an absolute path to an existing folder holding a `prompt.md` file, and SHALL NOT be inside a Git repository or worktree, a workspace repository or Wiffletree's data folder. A valid call SHALL create a run of the caller's project and return its id; a refused call SHALL create nothing and SHALL name the reason.
 
 #### Scenario: A valid start
 
@@ -50,12 +50,12 @@ A run SHALL use only the provider, model and effort it was started with, and SHA
 
 ### Requirement: A run is blind and isolated by its provider
 
-A run SHALL have no shell, web, repository, brain, memory, history or workspace tools, and none of the human's provider instructions, settings, skills or MCP servers. It SHALL read and write only inside its run folder. Its first message SHALL be the content of `prompt.md` with nothing added, and no instructions SHALL be appended to its system prompt. Its environment SHALL carry no Wiffletree session variable. A Claude run that starts with another tool, an MCP server other than an app run's driver, another permission mode or auto memory SHALL be stopped; so SHALL a Codex run that calls any MCP tool but its driver's.
+A run SHALL have no shell, web, repository, brain, memory, history or workspace tools, and none of the human's provider instructions, settings, skills or MCP servers. It SHALL read and write only inside its run folder. Its first message SHALL be the content of `prompt.md` with nothing added, and no instructions SHALL be appended to its system prompt. Its environment SHALL carry no Wiffletree session variable. A Claude run that starts with another tool, an MCP server other than its driver, another permission mode or auto memory SHALL be stopped; so SHALL a Codex run that calls any MCP tool but its driver's. Neither provider's built-in computer use SHALL be offered, and Codex SHALL ignore the user's config, so the user's `notify` hook never runs.
 
 #### Scenario: Claude's launch
 
 - **WHEN** a Claude run starts
-- **THEN** it runs with no setting sources, a strict MCP configuration holding only an app run's driver, `dontAsk`, only the read and write file tools, and allow rules for its folder alone
+- **THEN** it runs with no setting sources, a strict MCP configuration holding only its driver, `dontAsk`, only the read and write file tools, and allow rules for its folder alone
 
 #### Scenario: Codex's launch
 
@@ -131,12 +131,93 @@ Each project SHALL have an evaluator permission of off, app or desktop, which on
 
 ### Requirement: Full-desktop runs take turns at the screen
 
-App-only runs SHALL run side by side. Full-desktop runs SHALL share one queue for every project and one screen lock: only the run holding the lock runs, the others wait queued in the order they were started, and the lock passes on when the holder ends.
+App-only runs SHALL run side by side. Full-desktop runs SHALL share one queue for every project and one screen lock: the run at the front takes the lock, the others wait queued in the order they were started, and the lock passes on when the holder ends. A run holding the lock SHALL wait for the human's Start on an Inbox card offering Start now, Later and Skip these runs, and SHALL NOT touch the screen before Start now. Start now SHALL start the run, unless its provider is at its usage limit, when it SHALL be refused with the reset time and the card stays. Later SHALL leave the card and the run first in line. Skip these runs SHALL stop the run and its project's queued desktop runs, telling their coordinator. The card SHALL NOT be dismissed. A full-desktop run whose turn reaches its usage limit SHALL end as failed rather than wait, so it never takes the screen again without a Start.
 
 #### Scenario: Two desktop runs
 
 - **WHEN** two desktop runs are admitted
-- **THEN** the first runs and the second stays queued until the first ends
+- **THEN** the first holds the screen and waits for the human's Start, and the second stays queued until the first ends
+
+#### Scenario: Start now
+
+- **WHEN** the human presses Start now on the card of the run holding the screen
+- **THEN** the run gets its session and starts, and only then
+
+#### Scenario: Skip these runs
+
+- **WHEN** the human presses Skip these runs
+- **THEN** the run and its project's queued desktop runs end as stopped, "Skipped by you.", the coordinator is told of each, and the screen passes to the next project's run
+
+#### Scenario: A limit mid-run
+
+- **WHEN** a desktop run's turn ends at its provider's usage limit
+- **THEN** the run fails and the screen passes on; it does not wait for the reset
+
+### Requirement: A full-desktop run sees and touches only the apps it names
+
+`start_evaluation` in desktop mode SHALL take `apps`, one to ten bundle IDs, and no target, and SHALL refuse an empty list, a malformed ID and Wiffletree Evaluator itself. Nothing SHALL be allowed that the coordinator does not name. The run's only MCP server SHALL be the desktop driver, named `desktop`, for Claude and Codex alike, with the tools screenshot, click, double_click, right_click, move, type_text, key, scroll, drag, open_app and list_windows, in screen points; every screenshot SHALL report its scale and be saved inside the run folder by the app driver's rules. The helper, not the model, SHALL enforce:
+
+- a screenshot draws only the allowed apps' windows, each captured alone, at their screen frames, so its pixels divided by its scale are screen points; never the whole display;
+- a click, move, scroll or drag is refused unless the topmost on-screen window at its point, at that moment, belongs to an allowed app;
+- keys and text are refused unless an allowed app is frontmost, and go to that app's process alone;
+- open_app opens only an allowed app, and list_windows lists only their windows.
+
+#### Scenario: Input over another app
+
+- **WHEN** an evaluator allowed only Calculator clicks a point where a notification banner covers Calculator
+- **THEN** the click is refused, and the reply does not name the other app
+
+#### Scenario: Keys while another app is frontmost
+
+- **WHEN** Terminal is frontmost and the evaluator types text
+- **THEN** nothing is typed and the tool says no allowed app is frontmost
+
+#### Scenario: No apps
+
+- **WHEN** a coordinator starts a desktop run with no apps
+- **THEN** the call is refused and no run is created
+
+### Requirement: Only Wiffletree Evaluator holds the screen permissions
+
+A full-desktop run SHALL drive the screen through Wiffletree Evaluator, a helper app shipped in Wiffletree with its own bundle ID, signed with Wiffletree's identity and the hardened runtime. Because macOS charges Screen Recording to the outermost bundle, the host SHALL install it outside Wiffletree's bundle, in its data folder, and SHALL start that copy per run through LaunchServices, so that macOS charges the helper's own grants and never Wiffletree's. Before the provider starts, the host SHALL read the helper's Screen Recording and Accessibility grants, as the helper sees them, and whether it can hear Esc, and SHALL fail the run, naming the System Settings pane to open, when any is missing. The helper SHALL listen on a socket of the run's own with mode 600 and quit when the run ends or the host's connection closes; the host SHALL kill it if it stays. Settings › Screen control (ticket 5) SHALL describe the helper's permissions and no provider's computer use.
+
+#### Scenario: The helper is charged as itself
+
+- **WHEN** the host starts and the shipped helper differs from its installed copy, or there is none
+- **THEN** it installs the helper in its data folder, and a run's helper is checked for Screen Recording and Accessibility as `com.vyttle.wiffletree.evaluator`, never as Wiffletree
+
+#### Scenario: A missing grant
+
+- **WHEN** a desktop run starts and the helper lacks Screen Recording
+- **THEN** the run fails before anything touches the screen, naming System Settings › Privacy & Security › Screen & System Audio Recording
+
+#### Scenario: The run ends
+
+- **WHEN** a desktop run's turn ends, however it ends
+- **THEN** the helper quits, and is killed if it has not quit within three seconds
+
+### Requirement: The human stops a full-desktop run on the screen
+
+While a full-desktop run holds the screen, the helper SHALL show "Evaluator using this Mac" in the menu bar with Stop, and SHALL listen for Esc anywhere, ignoring the keys it posts itself. Esc, Stop or the helper quitting SHALL stop the run at once, as `stop_evaluation` does, and the helper SHALL refuse every later request.
+
+#### Scenario: Esc
+
+- **WHEN** the human presses Esc during a desktop run
+- **THEN** the turn is cancelled at once and the run ends as stopped, "Stopped: you pressed Esc.", and its coordinator is told
+
+### Requirement: A floating panel shows the run and stops it
+
+For the whole of a full-desktop run, the helper SHALL show the control panel approved in `ui/control-overlay.html`: a non-activating panel that floats above every window, on every Space and over full-screen apps, in the top-right corner under the menu bar unless the human has dragged it to another corner, which it SHALL remember. It SHALL show a red status dot, "Evaluator using this Mac", the run's model, its first two allowed apps then "+N", the time so far, and "1 of N" when more full-desktop runs wait; an Esc hint; and a red Stop. It SHALL shrink to "Evaluator", the time and Stop over a full-screen app, and show "Stopping…" while the run ends. Its Stop SHALL end the run as Esc and the menu bar's Stop do, as "Stopped from the evaluator's panel." Clicking it SHALL NOT take focus from the app under test. The host SHALL give the helper the run's model and the number of waiting runs when it starts it. The panel SHALL never appear in a screenshot, and the evaluator's input aimed at it SHALL be refused, since it is no allowed app's window.
+
+#### Scenario: Stop from the panel
+
+- **WHEN** the human clicks the panel's Stop during a desktop run
+- **THEN** the panel says "Stopping…", the run ends as stopped, "Stopped from the evaluator's panel.", and the panel disappears with the helper
+
+#### Scenario: The evaluator aims at the panel
+
+- **WHEN** the evaluator clicks a point the panel covers, even over an allowed app's window
+- **THEN** the click is refused, and no screenshot shows the panel
 
 ### Requirement: The coordinator learns the outcome, never the content
 

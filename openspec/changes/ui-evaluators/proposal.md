@@ -2,7 +2,9 @@
 
 The UX eval-and-improve loop is paused because only the human can start its evaluators: fresh, blind agents on an exact model that read a prompt, drive the app under test and write a report. A coordinator should be able to start one itself, on the model the loop names, and be woken when it ends, without ever seeing what the evaluator thought.
 
-On November 4, 2026 Michael approved `ui/mockups.html` and the plan behind it, with both screen-control modes: **App only**, which drives just the app under test through its automation socket, and **Full desktop**, which uses Claude's or Codex's own computer use.
+On November 4, 2026 Michael approved `ui/mockups.html` and the plan behind it, with both screen-control modes: **App only**, which drives just the app under test through its automation socket, and **Full desktop**, which drives the apps a run names on the human's screen.
+
+The same day, the computer-use spike found that neither provider's own computer use works when Wiffletree launches it: Claude Code allows it only in interactive sessions, and macOS refuses Codex's Sky service the Apple events it needs, charging them to `wiffletree-host`. Michael chose Wiffletree's own desktop driver instead, run through a helper app that alone holds the screen permissions, over Peekaboo or a virtual machine.
 
 ## What Changes
 
@@ -14,8 +16,8 @@ On November 4, 2026 Michael approved `ui/mockups.html` and the plan behind it, w
 - **Queue and screen lock.** App-only runs run side by side. Full-desktop runs share one queue for every project and one screen lock.
 - **The completion wake-up** holds only the run's id, state, model, folder and duration.
 - **The app driver** (ticket 3): an MCP tool over the automation socket and a test copy of the app launched with `~/ux-eval/launch.sh`'s isolation.
-- **The desktop driver** (ticket 4): each provider's computer-use server through the helper app the spike chooses, Settings › Screen control, the Start-now card, Esc and Stop, and the menu bar indicator.
-- **The UI** (ticket 5): the Agents panel's Evaluations group, the run page and the banners.
+- **The desktop driver** (ticket 4): the Wiffletree Evaluator helper app, bundled in Wiffletree and signed with it, which alone holds Screen Recording and Accessibility; a `desktop` MCP driver that Claude and Codex share; screenshots and input limited to the apps a run names; the Start-now card; Esc and the menu bar item's Stop. Neither provider's built-in computer use is used.
+- **The UI** (ticket 5): the Agents panel's Evaluations group, the run page, the banners and Settings › Screen control, whose permission rows describe the helper. Mockup screen 2's Providers rows no longer apply.
 
 ## Capabilities
 
@@ -30,7 +32,8 @@ None. Evaluator runs take no part in tickets, model selection or the agent tree.
 ## Impact
 
 - `workspace-core`: `Role::Evaluator`, the evaluation records and commands.
-- `workspace-host`: `evaluations.rs`, the evaluator launch in `provider/evaluator.rs`, the three coordinator tools, the Inbox card's answer, the scheduler, `coordinator.md`.
-- `workspace-desktop`: the Inbox card (generic options until ticket 5), the Evaluations group and the run page (ticket 5), Settings › Screen control (ticket 4).
+- `workspace-host`: `evaluations.rs`, the evaluator launch in `provider/evaluator.rs`, the three coordinator tools, the Inbox cards' answers, the scheduler, `coordinator.md`, the app and desktop drivers, and the helper's launch in `provider/desktop_helper.rs`.
+- `workspace-evaluator` (new): the Wiffletree Evaluator helper app; `scripts/package_macos.sh` bundles and signs it.
+- `workspace-desktop`: the Inbox cards (generic options until ticket 5), the Evaluations group, the run page and Settings › Screen control (ticket 5).
 - `docs/FEATURES.md`, `design/README.md`.
 - Older stores load unchanged: the new tables start empty and a project with no choice is off.
