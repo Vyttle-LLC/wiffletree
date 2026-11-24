@@ -632,22 +632,24 @@ mod tests {
             let id = format!("{ASSISTANT_NOTICE_PREFIX}{id}");
             host.send(&id, None, &assistant.id, body).unwrap()
         };
+        // A loop's result, passed on as Wiffletree's notices are, and an approval notice.
         let result = notice(
             &mut host,
-            "ran:card-1",
-            "The human pressed Run on action card card-1, and it ran: Sent",
+            "loop-run:r1",
+            "Morning brief finished: 3 threads",
         );
         let approval = notice(&mut host, "approval:a1", "An approval waits");
-        let guard = host.turn_guard(&[human, result, approval]).unwrap();
-        assert!(guard.held());
-        assert_eq!(guard.read, ["a message from Wiffletree"]);
-        assert_eq!(guard.picked.as_ref(), Some(&celadon));
-        assert_eq!(guard.human_message.as_deref(), Some("m1"));
-        // So a loop change the turn asks for waits for the human's Apply.
         let recipe = json!({"space": celadon, "name": "Digest", "prompt": "Summarise", "cron": "0 7 * * *", "timezone": "UTC"});
-        let card = host.loop_tool("create_loop", &recipe, &guard).unwrap();
-        assert_eq!(card["applied"], false);
-        assert!(host.recipes().unwrap().is_empty());
+        for other in [result, approval] {
+            let guard = host.turn_guard(&[human.clone(), other.clone()]).unwrap();
+            assert_eq!(guard.read, ["a message from Wiffletree"], "{}", other.id);
+            assert_eq!(guard.picked.as_ref(), Some(&celadon));
+            assert_eq!(guard.human_message.as_deref(), Some("m1"));
+            // So a loop change the turn asks for waits for the human's Apply.
+            let card = host.loop_tool("create_loop", &recipe, &guard).unwrap();
+            assert_eq!(card["applied"], false, "{}", other.id);
+            assert!(host.recipes().unwrap().is_empty());
+        }
     }
 
     #[test]
