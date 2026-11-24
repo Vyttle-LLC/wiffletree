@@ -6094,6 +6094,67 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
         assert!(!actor.host.checkout_reservations.contains(&ticket.id));
     }
 
+    #[test]
+    fn a_ticket_turn_creates_its_scratch_folder_and_sorting_and_compaction_runs_get_none() {
+        run_with_provider(
+            "service::tests::scratch_folders_with_the_fixture_provider",
+            &fixture_provider(),
+        );
+    }
+    #[test]
+    #[ignore = "run by a_ticket_turn_creates_its_scratch_folder_and_sorting_and_compaction_runs_get_none, with the fixture as its provider"]
+    fn scratch_folders_with_the_fixture_provider() {
+        assert!(
+            std::env::var_os("WORKSPACE_CLAUDE_BIN").is_some(),
+            "never a real provider"
+        );
+        let scratch_of = |ticket: &str| crate::scratch::ticket_scratch(ticket);
+
+        let pinned_implementer = |host: &mut Host, ticket: &Ticket| {
+            let implementer = host
+                .assign_ticket(&ticket.id, Role::Implementer, Provider::Claude, "Do", None)
+                .unwrap();
+            let pinned = ModelProfile {
+                provider: Provider::Claude,
+                model: "custom".into(),
+                effort: "high".into(),
+            };
+            host.configure_session(&implementer.id, pinned).unwrap();
+            implementer
+        };
+
+        let (_home, mut host, ticket, _) = ticket_fixture();
+        let implementer = pinned_implementer(&mut host, &ticket);
+        let (mut actor, _, _) = idle_actor(host);
+        let input = actor.host.messages(&implementer.id, None, 10).unwrap();
+        assert!(!scratch_of(&ticket.id).exists());
+        actor.start_turn(implementer, input).unwrap();
+        assert!(scratch_of(&ticket.id).is_dir(), "a ticket turn's scratch");
+        fs::remove_dir_all(scratch_of(&ticket.id)).unwrap();
+
+        let (home, mut host, ticket, _) = ticket_fixture();
+        let implementer = pinned_implementer(&mut host, &ticket);
+        let mut runtime = host.session_runtime(&implementer.id).unwrap();
+        runtime.directory = Some(home.path().to_string_lossy().into_owned());
+        runtime.compaction = Some(Compaction {
+            instructions: None,
+            requested_at: now(),
+            state: CompactionState::Queued,
+        });
+        host.save_runtime(&runtime).unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+        actor.start_compaction(implementer).unwrap();
+        assert!(actor.compacting.len() == 1, "the compaction started");
+        assert!(!scratch_of(&ticket.id).exists(), "a compaction's scratch");
+
+        let (mut f, _remote) = keeper::tests::sorting();
+        let sort = keeper::tests::sort_of(&mut f, &["Rename this"]);
+        let ticket = f.ticket.clone();
+        let (mut actor, _, _) = idle_actor(f.host);
+        actor.start_sort(sort);
+        assert!(!scratch_of(&ticket).exists(), "a sorting run's scratch");
+    }
+
     /// An actor with one active turn and no provider process behind it.
     fn actor_with_turn() -> (tempfile::TempDir, Actor, String, String) {
         let (home, actor, session, run, _, _) = actor_with_signals();
