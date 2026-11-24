@@ -24,6 +24,8 @@ pub(crate) const REMOVING_PREFIX: &str = ".removing-";
 const REPORT_AFTER: i64 = 3;
 /// The inbox operation of a delete's failure notice, followed by what tells it apart.
 const FAILED_NOTICE: &str = "worktree-delete-failed:";
+/// The next attempt of a held delete; see `hold_deletion`.
+const HELD: i64 = i64::MAX;
 /// The wait after the first failed attempt; it doubles with each further one.
 const FIRST_RETRY_MS: i64 = 15_000;
 const LONGEST_RETRY_MS: i64 = 10 * 60_000;
@@ -181,15 +183,6 @@ pub(crate) fn size_label(bytes: u64) -> String {
     }
 }
 
-/// An unused `.removing-` name in `beside` for a folder of `ticket` to wait in.
-fn aside(beside: &Path, ticket: &str) -> PathBuf {
-    let at = now();
-    (0..)
-        .map(|n| beside.join(format!("{REMOVING_PREFIX}{ticket}-{at}-{n}")))
-        .find(|path| fs::symlink_metadata(path).is_err())
-        .expect("an unused name exists")
-}
-
 /// Attempts the delete on a thread of its own, leaving its outcome in `finished` before
 /// `notify` is called.
 fn delete(
@@ -233,26 +226,41 @@ impl Host {
         self.worktree_deletions.due_at = 0;
         Ok(())
     }
-    /// Deletes `folder`, a folder of `ticket`, durably: records it, then renames it aside into
-    /// `beside`, which must be on its filesystem and outside any worktree it should leave
-    /// clean. Refuses anything but a real folder, never following a symbolic link.
-    pub(crate) fn delete_durably(
-        &mut self,
-        folder: &Path,
-        beside: &Path,
-        ticket: &str,
-    ) -> Result<()> {
-        ensure!(
-            fs::symlink_metadata(folder).is_ok_and(|m| m.is_dir()),
-            "{} is not a folder",
-            folder.display()
-        );
-        let aside = aside(beside, ticket);
+    /// Records the delete of a folder of `ticket` that is to be renamed into `beside`, which
+    /// must be on its filesystem and outside any worktree it should leave clean, and returns
+    /// where it is to wait. The delete is held, so nothing deletes or forgets it while the
+    /// rename happens off the host thread, until `release_deletion`, or `forget_worktree_deletion`
+    /// if it never moved. A start releases every held delete, and drops one whose folder never
+    /// moved as gone.
+    pub(crate) fn hold_deletion(&mut self, beside: &Path, ticket: &str) -> Result<PathBuf> {
+        // Neither on disk nor held for a folder still to move there.
+        let at = now();
+        let mut names = (0..).map(|n| beside.join(format!("{REMOVING_PREFIX}{ticket}-{at}-{n}")));
+        let aside = loop {
+            let name = names.next().expect("an unused name exists");
+            let recorded: bool = self.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM worktree_deletions WHERE path=?1)",
+                [name.to_string_lossy()],
+                |r| r.get(0),
+            )?;
+            if !recorded && fs::symlink_metadata(&name).is_err() {
+                break name;
+            }
+        };
         self.record_worktree_deletion(&aside, Some(ticket))?;
-        if let Err(error) = fs::rename(folder, &aside) {
-            self.forget_worktree_deletion(&aside)?;
-            bail!("Move {} aside: {error}", folder.display());
-        }
+        self.db.execute(
+            "UPDATE worktree_deletions SET next_attempt_at=?2 WHERE path=?1",
+            params![aside.to_string_lossy(), HELD],
+        )?;
+        Ok(aside)
+    }
+    /// Lets a held delete start now.
+    pub(crate) fn release_deletion(&mut self, folder: &Path) -> Result<()> {
+        self.db.execute(
+            "UPDATE worktree_deletions SET next_attempt_at=?2 WHERE path=?1",
+            params![folder.to_string_lossy(), now()],
+        )?;
+        self.worktree_deletions.due_at = 0;
         Ok(())
     }
     /// The folders waiting to be deleted, oldest first.
@@ -459,7 +467,7 @@ impl Host {
         let mut due = None::<i64>;
         for (path, ticket, next) in recorded {
             let folder = PathBuf::from(path);
-            if self.worktree_deletions.folders.contains(&folder) {
+            if self.worktree_deletions.folders.contains(&folder) || next == HELD {
                 continue;
             }
             if is_gone(&folder) {

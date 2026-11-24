@@ -61,6 +61,8 @@ impl Host {
                 None,
             )
             .with_context(|| format!("Restore \"{}\" ({})", ticket.title, ticket.id))?;
+            // Its build output outside the worktree belongs to it again.
+            self.forget_outside_cleanup(&ticket.id)?;
         }
         Ok(())
     }
@@ -265,12 +267,7 @@ impl Host {
     }
     /// Whether a provider run of an agent on the ticket has started and not finished.
     pub(crate) fn ticket_run_open(&self, ticket: &str) -> Result<bool> {
-        Ok(self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM provider_runs r JOIN runtimes t ON t.session_id=r.session_id
-             WHERE json_extract(t.data,'$.ticket_id')=?1 AND r.finished_at IS NULL)",
-            [ticket],
-            |r| r.get(0),
-        )?)
+        Ok(ticket_run_open(&self.db, ticket)?)
     }
     /// Worktrees left by finished tickets, and Wiffletree-made worktrees no ticket records, each
     /// with the one class that says whether it may be removed. Changes nothing.
@@ -544,6 +541,17 @@ impl Host {
 
 /// Adds provider runs' process group and its leader's start time, which an earlier version
 /// recorded when the provider started; `agent_processes::migrate` carries them into the record.
+/// Whether a provider run of an agent on the ticket has started and not finished, as `db`
+/// records it; any connection to the store can ask.
+pub(crate) fn ticket_run_open(db: &Connection, ticket: &str) -> rusqlite::Result<bool> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM provider_runs r JOIN runtimes t ON t.session_id=r.session_id
+         WHERE json_extract(t.data,'$.ticket_id')=?1 AND r.finished_at IS NULL)",
+        [ticket],
+        |r| r.get(0),
+    )
+}
+
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
     for column in ["process_group", "process_started"] {
         let present: i64 = db.query_row(

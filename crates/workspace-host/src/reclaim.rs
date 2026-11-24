@@ -12,6 +12,18 @@
 //! it was. Scanning and measuring run off the host thread; their latest result is kept for a few
 //! minutes and answers the disk use read. Under the hard floor, the build gate holds new builds
 //! and the human's inbox says so until space returns.
+//!
+//! Nothing that uses the build output has it moved from under it, as far as can be seen. The
+//! scan, at most a few seconds old, is followed on the host thread by a look at the ticket's
+//! turns; the deletes are recorded and held; then a worker, just before it renames, looks for
+//! processes with a file in the folders, for builds the gate admitted or queued that run in the
+//! worktree, and through its own connection to the store for an agent turn that started. Once
+//! the folders moved it looks for processes again, and moves them all back if one uses them.
+//! What remains is the time between that last look and the renames, a few milliseconds: a
+//! process that is neither an agent's turn nor a gated build, and that opens its first file in
+//! the folders then, has them moved from under it. Removing a ticket's worktree deletes its
+//! build output outside the worktree the same way, by a cleanup recorded before the worktree
+//! moves, which is dropped if the worktree is back at its path when it runs.
 use crate::*;
 use std::{
     collections::{HashMap, HashSet},
@@ -23,6 +35,8 @@ use std::{
 const CHECK_MS: i64 = 3 * 60_000;
 /// How long a measurement of every ticket's disk use is kept.
 const SURVEY_MS: i64 = 5 * 60_000;
+/// How old a ticket's scan may be when its build output is moved; an older one is redone.
+const FRESH_SCAN_MS: i64 = 5_000;
 /// The inbox operation of the card saying builds wait for space, followed by when it began.
 const BUILDS_HELD: &str = "builds-held:";
 
@@ -94,9 +108,11 @@ type Inspected = Result<Vec<(PathBuf, u64)>, String>;
 
 enum Finished {
     Survey(Survey),
-    Inspected(String, Why, Inspected),
-    /// A removed ticket's build output outside its worktree.
-    Outside(String, Vec<PathBuf>),
+    /// A ticket's scan to reclaim it, with when it ended.
+    Inspected(String, Why, Inspected, i64),
+    /// A removed ticket's build output outside its worktree, each folder with its size.
+    Outside(String, Vec<(PathBuf, u64)>),
+    Moved(Move, Moved),
 }
 
 /// A ticket's folders, as the threads off the host thread look at them.
@@ -286,6 +302,126 @@ fn inspect(folders: &Folders) -> Inspected {
     }
 }
 
+/// What a move aside is for.
+#[derive(Clone, Copy, Debug)]
+enum Purpose {
+    Reclaim(Why),
+    /// A removed ticket's build output outside its worktree.
+    Outside,
+}
+
+/// Folders of one ticket to rename aside off the host thread, their deletes recorded and held.
+struct Move {
+    ticket: String,
+    purpose: Purpose,
+    worktree: PathBuf,
+    /// Each folder, where it is to wait, and its size.
+    folders: Vec<(PathBuf, PathBuf, u64)>,
+    /// The host's data folder, holding its store and the build gate's state.
+    home: PathBuf,
+}
+
+/// What a move did.
+#[derive(Debug)]
+enum Moved {
+    /// Nothing moved, and why.
+    Kept(String),
+    /// A process used a folder once it moved, so every folder was moved back, and why. Lists
+    /// where each that could not go back waits.
+    PutBack(String, Vec<PathBuf>),
+    /// Where each folder that moved waits, with its size.
+    Done(Vec<(PathBuf, u64)>),
+}
+
+/// Renames the folders aside unless something uses them. Everything that would stop it is
+/// looked at last, just before the renames: processes with files in the folders, builds the
+/// gate admitted or queued that run in the worktree, and, through its own connection to the
+/// store, an agent of the ticket that started a turn. Once moved, the folders are looked at for
+/// processes again, and moved back if one uses them. Off the host thread.
+fn run_move(job: &Move) -> Moved {
+    if let Some(reason) = in_use(job) {
+        return Moved::Kept(reason);
+    }
+    let moved: Vec<_> = (job.folders.iter())
+        .filter(|(folder, aside, _)| fs::rename(folder, aside).is_ok())
+        .collect();
+    let asides: Vec<PathBuf> = (moved.iter())
+        .filter_map(|(_, aside, _)| fs::canonicalize(aside).ok())
+        .collect();
+    if let Some(reason) = holders_of(&asides) {
+        let stuck = (moved.iter())
+            .filter(|(folder, aside, _)| fs::rename(aside, folder).is_err())
+            .map(|(_, aside, _)| aside.to_path_buf())
+            .collect();
+        return Moved::PutBack(reason, stuck);
+    }
+    let moved = (moved.into_iter())
+        .map(|(_, aside, size)| (aside.clone(), *size))
+        .collect();
+    Moved::Done(moved)
+}
+
+/// Why the move's folders must stay where they are now, if anything says so.
+fn in_use(job: &Move) -> Option<String> {
+    let folders: Vec<PathBuf> = (job.folders.iter())
+        .filter_map(|(folder, _, _)| fs::canonicalize(folder).ok())
+        .collect();
+    if let Some(reason) = holders_of(&folders) {
+        return Some(reason);
+    }
+    let worktree = fs::canonicalize(&job.worktree).unwrap_or_else(|_| job.worktree.clone());
+    let builds = build_gate::gated_builds(&job.home);
+    if working_folders(&builds)
+        .iter()
+        .any(|folder| folder.starts_with(&worktree))
+    {
+        return Some("a build the gate admitted or queued runs in its worktree".into());
+    }
+    let store = job.home.join(STORE_FILE);
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
+    let in_turn = Connection::open_with_flags(store, flags)
+        .and_then(|db| worktrees::ticket_run_open(&db, &job.ticket));
+    match in_turn {
+        Ok(false) => None,
+        Ok(true) => Some("an agent started a turn".into()),
+        Err(error) => Some(format!("could not read the store: {error}")),
+    }
+}
+
+/// Why processes keep `folders` (canonical) where they are, if any use a file in them.
+fn holders_of(folders: &[PathBuf]) -> Option<String> {
+    if folders.is_empty() {
+        return None;
+    }
+    match worktree_deletions::holders(folders) {
+        Ok(holders) if holders.is_empty() => None,
+        Ok(holders) => Some(format!("processes use it: {}", holders.join(", "))),
+        Err(reason) => Some(reason),
+    }
+}
+
+/// The working folders of the processes `pids`, as far as they can be read.
+#[cfg(target_os = "macos")]
+fn working_folders(pids: &[u32]) -> Vec<PathBuf> {
+    if pids.is_empty() {
+        return vec![];
+    }
+    let pids: Vec<String> = pids.iter().map(u32::to_string).collect();
+    let listed = std::process::Command::new("lsof")
+        .args(["-a", "-nPw", "-d", "cwd", "-F", "n", "-p", &pids.join(",")])
+        .output();
+    let listed = listed.map(|o| o.stdout).unwrap_or_default();
+    (String::from_utf8_lossy(&listed).lines())
+        .filter_map(|line| line.strip_prefix('n').map(PathBuf::from))
+        .collect()
+}
+#[cfg(not(target_os = "macos"))]
+fn working_folders(pids: &[u32]) -> Vec<PathBuf> {
+    (pids.iter())
+        .filter_map(|pid| fs::read_link(format!("/proc/{pid}/cwd")).ok())
+        .collect()
+}
+
 /// A ticket whose build output may be reclaimed now: no agent of it is in a turn.
 struct Candidate {
     ticket: String,
@@ -434,14 +570,12 @@ impl Host {
                     self.build_output.survey = Some(survey);
                     self.plan_reclaims(at)
                 }
-                Finished::Inspected(ticket, why, inspected) => {
+                Finished::Inspected(ticket, why, inspected, scanned_at) => {
                     self.build_output.inspecting.remove(&ticket);
-                    self.finish_reclaim(&ticket, why, inspected, at)
+                    self.move_reclaimed(&ticket, why, inspected, scanned_at)
                 }
-                Finished::Outside(ticket, folders) => {
-                    self.build_output.cleaning.remove(&ticket);
-                    self.delete_outside(&ticket, folders)
-                }
+                Finished::Outside(ticket, folders) => self.move_outside(&ticket, folders),
+                Finished::Moved(job, moved) => self.finish_move_aside(job, moved, at),
             };
             if let Err(error) = settled {
                 eprintln!("Reclaim build output: {error:#}");
@@ -545,7 +679,7 @@ impl Host {
         self.build_output.spawn(move || {
             let inspected = std::panic::catch_unwind(|| inspect(&folders))
                 .unwrap_or_else(|_| Err("the scan panicked".into()));
-            Finished::Inspected(folders.ticket, why, inspected)
+            Finished::Inspected(folders.ticket, why, inspected, now())
         });
     }
     /// Reclaims one ticket's build output, or with `None` every ticket's but those with an
@@ -569,11 +703,15 @@ impl Host {
         Ok(())
     }
 
-    /// Moves aside and records the delete of each folder a scan found to reclaim, then tells
-    /// the ticket's project. Nothing moves if an agent of the ticket started a turn, or a
-    /// process started using one of the folders, since the scan: both are looked at again here,
-    /// on the host thread, just before the move.
-    fn finish_reclaim(&mut self, id: &str, why: Why, inspected: Inspected, at: i64) -> Result<()> {
+    /// Starts moving aside each folder a fresh scan found to reclaim, unless an agent of the
+    /// ticket started a turn since. A scan older than a few seconds is redone first.
+    fn move_reclaimed(
+        &mut self,
+        id: &str,
+        why: Why,
+        inspected: Inspected,
+        scanned_at: i64,
+    ) -> Result<()> {
         let ticket = self.ticket(id)?;
         let folders = match inspected {
             Ok(folders) => folders,
@@ -585,42 +723,90 @@ impl Host {
         if folders.is_empty() {
             return Ok(());
         }
+        if now() - scanned_at > FRESH_SCAN_MS {
+            self.start_reclaim(&ticket, why);
+            return Ok(());
+        }
         if self.building(&ticket)? {
             eprintln!("Reclaim build output of {id}: kept, an agent started a turn");
             return Ok(());
         }
-        let canonical: Vec<PathBuf> = (folders.iter())
-            .filter_map(|(folder, _)| fs::canonicalize(folder).ok())
-            .collect();
-        match worktree_deletions::holders(&canonical) {
-            Ok(holders) if holders.is_empty() => {}
-            Ok(holders) => {
-                let holders = holders.join(", ");
-                eprintln!("Reclaim build output of {id}: kept, processes use it: {holders}");
-                return Ok(());
-            }
-            Err(reason) => {
-                eprintln!("Reclaim build output of {id}: kept, {reason}");
-                return Ok(());
-            }
-        }
-        let worktree = Path::new(&ticket.worktree);
-        let mut freed = 0;
+        self.build_output.inspecting.insert(id.to_owned());
+        self.move_aside(&ticket, Purpose::Reclaim(why), folders)
+    }
+    /// Records and holds the delete of each folder, then renames them aside off the host
+    /// thread; see `run_move`. Build output in the worktree waits beside the worktree, never in
+    /// it; any other folder waits beside itself.
+    fn move_aside(
+        &mut self,
+        ticket: &Ticket,
+        purpose: Purpose,
+        folders: Vec<(PathBuf, u64)>,
+    ) -> Result<()> {
+        let worktree = PathBuf::from(&ticket.worktree);
+        let mut planned = vec![];
         for (folder, size) in folders {
-            // Build output in the worktree waits beside the worktree, never in it.
-            let beside = match folder.starts_with(worktree) {
+            let beside = match folder.starts_with(&worktree) {
                 true => worktree.parent(),
                 false => folder.parent(),
             };
-            let Some(beside) = beside else { continue };
-            match self.delete_durably(&folder, beside, id) {
-                Ok(()) => freed += size,
-                Err(error) => eprintln!("Reclaim build output of {id}: {error:#}"),
+            if let Some(beside) = beside {
+                let aside = self.hold_deletion(beside, &ticket.id)?;
+                planned.push((folder, aside, size));
             }
         }
-        if freed == 0 {
-            return Ok(());
+        let job = Move {
+            ticket: ticket.id.clone(),
+            purpose,
+            worktree,
+            folders: planned,
+            home: self.home.clone(),
+        };
+        self.build_output.spawn(move || {
+            let moved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_move(&job)))
+                .unwrap_or_else(|_| Moved::Kept("the move panicked".into()));
+            Finished::Moved(job, moved)
+        });
+        Ok(())
+    }
+    /// Lets the deletes of what moved start and drops those of what stayed. A reclaim that moved
+    /// something is recorded and told to the ticket's project; a removed ticket's cleanup that
+    /// ran is done, and one kept waits for the next start.
+    fn finish_move_aside(&mut self, job: Move, moved: Moved, at: i64) -> Result<()> {
+        let id = &job.ticket;
+        match job.purpose {
+            Purpose::Reclaim(_) => self.build_output.inspecting.remove(id),
+            Purpose::Outside => self.build_output.cleaning.remove(id),
+        };
+        let (moved, stuck) = match moved {
+            Moved::Done(moved) => (moved, vec![]),
+            Moved::Kept(reason) => {
+                eprintln!("Move build output of {id} aside: kept, {reason}");
+                (vec![], vec![])
+            }
+            Moved::PutBack(reason, stuck) => {
+                eprintln!("Move build output of {id} aside: moved back, {reason}");
+                (vec![], stuck)
+            }
+        };
+        for (_, aside, _) in &job.folders {
+            let waits = moved.iter().any(|(path, _)| path == aside) || stuck.contains(aside);
+            match waits {
+                true => self.release_deletion(aside)?,
+                false => self.forget_worktree_deletion(aside)?,
+            }
         }
+        let freed: u64 = moved.iter().map(|(_, size)| size).sum();
+        match job.purpose {
+            Purpose::Outside if !moved.is_empty() || job.folders.is_empty() => {
+                self.forget_outside_cleanup(id)
+            }
+            Purpose::Reclaim(why) if freed > 0 => self.record_reclaim(id, why, freed, at),
+            _ => Ok(()),
+        }
+    }
+    fn record_reclaim(&mut self, id: &str, why: Why, freed: u64, at: i64) -> Result<()> {
+        let ticket = self.ticket(id)?;
         self.db.execute(
             "INSERT INTO build_output_reclaims VALUES (?1,?2,?3)
              ON CONFLICT(ticket_id) DO UPDATE SET reclaimed_at=excluded.reclaimed_at,bytes=excluded.bytes",
@@ -787,9 +973,12 @@ impl Host {
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
         for (ticket, worktree) in recorded {
-            if !self.build_output.cleaning.insert(ticket.clone()) {
+            if self.build_output.cleaning.contains(&ticket)
+                || !self.outside_cleanup_applies(&ticket)?
+            {
                 continue;
             }
+            self.build_output.cleaning.insert(ticket.clone());
             let (scratch, root) = (
                 self.scratch_folder(&ticket),
                 self.build_output.derived_data.clone(),
@@ -797,28 +986,38 @@ impl Host {
             self.build_output.spawn(move || {
                 let found =
                     root.map(|root| build_output::derived_data(Path::new(&worktree), &root));
-                let mut folders: Vec<PathBuf> = (found.into_iter().flat_map(|output| output.found))
-                    .map(|f| f.path)
-                    .collect();
+                let mut folders: Vec<(PathBuf, u64)> =
+                    (found.into_iter().flat_map(|output| output.found))
+                        .map(|f| (f.path, f.size))
+                        .collect();
                 if is_real_folder(&scratch) {
-                    folders.push(scratch);
+                    folders.push((scratch, 0));
                 }
                 Finished::Outside(ticket, folders)
             });
         }
         Ok(())
     }
-    /// Deletes a removed ticket's folders outside its worktree, each waiting beside itself.
-    fn delete_outside(&mut self, ticket: &str, folders: Vec<PathBuf>) -> Result<()> {
-        for folder in folders {
-            let Some(beside) = folder.parent() else {
-                continue;
-            };
-            if let Err(error) = self.delete_durably(&folder, beside, ticket) {
-                eprintln!("Delete {} of {ticket}: {error:#}", folder.display());
-            }
+    /// Whether a recorded cleanup is still for a removed worktree. One whose worktree is back
+    /// at its path, as a restore puts it, is dropped: its build output is the ticket's again.
+    /// One with an agent of the ticket in a turn waits for the next start.
+    fn outside_cleanup_applies(&mut self, id: &str) -> Result<bool> {
+        let ticket = self.ticket(id)?;
+        if fs::symlink_metadata(&ticket.worktree).is_ok() {
+            self.forget_outside_cleanup(id)?;
+            return Ok(false);
         }
-        self.forget_outside_cleanup(ticket)
+        Ok(!self.building(&ticket)?)
+    }
+    /// Moves aside a removed ticket's folders outside its worktree, each beside itself, once the
+    /// cleanup is looked at again on the host thread.
+    fn move_outside(&mut self, id: &str, folders: Vec<(PathBuf, u64)>) -> Result<()> {
+        if !self.outside_cleanup_applies(id)? {
+            self.build_output.cleaning.remove(id);
+            return Ok(());
+        }
+        let ticket = self.ticket(id)?;
+        self.move_aside(&ticket, Purpose::Outside, folders)
     }
 }
 
@@ -1267,7 +1466,7 @@ mod tests {
     }
 
     #[test]
-    fn build_output_a_process_starts_using_while_it_is_moved_is_moved_back() {
+    fn build_output_a_process_starts_using_after_its_scan_stays() {
         let mut f = Fixture::new();
         let ticket = f.ticket("Toolbar", 4096);
         let target = Path::new(&ticket.worktree).join("target");
@@ -1288,6 +1487,53 @@ mod tests {
         assert!(target.join("debug/app").exists());
         assert_eq!(f.host.pending_deletes().unwrap(), []);
         assert!(f.notices().is_empty());
+    }
+
+    #[test]
+    fn a_build_the_gate_admitted_in_the_worktree_keeps_its_build_output() {
+        let mut f = Fixture::new();
+        let ticket = f.ticket("Toolbar", 4096);
+        // A Cargo build working in the worktree, not in `target/`, holding a gate slot.
+        let mut build = std::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(&ticket.worktree)
+            .spawn()
+            .unwrap();
+        let held = f.host.home.join("build-gate/held");
+        fs::create_dir_all(&held).unwrap();
+        fs::write(held.join(build.id().to_string()), "cargo test").unwrap();
+
+        f.host.reclaim_build_output(Some(&ticket.id)).unwrap();
+        f.settle(now());
+        build.kill().unwrap();
+        build.wait().unwrap();
+
+        assert!(f.has_build_output(&ticket));
+        assert!(f.host.scratch_folder(&ticket.id).exists());
+        assert_eq!(f.host.pending_deletes().unwrap(), []);
+        assert!(f.notices().is_empty());
+    }
+
+    #[test]
+    fn a_cleanup_whose_worktree_is_back_is_dropped_and_moves_nothing() {
+        let mut f = Fixture::new();
+        let ticket = f.ticket("Toolbar", 0);
+        let worktree = Path::new(&ticket.worktree);
+        let derived = f.derived_data("App-a1", &worktree.join("App.xcworkspace"));
+        let scratch = f.host.scratch_folder(&ticket.id);
+        // A removal recorded its cleanup and was cut off, then a restore re-created the
+        // worktree, as if the worktree had been back at its path all along.
+        f.host.record_outside_cleanup(&ticket).unwrap();
+
+        f.reopen();
+        f.settle(now());
+
+        assert!(derived.exists() && scratch.exists());
+        assert_eq!(f.host.pending_deletes().unwrap(), []);
+        let recorded: i64 = (f.host.db)
+            .query_row("SELECT COUNT(*) FROM outside_cleanups", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 0);
     }
 
     #[test]

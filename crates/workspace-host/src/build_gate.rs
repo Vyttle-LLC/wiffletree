@@ -351,6 +351,15 @@ impl State {
     }
 }
 
+/// The builds holding or waiting for a slot of `data`'s gate, by process id. Some may have ended.
+pub(crate) fn gated_builds(data: &Path) -> Vec<u32> {
+    ["held", "waiting"]
+        .iter()
+        .flat_map(|part| entries(&data.join(STATE).join(part)).unwrap_or_default())
+        .map(|(build, _)| build)
+        .collect()
+}
+
 /// The files in `folder` named by a process id.
 fn entries(folder: &Path) -> io::Result<Vec<(u32, PathBuf)>> {
     let mut entries = vec![];
