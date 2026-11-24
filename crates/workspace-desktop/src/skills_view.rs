@@ -134,13 +134,13 @@ fn about(skill: Skill) -> About {
             decides: &["How to resolve a conflict", "How to fix failed checks"],
         },
         Skill::Assisting => About {
-            roles: "Assistant threads",
-            gets: "Assistant threads get",
+            roles: "The Assistant's conversation, issue threads and loop runs",
+            gets: "The Assistant, its issue threads and loop runs get",
             enforced: &[
-                "Read-only, plus their own scratch folder, held by the provider",
-                "Only their Space's sources, and no coordination tool",
-                "Space instructions cannot widen a thread's authority",
-                "Code work goes through Make this a project, which you confirm",
+                "Sources offered for their read tools only; an act waits for your Run on its card unless you chose Do without asking",
+                "A turn that read text others wrote changes nothing until you apply its card",
+                "Issue threads and loop runs are read-only, plus their scratch folder, held by the provider",
+                "Space instructions cannot widen what a turn may do",
             ],
             decides: &[
                 "How long an answer is",
