@@ -259,7 +259,8 @@ pub(crate) fn delete_line(delete: &PendingDelete) -> String {
 pub(crate) enum DiskCard {
     /// Free space is under the hard floor, so builds wait.
     BuildsHeld,
-    /// A folder could not be deleted; the name of the folder, perhaps shortened.
+    /// A folder could not be deleted; the folder's name. A name the host shortened matches no
+    /// waiting folder, so its card offers only Dismiss.
     DeleteFailed(String),
 }
 impl DiskCard {
@@ -277,7 +278,7 @@ impl DiskCard {
 fn failing_delete<'a>(disk: &'a DiskUse, name: &str) -> Option<&'a PendingDelete> {
     (disk.deletes.iter()).find(|delete| {
         let folder = std::path::Path::new(&delete.path).file_name();
-        folder.is_some_and(|folder| folder.to_string_lossy().starts_with(name))
+        folder.is_some_and(|folder| folder.to_string_lossy() == name)
     })
 }
 
@@ -458,19 +459,21 @@ mod tests {
         let held = DiskCard::of("builds-held:17").unwrap();
         assert_eq!(held, DiskCard::BuildsHeld);
         assert_eq!(card_actions(&held, None, true), [OpenSettings, ReclaimAll]);
-        let failed = DiskCard::of("worktree-delete-failed:17:.removing-cf62").unwrap();
-        assert_eq!(failed, DiskCard::DeleteFailed(".removing-cf62".into()));
+        let failed = DiskCard::of("worktree-delete-failed:17:.removing-t").unwrap();
+        assert_eq!(failed, DiskCard::DeleteFailed(".removing-t".into()));
         assert_eq!(DiskCard::of("permission:1"), None);
-        let folder = "/w/tasks/p/r/.removing-cf6255af".to_owned();
+        let pending = |path: &str| PendingDelete {
+            path: path.into(),
+            ticket_id: None,
+            attempts: 4,
+            last_error: Some("Permission denied".into()),
+            next_attempt_at: 0,
+            failing: true,
+        };
+        // An older reclaim of the same ticket waits first, under a longer name.
+        let folder = "/w/tasks/p/r/.removing-t".to_owned();
         let disk = DiskUse {
-            deletes: vec![PendingDelete {
-                path: folder.clone(),
-                ticket_id: None,
-                attempts: 4,
-                last_error: Some("Permission denied".into()),
-                next_attempt_at: 0,
-                failing: true,
-            }],
+            deletes: vec![pending("/w/tasks/p/r/.removing-t-16-0"), pending(&folder)],
             ..DiskUse::default()
         };
         assert_eq!(

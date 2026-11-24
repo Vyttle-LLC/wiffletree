@@ -942,12 +942,13 @@ impl Host {
             let reclaim = reclaims.get(&ticket.id).copied();
             let deleting = (deletes.iter()).filter(|d| d.ticket_id.as_deref() == Some(&ticket.id));
             let failing = deleting.clone().any(|d| d.failing);
-            let state = if failing {
+            // A turn comes first: an older delete still waiting never makes the ticket idle.
+            let state = if self.building(&ticket)? {
+                TicketDiskState::Building
+            } else if failing {
                 TicketDiskState::FailingToDelete
             } else if deleting.count() > 0 || self.build_output.inspecting.contains(&ticket.id) {
                 TicketDiskState::Reclaiming
-            } else if self.building(&ticket)? {
-                TicketDiskState::Building
             } else if reclaim.is_some_and(|(r, _)| last_turn_at.is_none_or(|t| r >= t)) {
                 TicketDiskState::Reclaimed
             } else {
@@ -1343,6 +1344,19 @@ mod tests {
         let disk = f.host.disk_use().unwrap();
         let row = disk.tickets.iter().find(|t| t.ticket_id == building.id);
         assert_eq!(row.unwrap().state, TicketDiskState::Building);
+        // An earlier reclaim's delete that keeps failing does not hide the turn.
+        let worktree = Path::new(&building.worktree);
+        let aside = (worktree.parent().unwrap()).join(format!(".removing-{}-1-0", building.id));
+        f.host
+            .record_worktree_deletion(&aside, Some(&building.id))
+            .unwrap();
+        (f.host.db)
+            .execute("UPDATE worktree_deletions SET reported_at=1", [])
+            .unwrap();
+        let disk = f.host.disk_use().unwrap();
+        let row = disk.tickets.iter().find(|t| t.ticket_id == building.id);
+        assert_eq!(row.unwrap().state, TicketDiskState::Building);
+        f.host.forget_worktree_deletion(&aside).unwrap();
 
         holder.kill().unwrap();
         holder.wait().unwrap();
