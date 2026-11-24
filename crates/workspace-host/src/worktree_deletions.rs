@@ -1,13 +1,16 @@
-//! A removed worktree waits, renamed to `.removing-<ticket id>` beside where it was, until its
-//! folder is deleted. Each such folder is recorded before it is renamed, so a host that stops
-//! partway through a delete resumes it at its next start. A failed delete is retried with
-//! backoff while the host runs and again at every start, and after repeated failures the ticket's
-//! owner, or the human's inbox when no ticket names the folder, is told once which folder failed,
-//! why and how big it is. A record is cleared only once its folder is proven gone. Only folders
-//! named with the `.removing-` prefix are ever deleted. A folder still used by a process, as its
-//! working directory or through an open file, is not deleted, since its open files would keep
-//! their space: the ticket's recorded processes are stopped, and any other holder is named in the
-//! failure and waited out, never signalled.
+//! Durable deletes. A folder to delete is first recorded, then renamed aside to
+//! `.removing-<ticket id>[-<time>[-<n>]]` on the same filesystem, and deleted off the host thread.
+//! A removed worktree waits beside where it was; reclaimed build output waits beside its
+//! worktree, never inside it, and Xcode's DerivedData folders and scratch folders wait beside
+//! themselves. Because each folder is recorded before it is renamed, a host that stops partway
+//! through a delete resumes it at its next start. A failed delete is retried with backoff while
+//! the host runs and again at every start, and after repeated failures the human's inbox is told
+//! once which folder failed, why and how big it is. A record is cleared only once its folder is
+//! proven gone. Only folders named with the `.removing-` prefix are ever deleted. A folder still
+//! used by a process, as its working directory or through an open file, is not deleted, since
+//! its open files would keep their space: the ticket's recorded processes are stopped once its
+//! worktree is removed, and any other holder is named in the failure and waited out, never
+//! signalled.
 use crate::*;
 use std::{
     collections::HashSet,
@@ -15,10 +18,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// The name a removed worktree's folder takes, followed by its ticket's id.
+/// The name a folder waiting to be deleted takes, followed by its ticket's id.
 pub(crate) const REMOVING_PREFIX: &str = ".removing-";
-/// Failed attempts after which the ticket's owner is told.
-pub(crate) const REPORT_AFTER: i64 = 3;
+/// Failed attempts after which the human is told.
+const REPORT_AFTER: i64 = 3;
+/// The inbox operation of a delete's failure notice, followed by what tells it apart.
+const FAILED_NOTICE: &str = "worktree-delete-failed:";
+/// The next attempt of a held delete; see `hold_deletion`.
+const HELD: i64 = i64::MAX;
 /// The wait after the first failed attempt; it doubles with each further one.
 const FIRST_RETRY_MS: i64 = 15_000;
 const LONGEST_RETRY_MS: i64 = 10 * 60_000;
@@ -75,15 +82,16 @@ fn is_gone(path: &Path) -> bool {
     fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
 }
 
-/// Whether `path` is `folder` or inside it; both canonical.
-fn within(path: &Path, folder: &Path) -> bool {
-    path.starts_with(folder)
+/// Whether `path` is one of `folders` or inside one; all canonical.
+fn within(path: &Path, folders: &[PathBuf]) -> bool {
+    folders.iter().any(|folder| path.starts_with(folder))
 }
 
-/// This user's processes whose working directory or an open file is inside `folder`, each as
-/// "pid (command)". Deleting under them would leave their open files' space allocated.
+/// This user's processes whose working directory or an open file is inside one of `folders`,
+/// each as "pid (command)". Deleting under them would leave their open files' space allocated,
+/// and moving a folder from under a build would break it. The folders must be canonical.
 #[cfg(target_os = "macos")]
-fn holders(folder: &Path) -> Result<Vec<String>, String> {
+pub(crate) fn holders(folders: &[PathBuf]) -> Result<Vec<String>, String> {
     // SAFETY: getuid cannot fail.
     let uid = unsafe { libc::getuid() }.to_string();
     let listed = std::process::Command::new("lsof")
@@ -96,7 +104,7 @@ fn holders(folder: &Path) -> Result<Vec<String>, String> {
         match line.split_at_checked(1) {
             Some(("p", value)) => (pid, command) = (value.to_owned(), String::new()),
             Some(("c", value)) => command = value.to_owned(),
-            Some(("n", name)) if within(Path::new(name), folder) => {
+            Some(("n", name)) if within(Path::new(name), folders) => {
                 let holder = format!("{pid} ({command})");
                 if !holders.contains(&holder) {
                     holders.push(holder);
@@ -108,7 +116,7 @@ fn holders(folder: &Path) -> Result<Vec<String>, String> {
     Ok(holders)
 }
 #[cfg(not(target_os = "macos"))]
-fn holders(folder: &Path) -> Result<Vec<String>, String> {
+pub(crate) fn holders(folders: &[PathBuf]) -> Result<Vec<String>, String> {
     let mut holders = vec![];
     for process in fs::read_dir("/proc").map_err(|e| e.to_string())?.flatten() {
         let pid = process.file_name().to_string_lossy().into_owned();
@@ -124,7 +132,7 @@ fn holders(folder: &Path) -> Result<Vec<String>, String> {
         if fs::read_link(proc.join("cwd"))
             .into_iter()
             .chain(open)
-            .any(|path| within(&path, folder))
+            .any(|path| within(&path, folders))
         {
             let command = fs::read_to_string(proc.join("comm")).unwrap_or_default();
             holders.push(format!("{pid} ({})", command.trim()));
@@ -136,7 +144,7 @@ fn holders(folder: &Path) -> Result<Vec<String>, String> {
 /// Deletes the folder unless a process still uses it.
 fn attempt(folder: &Path) -> Result<(), String> {
     let canonical = fs::canonicalize(folder).map_err(|e| e.to_string())?;
-    let holders = holders(&canonical)?;
+    let holders = holders(&[canonical])?;
     if !holders.is_empty() {
         return Err(format!(
             "processes still use files in it: {}",
@@ -154,7 +162,7 @@ fn attempt(folder: &Path) -> Result<(), String> {
 }
 
 /// Bytes allocated on disk to everything under `path`, as far as it can be read.
-fn allocated_size(path: &Path) -> u64 {
+pub(crate) fn allocated_size(path: &Path) -> u64 {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return 0;
     };
@@ -166,12 +174,12 @@ fn allocated_size(path: &Path) -> u64 {
     own + entries.map(|e| allocated_size(&e.path())).sum::<u64>()
 }
 
-fn size_label(bytes: u64) -> String {
-    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
-    const MB: f64 = 1024.0 * 1024.0;
+/// A size as macOS shows it, in decimal gigabytes or megabytes.
+pub(crate) fn size_label(bytes: u64) -> String {
+    let (gb, mb) = (workspace_core::GB as f64, 1_000_000.0);
     match bytes as f64 {
-        b if b >= GB => format!("{:.1} GB", b / GB),
-        b => format!("{:.1} MB", b / MB),
+        b if b >= gb => format!("{:.1} GB", b / gb),
+        b => format!("{:.1} MB", b / mb),
     }
 }
 
@@ -218,6 +226,63 @@ impl Host {
         self.worktree_deletions.due_at = 0;
         Ok(())
     }
+    /// Records the delete of a folder of `ticket` that is to be renamed into `beside`, which
+    /// must be on its filesystem and outside any worktree it should leave clean, and returns
+    /// where it is to wait. The delete is held, so nothing deletes or forgets it while the
+    /// rename happens off the host thread, until `release_deletion`, or `forget_worktree_deletion`
+    /// if it never moved. A start releases every held delete, and drops one whose folder never
+    /// moved as gone.
+    pub(crate) fn hold_deletion(&mut self, beside: &Path, ticket: &str) -> Result<PathBuf> {
+        // Neither on disk nor held for a folder still to move there.
+        let at = now();
+        let mut names = (0..).map(|n| beside.join(format!("{REMOVING_PREFIX}{ticket}-{at}-{n}")));
+        let aside = loop {
+            let name = names.next().expect("an unused name exists");
+            let recorded: bool = self.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM worktree_deletions WHERE path=?1)",
+                [name.to_string_lossy()],
+                |r| r.get(0),
+            )?;
+            if !recorded && fs::symlink_metadata(&name).is_err() {
+                break name;
+            }
+        };
+        self.record_worktree_deletion(&aside, Some(ticket))?;
+        self.db.execute(
+            "UPDATE worktree_deletions SET next_attempt_at=?2 WHERE path=?1",
+            params![aside.to_string_lossy(), HELD],
+        )?;
+        Ok(aside)
+    }
+    /// Lets a held delete start now.
+    pub(crate) fn release_deletion(&mut self, folder: &Path) -> Result<()> {
+        self.db.execute(
+            "UPDATE worktree_deletions SET next_attempt_at=?2 WHERE path=?1",
+            params![folder.to_string_lossy(), now()],
+        )?;
+        self.worktree_deletions.due_at = 0;
+        Ok(())
+    }
+    /// The folders waiting to be deleted, oldest first.
+    pub(crate) fn pending_deletes(&self) -> Result<Vec<PendingDelete>> {
+        Ok(self
+            .db
+            .prepare(
+                "SELECT path,ticket_id,attempts,last_error,next_attempt_at,reported_at IS NOT NULL
+                 FROM worktree_deletions ORDER BY recorded_at",
+            )?
+            .query_map([], |r| {
+                Ok(PendingDelete {
+                    path: r.get(0)?,
+                    ticket_id: r.get(1)?,
+                    attempts: r.get(2)?,
+                    last_error: r.get(3)?,
+                    next_attempt_at: r.get(4)?,
+                    failing: r.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
     /// Drops the record of a folder a removal put back or never moved.
     pub(crate) fn forget_worktree_deletion(&self, folder: &Path) -> Result<()> {
         self.db.execute(
@@ -260,12 +325,13 @@ impl Host {
                 if !is_removal_folder(&path) || !folder {
                     continue;
                 }
-                // `<ticket id>`, or `<ticket id>-<time>` beside an earlier removal's folder.
+                // `<ticket id>`, or that followed by `-<time>` or `-<time>-<n>`.
                 let name = entry.file_name().to_string_lossy()[REMOVING_PREFIX.len()..].to_owned();
-                let untimed = name.rsplit_once('-').map(|(id, _)| id.to_owned());
-                let ticket = std::iter::once(name)
-                    .chain(untimed)
-                    .find(|id| self.ticket(id).is_ok());
+                let shortened = name.match_indices('-').map(|(end, _)| &name[..end]);
+                let ticket = std::iter::once(name.as_str())
+                    .chain(shortened.rev())
+                    .find(|id| self.ticket(id).is_ok())
+                    .map(str::to_owned);
                 self.record_worktree_deletion(&path, ticket.as_deref())?;
             }
         }
@@ -312,7 +378,11 @@ impl Host {
         at: i64,
     ) -> Result<()> {
         let Err((error, size)) = outcome else {
-            return self.forget_worktree_deletion(folder);
+            // A folder back at the path since the delete is left recorded, and due again.
+            if is_gone(folder) {
+                self.forget_worktree_deletion(folder)?;
+            }
+            return Ok(());
         };
         let path = folder.to_string_lossy();
         let (ticket, recorded_at, attempts, reported): (Option<String>, i64, i64, bool) =
@@ -326,44 +396,65 @@ impl Host {
             "UPDATE worktree_deletions SET attempts=?2,last_error=?3,next_attempt_at=?4 WHERE path=?1",
             params![path, attempts, error, at + backoff(attempts)],
         )?;
-        eprintln!(
-            "Delete removed worktree {} (attempt {attempts}): {error}",
-            folder.display()
-        );
+        eprintln!("Delete {} (attempt {attempts}): {error}", folder.display());
         if attempts < REPORT_AFTER || reported {
             return Ok(());
         }
         let notice = format!(
-            "Wiffletree could not delete the removed worktree folder {} ({}) after {attempts} attempts: {error}. It keeps retrying, and at every start. Deleting the folder yourself frees the space.",
+            "Wiffletree could not delete the folder {} ({}) after {attempts} attempts: {error}. It keeps retrying, and at every start. Deleting the folder yourself frees the space.",
             folder.display(),
             size_label(size)
         );
-        match ticket.and_then(|id| self.ticket(&id).ok()) {
-            Some(ticket) => {
-                let id = format!("worktree-delete-failed:{}:{recorded_at}", ticket.id);
-                self.notify_ticket_owner(&ticket, &id, &notice)?;
-            }
-            None => {
-                // No ticket names the folder, so the human's inbox, under the newest project's
-                // orchestrator, is told instead.
-                let orchestrator =
-                    (self.sessions()?.into_iter()).rfind(|s| s.parent_id.is_none() && !s.archived);
-                let Some(orchestrator) = orchestrator else {
-                    eprintln!("{notice}");
-                    return Ok(());
-                };
-                let name = folder.file_name().unwrap_or_default().to_string_lossy();
-                let name = &name[..steps::floor_boundary(&name, name.len().min(80))];
-                let id = format!("worktree-delete-failed:{recorded_at}:{name}");
-                let notice = &notice[..steps::floor_boundary(&notice, notice.len().min(4096))];
-                self.request_attention(&orchestrator.id, "local", &id, notice, &[])?;
-            }
+        let name = folder.file_name().unwrap_or_default().to_string_lossy();
+        let name = &name[..steps::floor_boundary(&name, name.len().min(80))];
+        let id = format!("{FAILED_NOTICE}{recorded_at}:{name}");
+        let project = ticket
+            .and_then(|id| self.ticket(&id).ok())
+            .and_then(|ticket| self.session(&ticket.coordinator_id).ok())
+            .map(|coordinator| coordinator.project_id);
+        if !self.tell_inbox(project.as_deref(), &id, &notice)? {
+            // The disk use read still lists the failing delete.
+            eprintln!("{notice}");
+            return Ok(());
         }
         self.db.execute(
             "UPDATE worktree_deletions SET reported_at=?2 WHERE path=?1",
             params![path, at],
         )?;
         Ok(())
+    }
+    /// The session whose inbox tells the human about this machine: `project`'s main
+    /// coordinator while it is unarchived, else the newest unarchived main coordinator of any
+    /// project. `None` when there is no such coordinator.
+    pub(crate) fn inbox_session(&self, project: Option<&str>) -> Result<Option<Session>> {
+        let coordinators: Vec<Session> = (self.sessions()?.into_iter())
+            .filter(|s| {
+                s.parent_id.is_none()
+                    && s.role == Role::ProjectOrchestrator
+                    && !s.archived
+                    && self.project(&s.project_id).is_ok()
+            })
+            .collect();
+        let own = coordinators
+            .iter()
+            .find(|s| Some(s.project_id.as_str()) == project);
+        Ok(own.or(coordinators.last()).cloned())
+    }
+    /// Raises `notice` in the inbox of `inbox_session(project)` under `operation`. Returns
+    /// whether there was an inbox to tell.
+    pub(crate) fn tell_inbox(
+        &mut self,
+        project: Option<&str>,
+        operation: &str,
+        notice: &str,
+    ) -> Result<bool> {
+        let Some(session) = self.inbox_session(project)? else {
+            return Ok(false);
+        };
+        // Attention prompts allow 4096 bytes; cut on a character boundary within that.
+        let notice = &notice[..steps::floor_boundary(notice, notice.len().min(4096))];
+        self.request_attention(&session.id, "local", operation, notice, &[])?;
+        Ok(true)
     }
     /// Starts each recorded delete due at `at` that is not already running, and returns when
     /// the earliest of the rest comes due.
@@ -376,7 +467,7 @@ impl Host {
         let mut due = None::<i64>;
         for (path, ticket, next) in recorded {
             let folder = PathBuf::from(path);
-            if self.worktree_deletions.folders.contains(&folder) {
+            if self.worktree_deletions.folders.contains(&folder) || next == HELD {
                 continue;
             }
             if is_gone(&folder) {
@@ -409,13 +500,7 @@ impl Host {
         if Path::new(&ticket.worktree).exists() {
             return Ok(());
         }
-        let in_turn: bool = self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM provider_runs r JOIN runtimes t ON t.session_id=r.session_id
-             WHERE json_extract(t.data,'$.ticket_id')=?1 AND r.finished_at IS NULL)",
-            [ticket_id],
-            |r| r.get(0),
-        )?;
-        if in_turn {
+        if self.ticket_run_open(ticket_id)? {
             return Ok(());
         }
         let agents: Vec<String> = self
@@ -458,6 +543,94 @@ mod tests {
         }
         host.record_worktree_deletion(Path::new("/work/web/.removing-1"), None)
             .unwrap();
+    }
+
+    /// What a removal leaves behind: a ticket whose agent's finished run recorded a process
+    /// group, standing in for a build that outlived its turn.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_removed_worktrees_processes_are_stopped_only_with_no_worktree_back_and_no_turn() {
+        use crate::test_support::git;
+        use std::os::unix::process::CommandExt;
+        let folder = tempfile::tempdir().unwrap();
+        let main = folder.path().join("web");
+        fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q", "-b", "main"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "start"]);
+        let mut host = Host::open_set_up(folder.path().join("home")).unwrap();
+        host.set_workspaces_dir(folder.path().join("w").to_str().unwrap())
+            .unwrap();
+        let project = host.create_project("Stops").unwrap();
+        let coordinator = host.sessions().unwrap().remove(0).id;
+        let repository = (host.attach_repository(&project.id, main.to_str().unwrap(), "HEAD"))
+            .unwrap()
+            .id;
+        let ticket = host
+            .create_ticket(&coordinator, &repository, "Toolbar", "Do")
+            .unwrap();
+        let agent = host
+            .assign_ticket(&ticket.id, Role::Implementer, Provider::Claude, "Do", None)
+            .unwrap();
+        let run = |host: &Host, id: &str, finished: Option<i64>| {
+            host.db.execute(
+                "INSERT OR REPLACE INTO provider_runs(id,session_id,messages,started_at,finished_at,detail) VALUES (?1,?2,'[]',1,?3,'{}')",
+                params![id, agent.id, finished],
+            )
+            .unwrap();
+        };
+        run(&host, "earlier", Some(2));
+        let mut build = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let seen = processes::read(build.id() as i32).unwrap();
+        host.record_sightings(&agent.id, "earlier", &[processes::Sighting::Member(seen)])
+            .unwrap();
+        let running = |build: &mut std::process::Child| build.try_wait().unwrap().is_none();
+
+        host.stop_processes_in_removed_worktree(&ticket.id).unwrap();
+        assert!(running(&mut build), "the worktree is still there");
+        fs::rename(&ticket.worktree, folder.path().join("aside")).unwrap();
+        run(&host, "current", None);
+        host.stop_processes_in_removed_worktree(&ticket.id).unwrap();
+        assert!(running(&mut build), "an agent of the ticket is in a turn");
+        run(&host, "current", Some(3));
+        host.stop_processes_in_removed_worktree(&ticket.id).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while running(&mut build) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let stopped = !running(&mut build);
+        let _ = build.kill();
+        assert!(stopped);
+    }
+
+    #[test]
+    fn the_inbox_told_is_an_unarchived_project_coordinators() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let first = host.create_project("First").unwrap().id;
+        let second = host.create_project("Second").unwrap().id;
+        let coordinator = |host: &Host, project: &str| host.coordinator_of(project).unwrap();
+        let told = |host: &Host, project: Option<&str>| {
+            (host.inbox_session(project).unwrap()).map(|s| s.project_id)
+        };
+        assert_eq!(told(&host, Some(&first)), Some(first.clone()));
+        assert_eq!(told(&host, None), Some(second.clone()));
+        let archive = |host: &Host, project: &str| {
+            host.db
+                .execute(
+                    "UPDATE sessions SET data=json_set(data,'$.archived',json('true')) WHERE id=?1",
+                    [coordinator(host, project)],
+                )
+                .unwrap();
+        };
+        archive(&host, &first);
+        assert_eq!(told(&host, Some(&first)), Some(second.clone()));
+        archive(&host, &second);
+        assert_eq!(told(&host, Some(&first)), None);
+        assert!(!host.tell_inbox(None, "notice:1", "Nobody to tell").unwrap());
     }
 
     #[test]

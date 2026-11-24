@@ -39,6 +39,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::Activity { .. }
         | Command::GitHistory { .. }
         | Command::Settings
+        | Command::DiskUse
         | Command::CheckSettingsRepository { .. }
         | Command::CheckStorageRepository { .. }
         | Command::CheckStorageMove { .. }
@@ -190,6 +191,8 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::SetWorkspacesDir { .. }
         | Command::SetVerification { .. }
         | Command::SetBuildsAtOnce { .. }
+        | Command::SetDiskSettings { .. }
+        | Command::ReclaimBuildOutput { .. }
         | Command::SetCheckIns { .. }
         | Command::SetOwnerAllowed { .. }
         | Command::SetKeeper { .. }

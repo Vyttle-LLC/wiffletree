@@ -1350,6 +1350,10 @@ pub struct HostSettings {
     /// machine; the rest wait. Kept on this machine only.
     #[serde(default = "default_builds_at_once")]
     pub builds_at_once: usize,
+    /// When build output is reclaimed and when builds wait for disk space. Kept on this machine
+    /// only; the build gate reads `hard_floor_gb` from the file.
+    #[serde(default)]
+    pub disk: DiskSettings,
     /// The assistant's name. Shared: read from `settings/assistant.json`.
     #[serde(default = "assistant_name")]
     pub assistant_name: String,
@@ -1575,6 +1579,7 @@ impl HostSettings {
             settings_repository: None,
             remote_access: false,
             builds_at_once: DEFAULT_BUILDS_AT_ONCE,
+            disk: DiskSettings::default(),
             assistant_name: assistant_name(),
         }
     }
@@ -1593,6 +1598,142 @@ impl HostSettings {
         );
         Ok(())
     }
+}
+
+/// Bytes in the gigabyte the disk settings count in, as macOS shows sizes.
+pub const GB: u64 = 1_000_000_000;
+
+/// When build output is reclaimed and when builds wait for disk space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DiskSettings {
+    /// The build output allowed across every ticket. Over it, the least recently used idle
+    /// tickets' build output is reclaimed until the total is under it.
+    pub budget_gb: u32,
+    /// A ticket with no agent turn for this long has its build output reclaimed.
+    pub idle_hours: u32,
+    /// Below this much free space, idle build output is reclaimed before builds and turns.
+    pub soft_floor_gb: u32,
+    /// Below this much free space, new builds wait.
+    pub hard_floor_gb: u32,
+}
+impl Default for DiskSettings {
+    fn default() -> Self {
+        Self {
+            budget_gb: 100,
+            idle_hours: 24,
+            soft_floor_gb: 25,
+            hard_floor_gb: 5,
+        }
+    }
+}
+/// The longest idle time the settings accept: 30 days.
+pub const MAX_IDLE_HOURS: u32 = 30 * 24;
+impl DiskSettings {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.budget_gb >= 1,
+            "The build output budget must be at least 1 GB"
+        );
+        ensure!(
+            (1..=MAX_IDLE_HOURS).contains(&self.idle_hours),
+            "Reclaim when idle for 1–{MAX_IDLE_HOURS} hours"
+        );
+        ensure!(
+            self.hard_floor_gb >= 1,
+            "The hard floor must be at least 1 GB"
+        );
+        ensure!(
+            self.soft_floor_gb > self.hard_floor_gb,
+            "The soft floor must be above the hard floor"
+        );
+        Ok(())
+    }
+    pub fn budget(&self) -> u64 {
+        u64::from(self.budget_gb) * GB
+    }
+    pub fn idle_ms(&self) -> i64 {
+        i64::from(self.idle_hours) * 60 * 60_000
+    }
+    pub fn soft_floor(&self) -> u64 {
+        u64::from(self.soft_floor_gb) * GB
+    }
+    pub fn hard_floor(&self) -> u64 {
+        u64::from(self.hard_floor_gb) * GB
+    }
+}
+
+/// Where this machine's disk space goes: each ticket's source and build output, the free space
+/// on the workspaces disk, and the deletes still waiting. Sizes are measured off the host
+/// thread, at most every few minutes; `measured_at` says when.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskUse {
+    /// Free and total bytes on the disk holding the workspaces folder.
+    pub free: u64,
+    pub total: u64,
+    /// Build output across every ticket, against `HostSettings::disk`'s budget.
+    pub build_output: u64,
+    pub source: u64,
+    /// `None` until the first measurement ends.
+    pub measured_at: Option<i64>,
+    /// Free space is under the hard floor, so new builds wait.
+    pub builds_held: bool,
+    pub tickets: Vec<TicketDiskUse>,
+    pub deletes: Vec<PendingDelete>,
+}
+/// One ticket's disk use, as last measured.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TicketDiskUse {
+    pub ticket_id: String,
+    pub project_id: String,
+    pub repository_id: String,
+    pub title: String,
+    /// The worktree, less its build output.
+    pub source: u64,
+    /// The sum of `parts`.
+    pub build_output: u64,
+    /// Each build output folder: in the worktree, Xcode's DerivedData, or the scratch folder.
+    pub parts: Vec<DiskPart>,
+    /// Folders that looked like build output but are left alone, each with why.
+    pub left_alone: Vec<DiskPart>,
+    /// When an agent of the ticket last started or ended a turn; `None` if none ever ran.
+    pub last_turn_at: Option<i64>,
+    pub state: TicketDiskState,
+    /// When its build output was last reclaimed, and how much that freed.
+    pub reclaimed_at: Option<i64>,
+    pub reclaimed: u64,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskPart {
+    pub path: String,
+    pub size: u64,
+    /// Why a folder is left alone; empty for build output.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TicketDiskState {
+    /// An agent of the ticket is in a turn: its build output is never touched.
+    Building,
+    Idle,
+    /// Its build output is moved aside and being deleted.
+    Reclaiming,
+    /// Its build output was reclaimed since its last turn.
+    Reclaimed,
+    /// A delete of its folders failed repeatedly; it keeps retrying.
+    FailingToDelete,
+}
+/// A folder moved aside to be deleted: a removed worktree, or reclaimed build output.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingDelete {
+    pub path: String,
+    pub ticket_id: Option<String>,
+    pub attempts: u32,
+    pub last_error: Option<String>,
+    pub next_attempt_at: i64,
+    /// It failed often enough that the human was told.
+    pub failing: bool,
 }
 
 /// The PR keeper's triggers and quiet period, one value for the whole workspace. Every trigger
@@ -4150,6 +4291,19 @@ pub enum Command {
     SetBuildsAtOnce {
         builds: usize,
     },
+    /// Validates and saves when build output is reclaimed and the free-space floors; answers
+    /// with `HostSettings`.
+    SetDiskSettings {
+        disk: DiskSettings,
+    },
+    /// Answered with `DiskUse`, from sizes measured at most a few minutes ago.
+    DiskUse,
+    /// Reclaims one ticket's build output now, or with no ticket every ticket's but those with
+    /// an agent in a turn, keeping their source. Answered with `DiskUse` once the reclaims are
+    /// started; each finishes off the host thread.
+    ReclaimBuildOutput {
+        ticket_id: Option<String>,
+    },
     /// Validates and saves both check-in thresholds; answers with `HostSettings`.
     SetCheckIns {
         child_turns: u32,
@@ -4461,6 +4615,7 @@ impl Command {
             | Self::Activity { .. }
             | Self::GitHistory { .. }
             | Self::Settings
+            | Self::DiskUse
             | Self::CheckSettingsRepository { .. }
             | Self::CheckStorageRepository { .. }
             | Self::SpaceFormDefaults
@@ -4610,6 +4765,8 @@ impl Command {
             | Self::SetWorkspacesDir { .. }
             | Self::SetVerification { .. }
             | Self::SetBuildsAtOnce { .. }
+            | Self::SetDiskSettings { .. }
+            | Self::ReclaimBuildOutput { .. }
             | Self::SetCheckIns { .. }
             | Self::SetOwnerAllowed { .. }
             | Self::SetKeeper { .. }

@@ -483,7 +483,10 @@ pub(crate) mod tests {
         prepare(&mut host);
         drop(host);
         let binary = std::env::current_exe().unwrap();
-        let service = Service::start(data.path().into(), binary.clone()).unwrap();
+        let disk = workspace_host::DiskRoots::isolated(data.path());
+        let service =
+            Service::start_with_disk(data.path().into(), binary.clone(), Default::default(), disk)
+                .unwrap();
         let credential = new_credential().unwrap();
         let options = socket::Options {
             credential: credential.clone(),
@@ -612,7 +615,8 @@ pub(crate) mod tests {
                 binary: binary.clone(),
                 ..Default::default()
             };
-            Service::start_with(data.into(), binary, options).unwrap()
+            let disk = workspace_host::DiskRoots::isolated(data);
+            Service::start_with_disk(data.into(), binary, options, disk).unwrap()
         }
         /// This device's bridge to the host, as the switcher keeps one.
         pub(crate) fn bridge(&self) -> Bridge {

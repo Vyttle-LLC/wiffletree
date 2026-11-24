@@ -262,9 +262,11 @@ fn a_timer_firing_while_no_turn_starts_still_tells_clients_to_refresh() {
     db.execute("UPDATE schedules SET next_fire_at=?1", [now() + 1_500])
         .unwrap();
     drop(db);
-    let service = Service::start(
+    let service = Service::start_with_disk(
         home.path().to_path_buf(),
         env!("CARGO_BIN_EXE_wiffletree-host").into(),
+        Default::default(),
+        workspace_host::DiskRoots::isolated(home.path()),
     )
     .unwrap();
     let changes = service.changes();

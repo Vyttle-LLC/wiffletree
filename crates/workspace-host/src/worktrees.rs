@@ -52,6 +52,11 @@ impl Host {
             "Cannot restore worktrees: {}",
             missing.join("; ")
         );
+        // No cleanup of a removed ticket moves anything while its worktree comes back.
+        let moving = self.build_output.moving.clone();
+        let _moving = moving
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         for ticket in tickets {
             let repository = self.ticket_repository(ticket)?;
             ensure_worktree(
@@ -61,6 +66,8 @@ impl Host {
                 None,
             )
             .with_context(|| format!("Restore \"{}\" ({})", ticket.title, ticket.id))?;
+            // Its build output outside the worktree belongs to it again.
+            self.forget_outside_cleanup(&ticket.id)?;
         }
         Ok(())
     }
@@ -198,12 +205,16 @@ impl Host {
     /// delete is recorded before the rename, so it resumes after a stop (see
     /// `worktree_deletions`). If Git fails, the folder is renamed back only when the worktree is
     /// as clean there as it was checked to be; otherwise the removal completes, losing nothing
-    /// because the folder was clean, and the next start prunes.
+    /// because the folder was clean, and the next start prunes. Its Xcode DerivedData folders
+    /// and its scratch folder are deleted too, by a cleanup recorded before the worktree moves
+    /// (see `reclaim`), including when an earlier removal already took the worktree.
     fn remove_worktree(&mut self, ticket: &Ticket) -> Result<bool> {
         let repository = self.ticket_repository(ticket)?;
         let repository = Path::new(&repository.path);
         let worktree = Path::new(&ticket.worktree);
+        self.outside_cleanups_due();
         if !worktree.exists() {
+            self.record_outside_cleanup(ticket)?;
             runtime::git_output(repository, &["worktree", "prune"])?;
             return Ok(false);
         }
@@ -211,6 +222,7 @@ impl Host {
         let aside = removal_folder(ticket);
         self.record_worktree_deletion(&aside, Some(&ticket.id))
             .with_context(context)?;
+        self.record_outside_cleanup(ticket)?;
         let moved = (|| -> Result<()> {
             fs::rename(worktree, &aside).with_context(context)?;
             let forgotten = runtime::git_output(repository, &["worktree", "prune"]);
@@ -226,6 +238,7 @@ impl Host {
         if let Err(error) = moved {
             if !aside.exists() {
                 self.forget_worktree_deletion(&aside)?;
+                self.forget_outside_cleanup(&ticket.id)?;
             }
             return Err(error);
         }
@@ -253,15 +266,13 @@ impl Host {
     /// host did not wait for and the next start could not confirm, or one it started itself.
     /// Archiving stops what an agent started before it asks, so only a group that could not be
     /// confirmed, or a recycled group id, keeps the worktree longer.
-    fn agent_in_turn(&self, ticket: &Ticket) -> Result<bool> {
-        let unfinished: bool = self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM provider_runs r JOIN runtimes t ON t.session_id=r.session_id
-             WHERE json_extract(t.data,'$.ticket_id')=?1 AND r.finished_at IS NULL)",
-            [&ticket.id],
-            |r| r.get(0),
-        )?;
+    pub(crate) fn agent_in_turn(&self, ticket: &Ticket) -> Result<bool> {
         let mut groups = self.ticket_process_groups(&ticket.id)?.into_iter();
-        Ok(unfinished || groups.any(process_group_exists))
+        Ok(self.ticket_run_open(&ticket.id)? || groups.any(process_group_exists))
+    }
+    /// Whether a provider run of an agent on the ticket has started and not finished.
+    pub(crate) fn ticket_run_open(&self, ticket: &str) -> Result<bool> {
+        Ok(ticket_run_open(&self.db, ticket)?)
     }
     /// Worktrees left by finished tickets, and Wiffletree-made worktrees no ticket records, each
     /// with the one class that says whether it may be removed. Changes nothing.
@@ -531,6 +542,16 @@ impl Host {
         self.request_attention(&ticket.coordinator_id, "local", id, notice, &[])?;
         Ok(())
     }
+}
+
+/// Whether a provider run of an agent on the ticket is open, as any connection to the store sees it.
+pub(crate) fn ticket_run_open(db: &Connection, ticket: &str) -> rusqlite::Result<bool> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM provider_runs r JOIN runtimes t ON t.session_id=r.session_id
+         WHERE json_extract(t.data,'$.ticket_id')=?1 AND r.finished_at IS NULL)",
+        [ticket],
+        |r| r.get(0),
+    )
 }
 
 /// Adds provider runs' process group and its leader's start time, which an earlier version

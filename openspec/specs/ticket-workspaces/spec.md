@@ -128,7 +128,7 @@ The bundled role instructions SHALL contain no repository coordinator contract. 
 - **THEN** they require severity, `path:line`, trigger and evidence for every finding, forbid patches, and define blocking
 
 ### Requirement: Removing a ticket's worktree is whole whatever its size
-Removing a ticket's worktree, on accept, close, archive, a pending removal or an approved leftover removal, SHALL either remove it completely or leave it whole at its path with all its files, whatever the size of its folder, including ignored build output. The host SHALL rename the folder aside on the same filesystem, have Git forget the worktree within the usual Git time limit, and then delete the renamed folder without a time limit and without holding up other host work. If Git fails, the host SHALL rename the folder back and run the same cleanliness check removal began with; if the worktree is as clean as it was checked to be, the removal SHALL fail as before with the worktree whole, and if it is not or the check fails, the host SHALL complete the removal, which loses nothing because the worktree had no uncommitted or untracked files. A worktree SHALL never be left broken at its path. At startup the host SHALL delete any folder a stop left renamed aside and have Git forget registrations a cut-off removal left. The ticket's branch SHALL never be deleted.
+Removing a ticket's worktree, on accept, close, archive, a pending removal or an approved leftover removal, SHALL either remove it completely or leave it whole at its path with all its files, whatever the size of its folder, including ignored build output. The host SHALL rename the folder aside on the same filesystem, have Git forget the worktree within the usual Git time limit, and then delete the renamed folder without a time limit and without holding up other host work. If Git fails, the host SHALL rename the folder back and run the same cleanliness check removal began with; if the worktree is as clean as it was checked to be, the removal SHALL fail as before with the worktree whole, and if it is not or the check fails, the host SHALL complete the removal, which loses nothing because the worktree had no uncommitted or untracked files. A worktree SHALL never be left broken at its path. Once the worktree is aside, the host SHALL delete the ticket's Xcode DerivedData folders and its agents' scratch folder the same way. Every such delete SHALL be durable: the host SHALL record the folder before renaming it, retry a failed delete with backoff while it runs and at every start, never delete a folder a process still uses, and after three failed attempts tell the human's inbox once which folder failed, why and how big it is. A record SHALL be cleared only once its folder is proven gone. At startup the host SHALL record any `.removing-*` folder found beside a ticket's worktree, resume every recorded delete and have Git forget registrations a cut-off removal left. The ticket's branch SHALL never be deleted.
 
 #### Scenario: A large worktree is removed whole
 - **WHEN** a ticket whose worktree holds thousands of ignored build files is closed
@@ -149,6 +149,33 @@ Removing a ticket's worktree, on accept, close, archive, a pending removal or an
 #### Scenario: A stop during deletion
 - **WHEN** the host starts and a ticket's renamed-aside folder is still present
 - **THEN** that folder is deleted and the ticket's worktree is untouched
+
+#### Scenario: An Xcode project's ticket is removed
+- **WHEN** a ticket whose worktree Xcode built is closed
+- **THEN** its DerivedData folder for the worktree's path and its scratch folder are deleted with the worktree, and DerivedData folders for other paths are kept
+
+#### Scenario: A delete keeps failing
+- **WHEN** a renamed-aside folder cannot be deleted three times
+- **THEN** the human's inbox names the folder, the reason and its size once, and the host keeps retrying
+
+### Requirement: Build output is reclaimed and builds wait for disk space
+The host SHALL reclaim a ticket's build output, which is the folders `build_output::scan` finds (ecosystem defaults, `CACHEDIR.TAG` folders, the paths the repository's committed `.wiffletree/build-output` file declares, and Xcode's DerivedData folders for the worktree) and the ticket's scratch folder, and SHALL keep the worktree, its source, its uncommitted changes and every file that is not build output. It SHALL never touch a folder `scan` reports as ambiguous, a ticket with an agent in a turn, or build output a process still uses. A folder in the worktree SHALL be renamed aside beside the worktree, never inside it, and other folders beside themselves, each through the durable deletes, so the worktree stays as clean as it was. The host SHALL reclaim automatically the build output of accepted and closed tickets and of tickets with no agent turn for "Reclaim when idle for" (default 24 hours); when the build output across tickets is over the budget (default 100 GB), the least recently used idle tickets' until it is under; and when free space on the workspaces disk is under the soft floor (default 25 GB), looked at every few minutes and before every agent turn. The human SHALL be able to reclaim one ticket's build output, or all but those with an agent in a turn. Under the hard floor (default 5 GB), the build gate SHALL hold each new build, saying why, until space returns, and the human's inbox SHALL say builds wait once, until space returns. Each reclaim SHALL leave a quiet notice in the ticket's project chat. Sizes SHALL be measured off the host thread and kept for a few minutes.
+
+#### Scenario: Reclaiming beside user work
+- **WHEN** a worktree holds ignored `target/`, a changed tracked file, an untracked file and a `build/` folder Git does not ignore, and its build output is reclaimed
+- **THEN** `target/` and the scratch folder are deleted, everything else is kept, and `git status` reads the same as before
+
+#### Scenario: A build in progress
+- **WHEN** a ticket's agent is in a turn, or a process has its working directory or an open file in its build output
+- **THEN** its build output is kept
+
+#### Scenario: Over the budget
+- **WHEN** the build output across tickets is over the budget and no ticket is idle past the idle time
+- **THEN** the least recently used tickets not in a turn are reclaimed, oldest first, until the total is under the budget
+
+#### Scenario: Under the hard floor
+- **WHEN** free space on the workspaces disk is under the hard floor and an agent starts a build
+- **THEN** the build waits, printing why, the inbox says builds wait, and both clear once free space is back over the floor
 
 ### Requirement: A ticket may stack on another ticket in its repository
 `create_ticket` with `stack_on` SHALL accept only a ticket of the same project and repository that is not closed, and SHALL otherwise refuse, naming the parent and why, and create nothing. The ticket SHALL record the parent as `stacked_on`, and `workspace_context` SHALL show it on the ticket's full and short entries. A stacked ticket SHALL be measured against its parent's branch: the reviewers' base and diff, the size a publish reports, and whether a later commit has the verified commit's patch. A later commit SHALL NOT count as having that patch because it has it against the repository's base. A stacked ticket SHALL record its parent's `base`, so its base once the parent has merged is the parent's. Without `stack_on`, creation and measurement SHALL be unchanged.

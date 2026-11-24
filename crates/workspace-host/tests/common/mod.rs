@@ -182,6 +182,13 @@ impl ServiceFixture {
                 std::env::set_var(key, value);
             }
         }
-        Service::start(self.home, env!("CARGO_BIN_EXE_wiffletree-host").into()).unwrap()
+        let disk = workspace_host::DiskRoots::isolated(&self.home);
+        Service::start_with_disk(
+            self.home,
+            env!("CARGO_BIN_EXE_wiffletree-host").into(),
+            Default::default(),
+            disk,
+        )
+        .unwrap()
     }
 }

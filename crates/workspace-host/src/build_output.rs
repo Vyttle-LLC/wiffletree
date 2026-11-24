@@ -142,6 +142,22 @@ pub fn scan(worktree: &Path, derived_data: Option<&Path>) -> Result<BuildOutput>
                 .map(|path| (path, Source::DerivedData)),
         );
     }
+    Ok(measured(outputs, ambiguous))
+}
+
+/// Xcode's DerivedData folders under `root` for the worktree whose root was `worktree`, as
+/// `scan` finds them; the worktree need not be there any more. Walks each folder, so call it
+/// off the host's thread.
+pub(crate) fn derived_data(worktree: &Path, root: &Path) -> BuildOutput {
+    let outputs = derived_data_for(worktree, root)
+        .into_iter()
+        .map(|path| (path, Source::DerivedData))
+        .collect();
+    measured(outputs, Vec::new())
+}
+
+/// Each output measured: found, or ambiguous when it holds a Git repository.
+fn measured(outputs: Vec<(PathBuf, Source)>, mut ambiguous: Vec<Ambiguous>) -> BuildOutput {
     let mut found = Vec::new();
     let mut counted = HashSet::new();
     for (path, source) in outputs {
@@ -159,7 +175,7 @@ pub fn scan(worktree: &Path, derived_data: Option<&Path>) -> Result<BuildOutput>
             });
         }
     }
-    Ok(BuildOutput { found, ambiguous })
+    BuildOutput { found, ambiguous }
 }
 
 fn is_real_folder(path: &Path) -> bool {

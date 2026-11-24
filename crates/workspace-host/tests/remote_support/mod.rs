@@ -90,10 +90,11 @@ impl Studio {
             }),
             binary: env!("CARGO_BIN_EXE_wiffletree-host").into(),
         };
-        let service = Service::start_with(
+        let service = Service::start_with_disk(
             data.path().into(),
             env!("CARGO_BIN_EXE_wiffletree-host").into(),
             options,
+            workspace_host::DiskRoots::isolated(data.path()),
         )
         .unwrap();
         Self {

@@ -1033,8 +1033,17 @@ impl Service {
     pub fn start(home: PathBuf, helper: PathBuf) -> Result<Self> {
         Self::start_with(home, helper, remote::Options::default())
     }
-    /// Starts the host thread with `remote` for its remote access.
+    /// Starts the host thread with `remote` for its remote access, watching this machine's disk.
     pub fn start_with(home: PathBuf, helper: PathBuf, remote: remote::Options) -> Result<Self> {
+        Self::start_with_disk(home, helper, remote, DiskRoots::machine())
+    }
+    /// `start_with`, watching build output and free space in `disk`, as tests give their own.
+    pub fn start_with_disk(
+        home: PathBuf,
+        helper: PathBuf,
+        remote: remote::Options,
+        disk: DiskRoots,
+    ) -> Result<Self> {
         ensure!(
             helper.is_file(),
             "wiffletree-host helper is missing; rebuild the app bundle"
@@ -1059,6 +1068,10 @@ impl Service {
                     let deleted = worker.clone();
                     host.notify_worktree_deletions(move || {
                         let _ = deleted.send_blocking(Event::Wake(0));
+                    });
+                    let measured = worker.clone();
+                    host.watch_build_output(disk, move || {
+                        let _ = measured.send_blocking(Event::Wake(0));
                     });
                     host.delete_removed_worktrees()?;
                     host.settle_pending_worktrees();
@@ -1882,6 +1895,9 @@ impl Actor {
             }
         }
         if let Some(due) = self.host.settle_worktree_deletions(now()) {
+            self.wake(due);
+        }
+        if let Some(due) = self.host.settle_build_output(now()) {
             self.wake(due);
         }
         self.refresh_overlaps(now());
@@ -5331,6 +5347,12 @@ impl Actor {
         mut input: Vec<Message>,
         sort: Option<(String, keeper::Sorted)>,
     ) -> Result<()> {
+        // Free space is looked at before every turn: under the soft floor, idle build output
+        // is reclaimed off the host thread while the turn starts.
+        self.host.build_output.check_now();
+        if let Some(due) = self.host.settle_build_output(now()) {
+            self.wake(due);
+        }
         // The Assistant reads the human's messages before its work's and Wiffletree's.
         if session.role == Role::Conversation {
             input.sort_by_key(|message| !message.from_human());
@@ -6710,6 +6732,34 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
         actor.scheduling.wake_at = None;
         actor.process(Event::Wake(due));
         assert!(actor.pr_watch.start_due(i64::MAX).is_empty());
+    }
+
+    #[test]
+    fn a_failed_delete_wakes_the_host_when_its_retry_is_due() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let host = Host::open_set_up(home.path().join("home")).unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+        // The folder empties, but a parent without write permission keeps it in place.
+        let locked = home.path().join("locked");
+        let folder = locked.join(".removing-1");
+        fs::create_dir_all(folder.join("inner")).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+        actor.host.record_worktree_deletion(&folder, None).unwrap();
+
+        let attempts = |actor: &Actor| actor.host.pending_deletes().unwrap()[0].attempts;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while attempts(&actor) == 0 && Instant::now() < deadline {
+            actor.process(Event::Wake(0));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        let deletes = actor.host.pending_deletes().unwrap();
+        assert_eq!(deletes[0].attempts, 1);
+        // Any event, with no other work due, arms the wake for the retry.
+        actor.scheduling.wake_at = None;
+        actor.process(Event::Wake(0));
+        assert_eq!(actor.scheduling.wake_at, Some(deletes[0].next_attempt_at));
     }
 
     #[test]

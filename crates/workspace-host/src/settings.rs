@@ -13,7 +13,7 @@ const MOVED_FIELDS: [&str; 4] = [
 const SLUG_LIMIT: usize = 48;
 
 /// `~/wiffletree`, or `~/wiffletree-beta` for a beta build so the two never share folders.
-fn default_workspaces_dir() -> String {
+pub(crate) fn default_workspaces_dir() -> String {
     let name = if option_env!("WIFFLETREE_CHANNEL") == Some("beta") {
         "wiffletree-beta"
     } else {
@@ -206,6 +206,18 @@ impl Host {
             ..self.settings()
         };
         self.save_settings(&settings)?;
+        Ok(settings)
+    }
+    /// Saves when build output is reclaimed and the free-space floors on this machine. The
+    /// build gate reads the hard floor as it next looks; the next disk check applies the rest.
+    pub fn set_disk_settings(&mut self, disk: DiskSettings) -> Result<HostSettings> {
+        disk.validate()?;
+        let settings = HostSettings {
+            disk,
+            ..self.settings()
+        };
+        self.save_settings(&settings)?;
+        self.build_output.check_now();
         Ok(settings)
     }
     /// Saves the check-in thresholds. An invalid pair is refused and the saved one stays.

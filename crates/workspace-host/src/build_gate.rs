@@ -42,6 +42,8 @@ const POLL: Duration = Duration::from_millis(200);
 /// How long a `go run` keeps its slot after its last compile or link started, so the gaps
 /// between them do not hand the slot away.
 const GRACE: Duration = Duration::from_secs(2);
+/// How often a build held for disk space looks again.
+const SPACE_POLL: Duration = Duration::from_secs(5);
 /// The Cargo subcommands that only start other Cargo commands, so are no build themselves;
 /// every other one, an alias included, counts as a build.
 const CARGO_WRAPPERS: [&str; 2] = ["watch", "make"];
@@ -220,6 +222,54 @@ fn limit(data: &Path) -> usize {
         .clamp(1, workspace_core::MAX_BUILDS_AT_ONCE)
 }
 
+/// The workspaces folder and the hard floor from `data`'s `settings.json`, read on every look so
+/// a change applies to builds already waiting. A missing or unreadable file, or a field it
+/// lacks, means the default, as the host reads it.
+fn hard_floor(data: &Path) -> (PathBuf, u64) {
+    let settings: serde_json::Value = fs::read(data.join(crate::settings::FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let folder = (settings["workspaces_dir"].as_str())
+        .map_or_else(crate::settings::default_workspaces_dir, str::to_owned);
+    let floor_gb = (settings["disk"]["hard_floor_gb"].as_u64())
+        .unwrap_or(workspace_core::DiskSettings::default().hard_floor_gb.into());
+    (folder.into(), floor_gb.saturating_mul(workspace_core::GB))
+}
+
+/// The free space and the hard floor while the workspaces disk has less free space than the
+/// floor. `free` reads a disk's free bytes; a disk it cannot read never holds a build.
+fn short_of_space(data: &Path, free: impl Fn(&Path) -> Option<u64>) -> Option<(u64, u64)> {
+    let (folder, floor) = hard_floor(data);
+    free(&folder)
+        .filter(|available| *available < floor)
+        .map(|available| (available, floor))
+}
+
+/// Waits while the workspaces disk is short of space, saying once on `say` why, so a build
+/// waits instead of failing partway with "no space left". `pause` waits between looks.
+fn wait_for_space(
+    data: &Path,
+    free: impl Fn(&Path) -> Option<u64>,
+    say: &mut impl Write,
+    mut pause: impl FnMut(),
+) {
+    let mut told = false;
+    while let Some((available, floor)) = short_of_space(data, &free) {
+        if !told {
+            let gb = |bytes: u64| bytes as f64 / workspace_core::GB as f64;
+            let _ = writeln!(
+                say,
+                "Waiting for disk space: {:.1} GB free, under the {:.0} GB hard floor. Wiffletree reclaims idle build output; the build starts once space is back.",
+                gb(available),
+                gb(floor)
+            );
+            told = true;
+        }
+        pause();
+    }
+}
+
 /// The slot state, with its folders made, locked against other calls while it lives.
 struct State {
     folder: PathBuf,
@@ -301,6 +351,22 @@ impl State {
     }
 }
 
+/// Runs `look` with the builds holding or waiting for a slot of `data`'s gate, by process id,
+/// while the gate admits none: a build it admits next starts once `look` has returned. Some
+/// builds listed may have ended.
+pub(crate) fn while_admitting_none<T>(
+    data: &Path,
+    look: impl FnOnce(&[u32]) -> T,
+) -> io::Result<T> {
+    let state = State::open(data)?;
+    let builds: Vec<u32> = ["held", "waiting"]
+        .iter()
+        .flat_map(|part| entries(&state.folder.join(part)).unwrap_or_default())
+        .map(|(build, _)| build)
+        .collect();
+    Ok(look(&builds))
+}
+
 /// The files in `folder` named by a process id.
 fn entries(folder: &Path) -> io::Result<Vec<(u32, PathBuf)>> {
     let mut entries = vec![];
@@ -313,17 +379,32 @@ fn entries(folder: &Path) -> io::Result<Vec<(u32, PathBuf)>> {
     Ok(entries)
 }
 
-/// Waits until this call's build holds a slot, saying once on `say` that it waits. Returns a
-/// `go run`'s lease for this call.
+/// Waits until this call's build holds a slot, saying once on `say` that it waits. A build
+/// that holds none yet first waits for disk space. Returns a `go run`'s lease for this call.
 fn claim(data: &Path, say: &mut impl Write) -> io::Result<Option<File>> {
     let build = owner();
     let parent = std::os::unix::process::parent_id();
+    // A build that went away no longer needs this call.
+    let check_parent = || {
+        if std::os::unix::process::parent_id() != parent {
+            std::process::exit(1);
+        }
+    };
     let mut told = false;
     loop {
         let state = State::open(data)?;
         let holders = state.holders()?;
         let waiting = state.waiting(build.pid);
         let mut holds = holders.contains(&build.pid);
+        // Looked at before every admission, so a build queued for a slot waits too.
+        if !holds && short_of_space(data, crate::disk::free).is_some() {
+            drop(state);
+            wait_for_space(data, crate::disk::free, say, || {
+                std::thread::sleep(SPACE_POLL);
+                check_parent();
+            });
+            continue;
+        }
         if !holds {
             // Only the build's first call to wait says so.
             let first = !waiting.exists() && File::create_new(&waiting).is_ok();
@@ -346,10 +427,7 @@ fn claim(data: &Path, say: &mut impl Write) -> io::Result<Option<File>> {
             told = true;
         }
         std::thread::sleep(POLL);
-        // A build that went away no longer needs this call.
-        if std::os::unix::process::parent_id() != parent {
-            std::process::exit(1);
-        }
+        check_parent();
     }
 }
 
@@ -632,6 +710,51 @@ mod tests {
     fn each_data_folder_keeps_one_gate_folder() {
         assert_eq!(fnv(Path::new("/a")), fnv(Path::new("/a")));
         assert_ne!(fnv(Path::new("/a")), fnv(Path::new("/b")));
+    }
+
+    #[test]
+    fn a_new_build_waits_while_free_space_is_under_the_hard_floor_and_says_why_once() {
+        let data = tempfile::tempdir().unwrap();
+        let settings = |floor: &str| {
+            fs::write(
+                data.path().join("settings.json"),
+                format!(r#"{{"workspaces_dir":"/w"{floor}}}"#),
+            )
+            .unwrap();
+        };
+        let gb = workspace_core::GB;
+        // Free space as a build waiting would see it on each look: under 5 GB twice, then back.
+        let run = |readings: Vec<u64>| {
+            let readings = std::cell::RefCell::new(readings.into_iter());
+            let looked = std::cell::Cell::new(0);
+            let mut said = vec![];
+            wait_for_space(
+                data.path(),
+                |_| {
+                    looked.set(looked.get() + 1);
+                    readings.borrow_mut().next()
+                },
+                &mut said,
+                || {},
+            );
+            (looked.get(), String::from_utf8(said).unwrap())
+        };
+        // With no settings file, as on a new install, the host's defaults hold builds too.
+        let default = PathBuf::from(crate::settings::default_workspaces_dir());
+        assert_eq!(hard_floor(data.path()), (default, 5 * gb));
+        assert_eq!(run(vec![gb, 6 * gb]).0, 2);
+        settings("");
+        assert_eq!(hard_floor(data.path()).0, Path::new("/w"));
+        let (looks, said) = run(vec![gb, 4 * gb, 6 * gb]);
+        assert_eq!(looks, 3);
+        assert_eq!(said.lines().count(), 1);
+        assert!(said.starts_with("Waiting for disk space: 1.0 GB free, under the 5 GB hard floor"));
+        // Enough free space never holds a build, and neither does a disk that cannot be read.
+        assert_eq!(run(vec![6 * gb]), (1, String::new()));
+        assert_eq!(run(vec![]), (1, String::new()));
+        // The floor comes from the settings file.
+        settings(r#","disk":{"hard_floor_gb":2}"#);
+        assert_eq!(run(vec![3 * gb]), (1, String::new()));
     }
 
     #[test]
