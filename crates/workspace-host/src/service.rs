@@ -652,6 +652,8 @@ enum Event {
     ActionRan {
         card: String,
         result: std::result::Result<String, String>,
+        /// What a Claude run's start offered that was not yet denied.
+        seen: provider::SourceTools,
         on_run: bool,
         reply: Reply,
     },
@@ -2754,9 +2756,13 @@ impl Actor {
             Event::ActionRan {
                 card,
                 result,
+                seen,
                 on_run,
                 reply,
             } => {
+                if let Err(e) = self.host.record_source_tools(&seen) {
+                    eprintln!("Recording an action run's source tools: {e:#}");
+                }
                 let ran = result.map_err(|error| anyhow::anyhow!(error));
                 let card = self.host.action_ran(&card, &ran, on_run);
                 let answer = card.and_then(|card| Ok(serde_json::to_value(card)?));
@@ -3688,10 +3694,11 @@ impl Actor {
                 // Only our own cancellation counts; a real failure keeps its error and held input.
                 let stop_reason = active.stopped_by_parent.take().filter(|_| cancelled);
                 let error = error.filter(|_| stop_reason.is_none());
-                // The Assistant's turn that met source tools not seen before stopped before the
-                // model acted; its input starts again at once, with those tools denied.
+                // The Assistant's turn, or a loop's run that loads a claude.ai connector, that
+                // met source tools or servers not seen before stopped before the model acted;
+                // its input starts again at once, with them denied.
                 // A Stop that crossed the failed start wins: nothing starts again.
-                let start_again = session.role == Role::Conversation
+                let start_again = matches!(session.role, Role::Conversation | Role::JobRun)
                     && (error.as_deref())
                         .is_some_and(|e| e.starts_with(provider::NEW_SOURCE_TOOLS))
                     && !cancelled
@@ -3792,7 +3799,7 @@ impl Actor {
                 }
                 // A job's run is one turn, which its record ends with; a failed one is not
                 // retried at a usage limit's reset.
-                if session.role == Role::JobRun {
+                if session.role == Role::JobRun && !start_again {
                     let end = match (&stop_reason, &error) {
                         (Some(reason), _) => crate::jobs::RunEnd::Stopped(reason.clone()),
                         (None, Some(error)) => crate::jobs::RunEnd::Failed(error.clone()),
@@ -4550,10 +4557,11 @@ impl Actor {
     ) {
         let sender = self.sender.clone();
         std::thread::spawn(move || {
-            let result = run.run().map_err(|e| format!("{e:#}"));
+            let (result, seen) = run.run_reporting();
             let _ = sender.send_blocking(Event::ActionRan {
                 card,
-                result,
+                result: result.map_err(|e| format!("{e:#}")),
+                seen,
                 on_run,
                 reply,
             });
@@ -8604,7 +8612,10 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
         let reported = [("calendar".to_owned(), ["delete_calendar".to_owned()].into())];
         let stopped = format!("{} (calendar delete_calendar)", provider::NEW_SOURCE_TOOLS);
         for event in [
-            ProviderEvent::SourceTools(reported.into()),
+            ProviderEvent::SourceTools(provider::SourceTools {
+                tools: reported.into(),
+                ..Default::default()
+            }),
             ProviderEvent::Finished {
                 error: Some(stopped),
                 usage: Value::Null,
@@ -8631,6 +8642,81 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
             )
             .unwrap();
         assert_eq!(recorded, 1, "denied from the next launch on");
+    }
+
+    #[test]
+    fn a_loop_run_that_meets_an_unseen_server_starts_again_with_it_denied() {
+        use workspace_core::job::{Recipe, RunOutcome, Schedule, Sharing};
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let personal = host.default_space().unwrap();
+        let gmail = serde_json::from_value(
+            json!({"kind":"mcp","server":"claude.ai Gmail","tools":["search_threads"]}),
+        )
+        .unwrap();
+        let recipe = Recipe {
+            id: "brief".into(),
+            name: "Brief".into(),
+            space_id: personal,
+            prompt: "Brief me.".into(),
+            schedule: Schedule {
+                cron: "0 7 * * *".into(),
+                timezone: "America/New_York".into(),
+            },
+            model: None,
+            sources: vec![gmail],
+            output: None,
+            sharing: Sharing::OneRunner,
+            runner: None,
+            enabled: true,
+            extra: Default::default(),
+        };
+        let key = host.save_job(recipe).unwrap().recipe.key();
+        let (mut actor, _, _) = idle_actor(host);
+        let run = actor.host.run_now(&key).unwrap();
+        let thread = actor.host.session(run.thread_id.as_ref().unwrap()).unwrap();
+        let prompt = actor.host.messages(&thread.id, None, 1).unwrap().remove(0);
+        actor.host.turn_started(&thread.id).unwrap();
+        actor.active.insert(
+            thread.id.clone(),
+            active_turn("run", vec![prompt.id.clone()]),
+        );
+        let stopped = format!(
+            "{} (the server claude.ai Slack)",
+            provider::NEW_SOURCE_TOOLS
+        );
+        for event in [
+            ProviderEvent::SourceTools(provider::SourceTools {
+                other_servers: ["claude.ai Slack".to_owned()].into(),
+                ..Default::default()
+            }),
+            ProviderEvent::Finished {
+                error: Some(stopped),
+                usage: Value::Null,
+                cancelled: false,
+            },
+        ] {
+            actor.handle(Event::Provider {
+                session: thread.id.clone(),
+                run: "run".into(),
+                event,
+            });
+        }
+        // The run goes on with its prompt queued again, and its next start denies Slack whole.
+        assert_eq!(
+            actor.host.job_run(&run.id).unwrap().outcome,
+            RunOutcome::Running
+        );
+        assert_eq!(
+            actor.host.message(&prompt.id).unwrap().receipt,
+            Receipt::Queued
+        );
+        assert_eq!(
+            actor.host.session(&thread.id).unwrap().status,
+            Status::Ready
+        );
+        let launch = actor.host.thread_launch(&thread).unwrap();
+        assert!(launch.seen.other_servers.contains("claude.ai Slack"));
     }
 
     #[test]

@@ -17,6 +17,7 @@ pub(crate) fn migrate(db: &Connection) -> Result<()> {
          CREATE TABLE IF NOT EXISTS conversation_routes (message_id TEXT PRIMARY KEY, data TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS conversation_picks (message_id TEXT PRIMARY KEY, space_id TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS conversation_source_tools (server TEXT NOT NULL, tool TEXT NOT NULL, PRIMARY KEY(server,tool));
+         CREATE TABLE IF NOT EXISTS conversation_other_servers (server TEXT PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS conversation_draft (id INTEGER PRIMARY KEY CHECK (id=1), body TEXT NOT NULL);",
     )?;
     draft_held_messages(db)
@@ -311,8 +312,8 @@ impl Host {
         Ok(parts.join("\n\n---\n\n"))
     }
     /// The Spaces the Assistant serves, after its instructions: each with its id, description,
-    /// repositories and sources.
-    pub(crate) fn conversation_section(&self) -> Result<String> {
+    /// repositories and sources, saying which ones `provider` cannot reach.
+    pub(crate) fn conversation_section(&self, provider: Provider) -> Result<String> {
         let mut text = String::from("\n## Spaces\n");
         let repositories = self.repositories()?;
         for record in self.spaces()?.into_iter().filter(|r| r.local.enabled) {
@@ -336,6 +337,13 @@ impl Host {
                     Source::Mcp { .. } => "MCP server",
                     Source::Cli { .. } => "CLI",
                 };
+                if provider != Provider::Claude && provider::is_claude_ai(source.name()) {
+                    text.push_str(&format!(
+                        "Source {} ({kind}): unavailable here; it is a claude.ai connector, which only Claude reaches\n",
+                        source.name()
+                    ));
+                    continue;
+                }
                 text.push_str(&format!(
                     "Source {} ({kind}): reads {}; acts {}\n",
                     source.name(),
@@ -350,7 +358,8 @@ impl Host {
         Ok(text)
     }
     /// The servers of every Space's MCP sources the Assistant's provider can start, as its own
-    /// configuration defines them, each offered for its read tools.
+    /// configuration defines them, and on Claude the claude.ai connectors they list, each
+    /// offered for its read tools.
     pub(crate) fn conversation_launch(
         &self,
         session: &Session,
@@ -359,38 +368,58 @@ impl Host {
         let mut launch = provider::ConversationLaunch::default();
         for record in self.spaces()?.into_iter().filter(|r| r.local.enabled) {
             for source in &record.space.sources {
-                if let Source::Mcp {
+                let Source::Mcp {
                     server, tools, act, ..
                 } = source
-                    && let Some(definition) =
-                        provider::server_definition(session.provider, &home, server)
-                {
+                else {
+                    continue;
+                };
+                let definition = match provider::is_claude_ai(server) {
+                    true => (session.provider == Provider::Claude).then_some(Value::Null),
+                    false => provider::server_definition(session.provider, &home, server),
+                };
+                if let Some(definition) = definition {
                     launch.add(server, definition, tools, act);
                 }
             }
         }
+        launch.reported(self.source_tools_seen()?);
+        Ok(launch)
+    }
+    /// What Claude starts have reported, by the Assistant's turns, acts' runs and loop runs
+    /// that load connectors.
+    pub(crate) fn source_tools_seen(&self) -> Result<provider::SourceTools> {
+        let mut seen = provider::SourceTools::default();
         let reported: Vec<(String, String)> = (self.db)
             .prepare("SELECT server,tool FROM conversation_source_tools")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
         for (server, tool) in reported {
-            launch.reported(&server, [tool]);
+            seen.tools.entry(server).or_default().insert(tool);
         }
-        Ok(launch)
+        seen.other_servers = (self.db)
+            .prepare("SELECT server FROM conversation_other_servers")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(seen)
     }
-    /// Keeps the tools the Assistant's Claude reported each source's server offers, so the ones
-    /// that are not read tools are denied by name from the next turn on.
-    pub(crate) fn record_source_tools(
-        &self,
-        reported: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
-    ) -> Result<()> {
-        for (server, tools) in reported {
+    /// Keeps what a Claude start reported, by the Assistant's turn, an act's or a loop's run: each
+    /// source's server's tools, so the ones that are not read tools are denied by name from the
+    /// next start on, and the servers no Space lists, which are denied whole.
+    pub(crate) fn record_source_tools(&self, reported: &provider::SourceTools) -> Result<()> {
+        for (server, tools) in &reported.tools {
             for tool in tools {
                 self.db.execute(
                     "INSERT OR IGNORE INTO conversation_source_tools VALUES (?1,?2)",
                     params![server, tool],
                 )?;
             }
+        }
+        for server in &reported.other_servers {
+            self.db.execute(
+                "INSERT OR IGNORE INTO conversation_other_servers VALUES (?1)",
+                params![server],
+            )?;
         }
         Ok(())
     }

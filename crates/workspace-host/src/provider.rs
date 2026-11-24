@@ -13,8 +13,8 @@ use crate::runtime::LowPriority as _;
 use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
 pub use act_run::{UrlAct, act_call_refused, act_run};
-pub use conversation::ConversationLaunch;
 use conversation::tool_calls;
+pub use conversation::{ConversationLaunch, SourceTools, is_claude_ai};
 pub use evaluator::{EvaluatorLaunch, prepare_codex_home};
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
 use output::{Next, Output, StopReading};
@@ -62,8 +62,9 @@ pub enum ProviderEvent {
     /// The Assistant's turn read text written by others through a call the host sees, such
     /// as "gmail search_threads" or "a web page".
     ReadOthers(String),
-    /// The tools the Assistant's Claude reported each source's server offers, at its start.
-    SourceTools(std::collections::BTreeMap<String, std::collections::BTreeSet<String>>),
+    /// What the Assistant's Claude reported at its start: the tools each source's server
+    /// offers, and the servers no Space lists.
+    SourceTools(SourceTools),
     Finished {
         error: Option<String>,
         usage: Value,
@@ -319,7 +320,7 @@ pub fn command(turn: &Turn) -> Result<ProcessCommand> {
     ensure!(
         turn.session.provider != Provider::Codex
             || turn.thread.as_ref().is_none_or(ThreadLaunch::codex_may_run),
-        "A job with a CLI source runs only on Claude: Codex cannot yet hold a CLI to its listed commands"
+        "A job with a CLI source or a claude.ai connector runs only on Claude: Codex cannot yet hold a CLI to its listed commands, and cannot reach a connector"
     );
     let mut cmd = ProcessCommand::new(executable(turn.session.provider)?);
     configure(&mut cmd, turn);
@@ -836,7 +837,22 @@ fn run_turn(
                     if let Some(id) = value["session_id"].as_str() {
                         emit(ProviderEvent::Session(id.into()));
                     }
+                    // A loop run that loads a claude.ai connector also loads the human's other
+                    // servers: what its start offers that is not yet denied is recorded, and the
+                    // run starts again with it denied, as the Assistant's turn does below.
                     if let Some(launch) = &turn.thread {
+                        if launch.loads_connectors() {
+                            let reported = launch.reported_by_claude(&value);
+                            if !reported.is_empty() {
+                                emit(ProviderEvent::SourceTools(reported));
+                            }
+                            let unseen = launch.unseen_by_claude(&value);
+                            ensure!(
+                                unseen.is_empty(),
+                                "{NEW_SOURCE_TOOLS} ({})",
+                                unseen.join(", ")
+                            );
+                        }
                         launch.check_claude_start(&value)?;
                     }
                     // What each source's server offers, so its other tools are denied by name

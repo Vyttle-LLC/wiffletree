@@ -512,6 +512,16 @@ pub(crate) fn mcp_exchange(
 fn check_source(provider: Provider, env: &SourceEnv, source: &Source) -> SourceCheck {
     let label = source_label(source);
     let problem = match source {
+        // Only Claude reaches a claude.ai connector, and it loads it itself: its start says
+        // whether the connector is connected.
+        Source::Mcp { server, .. } if provider::is_claude_ai(server) => {
+            (provider != Provider::Claude).then(|| {
+                format!(
+                    "{server} is a claude.ai connector, which only Claude reaches; this loop runs on {}.",
+                    provider.label()
+                )
+            })
+        }
         Source::Mcp { server, tools, .. } => {
             match provider::server_definition(provider, &env.home, server) {
                 None => {
@@ -642,36 +652,40 @@ impl Host {
     /// runs what's Job row, or the Assistant row without one, as the recipe's Space resolves
     /// them. A recipe with a CLI source runs only on Claude, which can hold the CLI to its
     /// listed commands; Codex cannot yet (design, decision 9), so a Space row of Codex choices
-    /// falls back to this Mac's.
+    /// falls back to this Mac's. So does one with a claude.ai connector, which only Claude
+    /// reaches.
     pub(crate) fn job_model(&self, recipe: &Recipe) -> Result<(ModelProfile, String, bool)> {
         let space = Some(&recipe.space_id);
-        let cli = (recipe.sources.iter()).find_map(|source| match source {
-            Source::Cli { command, .. } => Some(command.clone()),
+        let claude_only = (recipe.sources.iter()).find_map(|source| match source {
+            Source::Cli { command, .. } => {
+                Some(format!("Codex cannot yet hold {command} to read commands"))
+            }
+            Source::Mcp { server, .. } if provider::is_claude_ai(server) => Some(format!(
+                "Codex cannot reach {server}, a claude.ai connector"
+            )),
             Source::Mcp { .. } => None,
         });
-        let codex_note = |cli: &str| format!("Codex cannot yet hold {cli} to read commands");
         let mut notes = vec![];
         if let Some(profile) = recipe.model.clone() {
             let reason = "Chosen in the recipe";
-            match (self.may_use(&profile), &cli) {
+            match (self.may_use(&profile), &claude_only) {
                 (false, _) => notes.push(format!(
                     "{reason}, {}, is not available on this Mac.",
                     profile.short()
                 )),
-                (true, Some(cli)) if profile.provider != Provider::Claude => notes.push(format!(
-                    "{reason}, {}, is on Codex, and {}.",
+                (true, Some(note)) if profile.provider != Provider::Claude => notes.push(format!(
+                    "{reason}, {}, is on Codex, and {note}.",
                     profile.short(),
-                    codex_note(cli)
                 )),
                 (true, _) => return Ok((profile, reason.into(), false)),
             }
         }
         let (quotas, mut unusable, switch_at) = self.limits()?;
-        // Codex signed in here still cannot run a recipe with a CLI source.
-        let held = cli.is_some() && unusable.insert(Provider::Codex);
+        // Codex signed in here still cannot run a recipe with a CLI source or a connector.
+        let held = claude_only.is_some() && unusable.insert(Provider::Codex);
         let mut table = self.space_table(space, &unusable)?;
-        if let (true, Some(cli)) = (held, &cli) {
-            table = table.because(Provider::Codex, codex_note(cli));
+        if let (true, Some(note)) = (held, &claude_only) {
+            table = table.because(Provider::Codex, note.clone());
         }
         let selection = &table.selection;
         let row = (selection.row(&Job::Job)).or_else(|| selection.row(&Job::Assistant));
@@ -679,11 +693,10 @@ impl Host {
             Some(_) => "Job row",
             None => "Assistant row",
         };
-        if let (Some(cli), Some(row)) = (&cli, row) {
+        if let (Some(note), Some(row)) = (&claude_only, row) {
             ensure!(
                 row.main.choices().any(|p| p.provider == Provider::Claude),
-                "{}, and the {row_name} has no Claude choice.",
-                codex_note(cli)
+                "{note}, and the {row_name} has no Claude choice."
             );
         }
         let limits = Limits {
@@ -2156,6 +2169,73 @@ mod tests {
         assert_eq!(state.attention, 1);
         s.host.see_job_runs(&key).unwrap();
         assert_eq!(s.host.job_states().unwrap()[0].attention, 0);
+    }
+
+    #[test]
+    fn a_morning_brief_reads_mail_and_calendar_through_claude_ai_connectors_on_claude_only() {
+        let mut s = jobs();
+        let connector = |server: &str, tool: &str| Source::Mcp {
+            server: server.into(),
+            tools: vec![tool.into()],
+            act: vec![],
+            without_asking: vec![],
+            extra: Default::default(),
+        };
+        let mut brief = recipe(&s.personal, "Morning brief", "0 7 * * 1-5");
+        brief.sources = vec![
+            connector("claude.ai Gmail", "search_threads"),
+            connector("claude.ai Google Calendar", "list_events"),
+        ];
+        let codex = ModelProfile {
+            provider: Provider::Codex,
+            model: "gpt-6.1-sol".into(),
+            effort: "medium".into(),
+        };
+        brief.model = Some(codex.clone());
+        let key = s.host.save_job(brief).unwrap().recipe.key();
+        // Nothing on this Mac defines a connector: Claude's start says whether it is connected.
+        let run = s.host.run_now(&key).unwrap();
+        assert_eq!(run.outcome, RunOutcome::Running, "{}", run.reason);
+        assert_eq!(run.profile.map(|p| p.provider), Some(Provider::Claude));
+        assert!(
+            run.model_reason.contains(
+                "is on Codex, and Codex cannot reach claude.ai Gmail, a claude.ai connector"
+            ),
+            "{}",
+            run.model_reason
+        );
+        let session = s.host.session(run.thread_id.as_ref().unwrap()).unwrap();
+        let launch = s.host.thread_launch(&session).unwrap();
+        assert!(launch.loads_connectors());
+        assert!(launch.servers["claude.ai Gmail"].is_null());
+        assert!(!launch.codex_may_run());
+        s.host
+            .job_run_ended(run.thread_id.as_ref().unwrap(), RunEnd::Finished)
+            .unwrap();
+        // On Codex alone the run does not start, and says why.
+        let mut selection = s.host.model_selection().unwrap();
+        selection.set_job_row(Some(Line {
+            first: codex,
+            then: Then::Wait,
+        }));
+        s.host.set_model_selection(&selection).unwrap();
+        let run = s.host.run_now(&key).unwrap();
+        assert_eq!(run.outcome, RunOutcome::NotStarted);
+        assert_eq!(
+            run.reason,
+            "Codex cannot reach claude.ai Gmail, a claude.ai connector, and the Job row has no Claude choice."
+        );
+        let checked = check_source(
+            Provider::Codex,
+            &s.host.source_env(),
+            &connector("claude.ai Gmail", "x"),
+        );
+        assert_eq!(
+            checked.problem.as_deref(),
+            Some(
+                "claude.ai Gmail is a claude.ai connector, which only Claude reaches; this loop runs on Codex."
+            )
+        );
     }
 
     #[test]

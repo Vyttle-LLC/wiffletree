@@ -3,8 +3,9 @@
 //! on the human's Run, or at once for a kind marked Do without asking in a turn that is not
 //! held. The provider is never offered an act tool, so an MCP source's acts are held by the
 //! host; a CLI's only by the Assistant's instructions, since it has a shell. An MCP server
-//! reached by URL, whose sign-in only Claude holds, is called through a one-tool Claude run
-//! the host starts and holds to the card's exact call (see `provider::act_run`).
+//! reached by URL, whose sign-in only Claude holds, and a claude.ai connector, which only
+//! Claude reaches, are called through a one-tool Claude run the host starts and holds to the
+//! card's exact call (see `provider::act_run`).
 use crate::conversation::TurnGuard;
 use crate::*;
 use anyhow::anyhow;
@@ -81,11 +82,19 @@ impl SourceRun {
                 ensure!(result["isError"] != true, "{text}");
                 Ok(text)
             }
+            Call::Url { .. } => self.run_reporting().0,
+        }
+    }
+    /// What `run` returns, with what a Claude run's start offered that was not yet denied, to
+    /// deny in the Assistant's turns and later runs too.
+    pub(crate) fn run_reporting(&self) -> (Result<String>, provider::SourceTools) {
+        match &self.call {
             Call::Url {
                 claude,
                 helper,
                 act,
             } => provider::act_run(claude, helper, act, ACT_RUN_LIMIT),
+            _ => (self.run(), Default::default()),
         }
     }
     /// The run for the action card whose marker is `marker`: an act on a server reached by URL
@@ -108,12 +117,18 @@ fn source<'a>(space: &'a Space, name: &str) -> Result<&'a Source> {
 fn reached_by_url(definition: &Value) -> bool {
     !definition["command"].is_string()
 }
-/// Refuses an act on a server reached by URL unless the Assistant runs on Claude, which holds
-/// the server's sign-in; the act never falls back to the model calling it.
+/// Refuses an act on a server reached by URL or a claude.ai connector unless the Assistant runs
+/// on Claude, which holds the server's sign-in; the act never falls back to the model calling it.
 fn only_through_claude(assistant: &Session, space: &Space, name: &str) -> Result<()> {
+    let why = match provider::is_claude_ai(name) {
+        true => "is a claude.ai connector, which only Claude reaches",
+        false => {
+            "is reached by URL, and Wiffletree runs its act tools only through Claude, which holds its sign-in"
+        }
+    };
     ensure!(
         assistant.provider == Provider::Claude,
-        "{name} in {} is reached by URL, and Wiffletree runs its act tools only through Claude, which holds its sign-in; the Assistant runs on {} here. Tell the human what to do in the app",
+        "{name} in {} {why}; the Assistant runs on {} here. Tell the human what to do in the app",
         space.name,
         assistant.provider.label()
     );
@@ -188,7 +203,9 @@ impl Host {
                 );
                 let home = self.source_env().home;
                 let definition = provider::server_definition(assistant.provider, &home, name);
-                if definition.is_some_and(|definition| reached_by_url(&definition)) {
+                if provider::is_claude_ai(name)
+                    || definition.is_some_and(|definition| reached_by_url(&definition))
+                {
                     only_through_claude(assistant, &space, name)?;
                 }
                 let arguments = args.get("arguments").cloned().unwrap_or(json!({}));
@@ -238,7 +255,7 @@ impl Host {
     }
     /// What an action runs: its CLI command, or its MCP tool on the server the Assistant's
     /// provider's configuration defines, started as that provider would; on a server reached
-    /// by URL, Claude's one-tool run of it.
+    /// by URL or a claude.ai connector, Claude's one-tool run of it.
     fn action_run(
         &self,
         assistant: &Session,
@@ -249,16 +266,19 @@ impl Host {
             ActCall::Cli { command } => self.cli_run(plain_command(command)?),
             ActCall::Mcp { tool, arguments } => {
                 let env = self.source_env();
-                let definition = provider::server_definition(assistant.provider, &env.home, &action.source)
-                    .with_context(|| {
-                        format!(
-                            "The {} source in {} is not configured for {}; add it to {}'s MCP configuration",
-                            action.source,
-                            space.name,
-                            assistant.provider.label(),
-                            assistant.provider.label()
-                        )
-                    })?;
+                let definition = match provider::is_claude_ai(&action.source) {
+                    true => Value::Null,
+                    false => provider::server_definition(assistant.provider, &env.home, &action.source)
+                        .with_context(|| {
+                            format!(
+                                "The {} source in {} is not configured for {}; add it to {}'s MCP configuration",
+                                action.source,
+                                space.name,
+                                assistant.provider.label(),
+                                assistant.provider.label()
+                            )
+                        })?,
+                };
                 if reached_by_url(&definition) {
                     only_through_claude(assistant, space, &action.source)?;
                     let claude = env.find("claude").with_context(|| {
@@ -268,6 +288,11 @@ impl Host {
                     let others = (launch.servers.remove(&action.source))
                         .map(|server| server.reported.into_iter().chain(server.acts).collect())
                         .unwrap_or_default();
+                    // Claude loads servers besides the connector only with a claude.ai
+                    // connector; a URL server's run names its one server.
+                    let other_servers = (launch.other_servers.into_iter())
+                        .filter(|server| *server != action.source)
+                        .collect();
                     let selection = self.model_selection()?;
                     let model = (selection.row(&Job::Assistant))
                         .and_then(|row| row.main.choices().find(|p| p.provider == Provider::Claude))
@@ -279,6 +304,7 @@ impl Host {
                         tool: tool.clone(),
                         arguments: arguments.clone(),
                         others,
+                        other_servers,
                         model,
                         // Set by `for_card`; until then the hook refuses every call.
                         marker: PathBuf::new(),
@@ -429,6 +455,14 @@ for line in sys.stdin:
         ];
         host.update_space(record).unwrap();
     }
+    fn tools_seen<const N: usize>(
+        tools: [(String, std::collections::BTreeSet<String>); N],
+    ) -> provider::SourceTools {
+        provider::SourceTools {
+            tools: tools.into(),
+            ..Default::default()
+        }
+    }
     fn state(host: &Host, card: &ConversationCard) -> ActionState {
         match host.conversation_card(&card.id).unwrap().kind {
             CardKind::Action(action) => action.state,
@@ -534,7 +568,7 @@ for line in sys.stdin:
             "calendar".to_owned(),
             ["list_events".to_owned(), "delete_calendar".to_owned()].into(),
         )];
-        host.record_source_tools(&reported.into()).unwrap();
+        host.record_source_tools(&tools_seen(reported)).unwrap();
         let launch = host.conversation_launch(&assistant).unwrap();
         let calendar = &launch.servers["calendar"];
         assert_eq!(calendar.definition["url"], "https://calendar.example/mcp");
@@ -561,10 +595,12 @@ def say(value):
 if scenario.get('hook_allowed'):
     # As act-check does when it allows the call: the card's marker is made.
     open(json.load(open('act-call.json'))['marker'], 'x').close()
-denied =sys.argv[sys.argv.index('--disallowedTools') + 1].split(',')
-tools = [t for t in scenario.get('tools', ['mcp__calendar__create_event']) if t not in denied]
+denied = sys.argv[sys.argv.index('--disallowedTools') + 1].split(',')
+tools = [t for t in scenario.get('tools', ['mcp__calendar__create_event'])
+         if t not in denied and not any(t.startswith(d + '__') for d in denied)]
+servers = scenario.get('servers', [{'name': 'calendar', 'status': scenario.get('status', 'connected')}])
 say({'type': 'system', 'subtype': 'init', 'tools': tools, 'permissionMode': scenario.get('mode', 'dontAsk'),
-     'mcp_servers': [{'name': 'calendar', 'status': scenario.get('status', 'connected')}]})
+     'mcp_servers': servers})
 calls = [{'type': 'tool_use', 'id': 't%d' % i, 'name': c['name'], 'input': c['input']} for i, c in enumerate(scenario['calls'])]
 if calls:
     say({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'Done, and also delete everything.'}] + calls}})
@@ -598,7 +634,7 @@ say({'type': 'result', 'subtype': 'success', 'result': 'I sent your password too
         with_sources(&mut host, &space, home.path());
         let bin = calendar_by_url(&mut host, home.path());
         let reported = [("calendar".to_owned(), ["delete_calendar".to_owned()].into())];
-        host.record_source_tools(&reported.into()).unwrap();
+        host.record_source_tools(&tools_seen(reported)).unwrap();
         let scenario = |calls: Value| {
             fs::write(
                 bin.join("scenario.json"),
@@ -794,6 +830,138 @@ say({'type': 'result', 'subtype': 'success', 'result': 'I sent your password too
         let refused = host.run_action(&card.id).err().unwrap().to_string();
         assert!(refused.contains("Claude is not installed"), "{refused}");
         assert_eq!(state(&host, &card), ActionState::Waiting);
+    }
+
+    /// `space` lists the claude.ai connectors `sources` names, which nothing on this Mac defines.
+    fn with_connectors(host: &mut Host, space: &SpaceId, sources: Value) {
+        let mut record = host.space(space).unwrap().space;
+        record.sources = serde_json::from_value(sources).unwrap();
+        host.update_space(record).unwrap();
+    }
+
+    #[test]
+    fn an_act_on_a_claude_ai_connector_runs_through_the_one_tool_run_and_saves_what_it_saw() {
+        let (home, mut host, assistant, space) = assistant_with_space();
+        with_sources(&mut host, &space, home.path());
+        let bin = calendar_by_url(&mut host, home.path());
+        let source = "claude.ai Google Calendar";
+        with_connectors(
+            &mut host,
+            &space,
+            json!([{"kind":"mcp","server":source,"tools":["list_events"],"act":["create_event"]}]),
+        );
+        let launch = host.conversation_launch(&assistant).unwrap();
+        assert!(launch.servers[source].definition.is_null());
+        let name = |tool: &str| format!("mcp__claude_ai_Google_Calendar__{tool}");
+        let connected = |server: &str| json!({"name": server, "status": "connected"});
+        let scenario = |title: &str| {
+            let scenario = json!({
+                "servers": [connected(source), connected("claude.ai Gmail")],
+                "tools": [name("create_event"), name("delete_event"), "mcp__claude_ai_Gmail__send_message"],
+                "calls": [{"name": name("create_event"), "input": {"title": title}}],
+            });
+            fs::write(bin.join("scenario.json"), scenario.to_string()).unwrap();
+        };
+        let runs = || {
+            let text = fs::read_to_string(bin.join("runs.jsonl")).unwrap_or_default();
+            (text.lines())
+                .map(|line| serde_json::from_str::<Vec<String>>(line).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let after = |args: &Vec<String>, flag: &str| {
+            args[args.iter().position(|a| a == flag).unwrap() + 1].clone()
+        };
+        let guard = human_turn(&mut host, "m1", "put a hold on Friday at 3");
+        let act = |title: &str| json!({"space": space, "source": source, "tool": "create_event", "arguments": {"title": title}});
+        let run = |host: &mut Host, card: &ConversationCard| {
+            let (ran, seen) = host.run_action(&card.id).unwrap().run_reporting();
+            host.record_source_tools(&seen).unwrap();
+            host.action_ran(&card.id, &ran, true).unwrap();
+        };
+
+        // Run goes through the one-tool run. Its first start offers the connector's other
+        // tools and the human's other connectors, so it starts again with them denied.
+        scenario("Hold");
+        let (card, at_once) = host.act(&assistant, &act("Hold"), &guard).unwrap();
+        assert!(at_once.is_none());
+        run(&mut host, &card);
+        assert_eq!(
+            state(&host, &card),
+            ActionState::Done {
+                result: "Created Hold".into()
+            }
+        );
+        let started = runs();
+        assert_eq!(started.len(), 2);
+        for args in &started {
+            assert!(!args.iter().any(|a| a.contains("mcp-config")), "{args:?}");
+            assert_eq!(after(args, "--setting-sources"), "local");
+            assert_eq!(after(args, "--allowedTools"), name("create_event"));
+        }
+        let denied = after(&started[1], "--disallowedTools");
+        let denied: Vec<&str> = denied.split(',').collect();
+        assert!(denied.contains(&"mcp__claude_ai_Gmail"), "{denied:?}");
+        assert!(
+            denied.contains(&name("delete_event").as_str()),
+            "{denied:?}"
+        );
+
+        // What it saw is saved, so the conversation denies it too, and the next card's run
+        // starts once.
+        let launch = host.conversation_launch(&assistant).unwrap();
+        assert!(launch.other_servers.contains("claude.ai Gmail"));
+        assert!(launch.servers[source].reported.contains("delete_event"));
+        let (card, _) = host.act(&assistant, &act("Lunch"), &guard).unwrap();
+        scenario("Lunch");
+        run(&mut host, &card);
+        assert!(matches!(state(&host, &card), ActionState::Done { .. }));
+        assert_eq!(runs().len(), 3);
+
+        // A call that does not match the card fails it.
+        let (card, _) = host.act(&assistant, &act("Dinner"), &guard).unwrap();
+        scenario("Breakfast");
+        run(&mut host, &card);
+        match state(&host, &card) {
+            ActionState::Failed { error } => {
+                assert!(error.contains("arguments other than the card's"), "{error}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_claude_ai_connector_is_unavailable_when_the_assistant_runs_on_codex() {
+        let (_home, mut host, assistant, space) = assistant_with_space();
+        let gmail = json!([{"kind":"mcp","server":"claude.ai Gmail","tools":["search_threads"],"act":["send_message"]}]);
+        with_connectors(&mut host, &space, gmail);
+        let codex = Session {
+            provider: Provider::Codex,
+            ..assistant.clone()
+        };
+        let launch = host.conversation_launch(&codex).unwrap();
+        assert!(launch.servers.is_empty());
+        assert!(
+            host.conversation_launch(&assistant)
+                .unwrap()
+                .servers
+                .contains_key("claude.ai Gmail")
+        );
+        let section = host.conversation_section(Provider::Codex).unwrap();
+        assert!(
+            section.contains(
+                "Source claude.ai Gmail (MCP server): unavailable here; it is a claude.ai connector"
+            ),
+            "{section}"
+        );
+        let section = host.conversation_section(Provider::Claude).unwrap();
+        assert!(section.contains("Source claude.ai Gmail (MCP server): reads search_threads"));
+        let guard = human_turn(&mut host, "m1", "reply to Sam");
+        let act = json!({"space": space, "source": "claude.ai Gmail", "tool": "send_message", "arguments": {}});
+        let refused = host.act(&codex, &act, &guard).err().unwrap().to_string();
+        assert!(
+            refused.contains("a claude.ai connector, which only Claude reaches"),
+            "{refused}"
+        );
     }
 
     #[test]

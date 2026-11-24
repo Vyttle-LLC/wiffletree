@@ -434,7 +434,7 @@ impl Host {
             text.push_str(&self.attached_section(session)?);
         }
         if session.role == Role::Conversation {
-            text.push_str(&self.conversation_section()?);
+            text.push_str(&self.conversation_section(session.provider)?);
             // It belongs to no Space, so it gets every Space's additions, each for its requests.
             for record in self.spaces()?.into_iter().filter(|r| r.local.enabled) {
                 let space = &record.space;
