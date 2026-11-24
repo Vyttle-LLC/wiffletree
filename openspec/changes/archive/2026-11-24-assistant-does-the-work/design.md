@@ -38,7 +38,9 @@ Decisions 5 and 6 were added by Michael on November 23, 2026, after the first dr
 
 So the Assistant launches exactly as a coordinator does: Claude with `--dangerously-skip-permissions`, Codex with `--dangerously-bypass-approvals-and-sandbox`, working in `<data folder>/assistant/workspace/`, with full read and run access to every repository, worktree and project folder.
 
-Code changes to a repository added to Wiffletree still land through work, as tickets that are reviewed and published as pull requests. This is an instruction in the Assistant core, the same way the Coordinating core tells coordinators not to implement, with its reason: edits made from two places collide with the implementer's, and reviewed pull requests are the product's guarantee. The host does not enforce it.
+Code changes to a repository added to Wiffletree still land through work, as tickets that are reviewed and published as pull requests. This is an instruction in the Assistant core, the same way the Coordinating core tells coordinators not to implement, with its reason: edits made from two places collide with the implementer's, and reviewed pull requests are the product's guarantee. The host does not stop the edits themselves.
+
+*Added by Michael on November 24, 2026, with #272:* the Assistant runs under the guard on every agent's `git` and `gh` (`agent-git-guard`). Its launch puts the guard first on `PATH`, on Claude and Codex, the latter with `allow_login_shell=false` so a login shell cannot reorder it, and gives it no branch: `git` refuses every push and `gh` runs reads only. So pushing and GitHub writes are guarded, not only instructed. Like every agent's, the guard is a guardrail, not a sandbox: a full path to the real binary or a call with the human's token is not stopped.
 
 *Alternatives considered:* the Seatbelt profile (dropped by Michael, above); Claude deny rules on managed paths (they cannot hold `Bash`, and would only make the rule look enforced).
 

@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: The Assistant parents the coordinators of its work
-A project that `start_work` creates SHALL belong to the Space named, use that Space's repositories plus those named, and record that it is the Assistant's work item. Its coordinator SHALL have the Assistant as its parent and SHALL stay its project's coordinator in every other way. Creation, the brief and the start SHALL succeed or fail together, as `create_project` does. The brief SHALL be sent as a Wiffletree message naming the Assistant, and SHALL say that the Assistant relays the human's request and is the coordinator's parent, and that approvals only the human gives still come from the human. For that coordinator, `report` SHALL reach the Assistant; `ask_user` SHALL be delivered to the Assistant as a message, waking it, and SHALL create no Inbox item; and `send_message` SHALL reach its own workers and the Assistant. Approvals the host creates for the project, for publishing, merging and permissions, SHALL stay Inbox items for the human (see assistant, "Human-only approvals reach the human"). The coordinator's core SHALL say who its parent is. The human SHALL still be able to message the coordinator from its project's view, and those messages SHALL count as the human's.
+A project that `start_work` creates SHALL belong to the Space named, use that Space's repositories plus those named, and record that it is the Assistant's work item. Its coordinator SHALL have the Assistant as its parent and SHALL stay its project's coordinator in every other way. Creation, the brief and the start SHALL succeed or fail together, as `create_project` does. The brief SHALL be sent as a Wiffletree message naming the Assistant, and SHALL say that the Assistant relays the human's request and is the coordinator's parent, and that approvals only the human gives still come from the human. For that coordinator, `report` SHALL reach the Assistant; `ask_user` SHALL be delivered to the Assistant as a message, waking it, and SHALL create no Inbox item; and `send_message` SHALL reach its own workers and the Assistant. Approvals the host creates for the project, for publishing, merging and permissions, SHALL stay Inbox items for the human (see assistant, "Human-only approvals reach the human"). The coordinator's core SHALL say who its parent is. The human SHALL still be able to message the coordinator from its project's view, and those messages SHALL count as the human's. A work item's project SHALL never be filed under another project or have projects filed under it, by any command, so its coordinator never gains a parent project's or a child's coordinator to message.
 
 #### Scenario: A question from work
 - **WHEN** the coordinator of an Assistant work item calls `ask_user` asking which shade to use
@@ -10,6 +10,10 @@ A project that `start_work` creates SHALL belong to the Space named, use that Sp
 #### Scenario: A publish approval
 - **WHEN** a ticket of an Assistant work item needs the human's approval to publish to an owner that is not allowed
 - **THEN** the Inbox holds the approval as for any project, and the Assistant is told of it
+
+#### Scenario: Filing work under a project
+- **WHEN** the human tries to file the Assistant's "Comment colour passes AA" under the project "Website redesign", or to file a project under it
+- **THEN** it is refused, saying the Assistant's work lives under the Assistant, and nothing changes
 
 #### Scenario: Creation fails
 - **WHEN** `start_work` names a repository id that is no workspace repository

@@ -27,7 +27,7 @@ The Assistant SHALL decide which Space each request belongs to from the conversa
 - **THEN** the call is refused, naming the Space the human chose
 
 ### Requirement: The Assistant acts on this Mac
-The Assistant SHALL run in its provider's YOLO mode, as a coordinator does, in its working directory `<data folder>/assistant/workspace/`: it SHALL run commands, read and write files anywhere this Mac's user can, and search and fetch the web. It SHALL have full read and run access to every repository added to Wiffletree, every ticket worktree and every project folder, so it can inspect diffs, run builds and tests and read logs, in its work above all. The host SHALL NOT limit its repository access. Code changes to a repository added to Wiffletree SHALL land through work, as tickets that are reviewed and published as pull requests; the Assistant core SHALL say so in the way the Coordinating core tells coordinators not to implement, and SHALL give the reason: edits made from two places collide with the implementer's, and reviewed pull requests are the product's guarantee. The host SHALL NOT enforce it. The Assistant SHALL reach other apps, such as mail, calendars and trackers, through Space sources, as "The Assistant uses apps through Space sources" says.
+The Assistant SHALL run in its provider's YOLO mode, as a coordinator does, in its working directory `<data folder>/assistant/workspace/`: it SHALL run commands, read and write files anywhere this Mac's user can, and search and fetch the web. It SHALL have full read and run access to every repository added to Wiffletree, every ticket worktree and every project folder, so it can inspect diffs, run builds and tests and read logs, in its work above all. The host SHALL NOT limit its repository access. Code changes to a repository added to Wiffletree SHALL land through work, as tickets that are reviewed and published as pull requests; the Assistant core SHALL say so in the way the Coordinating core tells coordinators not to implement, and SHALL give the reason: edits made from two places collide with the implementer's, and reviewed pull requests are the product's guarantee. The host SHALL NOT enforce it beyond the guard on every agent's `git` and `gh` (see agent-git-guard), which the Assistant's launch SHALL put first on its shells' `PATH`, on Claude and Codex, giving it no branch to push: its `git` SHALL refuse every push and its `gh` SHALL run reads only. The Assistant SHALL reach other apps, such as mail, calendars and trackers, through Space sources, as "The Assistant uses apps through Space sources" says.
 
 #### Scenario: A local script
 - **WHEN** the human asks the Assistant to tidy `~/Downloads` by file type
@@ -36,6 +36,10 @@ The Assistant SHALL run in its provider's YOLO mode, as a coordinator does, in i
 #### Scenario: A fix in a managed repository
 - **WHEN** the human asks for a typo fix in `celadon-docs`, a repository added to Wiffletree
 - **THEN** the Assistant starts work for it, and does not edit the clone itself
+
+#### Scenario: A push from the Assistant
+- **WHEN** the Assistant runs `git push origin HEAD:fix-footer` in a clone, or `gh pr create`, on Claude or on Codex
+- **THEN** the guard refuses it with one line naming the Wiffletree tool to use instead, and nothing reaches GitHub
 
 #### Scenario: Checking its work's build
 - **WHEN** the human asks whether the comment colour work's nvim ticket builds

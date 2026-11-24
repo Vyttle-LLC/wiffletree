@@ -6,7 +6,7 @@ Says what a Space's brain is and how Wiffletree writes it: the `second-brain/` f
 ## Requirements
 
 ### Requirement: A project's brain comes from its Space
-A project SHALL store no brain of its own. A project's brain SHALL be its Space's brain. A project a coordinator creates with `create_project` SHALL belong to the creating project's Space and SHALL use that Space's brain. Assistant threads and job runs SHALL use their own Space's brain. Capture, compile, search and `query_brain` SHALL resolve the brain this way and in no other way.
+A project SHALL store no brain of its own. A project's brain SHALL be its Space's brain. A project a coordinator creates with `create_project` SHALL belong to the creating project's Space and SHALL use that Space's brain. Issue threads and job runs SHALL use their own Space's brain. The Assistant, which serves every Space, SHALL use the brain of the Space it names in each `query_brain` or `log_work` call (see `project-memory` and `brain-browser`), and a project it starts with `start_work` SHALL use the brain of the Space it names there. Capture, compile, search and `query_brain` SHALL resolve the brain this way and in no other way.
 
 #### Scenario: A project in the Sage Space
 - **WHEN** a project in the Sage Space works in repositories owned by `Sage-Social` and by `Vyttle-LLC`
@@ -19,6 +19,10 @@ A project SHALL store no brain of its own. A project's brain SHALL be its Space'
 #### Scenario: A Space on this Mac alone
 - **WHEN** a project's Space is Personal, which named no brain in an earlier release
 - **THEN** the project logs to Personal's own brain, on this Mac alone, and nothing is pushed
+
+#### Scenario: The Assistant names a Space
+- **WHEN** the Assistant logs one entry naming Personal and queries the brain naming Vyttle
+- **THEN** the entry goes to Personal's brain, the query reads only Vyttle's, and a work item it starts in Celadon logs to Celadon's brain
 
 ### Requirement: A Space's brain is its folder's second-brain
 A Space's brain SHALL be `second-brain/` in its repository's folder, holding its logs, its wiki and its reconcile queue. Every Space SHALL have one, nothing SHALL register it, and no Space SHALL name a brain. Spaces in one folder SHALL share one brain. These specifications' "a Space's brain" SHALL mean this folder, and "wiki" SHALL mean its `notes/` and `STATUS.md`. A brain SHALL be read and written only through the repository's one clone and sync engine (see `shared-repositories`). No agent SHALL add, remove or move a brain.

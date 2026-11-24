@@ -2500,7 +2500,7 @@ mod tests {
                 "PR keeper v1",
                 "Thread contract v3",
                 "Assistant contract v2",
-                "Assistant v5",
+                "Assistant v6",
                 "Job run v3"
             ]
         );

@@ -251,6 +251,28 @@ fn work_the_assistant_starts_reports_to_it_and_never_reaches_the_inbox() {
         == CardKind::Work {
             project_id: project.id.clone()
         }));
+    // Nor is it ever filed under or over another project.
+    let started = request(
+        &service,
+        Command::CreateProject {
+            name: "Website redesign".into(),
+            space_id: Some(fixture.celadon.clone()),
+        },
+    );
+    let human = started["id"].as_str().unwrap().to_owned();
+    for (child, parent) in [(&project.id, &human), (&human, &project.id)] {
+        let filed = (service.request(Command::SetProjectParent {
+            project_id: child.clone(),
+            parent_id: Some(parent.clone()),
+        }))
+        .unwrap()
+        .recv_blocking()
+        .unwrap()
+        .unwrap_err()
+        .to_string();
+        assert!(filed.contains("lives under the Assistant"), "{filed}");
+    }
+    assert!(work(&service, "Footer year").parent_id.is_none());
 }
 
 #[test]
