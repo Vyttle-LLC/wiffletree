@@ -55,17 +55,42 @@ pub(crate) fn section_of(index: &WorkspaceIndex, project: &Project) -> SpaceId {
     }
 }
 
+/// Every lens's sections, by Space id and name: each Space in the Spaces' order, then No Space.
+pub(crate) fn spaces(index: &WorkspaceIndex) -> Vec<(SpaceId, String)> {
+    let listed =
+        (index.snapshot().spaces.iter()).map(|space| (space.id.clone(), space.name.clone()));
+    listed
+        .chain([(SpaceId::default(), "No Space".to_owned())])
+        .collect()
+}
+
+/// The projects listed in `space`'s section, in the host's order, each with its coordinator.
+/// Archived projects count only when `show_archived`.
+pub(crate) fn shown<'a>(
+    index: &'a WorkspaceIndex,
+    space: &SpaceId,
+    show_archived: bool,
+) -> Vec<(&'a Project, &'a Session)> {
+    (index.snapshot().projects.iter())
+        // The Assistant's work is listed in its rail, never as a project row.
+        .filter(|project| project.assistant_work.is_none() && section_of(index, project) == *space)
+        .filter_map(|project| {
+            let root = index
+                .roots(&project.id)
+                .find(|s| show_archived || !s.archived)?;
+            Some((project, root))
+        })
+        .collect()
+}
+
 /// A section for each Space with a shown project, in the Spaces' order, then No Space with the
 /// projects in none. Archived projects count only when `show_archived`.
 pub(crate) fn sections(index: &WorkspaceIndex, show_archived: bool) -> Vec<Section<'_>> {
-    let snapshot = index.snapshot();
-    let parents: BTreeSet<&str> = (snapshot.projects.iter())
+    let parents: BTreeSet<&str> = (index.snapshot().projects.iter())
         .filter_map(|project| project.parent_id.as_deref())
         .collect();
-    let listed = (snapshot.spaces.iter()).map(|space| (space.id.clone(), space.name.clone()));
-    let none = (SpaceId::default(), "No Space".to_owned());
-    listed
-        .chain([none])
+    spaces(index)
+        .into_iter()
         .map(|(space, name)| Section {
             entries: entries(index, &space, show_archived, &parents),
             space,
@@ -84,16 +109,7 @@ fn entries<'a>(
     show_archived: bool,
     parents: &BTreeSet<&str>,
 ) -> Vec<Entry<'a>> {
-    let shown: Vec<(&Project, &Session)> = (index.snapshot().projects.iter())
-        // The Assistant's work is listed in its rail, never as a project row.
-        .filter(|project| project.assistant_work.is_none() && section_of(index, project) == *space)
-        .filter_map(|project| {
-            let root = index
-                .roots(&project.id)
-                .find(|s| show_archived || !s.archived)?;
-            Some((project, root))
-        })
-        .collect();
+    let shown = shown(index, space, show_archived);
     let top_level: BTreeSet<&str> = (shown.iter())
         .filter(|(project, _)| project.parent_id.is_none())
         .map(|(project, _)| project.id.as_str())

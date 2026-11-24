@@ -75,14 +75,17 @@ impl Default for Preferences {
 }
 
 /// A way of drawing the sidebar's project list over the same projects.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Lens {
     /// Parents with their children, and loose projects.
     #[default]
     Outcome,
+    /// Projects under each app of their tickets' repositories.
     App,
+    /// Projects under each layer of their tickets' repositories.
     Layer,
+    /// What waits on the human.
     Me,
 }
 
@@ -95,10 +98,6 @@ impl Lens {
             Lens::Layer => "Layer",
             Lens::Me => "Me",
         }
-    }
-    /// Only the Outcome lens is drawn so far.
-    pub(crate) fn available(self) -> bool {
-        self == Lens::Outcome
     }
 }
 

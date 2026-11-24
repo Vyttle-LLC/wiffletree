@@ -110,6 +110,26 @@ impl Reorder<'_> {
     }
 }
 
+/// Where a project row is drawn.
+enum Place<'a> {
+    /// In the Outcome tree, where rows are dragged and renamed.
+    Tree(&'a Reorder<'a>),
+    /// In a lens's bucket, with its muted line beneath it.
+    Bucket(Option<String>),
+}
+
+/// What a Space's section row shows.
+struct SectionHead<'a> {
+    space: SpaceId,
+    name: &'a str,
+    /// Its projects' coordinators, for its state while collapsed.
+    projects: &'a [&'a Session],
+    /// Its projects, or in the Me lens its rows.
+    count: usize,
+    /// It is the list's first row, with no hairline above it.
+    first: bool,
+}
+
 /// Tells whatever a project is dragged over where the pointer is, as if it had moved.
 fn repeat_pointer(window: &mut Window, cx: &mut App) {
     if cx.has_active_drag() {
@@ -190,10 +210,12 @@ pub(super) struct Sidebar {
     pub(super) creating_project: bool,
     pub(super) project_name: Entity<InputState>,
     pub(super) project_edit: Option<project_name::NameEdit>,
-    /// Collapsed Space sections, by their Space's id.
-    collapsed_spaces: BTreeSet<SpaceId>,
-    /// Collapsed parents, by their project's id. Parents start expanded at app start.
-    collapsed_parents: BTreeSet<String>,
+    /// What each lens has collapsed. Everything starts expanded at app start, but for the Me
+    /// lens, which starts the first time it is drawn.
+    folds: BTreeMap<Lens, lenses::Folds>,
+    me_started: bool,
+    /// The bucket `open_lens_bucket` opened, scrolled into view once it is drawn.
+    scroll_to_bucket: Option<(SpaceId, lenses::Bucket)>,
     /// The project being dragged in the sidebar; gone once the drag ends.
     project_drag: Option<WeakEntity<ProjectDrag>>,
     /// The press in progress ended a rename, so it does not also start a drag.
@@ -234,8 +256,11 @@ impl Sidebar {
             creating_project: false,
             project_name,
             project_edit: None,
-            collapsed_spaces: BTreeSet::new(),
-            collapsed_parents: BTreeSet::new(),
+            folds: Lens::ALL
+                .map(|lens| (lens, lenses::Folds::default()))
+                .into(),
+            me_started: false,
+            scroll_to_bucket: None,
             project_drag: None,
             rename_press: false,
             press_clicks: 0,
@@ -275,11 +300,6 @@ impl Sidebar {
             cx.notify();
         }
     }
-    /// The Space whose section lists a project.
-    fn section_of(&self, project_id: &str) -> Option<SpaceId> {
-        let index = self.shared.index.as_ref()?;
-        Some(tree::section_of(index, index.project(project_id)?))
-    }
     /// Opens the collapsed Space and parent of a project selected from elsewhere, such as the
     /// Inbox, so its row shows.
     fn reveal_selected(&mut self) {
@@ -292,15 +312,53 @@ impl Sidebar {
         }
         self.reveal(&project_id);
     }
+    /// Opens what hides the project's row, in every lens.
     fn reveal(&mut self, project_id: &str) {
-        let index = self.shared.index.as_ref();
-        let parent = index.and_then(|index| index.project(project_id)?.parent_id.clone());
-        if let Some(parent) = parent {
-            self.collapsed_parents.remove(&parent);
+        let Some(index) = &self.shared.index else {
+            return;
+        };
+        for folds in self.folds.values_mut() {
+            folds.reveal(index, project_id);
         }
-        if let Some(space) = self.section_of(project_id) {
-            self.collapsed_spaces.remove(&space);
+    }
+    fn folds(&self, lens: Lens) -> &lenses::Folds {
+        &self.folds[&lens]
+    }
+    fn folds_mut(&mut self, lens: Lens) -> &mut lenses::Folds {
+        self.folds.entry(lens).or_default()
+    }
+    /// The Me lens starts with only the selected project's Space expanded, the first time it is
+    /// drawn with the workspace.
+    fn start_me_lens(&mut self, cx: &App) {
+        if self.me_started || cx.global::<Preferences>().lens != Lens::Me {
+            return;
         }
+        let Some(index) = &self.shared.index else {
+            return;
+        };
+        let selected = self
+            .shared
+            .selected_session()
+            .map(|s| s.project_id.as_str());
+        let folds = lenses::Folds::me(index, selected);
+        self.folds.insert(Lens::Me, folds);
+        self.me_started = true;
+    }
+    /// Shows `lens` with `space`'s section and its `bucket` expanded and scrolled into view. The
+    /// selected conversation stays open.
+    #[allow(dead_code, reason = "the project header's tag chips call it")]
+    pub(super) fn open_lens_bucket(
+        &mut self,
+        lens: Lens,
+        space: SpaceId,
+        bucket: lenses::Bucket,
+        cx: &mut Context<Self>,
+    ) {
+        set_lens(lens, cx);
+        self.start_me_lens(cx);
+        self.folds_mut(lens).open_bucket(&space, bucket.clone());
+        self.scroll_to_bucket = Some((space, bucket));
+        cx.notify();
     }
     fn name_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let root = (self.pending_project_selection.as_ref()).and_then(|project| {
@@ -513,6 +571,9 @@ impl Sidebar {
         let projects = self.shared.snapshot().map_or(0, |s| hosts::counts(s).0);
         let offers_new_project = self.shared.offers_new_project();
         let archived = self.shared.snapshot().map_or(0, |s| s.archived_sessions);
+        let lens = cx.global::<Preferences>().lens;
+        let me = (self.shared.index.as_deref()).map(|index| lenses::me_sections(index, now()));
+        let waiting_on_me = me.as_deref().map_or(0, lenses::me_count);
         div()
             .size_full()
             .flex()
@@ -598,7 +659,7 @@ impl Sidebar {
                         )
                     })),
             )
-            .child(lens_control(p, cx))
+            .child(lens_control(lens, waiting_on_me, p))
             .child(
                 div()
                     .relative()
@@ -635,7 +696,13 @@ impl Sidebar {
                                     )
                                 })
                             })
-                            .child(self.tree(p, cx)),
+                            .map(|list| match (lens, me) {
+                                (Lens::Outcome, _) => list.child(self.tree(p, cx)),
+                                (Lens::Me, Some(me)) => {
+                                    list.children(self.lens_rows(lens, &me, p, cx))
+                                }
+                                _ => list.children(self.tag_lens_rows(lens, p, cx)),
+                            }),
                     )
                     .vertical_scrollbar(&self.tree_scroll),
             )
@@ -1101,7 +1168,7 @@ impl Sidebar {
         };
         let reorder = Reorder {
             sections: &sections,
-            collapsed_parents: &self.collapsed_parents,
+            collapsed_parents: &self.folds(Lens::Outcome).parents,
             moving,
             target: target.clone(),
         };
@@ -1118,8 +1185,8 @@ impl Sidebar {
         let rows = tree::rows(
             index,
             self.shared.show_archived,
-            &self.collapsed_spaces,
-            &self.collapsed_parents,
+            &self.folds(Lens::Outcome).spaces,
+            &self.folds(Lens::Outcome).parents,
         );
         for row in rows {
             // Every row completes the project above it, a top-level row completes the children
@@ -1153,7 +1220,14 @@ impl Sidebar {
                             .rounded_md()
                             .bg(p.overlay)
                     });
-                    let row = self.space_row(listed, &name, &projects, first, p, cx);
+                    let head = SectionHead {
+                        space: listed,
+                        name: &name,
+                        projects: &projects,
+                        count: projects.len(),
+                        first,
+                    };
+                    let row = self.space_row(Lens::Outcome, head, p, cx);
                     tree = tree
                         .children(end)
                         .child(refusing(row, refused, cx))
@@ -1164,15 +1238,22 @@ impl Sidebar {
                     under = reorder.under(&tree::Movable(root.project_id.clone()));
                     tree = tree
                         .children(line(tree::Drop::Before(root.project_id.clone()), depth))
-                        .child(self.project_row(root, child, None, &reorder, p, cx));
+                        .child(self.project_row(root, child, None, Place::Tree(&reorder), p, cx));
                     project = Some((root, depth));
                 }
                 tree::Row::Parent { root, children } => {
                     under = reorder.under(&tree::Movable(root.project_id.clone()));
                     tree = tree
                         .children(line(tree::Drop::Before(root.project_id.clone()), 0))
-                        .child(self.project_row(root, false, Some(&children[..]), &reorder, p, cx));
-                    if !self.collapsed_parents.contains(&root.project_id) {
+                        .child(self.project_row(
+                            root,
+                            false,
+                            Some(&children[..]),
+                            Place::Tree(&reorder),
+                            p,
+                            cx,
+                        ));
+                    if !self.folds(Lens::Outcome).parents.contains(&root.project_id) {
                         parent = Some(root.project_id.clone());
                     }
                     project = Some((root, 0));
@@ -1186,6 +1267,143 @@ impl Sidebar {
             tree = tree.children(line(tree::Drop::EndOfChildren(id), 1));
         }
         tree.children(space.and_then(|space| line(tree::Drop::End(space), 0)))
+    }
+
+    /// The App or Layer lens's rows.
+    fn tag_lens_rows(&self, lens: Lens, p: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let (Some(index), Some(kind)) = (&self.shared.index, lenses::tag_kind(lens)) else {
+            return vec![];
+        };
+        let sections = lenses::tag_sections(index, kind, self.shared.show_archived);
+        self.lens_rows(lens, &sections, p, cx)
+    }
+
+    /// A lens's rows, each a child of the scrolled list so a bucket can be scrolled to: each
+    /// Space's section row, then each bucket's row and its project rows, or its first names
+    /// while it is collapsed.
+    fn lens_rows(
+        &self,
+        lens: Lens,
+        sections: &[lenses::LensSection],
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let folds = self.folds(lens);
+        if sections.is_empty() {
+            let empty = match lens {
+                Lens::Me => "Nothing waits on you.",
+                _ => "No projects yet.",
+            };
+            return vec![div().px_2().py_3().child(hint(empty, p)).into_any_element()];
+        }
+        let mut rows = vec![];
+        for (at, section) in sections.iter().enumerate() {
+            let projects = section.projects();
+            let head = SectionHead {
+                space: section.space.clone(),
+                name: &section.name,
+                projects: &projects,
+                count: match lens {
+                    Lens::Me => section.entries(),
+                    _ => projects.len(),
+                },
+                first: at == 0,
+            };
+            rows.push(self.space_row(lens, head, p, cx).into_any_element());
+            if folds.spaces.contains(&section.space) {
+                continue;
+            }
+            for group in &section.groups {
+                let bucket = (section.space.clone(), group.bucket.clone());
+                if self.scroll_to_bucket.as_ref() == Some(&bucket) {
+                    self.tree_scroll.scroll_to_top_of_item(rows.len());
+                }
+                let folded = folds.buckets.contains(&bucket);
+                let id = format!("bucket-{}-{:?}", section.space, group.bucket);
+                rows.push(
+                    self.bucket_row(lens, bucket, group.projects.len(), folded, p, cx)
+                        .into_any_element(),
+                );
+                let listed = if folded {
+                    div()
+                        .pl(inset(1) + px(4.))
+                        .pr_2()
+                        .pb_1()
+                        .text_size(px(font::CAPTION))
+                        .text_color(p.subtle)
+                        .text_ellipsis()
+                        .child(lenses::folded_line(&group.projects))
+                } else {
+                    // A project listed in several buckets keeps its rows apart by the bucket's id.
+                    let project_rows = group.projects.iter().map(|listed| {
+                        let place = Place::Bucket(listed.line.clone());
+                        self.project_row(listed.root, listed.child, None, place, p, cx)
+                    });
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.))
+                        .children(project_rows.collect::<Vec<_>>())
+                };
+                rows.push(listed.id(SharedString::from(id)).into_any_element());
+            }
+        }
+        rows
+    }
+
+    /// A bucket's row: its tag as a chip, or its name in the Me lens, and how many rows it
+    /// holds. Activating it folds or unfolds the bucket.
+    fn bucket_row(
+        &self,
+        lens: Lens,
+        bucket: (SpaceId, lenses::Bucket),
+        count: usize,
+        folded: bool,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let label = bucket.1.label(lens);
+        let name = if bucket.1.is_tag() {
+            let app = lens == Lens::App && matches!(bucket.1, lenses::Bucket::Tag(_));
+            tag_chip(label.clone(), app, p)
+        } else {
+            div().child(label.clone())
+        };
+        div()
+            .id(SharedString::from(format!(
+                "bucket-row-{}-{label}",
+                bucket.0
+            )))
+            .min_h(px(28.))
+            .mt(px(6.))
+            .pl(inset(0) + px(10.))
+            .pr_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded_md()
+            .cursor_pointer()
+            .text_size(px(font::META))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(p.subtle)
+            .hover(move |d| d.bg(p.overlay.opacity(0.6)))
+            .on_click(cx.listener(move |v, _, _, c| v.toggle_bucket(lens, bucket.clone(), c)))
+            .child(
+                icon(if folded {
+                    "chevron-right"
+                } else {
+                    "chevron-down"
+                })
+                .size(px(12.)),
+            )
+            .child(name)
+            .child(div().flex_1())
+            .child(
+                div()
+                    .flex_none()
+                    .font_family(mono_font())
+                    .child(count.to_string()),
+            )
     }
 
     /// Makes a project row draggable, and a place other rows are dropped on.
@@ -1280,16 +1498,25 @@ impl Sidebar {
     }
 
     fn toggle_parent(&mut self, project_id: &str, cx: &mut Context<Self>) {
-        if !self.collapsed_parents.remove(project_id) {
-            self.collapsed_parents.insert(project_id.to_owned());
-        }
+        lenses::toggle(
+            &mut self.folds_mut(Lens::Outcome).parents,
+            project_id.to_owned(),
+        );
         cx.notify();
     }
 
-    fn toggle_space(&mut self, space: &SpaceId, cx: &mut Context<Self>) {
-        if !self.collapsed_spaces.remove(space) {
-            self.collapsed_spaces.insert(space.clone());
-        }
+    fn toggle_space(&mut self, lens: Lens, space: SpaceId, cx: &mut Context<Self>) {
+        lenses::toggle(&mut self.folds_mut(lens).spaces, space);
+        cx.notify();
+    }
+
+    fn toggle_bucket(
+        &mut self,
+        lens: Lens,
+        bucket: (SpaceId, lenses::Bucket),
+        cx: &mut Context<Self>,
+    ) {
+        lenses::toggle(&mut self.folds_mut(lens).buckets, bucket);
         cx.notify();
     }
 
@@ -1432,46 +1659,40 @@ impl Sidebar {
 
     /// The most urgent state among `projects`, for a collapsed parent or Space.
     fn rollup(&self, projects: &[&Session], p: Palette) -> Option<AnyElement> {
-        let ids: Vec<&str> = projects
-            .iter()
-            .map(|root| root.project_id.as_str())
-            .collect();
-        let needs_you = self.shared.snapshot().map_or(0, |s| {
-            family_needs_you(&s.attention, &s.workspace_notes, &ids)
-        });
-        let stuck = (projects.iter())
-            .map(|root| self.agent_counts(root).stuck)
-            .sum();
-        let shown: Vec<Status> = (projects.iter())
-            .map(|root| self.shared.shown_status(root))
-            .collect();
-        Some(match tree::rollup(needs_you, stuck, &shown)? {
-            tree::Rollup::NeedsYou(count) => needs_you_badge(count, p).into_any_element(),
-            tree::Rollup::Stuck(count) => stuck_pill(count, p).into_any_element(),
-            tree::Rollup::Blocked => status_glyph(Status::Blocked, 12., p),
-            tree::Rollup::Working => status_glyph(Status::Working, 12., p),
-        })
+        let index = self.shared.index.as_deref()?;
+        Some(
+            match family_state(index, &self.shared.progress, projects)? {
+                tree::Rollup::NeedsYou(count) => needs_you_badge(count, p).into_any_element(),
+                tree::Rollup::Stuck(count) => stuck_pill(count, p).into_any_element(),
+                tree::Rollup::Blocked => status_glyph(Status::Blocked, 12., p),
+                tree::Rollup::Working => status_glyph(Status::Working, 12., p),
+            },
+        )
     }
 
-    /// A Space's section row: its name and project count, and collapsed, the most urgent state
+    /// A Space's section row in `lens`: its name and count, and collapsed, the most urgent state
     /// among its projects. Activating it collapses or expands the section. A hairline parts it
     /// from the section above.
     fn space_row(
         &self,
-        space: SpaceId,
-        name: &str,
-        projects: &[&Session],
-        first: bool,
+        lens: Lens,
+        SectionHead {
+            space,
+            name,
+            projects,
+            count,
+            first,
+        }: SectionHead,
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
-        let collapsed = self.collapsed_spaces.contains(&space);
+        let collapsed = self.folds(lens).spaces.contains(&space);
         let state = collapsed.then(|| self.rollup(projects, p)).flatten();
         let row = self
             .row(SharedString::from(format!("space-{space}")), false, p)
             .pl(inset(0) - px(4.))
             .text_color(p.subtle)
-            .on_click(cx.listener(move |v, _, _, c| v.toggle_space(&space, c)))
+            .on_click(cx.listener(move |v, _, _, c| v.toggle_space(lens, space.clone(), c)))
             .child(
                 div()
                     .flex_none()
@@ -1499,7 +1720,7 @@ impl Sidebar {
                     .flex_none()
                     .font_family(mono_font())
                     .text_size(px(font::META))
-                    .child(projects.len().to_string()),
+                    .child(count.to_string()),
             )
             .children(state.map(|state| div().flex_none().child(state)));
         div()
@@ -1592,13 +1813,14 @@ impl Sidebar {
 
     /// A project's row, indented with a branch icon for a `child`. A parent's row, which is given
     /// its shown `children`, has a chevron that collapses them; collapsed, it shows how many and
-    /// the most urgent state among it and them.
+    /// the most urgent state among it and them. Only the Outcome tree's rows are dragged and
+    /// renamed in place, as a lens may list a project more than once.
     fn project_row(
         &self,
         root: &Session,
         child: bool,
         children: Option<&[&Session]>,
-        reorder: &Reorder,
+        place: Place,
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -1606,7 +1828,8 @@ impl Sidebar {
         let project_id = root.project_id.clone();
         let label = root.name.clone();
         let depth = usize::from(child);
-        let collapsed = (children.filter(|_| self.collapsed_parents.contains(&project_id)))
+        let outcome_parents = &self.folds(Lens::Outcome).parents;
+        let collapsed = (children.filter(|_| outcome_parents.contains(&project_id)))
             .map(|children| (children.len(), self.parent_rollup(root, children, p)));
         let index = self.shared.index.as_ref();
         let own = index.and_then(|index| index.project(&project_id));
@@ -1614,9 +1837,15 @@ impl Sidebar {
         let parent_name = (own.and_then(|project| project.parent_id.as_deref()))
             .and_then(|parent| Some(index?.project(parent)?.name.clone()))
             .unwrap_or_default();
-        let with_parent = (self.shared.snapshot())
-            .and_then(|s| s.questions_with_parent.get(&project_id).copied())
-            .unwrap_or(0) as usize;
+        let with_parent = self
+            .shared
+            .snapshot()
+            .map_or(0, |s| with_parent(s, &project_id));
+        let (reorder, beneath) = match place {
+            Place::Tree(reorder) => (Some(reorder), None),
+            Place::Bucket(beneath) => (None, beneath),
+        };
+        let renamable = reorder.is_some();
         // The coordinator or any of its agents being open selects the project.
         let selected = self.shared.page == Page::Conversation
             && self
@@ -1624,10 +1853,7 @@ impl Sidebar {
                 .selected_session()
                 .is_some_and(|s| s.project_id == project_id);
         let agents = self.agent_counts(root);
-        let edit = self
-            .project_edit
-            .as_ref()
-            .filter(|e| e.project_id == project_id);
+        let edit = (self.project_edit.as_ref()).filter(|e| renamable && e.project_id == project_id);
         let editing = edit.is_some();
         let live = self
             .shared
@@ -1661,7 +1887,8 @@ impl Sidebar {
         let click_project = project_id.clone();
         let toggled = project_id.clone();
         let movable = tree::Movable(project_id.clone());
-        let filing_target = reorder.target == Some(tree::Drop::Under(project_id.clone()));
+        let filing_target =
+            reorder.is_some_and(|r| r.target == Some(tree::Drop::Under(project_id.clone())));
         let row = self
             .row(SharedString::from(format!("tree-{id}")), selected, p)
             // The dragged project would be filed under this one.
@@ -1688,7 +1915,7 @@ impl Sidebar {
             .on_click(cx.listener(move |v, event: &ClickEvent, w, c| {
                 if !editing {
                     c.emit(Intent::Select(id.clone()));
-                    if event.click_count() == 2 {
+                    if renamable && event.click_count() == 2 {
                         v.begin_project_rename(click_project.clone(), w, c);
                     }
                 }
@@ -1786,13 +2013,21 @@ impl Sidebar {
                             let filing = filing.clone();
                             let (evaluators, evaluators_project) =
                                 (weak.clone(), rename_id.clone());
-                            menu.item(PopupMenuItem::new("Rename").icon(icon("rename")).on_click(
-                                move |_, window, cx| {
-                                    let _ = rename.update(cx, |view, cx| {
-                                        view.begin_project_rename(rename_id.clone(), window, cx)
-                                    });
-                                },
-                            ))
+                            menu.when(renamable, |menu| {
+                                menu.item(
+                                    PopupMenuItem::new("Rename").icon(icon("rename")).on_click(
+                                        move |_, window, cx| {
+                                            let _ = rename.update(cx, |view, cx| {
+                                                view.begin_project_rename(
+                                                    rename_id.clone(),
+                                                    window,
+                                                    cx,
+                                                )
+                                            });
+                                        },
+                                    ),
+                                )
+                            })
                             .item(
                                 PopupMenuItem::new("Add repositories…")
                                     .icon(icon("folder"))
@@ -1880,6 +2115,16 @@ impl Sidebar {
                 }
                 (None, attention) => needs_you_badge(attention, p),
             })
+            .children(beneath.map(|line| {
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .pl(px(22.))
+                    .text_size(px(font::CAPTION))
+                    .text_color(p.subtle)
+                    .text_ellipsis()
+                    .child(line)
+            }))
             .when(!root.archived, |row| {
                 row.child(track(
                     project.map(|project| (project.position, project.state)),
@@ -1897,10 +2142,9 @@ impl Sidebar {
                         .child(format!("◐ {line}"))
                 }),
             );
-        if editing {
-            row
-        } else {
-            self.reorderable(row, movable, &label, reorder, p, cx)
+        match reorder {
+            Some(reorder) if !editing => self.reorderable(row, movable, &label, reorder, p, cx),
+            _ => row,
         }
     }
 
@@ -1958,7 +2202,11 @@ impl Render for Sidebar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         render_counts::count("Sidebar");
         let p = palette(is_dark(cx));
-        self.sidebar(p, cx)
+        self.start_me_lens(cx);
+        let sidebar = self.sidebar(p, cx);
+        // Drawing it asked the list to scroll to the bucket, once.
+        self.scroll_to_bucket = None;
+        sidebar
     }
 }
 
@@ -2084,15 +2332,9 @@ impl Sidebar {
     }
 }
 
-/// The lenses under the PROJECTS header: Outcome, App, Layer and Me. Only the lenses this version
-/// draws can be chosen; the others wait, dimmed.
-fn lens_control(p: Palette, cx: &mut Context<Sidebar>) -> Div {
-    let saved = cx.global::<Preferences>().lens;
-    let current = if saved.available() {
-        saved
-    } else {
-        Lens::default()
-    };
+/// The lenses under the PROJECTS header: Outcome, App, Layer and Me, which counts what waits on
+/// the human across every Space, whichever lens is shown.
+fn lens_control(current: Lens, waiting_on_me: usize, p: Palette) -> Div {
     let mut control = div()
         .flex_none()
         .mx_3()
@@ -2106,18 +2348,27 @@ fn lens_control(p: Palette, cx: &mut Context<Sidebar>) -> Div {
         .bg(p.base);
     for (at, lens) in Lens::ALL.into_iter().enumerate() {
         let on = lens == current;
-        let tooltip = if lens.available() {
-            format!("{} · ⌘{}", lens.label(), at + 1)
-        } else {
-            format!("The {} lens is not available yet", lens.label())
-        };
+        let tooltip = format!("{} · ⌘{}", lens.label(), at + 1);
+        let badge = (lens == Lens::Me && waiting_on_me > 0).then(|| {
+            div()
+                .flex_none()
+                .px(px(4.))
+                .rounded_full()
+                .bg(p.yellow)
+                .text_color(p.on_accent)
+                .font_weight(FontWeight::BOLD)
+                .child(waiting_on_me.to_string())
+        });
         let segment = div()
             .id(SharedString::from(format!("lens-{}", lens.label())))
             .flex_1()
             .py(px(3.))
             .flex()
             .justify_center()
+            .items_center()
+            .gap_1()
             .rounded_md()
+            .cursor_pointer()
             .text_size(px(font::META))
             .text_color(if on { p.text } else { p.subtle })
             .when(on, |d| {
@@ -2126,16 +2377,27 @@ fn lens_control(p: Palette, cx: &mut Context<Sidebar>) -> Div {
                     .shadow_sm()
             })
             .tooltip(move |w, c| Tooltip::new(tooltip.clone()).build(w, c))
-            .child(lens.label());
-        control = control.child(if lens.available() {
-            segment
-                .cursor_pointer()
-                .on_click(move |_, _, cx| set_lens(lens, cx))
-        } else {
-            segment.opacity(0.45)
-        });
+            .child(lens.label())
+            .children(badge)
+            .on_click(move |_, _, cx| set_lens(lens, cx));
+        control = control.child(segment);
     }
     control
+}
+
+/// An app or layer, tinted for an app, as the lenses and a project's header show them.
+fn tag_chip(label: String, app: bool, p: Palette) -> Div {
+    let tint = if app { p.focus } else { p.subtle };
+    div()
+        .flex_none()
+        .px(px(5.))
+        .py(px(1.))
+        .rounded(px(5.))
+        .bg(if app { tint.opacity(0.14) } else { p.overlay })
+        .text_color(tint)
+        .font_family(mono_font())
+        .font_weight(FontWeight::NORMAL)
+        .child(label)
 }
 
 fn insertion_line(depth: usize, p: Palette) -> Div {
@@ -2290,6 +2552,32 @@ pub(super) fn needs_you(
             .count()
 }
 
+/// What a child's hollow badge counts: its questions waiting with its parent.
+fn with_parent(snapshot: &Snapshot, project_id: &str) -> usize {
+    (snapshot.questions_with_parent.get(project_id)).map_or(0, |&count| count as usize)
+}
+
+/// The most urgent state among `projects`, for a collapsed parent or section: the items that
+/// need the human, each once, then their stuck agents, then the status each row shows.
+fn family_state(
+    index: &WorkspaceIndex,
+    board: &progress::ProgressBoard,
+    projects: &[&Session],
+) -> Option<tree::Rollup> {
+    let snapshot = index.snapshot();
+    let ids: Vec<&str> = (projects.iter())
+        .map(|root| root.project_id.as_str())
+        .collect();
+    let needs_you = family_needs_you(&snapshot.attention, &snapshot.workspace_notes, &ids);
+    let stuck = (projects.iter())
+        .map(|root| tree::agent_counts(board, index, root).stuck)
+        .sum();
+    let shown: Vec<Status> = (projects.iter())
+        .map(|root| shown_status(root, index))
+        .collect();
+    tree::rollup(needs_you, stuck, &shown)
+}
+
 /// What the badges of `projects` count together, each item once however many of them it is for.
 fn family_needs_you(attention: &[Attention], notes: &[WorkspaceNote], projects: &[&str]) -> usize {
     let attention = (attention.iter()).filter(|a| projects.contains(&a.project_id.as_str()));
@@ -2333,7 +2621,10 @@ fn assistant_marks(snapshot: Option<&Snapshot>, now: i64) -> (usize, Option<Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{assistant_marks, family_needs_you, needs_you, shown_status};
+    use super::{
+        assistant_marks, family_needs_you, family_state, needs_you, shown_status, with_parent,
+    };
+    use crate::{progress::ProgressBoard, tree};
     use workspace_core::{
         Attention, Paused, Provider, Role, Session, Snapshot, Status, WorkspaceIndex, WorkspaceNote,
     };
@@ -2499,5 +2790,67 @@ mod tests {
             assistant_marks(Some(&snapshot), 31 * minute),
             (1, Some("Working 30 min".into()))
         );
+    }
+
+    /// A started parent with one child, and their coordinators.
+    fn family() -> (tempfile::TempDir, workspace_host::Host, Session, Session) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut host = workspace_host::Host::open_set_up(directory.path().join("home")).unwrap();
+        host.set_workspaces_dir(directory.path().join("workspaces").to_str().unwrap())
+            .unwrap();
+        let parent = host.create_project("Accessible contrast").unwrap();
+        let child = host.create_project("Contrast warnings").unwrap();
+        for project in [&parent, &child] {
+            host.set_live(&project.id, true).unwrap();
+        }
+        host.set_project_parent(&child.id, Some(&parent.id))
+            .unwrap();
+        let coordinator = |project: &str| {
+            let mut sessions = host.sessions().unwrap().into_iter();
+            sessions.find(|s| s.project_id == project).unwrap()
+        };
+        let (parent, child) = (coordinator(&parent.id), coordinator(&child.id));
+        (directory, host, parent, child)
+    }
+
+    /// The snapshot, with the child's coordinator working.
+    fn with_child_working(host: &workspace_host::Host, child: &Session) -> WorkspaceIndex {
+        let mut snapshot = host.snapshot().unwrap();
+        let mut sessions = snapshot.sessions.iter_mut();
+        sessions.find(|s| s.id == child.id).unwrap().status = Status::Working;
+        WorkspaceIndex::new(snapshot, Default::default())
+    }
+
+    #[test]
+    fn a_collapsed_parent_rolls_up_its_childs_questions_only_once_they_reach_the_human() {
+        let (_directory, mut host, parent, child) = family();
+        let asked = host
+            .agent_tool(
+                &child.id,
+                "ask_user",
+                serde_json::json!({"request_id": "r", "question": "Warn?", "options": []}),
+            )
+            .unwrap();
+        let board = ProgressBoard::default();
+        let rollup = |index: &WorkspaceIndex| {
+            let family = [&parent, &child].map(|s| index.session(&s.id).unwrap());
+            family_state(index, &board, &family)
+        };
+
+        // With the parent, the question is the child's hollow badge and the family is working.
+        let index = with_child_working(&host, &child);
+        assert_eq!(with_parent(index.snapshot(), &child.project_id), 1);
+        assert_eq!(with_parent(index.snapshot(), &parent.project_id), 0);
+        assert_eq!(rollup(&index), Some(tree::Rollup::Working));
+
+        host.agent_tool(
+            &parent.id,
+            "escalate_question",
+            serde_json::json!({"question_id": asked["id"]}),
+        )
+        .unwrap();
+        let index = with_child_working(&host, &child);
+        assert_eq!(with_parent(index.snapshot(), &child.project_id), 0);
+        assert_eq!(rollup(&index), Some(tree::Rollup::NeedsYou(1)));
     }
 }

@@ -54,10 +54,10 @@ Six slices, one ticket each. Dependencies:
 
 ## 5. Slice (e) — Desktop: App, Layer and Me lenses
 
-- [ ] 5.1 App and Layer: buckets per tag in vocabulary order, "no app" or "no layer", "not started", a project under every bucket, the parent line, folding with the first three names, no drag; ⌘2 and ⌘3.
-- [ ] 5.2 Me: Questions, Merge on GitHub, Going quiet and Ready to close with their reasons, the selected Space expanded and others collapsed with counts; ⌘4.
-- [ ] 5.3 The Me badge across Spaces, shown in every lens.
-- [ ] 5.4 Tests: a project in two buckets, each Me bucket's rule including a standing project and a parent with an open child, the badge count, keyboard switching while a composer has focus.
+- [x] 5.1 App and Layer: buckets per tag in vocabulary order, "no app" or "no layer", "not started", a project under every bucket, the parent line, folding with the first three names, no drag; ⌘2 and ⌘3.
+- [x] 5.2 Me: Questions, Merge on GitHub, Going quiet and Ready to close with their reasons, the selected Space expanded and others collapsed with counts; ⌘4.
+- [x] 5.3 The Me badge across Spaces, shown in every lens.
+- [x] 5.4 Tests: a project in two buckets, each Me bucket's rule including a standing project and a parent with an open child, the badge count, keyboard switching while a composer has focus.
 - [ ] 5.5 The header's tag chips (drawn by slice f) open their lens with the bucket expanded and in view (6.4b), with the test: a chip switching lens without changing the conversation.
 
 ## 6. Slice (f) — Desktop: Agents in the rail, breadcrumb and chips
