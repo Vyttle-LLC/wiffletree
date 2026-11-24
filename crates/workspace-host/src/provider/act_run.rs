@@ -90,6 +90,9 @@ impl UrlAct {
             .args(["-p", "--tools", "", "--no-session-persistence"])
             // Overrides a bypass mode in the human's settings: only the act tool is allowed.
             .args(["--permission-mode", "dontAsk"])
+            // Leaves out the human's own settings, whose hooks could change the call's input
+            // after act-check allowed it; the run's folder is empty, so no other source loads.
+            .args(["--setting-sources", "local"])
             .args(["--strict-mcp-config", "--mcp-config", &servers.to_string()])
             .args(["--allowedTools", &self.name()])
             .args(["--disallowedTools", &denied.join(",")])
@@ -358,6 +361,8 @@ mod tests {
         let after = |flag: &str| &args[args.iter().position(|a| a == flag).unwrap() + 1];
         assert_eq!(after("--model"), "claude-sonnet-5-5");
         assert_eq!(after("--tools"), "");
+        // The human's own hooks could rewrite the call after act-check allowed it.
+        assert_eq!(after("--setting-sources"), "local");
         assert_eq!(after("--allowedTools"), "mcp__calendar__create_event");
         assert_eq!(
             after("--disallowedTools"),
