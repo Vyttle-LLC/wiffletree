@@ -1917,6 +1917,7 @@ mod tests {
             options: vec![],
             answer: None,
             repository_request: None,
+            route: Default::default(),
         };
         let with_publish = |stamp| {
             let index = index(stamp);

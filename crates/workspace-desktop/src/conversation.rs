@@ -1236,6 +1236,7 @@ mod tests {
             options: Vec::new(),
             answer: None,
             repository_request: None,
+            route: Default::default(),
         }
     }
 

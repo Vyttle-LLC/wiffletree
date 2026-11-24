@@ -13,7 +13,7 @@ Six slices, one ticket each. Dependencies:
 
 - [x] 1.1 `workspace-core`: `Project.parent_id` and `Project.standing`, both defaulting to empty and left out of the store when empty; the snapshot carries both.
 - [x] 1.2 Host checks for every write of the link: same Space, one level, not onto itself, not onto a child, not for a project with children; a refusal names the rule.
-- [x] 1.3 A command to set or clear a project's parent, with `project_moved_under` and `project_moved_out` activity on the project and each parent; questions with a parent go to the human, in the same change, when its child is made loose or filed under another parent.
+- [x] 1.3 A command to set or clear a project's parent, with `project_moved_under` and `project_moved_out` activity on the project and each parent (forwarding of questions waiting with the parent lands in slice (b), through `leave_parent`).
 - [x] 1.4 Move to another Space clears the project's link and its children's; the Move dialog's wording names the children that become loose.
 - [x] 1.5 `create_project` makes a child or a sibling, with the notice to the parent for a sibling; parents' messages do not count as the human's for the briefed-project rule.
 - [x] 1.6 `send_message` between a parent's and its children's coordinators; a child coordinator's `report` delivered to its parent's coordinator; siblings refused with the reason.
@@ -26,14 +26,14 @@ Six slices, one ticket each. Dependencies:
 
 ## 2. Slice (b) — Host: questions routed through the parent
 
-- [ ] 2.1 `Attention` gains its routing state, with the parent or with the human, defaulting to the human for older stores.
-- [ ] 2.2 A child coordinator's `ask_user` creates the item with the parent and wakes the parent's coordinator with the question; approvals keep going to the human.
-- [ ] 2.3 `answer_question` and `escalate_question`, offered to coordinators, refused for questions that are not their children's or not with them, and "already answered" or "already with the human" on a race.
-- [ ] 2.4 The answer resumes the child as a human answer does and counts for `questions_waiting`.
-- [ ] 2.5 The one-line notice to the parent when the human answers or messages a child, delivered with its next turn without starting one.
-- [ ] 2.6 Inbox, needs-you counts and the snapshot count only items with the human; the snapshot carries each project's count with its parent for the hollow badge.
-- [ ] 2.7 Desktop: the escalated Inbox label "<child> · via <parent>" with the note.
-- [ ] 2.8 Tests: answered by the parent, escalated, a race either way, an approval skipping the parent, a child unfiled with questions waiting, the notice not starting a turn, a restart with a question with the parent.
+- [x] 2.1 `Attention` gains its routing state, with the parent or with the human, defaulting to the human for older stores.
+- [x] 2.2 A child coordinator's `ask_user` creates the item with the parent and wakes the parent's coordinator with the question; approvals keep going to the human. `leave_parent` sends questions still with the old parent to the human in the same change, when a child is unfiled, refiled under another parent or moved to another Space.
+- [x] 2.3 `answer_question` and `escalate_question`, offered to coordinators, refused for questions that are not their children's or not with them, and "already answered" or "already with the human" on a race.
+- [x] 2.4 The answer resumes the child as a human answer does and counts for `questions_waiting`.
+- [x] 2.5 The one-line notice to the parent when the human answers or messages a child, delivered with its next turn without starting one.
+- [x] 2.6 Inbox, needs-you counts and the snapshot count only items with the human; the snapshot carries each project's count with its parent for the hollow badge.
+- [x] 2.7 Desktop: the escalated Inbox label "<child> · via <parent>" with the note.
+- [x] 2.8 Tests: answered by the parent, escalated, a race either way, an approval skipping the parent, a child unfiled with questions waiting, the notice not starting a turn, a restart with a question with the parent.
 
 ## 3. Slice (c) — Space repository tags and derived project tags
 

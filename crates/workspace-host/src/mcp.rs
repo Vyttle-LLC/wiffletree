@@ -204,7 +204,7 @@ pub fn tools() -> Value {
         ),
         tool(
             "ask_user",
-            "Coordinator: place one decision in front of the human, then finish your turn. The answer resumes you. When there are distinct choices, list them as options: short, self-explanatory labels the human can pick with one click. They can always answer in their own words instead.",
+            "Coordinator: place one decision in front of the human, then finish your turn. The answer resumes you. When there are distinct choices, list them as options: short, self-explanatory labels the human can pick with one click. They can always answer in their own words instead. A child project's question goes to its parent project's coordinator first, which answers it or sends it on to the human; either answer resumes you.",
             json!({"request_id":string,"question":string,"options":{"type":"array","items":{"type":"string"},"maxItems":6}}),
             vec!["request_id", "question"]
         ),
@@ -213,6 +213,18 @@ pub fn tools() -> Value {
             "Coordinator: remove your own open inbox question once it no longer needs the human, e.g. their message or new evidence already settled it.",
             json!({"request_id":string,"resolution":string}),
             vec!["request_id", "resolution"]
+        ),
+        tool(
+            "answer_question",
+            "Parent project's coordinator: answer a child project's question waiting with you, by the question_id its message gave. It closes the question and resumes the child with your answer, labelled as yours. Answer only from decisions already made, such as the brain or the human's earlier answers; escalate every product, security and approval question instead. Refused for a question that is not your child projects' or not with you, and with \"already answered\" or \"already with the human\" when it was settled first.",
+            json!({"question_id":string,"answer":string}),
+            vec!["question_id", "answer"]
+        ),
+        tool(
+            "escalate_question",
+            "Parent project's coordinator: send a child project's question waiting with you to the human's Inbox, labelled with the child's name and \"via\" your project, with an optional note. The human's answer resumes the child, and you get one line saying what they answered. Refused as answer_question is.",
+            json!({"question_id":string,"note":string}),
+            vec!["question_id"]
         ),
         tool(
             "request_permission",

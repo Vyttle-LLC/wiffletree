@@ -106,6 +106,7 @@ fn a_publish_item_is_an_approval_and_its_result_comes_from_wiffletree() {
         options: vec![],
         answer: None,
         repository_request: None,
+        route: Default::default(),
     };
     let publish = attention("publish:r1:push");
     assert!(publish.is_permission() && publish.is_publish());

@@ -68,6 +68,8 @@ fn the_tool_list_offers_ticket_tools_and_no_repository_coordinator_tools() {
             "query_brain",
             "ask_user",
             "close_question",
+            "answer_question",
+            "escalate_question",
             "request_permission",
         ]
     );
@@ -378,15 +380,16 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = core(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator core — v20"));
+    assert!(coordinator.contains("Project coordinator core — v21"));
     // Naming and filing rules, and the parent's duty to escalate what it has no decision for.
     for rule in [
         "Prefer adding a ticket to your own project",
         "Create a project only for a separate outcome",
         "Name a parent after an outcome, never after an app or a layer",
         "a child after one deliverable, without repeating its parent's name",
-        "answer a child's question only from decisions already made, such as the brain or the human's earlier answers",
-        "escalate every product, security and approval question to the human",
+        "answer_question, only from decisions already made, such as the brain or the human's earlier answers",
+        "escalate_question, with a note saying why, which sends it to the human's Inbox",
+        "Always escalate product, security and approval questions",
     ] {
         assert!(coordinator.contains(rule), "{rule}");
     }
