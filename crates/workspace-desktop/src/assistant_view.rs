@@ -96,9 +96,6 @@ pub(super) struct AssistantPage {
     composer: Entity<TextareaState>,
     /// The human's unsent draft was read into the composer.
     draft_read: bool,
-    /// The model chosen in the composer, until the host gives it to the conversation between
-    /// turns.
-    chosen_model: Option<ModelProfile>,
     sending: bool,
     /// The assistant's name the composer's placeholder uses.
     named: String,
@@ -172,7 +169,6 @@ impl AssistantPage {
             chosen_space: None,
             composer,
             draft_read: false,
-            chosen_model: None,
             sending: false,
             named: DEFAULT_NAME.into(),
             chat: vec![],
@@ -238,7 +234,6 @@ impl AssistantPage {
             });
             self.named = name;
         }
-        self.apply_chosen_model(window, cx);
         if shown {
             self.read_messages(window, cx);
             self.read_chat(window, cx);
@@ -748,16 +743,14 @@ impl AssistantPage {
     /// applies from the next turn; before, this Mac's Assistant row, which its first turn uses.
     fn model_chip(&self, cx: &mut Context<Self>) -> AnyElement {
         let state = self.conversation_state();
-        let current = (self.chosen_model.clone())
-            .or_else(|| state.and_then(|c| c.profile.clone()))
-            .or_else(|| {
-                let selection = &self.shared.snapshot()?.model_selection;
-                models::thread_model(selection, None, &self.shared.detection)
-            });
+        let current = (state.and_then(|c| c.profile.clone())).or_else(|| {
+            let selection = &self.shared.snapshot()?.model_selection;
+            models::thread_model(selection, None, &self.shared.detection)
+        });
         let label = current
             .as_ref()
             .map_or("Who runs what".into(), |m| m.short());
-        let (Some(current), Some(_)) = (current, state) else {
+        let (Some(current), Some(state)) = (current, state) else {
             return button("assistant-model")
                 .xsmall()
                 .label(label)
@@ -768,7 +761,8 @@ impl AssistantPage {
         let choices = selection.map_or(vec![], |selection| {
             models::profile_choices(&self.shared.catalog, &selection, current.provider)
         });
-        let weak = cx.weak_entity();
+        let (weak, session_id) = (cx.weak_entity(), state.session_id.clone());
+        // The host takes the choice at once, even during a turn, and the next turn starts on it.
         button("assistant-model")
             .xsmall()
             .label(label)
@@ -776,15 +770,17 @@ impl AssistantPage {
             .tooltip("Applies from the Assistant's next turn")
             .dropdown_menu(move |mut menu, _, _| {
                 for profile in &choices {
-                    let (weak, chosen) = (weak.clone(), profile.clone());
+                    let (weak, session_id) = (weak.clone(), session_id.clone());
+                    let configure = Command::ConfigureSession {
+                        session_id,
+                        profile: profile.clone(),
+                    };
                     menu = menu.item(
                         PopupMenuItem::new(profile.short())
                             .checked(*profile == current)
                             .on_click(move |_, window, cx| {
                                 let _ = weak.update(cx, |view, cx| {
-                                    view.chosen_model = Some(chosen.clone());
-                                    view.apply_chosen_model(window, cx);
-                                    cx.notify();
+                                    view.request(configure.clone(), window, cx)
                                 });
                             }),
                     );
@@ -792,29 +788,6 @@ impl AssistantPage {
                 menu.scrollable(true).max_h(px(320.))
             })
             .into_any_element()
-    }
-    /// Gives the conversation the model chosen in the composer once no turn runs, since the
-    /// host changes a session's model only between turns.
-    fn apply_chosen_model(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(state) = self.conversation_state() else {
-            return;
-        };
-        let Some(profile) = self.chosen_model.clone() else {
-            return;
-        };
-        if state.profile.as_ref() == Some(&profile) {
-            self.chosen_model = None;
-            return;
-        }
-        if state.status == Status::Working {
-            return;
-        }
-        let configure = Command::ConfigureSession {
-            session_id: state.session_id.clone(),
-            profile,
-        };
-        self.chosen_model = None;
-        self.request(configure, window, cx);
     }
     fn composer_box(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let spaces = self.spaces().to_vec();

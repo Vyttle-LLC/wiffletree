@@ -2897,8 +2897,7 @@ impl Actor {
                             }
                             human_stops.push(session_id.clone());
                         }
-                        Command::ConfigureSession { session_id, .. }
-                        | Command::ReconcileSession { session_id, .. } => ensure!(
+                        Command::ReconcileSession { session_id, .. } => ensure!(
                             !self.active.contains_key(session_id),
                             "Wait for the active turn to stop"
                         ),
@@ -7818,6 +7817,31 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
         actor.host.save_runtime(&runtime).unwrap();
         spend(&mut actor.host, Provider::Codex, 99.);
         assert_eq!(actor.host.hold_reason(&reviewer).unwrap(), None);
+    }
+
+    #[test]
+    fn a_model_chosen_during_a_turn_starts_the_next_turn_but_never_changes_provider() {
+        let (_home, mut actor, _, implementer, _) = implementer_in_turn("assigned");
+        let session = actor.host.session(&implementer.id).unwrap();
+        assert_eq!(session.status, Status::Working);
+        let mut configure = |provider| {
+            let (reply, answer) = async_channel::bounded(1);
+            let profile = ModelProfile {
+                provider,
+                model: "custom".into(),
+                effort: "high".into(),
+            };
+            let command = Command::ConfigureSession {
+                session_id: implementer.id.clone(),
+                profile: profile.clone(),
+            };
+            actor.process(Event::Command(command, reply));
+            (answer.try_recv().unwrap(), profile)
+        };
+        assert!(configure(Provider::Codex).0.is_err(), "provider kept");
+        let (answer, chosen) = configure(Provider::Claude);
+        answer.unwrap();
+        assert_eq!(actor.host.turn_profile(&session).unwrap(), chosen);
     }
 
     #[test]
