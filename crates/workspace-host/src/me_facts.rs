@@ -75,7 +75,8 @@ impl Host {
                 json_extract(t.data,'$.pull_request.number'),
                 json_extract(t.data,'$.pull_request.base'),
                 json_extract(t.data,'$.verification.outcome')
-             FROM tickets t JOIN sessions s ON s.id=t.coordinator_id ORDER BY t.rowid",
+             FROM tickets t JOIN sessions s ON s.id=t.coordinator_id
+             WHERE s.project_id IS NOT NULL ORDER BY t.rowid",
         )?;
         let read = rows.query_map([], |r| {
             Ok((
@@ -109,12 +110,14 @@ impl Host {
         Ok(tickets)
     }
 
-    /// By project, when one of its sessions, archived ones included, last started a turn.
+    /// By project, when one of its sessions, archived ones included, last started a turn. The
+    /// Assistant's session has no project.
     fn projects_last_turn(&self) -> Result<BTreeMap<String, i64>> {
         let mut rows = self.db.prepare(
             "SELECT s.project_id, max(json_extract(r.data,'$.last_started_at'))
              FROM runtimes r JOIN sessions s ON s.id=r.session_id
-             WHERE json_extract(r.data,'$.last_started_at') IS NOT NULL GROUP BY s.project_id",
+             WHERE s.project_id IS NOT NULL AND json_extract(r.data,'$.last_started_at') IS NOT NULL
+             GROUP BY s.project_id",
         )?;
         let turns = rows.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(turns.collect::<rusqlite::Result<_>>()?)
@@ -123,7 +126,8 @@ impl Host {
     /// The projects whose coordinator is archived.
     fn archived_projects(&self) -> Result<BTreeSet<String>> {
         let query = format!(
-            "SELECT project_id FROM sessions WHERE parent_id IS NULL AND role=?1 AND {ARCHIVED_FLAG}=1"
+            "SELECT project_id FROM sessions
+             WHERE project_id IS NOT NULL AND parent_id IS NULL AND role=?1 AND {ARCHIVED_FLAG}=1"
         );
         let mut rows = self.db.prepare(&query)?;
         let projects = rows.query_map([tag(&Role::ProjectOrchestrator)?], |r| r.get(0))?;
@@ -347,5 +351,23 @@ mod tests {
         let snapshot = f.host.snapshot().unwrap();
         assert!(!snapshot.runtimes.iter().any(|r| r.session_id == worker.id));
         assert_eq!(f.facts(&platform).last_turn_started, Some(105 * day));
+    }
+
+    #[test]
+    fn the_assistants_session_which_has_no_project_is_left_out() {
+        let mut f = fixture();
+        let platform = f.project("Platform");
+        let assistant = f.host.assistant().unwrap();
+        let mut runtime = f.host.session_runtime(&assistant.id).unwrap();
+        runtime.last_started_at = Some(7);
+        f.host.save_runtime(&runtime).unwrap();
+
+        let snapshot = f.host.snapshot().unwrap();
+        assert!(
+            snapshot
+                .me_facts
+                .keys()
+                .all(|project| *project == platform.id)
+        );
     }
 }
