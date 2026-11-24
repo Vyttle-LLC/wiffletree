@@ -205,10 +205,10 @@ fn waiting_line(
 }
 
 /// The elapsed-time timer runs only while the Agents panel is open and an agent it lists under
-/// a ticket is working; `sync_agents_clock` starts it on this and each tick stops it when this
-/// ends.
-fn clock_runs(panel: Option<Panel>, agents: &[&AgentProgress]) -> bool {
-    panel == Some(Panel::Agents) && agents.iter().any(|agent| agent.working)
+/// a ticket is working, or one of its UI evaluator runs has not ended; `sync_agents_clock`
+/// starts it on this and each tick stops it when this ends.
+fn clock_runs(panel: Option<Panel>, agents: &[&AgentProgress], live_runs: bool) -> bool {
+    panel == Some(Panel::Agents) && (live_runs || agents.iter().any(|agent| agent.working))
 }
 
 /// A fold's one subtle line, with its chevron.
@@ -648,11 +648,15 @@ impl Inspector {
 
     fn agents_working(&self) -> bool {
         let agents = self.shared.roster().map(|roster| roster.ticket_agents());
-        clock_runs(self.shared.panel, &agents.unwrap_or_default())
+        let project = self.shared.project_id();
+        let live_runs = (self.shared.evaluations().iter())
+            .any(|run| Some(&run.project_id) == project.as_ref() && !run.state.ended());
+        clock_runs(self.shared.panel, &agents.unwrap_or_default(), live_runs)
     }
 
     /// Redraws the elapsed times every half minute, only while the panel is open and a
-    /// listed agent works.
+    /// listed agent works or a listed run has not ended. The bands and a run's page are drawn
+    /// uncached, so the window's minute redraw keeps theirs current.
     pub(super) fn sync_agents_clock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.agents_clock || !self.agents_working() {
             return;
@@ -749,13 +753,15 @@ mod tests {
     #[test]
     fn the_agents_timer_runs_only_while_the_panel_is_open_and_a_listed_agent_works() {
         let (working, idle) = (agent(true), agent(false));
-        assert!(clock_runs(Some(Panel::Agents), &[&idle, &working]));
-        // An idle panel: open, with no listed agent working.
-        assert!(!clock_runs(Some(Panel::Agents), &[&idle]));
-        assert!(!clock_runs(Some(Panel::Agents), &[]));
-        // Closed, or another panel shown, while an agent works.
-        assert!(!clock_runs(None, &[&working]));
-        assert!(!clock_runs(Some(Panel::Team), &[&working]));
+        assert!(clock_runs(Some(Panel::Agents), &[&idle, &working], false));
+        // An idle panel: open, with no listed agent working and no run that has not ended.
+        assert!(!clock_runs(Some(Panel::Agents), &[&idle], false));
+        assert!(!clock_runs(Some(Panel::Agents), &[], false));
+        // A running, waiting or queued evaluator run keeps its row's minutes current.
+        assert!(clock_runs(Some(Panel::Agents), &[], true));
+        // Closed, or another panel shown, while an agent works or a run goes on.
+        assert!(!clock_runs(None, &[&working], true));
+        assert!(!clock_runs(Some(Panel::Team), &[&working], true));
     }
 
     #[test]
@@ -795,7 +801,7 @@ mod tests {
         // another project changes whether the timer runs.
         let runs = |project: &str| {
             let roster = Roster::new(&board, &index, project, &format!("{project}-coordinator"));
-            clock_runs(Some(Panel::Agents), &roster.ticket_agents())
+            clock_runs(Some(Panel::Agents), &roster.ticket_agents(), false)
         };
         assert!(runs("working") && !runs("quiet"));
     }

@@ -419,7 +419,7 @@ mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
     use super::{
         EvaluatorCard, allow_summary, app_label, bands, model_name, ordinal, pinned_model,
-        sidebar_line, start_summary, state_label, waiting_for, when_line,
+        run_minutes, sidebar_line, start_summary, state_label, waiting_for, when_line,
     };
     use crate::wording;
     use workspace_core::{
@@ -466,6 +466,21 @@ mod tests {
         ]
     }
     const MINUTE: i64 = 60_000;
+
+    #[test]
+    fn a_running_runs_minutes_turn_over_at_each_whole_minute() {
+        let running = run("a", EvaluationState::Running);
+        let at = |seconds: i64| run_minutes(&running, seconds * 1000);
+        assert_eq!(at(0), "under 1 min");
+        assert_eq!(at(59), "under 1 min");
+        assert_eq!(at(60), "1 min");
+        assert_eq!(at(119), "1 min");
+        assert_eq!(at(120), "2 min");
+        // An ended run keeps its length, however late it is read.
+        let mut ended = run("b", EvaluationState::Finished);
+        ended.ended_at = Some(41 * MINUTE + 59_000);
+        assert_eq!(run_minutes(&ended, 500 * MINUTE), "41 min");
+    }
 
     #[test]
     fn each_state_reads_as_the_mockup_says_it() {
