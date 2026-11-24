@@ -1853,8 +1853,8 @@ impl Host {
             Command::PreviewJob { recipe } => {
                 serde_json::to_value(self.preview_job(&recipe)?.check())?
             }
+            // The service lists and starts sources off the host thread instead.
             Command::SourceCandidates => serde_json::to_value(self.source_candidates())?,
-            // The service starts the source off the host thread instead.
             Command::ProbeSource { kind, name } => {
                 serde_json::to_value(source_setup::probe(&self.source_env(), kind, &name))?
             }

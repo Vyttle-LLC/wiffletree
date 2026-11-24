@@ -74,7 +74,6 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::IssuePeople { .. }
         | Command::SearchThreads { .. }
         | Command::ConversationCards
-        | Command::SourceCandidates
         | Command::Proposals { .. }
         | Command::Evaluations { .. } => Row::Read,
         Command::ResolvePaths { .. } | Command::ReadFile { .. } | Command::ListFolder { .. } => {
@@ -129,6 +128,8 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::MoveRoutedMessage { .. }
         | Command::SaveJob { .. }
         | Command::PreviewJob { .. }
+        // Each starts a provider or a source: listing candidates starts Claude for its connectors.
+        | Command::SourceCandidates
         | Command::ProbeSource { .. }
         | Command::SetJobEnabled { .. }
         | Command::RunJobNow { .. }
@@ -320,6 +321,9 @@ mod tests {
         ] {
             assert!(check(&command, AccessLevel::Control, host).is_err());
         }
+        // Listing sources starts Claude to find its connectors.
+        assert!(check(&Command::SourceCandidates, AccessLevel::ViewOnly, host).is_err());
+        assert!(check(&Command::SourceCandidates, AccessLevel::Control, host).is_ok());
         let scan = Command::DiscoverRepositories { folders: vec![] };
         assert!(check(&scan, AccessLevel::ViewOnly, host).is_err());
         assert!(check(&scan, AccessLevel::Control, host).is_ok());

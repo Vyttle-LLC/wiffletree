@@ -623,6 +623,36 @@ mod tests {
     }
 
     #[test]
+    fn a_result_or_notice_batched_with_the_humans_message_holds_the_turns_loop_change() {
+        let (_home, mut host, assistant, celadon) = assistant_with_space();
+        let human = host
+            .send_to_assistant("m1", "a loop please", &[], Some(&celadon))
+            .unwrap();
+        let notice = |host: &mut Host, id: &str, body: &str| {
+            let id = format!("{ASSISTANT_NOTICE_PREFIX}{id}");
+            host.send(&id, None, &assistant.id, body).unwrap()
+        };
+        // A loop's result, passed on as Wiffletree's notices are, and an approval notice.
+        let result = notice(
+            &mut host,
+            "loop-run:r1",
+            "Morning brief finished: 3 threads",
+        );
+        let approval = notice(&mut host, "approval:a1", "An approval waits");
+        let recipe = json!({"space": celadon, "name": "Digest", "prompt": "Summarise", "cron": "0 7 * * *", "timezone": "UTC"});
+        for other in [result, approval] {
+            let guard = host.turn_guard(&[human.clone(), other.clone()]).unwrap();
+            assert_eq!(guard.read, ["a message from Wiffletree"], "{}", other.id);
+            assert_eq!(guard.picked.as_ref(), Some(&celadon));
+            assert_eq!(guard.human_message.as_deref(), Some("m1"));
+            // So a loop change the turn asks for waits for the human's Apply.
+            let card = host.loop_tool("create_loop", &recipe, &guard).unwrap();
+            assert_eq!(card["applied"], false, "{}", other.id);
+            assert!(host.recipes().unwrap().is_empty());
+        }
+    }
+
+    #[test]
     fn the_conversation_gets_every_spaces_additions_each_under_its_heading() {
         let (_home, mut host, assistant, celadon) = assistant_with_space();
         host.create_space("Sage", "", "Treat production as read-only.", None)

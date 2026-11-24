@@ -43,6 +43,11 @@ fn composer_placeholder(name: &str) -> String {
 pub(super) fn any_working(tabs: &[ThreadTab]) -> bool {
     tabs.iter().any(|tab| tab.status == Status::Working)
 }
+/// The composer's Space once a message sent with `sent` arrived: none for the next message,
+/// unless the human picked another while it was sending.
+fn space_after_send(chosen: Option<SpaceId>, sent: &Option<SpaceId>) -> Option<SpaceId> {
+    chosen.filter(|chosen| Some(chosen) != sent.as_ref())
+}
 /// A saved output's line on its card.
 fn saved_line(title: &str, version: u32) -> String {
     match version {
@@ -364,11 +369,16 @@ impl AssistantPage {
             };
             self.request(resume, window, cx);
         }
-        let ask = ask::send_to_assistant(new_id(), body, self.chosen_space.take());
-        self.ask(ask, window, cx, |view, sent, window, cx| {
+        let picked = self.chosen_space.clone();
+        let ask = ask::send_to_assistant(new_id(), body, picked.clone());
+        self.ask(ask, window, cx, move |view, sent, window, cx| {
             view.sending = false;
             match sent {
-                Ok(_) => view.clear_composer(window, cx),
+                Ok(_) => {
+                    view.chosen_space = space_after_send(view.chosen_space.take(), &picked);
+                    view.clear_composer(window, cx);
+                }
+                // The message is still in the composer, so its Space stays with it.
                 Err(error) => toast_error(error, window, cx),
             }
             cx.notify();
@@ -1314,10 +1324,11 @@ impl Render for AssistantPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        Entry, assistant_name, composer_placeholder, long_turn_text, saved_line, timeline,
+        Entry, assistant_name, composer_placeholder, long_turn_text, saved_line, space_after_send,
+        timeline,
     };
     use workspace_core::assistant::conversation::{CardKind, ConversationCard};
-    use workspace_core::{Message, Snapshot};
+    use workspace_core::{Message, Snapshot, SpaceId};
 
     #[test]
     fn the_sidebar_row_names_the_assistant() {
@@ -1363,6 +1374,14 @@ mod tests {
             })
             .collect();
         assert_eq!(order, ["ask", "work", "reply", "same"]);
+    }
+
+    #[test]
+    fn a_picked_space_is_kept_until_its_message_is_sent() {
+        let (home, work) = (Some(SpaceId("home".into())), Some(SpaceId("work".into())));
+        assert_eq!(space_after_send(home.clone(), &home), None);
+        assert_eq!(space_after_send(work.clone(), &home), work);
+        assert_eq!(space_after_send(None, &home), None);
     }
 
     #[test]

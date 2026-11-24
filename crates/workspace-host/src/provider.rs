@@ -2,6 +2,7 @@
 //! sorting and assistant threads, which the provider holds to what they are given.
 mod act_run;
 mod codex_compaction;
+mod connectors;
 mod constrained;
 mod conversation;
 mod evaluator;
@@ -13,6 +14,7 @@ use crate::runtime::LowPriority as _;
 use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
 pub use act_run::{UrlAct, act_call_refused, act_run};
+pub use connectors::{Connector, claude_ai_connectors};
 use conversation::tool_calls;
 pub use conversation::{ConversationLaunch, SourceTools, is_claude_ai};
 pub use evaluator::{EvaluatorLaunch, prepare_codex_home};

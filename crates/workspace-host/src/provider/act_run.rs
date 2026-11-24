@@ -166,7 +166,18 @@ pub fn act_run(
     act: &UrlAct,
     limit: Duration,
 ) -> (Result<String>, SourceTools) {
-    let deadline = Instant::now() + limit;
+    let run = |act: &UrlAct, limit| one_run(claude, helper, act, limit);
+    attempts(act, limit, Instant::now, run)
+}
+
+/// `act_run`'s attempts, each made by `run` within the time it is given, on the clock `now`.
+fn attempts(
+    act: &UrlAct,
+    limit: Duration,
+    now: impl Fn() -> Instant,
+    mut run: impl FnMut(&UrlAct, Duration) -> Result<String>,
+) -> (Result<String>, SourceTools) {
+    let deadline = now() + limit;
     let mut act = act.clone();
     let mut seen = SourceTools::default();
     let called = |act: &UrlAct| act.marker.exists();
@@ -178,7 +189,7 @@ pub fn act_run(
     {
         return (Err(error.into()), seen);
     }
-    let ran = match one_run(claude, helper, &act, limit) {
+    let ran = match run(&act, limit) {
         Err(error) if error.is::<UnseenTools>() && !called(&act) => {
             let unseen: UnseenTools = error.downcast().expect("checked above");
             act.others.extend(unseen.tools.iter().cloned());
@@ -187,8 +198,8 @@ pub fn act_run(
                 seen.tools.insert(act.server.clone(), unseen.tools);
             }
             seen.other_servers = unseen.servers;
-            let left = deadline.saturating_duration_since(Instant::now());
-            one_run(claude, helper, &act, left)
+            let left = deadline.saturating_duration_since(now());
+            run(&act, left)
         }
         ran => ran,
     };
@@ -240,44 +251,47 @@ fn one_run(claude: &Path, helper: &Path, act: &UrlAct, limit: Duration) -> Resul
         act.arguments
     );
     let mut called: Option<String> = None;
-    answer_run(
-        claude,
-        configure,
-        input.into_bytes(),
-        limit,
-        |value| match value["type"].as_str() {
-            Some("system") if value["subtype"] == "init" => started(act, value).map(|_| None),
-            Some("assistant") => {
-                for call in tool_uses(value) {
-                    let name = call["name"].as_str().unwrap_or_default();
-                    if let Some(why) = act.refused(name, &call["input"]) {
-                        bail!("{why}");
-                    }
-                    ensure!(
-                        called.is_none(),
-                        "Stopped: the run called {} a second time; the first call may have gone through",
-                        act.tool
-                    );
-                    called = Some(call["id"].as_str().unwrap_or_default().to_owned());
+    answer_run(claude, configure, input.into_bytes(), limit, |value| {
+        read_event(act, &mut called, value)
+    })
+}
+
+/// What one event of the run's stream says: the tool's text once its result arrives, an error
+/// when the run started, called or ended otherwise than with the one call, else nothing yet.
+/// `called` holds the call's id once it is made.
+fn read_event(act: &UrlAct, called: &mut Option<String>, value: &Value) -> Result<Option<String>> {
+    match value["type"].as_str() {
+        Some("system") if value["subtype"] == "init" => started(act, value).map(|_| None),
+        Some("assistant") => {
+            for call in tool_uses(value) {
+                let name = call["name"].as_str().unwrap_or_default();
+                if let Some(why) = act.refused(name, &call["input"]) {
+                    bail!("{why}");
                 }
-                Ok(None)
+                ensure!(
+                    called.is_none(),
+                    "Stopped: the run called {} a second time; the first call may have gone through",
+                    act.tool
+                );
+                *called = Some(call["id"].as_str().unwrap_or_default().to_owned());
             }
-            Some("user") => {
-                let result = (tool_results(value))
-                    .find(|result| called.as_deref() == result["tool_use_id"].as_str());
-                let Some(result) = result else {
-                    return Ok(None);
-                };
-                let text = result_text(&result["content"]);
-                match result["is_error"] == true {
-                    true => Err(ServerSaid(text).into()),
-                    false => Ok(Some(text)),
-                }
+            Ok(None)
+        }
+        Some("user") => {
+            let result = (tool_results(value))
+                .find(|result| called.as_deref() == result["tool_use_id"].as_str());
+            let Some(result) = result else {
+                return Ok(None);
+            };
+            let text = result_text(&result["content"]);
+            match result["is_error"] == true {
+                true => Err(ServerSaid(text).into()),
+                false => Ok(Some(text)),
             }
-            Some("result") => bail!("Claude ended without calling {}", act.tool),
-            _ => Ok(None),
-        },
-    )
+        }
+        Some("result") => bail!("Claude ended without calling {}", act.tool),
+        _ => Ok(None),
+    }
 }
 
 /// Checks the run's start: it denies whatever is not allowed, and offers exactly the act tool
@@ -558,44 +572,82 @@ mod tests {
         );
     }
 
-    /// A stand-in for Claude that takes `pause` seconds to start, offers the act tool and one
-    /// other tool unless denied, and calls the act tool.
-    const SLOW_CLAUDE: &str = r#"#!/usr/bin/env python3
-import json, sys, time
-time.sleep(float(sys.argv[0].rsplit('-', 1)[1]))
-denied = sys.argv[sys.argv.index('--disallowedTools') + 1].split(',')
-tools = [t for t in ['mcp__calendar__create_event', 'mcp__calendar__rename_calendar'] if t not in denied]
-print(json.dumps({'type': 'system', 'subtype': 'init', 'permissionMode': 'dontAsk', 'tools': tools,
-                  'mcp_servers': [{'name': 'calendar', 'status': 'connected'}]}), flush=True)
-args = json.loads(sys.stdin.read().split('\n', 1)[1])
-call = {'type': 'tool_use', 'id': 't0', 'name': 'mcp__calendar__create_event', 'input': args}
-print(json.dumps({'type': 'assistant', 'message': {'content': [call]}}), flush=True)
-result = {'type': 'tool_result', 'tool_use_id': 't0', 'content': 'Created'}
-print(json.dumps({'type': 'user', 'message': {'content': [result]}}), flush=True)
-"#;
-
     #[test]
     fn a_restart_for_unseen_tools_shares_the_first_attempts_limit_and_reports_them() {
-        use std::os::unix::fs::PermissionsExt;
         let folder = tempfile::tempdir().unwrap();
-        let claude = folder.path().join("claude-2.0");
-        fs::write(&claude, SLOW_CLAUDE).unwrap();
-        fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+        let clock = std::cell::Cell::new(Instant::now());
+        // Each start takes two seconds on the clock and offers rename_calendar until denied.
+        let run = |act: &UrlAct, limit: Duration| -> Result<String> {
+            clock.set(clock.get() + Duration::from_secs(2));
+            match act.others.contains("rename_calendar") {
+                false => Err(UnseenTools {
+                    tools: ["rename_calendar".into()].into(),
+                    servers: Default::default(),
+                }
+                .into()),
+                true if limit >= Duration::from_secs(2) => Ok("Created".into()),
+                true => Err(TookTooLong.into()),
+            }
+        };
         let card = |name: &str| create_event(&folder.path().join(name));
-        // Two starts of two seconds each fit in six seconds,
-        let (ran, seen) = act_run(&claude, Path::new("/h"), &card("a"), Duration::from_secs(6));
+        // Two starts fit in six seconds,
+        let (ran, seen) = attempts(&card("a"), Duration::from_secs(6), || clock.get(), run);
         assert_eq!(ran.unwrap(), "Created");
         assert_eq!(
             seen.tools["calendar"],
             ["rename_calendar".to_owned()].into()
         );
         // but not in three: the second start has only what the first left.
-        let (ran, seen) = act_run(&claude, Path::new("/h"), &card("b"), Duration::from_secs(3));
+        let (ran, seen) = attempts(&card("b"), Duration::from_secs(3), || clock.get(), run);
         assert!(ran.unwrap_err().is::<TookTooLong>());
         assert_eq!(
             seen.tools["calendar"],
             ["rename_calendar".to_owned()].into()
         );
+    }
+
+    #[test]
+    fn the_run_ends_with_the_tools_text_or_says_why_it_did_not() {
+        let act = create_event(Path::new("/m"));
+        let call = |name: &str| {
+            let call =
+                json!({"type": "tool_use", "id": "t0", "name": name, "input": act.arguments});
+            json!({"type": "assistant", "message": {"content": [call]}})
+        };
+        let result = |is_error: bool| {
+            let result = json!({"type": "tool_result", "tool_use_id": "t0", "content": [{"type": "text", "text": "Busy then"}], "is_error": is_error});
+            json!({"type": "user", "message": {"content": [result]}})
+        };
+        let ended = json!({"type": "result", "subtype": "success"});
+        let read = |events: &[&Value]| -> Result<Option<String>> {
+            let mut called = None;
+            for event in events {
+                if let Some(text) = read_event(&act, &mut called, event)? {
+                    return Ok(Some(text));
+                }
+            }
+            Ok(None)
+        };
+        let made = call("mcp__calendar__create_event");
+        assert_eq!(
+            read(&[&made, &result(false)]).unwrap().as_deref(),
+            Some("Busy then")
+        );
+        // The server's error is its own answer, kept apart from the run's failures.
+        let said = read(&[&made, &result(true)]).unwrap_err();
+        assert_eq!(said.downcast::<ServerSaid>().unwrap().0, "Busy then");
+        let none = read(&[&ended]).unwrap_err().to_string();
+        assert_eq!(none, "Claude ended without calling create_event");
+        let twice = read(&[&made, &made]).unwrap_err().to_string();
+        assert!(twice.contains("a second time"), "{twice}");
+        let other = read(&[&call("Bash")]).unwrap_err().to_string();
+        assert!(other.contains("called Bash"), "{other}");
+        // A start that offers a tool besides the server's stops the run before the model acts.
+        let init = json!({"type": "system", "subtype": "init", "permissionMode": "dontAsk",
+            "tools": ["mcp__calendar__create_event", "Bash"],
+            "mcp_servers": [{"name": "calendar", "status": "connected"}]});
+        let refused = read(&[&init]).unwrap_err().to_string();
+        assert!(refused.contains("started with Bash"), "{refused}");
     }
 
     #[test]

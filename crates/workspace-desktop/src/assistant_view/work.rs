@@ -363,6 +363,102 @@ mod tests {
         assert_eq!(ids, ["open", "email", "merge"]);
     }
 
+    fn work(state: WorkState, ended_at: Option<i64>) -> AssistantWork {
+        AssistantWork {
+            small: false,
+            state,
+            ended_at,
+        }
+    }
+
+    #[test]
+    fn a_work_item_reads_its_coordinators_tickets_and_marks_the_row_working() {
+        let (_directory, host, root, _) = crate::test_support::ticket_store();
+        let mut snapshot = host.snapshot().unwrap();
+        snapshot.projects[0].assistant_work = Some(work(WorkState::Running, None));
+        // A project the human started is not the Assistant's work.
+        let mut theirs = snapshot.projects[0].clone();
+        (theirs.id, theirs.assistant_work) = ("theirs".into(), None);
+        snapshot.projects.push(theirs);
+        let index = WorkspaceIndex::new(snapshot.clone(), Default::default());
+        let items = work_items(&index);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].coordinator.map(|c| &c.id), Some(&root.id));
+        assert_eq!(items[0].stage, Stage::Building { at: 1, of: 1 });
+        assert!(!items[0].working);
+        assert!(!assistant_working(&index));
+
+        let coordinator = (snapshot.sessions.iter_mut()).find(|s| s.id == root.id);
+        coordinator.unwrap().status = Status::Working;
+        let index = WorkspaceIndex::new(snapshot, Default::default());
+        assert!(work_items(&index)[0].working);
+        assert!(assistant_working(&index));
+    }
+
+    #[test]
+    fn the_assistant_row_works_while_its_conversation_or_a_loop_run_does() {
+        let idle = Snapshot {
+            conversation: Some(conversation(vec![])),
+            ..Default::default()
+        };
+        assert!(!assistant_working(&WorkspaceIndex::new(
+            idle.clone(),
+            Default::default()
+        )));
+        let mut turn = idle.clone();
+        turn.conversation.as_mut().unwrap().status = Status::Working;
+        assert!(assistant_working(&WorkspaceIndex::new(
+            turn,
+            Default::default()
+        )));
+        let mut looping = idle;
+        let job: JobState = serde_json::from_value(serde_json::json!({
+            "recipe": {
+                "id": "brief", "name": "Morning brief", "space_id": "personal", "prompt": "",
+                "schedule": {"cron": "0 8 * * 1-5", "timezone": "America/Chicago"},
+                "enabled": true,
+            },
+            "schedule": "Weekdays at 08:00 (America/Chicago)",
+            "model": "Sonnet",
+            "runs": [{"id": "r", "job": "personal/brief", "started_at": 0, "outcome": "running"}],
+        }))
+        .unwrap();
+        looping.jobs.push(job);
+        assert!(assistant_working(&WorkspaceIndex::new(
+            looping,
+            Default::default()
+        )));
+    }
+
+    #[test]
+    fn done_recently_lists_work_ended_in_the_last_7_days_newest_first() {
+        let day = 24 * 60 * 60 * 1000;
+        let now = 30 * day;
+        let mut snapshot = Snapshot::default();
+        for (id, state, ended_at) in [
+            ("running", WorkState::Running, None),
+            ("done-long-ago", WorkState::Done, Some(now - 8 * day)),
+            ("stopped", WorkState::Stopped, Some(now - 2 * day)),
+            ("done", WorkState::Done, Some(now - day)),
+            ("paused", WorkState::Paused, Some(now - day)),
+        ] {
+            let project: Project = serde_json::from_value(serde_json::json!({
+                "id": id, "name": id,
+            }))
+            .unwrap();
+            snapshot.projects.push(Project {
+                assistant_work: Some(work(state, ended_at)),
+                ..project
+            });
+        }
+        let index = WorkspaceIndex::new(snapshot, Default::default());
+        let items = work_items(&index);
+        let done: Vec<&str> = (done_recently(&items, now).iter())
+            .map(|item| item.project.id.as_str())
+            .collect();
+        assert_eq!(done, ["done", "stopped"]);
+    }
+
     #[test]
     fn a_long_turn_is_noted_at_30_minutes_and_each_30_after() {
         let minute = 60_000;

@@ -1636,7 +1636,8 @@ pub(crate) fn unpushed_folder(space: &Space, recipe: &Recipe) -> String {
 
 pub(crate) const STOPPED_BY_YOU: &str = "You stopped the run.";
 
-/// Starts and proposes jobs as the service does, with sources checked here, not off the thread.
+/// Starts jobs as the service does, with sources checked here, not off the thread, and checks
+/// the loops `create_loop` describes.
 #[cfg(test)]
 impl Host {
     pub(crate) fn run_now(&mut self, key: &JobKey) -> Result<JobRun> {
@@ -1662,8 +1663,8 @@ impl Host {
             }
         }
     }
-    /// The recipe the Assistant's `create_loop` describes with `args` in `space`, with its
-    /// preview, or why it is refused there, as the loop tool checks it before any change.
+    /// The recipe `create_loop` with `args` describes in `space`, refused as `loop_tool` refuses
+    /// it, and its preview.
     pub(crate) fn propose(&self, space: &Space, args: &Value) -> Result<(Recipe, RecipePreview)> {
         let recipe = assistant::proposed_recipe(&space.id, args)?;
         self.refuse_taken_job(&recipe)?;
