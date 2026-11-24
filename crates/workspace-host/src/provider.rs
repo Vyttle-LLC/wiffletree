@@ -18,7 +18,7 @@ pub use conversation::{ConversationLaunch, SourceTools, is_claude_ai};
 pub use evaluator::{EvaluatorLaunch, prepare_codex_home};
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
 use output::{Next, Output, StopReading};
-pub use restricted::{ThreadLaunch, server_definition, shell_text_refused};
+pub use restricted::{ThreadLaunch, server_definition, shell_text_refused, user_allow_rules};
 use std::os::unix::process::CommandExt;
 use std::{
     io::{Read, Write},
@@ -320,7 +320,7 @@ pub fn command(turn: &Turn) -> Result<ProcessCommand> {
     ensure!(
         turn.session.provider != Provider::Codex
             || turn.thread.as_ref().is_none_or(ThreadLaunch::codex_may_run),
-        "A job with a CLI source runs only on Claude: Codex cannot yet hold a CLI to its listed commands"
+        "A job with a CLI source or a claude.ai connector runs only on Claude: Codex cannot yet hold a CLI to its listed commands, and cannot reach a connector"
     );
     let mut cmd = ProcessCommand::new(executable(turn.session.provider)?);
     configure(&mut cmd, turn);
@@ -837,7 +837,22 @@ fn run_turn(
                     if let Some(id) = value["session_id"].as_str() {
                         emit(ProviderEvent::Session(id.into()));
                     }
+                    // A loop run that loads a claude.ai connector also loads the human's other
+                    // servers: what its start offers that is not yet denied is recorded, and the
+                    // run starts again with it denied, as the Assistant's turn does below.
                     if let Some(launch) = &turn.thread {
+                        if launch.loads_connectors() {
+                            let reported = launch.reported_by_claude(&value);
+                            if !reported.is_empty() {
+                                emit(ProviderEvent::SourceTools(reported));
+                            }
+                            let unseen = launch.unseen_by_claude(&value);
+                            ensure!(
+                                unseen.is_empty(),
+                                "{NEW_SOURCE_TOOLS} ({})",
+                                unseen.join(", ")
+                            );
+                        }
                         launch.check_claude_start(&value)?;
                     }
                     // What each source's server offers, so its other tools are denied by name

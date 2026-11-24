@@ -422,6 +422,17 @@ fn plain(name: &str) -> bool {
         && (name.chars()).all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// Whether a name is a claude.ai connector's as Claude lists it, such as `claude.ai Google
+/// Calendar`: the prefix, then words of letters, digits, `-`, `_`, `.` and parentheses.
+fn claude_ai_connector(name: &str) -> bool {
+    let Some(display) = name.strip_prefix("claude.ai ") else {
+        return false;
+    };
+    !display.trim().is_empty()
+        && name.len() <= 64
+        && (display.chars()).all(|c| c.is_ascii_alphanumeric() || " -_.()".contains(c))
+}
+
 /// Whether the words after a CLI's name start one of its operations in `READS` (design,
 /// decision 9); an aws command first names its profile.
 fn reads(command: &str, words: &[&str]) -> bool {
@@ -454,8 +465,8 @@ pub fn validate_source(source: &Source) -> Result<()> {
     match source {
         Source::Mcp { server, tools, .. } => {
             ensure!(
-                plain(server),
-                "Name the MCP server as its configuration does"
+                plain(server) || claude_ai_connector(server),
+                "Name the MCP server as its configuration does, or a claude.ai connector as `claude mcp list` shows it"
             );
             ensure!(
                 !tools.is_empty() && tools.iter().all(|tool| plain(tool)),
@@ -745,6 +756,28 @@ mod tests {
             "5-1 * * * *",
         ] {
             assert!(Cron::parse(cron).is_err(), "{cron}");
+        }
+    }
+
+    #[test]
+    fn a_loop_may_read_a_claude_ai_connector_named_as_claude_lists_it() {
+        let mcp = |server: &str| Source::Mcp {
+            server: server.into(),
+            tools: vec!["list_events".into()],
+            act: vec![],
+            without_asking: vec![],
+            extra: Default::default(),
+        };
+        for server in ["linear", "claude.ai Google Calendar", "claude.ai Gmail (2)"] {
+            validate_source(&mcp(server)).unwrap();
+        }
+        for server in [
+            "claude.ai ",
+            "claude.ai Gmail; rm",
+            "my server",
+            "claude.ai Gmail,x",
+        ] {
+            assert!(validate_source(&mcp(server)).is_err(), "{server}");
         }
     }
 

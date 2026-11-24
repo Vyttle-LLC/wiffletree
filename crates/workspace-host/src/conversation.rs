@@ -383,6 +383,12 @@ impl Host {
                 }
             }
         }
+        launch.reported(self.source_tools_seen()?);
+        Ok(launch)
+    }
+    /// What Claude starts have reported, by the Assistant's turns, acts' runs and loop runs
+    /// that load connectors.
+    pub(crate) fn source_tools_seen(&self) -> Result<provider::SourceTools> {
         let mut seen = provider::SourceTools::default();
         let reported: Vec<(String, String)> = (self.db)
             .prepare("SELECT server,tool FROM conversation_source_tools")?
@@ -395,10 +401,9 @@ impl Host {
             .prepare("SELECT server FROM conversation_other_servers")?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        launch.reported(seen);
-        Ok(launch)
+        Ok(seen)
     }
-    /// Keeps what a Claude start reported, by the Assistant's turn or an act's run: each
+    /// Keeps what a Claude start reported, by the Assistant's turn, an act's or a loop's run: each
     /// source's server's tools, so the ones that are not read tools are denied by name from the
     /// next start on, and the servers no Space lists, which are denied whole.
     pub(crate) fn record_source_tools(&self, reported: &provider::SourceTools) -> Result<()> {

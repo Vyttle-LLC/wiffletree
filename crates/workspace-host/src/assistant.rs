@@ -560,13 +560,17 @@ impl Host {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_default();
+        // A claude.ai connector has no definition, and only Claude reaches it.
         let servers = (sources.iter())
             .filter_map(|source| match source {
                 Source::Mcp { server, .. } => Some(server),
                 Source::Cli { .. } => None,
             })
             .filter_map(|server| {
-                let definition = provider::server_definition(session.provider, &home, server)?;
+                let definition = match provider::is_claude_ai(server) {
+                    true => (session.provider == Provider::Claude).then_some(Value::Null)?,
+                    false => provider::server_definition(session.provider, &home, server)?,
+                };
                 Some((server.clone(), definition))
             })
             .collect();
@@ -576,6 +580,8 @@ impl Host {
             scratch: fs::canonicalize(scratch)?,
             sources,
             servers,
+            seen: self.source_tools_seen()?,
+            user_allowed: provider::user_allow_rules(&home),
             job_run: thread.job.is_some(),
             issue_thread: thread.attached.is_some(),
             compile: None,
