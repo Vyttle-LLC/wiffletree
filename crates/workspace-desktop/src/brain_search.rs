@@ -564,6 +564,9 @@ mod tests {
             additions: String::new(),
             behaviors: Default::default(),
             repository_settings: Default::default(),
+            apps: vec![],
+            layers: vec![],
+            repository_tags: Default::default(),
             brain: Some(SpaceBrain {
                 repository: BrainRepository::GitHub {
                     owner: "Sage-Social".into(),

@@ -55,8 +55,15 @@ struct SpaceFile {
     repository_settings: BTreeMap<String, RepositorySettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     brain: Option<SpaceBrain>,
+    /// Kept a list of `owner/name` strings, which older hosts read; the tags are in new keys.
     #[serde(default)]
     repositories: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    apps: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    layers: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    repository_tags: BTreeMap<String, RepositoryTags>,
     #[serde(default)]
     models: SpaceModels,
     #[serde(default, skip_serializing_if = "ReviewOverrides::is_empty")]
@@ -81,6 +88,9 @@ fn space_yaml(space: &Space) -> Result<Vec<u8>> {
         repository_settings: space.repository_settings.clone(),
         brain: space.brain.clone(),
         repositories: space.repositories.clone(),
+        apps: space.apps.clone(),
+        layers: space.layers.clone(),
+        repository_tags: space.repository_tags.clone(),
         models: space.models.clone(),
         reviews: space.reviews.clone(),
         sources: space.sources.clone(),
@@ -108,7 +118,7 @@ fn read_space(content: &[u8], storage: SpaceStorage) -> Result<Space> {
         !file.extra.contains_key("storage"),
         "space.yaml names a storage, which a Space's file cannot"
     );
-    let space = Space {
+    let mut space = Space {
         id: file.id,
         name: file.name,
         color: file.color,
@@ -119,11 +129,15 @@ fn read_space(content: &[u8], storage: SpaceStorage) -> Result<Space> {
         brain: file.brain,
         storage,
         repositories: file.repositories,
+        apps: file.apps,
+        layers: file.layers,
+        repository_tags: file.repository_tags,
         models: file.models,
         reviews: file.reviews,
         sources: file.sources,
         extra: file.extra,
     };
+    spaces::drop_stray_tags(&mut space);
     spaces::validate(&space)?;
     Ok(space)
 }
@@ -1820,6 +1834,9 @@ impl Host {
             additions: additions.into(),
             behaviors: Default::default(),
             repository_settings: Default::default(),
+            apps: vec![],
+            layers: vec![],
+            repository_tags: Default::default(),
             brain: None,
             storage: SpaceStorage {
                 repository: storage,
@@ -2495,6 +2512,9 @@ pub(crate) mod tests {
             additions: "Name the ticket.".into(),
             behaviors: Default::default(),
             repository_settings: Default::default(),
+            apps: vec![],
+            layers: vec![],
+            repository_tags: Default::default(),
             brain: None,
             storage: SpaceStorage {
                 repository: github(NAME),
@@ -2723,6 +2743,53 @@ sources:
         let file = written(&space);
         assert_eq!(file["instructions"], "Never log names.");
         assert_eq!(file.get("additions"), None);
+    }
+
+    #[test]
+    fn repository_tags_are_new_keys_beside_the_plain_repository_list() {
+        let storage = SpaceStorage {
+            repository: super::github(NAME),
+            folder: "celadon".into(),
+            root: String::new(),
+        };
+        let old = "format: 1\nid: c\nname: Celadon\nrepositories: [celadon-theme/nvim]\n";
+        let mut space = read_space(old.as_bytes(), storage.clone()).unwrap();
+        assert!(space.apps.is_empty() && space.layers.is_empty());
+        assert_eq!(space.tags_of("celadon-theme/nvim"), None);
+        assert_eq!(written(&space).get("repository_tags"), None);
+
+        space.set_tag("celadon-theme/nvim", TagKind::App, Some("nvim"));
+        space.set_tag("celadon-theme/nvim", TagKind::Layer, Some("frontend"));
+        let file = serde_json::to_value(written(&space)).unwrap();
+        assert_eq!(
+            file["repositories"],
+            serde_json::json!(["celadon-theme/nvim"])
+        );
+        assert_eq!(file["apps"], serde_json::json!(["nvim"]));
+        assert_eq!(file["layers"], serde_json::json!(["frontend"]));
+        assert_eq!(
+            file["repository_tags"]["celadon-theme/nvim"],
+            serde_json::json!({"app": "nvim", "layer": "frontend"})
+        );
+        let yaml = space_yaml(&space).unwrap();
+        assert_eq!(read_space(&yaml, storage).unwrap(), space);
+    }
+
+    #[test]
+    fn a_tag_outside_the_spaces_values_reads_as_untagged() {
+        let storage = SpaceStorage {
+            repository: super::github(NAME),
+            folder: "celadon".into(),
+            root: String::new(),
+        };
+        let stray = "format: 1\nid: c\nname: Celadon\nrepositories: [celadon-theme/nvim, celadon-theme/website]\napps: [nvim]\nlayers: [frontend]\nrepository_tags:\n  celadon-theme/nvim: {app: nvim, layer: backend}\n  celadon-theme/website: {layer: web}\n";
+        let space = read_space(stray.as_bytes(), storage).unwrap();
+        let nvim = space.tags_of("celadon-theme/nvim").unwrap();
+        assert_eq!(
+            (nvim.app.as_deref(), nvim.layer.as_deref()),
+            (Some("nvim"), None)
+        );
+        assert_eq!(space.tags_of("celadon-theme/website"), None);
     }
 
     #[test]

@@ -168,6 +168,9 @@ fn new_space(name: &str, prefixes: &mut Vec<String>) -> (Space, TrackerConfig) {
         additions: String::new(),
         behaviors: Default::default(),
         repository_settings: Default::default(),
+        apps: vec![],
+        layers: vec![],
+        repository_tags: Default::default(),
         brain: None,
         storage: SpaceStorage {
             repository: StorageRepository::Local { id: new_id() },
@@ -362,6 +365,48 @@ pub(crate) fn validate(space: &Space) -> Result<()> {
     Ok(())
 }
 
+/// Drops each repository tag that is not one of the Space's values, as a sync or a hand edit of
+/// `space.yaml` can leave, so that repository reads as untagged for it.
+pub(crate) fn drop_stray_tags(space: &mut Space) {
+    let (apps, layers) = (space.apps.clone(), space.layers.clone());
+    for tags in space.repository_tags.values_mut() {
+        tags.app.take_if(|app| !apps.contains(app));
+        tags.layer.take_if(|layer| !layers.contains(layer));
+    }
+    space.repository_tags.retain(|_, tags| !tags.is_empty());
+}
+
+/// The Space's apps and layers are short, distinct names, and each repository's tags are among
+/// them.
+fn validate_tags(space: &Space) -> Result<()> {
+    for kind in TagKind::ALL {
+        let values = space.values(kind);
+        for (at, value) in values.iter().enumerate() {
+            ensure!(
+                !value.is_empty() && value.trim() == value && value.len() <= MAX_TAG_BYTES,
+                "{} names are 1 to {MAX_TAG_BYTES} bytes with no space around them",
+                kind.label()
+            );
+            ensure!(
+                !values[..at].iter().any(|v| v.eq_ignore_ascii_case(value)),
+                "{value} is listed twice"
+            );
+        }
+        for (repository, tags) in &space.repository_tags {
+            if let Some(value) = tags.get(kind) {
+                ensure!(
+                    values.iter().any(|v| v == value),
+                    "{repository}'s {} {value} is not one of {}'s",
+                    kind.label().to_lowercase(),
+                    space.name
+                );
+            }
+        }
+    }
+    Ok(())
+}
+const MAX_TAG_BYTES: usize = 64;
+
 impl Host {
     /// In the order they were created.
     pub fn spaces(&self) -> Result<Vec<SpaceRecord>> {
@@ -375,6 +420,41 @@ impl Host {
                 })
             })?
             .collect::<rusqlite::Result<_>>()?)
+    }
+    /// Each project's tags, from its Space's tags for the repositories of all its tickets in any
+    /// state. Derived on every read, so a new ticket, a retagged repository and a project moved
+    /// to another Space show at once.
+    pub(crate) fn project_tags(
+        &self,
+        projects: &[Project],
+        spaces: &[Space],
+    ) -> Result<BTreeMap<String, ProjectTags>> {
+        let identities: BTreeMap<String, Option<String>> = (self.repositories()?.into_iter())
+            .map(|r| (r.id.clone(), r.github_identity()))
+            .collect();
+        let mut worked: BTreeMap<String, Vec<Option<String>>> = BTreeMap::new();
+        let mut rows = self.db.prepare(
+            "SELECT DISTINCT s.project_id, coalesce(json_extract(t.data,'$.repository_id'),'') FROM tickets t JOIN sessions s ON s.id=t.coordinator_id",
+        )?;
+        for row in rows.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+            let (project, repository) = row?;
+            let identity = identities.get(&repository).cloned().flatten();
+            worked.entry(project).or_default().push(identity);
+        }
+        Ok((projects.iter())
+            .map(|project| {
+                let space = spaces.iter().find(|s| s.id == project.space);
+                let repositories = worked.get(&project.id).map_or(&[][..], |r| r);
+                let tags = ProjectTags::derive(space, repositories.iter().map(Option::as_deref));
+                (project.id.clone(), tags)
+            })
+            .collect())
+    }
+    pub(crate) fn tags_of(&self, project: &str) -> Result<ProjectTags> {
+        let project = self.project(project)?;
+        let spaces: Vec<Space> = self.spaces()?.into_iter().map(|r| r.space).collect();
+        let mut tags = self.project_tags(std::slice::from_ref(&project), &spaces)?;
+        Ok(tags.remove(&project.id).unwrap_or_default())
     }
     /// Every Space's id, in the order they were created.
     pub fn space_ids(&self) -> Result<Vec<SpaceId>> {
@@ -505,6 +585,8 @@ impl Host {
             "A Space's storage cannot be changed here"
         );
         validate(&space)?;
+        // Strict only here: a file read with a stray tag reads it as untagged instead.
+        validate_tags(&space)?;
         self.check_space_behaviors(&current.space, &space)?;
         self.check_space_models(&current.space, &space)?;
         self.ensure_unused_name(&space.name, Some(&space.id))?;
