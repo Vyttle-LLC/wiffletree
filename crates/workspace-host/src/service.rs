@@ -1551,6 +1551,14 @@ impl Actor {
                     let _ = reply.try_send(read.map_err(|e| format!("{e:#}")));
                 });
             }
+            Command::ProbeSource { kind, name } => {
+                let (env, kind, name) = (self.host.source_env(), *kind, name.clone());
+                let reply = reply.clone();
+                std::thread::spawn(move || {
+                    let probe = serde_json::to_value(source_setup::probe(&env, kind, &name));
+                    let _ = reply.try_send(probe.map_err(|e| e.to_string()));
+                });
+            }
             Command::PreviewJob { recipe } => {
                 let pending = self.host.preview_job(recipe)?;
                 let reply = reply.clone();

@@ -20,7 +20,7 @@ use workspace_core::job::{
 /// A due time passed by more than this when the scheduler reaches it is a catch-up.
 const LATE_AFTER_MS: i64 = 60_000;
 /// How long a source's sign-in check, or an MCP server's handshake, may take.
-const CHECK_LIMIT: std::time::Duration = std::time::Duration::from_secs(15);
+pub(crate) const CHECK_LIMIT: std::time::Duration = std::time::Duration::from_secs(15);
 /// The next runs a recipe card and a job's page show.
 const NEXT_SHOWN: usize = 3;
 /// How far ahead a schedule is searched for its next time: past every Feb 29.
@@ -333,7 +333,7 @@ pub(crate) struct SourceEnv {
 }
 impl SourceEnv {
     /// The host's own: its `PATH` and the folders the provider CLIs are found in.
-    fn of_host() -> Self {
+    pub(crate) fn of_host() -> Self {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_default();
@@ -360,7 +360,7 @@ impl SourceEnv {
 }
 
 /// The sign-in check of a CLI Wiffletree knows, and the command that fixes a failed one.
-fn known_check(command: &str, prefixes: &[String]) -> Option<(Vec<String>, String)> {
+pub(crate) fn known_check(command: &str, prefixes: &[String]) -> Option<(Vec<String>, String)> {
     let words = |text: &str| text.split_whitespace().map(str::to_owned).collect();
     match command {
         "gh" => Some((words("gh auth status"), "gh auth login".into())),

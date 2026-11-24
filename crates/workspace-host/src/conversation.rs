@@ -2,7 +2,9 @@
 //! this install owns, working in `<data folder>/assistant/workspace/` in YOLO mode; what holds
 //! its turns to cards; the cards its tools raise; and its tools that act in a named Space.
 use crate::*;
-use workspace_core::assistant::conversation::{CardKind, ConversationCard, Route};
+use workspace_core::assistant::conversation::{
+    CardKind, ConversationCard, ConversationState, Route,
+};
 
 /// The Assistant's working directory.
 pub(crate) fn workspace_folder(home: &Path) -> PathBuf {
@@ -133,6 +135,25 @@ impl Host {
                 |r| decode(r, 0),
             )
             .optional()?)
+    }
+    /// The conversation as the snapshot carries it, once its first message started it.
+    pub(crate) fn conversation_state(&self) -> Result<Option<ConversationState>> {
+        let Some(session) = self.assistant_session()? else {
+            return Ok(None);
+        };
+        let session = self.shown(session);
+        let runtime = self.session_runtime(&session.id)?;
+        Ok(Some(ConversationState {
+            status: session.status,
+            turn_started_at: (session.status == Status::Working)
+                .then_some(runtime.last_started_at)
+                .flatten(),
+            message_revision: self.message_revision(&session.id)?,
+            profile: runtime.profile,
+            cards: self.conversation_cards()?,
+            routes: self.conversation_routes()?,
+            session_id: session.id,
+        }))
     }
     /// The Assistant's session, started now on this Mac's Assistant row when it has none.
     pub(crate) fn assistant(&mut self) -> Result<Session> {

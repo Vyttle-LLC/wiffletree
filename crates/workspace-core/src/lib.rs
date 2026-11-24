@@ -1068,6 +1068,10 @@ pub struct Snapshot {
     /// no Space and not listed.
     #[serde(default)]
     pub jobs: Vec<job::JobState>,
+    /// The Assistant's one conversation, once its first message started it. Its session is not
+    /// in `sessions`: no project, panel or tree lists it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<assistant::conversation::ConversationState>,
 }
 fn assistant_name() -> String {
     assistant::DEFAULT_NAME.into()
@@ -3578,6 +3582,15 @@ pub enum Command {
     /// Read-only: the conversation's session, cards and routing tags, as
     /// `{session, cards, routes}`.
     ConversationCards,
+    /// Read-only, for Add source: the MCP servers configured for this Mac's Claude and Codex
+    /// and the well-known CLIs installed here. Answered with `Vec<SourceCandidate>`.
+    SourceCandidates,
+    /// Read-only, for Add source: starts one MCP server as its provider would, or checks a
+    /// CLI's sign-in, and lists its tools with suggested kinds. Answered with `SourceProbe`.
+    ProbeSource {
+        kind: SourceKind,
+        name: String,
+    },
     /// The human's answer on a decision card; it reaches the Assistant as their message.
     /// Answered with the card.
     AnswerDecision {
@@ -4445,6 +4458,8 @@ impl Command {
             | Self::IssuePeople { .. }
             | Self::SearchThreads { .. }
             | Self::ConversationCards
+            | Self::SourceCandidates
+            | Self::ProbeSource { .. }
             | Self::Proposals { .. }
             | Self::Evaluations { .. }
             | Self::PreviewJob { .. }
@@ -4622,6 +4637,8 @@ impl Command {
                 | Self::SetAssistantName { .. }
                 | Self::SendToAssistant { .. }
                 | Self::ConversationCards
+                | Self::SourceCandidates
+                | Self::ProbeSource { .. }
                 | Self::AnswerDecision { .. }
                 | Self::ApplyLoopCard { .. }
                 | Self::DeclineLoopCard { .. }

@@ -536,21 +536,30 @@ pub(super) fn toml_inline(value: &Value) -> String {
 /// The definition of the MCP server `name` in `provider`'s own configuration under `home`:
 /// Claude's `~/.claude.json`, Codex's `config.toml` in `$CODEX_HOME` or `~/.codex`.
 pub fn server_definition(provider: Provider, home: &Path, name: &str) -> Option<Value> {
-    match provider {
-        Provider::Claude => {
-            let config: Value =
-                serde_json::from_slice(&fs::read(home.join(".claude.json")).ok()?).ok()?;
-            config["mcpServers"].get(name).cloned()
-        }
+    configured_servers(provider, home).remove(name)
+}
+
+/// Every MCP server `provider`'s own configuration under `home` names, by name.
+pub fn configured_servers(provider: Provider, home: &Path) -> serde_json::Map<String, Value> {
+    let servers = match provider {
+        Provider::Claude => fs::read(home.join(".claude.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .map(|config| config["mcpServers"].clone()),
         Provider::Codex => {
             let folder = std::env::var_os("CODEX_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home.join(".codex"));
-            let text = fs::read_to_string(folder.join("config.toml")).ok()?;
-            let config: toml::Table = text.parse().ok()?;
-            let server = config.get("mcp_servers")?.get(name)?.clone();
-            serde_json::to_value(server).ok()
+            fs::read_to_string(folder.join("config.toml"))
+                .ok()
+                .and_then(|text| text.parse::<toml::Table>().ok())
+                .and_then(|config| config.get("mcp_servers").cloned())
+                .and_then(|servers| serde_json::to_value(servers).ok())
         }
+    };
+    match servers {
+        Some(Value::Object(servers)) => servers,
+        _ => serde_json::Map::new(),
     }
 }
 

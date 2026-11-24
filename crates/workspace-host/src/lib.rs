@@ -64,6 +64,7 @@ mod settings;
 pub(crate) mod shared;
 pub mod skills;
 pub mod socket;
+mod source_setup;
 mod spaces;
 mod stacks;
 mod steps;
@@ -634,7 +635,7 @@ impl Host {
                 record.space
             })
             .collect();
-        Ok(Snapshot { projects: self.projects()?, spaces, space_locals, issue_trackers: self.issue_trackers()?, last_filed_space: self.last_filed_space()?, linear_import: self.linear.status.clone(), repositories: self.repositories()?, open_ticket_repositories: repositories::open_ticket_repositories(&self.db)?, sessions: self.live_sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} OR id IN (SELECT json_extract(data,'$.ticket_id') FROM runtimes WHERE session_id IN ({in_turn})) ORDER BY rowid", tickets_listed(true)), [&turning])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id IN (SELECT id FROM sessions WHERE {}) OR session_id IN ({in_turn}) ORDER BY rowid", sessions_where(true)), [&turning])?, archive_stamp: self.archive_stamp()?, message_revisions: self.message_revisions()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, core_instructions: provider::core_instructions(), still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held(), assistant_name: self.assistant_name(), threads: self.thread_tabs(now())?, jobs: self.job_states()? })
+        Ok(Snapshot { projects: self.projects()?, spaces, space_locals, issue_trackers: self.issue_trackers()?, last_filed_space: self.last_filed_space()?, linear_import: self.linear.status.clone(), repositories: self.repositories()?, open_ticket_repositories: repositories::open_ticket_repositories(&self.db)?, sessions: self.live_sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} OR id IN (SELECT json_extract(data,'$.ticket_id') FROM runtimes WHERE session_id IN ({in_turn})) ORDER BY rowid", tickets_listed(true)), [&turning])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id IN (SELECT id FROM sessions WHERE {}) OR session_id IN ({in_turn}) ORDER BY rowid", sessions_where(true)), [&turning])?, archive_stamp: self.archive_stamp()?, message_revisions: self.message_revisions()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, core_instructions: provider::core_instructions(), still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held(), assistant_name: self.assistant_name(), threads: self.thread_tabs(now())?, jobs: self.job_states()?, conversation: self.conversation_state()? })
     }
     /// The snapshot's sessions: the live ones, then archived ones still in a turn, which show as
     /// working until it ends.
@@ -1851,6 +1852,11 @@ impl Host {
             // The service checks a preview's sources off the host thread instead.
             Command::PreviewJob { recipe } => {
                 serde_json::to_value(self.preview_job(&recipe)?.check())?
+            }
+            Command::SourceCandidates => serde_json::to_value(self.source_candidates())?,
+            // The service starts the source off the host thread instead.
+            Command::ProbeSource { kind, name } => {
+                serde_json::to_value(source_setup::probe(&self.source_env(), kind, &name))?
             }
             Command::SetJobEnabled {
                 space_id,

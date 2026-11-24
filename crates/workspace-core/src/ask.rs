@@ -1,5 +1,6 @@
 //! Commands paired with the type the host answers each with, so a client decodes a reply as
 //! what it is and a mismatch fails to compile. Only this module pairs them.
+use crate::assistant::conversation::ConversationCard;
 use crate::{skills::Line, *};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -538,6 +539,43 @@ pub fn discard_proposal(thread_id: String, proposal_id: String) -> Ask<assistant
 /// Answered with the name as saved.
 pub fn set_assistant_name(name: String) -> Ask<String> {
     Ask::new(Command::SetAssistantName { name })
+}
+pub fn answer_decision(card_id: String, answer: String) -> Ask<ConversationCard> {
+    Ask::new(Command::AnswerDecision { card_id, answer })
+}
+pub fn apply_loop_card(card_id: String) -> Ask<ConversationCard> {
+    Ask::new(Command::ApplyLoopCard { card_id })
+}
+pub fn decline_loop_card(card_id: String) -> Ask<ConversationCard> {
+    Ask::new(Command::DeclineLoopCard { card_id })
+}
+pub fn undo_loop_change(card_id: String) -> Ask<ConversationCard> {
+    Ask::new(Command::UndoLoopChange { card_id })
+}
+pub fn run_action(card_id: String) -> Ask<ConversationCard> {
+    Ask::new(Command::RunAction { card_id })
+}
+pub fn decline_action(card_id: String) -> Ask<ConversationCard> {
+    Ask::new(Command::DeclineAction { card_id })
+}
+pub fn stop_work(project_id: String) -> Ask<Project> {
+    Ask::new(Command::StopWork { project_id })
+}
+/// Change on a message's routing tag: to another work item, or with `None` to no work.
+pub fn move_routed_message(
+    message_id: String,
+    project_id: Option<String>,
+) -> Ask<assistant::conversation::Route> {
+    Ask::new(Command::MoveRoutedMessage {
+        message_id,
+        project_id,
+    })
+}
+pub fn source_candidates() -> Ask<Vec<SourceCandidate>> {
+    Ask::new(Command::SourceCandidates)
+}
+pub fn probe_source(kind: SourceKind, name: String) -> Ask<SourceProbe> {
+    Ask::new(Command::ProbeSource { kind, name })
 }
 /// The human's message to the Assistant's one conversation; `space_id` is the Space picked in
 /// the composer, if any.
