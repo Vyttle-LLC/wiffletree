@@ -17,6 +17,7 @@ impl Host {
     pub(crate) fn me_facts(&self, projects: &[Project]) -> Result<BTreeMap<String, MeFacts>> {
         let tickets = self.tickets_by_project()?;
         let archived = self.archived_projects()?;
+        let last_turns = self.projects_last_turn()?;
         let repositories = self.repositories()?;
         let protects = |repository_id: &str, base: &str| {
             (repositories.iter())
@@ -56,6 +57,7 @@ impl Host {
             let project_facts = MeFacts {
                 ready_to_close,
                 merges,
+                last_turn_started: last_turns.get(&project.id).copied(),
             };
             if project_facts != MeFacts::default() {
                 facts.insert(project.id.clone(), project_facts);
@@ -105,6 +107,17 @@ impl Host {
             });
         }
         Ok(tickets)
+    }
+
+    /// By project, when one of its sessions, archived ones included, last started a turn.
+    fn projects_last_turn(&self) -> Result<BTreeMap<String, i64>> {
+        let mut rows = self.db.prepare(
+            "SELECT s.project_id, max(json_extract(r.data,'$.last_started_at'))
+             FROM runtimes r JOIN sessions s ON s.id=r.session_id
+             WHERE json_extract(r.data,'$.last_started_at') IS NOT NULL GROUP BY s.project_id",
+        )?;
+        let turns = rows.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(turns.collect::<rusqlite::Result<_>>()?)
     }
 
     /// The projects whose coordinator is archived.
@@ -307,5 +320,32 @@ mod tests {
                 base: "main".into()
             }]
         );
+    }
+
+    #[test]
+    fn the_last_turn_counts_an_archived_worker_the_snapshot_leaves_out() {
+        let mut f = fixture();
+        let platform = f.project("Platform");
+        f.host.set_project_standing(&platform.id, true).unwrap();
+        let ticket = f.ticket(&platform, TicketState::Planned, None, false);
+        let worker = (f.host)
+            .assign_ticket(&ticket.id, Role::Implementer, Provider::Codex, "Fix", None)
+            .unwrap();
+        let started = |host: &Host, session: &str, at: i64| {
+            let mut runtime = host.session_runtime(session).unwrap();
+            runtime.last_started_at = Some(at);
+            host.save_runtime(&runtime).unwrap();
+        };
+        let day = 24 * 60 * 60 * 1000;
+        started(&f.host, &f.coordinator(&platform).id, 100 * day);
+        started(&f.host, &worker.id, 105 * day);
+        let mut accepted = f.host.ticket(&ticket.id).unwrap();
+        accepted.state = TicketState::Accepted;
+        f.host.save_ticket(&accepted).unwrap();
+        f.host.set_archived(&worker.id, true).unwrap();
+
+        let snapshot = f.host.snapshot().unwrap();
+        assert!(!snapshot.runtimes.iter().any(|r| r.session_id == worker.id));
+        assert_eq!(f.facts(&platform).last_turn_started, Some(105 * day));
     }
 }

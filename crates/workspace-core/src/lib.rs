@@ -1143,6 +1143,9 @@ pub struct MeFacts {
     /// protected branch, which only the human merges into, in the tickets' order.
     #[serde(default)]
     pub merges: Vec<HumanMerge>,
+    /// When one of its sessions, archived or not, last started a turn, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_started: Option<i64>,
 }
 /// An open pull request only the human can merge.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

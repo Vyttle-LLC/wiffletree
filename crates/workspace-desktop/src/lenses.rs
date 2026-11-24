@@ -182,17 +182,12 @@ pub(crate) fn me_count(sections: &[LensSection]) -> usize {
     sections.iter().map(LensSection::entries).sum()
 }
 
-/// By project, when one of its sessions last started a turn.
+/// By project, when one of its sessions last started a turn, archived workers included, as only
+/// the host knows without the archive.
 fn latest_turns(index: &WorkspaceIndex) -> BTreeMap<&str, i64> {
-    let mut latest = BTreeMap::new();
-    for session in index.sessions() {
-        let started = index.runtime(&session.id).and_then(|r| r.last_started_at);
-        if let Some(started) = started {
-            let at = latest.entry(session.project_id.as_str()).or_insert(started);
-            *at = (*at).max(started);
-        }
-    }
-    latest
+    (index.snapshot().me_facts.iter())
+        .filter_map(|(project, facts)| Some((project.as_str(), facts.last_turn_started?)))
+        .collect()
 }
 
 /// Why the Me lens lists `project` under `bucket`; none when it does not.
@@ -458,8 +453,9 @@ mod tests {
         fn new(names: &[&str]) -> Self {
             let (directory, host) = listed(names);
             let mut snapshot = host.snapshot().unwrap();
-            for runtime in &mut snapshot.runtimes {
-                runtime.last_started_at = Some(NOW - DAY / 24);
+            for project in &snapshot.projects {
+                let facts = snapshot.me_facts.entry(project.id.clone()).or_default();
+                facts.last_turn_started = Some(NOW - DAY / 24);
             }
             Self {
                 _directory: directory,
@@ -478,11 +474,9 @@ mod tests {
                 .id
                 .clone()
         }
+        /// No session of `name`, archived ones included, has started a turn for `days` days.
         fn quiet_for(&mut self, name: &str, days: i64) {
-            let coordinator = self.coordinator(name);
-            let mut runtimes = self.snapshot.runtimes.iter_mut();
-            let runtime = runtimes.find(|r| r.session_id == coordinator);
-            runtime.unwrap().last_started_at = Some(NOW - days * DAY - 1);
+            self.facts(name).last_turn_started = Some(NOW - days * DAY - 1);
         }
         fn file(&mut self, child: &str, parent: &str) {
             let parent = self.id(parent);
