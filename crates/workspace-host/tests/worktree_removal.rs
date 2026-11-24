@@ -292,6 +292,72 @@ fn a_delete_that_keeps_failing_is_retried_then_reported_once_with_folder_reason_
 }
 
 #[test]
+fn a_folder_a_process_wiffletree_did_not_start_still_uses_waits_for_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut host, _, ticket) = ticket_with_build_output(directory.path(), 10);
+    // A build outside Wiffletree's records, working in the build output.
+    let mut build = Command::new("sleep")
+        .arg("60")
+        .current_dir(Path::new(&ticket.worktree).join("target/debug"))
+        .spawn()
+        .unwrap();
+    let left = removal_folder(&ticket);
+
+    let at = workspace_host::now();
+    host.close_ticket(&ticket.id).unwrap();
+    let due = settle_finished(&mut host, at);
+
+    let alive = build.try_wait().unwrap().is_none();
+    build.kill().unwrap();
+    build.wait().unwrap();
+    assert!(alive, "the build was signalled");
+    assert!(left.join("target/debug/0/0.o").exists());
+    let recorded = recorded_deletions(directory.path());
+    let error = recorded[0].2.as_deref().unwrap();
+    assert!(
+        error.contains(&format!("{} (sleep)", build.id())),
+        "{error}"
+    );
+
+    let at = due.unwrap();
+    host.settle_worktree_deletions(at);
+    assert_eq!(settle_finished(&mut host, at), None);
+    assert!(!left.exists());
+    assert!(recorded_deletions(directory.path()).is_empty());
+}
+
+#[test]
+fn a_failing_delete_no_ticket_names_is_reported_in_the_inbox() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut host, coordinator, ticket) = ticket_with_build_output(directory.path(), 0);
+    let orphan = Path::new(&ticket.worktree).with_file_name(".removing-gone");
+    let stuck = orphan.join("target");
+    fs::create_dir_all(&stuck).unwrap();
+    fs::write(stuck.join("build.o"), "binary").unwrap();
+    fs::set_permissions(&stuck, fs::Permissions::from_mode(0o555)).unwrap();
+
+    host.delete_removed_worktrees().unwrap();
+    let mut at = workspace_host::now();
+    for attempt in 1..=4 {
+        if attempt > 1 {
+            host.settle_worktree_deletions(at);
+        }
+        at = settle_finished(&mut host, at).unwrap();
+    }
+
+    fs::set_permissions(&stuck, fs::Permissions::from_mode(0o755)).unwrap();
+    let prompts: Vec<String> = store(directory.path())
+        .prepare("SELECT json_extract(data,'$.prompt') FROM attention WHERE operation_id LIKE 'worktree-delete-failed:%' AND session_id=?1")
+        .unwrap()
+        .query_map([&coordinator.id], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(prompts.len(), 1, "{prompts:?}");
+    assert!(prompts[0].contains(".removing-gone"), "{}", prompts[0]);
+}
+
+#[test]
 fn a_folder_left_aside_by_a_stop_is_deleted_at_start() {
     let directory = tempfile::tempdir().unwrap();
     let (mut host, _, ticket) = ticket_with_build_output(directory.path(), 0);

@@ -2,10 +2,18 @@
 //! folder is deleted. Each such folder is recorded before it is renamed, so a host that stops
 //! partway through a delete resumes it at its next start. A failed delete is retried with
 //! backoff while the host runs and again at every start, and after repeated failures the ticket's
-//! owner is told once which folder failed, why and how big it is. A record is cleared only once
-//! its folder is gone. Only folders named with the `.removing-` prefix are ever deleted.
+//! owner, or the human's inbox when no ticket names the folder, is told once which folder failed,
+//! why and how big it is. A record is cleared only once its folder is proven gone. Only folders
+//! named with the `.removing-` prefix are ever deleted. A folder still used by a process, as its
+//! working directory or through an open file, is not deleted, since its open files would keep
+//! their space: the ticket's recorded processes are stopped, and any other holder is named in the
+//! failure and waited out, never signalled.
 use crate::*;
-use std::{collections::HashMap, os::unix::fs::MetadataExt, sync::Arc, thread::JoinHandle};
+use std::{
+    collections::HashSet,
+    os::unix::fs::MetadataExt,
+    sync::{Arc, Mutex},
+};
 
 /// The name a removed worktree's folder takes, followed by its ticket's id.
 pub(crate) const REMOVING_PREFIX: &str = ".removing-";
@@ -18,10 +26,15 @@ const LONGEST_RETRY_MS: i64 = 10 * 60_000;
 /// A failed attempt: why, and how much the folder still holds on disk.
 type Failure = (String, u64);
 
+/// A delete's folder and what its attempt did.
+type Finished = (PathBuf, Result<(), Failure>);
+
 /// The deletes running off the host thread.
 #[derive(Default)]
 pub(crate) struct Running {
-    deletes: HashMap<PathBuf, JoinHandle<Result<(), Failure>>>,
+    folders: HashSet<PathBuf>,
+    /// Each delete's outcome, put here before `notify` is called.
+    finished: Arc<Mutex<Vec<Finished>>>,
     /// Called from a delete's thread as it finishes, so the service settles it promptly.
     notify: Option<Arc<dyn Fn() + Send + Sync>>,
     /// When a waiting delete next comes due; nothing is read before then unless one finished.
@@ -56,9 +69,88 @@ fn is_removal_folder(path: &Path) -> bool {
         .is_some_and(|name| name.starts_with(REMOVING_PREFIX) && name.len() > REMOVING_PREFIX.len())
 }
 
-/// A real folder, not a symbolic link to one.
-fn is_folder(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+/// Proven absent. A path whose metadata cannot be read, such as behind a folder without search
+/// permission, is not.
+fn is_gone(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// Whether `path` is `folder` or inside it; both canonical.
+fn within(path: &Path, folder: &Path) -> bool {
+    path.starts_with(folder)
+}
+
+/// This user's processes whose working directory or an open file is inside `folder`, each as
+/// "pid (command)". Deleting under them would leave their open files' space allocated.
+#[cfg(target_os = "macos")]
+fn holders(folder: &Path) -> Result<Vec<String>, String> {
+    // SAFETY: getuid cannot fail.
+    let uid = unsafe { libc::getuid() }.to_string();
+    let listed = std::process::Command::new("lsof")
+        .args(["-nPw", "-u", &uid, "-F", "pcn"])
+        .output()
+        .map_err(|e| format!("could not list open files with lsof: {e}"))?;
+    let mut holders = vec![];
+    let (mut pid, mut command) = (String::new(), String::new());
+    for line in String::from_utf8_lossy(&listed.stdout).lines() {
+        match line.split_at_checked(1) {
+            Some(("p", value)) => (pid, command) = (value.to_owned(), String::new()),
+            Some(("c", value)) => command = value.to_owned(),
+            Some(("n", name)) if within(Path::new(name), folder) => {
+                let holder = format!("{pid} ({command})");
+                if !holders.contains(&holder) {
+                    holders.push(holder);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(holders)
+}
+#[cfg(not(target_os = "macos"))]
+fn holders(folder: &Path) -> Result<Vec<String>, String> {
+    let mut holders = vec![];
+    for process in fs::read_dir("/proc").map_err(|e| e.to_string())?.flatten() {
+        let pid = process.file_name().to_string_lossy().into_owned();
+        if pid.parse::<u32>().is_err() {
+            continue;
+        }
+        let proc = process.path();
+        let open = (fs::read_dir(proc.join("fd"))
+            .into_iter()
+            .flatten()
+            .flatten())
+        .filter_map(|fd| fs::read_link(fd.path()).ok());
+        if fs::read_link(proc.join("cwd"))
+            .into_iter()
+            .chain(open)
+            .any(|path| within(&path, folder))
+        {
+            let command = fs::read_to_string(proc.join("comm")).unwrap_or_default();
+            holders.push(format!("{pid} ({})", command.trim()));
+        }
+    }
+    Ok(holders)
+}
+
+/// Deletes the folder unless a process still uses it.
+fn attempt(folder: &Path) -> Result<(), String> {
+    let canonical = fs::canonicalize(folder).map_err(|e| e.to_string())?;
+    let holders = holders(&canonical)?;
+    if !holders.is_empty() {
+        return Err(format!(
+            "processes still use files in it: {}",
+            holders.join(", ")
+        ));
+    }
+    let deleted = fs::remove_dir_all(folder);
+    match is_gone(folder) {
+        true => Ok(()),
+        false => Err(deleted.map_or_else(
+            |error| error.to_string(),
+            |()| "the folder was there again afterwards".into(),
+        )),
+    }
 }
 
 /// Bytes allocated on disk to everything under `path`, as far as it can be read.
@@ -83,27 +175,25 @@ fn size_label(bytes: u64) -> String {
     }
 }
 
+/// Attempts the delete on a thread of its own, leaving its outcome in `finished` before
+/// `notify` is called.
 fn delete(
     folder: PathBuf,
+    finished: Arc<Mutex<Vec<Finished>>>,
     notify: Option<Arc<dyn Fn() + Send + Sync>>,
-) -> JoinHandle<Result<(), Failure>> {
+) {
     std::thread::spawn(move || {
-        let deleted = fs::remove_dir_all(&folder);
-        let deleted = match is_folder(&folder) {
-            false => Ok(()),
-            true => Err((
-                deleted.map_or_else(
-                    |error| error.to_string(),
-                    |()| "the folder was there again afterwards".into(),
-                ),
-                allocated_size(&folder),
-            )),
-        };
+        let attempted = std::panic::catch_unwind(|| attempt(&folder))
+            .unwrap_or_else(|_| Err("the delete panicked".into()));
+        let outcome = attempted.map_err(|error| (error, allocated_size(&folder)));
+        finished
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push((folder, outcome));
         if let Some(notify) = notify {
             notify();
         }
-        deleted
-    })
+    });
 }
 
 impl Host {
@@ -142,7 +232,7 @@ impl Host {
     }
     /// Whether a delete is running off the host thread.
     pub fn worktree_deletions_running(&self) -> bool {
-        !self.worktree_deletions.deletes.is_empty()
+        !self.worktree_deletions.folders.is_empty()
     }
     /// At startup: records every removed worktree's folder found beside a ticket's worktree or
     /// in a project's repository folder under the workspaces folder, whether or not anything
@@ -165,12 +255,17 @@ impl Host {
         for folder in folders {
             for entry in fs::read_dir(&folder).into_iter().flatten().flatten() {
                 let path = entry.path();
-                if !is_removal_folder(&path) || !is_folder(&path) {
+                // The listing's own type, which is never a link's target.
+                let folder = entry.file_type().is_ok_and(|t| t.is_dir());
+                if !is_removal_folder(&path) || !folder {
                     continue;
                 }
-                let name = entry.file_name();
-                let id = name.to_string_lossy()[REMOVING_PREFIX.len()..].to_owned();
-                let ticket = self.ticket(&id).is_ok().then_some(id);
+                // `<ticket id>`, or `<ticket id>-<time>` beside an earlier removal's folder.
+                let name = entry.file_name().to_string_lossy()[REMOVING_PREFIX.len()..].to_owned();
+                let untimed = name.rsplit_once('-').map(|(id, _)| id.to_owned());
+                let ticket = std::iter::once(name)
+                    .chain(untimed)
+                    .find(|id| self.ticket(id).is_ok());
                 self.record_worktree_deletion(&path, ticket.as_deref())?;
             }
         }
@@ -183,21 +278,17 @@ impl Host {
     /// next waiting one comes due. The service calls this after every event; it reads the store
     /// only when a delete has finished or one is due. Failures are logged, never propagated.
     pub fn settle_worktree_deletions(&mut self, at: i64) -> Option<i64> {
-        let finished: Vec<PathBuf> = (self.worktree_deletions.deletes.iter())
-            .filter(|(_, delete)| delete.is_finished())
-            .map(|(folder, _)| folder.clone())
-            .collect();
+        let finished = std::mem::take(
+            &mut *(self.worktree_deletions.finished)
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
         let waiting = self.worktree_deletions.due_at;
         if finished.is_empty() && at < waiting {
             return (waiting < i64::MAX).then_some(waiting);
         }
-        for folder in finished {
-            let Some(delete) = self.worktree_deletions.deletes.remove(&folder) else {
-                continue;
-            };
-            let outcome = delete
-                .join()
-                .unwrap_or_else(|_| Err(("the delete panicked".into(), 0)));
+        for (folder, outcome) in finished {
+            self.worktree_deletions.folders.remove(&folder);
             if let Err(error) = self.record_attempt(&folder, outcome, at) {
                 eprintln!("Delete removed worktree {}: {error:#}", folder.display());
             }
@@ -247,12 +338,27 @@ impl Host {
             folder.display(),
             size_label(size)
         );
-        let Some(ticket) = ticket.and_then(|id| self.ticket(&id).ok()) else {
-            eprintln!("{notice}");
-            return Ok(());
-        };
-        let id = format!("worktree-delete-failed:{}:{recorded_at}", ticket.id);
-        self.notify_ticket_owner(&ticket, &id, &notice)?;
+        match ticket.and_then(|id| self.ticket(&id).ok()) {
+            Some(ticket) => {
+                let id = format!("worktree-delete-failed:{}:{recorded_at}", ticket.id);
+                self.notify_ticket_owner(&ticket, &id, &notice)?;
+            }
+            None => {
+                // No ticket names the folder, so the human's inbox, under the newest project's
+                // orchestrator, is told instead.
+                let orchestrator =
+                    (self.sessions()?.into_iter()).rfind(|s| s.parent_id.is_none() && !s.archived);
+                let Some(orchestrator) = orchestrator else {
+                    eprintln!("{notice}");
+                    return Ok(());
+                };
+                let name = folder.file_name().unwrap_or_default().to_string_lossy();
+                let name = &name[..steps::floor_boundary(&name, name.len().min(80))];
+                let id = format!("worktree-delete-failed:{recorded_at}:{name}");
+                let notice = &notice[..steps::floor_boundary(&notice, notice.len().min(4096))];
+                self.request_attention(&orchestrator.id, "local", &id, notice, &[])?;
+            }
+        }
         self.db.execute(
             "UPDATE worktree_deletions SET reported_at=?2 WHERE path=?1",
             params![path, at],
@@ -270,10 +376,10 @@ impl Host {
         let mut due = None::<i64>;
         for (path, ticket, next) in recorded {
             let folder = PathBuf::from(path);
-            if self.worktree_deletions.deletes.contains_key(&folder) {
+            if self.worktree_deletions.folders.contains(&folder) {
                 continue;
             }
-            if !is_folder(&folder) {
+            if is_gone(&folder) {
                 self.forget_worktree_deletion(&folder)?;
                 continue;
             }
@@ -286,9 +392,10 @@ impl Host {
             {
                 eprintln!("Stop processes of ticket {ticket}: {error:#}");
             }
-            let notify = self.worktree_deletions.notify.clone();
-            let delete = delete(folder.clone(), notify);
-            self.worktree_deletions.deletes.insert(folder, delete);
+            let running = &mut self.worktree_deletions;
+            let (finished, notify) = (running.finished.clone(), running.notify.clone());
+            delete(folder.clone(), finished, notify);
+            running.folders.insert(folder);
         }
         Ok(due)
     }
@@ -351,5 +458,19 @@ mod tests {
         }
         host.record_worktree_deletion(Path::new("/work/web/.removing-1"), None)
             .unwrap();
+    }
+
+    #[test]
+    fn a_folder_whose_metadata_cannot_be_read_is_not_gone() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join("web/.removing-1");
+        fs::create_dir_all(&folder).unwrap();
+        let parent = directory.path().join("web");
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o000)).unwrap();
+        let gone = is_gone(&folder);
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!gone);
+        assert!(is_gone(&directory.path().join("web/.removing-2")));
     }
 }

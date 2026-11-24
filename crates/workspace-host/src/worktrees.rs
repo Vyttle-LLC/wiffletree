@@ -679,13 +679,18 @@ fn is_worktree(repository: &Path, path: &Path, git: &publish::GitTool) -> Result
 }
 
 /// Where a ticket's worktree waits while it is deleted: beside it, so the rename stays on one
-/// filesystem.
+/// filesystem. An earlier removal's folder still waiting there keeps its name, and this one is
+/// told apart by the time.
 fn removal_folder(ticket: &Ticket) -> PathBuf {
-    Path::new(&ticket.worktree).with_file_name(format!(
-        "{}{}",
-        worktree_deletions::REMOVING_PREFIX,
-        ticket.id
-    ))
+    let named = |name: String| {
+        Path::new(&ticket.worktree)
+            .with_file_name(format!("{}{name}", worktree_deletions::REMOVING_PREFIX))
+    };
+    let folder = named(ticket.id.clone());
+    match fs::symlink_metadata(&folder) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => folder,
+        _ => named(format!("{}-{}", ticket.id, now())),
+    }
 }
 
 /// Adds the worktree unless it is already registered: from an existing branch, or as a new
