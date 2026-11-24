@@ -1,13 +1,15 @@
-//! Add source on a Space's page (OpenSpec change `assistant-does-the-work`, task 3.5, spaces
-//! "Connecting a source is one form"): the MCP servers configured for this Mac's Claude and
-//! Codex and the well-known CLIs found here, or one typed by hand; its tools with suggested
-//! read or act kinds, Do without asking, and the source's own sign-in instructions with Try
-//! again. Wiffletree runs no sign-in itself. Saving writes the source to the Space.
+//! Add source on a Space's page (OpenSpec change `assistant-does-the-work`, tasks 1.9 and 3.5,
+//! spaces "Connecting a source is one form"): the MCP servers configured for this Mac's Claude
+//! and Codex, the claude.ai connectors its Claude loads and the well-known CLIs found here, or
+//! one typed by hand; its tools with suggested read or act kinds, Do without asking, and the
+//! source's own sign-in instructions with Try again. Wiffletree runs no sign-in itself. Saving
+//! writes the source to the Space.
 use super::*;
 use workspace_core::{SourceCandidate, SourceKind, SourceProbe, SuggestedTool};
 
 const CLI_ACTS: &str = "A CLI's act commands wait for a card only because the Assistant is told to run them through act; it could run the CLI in its own shell. An MCP server's act tools always wait for a card.";
-const URL_ACTS: &str = "This server is reached by URL. Its read tools work; acting through it is refused for now, so its act tools never run, even with a card.";
+const URL_ACTS: &str = "This server is reached by URL. Its read tools work; its act tools run only through Claude, which holds its sign-in, after you press Run on the card.";
+const CLAUDE_AI: &str = "A claude.ai connector, reached through your claude.ai account: only the Assistant on Claude uses it, and on Codex it is unavailable. Its act tools run through Claude after you press Run on the card.";
 const SIGN_IN: &str = "Sign in with the source's own tool, as its documentation says, then Try again. Wiffletree never signs in for you or keeps its tokens.";
 
 /// One tool or command prefix as the form lists it.
@@ -90,6 +92,15 @@ pub(super) fn suggests_act_by_hand(kind: Option<SourceKind>, name: &str) -> bool
     };
     workspace_core::suggests_act(word, None)
 }
+/// The picked source as its probe found it: a server typed by hand may be reached by URL or be
+/// a claude.ai connector, which the form then notes.
+pub(super) fn as_probed(picked: SourceCandidate, found: &SourceProbe) -> SourceCandidate {
+    SourceCandidate {
+        by_url: found.by_url,
+        claude_ai: found.claude_ai,
+        ..picked
+    }
+}
 /// Whether `next` is the source already picked, of the same kind and name.
 pub(super) fn same_source(picked: Option<&SourceCandidate>, next: &SourceCandidate) -> bool {
     picked.is_some_and(|picked| picked.kind == next.kind && picked.name == next.name)
@@ -122,6 +133,28 @@ pub(super) struct AddSource {
     by_hand_kind: SourceKind,
     extra_tool: Entity<InputState>,
     saving: bool,
+}
+
+impl AddSource {
+    /// Shows what the picked source offers, and marks it as the probe found it: a server typed
+    /// by hand may turn out to be reached by URL or a claude.ai connector.
+    fn listed(&mut self, probe: Result<SourceProbe, String>) {
+        if let Ok(found) = &probe {
+            self.picked = self.picked.take().map(|picked| as_probed(picked, found));
+            // A tool the human already chose keeps its choice when Try again lists it.
+            let kept = std::mem::take(&mut self.tools);
+            self.tools = (found.tools.iter().cloned())
+                .map(ToolChoice::from)
+                .map(|tool| (kept.iter().find(|k| k.name == tool.name).cloned()).unwrap_or(tool))
+                .chain(
+                    kept.iter()
+                        .filter(|k| found.tools.iter().all(|t| t.name != k.name))
+                        .cloned(),
+                )
+                .collect();
+        }
+        self.probe = Some(probe);
+    }
 }
 
 impl SpacesPage {
@@ -169,6 +202,17 @@ impl SpacesPage {
             adding.tools.clear();
         }
         adding.picked = Some(picked.clone());
+        // A connector's tools came with it from Claude's start, so it is not started again.
+        if !picked.tools.is_empty() {
+            let found = SourceProbe {
+                tools: picked.tools.clone(),
+                claude_ai: picked.claude_ai,
+                ..Default::default()
+            };
+            adding.listed(Ok(found));
+            cx.notify();
+            return;
+        }
         adding.probing = true;
         adding.probe = None;
         let ask = ask::probe_source(picked.kind, picked.name.clone());
@@ -180,22 +224,7 @@ impl SpacesPage {
                 return;
             }
             adding.probing = false;
-            if let Ok(found) = &probe {
-                // A tool the human already chose keeps its choice when Try again lists it.
-                let kept = std::mem::take(&mut adding.tools);
-                adding.tools = (found.tools.iter().cloned())
-                    .map(ToolChoice::from)
-                    .map(|tool| {
-                        (kept.iter().find(|k| k.name == tool.name).cloned()).unwrap_or(tool)
-                    })
-                    .chain(
-                        kept.iter()
-                            .filter(|k| found.tools.iter().all(|t| t.name != k.name))
-                            .cloned(),
-                    )
-                    .collect();
-            }
-            adding.probe = Some(probe);
+            adding.listed(probe);
             cx.notify();
         });
         cx.notify();
@@ -213,6 +242,8 @@ impl SpacesPage {
             name,
             configured_for: vec![],
             by_url: false,
+            claude_ai: false,
+            tools: vec![],
         };
         self.probe(picked, window, cx);
     }
@@ -322,7 +353,12 @@ impl SpacesPage {
         );
         let mut list = div().flex().flex_wrap().gap_2();
         match &adding.candidates {
-            None => list = list.child(hint("Looking for MCP servers and CLIs on this Mac…", p)),
+            None => {
+                list = list.child(hint(
+                    "Looking for MCP servers, claude.ai connectors and CLIs on this Mac…",
+                    p,
+                ))
+            }
             Some(Err(error)) => list = list.child(hint(error.clone(), p).text_color(p.red)),
             Some(Ok(found)) if found.is_empty() => {
                 list = list.child(hint(
@@ -334,6 +370,7 @@ impl SpacesPage {
                 for (at, candidate) in found.iter().enumerate() {
                     let picked = adding.picked.as_ref() == Some(candidate);
                     let kind = match candidate.kind {
+                        SourceKind::Mcp if candidate.claude_ai => "MCP · Claude only",
                         SourceKind::Mcp => "MCP",
                         SourceKind::Cli => "CLI",
                     };
@@ -411,8 +448,8 @@ impl SpacesPage {
         }) {
             let (why, sign_in, said) = problem;
             // A started server's error may be an expired sign-in; a missing CLI is not.
-            let may_be_signed_out =
-                sign_in.is_some() || (picked.kind == SourceKind::Mcp && !picked.by_url);
+            let may_be_signed_out = sign_in.is_some()
+                || (picked.kind == SourceKind::Mcp && !picked.by_url && !picked.claude_ai);
             let retried = picked.clone();
             form =
                 form.child(
@@ -453,6 +490,9 @@ impl SpacesPage {
         form = form
             .when(picked.by_url, |d| {
                 d.child(hint(URL_ACTS, p).text_color(p.yellow))
+            })
+            .when(picked.claude_ai, |d| {
+                d.child(hint(CLAUDE_AI, p).text_color(p.yellow))
             })
             .when(picked.kind == SourceKind::Cli, |d| {
                 d.child(hint(CLI_ACTS, p))
@@ -546,8 +586,10 @@ impl SpacesPage {
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolChoice, chosen_source, same_source, suggests_act_by_hand, with_source};
-    use workspace_core::{Source, SourceCandidate, SourceKind};
+    use super::{
+        ToolChoice, as_probed, chosen_source, same_source, suggests_act_by_hand, with_source,
+    };
+    use workspace_core::{Source, SourceCandidate, SourceKind, SourceProbe};
 
     #[test]
     fn choices_carry_over_only_to_try_again_on_the_same_source() {
@@ -556,6 +598,8 @@ mod tests {
             name: name.into(),
             configured_for: vec![],
             by_url: false,
+            claude_ai: false,
+            tools: vec![],
         };
         let gh = candidate(SourceKind::Cli, "gh");
         assert!(same_source(Some(&gh), &gh));
@@ -565,6 +609,29 @@ mod tests {
         ));
         assert!(!same_source(Some(&gh), &candidate(SourceKind::Mcp, "gh")));
         assert!(!same_source(None, &gh));
+    }
+
+    #[test]
+    fn a_server_typed_by_hand_is_noted_as_its_probe_found_it() {
+        let typed = SourceCandidate {
+            kind: SourceKind::Mcp,
+            name: "calendar".into(),
+            configured_for: vec![],
+            by_url: false,
+            claude_ai: false,
+            tools: vec![],
+        };
+        let by_url = SourceProbe {
+            by_url: true,
+            ..Default::default()
+        };
+        assert!(as_probed(typed.clone(), &by_url).by_url);
+        let connector = SourceProbe {
+            claude_ai: true,
+            ..Default::default()
+        };
+        let probed = as_probed(typed, &connector);
+        assert!(probed.claude_ai && !probed.by_url);
     }
 
     #[test]

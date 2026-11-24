@@ -675,11 +675,9 @@ impl Sidebar {
         let working = index.is_some_and(work::assistant_working);
         let selected = self.shared.page == Page::Assistant || self.shared.assistant_work_open();
         let jobs = snapshot.map_or(&[][..], |s| &s.jobs);
-        let needs_you = snapshot.map_or(0, |s| work::needs_you(s).len());
+        let (needs_you, long_turn) = assistant_marks(snapshot, ui::now());
         let mut notes = div().flex().flex_col();
-        let long_turn = (snapshot.and_then(|s| s.conversation.as_ref()))
-            .and_then(|c| work::long_turn_minutes(c, ui::now()));
-        if let Some(minutes) = long_turn {
+        if let Some(long_turn) = long_turn {
             notes = notes.child(
                 div()
                     .flex()
@@ -689,11 +687,7 @@ impl Sidebar {
                     .pr_2()
                     .text_size(px(font::META))
                     .text_color(p.subtle)
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(assistant_view::long_turn_text(minutes)),
-                    )
+                    .child(div().flex_1().child(long_turn))
                     .child(
                         button("stop-assistant-long-turn")
                             .ghost()
@@ -2033,9 +2027,20 @@ pub(crate) fn restart_host(bridge: Bridge, when: RestartWhen, window: &mut Windo
         .detach();
 }
 
+/// The Assistant row's Needs-you count, what its rail lists there, and the note for its own
+/// turn once that has run 30 minutes.
+fn assistant_marks(snapshot: Option<&Snapshot>, now: i64) -> (usize, Option<String>) {
+    use assistant_view::work;
+    let needs_you = snapshot.map_or(0, |s| work::needs_you(s).len());
+    let long_turn = (snapshot.and_then(|s| s.conversation.as_ref()))
+        .and_then(|c| work::long_turn_minutes(c, now))
+        .map(assistant_view::long_turn_text);
+    (needs_you, long_turn)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{needs_you, shown_status};
+    use super::{assistant_marks, needs_you, shown_status};
     use workspace_core::{
         Attention, Paused, Provider, Role, Session, Snapshot, Status, WorkspaceIndex, WorkspaceNote,
     };
@@ -2151,5 +2156,43 @@ mod tests {
         };
         let ruled = WorkspaceNote::Conflict(ruled);
         assert_eq!(needs_you(&[], std::slice::from_ref(&ruled), "a"), 0);
+    }
+
+    #[test]
+    fn the_assistant_row_counts_what_needs_you_and_notes_a_long_turn() {
+        use workspace_core::assistant::conversation::{
+            CardKind, ConversationCard, ConversationState, Decision,
+        };
+        let minute = 60_000;
+        let decision = ConversationCard {
+            id: "shade".into(),
+            created_at: 0,
+            read: vec![],
+            kind: CardKind::Decision(Decision {
+                project_id: None,
+                question: "Which shade?".into(),
+                recommendation: "The lighter one".into(),
+                options: vec!["Lighter".into(), "Warmer".into()],
+                answer: None,
+            }),
+        };
+        let snapshot = Snapshot {
+            conversation: Some(ConversationState {
+                session_id: "assistant".into(),
+                status: Status::Working,
+                turn_started_at: Some(0),
+                message_revision: 0,
+                profile: None,
+                cards: vec![decision],
+                routes: vec![],
+            }),
+            ..Default::default()
+        };
+        assert_eq!(assistant_marks(None, 0), (0, None));
+        assert_eq!(assistant_marks(Some(&snapshot), 29 * minute), (1, None));
+        assert_eq!(
+            assistant_marks(Some(&snapshot), 31 * minute),
+            (1, Some("Working 30 min".into()))
+        );
     }
 }

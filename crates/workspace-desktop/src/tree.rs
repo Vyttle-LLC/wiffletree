@@ -523,6 +523,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_assistants_work_is_never_a_project_row() {
+        let (_directory, host, _, _) = store();
+        let mut snapshot = host.snapshot().unwrap();
+        snapshot.projects[0].assistant_work = Some(AssistantWork {
+            small: true,
+            state: WorkState::Running,
+            ended_at: None,
+        });
+        let index = WorkspaceIndex::new(snapshot, Default::default());
+        assert!(drawn(&index, true, true).is_empty());
+    }
+
     /// The store's index with `agent` in `status`, and its last turn failed when `failed`.
     fn with_agent(host: &Host, agent: &str, status: Status, failed: bool) -> WorkspaceIndex {
         let mut snapshot = host.snapshot().unwrap();

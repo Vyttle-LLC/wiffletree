@@ -645,8 +645,8 @@ pub(crate) mod legacy {
         pub provider_profiles: Vec<Profiles>,
     }
     impl Policy {
-        /// What the old router gave an unassigned session of this provider; `None` when it
-        /// would have refused the provider.
+        /// The model this policy gave a session of this provider that had none; `None` when
+        /// the policy refused the provider. The migration pins it on such sessions.
         pub(crate) fn standard(&self, provider: Provider) -> Option<ModelProfile> {
             let profile = match self.mode {
                 Mode::Fixed => self.default.clone(),

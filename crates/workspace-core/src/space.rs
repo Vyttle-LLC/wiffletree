@@ -467,8 +467,8 @@ pub enum SourceKind {
     Mcp,
     Cli,
 }
-/// What Add source offers: an MCP server configured for this Mac's Claude or Codex, or a
-/// well-known CLI installed on this Mac.
+/// What Add source offers: an MCP server configured for this Mac's Claude or Codex, a claude.ai
+/// connector this Mac's Claude loads, or a well-known CLI installed on this Mac.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceCandidate {
     pub kind: SourceKind,
@@ -476,9 +476,15 @@ pub struct SourceCandidate {
     /// The providers whose configuration names this MCP server; empty for a CLI.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub configured_for: Vec<crate::Provider>,
-    /// An MCP server reached by URL (HTTP or SSE), whose act tools the host refuses for now.
+    /// An MCP server reached by URL (HTTP or SSE), whose act tools only Claude runs.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub by_url: bool,
+    /// A claude.ai connector, such as "claude.ai Gmail", which only Claude reaches.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub claude_ai: bool,
+    /// A connector's tools as Claude's start reported them, so it needs no start of its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<SuggestedTool>,
 }
 /// One tool or command prefix Add source lists, with the kind it suggests.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -504,6 +510,12 @@ pub struct SourceProbe {
     /// which is where it names its own sign-in command or link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_said: Option<String>,
+    /// The MCP server is reached by URL, as `SourceCandidate::by_url`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub by_url: bool,
+    /// The MCP server is a claude.ai connector, as `SourceCandidate::claude_ai`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub claude_ai: bool,
 }
 /// The kind Add source suggests for an MCP tool: its `readOnlyHint` when the server gives
 /// one, else read only when its name starts with a word that only reads.
