@@ -38,6 +38,7 @@ pub mod skills;
 mod space;
 mod steps;
 mod suggestion;
+mod tags;
 mod usage;
 use anyhow::{Context, Result, bail, ensure};
 pub use brain::*;
@@ -69,6 +70,7 @@ use std::{
 };
 pub use steps::*;
 pub use suggestion::*;
+pub use tags::*;
 pub use usage::*;
 
 pub const MAX_PAGE: usize = 100;
@@ -1044,6 +1046,10 @@ pub struct Snapshot {
     /// is off and asks at its first run.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub evaluator_permissions: BTreeMap<String, EvaluatorPermission>,
+    /// Each project's apps and layers, by project id, derived from its tickets' repositories.
+    /// Older hosts leave it out.
+    #[serde(default)]
+    pub project_tags: BTreeMap<String, ProjectTags>,
 }
 /// How many of a project's runs a snapshot lists, the ended ones as room allows.
 pub const RECENT_EVALUATIONS: usize = 20;

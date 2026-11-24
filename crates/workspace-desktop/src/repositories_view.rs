@@ -92,7 +92,35 @@ pub(super) struct RepositoriesPage {
     seen: Option<BTreeSet<String>>,
     arriving: BTreeSet<String>,
     adding: Vec<Adding>,
+    /// The tags a Space chip's add suggested, applied only once the human chooses Use.
+    tag_suggestions: Vec<TagSuggestion>,
     scroll: ui::PageScroll,
+}
+
+/// The tags suggested for `repository` on joining `space`, from its closest-named repository.
+#[derive(Debug, PartialEq)]
+struct TagSuggestion {
+    space: SpaceId,
+    repository: String,
+    tags: RepositoryTags,
+}
+
+/// What putting `repository` in `space_ids` suggests in each of those Spaces it joins.
+fn suggested_on_joining(
+    spaces: &[Space],
+    repository: &str,
+    space_ids: &[SpaceId],
+) -> Vec<TagSuggestion> {
+    (spaces.iter())
+        .filter(|space| space_ids.contains(&space.id) && !space.lists_named(repository))
+        .filter_map(|space| {
+            Some(TagSuggestion {
+                space: space.id.clone(),
+                repository: repository.to_owned(),
+                tags: space.suggested_tags(repository)?,
+            })
+        })
+        .collect()
 }
 
 /// The Space chosen for a repository: one of them, Personal before it exists, or none.
@@ -151,6 +179,7 @@ impl RepositoriesPage {
             seen: None,
             arriving: BTreeSet::new(),
             adding: vec![],
+            tag_suggestions: vec![],
             scroll: ui::PageScroll::new(RepositoriesCard::COUNT),
         }
     }
@@ -245,7 +274,8 @@ impl RepositoriesPage {
         }
     }
 
-    /// Puts `repository` in exactly `space_ids`, editing each Space's repositories.
+    /// Puts `repository` in exactly `space_ids`, editing each Space's repositories, and suggests
+    /// tags for it in each Space it joins.
     fn set_spaces(
         &mut self,
         repository: String,
@@ -253,6 +283,10 @@ impl RepositoriesPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let spaces = self.shared.snapshot().map_or(&[][..], |s| &s.spaces);
+        let suggested = suggested_on_joining(spaces, &repository, &space_ids);
+        self.tag_suggestions.retain(|s| s.repository != repository);
+        self.tag_suggestions.extend(suggested);
         let command = Command::SetRepositorySpaces {
             repository,
             space_ids,
@@ -409,6 +443,72 @@ impl RepositoriesPage {
                     })),
                 ),
             ),
+        )
+    }
+
+    /// Tags a Space chip's add suggested, with Use and Dismiss; gone once the Space no longer
+    /// lists the repository.
+    fn tag_suggestion_card(
+        &self,
+        at: usize,
+        suggestion: &TagSuggestion,
+        snapshot: &Snapshot,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let space = (snapshot.spaces.iter())
+            .find(|s| s.id == suggestion.space && s.lists_named(&suggestion.repository))?;
+        let words = spaces_view::suggestion_words(&suggestion.tags);
+        let mut tagged = space.clone();
+        for kind in TagKind::ALL {
+            if let Some(value) = suggestion.tags.get(kind) {
+                tagged.set_tag(&suggestion.repository, kind, Some(value));
+            }
+        }
+        let (repository, space_id) = (suggestion.repository.clone(), suggestion.space.clone());
+        let done = move |view: &mut Self| {
+            (view.tag_suggestions).retain(|s| !(s.repository == repository && s.space == space_id));
+        };
+        let used = done.clone();
+        Some(
+            card(p)
+                .child(hint(
+                    format!(
+                        "Tags for {} in {}: {words}",
+                        suggestion.repository, space.name
+                    ),
+                    p,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            button(SharedString::from(format!("dismiss-tags-{at}")))
+                                .ghost()
+                                .label("Dismiss")
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    done(view);
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            ui::gated(
+                                button(SharedString::from(format!("use-tags-{at}")))
+                                    .primary()
+                                    .label("Use"),
+                                &self.shared.host,
+                            )
+                            .on_click(cx.listener(
+                                move |view, _, window, cx| {
+                                    used(view);
+                                    let space = Box::new(tagged.clone());
+                                    view.request(Command::UpdateSpace { space }, window, cx);
+                                },
+                            )),
+                        ),
+                ),
         )
     }
 
@@ -573,6 +673,9 @@ impl RepositoriesPage {
         }
         for adding in &self.adding {
             body = body.child(self.adding_card(adding, snapshot, p, cx));
+        }
+        for (at, suggestion) in self.tag_suggestions.iter().enumerate() {
+            body = body.children(self.tag_suggestion_card(at, suggestion, snapshot, p, cx));
         }
         let mut shown = std::collections::HashSet::new();
         for (at, (space, repositories)) in grouped(&snapshot.spaces, &snapshot.repositories)
@@ -1976,8 +2079,8 @@ mod tests {
     use super::{
         BASE_HINT, KEEPER_NEVER, NEVER, Pick, UNTIL_GITHUB_ANSWERS, WITHOUT_ASKING, checks_summary,
         confirmed, entry_matches, fixes_are_on, grouped, held_lines, method_line, partly_on_hint,
-        pr_check_status, protected_summary, refused_base, repository_counts, suggestion_reason,
-        toggled, with_fixes, with_picks,
+        pr_check_status, protected_summary, refused_base, repository_counts, suggested_on_joining,
+        suggestion_reason, toggled, with_fixes, with_picks,
     };
     use crate::ui;
     use workspace_core::*;
@@ -2351,6 +2454,9 @@ mod tests {
             additions: String::new(),
             behaviors: Default::default(),
             repository_settings: Default::default(),
+            apps: vec![],
+            layers: vec![],
+            repository_tags: Default::default(),
             brain: None,
             storage: SpaceStorage {
                 repository: StorageRepository::Local { id: name.into() },
@@ -2363,6 +2469,22 @@ mod tests {
             sources: vec![],
             extra: Extra::new(),
         }
+    }
+
+    #[test]
+    fn a_space_chip_suggests_tags_only_in_the_spaces_the_repository_joins() {
+        let mut celadon = space("Celadon", &["celadon-theme/palette-api"]);
+        celadon.set_tag("celadon-theme/palette-api", TagKind::Layer, Some("backend"));
+        let vyttle = space("Vyttle", &["celadon-theme/palette-api"]);
+        let spaces = [celadon.clone(), vyttle.clone()];
+        let both = [celadon.id.clone(), vyttle.id.clone()];
+
+        let suggested = suggested_on_joining(&spaces, "celadon-theme/palette-cli", &both);
+        assert_eq!(suggested.len(), 1, "Vyttle's palette-api is untagged");
+        assert_eq!(suggested[0].space, celadon.id);
+        assert_eq!(suggested[0].tags.layer.as_deref(), Some("backend"));
+        // Already listed, so it joins nothing.
+        assert!(suggested_on_joining(&spaces, "celadon-theme/palette-api", &both).is_empty());
     }
 
     #[test]

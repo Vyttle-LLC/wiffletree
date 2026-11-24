@@ -12,6 +12,8 @@ use gpui_component::{
 };
 use linear_import_view::LinearImportPanel;
 use repository_box::BringingIn;
+use repository_tags::Tagging;
+pub(super) use repository_tags::suggestion_words;
 use repository_tree::{Choice, Tree, merged_list, shown_path};
 use setup::{RepositoryChoice, shown_folder};
 use std::collections::BTreeMap;
@@ -19,6 +21,7 @@ use ui::{banner, card, hint, icon, mono, section};
 use wording::{age, counted, counted_as};
 
 mod repository_box;
+mod repository_tags;
 mod setup;
 
 const SCANS: &str = "Before pushing, Wiffletree runs its personal-data and secret scans on this Mac and holds a file that fails, instead of pushing it.";
@@ -89,6 +92,11 @@ pub(super) struct SpacesPage {
     bringing_in: Option<BringingIn>,
     /// The form's code repositories, saved with Save.
     repositories: Vec<String>,
+    /// Every code repository has a row, not only the first `REPOSITORY_ROWS`.
+    all_repositories: bool,
+    /// The form's apps and layers, saved with Save, and the field a new one is typed in.
+    tagging: Tagging,
+    tag_input: Entity<InputState>,
     /// The root folders the form follows, saved with Save, and as they read when it was filled.
     followed: Vec<String>,
     followed_read: Vec<String>,
@@ -132,6 +140,13 @@ impl SpacesPage {
             }
         })
         .detach();
+        let tag_input = input("frontend", window, cx);
+        cx.subscribe_in(&tag_input, window, |view, _, event: &InputEvent, _, cx| {
+            if let (InputEvent::PressEnter { .. }, Some(space)) = (event, view.shown_space()) {
+                view.type_value(&space.clone(), cx);
+            }
+        })
+        .detach();
         Self {
             bridge,
             shared: Shared::default(),
@@ -157,6 +172,9 @@ impl SpacesPage {
             protect_refused: None,
             bringing_in: None,
             repositories: vec![],
+            all_repositories: false,
+            tagging: Tagging::default(),
+            tag_input,
             followed: vec![],
             followed_read: vec![],
             on_github: false,
@@ -280,14 +298,28 @@ impl SpacesPage {
             self.edited(from, cx).as_ref() != Ok(read) || self.followed != self.followed_read
         })
     }
-    /// The form's repositories or followed roots differ from what it was filled with.
+    /// The form's repositories, their tags or followed roots differ from what it was filled with.
     fn chose_repositories(&self) -> bool {
         self.followed != self.followed_read
-            || (self.loaded.as_ref())
-                .is_some_and(|(_, read)| self.repositories != read.repositories)
+            || (self.loaded.as_ref()).is_some_and(|(from, read)| {
+                let draft = self.tagging.applied(from, &self.repositories);
+                (
+                    draft.repositories,
+                    draft.apps,
+                    draft.layers,
+                    draft.repository_tags,
+                ) != (
+                    read.repositories.clone(),
+                    read.apps.clone(),
+                    read.layers.clone(),
+                    read.repository_tags.clone(),
+                )
+            })
     }
     fn load(&mut self, space: &Space, window: &mut Window, cx: &mut Context<Self>) {
         self.repositories = space.repositories.clone();
+        self.tagging = Tagging::load(space);
+        self.all_repositories = false;
         self.followed = self.followed_here(&space.id);
         self.followed_read = self.followed.clone();
         self.editing_prefix = false;
@@ -400,9 +432,8 @@ impl SpacesPage {
         Ok(Space {
             name,
             description: self.description.read(cx).value().trim().to_owned(),
-            repositories: self.repositories.clone(),
             sources,
-            ..space.clone()
+            ..self.tagging.applied(space, &self.repositories)
         })
     }
 
@@ -501,6 +532,21 @@ impl SpacesPage {
     /// Takes what Done chose into the form's draft; Save writes it.
     pub(super) fn chosen(&mut self, tree: &Tree, cx: &mut Context<Self>) {
         let choice = tree.finish(&self.repositories);
+        let added: Vec<String> = (choice.repositories.iter())
+            .filter(|r| {
+                !self
+                    .repositories
+                    .iter()
+                    .any(|had| had.eq_ignore_ascii_case(r))
+            })
+            .cloned()
+            .collect();
+        if let Some(space) = self.shown_space().cloned() {
+            // An added repository's row, with its suggestion, may be past the rows shown.
+            if self.tagging.suggest(&space, &self.repositories, &added) {
+                self.all_repositories = true;
+            }
+        }
         self.repositories = choice.repositories;
         self.followed = choice.followed;
         cx.notify();
@@ -847,8 +893,11 @@ impl SpacesPage {
                     ),
             );
         }
-        let shown = self.repositories.iter().take(REPOSITORY_ROWS).enumerate();
-        for (at, identity) in shown {
+        let rows = match self.all_repositories {
+            true => self.repositories.len(),
+            false => REPOSITORY_ROWS,
+        };
+        for (at, identity) in self.repositories.iter().take(rows).enumerate() {
             let cloned = here.iter().any(|r| r.is_github(identity));
             field = field.child(
                 div()
@@ -859,6 +908,7 @@ impl SpacesPage {
                     .when(!cloned, |d| {
                         d.child(hint("not cloned on this Mac", p).text_color(p.yellow))
                     })
+                    .child(self.tag_controls(space, at, identity, cx))
                     .child(
                         button(SharedString::from(format!("drop-space-repository-{at}")))
                             .ghost()
@@ -871,21 +921,23 @@ impl SpacesPage {
                             })),
                     ),
             );
+            field = field.children(self.suggestion_line(space, at, identity, p, cx));
         }
-        let hidden = self.repositories.len().saturating_sub(REPOSITORY_ROWS);
+        let hidden = self.repositories.len().saturating_sub(rows);
         let more = (hidden > 0).then(|| {
-            let shown = space.clone();
             button("more-space-repositories")
                 .link()
                 .xsmall()
                 .label(format!("and {hidden} more"))
-                .on_click(cx.listener(move |view, _, window, cx| {
-                    view.choose_repositories(&shown, window, cx)
+                .on_click(cx.listener(|view, _, _, cx| {
+                    view.all_repositories = true;
+                    cx.notify();
                 }))
         });
         let shown = space.clone();
         field
             .children(more.map(|more| div().flex().child(more)))
+            .children(self.values_line(space, p, cx))
             .child(
                 div().mt_1().flex().child(
                     button("choose-space-repositories")
@@ -1116,6 +1168,13 @@ fn merged(read: &Space, form: &Space, latest: &Space) -> Space {
         name: pick(&read.name, &form.name, &latest.name),
         description: pick(&read.description, &form.description, &latest.description),
         repositories: merged_list(&read.repositories, &form.repositories, &latest.repositories),
+        apps: pick(&read.apps, &form.apps, &latest.apps),
+        layers: pick(&read.layers, &form.layers, &latest.layers),
+        repository_tags: pick(
+            &read.repository_tags,
+            &form.repository_tags,
+            &latest.repository_tags,
+        ),
         sources: pick(&read.sources, &form.sources, &latest.sources),
         ..latest.clone()
     }
@@ -1523,6 +1582,7 @@ mod tests {
         brings_lines, compile_words, leaves_line, logs_line, not_on_github_line, plan_notes,
         where_line, wiki_line,
     };
+    use super::repository_tags::{Tagging, removal_sentence};
     use super::setup::{
         Mark, check_lines, compiles_now, join_choices, owner_label, proposed_repository_name,
         repository_to_create,
@@ -1544,6 +1604,9 @@ mod tests {
             additions: String::new(),
             behaviors: Default::default(),
             repository_settings: Default::default(),
+            apps: vec![],
+            layers: vec![],
+            repository_tags: Default::default(),
             brain: None,
             storage: SpaceStorage {
                 repository: storage,
@@ -1988,6 +2051,65 @@ mod tests {
             merged(&read, &form, &latest).repositories,
             ["Sage-Social/web"],
             "what the form took out goes, and what joined meanwhile stays"
+        );
+    }
+
+    #[test]
+    fn an_add_suggests_tags_that_apply_only_once_confirmed() {
+        let mut read = sage();
+        read.repositories = vec!["celadon-theme/palette-api".into()];
+        read.set_tag("celadon-theme/palette-api", TagKind::Layer, Some("backend"));
+        let mut tagging = Tagging::load(&read);
+        let added = ["celadon-theme/palette-cli".to_owned()];
+        // A suggestion says so, which shows every row so it is not behind "and N more".
+        assert!(tagging.suggest(&read, &read.repositories, &added));
+        let suggested = tagging.suggestion(&added[0]).unwrap();
+        assert_eq!(
+            (suggested.app.as_deref(), suggested.layer.as_deref()),
+            (None, Some("backend"))
+        );
+        let listed = [read.repositories.clone(), added.to_vec()].concat();
+        let form = tagging.applied(&read, &listed);
+        assert_eq!(form.tags_of(&added[0]), None, "untagged until Use");
+
+        let wallpapers = ["celadon-theme/wallpapers".into()];
+        assert!(!tagging.suggest(&read, &read.repositories, &wallpapers));
+        assert_eq!(tagging.suggestion("celadon-theme/wallpapers"), None);
+    }
+
+    #[test]
+    fn tags_the_form_changed_are_saved_over_the_latest_space() {
+        let mut read = sage();
+        read.repositories = vec!["Sage-Social/api".into(), "Sage-Social/web".into()];
+        let mut latest = read.clone();
+        latest.description = "Pulled from a teammate".into();
+        let mut form = read.clone();
+        form.set_tag("Sage-Social/web", TagKind::Layer, Some("frontend"));
+        let saved = merged(&read, &form, &latest);
+        assert_eq!(saved.layers, ["frontend"]);
+        assert_eq!(
+            saved.tags_of("Sage-Social/web"),
+            form.tags_of("Sage-Social/web")
+        );
+        assert_eq!(saved.description, "Pulled from a teammate");
+        // A repository the form takes out loses its tags with it.
+        let dropped = Tagging::load(&form).applied(&form, &["Sage-Social/api".into()]);
+        assert!(dropped.repository_tags.is_empty());
+    }
+
+    #[test]
+    fn removing_a_value_names_every_repository_that_has_it() {
+        let users = [
+            "celadon-theme/palette-api".to_owned(),
+            "celadon-theme/website".to_owned(),
+        ];
+        assert_eq!(
+            removal_sentence(&users, "layer"),
+            "celadon-theme/palette-api and celadon-theme/website have it, and will have no layer."
+        );
+        assert_eq!(
+            removal_sentence(&users[..1], "layer"),
+            "celadon-theme/palette-api has it, and will have no layer."
         );
     }
 

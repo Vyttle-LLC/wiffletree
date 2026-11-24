@@ -37,11 +37,11 @@ Six slices, one ticket each. Dependencies:
 
 ## 3. Slice (c) — Space repository tags and derived project tags
 
-- [ ] 3.1 `space.yaml`: `apps`, `layers` and `repository_tags`, read as empty when missing; edits commit and sync as other Space edits.
-- [ ] 3.2 The derived apps and layers on each project, "no app", "no layer" and "not started", in the snapshot and the coordinator's `workspace_context`.
-- [ ] 3.3 The suggestion from the longest shared leading run of hyphen-separated words.
-- [ ] 3.4 Desktop: App and Layer on the Space page's code repositories, the value menus, typing a value, removing a value in use, and the suggestion on add.
-- [ ] 3.5 Tests: an older Space file, two Spaces tagging one repository differently, a project's union across ticket states, retagging, the suggestion with and without a match.
+- [x] 3.1 `space.yaml`: `apps`, `layers` and `repository_tags`, read as empty when missing; edits commit and sync as other Space edits.
+- [x] 3.2 The derived apps and layers on each project, "no app", "no layer" and "not started", in the snapshot and the coordinator's `workspace_context`.
+- [x] 3.3 The suggestion from the longest shared leading run of hyphen-separated words.
+- [x] 3.4 Desktop: App and Layer on the Space page's code repositories, the value menus, typing a value, removing a value in use, and the suggestion on add.
+- [x] 3.5 Tests: an older Space file, two Spaces tagging one repository differently, a project's union across ticket states, retagging, the suggestion with and without a match.
 
 ## 4. Slice (d) — Desktop: Outcome lens tree and reparent drag, groups retired
 

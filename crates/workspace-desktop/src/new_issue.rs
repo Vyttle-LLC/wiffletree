@@ -319,6 +319,9 @@ mod tests {
             additions: String::new(),
             behaviors: Default::default(),
             repository_settings: Default::default(),
+            apps: vec![],
+            layers: vec![],
+            repository_tags: Default::default(),
             brain: None,
             storage: SpaceStorage {
                 repository: storage,
