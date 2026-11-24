@@ -188,6 +188,7 @@ fn card(
         options: options.iter().map(|option| (*option).to_owned()).collect(),
         answer: None,
         repository_request: None,
+        route: QuestionRoute::Human,
     };
     db.execute(
         "INSERT INTO attention VALUES (?1,?2,?3,?4,?5)",
