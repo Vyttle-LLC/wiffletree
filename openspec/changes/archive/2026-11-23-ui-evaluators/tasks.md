@@ -1,9 +1,9 @@
 ## 1. Ticket 1 · Desktop computer-use spike
 
-- [ ] 1.1 Claude `-p` with `claude --computer-use-mcp` through `--mcp-config`: tools, app access, lock.
-- [ ] 1.2 Codex `exec` with its computer-use server enabled through `-c`.
-- [ ] 1.3 Which process macOS asks for Screen Recording and Accessibility, and a helper app that alone holds them.
-- [ ] 1.4 Stop and Esc for each provider. Findings in `docs/computer-use-spike.md`.
+- [x] 1.1 Claude `-p` with `claude --computer-use-mcp` through `--mcp-config`: tools, app access, lock.
+- [x] 1.2 Codex `exec` with its computer-use server enabled through `-c`.
+- [x] 1.3 Which process macOS asks for Screen Recording and Accessibility, and a helper app that alone holds them.
+- [x] 1.4 Stop and Esc for each provider. Findings in `docs/computer-use-spike.md` on the spike's branch, summarized in the design.
 
 ## 2. Ticket 2 · Evaluator runs and `start_evaluation`
 
@@ -42,8 +42,8 @@ The spike ruled out each provider's own computer use; the human chose Wiffletree
 
 ## 5. Ticket 5 · UI
 
-- [ ] 5.0 Settings › Screen control (screen 2): the helper's Screen Recording and Accessibility rows, read through the helper; the Providers rows no longer apply.
-- [ ] 5.1 The Agents panel's Evaluations group with every state (screen 4).
-- [ ] 5.2 A run's page with its model, mode, folder, steps and Stop (screen 5).
-- [ ] 5.3 The banners, the Inbox card as drawn (screen 1) and the project menu's UI evaluators choice.
-- [ ] 5.4 Archive this change.
+- [x] 5.0 Settings › Screen control (screen 2): the helper's Screen Recording and Accessibility rows, read through the helper; the Providers rows no longer apply.
+- [x] 5.1 The Agents panel's Evaluations group with every state (screen 4).
+- [x] 5.2 A run's page with its model, mode, folder, steps and Stop (screen 5).
+- [x] 5.3 The banners, the Inbox card as drawn (screen 1) and the project menu's UI evaluators choice.
+- [x] 5.4 Archive this change.

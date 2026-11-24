@@ -304,6 +304,44 @@ impl Host {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The snapshot's runs: every run that has not ended, then each project's latest ended
+    /// ones, up to `RECENT_EVALUATIONS` in all per project; newest first.
+    pub(crate) fn listed_evaluations(&self) -> Result<Vec<Evaluation>> {
+        let all: Vec<Evaluation> = self
+            .db
+            .prepare("SELECT data FROM evaluations ORDER BY created_at DESC, rowid DESC")?
+            .query_map([], |r| decode(r, 0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut listed: std::collections::HashMap<&str, usize> = Default::default();
+        for run in all.iter().filter(|run| !run.state.ended()) {
+            *listed.entry(&run.project_id).or_default() += 1;
+        }
+        let mut kept = vec![];
+        for run in &all {
+            let room = listed.entry(&run.project_id).or_default();
+            if !run.state.ended() {
+                kept.push(run.clone());
+            } else if *room < RECENT_EVALUATIONS {
+                *room += 1;
+                kept.push(run.clone());
+            }
+        }
+        Ok(kept)
+    }
+    /// What the human allows in each project that has a choice.
+    pub(crate) fn evaluator_permissions(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, EvaluatorPermission>> {
+        let rows: Vec<(String, String)> = self
+            .db
+            .prepare("SELECT project_id, permission FROM evaluator_permissions")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        (rows.into_iter())
+            .map(|(project, permission)| Ok((project, serde_json::from_value(json!(permission))?)))
+            .collect()
+    }
+
     /// `start_evaluation`: checks everything a run needs, then creates it. A refusal creates
     /// nothing and says why.
     pub(crate) fn start_evaluation(&mut self, caller: &Session, args: &Value) -> Result<Value> {
@@ -758,7 +796,7 @@ impl Host {
     /// screen without its Start now.
     fn ask_to_start(&mut self, run: &Evaluation) -> Result<()> {
         let apps: Vec<String> = (run.apps.iter())
-            .map(|app| match sensitive(app) {
+            .map(|app| match sensitive_app(app) {
                 Some(why) => format!("{app} ({why})"),
                 None => app.clone(),
             })
@@ -1086,31 +1124,6 @@ fn is_bundle_id(text: &str) -> bool {
             !part.is_empty()
                 && (part.chars()).all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         })
-}
-/// Why the Start card calls out an app the coordinator named: these reach far beyond their own
-/// windows.
-fn sensitive(app: &str) -> Option<&'static str> {
-    let app = app.to_ascii_lowercase();
-    let terminals = [
-        "com.apple.terminal",
-        "com.googlecode.iterm2",
-        "com.mitchellh.ghostty",
-        "dev.warp.warp-stable",
-        "net.kovidgoyal.kitty",
-        "org.alacritty",
-        "com.github.wez.wezterm",
-    ];
-    if app.starts_with("com.vyttle.wiffletree") {
-        Some("Wiffletree itself: it can drive your agents")
-    } else if terminals.contains(&app.as_str()) {
-        Some("a terminal: it can run any command")
-    } else if app == "com.apple.systempreferences" {
-        Some("System Settings")
-    } else if app == "com.apple.finder" {
-        Some("Finder: it can open and move your files")
-    } else {
-        None
-    }
 }
 fn permission_label(permission: EvaluatorPermission) -> &'static str {
     (EvaluatorPermission::CHOICES.iter())
@@ -1983,6 +1996,40 @@ pub(crate) mod tests {
         assert_eq!(
             f.host.evaluation(&id).unwrap().state,
             EvaluationState::Stopped
+        );
+    }
+
+    #[test]
+    fn the_snapshot_lists_every_unended_run_and_a_projects_latest_ended_ones() {
+        let mut f = fixture();
+        let project = f.coordinator.project_id.clone();
+        assert!(f.host.snapshot().unwrap().evaluator_permissions.is_empty());
+        let folder = f.folder("held");
+        let held = f.start(&folder, "app").unwrap()["run_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut ended = f.host.evaluation(&held).unwrap();
+        ended.state = EvaluationState::Finished;
+        for at in 0..RECENT_EVALUATIONS as i64 + 3 {
+            ended.id = format!("ended-{at}");
+            ended.created_at = at;
+            f.host.save_evaluation(&ended).unwrap();
+        }
+        let snapshot = f.host.snapshot().unwrap();
+        let listed: Vec<&str> = (snapshot.evaluations.iter())
+            .map(|run| run.id.as_str())
+            .collect();
+        assert_eq!(listed.len(), RECENT_EVALUATIONS);
+        // The held run is the newest; the oldest ended runs make room for it.
+        assert_eq!(listed[0], held);
+        assert_eq!(listed[1], format!("ended-{}", RECENT_EVALUATIONS + 2));
+        assert!(!listed.contains(&"ended-3"));
+        f.allow(EvaluatorPermission::Desktop);
+        let snapshot = f.host.snapshot().unwrap();
+        assert_eq!(
+            snapshot.evaluator_permissions[&project],
+            EvaluatorPermission::Desktop
         );
     }
 }

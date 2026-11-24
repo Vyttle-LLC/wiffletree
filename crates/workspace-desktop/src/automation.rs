@@ -91,7 +91,17 @@ pub(crate) enum Step {
         width: f64,
         height: f64,
     },
+    /// Points the pointer steps, `window`, `capture` and `resize` at the visible window with
+    /// this title, such as `Settings`, or back at the main window with none. Keys and text
+    /// still go to the main window.
+    Target {
+        #[serde(default)]
+        title: Option<String>,
+    },
 }
+
+/// The title of the window `Target` chose; the main window when `None`.
+static TARGET: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 #[derive(Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -289,8 +299,9 @@ pub(crate) struct NativeWindow {
 
 impl NativeWindow {
     fn find() -> Result<Self, String> {
+        let target = TARGET.lock().unwrap_or_else(|e| e.into_inner()).clone();
         // SAFETY: runs on the main thread, where AppKit objects may be messaged; the window list
-        // is owned by NSApp and outlives this call.
+        // is owned by NSApp and outlives this call, and a window's title is an NSString.
         unsafe {
             let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
             let windows: *mut Object = msg_send![app, windows];
@@ -299,7 +310,13 @@ impl NativeWindow {
                 let window: *mut Object = msg_send![windows, objectAtIndex: index];
                 let visible: bool = msg_send![window, isVisible];
                 let main: bool = msg_send![window, canBecomeMainWindow];
-                if visible && main {
+                let targeted = target.as_deref().is_none_or(|target| {
+                    let title: *mut Object = msg_send![window, title];
+                    let utf8: *const std::ffi::c_char = msg_send![title, UTF8String];
+                    !utf8.is_null()
+                        && std::ffi::CStr::from_ptr(utf8).to_bytes() == target.as_bytes()
+                });
+                if visible && main && targeted {
                     let number: isize = msg_send![window, windowNumber];
                     return Ok(Self { window, number });
                 }
@@ -532,7 +549,9 @@ impl Step {
         }
         NativeWindow::find()?.draw_later();
         let size = window.viewport_size();
-        let height = f64::from(f32::from(size.height));
+        // The targeted window's content height, which turns window points into AppKit's.
+        let geometry = NativeWindow::find()?.geometry();
+        let height = geometry.frame.size.y - geometry.chrome.y;
         match self {
             Self::Move { x, y } => NativeWindow::find()?.mouse(MOUSE_MOVED, x, y, height, 0),
             Self::Press {
@@ -620,6 +639,11 @@ impl Step {
                 let native = NativeWindow::find()?;
                 let frame = native.geometry().frame_for(width, height);
                 native.set_frame_later(frame);
+            }
+            Self::Target { title } => {
+                *TARGET.lock().unwrap_or_else(|e| e.into_inner()) = title;
+                // Stage Manager would otherwise show it as a thumbnail, as for the main window.
+                NativeWindow::stay_on_stage()?;
             }
         }
         Ok(Value::Null)

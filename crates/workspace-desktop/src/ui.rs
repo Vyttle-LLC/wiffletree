@@ -654,7 +654,7 @@ pub(super) fn locked(controls: Div, host: &HostView, p: Palette) -> Div {
 }
 
 /// The widest a page's column gets.
-const COLUMN: f32 = 980.;
+pub(super) const COLUMN: f32 = 980.;
 
 /// A page's scroll position and the cards it can open at. A card has no position until it is
 /// painted, so a request waits for the page's next render.
@@ -1017,6 +1017,32 @@ impl Workspace {
     }
 }
 
+impl Workspace {
+    /// The bands over the window while UI evaluators run: red while one uses this Mac's screen,
+    /// quiet for each in a test copy. The helper's own panel and menu bar item stay too.
+    fn evaluator_bands(&self, p: Palette, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
+        let bands =
+            crate::evaluations::bands(&self.shared.catalog, self.shared.evaluations(), now());
+        (bands.iter())
+            .map(|band| {
+                let (open, stop) = (band.run_id.clone(), band.run_id.clone());
+                crate::evaluations::band_view(
+                    band,
+                    move |view: &mut Self, window, cx| {
+                        view.handle(&Intent::OpenEvaluation(open.clone()), window, cx)
+                    },
+                    move |view: &mut Self, window, cx| {
+                        let run_id = stop.clone();
+                        view.request(Command::StopEvaluation { run_id }, window, cx)
+                    },
+                    p,
+                    cx,
+                )
+            })
+            .collect()
+    }
+}
+
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::render_counts::count("Workspace");
@@ -1057,6 +1083,7 @@ impl Render for Workspace {
             Page::Assistant => self.assistant.clone().into_any_element(),
             // Not cached: a board's placeholder must paint in every frame that shows it.
             Page::Boards => self.boards.clone().into_any_element(),
+            Page::Evaluation => self.run_page.clone().into_any_element(),
             Page::Conversation if self.shared.selected_session().is_some() => {
                 // Not cached: GPUI draws every view inside a cached view that renders again,
                 // so the transcript is cached only below an uncached conversation.
@@ -1078,6 +1105,7 @@ impl Render for Workspace {
             .flex()
             .flex_col()
             .child(TitleBar::new())
+            .children(self.evaluator_bands(p, cx))
             .child(
                 div()
                     .flex_1()
