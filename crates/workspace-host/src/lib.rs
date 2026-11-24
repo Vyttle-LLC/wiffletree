@@ -10,6 +10,7 @@ mod brain_sync;
 mod brains;
 mod branches;
 pub mod build_gate;
+pub mod build_output;
 mod checkout;
 pub mod compaction;
 mod compile;
