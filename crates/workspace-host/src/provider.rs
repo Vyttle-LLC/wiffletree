@@ -13,8 +13,8 @@ use crate::runtime::LowPriority as _;
 use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
 pub use act_run::{UrlAct, act_call_refused, act_run};
-pub use conversation::ConversationLaunch;
 use conversation::tool_calls;
+pub use conversation::{ConversationLaunch, SourceTools, is_claude_ai};
 pub use evaluator::{EvaluatorLaunch, prepare_codex_home};
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
 use output::{Next, Output, StopReading};
@@ -62,8 +62,9 @@ pub enum ProviderEvent {
     /// The Assistant's turn read text written by others through a call the host sees, such
     /// as "gmail search_threads" or "a web page".
     ReadOthers(String),
-    /// The tools the Assistant's Claude reported each source's server offers, at its start.
-    SourceTools(std::collections::BTreeMap<String, std::collections::BTreeSet<String>>),
+    /// What the Assistant's Claude reported at its start: the tools each source's server
+    /// offers, and the servers no Space lists.
+    SourceTools(SourceTools),
     Finished {
         error: Option<String>,
         usage: Value,

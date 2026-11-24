@@ -32,7 +32,7 @@ Spaces SHALL be created, edited and removed only on the Spaces page of Settings,
 - **THEN** the removal is refused, saying its archived projects would have nowhere to go, and nothing changes
 
 ### Requirement: Sources a Space allows
-A Space's sources SHALL list the MCP servers and local CLIs its loops and the Assistant may use, in the format job recipes use (see `scheduled-jobs`), each with its read tools or command prefixes and, optionally, its act tools or command prefixes, some of which the human may mark "Do without asking". Tools and prefixes saved before act lists existed SHALL read as read tools. The Space's page SHALL edit them. Job runs in the Space SHALL use only read tools and prefixes, as their recipe allows; act lists and marks SHALL never reach a loop. The Assistant SHALL use every Space's sources as assistant says ("The Assistant uses apps through Space sources", "Reading is free; acting needs a card"). For an MCP server reached by URL, the Assistant's first turn that meets a tool Wiffletree has not seen SHALL stop before the model acts and start again with that tool denied, and its act tools SHALL run through the one-tool Claude run assistant describes ("The Assistant uses apps through Space sources"). Issue threads SHALL use no source. Only the human's client SHALL change a Space's sources, act lists or marks.
+A Space's sources SHALL list the MCP servers and local CLIs its loops and the Assistant may use, in the format job recipes use (see `scheduled-jobs`), each with its read tools or command prefixes and, optionally, its act tools or command prefixes, some of which the human may mark "Do without asking". Tools and prefixes saved before act lists existed SHALL read as read tools. The Space's page SHALL edit them. Job runs in the Space SHALL use only read tools and prefixes, as their recipe allows; act lists and marks SHALL never reach a loop. The Assistant SHALL use every Space's sources as assistant says ("The Assistant uses apps through Space sources", "Reading is free; acting needs a card"). For an MCP server reached by URL, the Assistant's first turn that meets a tool Wiffletree has not seen SHALL stop before the model acts and start again with that tool denied, and its act tools SHALL run through the one-tool Claude run assistant describes ("The Assistant uses apps through Space sources"). A source MAY name a claude.ai connector, such as `claude.ai Google Calendar`, by the name `claude mcp list` shows; the Assistant on Claude SHALL use it as assistant describes, and on Codex it SHALL be unavailable. Issue threads SHALL use no source. Only the human's client SHALL change a Space's sources, act lists or marks.
 
 #### Scenario: Linear in Sage
 - **WHEN** the user adds the Linear MCP server with its list and read tools to Sage's sources
@@ -45,6 +45,10 @@ A Space's sources SHALL list the MCP servers and local CLIs its loops and the As
 #### Scenario: Gmail reached by URL
 - **WHEN** the same Gmail source is an HTTP MCP server that also offers `delete_thread`, not seen before
 - **THEN** the Assistant's first turn stops before the model acts and starts again with `delete_thread` denied, it reads mail with `search_threads` and `read_thread`, and an `act` for `send_message` raises a card whose Run sends through a Claude run offered only `send_message`, held to the card's exact arguments
+
+#### Scenario: Google Calendar as a claude.ai connector
+- **WHEN** the user adds `claude.ai Google Calendar` to Personal with `list_events` read and `create_event` act
+- **THEN** the Assistant on Claude reads events with `list_events` and is offered no other Calendar tool and no connector Personal does not list, and Run on a `create_event` card goes through a Claude run offered only that tool
 
 #### Scenario: A loop on the same source
 - **WHEN** a Personal loop lists the Gmail source

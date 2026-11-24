@@ -652,6 +652,8 @@ enum Event {
     ActionRan {
         card: String,
         result: std::result::Result<String, String>,
+        /// What a Claude run's start offered that was not yet denied.
+        seen: provider::SourceTools,
         on_run: bool,
         reply: Reply,
     },
@@ -2754,9 +2756,13 @@ impl Actor {
             Event::ActionRan {
                 card,
                 result,
+                seen,
                 on_run,
                 reply,
             } => {
+                if let Err(e) = self.host.record_source_tools(&seen) {
+                    eprintln!("Recording an action run's source tools: {e:#}");
+                }
                 let ran = result.map_err(|error| anyhow::anyhow!(error));
                 let card = self.host.action_ran(&card, &ran, on_run);
                 let answer = card.and_then(|card| Ok(serde_json::to_value(card)?));
@@ -4550,10 +4556,11 @@ impl Actor {
     ) {
         let sender = self.sender.clone();
         std::thread::spawn(move || {
-            let result = run.run().map_err(|e| format!("{e:#}"));
+            let (result, seen) = run.run_reporting();
             let _ = sender.send_blocking(Event::ActionRan {
                 card,
-                result,
+                result: result.map_err(|e| format!("{e:#}")),
+                seen,
                 on_run,
                 reply,
             });
@@ -8604,7 +8611,10 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
         let reported = [("calendar".to_owned(), ["delete_calendar".to_owned()].into())];
         let stopped = format!("{} (calendar delete_calendar)", provider::NEW_SOURCE_TOOLS);
         for event in [
-            ProviderEvent::SourceTools(reported.into()),
+            ProviderEvent::SourceTools(provider::SourceTools {
+                tools: reported.into(),
+                ..Default::default()
+            }),
             ProviderEvent::Finished {
                 error: Some(stopped),
                 usage: Value::Null,
