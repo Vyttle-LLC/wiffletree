@@ -500,6 +500,10 @@ pub struct SourceProbe {
     /// The sign-in command the source's own tool gives, when Wiffletree knows it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sign_in: Option<String>,
+    /// What a failing MCP server itself said, its error or the end of its standard error,
+    /// which is where it names its own sign-in command or link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_said: Option<String>,
 }
 /// The kind Add source suggests for an MCP tool: its `readOnlyHint` when the server gives
 /// one, else read only when its name starts with a word that only reads.

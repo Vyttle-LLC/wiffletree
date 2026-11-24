@@ -2,7 +2,7 @@
 //! a source is one form"): the MCP servers this Mac's Claude and Codex are configured with and
 //! the well-known CLIs installed here, and what one of them offers once started. Wiffletree
 //! runs no app's sign-in itself; a signed-out source names the command its own tool gives.
-use crate::jobs::{SourceEnv, known_check, mcp_exchange};
+use crate::jobs::{SourceEnv, known_check, mcp_exchange_said};
 use crate::*;
 use workspace_core::job::{JOB_CLIS, cli_reads};
 use workspace_core::{SourceCandidate, SourceKind, SourceProbe, SuggestedTool, suggests_act};
@@ -82,12 +82,15 @@ fn probe_server(env: &SourceEnv, name: &str) -> SourceProbe {
         ));
     }
     let list = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"});
-    match mcp_exchange(env, &definition, list) {
+    match mcp_exchange_said(env, &definition, list) {
         Ok(listed) => SourceProbe {
             tools: server_tools(&listed),
             ..Default::default()
         },
-        Err(why) => problem(format!("The {name} MCP server {why}.")),
+        Err((why, said)) => SourceProbe {
+            server_said: said,
+            ..problem(format!("The {name} MCP server {why}."))
+        },
     }
 }
 
@@ -234,6 +237,38 @@ mod tests {
             ]
         );
         assert_eq!(probe.tools[0].description, "Events in a range");
+    }
+
+    /// A command-line MCP server `calendar` at `home` running `script`, as Claude configures it.
+    fn server(home: &Path, script: &str) -> SourceEnv {
+        let server = home.join("calendar-mcp");
+        fs::write(&server, script).unwrap();
+        fs::set_permissions(&server, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let claude = json!({"mcpServers": {"calendar": {"command": server}}});
+        fs::write(home.join(".claude.json"), claude.to_string()).unwrap();
+        let path = std::env::split_paths(&std::env::var_os("PATH").unwrap()).collect();
+        env(home, path)
+    }
+
+    #[test]
+    fn a_signed_out_server_shows_what_it_said_about_signing_in() {
+        let home = tempfile::tempdir().unwrap();
+        let refusing = "#!/usr/bin/env python3\nimport json, sys\nfor line in sys.stdin:\n    m = json.loads(line)\n    if 'id' not in m: continue\n    print(json.dumps({'jsonrpc': '2.0', 'id': m['id'], 'error': {'code': -32001, 'message': 'Not signed in. Run calendar-mcp login.'}}), flush=True)\n";
+        let refused = probe(&server(home.path(), refusing), SourceKind::Mcp, "calendar");
+        assert!(refused.problem.is_some());
+        assert_eq!(
+            refused.server_said.as_deref(),
+            Some("Not signed in. Run calendar-mcp login.")
+        );
+        // A server that stops at once leaves its sign-in line on standard error.
+        let home = tempfile::tempdir().unwrap();
+        let stopping =
+            "#!/bin/sh\necho 'Visit https://example.com/device to sign in' >&2\nexit 1\n";
+        let stopped = probe(&server(home.path(), stopping), SourceKind::Mcp, "calendar");
+        assert_eq!(
+            stopped.server_said.as_deref(),
+            Some("Visit https://example.com/device to sign in")
+        );
     }
 
     #[test]

@@ -55,6 +55,18 @@ pub(crate) fn action_lines(call: &ActCall) -> Vec<(String, String)> {
         }
     }
 }
+/// An approval card's buttons, each with the answer it sends. An approval the host raised
+/// with no options takes "approved" or "denied", as the Inbox sends them; one with options
+/// takes the option itself.
+pub(crate) fn approval_choices(options: &[String]) -> Vec<(String, String)> {
+    match options.is_empty() {
+        true => vec![
+            ("Approve".into(), "approved".into()),
+            ("Decline".into(), "denied".into()),
+        ],
+        false => options.iter().map(|o| (o.clone(), o.clone())).collect(),
+    }
+}
 /// Whether an applied loop change can still be undone: no later change of the same loop was
 /// applied since.
 pub(crate) fn undoable(cards: &[ConversationCard], card: &ConversationCard) -> bool {
@@ -390,18 +402,15 @@ impl AssistantPage {
         let Some(attention) = attention else {
             return frame.child(hint("Settled. Nothing waits here or in the Inbox.", p));
         };
-        let options = match attention.options.is_empty() {
-            true => vec!["Approve".to_owned(), "Decline".to_owned()],
-            false => attention.options.clone(),
-        };
         let mut choices = actions();
-        for (at, option) in options.into_iter().enumerate() {
-            let (id, answer) = (attention.id.clone(), option.clone());
+        for (at, (label, answer)) in approval_choices(&attention.options).into_iter().enumerate() {
+            let id = attention.id.clone();
             choices = choices.child(
                 button(SharedString::from(format!("approve-{attention_id}-{at}")))
                     .xsmall()
                     .when(at == 0, |b| b.primary())
-                    .label(option)
+                    .label(label)
+                    .map(|b| ui::gated(b, &self.shared.host))
                     .on_click(cx.listener(move |v, _, w, c| {
                         let resolve = Command::ResolveAttention {
                             id: id.clone(),
@@ -691,7 +700,7 @@ fn repository_of(url: &str) -> &str {
 mod tests {
     use super::{
         ActCall, ConversationCard, Kind, LoopCard, LoopCardState, LoopChange, Recipe, action_lines,
-        repository_of, schedule_words, undoable,
+        approval_choices, repository_of, schedule_words, undoable,
     };
     use serde_json::json;
     use workspace_core::SpaceId;
@@ -725,6 +734,14 @@ mod tests {
             "schedule": {"cron": cron, "timezone": "America/Chicago"}, "enabled": true,
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn approve_on_a_host_approval_sends_the_answer_the_host_approves_on() {
+        let answers: Vec<String> = approval_choices(&[]).into_iter().map(|(_, a)| a).collect();
+        assert_eq!(answers, ["approved", "denied"]);
+        let chosen = approval_choices(&["Merge".into()]);
+        assert_eq!(chosen, [("Merge".to_owned(), "Merge".to_owned())]);
     }
 
     #[test]

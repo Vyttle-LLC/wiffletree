@@ -419,18 +419,33 @@ pub(crate) fn mcp_exchange(
     definition: &Value,
     request: Value,
 ) -> std::result::Result<Value, String> {
-    use std::io::{BufRead, Write};
+    mcp_exchange_said(env, definition, request).map_err(|(why, _)| why)
+}
+
+/// Most of what an MCP server writes to its standard error that Add source keeps.
+const SAID_LIMIT: usize = 2000;
+
+/// As `mcp_exchange`, but a failure also carries what the server itself said: its JSON-RPC
+/// error's message, else the end of its standard error, which is where a signed-out server
+/// names its own sign-in command or link. Only Add source shows it, to the human.
+pub(crate) fn mcp_exchange_said(
+    env: &SourceEnv,
+    definition: &Value,
+    request: Value,
+) -> std::result::Result<Value, (String, Option<String>)> {
+    use std::io::{BufRead, Read, Write};
     use std::os::unix::process::CommandExt;
     let Some(command) = definition["command"].as_str().filter(|c| !c.is_empty()) else {
-        return Err("is not a command Wiffletree can start; only a command-line MCP server can be used this way".into());
+        return Err(("is not a command Wiffletree can start; only a command-line MCP server can be used this way".into(), None));
     };
     let program = match command.contains('/') {
         true => Some(PathBuf::from(command)),
         false => env.find(command),
     };
     let Some(program) = program else {
-        return Err(format!(
-            "names {command}, which is not installed on this Mac"
+        return Err((
+            format!("names {command}, which is not installed on this Mac"),
+            None,
         ));
     };
     let args = (definition["args"].as_array().into_iter().flatten()).filter_map(Value::as_str);
@@ -440,7 +455,7 @@ pub(crate) fn mcp_exchange(
         .env("PATH", std::env::join_paths(&env.path).unwrap_or_default())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .process_group(0);
     for (key, value) in definition["env"].as_object().into_iter().flatten() {
         if let Some(value) = value.as_str() {
@@ -448,12 +463,31 @@ pub(crate) fn mcp_exchange(
         }
     }
     let Ok(mut child) = start.spawn() else {
-        return Err("could not be started".into());
+        return Err(("could not be started".into(), None));
     };
     let group = child.id() as libc::pid_t;
-    let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-        return Err("could not be started".into());
+    let (Some(mut stdin), Some(stdout), Some(stderr)) =
+        (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    else {
+        return Err(("could not be started".into(), None));
     };
+    // Read to the end, keeping only the last of it, so the server never blocks on a full pipe.
+    let (said, stderr_end) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut kept: Vec<u8> = vec![];
+        let mut chunk = [0u8; 4096];
+        let mut stderr = stderr;
+        while let Ok(read) = stderr.read(&mut chunk) {
+            if read == 0 {
+                break;
+            }
+            kept.extend_from_slice(&chunk[..read]);
+            let over = kept.len().saturating_sub(SAID_LIMIT);
+            kept.drain(..over);
+        }
+        let _ = said.send(String::from_utf8_lossy(&kept).trim().to_owned());
+    });
+    let mut server_error: Option<String> = None;
     let (lines, answers) = std::sync::mpsc::channel::<Value>();
     std::thread::spawn(move || {
         for line in std::io::BufReader::new(stdout).lines() {
@@ -474,6 +508,7 @@ pub(crate) fn mcp_exchange(
             match answers.recv_timeout(left) {
                 Ok(value) if value["id"] == id => {
                     if !value["error"].is_null() {
+                        server_error = value["error"]["message"].as_str().map(str::to_owned);
                         return Err(
                             "answered with an error, such as a sign-in that has expired".into()
                         );
@@ -502,7 +537,12 @@ pub(crate) fn mcp_exchange(
     // SAFETY: `killpg` only sends a signal; the group is the server's own.
     unsafe { libc::killpg(group, libc::SIGKILL) };
     let _ = child.wait();
-    answered
+    // A process the server left behind may hold its standard error open; wait only briefly.
+    let stderr = (stderr_end.recv_timeout(std::time::Duration::from_secs(1))).unwrap_or_default();
+    answered.map_err(|why| {
+        let said = server_error.or((!stderr.is_empty()).then_some(stderr));
+        (why, said)
+    })
 }
 
 /// Checks one source as a run on `provider` would use it. An MCP server must be in that

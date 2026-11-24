@@ -90,6 +90,10 @@ pub(super) fn suggests_act_by_hand(kind: Option<SourceKind>, name: &str) -> bool
     };
     workspace_core::suggests_act(word, None)
 }
+/// Whether `next` is the source already picked, of the same kind and name.
+pub(super) fn same_source(picked: Option<&SourceCandidate>, next: &SourceCandidate) -> bool {
+    picked.is_some_and(|picked| picked.kind == next.kind && picked.name == next.name)
+}
 /// The Space's sources with `source` in place of the one of its kind and name, or added last.
 pub(super) fn with_source(sources: &[Source], source: Source) -> Vec<Source> {
     let same = |other: &Source| {
@@ -160,6 +164,10 @@ impl SpacesPage {
         let Some(adding) = &mut self.adding else {
             return;
         };
+        // Choices carry over only to Try again on the same source, never to another one.
+        if !same_source(adding.picked.as_ref(), &picked) {
+            adding.tools.clear();
+        }
         adding.picked = Some(picked.clone());
         adding.probing = true;
         adding.probe = None;
@@ -397,13 +405,11 @@ impl SpacesPage {
             );
         }
         if let Some(problem) = adding.probe.as_ref().and_then(|probe| match probe {
-            Ok(probe) => probe
-                .problem
-                .clone()
-                .map(|why| (why, probe.sign_in.clone())),
-            Err(error) => Some((error.clone(), None)),
+            Ok(probe) => (probe.problem.clone())
+                .map(|why| (why, probe.sign_in.clone(), probe.server_said.clone())),
+            Err(error) => Some((error.clone(), None, None)),
         }) {
-            let (why, sign_in) = problem;
+            let (why, sign_in, said) = problem;
             // A started server's error may be an expired sign-in; a missing CLI is not.
             let may_be_signed_out =
                 sign_in.is_some() || (picked.kind == SourceKind::Mcp && !picked.by_url);
@@ -422,6 +428,21 @@ impl SpacesPage {
                                 .gap_2()
                                 .child("Sign in with")
                                 .child(mono(command, p))
+                        }))
+                        // Its own words, such as the command or link that signs it in.
+                        .children(said.map(|said| {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(hint("The server said:", p))
+                                .child(
+                                    div()
+                                        .font_family(palette::mono_font())
+                                        .text_size(px(font::CAPTION))
+                                        .whitespace_normal()
+                                        .child(said),
+                                )
                         }))
                         .when(may_be_signed_out, |d| d.child(hint(SIGN_IN, p)))
                         .child(button("probe-again").xsmall().label("Try again").on_click(
@@ -525,8 +546,26 @@ impl SpacesPage {
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolChoice, chosen_source, suggests_act_by_hand, with_source};
-    use workspace_core::{Source, SourceKind};
+    use super::{ToolChoice, chosen_source, same_source, suggests_act_by_hand, with_source};
+    use workspace_core::{Source, SourceCandidate, SourceKind};
+
+    #[test]
+    fn choices_carry_over_only_to_try_again_on_the_same_source() {
+        let candidate = |kind, name: &str| SourceCandidate {
+            kind,
+            name: name.into(),
+            configured_for: vec![],
+            by_url: false,
+        };
+        let gh = candidate(SourceKind::Cli, "gh");
+        assert!(same_source(Some(&gh), &gh));
+        assert!(!same_source(
+            Some(&gh),
+            &candidate(SourceKind::Cli, "linctl")
+        ));
+        assert!(!same_source(Some(&gh), &candidate(SourceKind::Mcp, "gh")));
+        assert!(!same_source(None, &gh));
+    }
 
     #[test]
     fn a_cli_prefix_typed_by_hand_is_judged_by_its_verb() {

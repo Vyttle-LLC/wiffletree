@@ -175,7 +175,7 @@ struct ArchiveDemand<'a> {
 
 /// The archive is out of date and something shown needs it: Show archived, the Tickets, Agents or
 /// Events panel, the Repositories page, the Issues page, whose Work box lists accepted and closed
-/// tickets, the brain browser, a ticket table's done list or a publish or merge request, or a
+/// tickets, the Assistant, whose work shows its accepted tickets' PRs, the brain browser, a ticket table's done list or a publish or merge request, or a
 /// selected session or message sender that the snapshot does not list, which only the archive
 /// holds.
 fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
@@ -188,7 +188,8 @@ fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
                 shown.panel,
                 Some(Panel::Team | Panel::Agents | Panel::Events)
             )
-            || matches!(shown.page, Page::Repositories | Page::Issues)
+            // The Assistant's work cards and rail name the PRs of accepted tickets.
+            || matches!(shown.page, Page::Repositories | Page::Issues | Page::Assistant)
             // Logs links this Mac's entries to their tickets and conversations, finished ones too.
             || shown.page == Page::BrainBrowser
             || shown.done_tickets
@@ -1854,6 +1855,11 @@ mod tests {
             // The Work box lists a linked project's accepted and closed tickets.
             ArchiveDemand {
                 page: Page::Issues,
+                ..shown("live")
+            },
+            // Done recently lists finished work with its accepted tickets' PRs.
+            ArchiveDemand {
+                page: Page::Assistant,
                 ..shown("live")
             },
             // An archived session already in the held archive, whose status may have moved.
