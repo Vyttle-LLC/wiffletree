@@ -194,6 +194,9 @@ fn rollout(folder: &Path, suffix: &str) -> Option<PathBuf> {
 }
 
 /// Clears the environment the host inherited and passes on only `ENVIRONMENT` and the locale.
+/// That drops what `configure` set before an evaluator launch: the ticket's scratch `TMPDIR` and
+/// the agent build settings. An evaluator has no shell, only file tools and its driver's, so it
+/// runs no build; and the app copy it drives is started, not built, from this clean environment.
 pub(super) fn clear_environment(cmd: &mut ProcessCommand) {
     cmd.env_clear();
     for (name, value) in std::env::vars_os() {
@@ -424,6 +427,30 @@ mod tests {
             !env.iter().any(|name| name.starts_with("WORKSPACE_")),
             "{env:?}"
         );
+    }
+
+    #[test]
+    fn an_evaluator_gets_neither_a_ticket_scratch_folder_nor_agent_build_settings() {
+        let scratch = PathBuf::from("/var/folders/T/wiffletree-1/scratch/ticket");
+        for provider in [Provider::Claude, Provider::Codex] {
+            let mut turn = super::super::tests::turn(provider, None, vec![]);
+            turn.scratch = Some(scratch.clone());
+            turn.evaluator = Some(launch());
+            let mut cmd = ProcessCommand::new("provider");
+            configure(&mut cmd, &turn);
+
+            let env: Vec<_> = cmd.get_envs().collect();
+            assert!(
+                !env.iter()
+                    .any(|(name, _)| *name == "CARGO_PROFILE_DEV_DEBUG"),
+                "{provider:?}: {env:?}"
+            );
+            assert!(
+                !env.iter()
+                    .any(|(_, value)| value.is_some_and(|value| value == scratch)),
+                "{provider:?}: {env:?}"
+            );
+        }
     }
 
     #[test]

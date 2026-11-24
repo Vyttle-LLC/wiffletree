@@ -95,7 +95,8 @@ pub struct Turn {
     pub profile: ModelProfile,
     pub provider_session: Option<String>,
     pub cwd: PathBuf,
-    /// The ticket's scratch folder, which becomes the agent's `TMPDIR`; none outside a ticket.
+    /// The ticket's scratch folder, which becomes the agent's `TMPDIR`; none outside a ticket,
+    /// for a sorting run, or in effect for an evaluator, whose environment is cleared.
     pub scratch: Option<PathBuf>,
     pub prompt: String,
     /// The delivered messages' stored files, in order; images also go to the model as images.
