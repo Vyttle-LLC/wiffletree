@@ -544,10 +544,7 @@ impl Host {
     }
 }
 
-/// Adds provider runs' process group and its leader's start time, which an earlier version
-/// recorded when the provider started; `agent_processes::migrate` carries them into the record.
-/// Whether a provider run of an agent on the ticket has started and not finished, as `db`
-/// records it; any connection to the store can ask.
+/// Whether a provider run of an agent on the ticket is open, as any connection to the store sees it.
 pub(crate) fn ticket_run_open(db: &Connection, ticket: &str) -> rusqlite::Result<bool> {
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM provider_runs r JOIN runtimes t ON t.session_id=r.session_id
@@ -557,6 +554,8 @@ pub(crate) fn ticket_run_open(db: &Connection, ticket: &str) -> rusqlite::Result
     )
 }
 
+/// Adds provider runs' process group and its leader's start time, which an earlier version
+/// recorded when the provider started; `agent_processes::migrate` carries them into the record.
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
     for column in ["process_group", "process_started"] {
         let present: i64 = db.query_row(
