@@ -408,7 +408,6 @@ fn validate_tags(space: &Space) -> Result<()> {
     }
     Ok(())
 }
-const MAX_TAG_BYTES: usize = 64;
 
 impl Host {
     /// In the order they were created.
@@ -724,8 +723,8 @@ impl Host {
         self.space_repositories(&space)
     }
     /// Puts `repository`, named `owner/name`, in exactly `spaces`, writing only the Spaces whose
-    /// list changes, each to its `space.yaml` too, so membership travels with the Space. The
-    /// workspace repository itself is left as it is.
+    /// list changes, each to its `space.yaml` too, so membership travels with the Space. A Space
+    /// it leaves drops its tags there. The workspace repository itself is left as it is.
     pub fn set_repository_spaces(&mut self, repository: &str, spaces: &[SpaceId]) -> Result<()> {
         validate_repository_identity(repository)?;
         for space in spaces {
@@ -739,6 +738,8 @@ impl Host {
                     (true, None) => space.repositories.push(repository.into()),
                     (false, Some(at)) => {
                         space.repositories.remove(at);
+                        (space.repository_tags)
+                            .retain(|identity, _| !identity.eq_ignore_ascii_case(repository));
                     }
                     _ => continue,
                 }

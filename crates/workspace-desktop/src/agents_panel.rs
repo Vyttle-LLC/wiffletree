@@ -4,7 +4,10 @@
 use super::*;
 use progress::ProgressBoard;
 use std::{collections::HashSet, time::Duration};
-use ui::{card, empty_state, hint, icon, progress_bar, session_icon};
+use ui::{
+    card, empty_state, eyebrow, hint, hollow_badge, icon, needs_you_badge, progress_bar,
+    session_icon, status_glyph,
+};
 
 /// How often the elapsed times redraw while a listed agent works.
 const AGENTS_TICK: Duration = Duration::from_secs(30);
@@ -45,14 +48,34 @@ pub(crate) struct TicketCard<'a> {
     pub(crate) agents: Vec<&'a AgentProgress>,
 }
 
+/// A child project, folded into one card in its parent's panel.
+pub(crate) struct ChildCard<'a> {
+    pub(crate) project: &'a Project,
+    /// Its coordinator, then its other unarchived agents.
+    pub(crate) agents: Vec<&'a Session>,
+    /// How many of its questions wait with the parent.
+    pub(crate) with_parent: u32,
+}
+impl ChildCard<'_> {
+    pub(crate) fn coordinator(&self) -> &Session {
+        self.agents[0]
+    }
+    fn working(&self) -> usize {
+        let working = self.agents.iter().filter(|s| s.status == Status::Working);
+        working.count()
+    }
+}
+
 /// Everyone the panel lists for a project: a card for each open ticket, then for each finished
-/// ticket an unarchived agent still works on, such as one restored from the archive; the other
-/// finished tickets, accepted or closed, whichever half of the snapshot holds them; then the
-/// project's previous agents. Those are the rest of the coordinator's agents: archived agents,
-/// finished verifiers among them, workers from before tickets existed and retired repository
-/// coordinators. An archived project has no board entry, so all of its agents are previous.
+/// ticket an unarchived agent still works on, such as one restored from the archive; its
+/// unarchived child projects; the other finished tickets, accepted or closed, whichever half of
+/// the snapshot holds them; then the project's previous agents. Those are the rest of the
+/// coordinator's agents: archived agents, finished verifiers among them, workers from before
+/// tickets existed and retired repository coordinators. An archived project has no board entry,
+/// so all of its agents are previous.
 pub(crate) struct Roster<'a> {
     pub(crate) tickets: Vec<TicketCard<'a>>,
+    pub(crate) children: Vec<ChildCard<'a>>,
     pub(crate) finished: Vec<&'a Ticket>,
     pub(crate) previous: Vec<&'a Session>,
 }
@@ -104,6 +127,7 @@ impl<'a> Roster<'a> {
             .collect();
         Self {
             tickets,
+            children: child_cards(index, project_id),
             finished,
             previous,
         }
@@ -118,6 +142,11 @@ impl<'a> Roster<'a> {
         let on_tickets = self.ticket_agents().into_iter().filter(|a| a.working);
         on_tickets.count() + previous.count()
     }
+    /// The rail's badge: the project's own working agents and its children's, coordinators
+    /// included.
+    pub(crate) fn working_with_children(&self) -> usize {
+        self.working() + self.children.iter().map(ChildCard::working).sum::<usize>()
+    }
     pub(crate) fn busy_tickets(&self) -> usize {
         let busy = |card: &&TicketCard| card.agents.iter().any(|a| a.working);
         self.tickets.iter().filter(busy).count()
@@ -129,6 +158,28 @@ impl<'a> Roster<'a> {
             .filter(|s| stuck(s, index.runtime(&s.id)).is_some())
             .count()
     }
+}
+
+/// The unarchived children of `parent`, in the stored order, each with its unarchived agents.
+/// An archived child's coordinator is not in the snapshot.
+fn child_cards<'a>(index: &'a WorkspaceIndex, parent: &str) -> Vec<ChildCard<'a>> {
+    let snapshot = index.snapshot();
+    let children = (snapshot.projects.iter()).filter(|p| p.parent_id.as_deref() == Some(parent));
+    children
+        .filter_map(|project| {
+            let coordinator = index.roots(&project.id).next().filter(|c| !c.archived)?;
+            let others = index
+                .sessions()
+                .filter(|s| s.project_id == project.id && !s.archived && s.id != coordinator.id);
+            Some(ChildCard {
+                project,
+                agents: std::iter::once(coordinator).chain(others).collect(),
+                with_parent: (snapshot.questions_with_parent.get(&project.id))
+                    .copied()
+                    .unwrap_or(0),
+            })
+        })
+        .collect()
 }
 
 /// A previous agent's name, and the ticket it worked on, if any.
@@ -269,6 +320,7 @@ impl Inspector {
             .filter(|run| run.project_id == project)
             .collect();
         if roster.tickets.is_empty()
+            && roster.children.is_empty()
             && roster.finished.is_empty()
             && roster.previous.is_empty()
             && runs.is_empty()
@@ -287,7 +339,8 @@ impl Inspector {
             };
             body = body.child(self.ticket_card(index, ticket, ticket_card, p, cx));
         }
-        body.children(self.evaluations_group(&runs, p, cx))
+        body.children(self.child_projects(index, &roster.children, p, cx))
+            .children(self.evaluations_group(&runs, p, cx))
             .children(self.finished_tickets(&roster.finished, p, cx))
             .children(self.previous_agents(index, &roster.previous, p, cx))
     }
@@ -435,6 +488,88 @@ impl Inspector {
                     d.child(hint(step, p).pl(px(22.)).text_ellipsis())
                 })
                 .child(progress_bar(agent.position(), agent.state, 3., p)),
+        )
+    }
+
+    /// The "Child projects" heading and a folded card for each child: its most urgent state, the
+    /// hollow badge for questions with this project, its name, how many agents it has and who
+    /// they are. Activating a card selects the child's coordinator, leaving the panel open.
+    fn child_projects(
+        &self,
+        index: &WorkspaceIndex,
+        children: &[ChildCard],
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        if children.is_empty() {
+            return None;
+        }
+        let snapshot = index.snapshot();
+        let parent = self.shared.project_name();
+        let cards = children.iter().map(|child| {
+            let coordinator = child.coordinator();
+            let needs_you = sidebar::needs_you(
+                &snapshot.attention,
+                &snapshot.workspace_notes,
+                &child.project.id,
+            );
+            let stuck = Roster::new(
+                &self.shared.progress,
+                index,
+                &child.project.id,
+                &coordinator.id,
+            )
+            .stuck(index);
+            let shown = [sidebar::shown_status(coordinator, index)];
+            let state = tree::rollup(needs_you, stuck, &shown).map(|rollup| match rollup {
+                tree::Rollup::NeedsYou(count) => needs_you_badge(count, p).into_any_element(),
+                tree::Rollup::Stuck(count) => sidebar::stuck_pill(count, p).into_any_element(),
+                tree::Rollup::Blocked => status_glyph(Status::Blocked, 12., p),
+                tree::Rollup::Working => status_glyph(Status::Working, 12., p),
+            });
+            let others: Vec<Role> = child.agents[1..].iter().map(|s| s.role).collect();
+            let line = wording::child_line(
+                &parent,
+                child.with_parent,
+                needs_you > 0,
+                coordinator.status,
+                &others,
+            );
+            let id = coordinator.id.clone();
+            card(p)
+                .id(SharedString::from(format!("child-{}", child.project.id)))
+                .cursor_pointer()
+                .hover(|d| d.bg(p.overlay.opacity(0.7)))
+                .on_click(cx.listener(move |_, _, _, c| c.emit(Intent::Select(id.clone()))))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(icon("chevron-right").size(px(12.)).text_color(p.subtle))
+                        .children(state)
+                        .when(child.with_parent > 0, |d| {
+                            d.child(hollow_badge(child.with_parent as usize, p))
+                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_ellipsis()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(child.project.name.clone()),
+                        )
+                        .child(hint(child.agents.len().to_string(), p).flex_none()),
+                )
+                .child(hint(line, p).text_ellipsis())
+        });
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(eyebrow("Child projects", p))
+                .children(cards),
         )
     }
 
@@ -1034,6 +1169,72 @@ mod tests {
         assert!(board.project(&root.project_id).is_none() && roster.tickets.is_empty());
         let previous: Vec<&str> = roster.previous.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(previous, [&implementer.id]);
+    }
+
+    #[test]
+    fn a_parent_lists_each_child_and_its_badge_counts_the_childrens_working_agents() {
+        let (_directory, mut host, root, ticket) = ticket_store();
+        let own = host
+            .assign_ticket(&ticket.id, Role::Implementer, Provider::Codex, "Fix", None)
+            .unwrap();
+        let repository = host.repositories().unwrap().remove(0);
+        let mut child = |name: &str| {
+            let project = host.create_project(name).unwrap();
+            host.set_project_parent(&project.id, Some(&root.project_id))
+                .unwrap();
+            let sessions = host.sessions().unwrap().into_iter();
+            let coordinator = sessions.into_iter().find(|s| s.project_id == project.id);
+            let coordinator = coordinator.unwrap();
+            let repository = host
+                .attach_repository(&project.id, &repository.path, "HEAD")
+                .unwrap();
+            let ticket = host
+                .create_ticket(&coordinator.id, &repository.id, "Warnings", "Do it")
+                .unwrap();
+            let agent = host
+                .assign_ticket(&ticket.id, Role::Implementer, Provider::Codex, "Do", None)
+                .unwrap();
+            (project, coordinator, agent)
+        };
+        let (pickers, pickers_coordinator, pickers_agent) = child("Pickers: restore highlights");
+        let (warnings, warnings_coordinator, _) = child("Contrast warnings");
+        let mut snapshot = host.snapshot().unwrap();
+        for session in snapshot.sessions.iter_mut() {
+            if [&pickers_coordinator.id, &pickers_agent.id].contains(&&session.id) {
+                session.status = Status::Working;
+            }
+        }
+        snapshot
+            .questions_with_parent
+            .insert(warnings.id.clone(), 3);
+        let mut board = ProgressBoard::default();
+        board.merge(host.progress(0).unwrap());
+        let working = AgentProgress {
+            working: true,
+            ..board.agent(&own.id).unwrap().clone()
+        };
+        board.merge(ProgressPage {
+            revision: 2,
+            complete: false,
+            agents: vec![working],
+            tickets: vec![],
+            projects: vec![],
+        });
+        let index = WorkspaceIndex::new(snapshot, Default::default());
+
+        let roster = Roster::new(&board, &index, &root.project_id, &root.id);
+
+        let children: Vec<(&str, usize, u32)> = (roster.children.iter())
+            .map(|c| (c.project.id.as_str(), c.agents.len(), c.with_parent))
+            .collect();
+        // In the stored order, where a new project lands at the top.
+        assert_eq!(
+            children,
+            [(warnings.id.as_str(), 2, 3), (pickers.id.as_str(), 2, 0)]
+        );
+        // Activating a card selects the child's coordinator.
+        assert_eq!(roster.children[0].coordinator().id, warnings_coordinator.id);
+        assert_eq!((roster.working(), roster.working_with_children()), (1, 3));
     }
 
     #[test]

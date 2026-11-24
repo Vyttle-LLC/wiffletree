@@ -136,12 +136,54 @@ fn each_space_keeps_its_own_tags_and_a_move_takes_the_new_ones() {
         .id;
     let mut space = f.host.space(&vyttle).unwrap().space;
     space.repositories = vec!["celadon-theme/nvim".into()];
+    space.set_tag("celadon-theme/nvim", TagKind::App, Some("editor"));
+    space.set_tag("celadon-theme/nvim", TagKind::Layer, Some("plugins"));
     f.host.update_space(space).unwrap();
-    assert_eq!(f.tags().layers, ["frontend"]);
+    assert_eq!(
+        (f.tags().apps, f.tags().layers),
+        (vec!["nvim".into()], vec!["frontend".into()])
+    );
 
     f.host
         .move_project_to_space(&f.project.id, &vyttle)
         .unwrap();
     let moved = f.tags();
-    assert!(moved.has_none(TagKind::App) && moved.has_none(TagKind::Layer));
+    assert_eq!(
+        (moved.apps, moved.layers),
+        (vec!["editor".into()], vec!["plugins".into()])
+    );
+}
+
+#[test]
+fn a_repository_taken_out_of_a_space_loses_its_tags_there() {
+    let mut f = fixture();
+    let celadon = f.celadon.clone();
+    let vyttle = (f.host.create_space("Vyttle", "", "", None).unwrap().space).id;
+    f.host
+        .set_repository_spaces("celadon-theme/nvim", &[vyttle])
+        .unwrap();
+    let space = f.host.space(&celadon).unwrap().space;
+    assert_eq!(space.tags_of("celadon-theme/nvim"), None);
+    assert!(space.tags_of("celadon-theme/palette-api").is_some());
+    // Listed again, it starts untagged.
+    f.host
+        .set_repository_spaces("celadon-theme/nvim", std::slice::from_ref(&celadon))
+        .unwrap();
+    assert_eq!(
+        f.host
+            .space(&celadon)
+            .unwrap()
+            .space
+            .tags_of("celadon-theme/nvim"),
+        None
+    );
+}
+
+#[test]
+fn an_older_snapshot_without_project_tags_reads_as_none() {
+    let f = fixture();
+    let mut snapshot = serde_json::to_value(f.host.snapshot().unwrap()).unwrap();
+    snapshot.as_object_mut().unwrap().remove("project_tags");
+    let older: Snapshot = serde_json::from_value(snapshot).unwrap();
+    assert!(older.project_tags.is_empty());
 }

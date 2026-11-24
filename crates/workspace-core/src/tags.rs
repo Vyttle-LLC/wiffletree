@@ -4,6 +4,9 @@
 use crate::{Extra, Space};
 use serde::{Deserialize, Serialize};
 
+/// The longest app or layer name a Space keeps.
+pub const MAX_TAG_BYTES: usize = 64;
+
 /// The app and layer a Space gives one of its repositories, stored in `repository_tags`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepositoryTags {

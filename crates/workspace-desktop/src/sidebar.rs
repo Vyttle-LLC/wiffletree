@@ -2071,7 +2071,7 @@ fn stuck_label(stuck: usize) -> Option<String> {
 }
 
 /// Yellow, like needs-you: a stuck agent is the one other case the human hears about.
-fn stuck_pill(stuck: usize, p: Palette) -> Div {
+pub(super) fn stuck_pill(stuck: usize, p: Palette) -> Div {
     pill(stuck_label(stuck).unwrap_or_default(), p.yellow)
 }
 
@@ -2170,7 +2170,11 @@ fn switcher_row(row: &hosts::SwitcherRow, p: Palette) -> Stateful<Div> {
 }
 
 /// What a project's badge counts: its attention items, and the workspace notes, as the Inbox rail does.
-fn needs_you(attention: &[Attention], notes: &[WorkspaceNote], project_id: &str) -> usize {
+pub(super) fn needs_you(
+    attention: &[Attention],
+    notes: &[WorkspaceNote],
+    project_id: &str,
+) -> usize {
     attention
         .iter()
         .filter(|a| a.project_id == project_id)
