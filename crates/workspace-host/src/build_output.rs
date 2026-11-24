@@ -3,7 +3,8 @@
 //!
 //! A folder in the worktree is a candidate when its name is a default for a common ecosystem,
 //! it holds a `CACHEDIR.TAG`, or the repository's `.wiffletree/build-output` names it. It counts
-//! as build output only when Git ignores everything in it and tracks nothing in it. Any other
+//! as build output only when it is a real folder, not reached through a symbolic link, Git
+//! ignores everything in it and tracks nothing in it, and it holds no Git repository. Any other
 //! candidate is left alone and reported as ambiguous. This module only finds and measures: it
 //! deletes nothing.
 
@@ -68,7 +69,7 @@ pub enum Source {
     DerivedData,
 }
 
-/// A candidate folder in the worktree that is not build output, and why.
+/// A candidate folder that is not build output, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ambiguous {
     pub path: PathBuf,
@@ -81,6 +82,10 @@ pub enum Reason {
     HoldsTracked,
     /// It is, or holds, an untracked file that Git does not ignore.
     NotIgnored,
+    /// It holds a Git repository, which may have work that exists nowhere else. SwiftPM's own
+    /// clones, in the `checkouts` and `repositories` folders of `.build` or `SourcePackages`,
+    /// do not count.
+    HoldsRepository,
 }
 
 /// Xcode's DerivedData folder in the user's home, where it would be.
@@ -92,13 +97,19 @@ pub fn xcode_derived_data() -> Option<PathBuf> {
 /// The build output of the worktree whose root is `worktree`, with DerivedData folders from
 /// `derived_data` when given, such as `xcode_derived_data()`.
 ///
+/// Candidates come from the paths Git lists as ignored, untracked or tracked, the folders above
+/// them, and the folders inside an ignored folder that is not a candidate itself. A folder inside
+/// a candidate that counts as build output is not listed again. Symbolic links are never
+/// followed: a candidate must be a real folder at its own path in the worktree.
+///
 /// It runs Git and walks every folder it finds, which can take seconds for a large build, so
 /// call it on a worker thread, never on the host's own thread.
 pub fn scan(worktree: &Path, derived_data: Option<&Path>) -> Result<BuildOutput> {
+    let resolved = worktree.canonicalize()?;
     let status = Status::read(worktree)?;
     let tracked = tracked_paths(worktree)?;
     let declared = declared_patterns(worktree);
-    let mut found = Vec::new();
+    let mut outputs = Vec::new();
     let mut ambiguous = Vec::new();
     let mut taken: Vec<String> = Vec::new();
     for (folder, source) in candidates(worktree, &status, &tracked, &declared) {
@@ -106,34 +117,47 @@ pub fn scan(worktree: &Path, derived_data: Option<&Path>) -> Result<BuildOutput>
             continue;
         }
         let path = worktree.join(&folder);
+        // A symbolic link above the folder would put it somewhere the Git checks did not cover.
+        if path.canonicalize().ok() != Some(resolved.join(&folder)) {
+            continue;
+        }
         match status.why_not(&folder, &tracked) {
             None => {
                 taken.push(folder);
-                found.push(Found {
-                    path,
-                    source,
-                    size: 0,
-                });
+                outputs.push((path, source));
             }
             Some(reason) => ambiguous.push(Ambiguous { path, reason }),
         }
     }
     if let Some(root) = derived_data {
-        found.extend(
+        outputs.extend(
             derived_data_for(worktree, root)
                 .into_iter()
-                .map(|path| Found {
-                    path,
-                    source: Source::DerivedData,
-                    size: 0,
-                }),
+                .map(|path| (path, Source::DerivedData)),
         );
     }
+    let mut found = Vec::new();
     let mut counted = HashSet::new();
-    for output in &mut found {
-        output.size = allocated_size(&output.path, &mut counted);
+    for (path, source) in outputs {
+        let measured = measure(&path, &mut counted);
+        if measured.holds_repository {
+            ambiguous.push(Ambiguous {
+                path,
+                reason: Reason::HoldsRepository,
+            });
+        } else {
+            found.push(Found {
+                path,
+                source,
+                size: measured.size,
+            });
+        }
     }
     Ok(BuildOutput { found, ambiguous })
+}
+
+fn is_real_folder(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
 }
 
 /// The paths `git status` lists as ignored or untracked, relative to the root. An untracked or
@@ -231,7 +255,7 @@ fn candidates(
         candidates: BTreeMap::new(),
     };
     for path in status.ignored.iter().chain(&status.untracked) {
-        if worktree.join(path).is_dir() {
+        if is_real_folder(&worktree.join(path)) {
             search.upward(Some(path));
         } else {
             search.upward(parent(path));
@@ -241,7 +265,7 @@ fn candidates(
         search.upward(parent(path));
     }
     for path in &status.ignored {
-        if worktree.join(path).is_dir() && !search.candidates.contains_key(path) {
+        if is_real_folder(&worktree.join(path)) && !search.candidates.contains_key(path) {
             search.downward(path);
         }
     }
@@ -267,7 +291,11 @@ impl Search<'_> {
 
     /// Looks at the folders inside `folder`, but not inside a candidate or a symbolic link.
     fn downward(&mut self, folder: &str) {
-        let Ok(entries) = fs::read_dir(self.worktree.join(folder)) else {
+        let path = self.worktree.join(folder);
+        if !is_real_folder(&path) {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(path) else {
             return;
         };
         for entry in entries.flatten() {
@@ -285,6 +313,9 @@ impl Search<'_> {
     fn consider(&mut self, folder: &str) -> bool {
         if !self.considered.insert(folder.to_owned()) {
             return false;
+        }
+        if !is_real_folder(&self.worktree.join(folder)) {
+            return true;
         }
         if let Some(source) = source_of(self.worktree, folder, self.declared) {
             self.candidates.insert(folder.to_owned(), source);
@@ -372,13 +403,14 @@ fn derived_data_for(worktree: &Path, root: &Path) -> Vec<PathBuf> {
         .flatten()
         .map(|entry| entry.path())
         .filter(|folder| {
-            fs::read_to_string(folder.join("info.plist"))
-                .ok()
-                .and_then(|plist| workspace_path(&plist))
-                .is_some_and(|path| {
-                    let path = Path::new(&path);
-                    path.starts_with(worktree) || path.starts_with(&resolved)
-                })
+            is_real_folder(folder)
+                && fs::read_to_string(folder.join("info.plist"))
+                    .ok()
+                    .and_then(|plist| workspace_path(&plist))
+                    .is_some_and(|path| {
+                        let path = Path::new(&path);
+                        path.starts_with(worktree) || path.starts_with(&resolved)
+                    })
         })
         .collect();
     folders.sort();
@@ -402,31 +434,55 @@ fn workspace_path(plist: &str) -> Option<String> {
     )
 }
 
-/// The bytes allocated on disk to `path` and everything under it, without following symbolic
-/// links. A file with several hard links counts once across a scan. APFS clones share blocks
-/// with the file they were cloned from, but each is counted in full, so a folder seeded with
-/// `cp -c` may be over-counted. Entries that cannot be read count as nothing.
-fn allocated_size(path: &Path, counted: &mut HashSet<(u64, u64)>) -> u64 {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return 0;
-    };
-    if metadata.nlink() > 1
-        && !metadata.is_dir()
-        && !counted.insert((metadata.dev(), metadata.ino()))
-    {
-        return 0;
+/// What a walk of a folder and everything under it saw, without following symbolic links.
+#[derive(Default)]
+struct Measured {
+    /// The bytes allocated on disk. A file with several hard links counts once across a scan.
+    /// APFS clones share blocks with the file they were cloned from, but each is counted in
+    /// full, so a folder seeded with `cp -c` may be over-counted. Entries that cannot be read
+    /// count as nothing.
+    size: u64,
+    /// Whether a `.git` is inside, other than in SwiftPM's clones.
+    holds_repository: bool,
+}
+
+fn measure(path: &Path, counted: &mut HashSet<(u64, u64)>) -> Measured {
+    let mut measured = Measured::default();
+    measured.add(path, counted, true);
+    measured
+}
+
+impl Measured {
+    fn add(&mut self, path: &Path, counted: &mut HashSet<(u64, u64)>, repositories_count: bool) {
+        let Ok(metadata) = fs::symlink_metadata(path) else {
+            return;
+        };
+        if repositories_count && path.file_name() == Some(".git".as_ref()) {
+            self.holds_repository = true;
+        }
+        if metadata.nlink() > 1
+            && !metadata.is_dir()
+            && !counted.insert((metadata.dev(), metadata.ino()))
+        {
+            return;
+        }
+        self.size += metadata.blocks() * 512;
+        if !metadata.is_dir() {
+            return;
+        }
+        let swiftpm = matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(".build" | "SourcePackages")
+        );
+        for entry in fs::read_dir(path).into_iter().flatten().flatten() {
+            let clones = swiftpm
+                && matches!(
+                    entry.file_name().to_str(),
+                    Some("checkouts" | "repositories")
+                );
+            self.add(&entry.path(), counted, repositories_count && !clones);
+        }
     }
-    let own = metadata.blocks() * 512;
-    if !metadata.is_dir() {
-        return own;
-    }
-    let inside: u64 = fs::read_dir(path)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|entry| allocated_size(&entry.path(), counted))
-        .sum();
-    own + inside
 }
 
 #[cfg(test)]
@@ -663,6 +719,11 @@ mod tests {
             &plist(&root.join("ios/App.xcworkspace")),
         );
         write(&derived_data, "App-ours/Build/Products/App", "binary");
+        write(
+            &derived_data,
+            "App-ours/SourcePackages/checkouts/package/.git/HEAD",
+            "ref: refs/heads/main\n",
+        );
         write(&derived_data, "App-sibling/info.plist", &plist(&sibling));
         write(&derived_data, "ModuleCache.noindex/blob", "shared");
 
@@ -678,12 +739,89 @@ mod tests {
     fn a_hard_linked_file_counts_once() {
         let folder = tempfile::tempdir().unwrap();
         write(folder.path(), "a/file", &"x".repeat(64 * 1024));
-        let once = allocated_size(&folder.path().join("a"), &mut HashSet::new());
+        let once = measure(&folder.path().join("a"), &mut HashSet::new()).size;
         fs::hard_link(folder.path().join("a/file"), folder.path().join("a/link")).unwrap();
 
         assert_eq!(
-            allocated_size(&folder.path().join("a"), &mut HashSet::new()),
+            measure(&folder.path().join("a"), &mut HashSet::new()).size,
             once
+        );
+    }
+
+    #[test]
+    fn nothing_is_found_or_measured_through_a_symbolic_link() {
+        let (folder, root) = worktree(&[
+            (".gitignore", "/alias\n/target/\n"),
+            ("src/build/notes.txt", "tracked\n"),
+        ]);
+        std::os::unix::fs::symlink("src", root.join("alias")).unwrap();
+        let large = 1024 * 1024;
+        write(folder.path(), "elsewhere/large", &"x".repeat(large));
+        write(&root, "target/debug/app", "binary");
+        std::os::unix::fs::symlink(folder.path().join("elsewhere"), root.join("target/link"))
+            .unwrap();
+
+        let output = scan(&root, None).unwrap();
+
+        assert_eq!(
+            found(&root, &output),
+            [("target".into(), Source::DefaultName)]
+        );
+        assert!(output.found[0].size < large as u64);
+        assert_eq!(
+            ambiguous(&root, &output),
+            [("src/build".into(), Reason::HoldsTracked)]
+        );
+    }
+
+    #[test]
+    fn a_default_name_inside_build_output_is_not_listed_again() {
+        let (_folder, root) = worktree(&[(".gitignore", "node_modules/\n")]);
+        write(&root, "node_modules/x/node_modules/y/index.js", "module");
+
+        let output = scan(&root, None).unwrap();
+
+        assert_eq!(
+            found(&root, &output),
+            [("node_modules".into(), Source::DefaultName)]
+        );
+        assert!(output.ambiguous.is_empty());
+    }
+
+    #[test]
+    fn build_output_holding_a_git_repository_is_reported_except_swiftpm_clones() {
+        let (_folder, root) = worktree(&[(".gitignore", "/target/\n/.build/\n")]);
+        write(&root, "target/debug/app", "binary");
+        write(
+            &root,
+            "target/scratch/clone/.git/HEAD",
+            "ref: refs/heads/main\n",
+        );
+        write(
+            &root,
+            ".build/checkouts/package/.git/HEAD",
+            "ref: refs/heads/main\n",
+        );
+        write(
+            &root,
+            ".build/repositories/package-1/HEAD",
+            "ref: refs/heads/main\n",
+        );
+        write(
+            &root,
+            ".build/repositories/package-1/.git",
+            "gitdir: elsewhere\n",
+        );
+
+        let output = scan(&root, None).unwrap();
+
+        assert_eq!(
+            found(&root, &output),
+            [(".build".into(), Source::DefaultName)]
+        );
+        assert_eq!(
+            ambiguous(&root, &output),
+            [("target".into(), Reason::HoldsRepository)]
         );
     }
 }
