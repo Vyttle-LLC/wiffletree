@@ -22,6 +22,7 @@ mod context_view;
 mod conversation;
 mod conversation_header;
 mod creation;
+mod disk_use;
 mod effective_view;
 mod evaluation_page;
 mod evaluations;
@@ -1764,6 +1765,7 @@ fn main() -> anyhow::Result<()> {
         ]);
         register_window_actions(cx);
         hosts::watch(cx);
+        disk_use::watch(cx);
         background::install(
             bridge,
             |cx| {
