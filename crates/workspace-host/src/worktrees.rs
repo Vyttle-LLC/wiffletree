@@ -194,11 +194,12 @@ impl Host {
     }
     /// Whether a worktree was removed; a missing one only has its stale registration pruned.
     /// Removal is whole whatever the folder's size: the folder is renamed aside, Git forgets it
-    /// within its usual time limit, and the folder is then deleted off the host thread. If Git
-    /// fails, the folder is renamed back only when the worktree is as clean there as it was
-    /// checked to be; otherwise the removal completes, losing nothing because the folder was
-    /// clean, and the next start prunes.
-    fn remove_worktree(&self, ticket: &Ticket) -> Result<bool> {
+    /// within its usual time limit, and the folder is then deleted off the host thread. The
+    /// delete is recorded before the rename, so it resumes after a stop (see
+    /// `worktree_deletions`). If Git fails, the folder is renamed back only when the worktree is
+    /// as clean there as it was checked to be; otherwise the removal completes, losing nothing
+    /// because the folder was clean, and the next start prunes.
+    fn remove_worktree(&mut self, ticket: &Ticket) -> Result<bool> {
         let repository = self.ticket_repository(ticket)?;
         let repository = Path::new(&repository.path);
         let worktree = Path::new(&ticket.worktree);
@@ -208,27 +209,35 @@ impl Host {
         }
         let context = || format!("Remove \"{}\" ({})", ticket.title, ticket.id);
         let aside = removal_folder(ticket);
-        fs::rename(worktree, &aside).with_context(context)?;
-        let forgotten = runtime::git_output(repository, &["worktree", "prune"]);
-        if forgotten.is_err() {
-            fs::rename(&aside, worktree).with_context(context)?;
-            if is_clean(worktree).unwrap_or(false) {
-                forgotten.with_context(context)?;
-            }
+        self.record_worktree_deletion(&aside, Some(&ticket.id))
+            .with_context(context)?;
+        let moved = (|| -> Result<()> {
             fs::rename(worktree, &aside).with_context(context)?;
+            let forgotten = runtime::git_output(repository, &["worktree", "prune"]);
+            if forgotten.is_err() {
+                fs::rename(&aside, worktree).with_context(context)?;
+                if is_clean(worktree).unwrap_or(false) {
+                    forgotten.with_context(context)?;
+                }
+                fs::rename(worktree, &aside).with_context(context)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = moved {
+            if !aside.exists() {
+                self.forget_worktree_deletion(&aside)?;
+            }
+            return Err(error);
         }
-        delete_in_background(aside);
+        self.settle_worktree_deletions(now());
         Ok(true)
     }
-    /// Deletes worktree folders that a stop left renamed aside, off the host thread, and has Git
-    /// forget registrations a cut-off removal left. The service calls this at startup.
-    pub fn delete_removed_worktrees(&self) -> Result<()> {
-        for ticket in self.tickets()? {
-            let aside = removal_folder(&ticket);
-            if aside.exists() {
-                delete_in_background(aside);
-            }
-        }
+    /// Resumes deleting every removed worktree's folder, recorded or found beside a worktree
+    /// (see `sweep_worktree_deletions`), and has Git forget registrations a cut-off removal
+    /// left. The service calls this at startup.
+    pub fn delete_removed_worktrees(&mut self) -> Result<()> {
+        self.sweep_worktree_deletions()?;
+        self.settle_worktree_deletions(now());
         for repository in self.repositories()? {
             if let Err(error) =
                 runtime::git_output(Path::new(&repository.path), &["worktree", "prune"])
@@ -472,9 +481,7 @@ impl Host {
         tx.commit()?;
         Ok(())
     }
-    /// Tells the nearest unarchived owner of the ticket, from its coordinator up, once per mark.
-    /// When the whole tree is archived or the message is refused, the notice goes to the human's
-    /// attention inbox instead.
+    /// Tells the ticket's owner, once per mark; see `notify_ticket_owner`.
     fn report_kept_worktree(
         &mut self,
         ticket: &Ticket,
@@ -495,8 +502,19 @@ impl Host {
             "Wiffletree kept the worktree of ticket \"{}\" ({}) at {} instead of removing it: {reason:#}. Its branch {} is kept. Commit or discard that work, then remove the worktree yourself.",
             ticket.title, ticket.id, ticket.worktree, ticket.branch
         );
+        self.notify_ticket_owner(ticket, &id, &notice)
+    }
+    /// Tells the nearest unarchived owner of the ticket, from its coordinator up, under the
+    /// message id `id`. When the whole tree is archived or the message is refused, the notice
+    /// goes to the human's attention inbox instead.
+    pub(crate) fn notify_ticket_owner(
+        &mut self,
+        ticket: &Ticket,
+        id: &str,
+        notice: &str,
+    ) -> Result<()> {
         // Attention prompts allow 4096 bytes; cut on a character boundary within that.
-        let notice = &notice[..steps::floor_boundary(&notice, notice.len().min(4096))];
+        let notice = &notice[..steps::floor_boundary(notice, notice.len().min(4096))];
         let mut owner = Some(self.session(&ticket.coordinator_id)?);
         while let Some(session) = owner.take_if(|s| s.archived) {
             owner = session
@@ -506,11 +524,11 @@ impl Host {
                 .transpose()?;
         }
         if let Some(owner) = owner
-            && self.send(&id, None, &owner.id, notice).is_ok()
+            && self.send(id, None, &owner.id, notice).is_ok()
         {
             return Ok(());
         }
-        self.request_attention(&ticket.coordinator_id, "local", &id, notice, &[])?;
+        self.request_attention(&ticket.coordinator_id, "local", id, notice, &[])?;
         Ok(())
     }
 }
@@ -661,18 +679,18 @@ fn is_worktree(repository: &Path, path: &Path, git: &publish::GitTool) -> Result
 }
 
 /// Where a ticket's worktree waits while it is deleted: beside it, so the rename stays on one
-/// filesystem.
+/// filesystem. An earlier removal's folder still waiting there keeps its name, and this one is
+/// told apart by the time.
 fn removal_folder(ticket: &Ticket) -> PathBuf {
-    Path::new(&ticket.worktree).with_file_name(format!(".removing-{}", ticket.id))
-}
-
-/// Deletes the folder without a time limit on a thread of its own.
-fn delete_in_background(folder: PathBuf) {
-    std::thread::spawn(move || {
-        if let Err(error) = fs::remove_dir_all(&folder) {
-            eprintln!("Delete removed worktree {}: {error}", folder.display());
-        }
-    });
+    let named = |name: String| {
+        Path::new(&ticket.worktree)
+            .with_file_name(format!("{}{name}", worktree_deletions::REMOVING_PREFIX))
+    };
+    let folder = named(ticket.id.clone());
+    match fs::symlink_metadata(&folder) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => folder,
+        _ => named(format!("{}-{}", ticket.id, now())),
+    }
 }
 
 /// Adds the worktree unless it is already registered: from an existing branch, or as a new

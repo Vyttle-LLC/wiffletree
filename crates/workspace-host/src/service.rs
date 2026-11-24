@@ -1074,6 +1074,10 @@ impl Service {
                     let mut host = Host::open(home)?;
                     recover_unfinished_turns(&mut host)?;
                     checkout::recover_moves(&mut host)?;
+                    let deleted = worker.clone();
+                    host.notify_worktree_deletions(move || {
+                        let _ = deleted.send_blocking(Event::Wake(0));
+                    });
                     host.delete_removed_worktrees()?;
                     host.settle_pending_worktrees();
                     let directory = tempfile::Builder::new().prefix("aw-").tempdir_in("/tmp")?;
@@ -1874,6 +1878,9 @@ impl Actor {
             if let Err(e) = self.schedule() {
                 eprintln!("Workspace scheduler: {e:#}");
             }
+        }
+        if let Some(due) = self.host.settle_worktree_deletions(now()) {
+            self.wake(due);
         }
         self.refresh_overlaps(now());
         self.refresh_pull_requests(now(), dirty);
