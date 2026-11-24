@@ -85,6 +85,7 @@ fn run(home: &Path, prompt: &str, hold_until_closed: bool) -> Outcome {
         },
         provider_session: None,
         cwd: home.into(),
+        scratch: None,
         prompt: prompt.into(),
         attachments: vec![],
         socket: home.join("unused"),
@@ -94,6 +95,7 @@ fn run(home: &Path, prompt: &str, hold_until_closed: bool) -> Outcome {
         thread: None,
         evaluator: None,
         conversation: None,
+        push_branch: None,
     };
     let mut outcome = Outcome {
         steps: 0,

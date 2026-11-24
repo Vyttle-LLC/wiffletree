@@ -58,7 +58,9 @@ const APPLIES: &str =
     "Applies from each agent's next turn, and a Codex agent's from its next new session";
 const REWRITE_COST: &str = "When an update changes the stock text, Wiffletree merges the change into your rewrite and leaves a note you can review or undo. Where you also changed what the update changes, the PR keeper's Claude choice in Models merges that passage, or, without one, you choose the wording. Adding your own rules never needs a merge.";
 const OUT_OF_DATE: &str = "Your rewrite keeps running exactly as you wrote it. Look at what changed, then merge it in, or copy in what you want and mark it up to date.";
-const NOT_ENFORCED: &str = "Not enforced: an agent's shell isn't sandboxed, so it can still run git push or gh with your credentials.";
+const GUARDRAIL: &str = "A guardrail, not a sandbox: an agent's shell still runs as you, so a full path to git or gh, or a direct call to GitHub with your token, isn't stopped.";
+/// What the guard holds for an agent whose shell may push nothing.
+const READS_ONLY: &str = "Its shell's git pushes nothing, and gh only reads";
 
 /// What a skill's page says about it: who uses it, what the app's own operations enforce
 /// whatever its text says, and what its text decides.
@@ -83,6 +85,8 @@ fn about(skill: Skill) -> About {
                 "Findings are sorted before a ticket is accepted",
                 "Its publishing asks you unless the owner is allowed and the review passed",
                 "Its merging never touches a protected branch, and asks you after a blocked review",
+                READS_ONLY,
+                "It creates branches on origin only through Wiffletree, never a protected one",
             ],
             decides: &[
                 "When to plan, create tickets and start agents",
@@ -97,7 +101,8 @@ fn about(skill: Skill) -> About {
             enforced: &[
                 "One ticket, in its own worktree and branch",
                 "\u{201c}Ready for testing\u{201d} is refused with uncommitted files",
-                "Wiffletree pushes and opens pull requests only through its publishing, which checks the review and the owners you allowed",
+                "The shell's git pushes only the ticket's own branch, where you allowed the owner and until its pull request opens, and gh only reads",
+                "Pull requests open and update only through Wiffletree's publishing, which checks the review and the owners you allowed",
                 "Only the coordinator merges, through Wiffletree, never into a protected branch",
             ],
             decides: &[
@@ -115,6 +120,7 @@ fn about(skill: Skill) -> About {
                 "Findings carry a severity, a location, a trigger and evidence",
                 "A check fails only on a blocking finding with a location, a trigger and evidence",
                 "The worktree must be left exactly as it was found",
+                READS_ONLY,
             ],
             decides: &[
                 "What counts as blocking",
@@ -130,6 +136,7 @@ fn about(skill: Skill) -> About {
                 "The repository's checks and a review run before a push",
                 "One try per problem per head",
                 "The triggers set in Repositories",
+                READS_ONLY,
             ],
             decides: &["How to resolve a conflict", "How to fix failed checks"],
         },
@@ -2190,7 +2197,7 @@ impl BehaviorsPage {
             .gap_3()
             .child(
                 column("shield", "The app enforces, whatever this says", enforced)
-                    .child(hint(NOT_ENFORCED, p).text_color(p.yellow)),
+                    .child(hint(GUARDRAIL, p).text_color(p.yellow)),
             )
             .child(column("pencil", "This text decides", decides))
     }
@@ -2486,9 +2493,9 @@ mod tests {
         assert_eq!(
             tabs,
             [
-                "Contract v13",
-                "Coordinator v17",
-                "Implementer v5",
+                "Contract v14",
+                "Coordinator v19",
+                "Implementer v6",
                 "Verifier v2",
                 "PR keeper v1",
                 "Thread contract v3",

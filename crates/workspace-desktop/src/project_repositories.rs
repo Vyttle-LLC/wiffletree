@@ -142,6 +142,8 @@ mod tests {
             home: None,
             slug: None,
             created_by: None,
+            parent_id: None,
+            standing: false,
         }
     }
     fn snapshot(project: Project, spaces: Vec<Space>, open: &[(&str, &str)]) -> Snapshot {

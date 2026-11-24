@@ -597,22 +597,24 @@ impl Host {
     }
     /// Moves a project to another Space: its later entries go to that Space's brain, its earlier
     /// ones stay where they are, and it uses that Space's repositories in place of this one's. What
-    /// was added to it stays, and its open tickets finish where they are.
+    /// was added to it stays, and its open tickets finish where they are. A parent never spans
+    /// Spaces, so the project leaves its parent and its children stay behind, loose.
     pub fn move_project_to_space(&mut self, project: &str, space: &SpaceId) -> Result<Project> {
         let mut project = self.project(project)?;
         let target = self.space(space)?.space;
         if project.space == target.id {
             return Ok(project);
         }
-        project.space = target.id;
-        let tx = self.db.transaction()?;
-        tx.execute(
-            "UPDATE projects SET data=?2 WHERE id=?1",
-            params![project.id, encode(&project)?],
-        )?;
-        Self::event(&tx, &project.id, None, "space_changed", &target.name)?;
-        tx.commit()?;
-        Ok(project)
+        self.atomically(|host| {
+            host.leave_parent(&mut project)?;
+            for mut child in host.child_projects(&project.id)? {
+                host.leave_parent(&mut child)?;
+            }
+            project.space = target.id;
+            host.save_project(&project)?;
+            Self::event(&host.db, &project.id, None, "space_changed", &target.name)?;
+            Ok(project)
+        })
     }
     /// The workspace repositories whose GitHub name `space` lists, and the ones it lists that
     /// are not cloned on this Mac.
@@ -822,7 +824,7 @@ impl Host {
         Ok(uses)
     }
     /// A project is archived when its coordinator is.
-    fn project_archived(&self, project: &str) -> Result<bool> {
+    pub(crate) fn project_archived(&self, project: &str) -> Result<bool> {
         Ok(self.db.query_row(
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM sessions WHERE project_id=?1 AND role=?2 AND {ARCHIVED_FLAG}=1)"

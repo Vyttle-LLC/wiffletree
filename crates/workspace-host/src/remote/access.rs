@@ -148,6 +148,8 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::UpdateSpace { .. }
         | Command::RemoveSpace { .. }
         | Command::MoveProjectToSpace { .. }
+        | Command::SetProjectParent { .. }
+        | Command::SetProjectStanding { .. }
         | Command::SetRepositorySpaces { .. }
         | Command::SetFollowedRoots { .. }
         | Command::ConfirmRepositorySuggestions { .. }

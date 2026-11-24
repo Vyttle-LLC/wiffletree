@@ -4,6 +4,7 @@ use workspace_core::*;
 
 fn main() -> Result<()> {
     workspace_host::build_gate::run_if_called();
+    workspace_host::guard::run_if_called();
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("serve") {
         return serve(&args[1..]);
@@ -115,7 +116,7 @@ fn main() -> Result<()> {
     let data = std::path::PathBuf::from(&args[1]);
     std::fs::create_dir_all(&data)?;
     let data = std::fs::canonicalize(&data)?;
-    install_build_gate(&data, &std::env::current_exe()?);
+    install_agent_tools(&data, &std::env::current_exe()?);
     let service = workspace_host::service::Service::start(data, std::env::current_exe()?)?;
     let mut reader = io::stdin().lock();
     let mut output = io::stdout().lock();
@@ -170,10 +171,14 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Sends agents' builds through the build gate. Without it the host still runs, ungated.
-fn install_build_gate(data: &std::path::Path, binary: &std::path::Path) {
+/// Sends agents' builds through the build gate and their `git` and `gh` through the guard.
+/// Without either the host still runs, ungated or unguarded.
+fn install_agent_tools(data: &std::path::Path, binary: &std::path::Path) {
     if let Err(error) = workspace_host::build_gate::install(data, binary) {
         eprintln!("Build gate unavailable, so agents' builds are not limited: {error}");
+    }
+    if let Err(error) = workspace_host::guard::install(data, binary) {
+        eprintln!("Guard unavailable, so agents' git and gh are not guarded: {error}");
     }
 }
 
@@ -205,7 +210,7 @@ fn serve(args: &[String]) -> Result<()> {
     let data = std::fs::canonicalize(&data)?;
     workspace_host::socket::socket_path(&data)?;
     let binary = std::env::current_exe()?;
-    install_build_gate(&data, &binary);
+    install_agent_tools(&data, &binary);
     let credential = if child {
         workspace_host::socket::read_credential(&mut io::stdin().lock())?
     } else {

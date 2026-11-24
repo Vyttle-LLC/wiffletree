@@ -25,6 +25,7 @@ mod effective_view;
 mod events_view;
 mod file_links;
 mod files_view;
+mod filing;
 mod folders;
 mod held_entry;
 mod history_sheet;

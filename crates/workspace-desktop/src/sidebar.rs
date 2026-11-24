@@ -4,7 +4,7 @@ use crate::background::PendingUpdate;
 use gpui_component::{
     Disableable, Selectable,
     button::ButtonVariants,
-    menu::{DropdownMenu, PopupMenuItem},
+    menu::{DropdownMenu, PopupMenu, PopupMenuItem},
     tooltip::Tooltip,
 };
 use ui::{
@@ -1702,6 +1702,14 @@ impl Sidebar {
         let rename_id = project_id.clone();
         let click_project = project_id.clone();
         let movable = tree::Movable::Project(project_id.clone());
+        let filing = (self.shared.snapshot()).and_then(|snapshot| {
+            let project = snapshot.projects.iter().find(|p| p.id == project_id)?;
+            Some(Rc::new(Filing {
+                project: (project.id.clone(), project.name.clone()),
+                move_under: filing::move_under(snapshot, project),
+                standing: project.standing,
+            }))
+        });
         let row = self
             .row(SharedString::from(format!("tree-{id}")), selected, p)
             // Its children wrap, so the progress track and the agents line added last each take
@@ -1770,13 +1778,15 @@ impl Sidebar {
                         .xsmall()
                         .icon(icon("ellipsis").size(px(14.)))
                         .tooltip("Project actions")
-                        .dropdown_menu(move |menu, _, _| {
+                        .dropdown_menu(move |menu, window, cx| {
                             let rename = weak.clone();
                             let rename_id = rename_id.clone();
                             let add_repositories = weak.clone();
                             let add_ticket = weak.clone();
                             let archive = weak.clone();
                             let archive_id = archive_id.clone();
+                            let filed = weak.clone();
+                            let filing = filing.clone();
                             menu.item(PopupMenuItem::new("Rename").icon(icon("rename")).on_click(
                                 move |_, window, cx| {
                                     let _ = rename.update(cx, |view, cx| {
@@ -1808,6 +1818,9 @@ impl Sidebar {
                                         });
                                     }),
                             )
+                            .when_some(filing, |menu, filing| {
+                                filing_items(menu, filed, filing, window, cx)
+                            })
                             .separator()
                             .item(
                                 PopupMenuItem::new(if archived {
@@ -1882,6 +1895,117 @@ impl Render for Sidebar {
         render_counts::count("Sidebar");
         let p = palette(is_dark(cx));
         self.sidebar(p, cx)
+    }
+}
+
+/// What the project menu needs to file a project and mark it standing.
+struct Filing {
+    /// Its id and name.
+    project: (String, String),
+    move_under: filing::MoveUnder,
+    standing: bool,
+}
+
+/// Move under… and Standing in a project's menu.
+fn filing_items(
+    menu: PopupMenu,
+    sidebar: WeakEntity<Sidebar>,
+    filing: Rc<Filing>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let menu = match &filing.move_under {
+        filing::MoveUnder::Disabled(why) => {
+            let why = *why;
+            menu.item(
+                PopupMenuItem::element(move |_, _| {
+                    div()
+                        .id("move-under")
+                        .child("Move under…")
+                        .tooltip(move |w, c| Tooltip::new(why).build(w, c))
+                })
+                .icon(icon("project"))
+                .disabled(true),
+            )
+        }
+        filing::MoveUnder::Choices { .. } => {
+            let (sidebar, filing) = (sidebar.clone(), filing.clone());
+            menu.submenu_with_icon(
+                Some(icon("project")),
+                "Move under…",
+                window,
+                cx,
+                move |mut submenu, _, _| {
+                    let filing::MoveUnder::Choices { parents, no_parent } = &filing.move_under
+                    else {
+                        return submenu;
+                    };
+                    if parents.is_empty() && !no_parent {
+                        return submenu.label("No other loose project in this Space");
+                    }
+                    let choices = (parents.iter().map(|(id, name)| Some((id, name))))
+                        .chain(no_parent.then_some(None));
+                    for parent in choices {
+                        let (sidebar, filing) = (sidebar.clone(), filing.clone());
+                        let parent = parent.map(|(id, name)| (id.clone(), name.clone()));
+                        let label = parent.as_ref().map_or("No parent".into(), |p| p.1.clone());
+                        submenu = submenu.item(PopupMenuItem::new(label).on_click(
+                            move |_, window, cx| {
+                                let parent = parent.clone();
+                                let _ = sidebar.update(cx, |view, cx| {
+                                    view.confirm_parent(&filing.project, parent, window, cx)
+                                });
+                            },
+                        ));
+                    }
+                    submenu
+                },
+            )
+        }
+    };
+    let (project_id, standing) = (filing.project.0.clone(), filing.standing);
+    menu.item(
+        PopupMenuItem::new("Standing")
+            .checked(standing)
+            .on_click(move |_, window, cx| {
+                let command = Command::SetProjectStanding {
+                    project_id: project_id.clone(),
+                    standing: !standing,
+                };
+                let _ = sidebar.update(cx, |view, cx| view.request(command, window, cx));
+            }),
+    )
+}
+
+impl Sidebar {
+    /// Asks first, naming the project and its new parent or saying it becomes loose, then
+    /// files it; the host's refusal shows as a toast.
+    fn confirm_parent(
+        &mut self,
+        (project_id, project_name): &(String, String),
+        parent: Option<(String, String)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (title, line) = filing::confirmation(project_name, parent.as_ref().map(|p| &*p.1));
+        let command = Command::SetProjectParent {
+            project_id: project_id.clone(),
+            parent_id: parent.map(|p| p.0),
+        };
+        let weak = cx.weak_entity();
+        window.open_alert_dialog(cx, move |dialog, _, _| {
+            let (weak, command) = (weak.clone(), command.clone());
+            dialog
+                .title(title.clone())
+                .confirm()
+                .ok_text("Move")
+                .child(line.clone())
+                .on_ok(move |_, window, cx| {
+                    let command = command.clone();
+                    let _ = weak.update(cx, |view, cx| view.request(command, window, cx));
+                    true
+                })
+        });
     }
 }
 

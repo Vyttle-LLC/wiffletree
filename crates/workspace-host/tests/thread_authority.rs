@@ -97,6 +97,7 @@ fn launched_turn(
         },
         provider_session: session,
         cwd: folders.scratch.clone(),
+        scratch: None,
         prompt: prompt.into(),
         attachments: vec![],
         socket: folders.scratch.join("no-socket"),
@@ -106,6 +107,7 @@ fn launched_turn(
         thread: Some(launch),
         evaluator: None,
         conversation: None,
+        push_branch: None,
     };
     let mut reply = String::new();
     let mut failure = None;

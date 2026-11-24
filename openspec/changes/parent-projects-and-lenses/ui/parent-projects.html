@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Parent projects</title>
+<!--
+  Static study: parent projects with child projects, questions routed through the parent,
+  the Agents button moved to the right rail, and one Needs you page. No script, no network.
+  Projects, repositories, tickets, counts, times and messages are invented Celadon samples.
+-->
+<style>
+:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+h2{font:500 14px/1.3 inherit;margin:0}
+h3{font:600 12.5px/1.3 inherit;margin:0}
+p{margin:0}
+svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.intro{max-width:820px;margin-bottom:24px}
+.intro p{color:var(--subtle);font-size:12.5px}
+.intro b,.caption b,.notes b{color:var(--text);font-weight:500}
+.part{margin:34px 0 12px}
+.part p{color:var(--subtle);font-size:12px;max-width:820px;margin-top:4px}
+.studies{display:grid;grid-template-columns:repeat(3,minmax(0,300px));gap:28px;align-items:start}
+.study-head{display:flex;align-items:baseline;gap:8px;margin-bottom:10px}
+.tag{font-size:10.5px;padding:1px 7px;border-radius:999px;background:var(--focus);color:var(--base)}
+.caption{margin:10px 2px 0;font-size:11.5px;color:var(--subtle);max-width:820px}
+/* Sidebar, mirroring sidebar.rs. */
+.sidebar{background:var(--surface);border:1px solid var(--edge);border-radius:12px;overflow:hidden;box-shadow:0 12px 32px color-mix(in srgb,var(--text) 10%,transparent);padding-bottom:10px}
+.brand{height:52px;padding:0 12px 0 16px;display:flex;align-items:center;justify-content:space-between}
+.wordmark{font:400 19px/1 Georgia,"Times New Roman",serif;letter-spacing:-.03em}
+.wordmark i{font-style:normal;color:var(--accent)}
+.section{padding:10px 12px 4px 16px;display:flex;align-items:center;justify-content:space-between}
+.ghost{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--subtle);padding:2px 6px;border-radius:6px}
+.row{position:relative;display:flex;align-items:center;gap:6px;min-height:30px;margin:0 6px;padding:0 8px 0 4px;border-radius:7px}
+.row.selected{background:var(--overlay)}
+.row .chevron{width:18px;height:18px;display:flex;align-items:center;justify-content:center;color:var(--subtle)}
+.row .chevron svg{width:12px;height:12px}
+.row .icon{color:var(--subtle);display:flex}
+.name{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
+.figure{font:10.5px/1 ui-monospace,SFMono-Regular,monospace;color:var(--muted)}
+.track{position:absolute;left:28px;right:8px;bottom:1px;height:2px;border-radius:2px;background:color-mix(in srgb,var(--edge) 55%,transparent)}
+.track b{display:block;height:100%;border-radius:2px;background:var(--focus)}
+.track b.done{background:var(--green)}
+.in-group{padding-left:18px}
+.child{padding-left:22px}
+.child .name{font-weight:500;color:var(--subtle)}
+.child.selected .name{color:var(--text)}
+.child .track{left:50px}
+.group{min-height:28px;margin-top:6px;color:var(--subtle);font-size:12px}
+.group .name{font-weight:500}
+.count{font:10.5px/1 ui-monospace,SFMono-Regular,monospace;color:var(--muted)}
+.space{min-height:30px;margin:8px 12px 0;padding:6px 0 0;border-top:1px solid color-mix(in srgb,var(--edge) 60%,transparent);border-radius:0}
+.space.first{border-top:0}
+.space .name{font:600 10.5px/1.6 -apple-system,BlinkMacSystemFont,sans-serif;text-transform:uppercase;letter-spacing:.09em;color:var(--subtle)}
+.glyph{width:12px;height:12px;border-radius:50%;flex:none;display:inline-block}
+.glyph.working{border:2px solid var(--focus);border-right-color:transparent}
+.glyph.done{background:var(--green)}
+.glyph.paused{border:2px solid var(--muted)}
+.needs-you{font-size:10px;line-height:1;padding:3px 6px;border-radius:999px;background:var(--accent);color:var(--on-accent);flex:none}
+.needs-you.quiet{background:transparent;color:var(--muted);border:1px solid var(--edge)}
+.new{outline:2px dashed color-mix(in srgb,var(--accent) 55%,transparent);outline-offset:2px}
+.gone{text-decoration:line-through;opacity:.6}
+.pinned{margin:4px 6px 2px}
+/* Window: sidebar slice, conversation, panel, rail. */
+.window{display:grid;grid-template-columns:minmax(0,1fr) 300px 64px;background:var(--surface);border:1px solid var(--edge);border-radius:12px;overflow:hidden;box-shadow:0 12px 32px color-mix(in srgb,var(--text) 10%,transparent);max-width:1020px;min-height:420px}
+.window.no-panel{grid-template-columns:minmax(0,1fr) 64px}
+.convo{display:flex;flex-direction:column;border-right:1px solid color-mix(in srgb,var(--edge) 60%,transparent)}
+.header{height:52px;display:flex;align-items:center;gap:10px;padding:0 16px;border-bottom:1px solid color-mix(in srgb,var(--edge) 60%,transparent)}
+.header .title{font-weight:600;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.crumb{color:var(--focus);font-weight:500}
+.btn{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;padding:3px 9px;border:1px solid var(--edge);border-radius:7px;color:var(--text);background:var(--surface);white-space:nowrap}
+.btn.primary{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
+.strip{display:flex;align-items:center;gap:10px;padding:8px 16px;font-size:11.5px;color:var(--subtle);border-bottom:1px solid color-mix(in srgb,var(--edge) 40%,transparent)}
+.bar{flex:1;height:4px;border-radius:3px;background:color-mix(in srgb,var(--edge) 55%,transparent);overflow:hidden}
+.bar b{display:block;height:100%;background:var(--focus)}
+.msgs{flex:1;padding:14px 18px;display:flex;flex-direction:column;gap:12px}
+.msg{max-width:560px}
+.msg .who{font-size:11px;color:var(--muted);margin-bottom:2px}
+.msg .body{font-size:12.5px}
+.msg.me{align-self:flex-end;background:var(--overlay);padding:8px 12px;border-radius:10px}
+.msg.from-parent,.msg.from-child{border-left:3px solid var(--focus);padding:6px 10px;background:color-mix(in srgb,var(--focus) 7%,transparent);border-radius:0 8px 8px 0}
+.fold{font-size:11.5px;color:var(--subtle);display:flex;align-items:center;gap:6px}
+.composer{margin:10px 14px 14px;border:1px solid var(--edge);border-radius:10px;padding:9px 12px;color:var(--muted);font-size:12px;display:flex;justify-content:space-between}
+.panel{padding:14px;display:flex;flex-direction:column;gap:10px;border-right:1px solid color-mix(in srgb,var(--edge) 60%,transparent);background:color-mix(in srgb,var(--base) 35%,var(--surface))}
+.panel-title{display:flex;justify-content:space-between;align-items:baseline}
+.card{border:1px solid color-mix(in srgb,var(--edge) 70%,transparent);border-radius:9px;padding:8px 10px;background:var(--surface)}
+.card .line{display:flex;align-items:center;gap:6px}
+.card .meta{font-size:11px;color:var(--subtle);margin-top:2px}
+.rail{display:flex;flex-direction:column;align-items:center;gap:4px;padding:8px 0;background:var(--surface)}
+.rail-btn{position:relative;width:54px;height:50px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;border-radius:9px;color:var(--subtle);font-size:9.5px}
+.rail-btn.on{background:color-mix(in srgb,var(--accent) 10%,transparent);color:var(--accent)}
+.rail-btn .badge{position:absolute;top:3px;right:6px;font-size:9px;line-height:1;padding:2px 4px;border-radius:999px;background:var(--accent);color:var(--on-accent)}
+.rail-btn .badge.work{background:var(--focus);color:var(--base)}
+.rail-btn svg{width:16px;height:16px}
+/* Needs you page. */
+.page{background:var(--surface);border:1px solid var(--edge);border-radius:12px;padding:20px 22px;max-width:1020px;box-shadow:0 12px 32px color-mix(in srgb,var(--text) 10%,transparent)}
+.page h2{font:400 22px/1.2 Georgia,"Times New Roman",serif;letter-spacing:-.02em;margin-bottom:4px}
+.cols{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;margin-top:14px}
+.item{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-top:1px solid color-mix(in srgb,var(--edge) 50%,transparent)}
+.item .what{flex:1;min-width:0}
+.item .where{font-size:11px;color:var(--muted)}
+.pill{font-size:10px;padding:1px 7px;border-radius:999px;border:1px solid var(--edge);color:var(--subtle);white-space:nowrap}
+.pill.red{border-color:var(--red);color:var(--red)}
+.pill.green{border-color:var(--green);color:var(--green)}
+.notes{max-width:820px;margin-top:30px;font-size:12px;color:var(--subtle)}
+.notes li{margin:6px 0}
+@media(max-width:1020px){.studies{grid-template-columns:minmax(0,320px)}.window{grid-template-columns:1fr}.cols{grid-template-columns:1fr}body{padding:16px}}
+</style>
+</head>
+<body>
+<svg style="display:none" aria-hidden="true">
+  <symbol id="down" viewBox="0 0 14 14"><path d="M3 5l4 4 4-4"/></symbol>
+  <symbol id="right" viewBox="0 0 14 14"><path d="M5 3l4 4-4 4"/></symbol>
+  <symbol id="project" viewBox="0 0 14 14"><rect x="2" y="2.5" width="10" height="9" rx="2"/><path d="M2 5.5h10"/></symbol>
+  <symbol id="sub" viewBox="0 0 14 14"><path d="M3.5 2v5.5a1.5 1.5 0 0 0 1.5 1.5h5"/><path d="M8.5 7l2 2-2 2"/></symbol>
+  <symbol id="folder" viewBox="0 0 14 14"><path d="M1.5 4a1 1 0 0 1 1-1h3l1.2 1.5h4.8a1 1 0 0 1 1 1V10.5a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1z"/></symbol>
+  <symbol id="plus" viewBox="0 0 14 14"><path d="M7 2.5v9M2.5 7h9"/></symbol>
+  <symbol id="team" viewBox="0 0 14 14"><circle cx="5" cy="5" r="2"/><circle cx="10" cy="5.5" r="1.6"/><path d="M1.5 11.5c.4-2 1.8-3 3.5-3s3.1 1 3.5 3M8.5 9c.5-.5 1-.7 1.5-.7 1.3 0 2.2.9 2.5 2.4"/></symbol>
+  <symbol id="overview" viewBox="0 0 14 14"><rect x="2" y="2" width="4" height="4" rx="1"/><rect x="8" y="2" width="4" height="4" rx="1"/><rect x="2" y="8" width="4" height="4" rx="1"/><rect x="8" y="8" width="4" height="4" rx="1"/></symbol>
+  <symbol id="tickets" viewBox="0 0 14 14"><path d="M2 4.5h10M2 7h10M2 9.5h6"/></symbol>
+  <symbol id="inbox" viewBox="0 0 14 14"><path d="M2 8l1.5-5h7L12 8v3H2zM2 8h3l1 1.5h2L9 8h3"/></symbol>
+  <symbol id="memory" viewBox="0 0 14 14"><path d="M3 2.5h8v9H3zM5 5h4M5 7.5h4"/></symbol>
+  <symbol id="activity" viewBox="0 0 14 14"><path d="M1.5 7h2.5l1.5-4 3 8 1.5-4h2.5"/></symbol>
+  <symbol id="settings" viewBox="0 0 14 14"><circle cx="7" cy="7" r="2"/><path d="M7 1.5v2M7 10.5v2M1.5 7h2M10.5 7h2M3 3l1.4 1.4M9.6 9.6L11 11M3 11l1.4-1.4M9.6 4.4L11 3"/></symbol>
+  <symbol id="bell" viewBox="0 0 14 14"><path d="M4 9.5V6.5a3 3 0 0 1 6 0v3l1 1.5H3zM6 12.5h2"/></symbol>
+</svg>
+
+<header class="intro">
+  <div class="eyebrow">Design study · parent projects</div>
+  <h1>Big projects own their spin-offs</h1>
+  <p>Today a project that creates another project loses track of it. In this study the project that creates it becomes its <b>parent</b>. The new project becomes a <b>child</b>, nested under the parent. The two can message each other, and you can still open a child and talk to it directly. A child's questions go to its parent first, so the parent only brings you what it can't settle. <b>Agents</b> moves from the header to the right rail, next to Tickets, where agents are out of the way until you want them. A <b>Needs you</b> page lists everything waiting on you across all Spaces. New pieces have a dashed outline. Its projects, tickets and messages are invented Celadon samples.</p>
+</header>
+
+<!-- ───────────── Part 1: sidebar ───────────── -->
+<div class="part"><div class="eyebrow">Part 1</div><h2>The sidebar</h2></div>
+<main class="studies">
+  <section><div class="study-head"><h2>1 · Today</h2></div>
+  <div class="sidebar"><div class="brand"><span class="wordmark">wiffle<i>tree</i></span><span class="ghost"><svg><use href="#plus"/></svg></span></div>
+    <div class="section"><span class="eyebrow">Projects · 14</span></div>
+    <div class="row space first"><span class="chevron"><svg><use href="#down"/></svg></span><span class="name">Celadon</span><span class="count">10</span></div>
+    <div class="row"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Contrast: Which Panes Can Be Dimmed</span><span class="glyph paused"></span></div>
+    <div class="row"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">DNS: website Terraform</span><span class="figure">83%</span><span class="needs-you">1</span><i class="track"><b style="width:83%"></b></i></div>
+    <div class="row"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">CI-Runners</span><span class="figure">100%</span><span class="glyph done"></span><i class="track"><b class="done" style="width:100%"></b></i></div>
+    <div class="row group"><span class="chevron"><svg><use href="#down"/></svg></span><span class="icon"><svg><use href="#folder"/></svg></span><span class="name">Chrome</span><span class="count">2</span></div>
+    <div class="row in-group"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Redo sponsor page</span><span class="figure">100%</span><span class="glyph done"></span></div>
+    <div class="row in-group"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Readable diff colours in pickers</span><span class="figure">40%</span><span class="needs-you">1</span></div>
+    <div class="row group"><span class="chevron"><svg><use href="#down"/></svg></span><span class="icon"><svg><use href="#folder"/></svg></span><span class="name">Neovim</span><span class="count">2</span></div>
+    <div class="row in-group"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Contrast warnings</span><span class="figure">20%</span><span class="needs-you">4</span></div>
+    <div class="row in-group"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">pickers: restore highlights at launch</span><span class="needs-you">1</span></div>
+    <div class="row"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Colour-blind palettes</span><span class="figure">25%</span><span class="glyph paused"></span></div>
+    <div class="row"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Pickers: generated palette check</span><span class="glyph paused"></span></div>
+    <div class="row"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">CI Runners: Improve speed</span><span class="figure">100%</span><span class="glyph done"></span></div>
+  </div>
+  <p class="caption"><b>Ten projects at one level, with seven questions on four of them.</b> "Pickers: restore highlights" was spun off from "Contrast warnings", but nothing shows that. Its coordinator asks you its question, not the project it came from.</p></section>
+
+  <section><div class="study-head"><h2>2 · Parents and children</h2><span class="tag">Proposed</span></div>
+  <div class="sidebar"><div class="brand"><span class="wordmark">wiffle<i>tree</i></span><span class="ghost"><svg><use href="#plus"/></svg></span></div>
+    <div class="row pinned new"><span class="chevron"></span><span class="icon"><svg><use href="#bell"/></svg></span><span class="name">Needs you</span><span class="needs-you">3</span></div>
+    <div class="section"><span class="eyebrow">Projects · 7</span></div>
+    <div class="row space first"><span class="chevron"><svg><use href="#down"/></svg></span><span class="name">Celadon</span><span class="count">7</span></div>
+    <div class="row"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Contrast: Dimmed panes</span><span class="glyph paused"></span></div>
+    <div class="row"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">DNS: website Terraform</span><span class="figure">83%</span><span class="needs-you">1</span><i class="track"><b style="width:83%"></b></i></div>
+    <div class="row"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">CI Runners</span><span class="figure">2/2</span><span class="glyph done"></span><i class="track"><b class="done" style="width:100%"></b></i></div>
+    <div class="row new"><span class="chevron"><svg><use href="#down"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Chrome</span><span class="figure">1/2</span><span class="glyph working"></span><i class="track"><b style="width:60%"></b></i></div>
+    <div class="row child"><span class="chevron"></span><span class="icon"><svg><use href="#sub"/></svg></span><span class="name">Redo sponsor page</span><span class="glyph done"></span></div>
+    <div class="row child"><span class="chevron"></span><span class="icon"><svg><use href="#sub"/></svg></span><span class="name">Readable diff colours</span><span class="needs-you quiet" title="Chrome is handling it">1</span></div>
+    <div class="row new selected"><span class="chevron"><svg><use href="#down"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Neovim</span><span class="figure">0/2</span><span class="needs-you">2</span><i class="track"><b style="width:15%"></b></i></div>
+    <div class="row child"><span class="chevron"></span><span class="icon"><svg><use href="#sub"/></svg></span><span class="name">Contrast warnings</span><span class="needs-you quiet">3</span></div>
+    <div class="row child"><span class="chevron"></span><span class="icon"><svg><use href="#sub"/></svg></span><span class="name">Pickers: restore highlights</span><span class="glyph working"></span></div>
+    <div class="row"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Colour-blind palettes</span><span class="figure">25%</span><span class="glyph paused"></span></div>
+    <div class="row"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Pickers: generated palette check</span><span class="glyph paused"></span></div>
+  </div>
+  <p class="caption"><b>Seven projects, and two orange badges you have to act on.</b> Chrome and Neovim are now projects with their own coordinators, not folders. The two CI projects merged into one, and a hollow badge means the parent is handling that question. Here Neovim answered one of four on its own, and Chrome answered its child's. That leaves two Neovim questions and one DNS question, the 3 on Needs you.</p></section>
+
+  <section><div class="study-head"><h2>3 · Collapsed</h2><span class="tag">Proposed</span></div>
+  <div class="sidebar"><div class="brand"><span class="wordmark">wiffle<i>tree</i></span><span class="ghost"><svg><use href="#plus"/></svg></span></div>
+    <div class="row pinned"><span class="chevron"></span><span class="icon"><svg><use href="#bell"/></svg></span><span class="name">Needs you</span><span class="needs-you">3</span></div>
+    <div class="section"><span class="eyebrow">Projects · 7</span></div>
+    <div class="row space first"><span class="chevron"><svg><use href="#down"/></svg></span><span class="name">Celadon</span><span class="count">7</span></div>
+    <div class="row"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Contrast: Dimmed panes</span><span class="glyph paused"></span></div>
+    <div class="row"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">DNS: website Terraform</span><span class="figure">83%</span><span class="needs-you">1</span></div>
+    <div class="row"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">CI Runners</span><span class="glyph done"></span></div>
+    <div class="row"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Chrome</span><span class="count">+2</span><span class="glyph working"></span></div>
+    <div class="row"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Neovim</span><span class="count">+2</span><span class="needs-you">2</span></div>
+    <div class="row"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Colour-blind palettes</span><span class="glyph paused"></span></div>
+    <div class="row"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Pickers: generated palette check</span><span class="glyph paused"></span></div>
+    <div class="row space"><span class="chevron"><svg><use href="#right"/></svg></span><span class="name">Vyttle</span><span class="count">3</span><span class="glyph working"></span></div>
+    <div class="row space"><span class="chevron"><svg><use href="#right"/></svg></span><span class="name">Personal</span><span class="count">1</span><span class="glyph done"></span></div>
+  </div>
+  <p class="caption"><b>Collapsed, a parent is one row.</b> "+2" says how many children it has. It shows the most urgent state across itself and its children, the same way a collapsed group does today.</p></section>
+</main>
+
+<!-- ───────────── Part 2: parent project ───────────── -->
+<div class="part"><div class="eyebrow">Part 2</div><h2>A parent project, with Agents on the right</h2>
+<p>You talk to Neovim's coordinator as usual. Its children report to it, and their reports fold into its chat as one line each. The <b>2 working</b> button in the header goes away. Agents becomes a rail button with the same count, and its panel groups agents by ticket, then by child project, each folded.</p></div>
+<div class="window">
+  <div class="convo">
+    <div class="header"><span class="title">Neovim</span><span class="btn gone"><svg><use href="#team"/></svg>2 working</span><span class="btn"><svg><use href="#settings"/></svg></span></div>
+    <div class="strip"><span>Celadon · 2 children · 0 of 2 own tickets done</span><div class="bar"><b style="width:15%"></b></div></div>
+    <div class="msgs">
+      <div class="fold new"><svg><use href="#sub"/></svg><b style="color:var(--text);font-weight:500">Pickers: restore highlights</b> reported progress: fix ready for review · 9:40</div>
+      <div class="msg from-child new"><div class="who">Contrast warnings → Neovim · 9:52</div><div class="body">Should comments get a contrast warning when the user hasn't set a minimum ratio? I'm proposing: yes, WCAG AA is always the floor.</div></div>
+      <div class="msg"><div class="who">Neovim coordinator · 9:53</div><div class="body">Answered it myself: this follows the accessibility rule "AA is the floor for every highlight group", already decided in the brain on Nov 4. Sent the answer to Contrast warnings.<br><br>Two questions do need you, both product calls on the user-facing copy. They're in your inbox under Neovim.</div></div>
+      <div class="msg me"><div class="body">How's the whole Neovim effort looking?</div></div>
+      <div class="msg"><div class="who">Neovim coordinator · 10:02</div><div class="body">Pickers is nearly done: its fix is in review, with one Full review round left. Contrast warnings is blocked on your two copy questions, and its palette half is 40% through. Nothing is stale.</div></div>
+    </div>
+    <div class="composer"><span>Message Neovim…</span><span>⏎</span></div>
+  </div>
+  <div class="panel new">
+    <div class="panel-title"><h3>Agents</h3><span class="eyebrow">Neovim</span></div>
+    <div class="card"><div class="line"><span class="glyph working"></span><b style="font-weight:500">nvim · Warnings UI</b></div><div class="meta">Implementer · Opus · 6/9 · 12m</div></div>
+    <div class="eyebrow" style="margin-top:4px">Child projects</div>
+    <div class="card"><div class="line"><svg><use href="#right"/></svg><span class="glyph working"></span><b style="font-weight:500;flex:1">Pickers: restore highlights</b><span class="count">3</span></div><div class="meta">Coordinator + implementer + Codex reviewer</div></div>
+    <div class="card"><div class="line"><svg><use href="#right"/></svg><span class="needs-you quiet">3</span><b style="font-weight:500;flex:1">Contrast warnings</b><span class="count">2</span></div><div class="meta">Coordinator waiting on Neovim · 1 implementer idle</div></div>
+    <p class="caption" style="margin:0">Opening a child's card selects that child project, so you can talk to it directly.</p>
+  </div>
+  <div class="rail">
+    <div class="rail-btn"><svg><use href="#overview"/></svg>Overview</div>
+    <div class="rail-btn new on"><svg><use href="#team"/></svg>Agents<span class="badge work">2</span></div>
+    <div class="rail-btn"><svg><use href="#tickets"/></svg>Tickets</div>
+    <div class="rail-btn"><svg><use href="#inbox"/></svg>Inbox<span class="badge">2</span></div>
+    <div class="rail-btn"><svg><use href="#memory"/></svg>Memory</div>
+    <div class="rail-btn"><svg><use href="#activity"/></svg>Events</div>
+  </div>
+</div>
+<p class="caption"><b>The Agents rail button</b> shows how many agents are working across this project and its children. Tickets stays as it is. The header keeps only Effective settings.</p>
+
+<!-- ───────────── Part 3: child project ───────────── -->
+<div class="part"><div class="eyebrow">Part 3</div><h2>Talking to a child directly</h2>
+<p>A child is a full project with its own coordinator, tickets and agents. Selecting it opens its chat. The header names the parent, and you can click it to go back. Messages from the parent show up in the child's chat, labelled. When you message the child yourself, the parent sees a one-line note, so it doesn't contradict you.</p></div>
+<div class="window no-panel">
+  <div class="convo">
+    <div class="header"><span class="title"><span class="crumb new">← Neovim</span> &nbsp;/&nbsp; Contrast warnings</span><span class="btn"><svg><use href="#settings"/></svg></span></div>
+    <div class="strip"><span>Child of Neovim · questions go to Neovim first</span><div class="bar"><b style="width:20%"></b></div></div>
+    <div class="msgs">
+      <div class="msg"><div class="who">Warnings coordinator · 9:52</div><div class="body">Asked Neovim: should comments get a contrast warning when no minimum ratio is set?</div></div>
+      <div class="msg from-parent new"><div class="who">Neovim → Contrast warnings · 9:53</div><div class="body">Yes, WCAG AA is always the floor. Per the accessibility decision of Nov 4.</div></div>
+      <div class="msg"><div class="who">Warnings coordinator · 9:54</div><div class="body">Thanks. I've updated the palette ticket's brief and resumed its implementer. Two copy questions are still with you through Neovim.</div></div>
+      <div class="msg me"><div class="body">For the warning popup, keep the wording short. One line, no ratio.</div></div>
+      <div class="msg"><div class="who">Warnings coordinator · 10:05</div><div class="body">Got it. That answers one of the two copy questions, so I've closed it and told Neovim.</div></div>
+    </div>
+    <div class="composer"><span>Message Contrast warnings…</span><span>⏎</span></div>
+  </div>
+  <div class="rail">
+    <div class="rail-btn"><svg><use href="#overview"/></svg>Overview</div>
+    <div class="rail-btn new"><svg><use href="#team"/></svg>Agents<span class="badge work">1</span></div>
+    <div class="rail-btn"><svg><use href="#tickets"/></svg>Tickets</div>
+    <div class="rail-btn"><svg><use href="#inbox"/></svg>Inbox</div>
+    <div class="rail-btn"><svg><use href="#memory"/></svg>Memory</div>
+    <div class="rail-btn"><svg><use href="#activity"/></svg>Events</div>
+  </div>
+</div>
+
+<!-- ───────────── Part 4: Needs you ───────────── -->
+<div class="part"><div class="eyebrow">Part 4</div><h2>Needs you</h2>
+<p>Pinned at the top of the sidebar. It's a page Wiffletree builds from its own records, with no agent behind it. It lists only what is waiting on you, sorted by Space, with each entry labelled by its top-level project.</p></div>
+<div class="page new">
+  <h2>Needs you</h2><p style="color:var(--subtle);font-size:12px">3 questions · 2 pull requests · 1 going quiet · 2 ready to close</p>
+  <div class="cols">
+    <div>
+      <div class="eyebrow">Questions</div>
+      <div class="item"><span class="needs-you">?</span><div class="what">User-facing copy: what the popup says when a colour fails<div class="where">Neovim › Contrast warnings · asked 10:00</div></div><span class="btn primary">Answer</span></div>
+      <div class="item"><span class="needs-you">?</span><div class="what">Warnings: do inactive panes count toward the check?<div class="where">Neovim › Contrast warnings · asked 9:58</div></div><span class="btn primary">Answer</span></div>
+      <div class="item"><span class="needs-you">?</span><div class="what">Apply the DNS Terraform after the PR's CI plan passes?<div class="where">DNS: website Terraform · asked yesterday</div></div><span class="btn primary">Answer</span></div>
+      <div class="eyebrow" style="margin-top:14px">Pull requests waiting on you</div>
+      <div class="item"><span class="pill green">passed</span><div class="what">Redo sponsor page → main<div class="where">Chrome › Redo sponsor page · protected branch, only you can merge</div></div><span class="btn">Open PR</span></div>
+      <div class="item"><span class="pill green">passed</span><div class="what">CI runner speed → main<div class="where">CI Runners · protected branch</div></div><span class="btn">Open PR</span></div>
+    </div>
+    <div>
+      <div class="eyebrow">Going quiet</div>
+      <div class="item"><span class="pill">6 days</span><div class="what">Colour-blind palettes: no turn since Nov 17, 25% done<div class="where">Celadon</div></div><span class="btn">Open</span></div>
+      <div class="eyebrow" style="margin-top:14px">Ready to close</div>
+      <div class="item"><span class="pill green">done</span><div class="what">CI Runners: every ticket accepted, PR merged<div class="where">Celadon</div></div><span class="btn">Close</span></div>
+      <div class="item"><span class="pill green">done</span><div class="what">Recipes: UX redesign<div class="where">Personal</div></div><span class="btn">Close</span></div>
+      <div class="eyebrow" style="margin-top:14px">Blocked</div>
+      <p style="font-size:12px;color:var(--subtle);padding-top:6px">Nothing blocked that isn't already a question above.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ───────────── Rules ───────────── -->
+<section class="notes"><div class="eyebrow">How it behaves</div><ul>
+  <li><b>Spin-offs become children.</b> When a coordinator creates a project, the new project is its child. The parent's chat gets the child's reports. Either one can message the other with send_message, the same way a coordinator and its implementer talk today.</li>
+  <li><b>One level only.</b> A child can't have children of its own. If a child needs to spin off work, it asks its parent, and the new project becomes a sibling under the same parent. That keeps the sidebar to two levels.</li>
+  <li><b>The parent fields questions.</b> A child's ask_user goes to its parent first. The parent either answers it, citing the brain or an earlier decision you made, or passes it to you, labelled with the child's name. Product, security, and approval questions always reach you.</li>
+  <li><b>You can always talk to a child.</b> When you do, the parent gets a one-line note saying what you decided.</li>
+  <li><b>Coordinators stop sprawling.</b> A coordinator's first choice is to add a ticket to its own project. It creates a child only for a separate outcome: a different repository set, a different reviewer, or work that would make the parent wait.</li>
+  <li><b>You can build the tree by hand.</b> New project gets a Parent field, and a project's menu gets "Move under…" so you can file an existing project under a parent. "Make this a parent" turns a first-word group like Chrome into a parent project with its own coordinator.</li>
+  <li><b>Closing.</b> A parent can't be closed while it has open children. Closing a parent is still your decision. A parent can only propose it on Needs you.</li>
+  <li><b>Agents</b> moves to the right rail for every project, parent or not. Its badge counts working agents. The header's "N working" button is removed.</li>
+</ul></section>
+
+<section class="notes"><div class="eyebrow">Open questions for you</div><ul>
+  <li><b>Folders become parents?</b> I'd keep first-word groups for loose projects. I'd offer "Make this a parent" on a group, but never convert one automatically.</li>
+  <li><b>Questions routed through the parent:</b> should the inbox show a child's question as soon as it's asked, faded until the parent passes it on? Or only once the parent passes it to you? I'd go with only once passed on, to keep the inbox quiet.</li>
+  <li><b>Needs you as the home screen:</b> should it open when the app starts, instead of the last project?</li>
+</ul></section>
+</body>
+</html>

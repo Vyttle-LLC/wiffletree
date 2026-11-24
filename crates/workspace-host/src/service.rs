@@ -1056,6 +1056,10 @@ impl Service {
                     let mut host = Host::open(home)?;
                     recover_unfinished_turns(&mut host)?;
                     checkout::recover_moves(&mut host)?;
+                    let deleted = worker.clone();
+                    host.notify_worktree_deletions(move || {
+                        let _ = deleted.send_blocking(Event::Wake(0));
+                    });
                     host.delete_removed_worktrees()?;
                     host.settle_pending_worktrees();
                     let directory = tempfile::Builder::new().prefix("aw-").tempdir_in("/tmp")?;
@@ -1876,6 +1880,9 @@ impl Actor {
             if let Err(e) = self.schedule() {
                 eprintln!("Workspace scheduler: {e:#}");
             }
+        }
+        if let Some(due) = self.host.settle_worktree_deletions(now()) {
+            self.wake(due);
         }
         self.refresh_overlaps(now());
         self.refresh_pull_requests(now(), dirty);
@@ -3220,6 +3227,21 @@ impl Actor {
                                 args["base"].as_str(),
                                 reply.clone(),
                             )?;
+                            return Ok(None);
+                        }
+                        // Git waits on GitHub, so the branch is created off the host thread.
+                        "create_branch" => {
+                            only_arguments(
+                                "create_branch",
+                                &args,
+                                &["repository_id", "branch", "start"],
+                            )?;
+                            let creation = self.host.prepare_branch(&id, &args)?;
+                            let (git, reply) = (self.publish_tools.git.clone(), reply.clone());
+                            std::thread::spawn(move || {
+                                let created = creation.run(&git).map_err(|e| format!("{e:#}"));
+                                let _ = reply.try_send(created);
+                            });
                             return Ok(None);
                         }
                         "merge_ticket" => {
@@ -5058,6 +5080,8 @@ impl Actor {
             profile,
             provider_session: runtime.provider_session_id,
             cwd,
+            // A compaction runs no tools.
+            scratch: None,
             prompt: String::new(),
             attachments: vec![],
             socket: self.socket.clone(),
@@ -5069,6 +5093,8 @@ impl Actor {
             thread: None,
             evaluator: None,
             conversation: None,
+            // A compaction runs no shell command.
+            push_branch: None,
         };
         self.run_provider(turn, cancel);
         Ok(())
@@ -5375,6 +5401,14 @@ impl Actor {
             }
             fs::create_dir_all(&cwd)?;
         }
+        let scratch = match runtime.ticket_id.as_deref().filter(|_| !sorting) {
+            Some(ticket) => {
+                let scratch = crate::scratch::ticket_scratch(ticket);
+                fs::create_dir_all(&scratch)?;
+                Some(scratch)
+            }
+            None => None,
+        };
         let run = new_id();
         let cancel = Arc::new(AtomicBool::new(false));
         let token = format!("{}{}", new_id(), new_id());
@@ -5415,6 +5449,9 @@ impl Actor {
         if evaluator.is_some() {
             self.host.evaluation_turn_started(&session.id)?;
         }
+        let push_branch = self
+            .host
+            .push_branch(&session, runtime.ticket_id.as_deref())?;
         let started_at = now();
         let detail = json!({"profile":profile,"provider_session_id":runtime.provider_session_id,"skill_version":1,"selection":runtime.selection,"model_selection_revision":self.host.model_selection()?.revision});
         runtime.last_error = None;
@@ -5437,6 +5474,7 @@ impl Actor {
             profile,
             provider_session: runtime.provider_session_id.filter(|_| !sorting),
             cwd,
+            scratch,
             prompt,
             attachments: input.iter().flat_map(|m| m.attachments.clone()).collect(),
             socket: self.socket.clone(),
@@ -5446,6 +5484,7 @@ impl Actor {
             thread,
             evaluator,
             conversation,
+            push_branch,
         };
         let mut active = Active::new(
             run.clone(),

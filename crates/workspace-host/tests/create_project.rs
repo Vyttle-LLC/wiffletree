@@ -48,6 +48,7 @@ fn a_coordinator_creates_a_project_that_starts_on_its_labelled_brief() {
     .unwrap();
 
     assert_eq!(project.name, "Billing");
+    assert_eq!(project.parent_id.as_ref(), Some(&creator.project_id));
     assert_eq!(
         project.home.as_deref(),
         home.path().join("workspaces/projects/billing").to_str()
@@ -200,6 +201,9 @@ fn only_the_creator_sees_the_created_projects_tickets() {
         json!({"name": "Billing", "brief": "Fix the finding.", "repository_ids": [web.id]}),
     )
     .unwrap();
+    // As a project created before parent links: its own project's children are listed under
+    // child_projects instead.
+    host.set_project_parent(&project.id, None).unwrap();
     let coordinator = coordinator_of(&host, &project.id);
     let ticket = host
         .create_ticket(&coordinator.id, &web.id, "Invoice rounding", "Do")

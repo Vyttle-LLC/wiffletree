@@ -4,6 +4,7 @@ use brain_browser_view::{BrainOpening, BrainTarget, BrainView};
 use gpui_component::{
     Disableable,
     button::ButtonVariants,
+    checkbox::Checkbox,
     menu::{DropdownMenu, PopupMenuItem},
     tooltip::Tooltip,
 };
@@ -520,6 +521,7 @@ impl Inspector {
             .collect();
         let (project_id, project_name) = (project.id.clone(), project.name.clone());
         let from = space.map_or_else(|| "this Space".to_owned(), |s| s.name.clone());
+        let links = filing::space_move_line(snapshot, project, &from);
         let weak = cx.weak_entity();
         let mut section = div().flex().flex_col().gap_1().child(
             section("SPACE", p).child(
@@ -536,6 +538,7 @@ impl Inspector {
                         let (weak, id, name) = (weak.clone(), id.clone(), name.clone());
                         let (project_id, project_name) = (project_id.clone(), project_name.clone());
                         let (preview, from) = (preview.clone(), from.clone());
+                        let links = links.clone();
                         menu = menu.item(PopupMenuItem::new(name.clone()).on_click(
                             move |_, window, cx| {
                                 let move_to = Command::MoveProjectToSpace {
@@ -546,14 +549,16 @@ impl Inspector {
                                 let title = format!("Move {project_name} to {name}?");
                                 let (preview, from, to) =
                                     (preview.clone(), from.clone(), name.clone());
+                                let links = links.clone();
                                 let p = palette(is_dark(cx));
                                 window.open_alert_dialog(cx, move |dialog, _, _| {
                                     let (weak, move_to) = (weak.clone(), move_to.clone());
+                                    let summary = Self::move_summary(&preview, &from, &to, p);
                                     dialog
                                         .title(title.clone())
                                         .confirm()
                                         .ok_text("Move")
-                                        .child(Self::move_summary(&preview, &from, &to, p))
+                                        .child(summary.children(links.clone().map(|l| hint(l, p))))
                                         .on_ok(move |_, window, cx| {
                                             let move_to = move_to.clone();
                                             let _ = weak.update(cx, |view, cx| {
@@ -588,6 +593,21 @@ impl Inspector {
             format!("Logs to {}.", spaces_view::brain_label(space)),
             p,
         ))
+    }
+
+    /// The human's Standing flag, which keeps the project out of Ready to close.
+    fn standing(project: &Project, cx: &mut Context<Self>) -> Checkbox {
+        let project_id = project.id.clone();
+        Checkbox::new("project-standing")
+            .label("Standing: never ready to close")
+            .checked(project.standing)
+            .on_click(cx.listener(move |view, checked: &bool, window, cx| {
+                let command = Command::SetProjectStanding {
+                    project_id: project_id.clone(),
+                    standing: *checked,
+                };
+                view.request(command, window, cx);
+            }))
     }
 
     /// The Move dialog: where entries go, then what the project gains, loses and keeps.
@@ -902,7 +922,9 @@ impl Inspector {
                     .child(Self::stat(agents, "Agents", p)),
             );
             if let Some(project) = index.project(&session.project_id) {
-                body = body.child(self.space_section(project, snapshot, p, cx));
+                body = body
+                    .child(self.space_section(project, snapshot, p, cx))
+                    .child(Self::standing(project, cx));
             }
             let weak = cx.weak_entity();
             let mut repositories = div().flex().flex_col().child(

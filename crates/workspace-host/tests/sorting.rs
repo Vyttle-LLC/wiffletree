@@ -68,6 +68,7 @@ fn sort(folder: &std::path::Path, body: &str) -> (Vec<ProviderEvent>, anyhow::Re
         },
         provider_session: Some("earlier".into()),
         cwd: folder.into(),
+        scratch: None,
         prompt: comments.to_string(),
         attachments: vec![],
         socket: "/tmp/socket".into(),
@@ -77,6 +78,7 @@ fn sort(folder: &std::path::Path, body: &str) -> (Vec<ProviderEvent>, anyhow::Re
         thread: None,
         evaluator: None,
         conversation: None,
+        push_branch: None,
     };
     let mut events = vec![];
     let ran = provider::run(turn, Arc::new(AtomicBool::new(false)), |e| events.push(e));

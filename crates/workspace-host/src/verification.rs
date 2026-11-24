@@ -996,10 +996,12 @@ impl Host {
             kind != "passed" || matches!(session.role, Role::Tester | Role::Reviewer),
             "Only verification agents report passed"
         );
-        let parent = session
-            .parent_id
-            .clone()
-            .context("You have no parent to report to; answer the human in this chat instead")?;
+        // A child project's coordinator reports to its parent project's coordinator.
+        let parent = match &session.parent_id {
+            Some(parent) => Some(parent.clone()),
+            None => self.parent_coordinator(session)?,
+        }
+        .context("You have no parent to report to; answer the human in this chat instead")?;
         let report_id = format!("report:{}:{message_id}", session.id);
         let existing = self.message(&report_id).ok();
         if let Some(existing) = &existing {

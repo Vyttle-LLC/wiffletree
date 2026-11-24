@@ -26,6 +26,8 @@ pub(crate) enum StopReason {
     Startup,
     /// The human pressed Stop in the Processes panel; the agent keeps working.
     StoppedByHuman,
+    /// The ticket's worktree was removed and its folder is being deleted.
+    WorktreeRemoved,
 }
 impl StopReason {
     /// As the record keeps it in `process_groups.ended`.
@@ -37,6 +39,7 @@ impl StopReason {
             Self::Quit => "quit",
             Self::Startup => "startup",
             Self::StoppedByHuman => "stopped_by_human",
+            Self::WorktreeRemoved => "worktree_removed",
         }
     }
     /// Completes "stopped when …" and "still running after …".
@@ -48,6 +51,7 @@ impl StopReason {
             Self::Quit => "Wiffletree quit".into(),
             Self::Startup => "Wiffletree restarted".into(),
             Self::StoppedByHuman => "the human pressed Stop in the Processes panel".into(),
+            Self::WorktreeRemoved => format!("the worktree {agent} worked in was being deleted"),
         }
     }
 }

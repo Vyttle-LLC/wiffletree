@@ -353,6 +353,8 @@ pub(super) fn configure(cmd: &mut ProcessCommand, turn: &Turn, launch: &Conversa
                     "mcp_servers.agent_workspace={{required=true, default_tools_approval_mode=\"approve\", command={}, args=[\"assistant-mcp\"], env_vars=[\"WORKSPACE_SOCKET\",\"WORKSPACE_TOKEN\"] }}",
                     json!(turn.helper)
                 ),
+                // A login shell rebuilds PATH, which would put the guard's folder behind others.
+                "allow_login_shell=false".into(),
             ] {
                 cmd.arg("-c").arg(setting);
             }

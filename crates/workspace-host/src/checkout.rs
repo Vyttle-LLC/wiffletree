@@ -74,6 +74,9 @@ pub(crate) struct Ancestry {
     heads: std::collections::HashMap<String, String>,
     origins: std::collections::HashMap<String, repositories::Origin>,
     may_change: std::collections::HashSet<String>,
+    /// Tickets whose PR head is not in the worktree's HEAD but was once their branch's tip
+    /// here, such as a commit the implementer pushed and then amended.
+    earlier_tips: std::collections::HashSet<String>,
     ancestors: std::collections::HashMap<(PathBuf, String, String), bool>,
 }
 impl KeeperPoll {
@@ -142,6 +145,11 @@ impl KeeperPoll {
                     result
                         .origins
                         .insert(ticket.id.clone(), repositories::read_origin(worktree));
+                    let reference = format!("refs/heads/{}", ticket.branch);
+                    let tips = git_output(git, worktree, &["log", "-g", "--format=%H", &reference]);
+                    if tips.is_ok_and(|tips| tips.lines().any(|tip| tip == pr.head)) {
+                        result.earlier_tips.insert(ticket.id.clone());
+                    }
                 }
                 if ticket.publishing.is_none()
                     && head == pr.head
@@ -176,6 +184,9 @@ impl Ancestry {
     }
     pub(crate) fn may_change(&self, ticket: &Ticket) -> bool {
         self.may_change.contains(&ticket.id)
+    }
+    pub(crate) fn is_earlier_tip(&self, ticket: &Ticket) -> bool {
+        self.earlier_tips.contains(&ticket.id)
     }
     pub(crate) fn head(&self, ticket: &Ticket) -> Option<&str> {
         self.heads.get(&ticket.id).map(String::as_str)

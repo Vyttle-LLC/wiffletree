@@ -46,6 +46,7 @@ fn evaluate(
         },
         provider_session: None,
         cwd: folder.into(),
+        scratch: None,
         prompt: prompt.into(),
         attachments: vec![],
         socket: folder.join("no-socket"),
@@ -58,6 +59,7 @@ fn evaluate(
             codex_home: codex_home.into(),
         }),
         conversation: None,
+        push_branch: None,
     };
     let (mut reply, mut failure, mut reported) = (String::new(), None, None);
     provider::run(

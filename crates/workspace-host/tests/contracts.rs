@@ -83,6 +83,7 @@ fn the_tool_list_offers_ticket_tools_and_no_repository_coordinator_tools() {
         [
             "workspace_context",
             "create_ticket",
+            "create_branch",
             "create_project",
             "request_repository",
             "assign_ticket",
@@ -284,9 +285,10 @@ fn publishing_is_one_tool_only_merge_ticket_merges_and_none_approves_closes_or_c
 #[test]
 fn every_roles_instructions_state_the_publishing_rules_in_wiffletrees_own_words() {
     // The paragraph the human confirmed on October 13, 2026, with the coordinator's waiver of a
-    // blocked review standing since October 29 and its merges into branches that are not
-    // protected since October 30.
-    let confirmed = "Do not deploy, publish, change credentials, touch production, or alter main, the default branch or another shared branch without explicit human authorization. The one standing authorization is the coordinator's merge_ticket into a branch that is not protected. Nothing leaves this machine from your shell: never run git push, and never create, edit, comment on, review, close or merge a pull request yourself. To push a ticket's branch and open or update its pull request, call publish_ticket once the ticket's review has ended. The workspace runs the push itself: without asking when the human allowed the repository's owner, which workspace_context shows, and the review passed or the coordinator waived a blocked review; otherwise only after the human approves each step in their inbox. Write the pull request's title and description by the repository's and the human's own PR rules. Only the coordinator merges a pull request, with merge_ticket, and only into a branch that is not protected; only the human merges into a protected branch, which workspace_context lists for each repository.";
+    // blocked review standing since October 29, its merges into branches that are not
+    // protected since October 30, and the guard, own-branch pushes and create_branch since
+    // November 23.
+    let confirmed = "Do not deploy, publish, change credentials, touch production, or alter main, the default branch or another shared branch without explicit human authorization. The one standing authorization is the coordinator's merge_ticket into a branch that is not protected. Wiffletree guards your shell's git and gh: they refuse every push and every GitHub write it does not allow, so do not work around them with another path to Git or GitHub. Only an implementer may push, only its own ticket's branch to origin, and only until the ticket's pull request is open, as `git push origin HEAD:<branch>`, with --force-with-lease to replace it and never another force. Never create, edit, comment on, review, close or merge a pull request yourself. To open or update a ticket's pull request, call publish_ticket once the ticket's review has ended, whether or not its branch was pushed. The workspace runs the push itself: without asking when the human allowed the repository's owner, which workspace_context shows, and the review passed or the coordinator waived a blocked review; otherwise only after the human approves each step in their inbox. Write the pull request's title and description by the repository's and the human's own PR rules. Only the coordinator merges a pull request, with merge_ticket, and only into a branch that is not protected; only the coordinator creates a branch on origin, with create_branch; only the human merges into a protected branch, which workspace_context lists for each repository.";
     for role in agent_roles() {
         assert!(core(role).contains(confirmed), "{role:?}");
         // With every skill at stock no skill for pull requests is named, and no agent may
@@ -338,8 +340,12 @@ fn every_roles_instructions_state_the_publishing_rules_in_wiffletrees_own_words(
     assert!(coordinator.contains(
         "After a blocked cycle, publish it yourself with waived, under the same rules as accepting with a waiver"
     ));
+    assert!(coordinator.contains("create it with create_branch"));
     let implementer = core(Role::Implementer);
     assert!(implementer.contains("When asked to publish the ticket, write the pull request's title and description by the repository's and the human's PR rules and call publish_ticket."));
+    assert!(implementer.contains(
+        "until the ticket's pull request is open, you may push it to origin to save work"
+    ));
 }
 
 #[test]
@@ -361,17 +367,17 @@ fn the_features_page_says_what_wiffletree_publishes_and_what_it_cannot_prevent()
         "It merges a ticket's pull request only through its own checked merge",
         "It never merges into a protected branch and never approves, closes or comments on a ticket's pull request.",
         "Wiffletree pushes straight to its `main`, with no pull request and no review",
-        "Agents can still run any command on your Mac, including a push or a merge",
+        "Agents can still run any command on your Mac with your credentials",
+        "It is a guardrail, not a sandbox",
         "**Humans own integration.**",
         "You merge into protected branches",
     ] {
         assert!(features.contains(stated), "{stated}");
     }
     let notes = include_str!("../../../docs/DEVELOPMENT.md");
-    assert!(
-        notes
-            .contains("an agent's shell can still run `git push`, `gh pr create` or `gh pr merge`")
-    );
+    assert!(notes.contains("Publishing and merging are guarded, not sandboxed"));
+    assert!(notes.contains("calls GitHub with your token still gets through"));
+    assert!(readme.contains("it is a guardrail, not a sandbox"));
     assert!(notes.contains("merges a ticket's pull request only through `merge_ticket`"));
     for text in [readme, features, notes] {
         let lower = text.to_lowercase();
@@ -404,7 +410,18 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = core(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator core — v17"));
+    assert!(coordinator.contains("Project coordinator core — v19"));
+    // Naming and filing rules, and the parent's duty to escalate what it has no decision for.
+    for rule in [
+        "Prefer adding a ticket to your own project",
+        "Create a project only for a separate outcome",
+        "Name a parent after an outcome, never after an app or a layer",
+        "a child after one deliverable, without repeating its parent's name",
+        "answer a child's question only from decisions already made, such as the brain or the human's earlier answers",
+        "escalate every product, security and approval question to the human",
+    ] {
+        assert!(coordinator.contains(rule), "{rule}");
+    }
     // UI evaluators: the coordinator writes the whole prompt and hears only the end.
     for told in [
         "call start_evaluation",
@@ -435,7 +452,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
     }
     for role in agent_roles() {
         let core = core(role);
-        assert!(core.contains("Wiffletree communication contract — v13"));
+        assert!(core.contains("Wiffletree communication contract — v14"));
         // Every role is told to send a file as a Markdown link to its absolute path.
         assert!(core.contains(
             "When you point the human to a file, write a Markdown link to its absolute path, such as [mockup.html](/Users/me/project/mockup.html), wrapping a path with spaces in angle brackets. Never write a shell command to open it, a code block or a file:// URL."
@@ -625,7 +642,7 @@ fn the_assignment_tools_ask_for_a_job_and_small_work_never_a_model() {
 #[test]
 fn the_implementer_may_object_to_a_finding_instead_of_implementing_it() {
     let core = core(Role::Implementer);
-    assert!(core.contains("Implementer core — v5"));
+    assert!(core.contains("Implementer core — v6"));
     assert!(core.contains("may rebase this ticket's branch onto its base between your turns"));
     assert!(core.contains("Change files with your edit tools"));
     let implementer = provider::skill(Role::Implementer);

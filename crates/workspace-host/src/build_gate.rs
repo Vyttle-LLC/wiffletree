@@ -67,7 +67,7 @@ pub fn install(data: &Path, binary: &Path) -> io::Result<()> {
 }
 
 /// A stable name for a path, so each data folder keeps one gate folder.
-fn fnv(path: &Path) -> u64 {
+pub(crate) fn fnv(path: &Path) -> u64 {
     (path.as_os_str().as_encoded_bytes().iter()).fold(0xcbf2_9ce4_8422_2325, |hash, &byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
     })
