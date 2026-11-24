@@ -168,7 +168,7 @@ impl sidebar::Sidebar {
             cx,
             move |view, project, window, cx| match project {
                 Ok(project) => {
-                    cx.emit(Intent::Amend(Amendment::Project(project)));
+                    cx.emit(Intent::Amend(Amendment::Project(Box::new(project))));
                     if (view.project_edit.as_ref()).is_some_and(|e| e.project_id == project_id) {
                         view.project_edit = None;
                     }

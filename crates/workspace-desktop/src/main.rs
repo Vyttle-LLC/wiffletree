@@ -673,7 +673,7 @@ impl Workspace {
         self.amend_snapshot(|snapshot| match amendment {
             Amendment::Project(project) => {
                 if let Some(saved) = snapshot.projects.iter_mut().find(|p| p.id == project.id) {
-                    *saved = project.clone();
+                    *saved = (**project).clone();
                 }
                 for session in &mut snapshot.sessions {
                     if session.project_id == project.id && session.role == Role::ProjectOrchestrator

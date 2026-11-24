@@ -311,7 +311,7 @@ pub(super) enum Intent {
 /// A change to the snapshot the host has confirmed.
 #[derive(Clone)]
 pub(super) enum Amendment {
-    Project(Project),
+    Project(Box<Project>),
     Projects(Vec<Project>),
     Skill(Box<SkillState>),
 }

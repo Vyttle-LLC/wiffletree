@@ -1524,7 +1524,11 @@ mod tests {
         let mut conversation = turn(Provider::Codex, None, vec![]);
         conversation.session.role = Role::Conversation;
         conversation.conversation = Some(ConversationLaunch::default());
-        for turn in [turn(Provider::Codex, None, vec![]), compaction, conversation] {
+        for turn in [
+            turn(Provider::Codex, None, vec![]),
+            compaction,
+            conversation,
+        ] {
             let args = arguments(&turn);
             let at = args.iter().position(|a| a == "allow_login_shell=false");
             assert!(at.is_some_and(|at| args[at - 1] == "-c"), "{args:?}");
