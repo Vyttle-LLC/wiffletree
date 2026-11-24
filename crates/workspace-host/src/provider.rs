@@ -85,6 +85,8 @@ pub struct Turn {
     pub profile: ModelProfile,
     pub provider_session: Option<String>,
     pub cwd: PathBuf,
+    /// The ticket's scratch folder, which becomes the agent's `TMPDIR`; none outside a ticket.
+    pub scratch: Option<PathBuf>,
     pub prompt: String,
     /// The delivered messages' stored files, in order; images also go to the model as images.
     pub attachments: Vec<Attachment>,
@@ -315,6 +317,9 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
         .process_group(0)
         .at_low_priority()
         .own_descriptors_only();
+    if let Some(scratch) = &turn.scratch {
+        cmd.env("TMPDIR", scratch);
+    }
     if matches!(turn.kind, TurnKind::Sort) {
         constrained::configure(cmd, &turn.profile, keeper::SORTING, keeper::ANSWER_SCHEMA);
         return;
@@ -1042,6 +1047,7 @@ mod tests {
             },
             provider_session: None,
             cwd: PathBuf::from("/tmp"),
+            scratch: None,
             prompt: String::new(),
             attachments: vec![],
             socket: PathBuf::new(),
@@ -1138,6 +1144,24 @@ mod tests {
     }
 
     #[test]
+    fn a_ticket_turn_has_its_scratch_folder_as_tmpdir() {
+        let tmpdir = |turn: &Turn| {
+            let mut cmd = ProcessCommand::new("claude");
+            configure(&mut cmd, turn);
+            cmd.get_envs()
+                .find(|(name, _)| *name == "TMPDIR")
+                .and_then(|(_, value)| value.map(PathBuf::from))
+        };
+        let scratch = PathBuf::from("/var/folders/T/wiffletree-1/scratch/ticket");
+        let ticket = Turn {
+            scratch: Some(scratch.clone()),
+            ..turn(Provider::Claude, None, vec![])
+        };
+        assert_eq!(tmpdir(&ticket), Some(scratch));
+        assert_eq!(tmpdir(&turn(Provider::Claude, None, vec![])), None);
+    }
+
+    #[test]
     fn a_sorting_run_has_no_tools_no_workspace_and_no_earlier_conversation() {
         let sort = Turn {
             kind: TurnKind::Sort,
@@ -1211,6 +1235,7 @@ mod tests {
             },
             provider_session: resume.map(str::to_owned),
             cwd: "/tmp".into(),
+            scratch: None,
             prompt: "Look".into(),
             attachments,
             socket: "/tmp/socket".into(),

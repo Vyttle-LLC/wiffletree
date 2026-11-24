@@ -97,6 +97,7 @@ fn launched_turn(
         },
         provider_session: session,
         cwd: folders.scratch.clone(),
+        scratch: None,
         prompt: prompt.into(),
         attachments: vec![],
         socket: folders.scratch.join("no-socket"),

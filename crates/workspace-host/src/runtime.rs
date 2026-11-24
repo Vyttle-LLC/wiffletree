@@ -31,26 +31,36 @@ pub(crate) fn agent_threads() -> usize {
     std::thread::available_parallelism().map_or(1, |cores| (cores.get() / 2).max(1))
 }
 
-/// The thread caps to give an agent: each one `host_sets` reports unset, at `agent_threads`.
-fn missing_thread_caps(host_sets: impl Fn(&str) -> bool) -> Vec<(&'static str, String)> {
+/// Cargo's debug info for agents' dev and test builds: file and line for panics and backtraces,
+/// without the variables and types only a debugger reads.
+const AGENT_DEBUG_INFO: (&str, &str) = ("CARGO_PROFILE_DEV_DEBUG", "line-tables-only");
+
+/// The build settings to give an agent: the thread caps at `agent_threads` and the debug info,
+/// each only where `host_sets` reports the host's own environment leaves it unset.
+fn agent_build_settings(host_sets: impl Fn(&str) -> bool) -> Vec<(&'static str, String)> {
+    let threads = agent_threads().to_string();
+    let (debug, level) = AGENT_DEBUG_INFO;
     AGENT_THREAD_CAPS
         .into_iter()
-        .filter(|cap| !host_sets(cap))
-        .map(|cap| (cap, agent_threads().to_string()))
+        .map(|cap| (cap, threads.clone()))
+        .chain([(debug, level.to_owned())])
+        .filter(|(name, _)| !host_sets(name))
         .collect()
 }
 
 pub(crate) trait LowPriority {
     /// Runs the child, and so everything it starts, at `AGENT_NICENESS`, with Cargo and nextest
-    /// capped to half the cores unless the host's own environment already sets their caps, and
-    /// with builds sent through the build gate once the host installed it. A
-    /// niceness and the environment are inherited across fork and exec, so they reach tool
-    /// commands that lead their own process group or session too.
+    /// capped to half the cores and Cargo's debug info kept to line tables unless the host's own
+    /// environment already sets them, and with builds sent through the build gate once the host
+    /// installed it. A niceness and the environment are inherited across fork and exec, so they
+    /// reach tool commands that lead their own process group or session too.
     fn at_low_priority(&mut self) -> &mut Self;
 }
 impl LowPriority for Command {
     fn at_low_priority(&mut self) -> &mut Self {
-        self.envs(missing_thread_caps(|cap| std::env::var_os(cap).is_some()));
+        self.envs(agent_build_settings(|name| {
+            std::env::var_os(name).is_some()
+        }));
         self.envs(
             crate::build_gate::agent_env()
                 .iter()
@@ -709,20 +719,30 @@ mod model_tests {
     use super::*;
 
     #[test]
-    fn agents_get_half_the_cores_for_each_thread_cap_the_host_leaves_unset() {
+    fn agents_get_each_build_setting_the_host_leaves_unset() {
         let half = agent_threads().to_string();
+        let debug = ("CARGO_PROFILE_DEV_DEBUG", "line-tables-only".to_owned());
         assert_eq!(
-            missing_thread_caps(|_| false),
+            agent_build_settings(|_| false),
+            [
+                ("CARGO_BUILD_JOBS", half.clone()),
+                ("NEXTEST_TEST_THREADS", half.clone()),
+                debug.clone(),
+            ]
+        );
+        assert_eq!(
+            agent_build_settings(|name| name == "CARGO_BUILD_JOBS"),
+            [("NEXTEST_TEST_THREADS", half.clone()), debug]
+        );
+        // A debug level the host sets is the human's and is passed on as it is.
+        assert_eq!(
+            agent_build_settings(|name| name == "CARGO_PROFILE_DEV_DEBUG"),
             [
                 ("CARGO_BUILD_JOBS", half.clone()),
                 ("NEXTEST_TEST_THREADS", half)
             ]
         );
-        assert_eq!(
-            missing_thread_caps(|cap| cap == "CARGO_BUILD_JOBS"),
-            [("NEXTEST_TEST_THREADS", agent_threads().to_string())]
-        );
-        assert!(missing_thread_caps(|_| true).is_empty());
+        assert!(agent_build_settings(|_| true).is_empty());
     }
 
     #[test]

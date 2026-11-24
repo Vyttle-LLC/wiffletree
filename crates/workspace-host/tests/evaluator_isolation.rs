@@ -46,6 +46,7 @@ fn evaluate(
         },
         provider_session: None,
         cwd: folder.into(),
+        scratch: None,
         prompt: prompt.into(),
         attachments: vec![],
         socket: folder.join("no-socket"),
