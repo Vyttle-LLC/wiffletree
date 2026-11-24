@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Disk use study</title>
+<!-- Static study for disk use, reclaiming build output and the low-space guard: no script, no network, simulated data. -->
+<style>
+:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+h2{font:500 14px/1.3 inherit;margin:0 0 4px}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.subtle{color:var(--subtle)}
+.mono{font:11px/1.5 ui-monospace,SFMono-Regular,monospace;overflow-wrap:anywhere}
+.intro{max-width:860px;margin-bottom:24px}
+.intro p{color:var(--subtle);font-size:12px}
+.stack{display:grid;gap:26px}
+.panel{background:var(--surface);border:1px solid var(--edge);border-radius:14px;padding:16px}
+.caption{margin:10px 2px 0;font-size:11px;color:var(--subtle);max-width:900px}
+.caption b{color:var(--text);font-weight:500}
+.section{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.section .eyebrow{flex:1}
+.pill{flex:none;padding:1px 7px;border-radius:20px;font-size:10.5px;font-weight:500;white-space:nowrap}
+.pill.subtle{color:var(--subtle);background:var(--overlay)}
+.pill.green{color:var(--green);background:color-mix(in srgb,var(--green) 12%,transparent)}
+.pill.focus{color:var(--focus);background:color-mix(in srgb,var(--focus) 12%,transparent)}
+.pill.yellow{color:var(--yellow);background:color-mix(in srgb,var(--yellow) 14%,transparent)}
+.pill.red{color:var(--red);background:color-mix(in srgb,var(--red) 12%,transparent)}
+.btn{padding:4px 11px;border-radius:7px;font-size:12px;font-weight:500;border:1px solid transparent;white-space:nowrap}
+.btn.ghost{color:var(--subtle);border-color:var(--edge)}
+.btn.primary{background:var(--focus);color:var(--surface)}
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+/* Meters */
+.tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:16px}
+.tile{border:1px solid color-mix(in srgb,var(--edge) 55%,transparent);background:var(--base);border-radius:10px;padding:10px 12px}
+.tile .big{font:400 24px/1.2 Georgia,serif;letter-spacing:-.02em}
+.tile .small{font-size:11px;color:var(--subtle)}
+.meter{position:relative;height:10px;border-radius:5px;background:var(--overlay);margin:8px 0 4px;overflow:visible}
+.meter .fill{position:absolute;left:0;top:0;bottom:0;border-radius:5px}
+.meter .mark{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--text);opacity:.55}
+.meter .mark.soft{background:var(--yellow);opacity:1}
+.meter .mark.hard{background:var(--red);opacity:1}
+.legend{display:flex;justify-content:space-between;font-size:10.5px;color:var(--muted)}
+/* Settings */
+.settings{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:18px}
+.setting label{display:block;font-size:11.5px;color:var(--subtle);margin-bottom:3px}
+.field{display:inline-block;border:1px solid var(--edge);border-radius:7px;padding:2px 9px;background:var(--surface);font-size:12.5px;min-width:90px}
+.setting .hint{font-size:10.5px;color:var(--muted);margin-top:3px}
+/* Ticket table */
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;font-weight:500;color:var(--subtle);font-size:11px;padding:6px 8px;border-bottom:1px solid var(--edge)}
+td{padding:7px 8px;border-bottom:1px solid color-mix(in srgb,var(--edge) 30%,transparent);vertical-align:top}
+td.num,th.num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+tr.group td{background:var(--base);font-size:11px;color:var(--subtle);font-weight:500;padding:5px 8px}
+.bar{display:inline-block;height:6px;border-radius:3px;background:var(--accent);vertical-align:middle;margin-right:6px;opacity:.8}
+.bar.src{background:var(--focus)}
+.why{font-size:10.5px;color:var(--muted)}
+/* Agents panel row */
+.row{display:flex;align-items:flex-start;gap:8px;padding:6px 8px;border-radius:6px;font-size:12.5px}
+.row .dot{width:6px;height:6px;border-radius:50%;margin:7px 3px 0 0;flex:none;background:var(--focus)}
+.row .dot.done{background:var(--muted)}
+.row .stackline{flex:1;min-width:0}
+.diskline{font-size:11px;color:var(--subtle)}
+.new{box-shadow:inset 2px 0 0 var(--accent);padding-left:10px}
+/* Notices and inbox */
+.notice{display:flex;gap:8px;align-items:flex-start;padding:8px 10px;border-radius:8px;background:var(--base);font-size:12px;border:1px solid color-mix(in srgb,var(--edge) 50%,transparent)}
+.notice+.notice{margin-top:8px}
+.notice .t{flex:1}
+.notice .when{font-size:10.5px;color:var(--muted);white-space:nowrap}
+.card{border:1px solid color-mix(in srgb,var(--edge) 55%,transparent);background:var(--base);border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:8px}
+.card .ask{font-size:13.5px;font-weight:500}
+.card.danger{border-left:3px solid var(--red)}
+.card.warn{border-left:3px solid var(--yellow)}
+.actions{display:flex;justify-content:flex-end;gap:8px}
+dl{display:grid;grid-template-columns:110px minmax(0,1fr);gap:3px 10px;font-size:12px;margin:0}
+dt{color:var(--subtle)}dd{margin:0}
+.notes{max-width:880px;margin-top:26px;font-size:12px;color:var(--subtle)}
+.notes li{margin:6px 0}
+.notes b{color:var(--text);font-weight:500}
+@media(max-width:980px){.two,.tiles,.settings{grid-template-columns:minmax(0,1fr)}body{padding:16px}}
+</style>
+</head>
+<body>
+
+<header class="intro">
+  <div class="eyebrow">Design study · Disk use</div>
+  <h1>Build output stays within a budget you set, and you can see where the space went.</h1>
+  <p>Static study for the last ticket of the disk-growth work, requirement 6 plus the settings for requirements 3 and 4. It shows (a) a new Settings › Disk page with free space, the build-output budget and each ticket's use; (b) the same figure as one line on a ticket in the Agents panel; and (c) the quiet notices and Inbox cards for reclaiming, a removal that keeps failing, and the low-space guard. New parts have a red edge. Figures are sample data drawn from the 2026-11-23 incident.</p>
+</header>
+
+<div class="stack">
+
+<!-- (a) Settings › Disk -->
+<section>
+  <div class="panel" aria-label="Settings, Disk">
+    <div class="section"><div class="eyebrow">Settings · Disk</div><span class="btn ghost">Reclaim idle build output now</span></div>
+
+    <div class="tiles">
+      <div class="tile">
+        <div class="small">Free on this Mac's disk</div>
+        <div class="big">41 GB <span class="small">of 460 GB</span></div>
+        <div class="meter" title="Free space, with the soft and hard floors">
+          <div class="fill" style="width:8.9%;background:var(--yellow)"></div>
+          <div class="mark soft" style="left:5.4%"></div>
+          <div class="mark hard" style="left:1.1%"></div>
+        </div>
+        <div class="legend"><span>hard floor 5 GB · soft floor 25 GB</span><span>free</span></div>
+      </div>
+      <div class="tile">
+        <div class="small">Build output, all tickets</div>
+        <div class="big">131 GB <span class="small">budget 100 GB</span></div>
+        <div class="meter" title="Build output against the budget">
+          <div class="fill" style="width:100%;background:var(--red);opacity:.75"></div>
+        </div>
+        <div class="legend"><span class="bad" style="color:var(--red)">31 GB over · reclaiming 3 idle tickets</span><span></span></div>
+      </div>
+      <div class="tile">
+        <div class="small">Source and checkouts</div>
+        <div class="big">22 GB <span class="small">143 worktrees</span></div>
+        <div class="meter"><div class="fill" style="width:22%;background:var(--focus)"></div></div>
+        <div class="legend"><span>never reclaimed</span><span></span></div>
+      </div>
+    </div>
+
+    <div class="settings">
+      <div class="setting"><label>Build output budget</label><span class="field">100 GB</span><div class="hint">Over it, idle tickets' build output goes first, least recently used first.</div></div>
+      <div class="setting"><label>Reclaim when idle for</label><span class="field">24 hours</span><div class="hint">No agent turn in that time, or the ticket is accepted or closed.</div></div>
+      <div class="setting"><label>Soft floor</label><span class="field">25 GB free</span><div class="hint">Below it, idle build output is reclaimed before a build or turn starts.</div></div>
+      <div class="setting"><label>Hard floor</label><span class="field">5 GB free</span><div class="hint">Below it, new builds wait and you are told.</div></div>
+    </div>
+
+    <table aria-label="Disk use per ticket">
+      <thead><tr><th>Ticket</th><th class="num">Source</th><th class="num">Build output</th><th>Last agent turn</th><th>State</th><th></th></tr></thead>
+      <tbody>
+        <tr class="group"><td colspan="6">Wiffletree: Build Fixes · Vyttle-LLC/wiffletree</td></tr>
+        <tr><td>Detect build output per language</td><td class="num">152 MB</td><td class="num"><span class="bar" style="width:24px"></span>8.1 GB</td><td>12 min ago</td><td><span class="pill focus">building</span></td><td></td></tr>
+        <tr><td>Agent builds produce less output<div class="why">target/ 4.8 GB · scratch 7.2 GB</div></td><td class="num">151 MB</td><td class="num"><span class="bar" style="width:36px"></span>12 GB</td><td>3 h ago</td><td><span class="pill subtle">PR open</span></td><td><span class="btn ghost">Reclaim</span></td></tr>
+        <tr class="group"><td colspan="6">Wiffletree: computer-use agents for UI evaluation</td></tr>
+        <tr><td>Full-desktop driver in an Evaluator helper app</td><td class="num">160 MB</td><td class="num"><span class="bar" style="width:90px"></span>31 GB</td><td>2 days ago</td><td><span class="pill yellow">reclaiming</span></td><td></td></tr>
+        <tr><td>App driver over the automation socket<div class="why">Left alone: <span class="mono">build/</span> holds tracked files</div></td><td class="num">158 MB</td><td class="num"><span class="bar" style="width:0"></span>0 B</td><td>19 days ago</td><td><span class="pill green">reclaimed 25 GB</span></td><td></td></tr>
+        <tr class="group"><td colspan="6">Chat · Sage-Social/sagechat-app-watchos</td></tr>
+        <tr><td>Kid chat set-up and add device<div class="why">DerivedData/sagechat-app-watchos-a1b2… 3.1 GB · Pods 0.9 GB</div></td><td class="num">410 MB</td><td class="num"><span class="bar" style="width:12px"></span>4.0 GB</td><td>5 h ago</td><td><span class="pill subtle">idle</span></td><td><span class="btn ghost">Reclaim</span></td></tr>
+        <tr class="group"><td colspan="6">Removed worktrees still being deleted</td></tr>
+        <tr><td><span class="mono">…/wiffletree/.removing-cf6255af</span><div class="why">Permission denied · 4 attempts · next in 2 min</div></td><td class="num">—</td><td class="num">16 GB</td><td>—</td><td><span class="pill red">delete failing</span></td><td><span class="btn ghost">Show in Finder</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="caption"><b>Settings › Disk.</b> One page for the whole machine, because the disk is shared across Spaces. Tickets are grouped by project, largest first inside a group. "Reclaim" deletes that ticket's build output now and keeps its source; it is hidden while a build runs there. A row's small line names where the space is when it is outside <span class="mono">target/</span>-style folders (Xcode DerivedData, the ticket's scratch folder) or why something was left alone. Sizes refresh in the background, at most every few minutes.</p>
+</section>
+
+<!-- (b) Agents panel -->
+<section class="two">
+  <div>
+    <div class="panel" aria-label="Agents panel">
+      <div class="section"><div class="eyebrow">Agents panel · Wiffletree: Build Fixes</div></div>
+      <div class="row"><span class="dot"></span><div class="stackline">wiffletree · Detect build output per language
+        <div class="diskline new">8.1 GB build output · 152 MB source</div></div></div>
+      <div class="row"><span class="dot done"></span><div class="stackline">wiffletree · Agent builds produce less output
+        <div class="diskline new">12 GB build output · 151 MB source · <span style="color:var(--focus)">Reclaim</span></div></div></div>
+      <div class="row"><span class="dot done"></span><div class="stackline">wiffletree · Worktree removal always finishes
+        <div class="diskline new">Build output reclaimed · 149 MB source</div></div></div>
+    </div>
+    <p class="caption"><b>Agents panel.</b> One quiet line per ticket under its existing rows. "Reclaim" appears only when the ticket is idle and has more than 1 GB of build output.</p>
+  </div>
+
+  <!-- (c) Notices and Inbox -->
+  <div>
+    <div class="panel" aria-label="Notices and Inbox">
+      <div class="section"><div class="eyebrow">Coordinator chat · quiet notices</div></div>
+      <div class="notice new"><div class="t">Reclaimed 38 GB of build output from 3 idle tickets: build output was 131 GB, over the 100 GB budget.</div><span class="when">14:02</span></div>
+      <div class="notice new"><div class="t">Free space fell to 22 GB, below the 25 GB soft floor. Reclaimed 12 GB from "Agent builds produce less output" before the next build.</div><span class="when">15:40</span></div>
+
+      <div class="section" style="margin-top:16px"><div class="eyebrow">Inbox</div></div>
+      <div class="card danger new">
+        <div class="ask">Builds are waiting: only 4.6 GB is free.</div>
+        <dl><dt>Hard floor</dt><dd>5 GB</dd><dt>Waiting</dt><dd>3 builds in 3 tickets</dd><dt>Reclaimed</dt><dd>Everything idle; 46 GB is in tickets with a build in progress or a recent turn</dd></dl>
+        <div class="actions"><span class="btn ghost">Open Settings › Disk</span><span class="btn primary">Reclaim all but running builds</span></div>
+      </div>
+      <div class="card warn new" style="margin-top:10px">
+        <div class="ask">A removed worktree could not be deleted.</div>
+        <dl><dt>Folder</dt><dd class="mono">~/wiffletree/tasks/…/wiffletree/.removing-cf6255af</dd><dt>Size</dt><dd>16 GB</dd><dt>Why</dt><dd>Permission denied (os error 13), 3 attempts</dd></dl>
+        <div class="actions"><span class="btn ghost">Show in Finder</span><span class="btn primary">Retry now</span></div>
+      </div>
+    </div>
+    <p class="caption"><b>Notices and Inbox.</b> Reclaims are quiet notices in the project's chat and fold like the PR watcher's. Only the hard floor and a failing delete reach the Inbox, because only those need you.</p>
+  </div>
+</section>
+
+</div>
+
+<div class="notes">
+  <div class="eyebrow">How it behaves</div>
+  <ol>
+    <li><b>Build output</b> is what the detector finds: ecosystem defaults, <span class="mono">CACHEDIR.TAG</span> folders, a repository's committed <span class="mono">.wiffletree/build-output</span>, the worktree's Xcode DerivedData, and the ticket's scratch folder. Folders it is unsure of are never reclaimed and are named on the row.</li>
+    <li><b>Reclaiming</b> deletes build output and keeps source, uncommitted changes and untracked files. It never touches a ticket with a build in progress or an agent in a turn.</li>
+    <li><b>Order</b>: accepted or closed tickets first, then idle ones, least recently used first.</li>
+    <li><b>Removing a ticket</b> deletes its worktree, its DerivedData and its scratch folder together.</li>
+  </ol>
+  <div class="eyebrow" style="margin-top:14px">Questions for you (my recommendation first)</div>
+  <ol>
+    <li><b>Where:</b> a Settings › Disk page plus a line in the Agents panel (recommended), or the Agents panel only?</li>
+    <li><b>Manual Reclaim buttons:</b> keep them (recommended), or make reclaiming fully automatic?</li>
+    <li><b>Hard-floor card:</b> offer "Reclaim all but running builds", which also reclaims recently used tickets (recommended), or only point to Settings › Disk?</li>
+  </ol>
+</div>
+</body>
+</html>

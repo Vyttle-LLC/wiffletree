@@ -1604,6 +1604,8 @@ mod tests {
         assert!(message("answer:a", "Human answer to Q: yes").from_human());
         assert!(!message("pr:t:merged:141", "PR #141 merged.").from_human());
         assert!(!message("verification:t:1:outcome", "Passed").from_human());
+        let reclaimed = message("reclaim:t:17", "Reclaimed 12 GB of build output");
+        assert!(!reclaimed.from_human() && peer_message(&reclaimed, "s"));
         let mut reply = message("output:r", "Done");
         reply.sender = Some("agent".into());
         assert!(!reply.from_human());

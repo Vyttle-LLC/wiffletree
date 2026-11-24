@@ -417,6 +417,9 @@ pub fn disk_use() -> Ask<DiskUse> {
 pub fn reclaim_build_output(ticket_id: Option<String>) -> Ask<DiskUse> {
     Ask::new(Command::ReclaimBuildOutput { ticket_id })
 }
+pub fn retry_delete(path: String) -> Ask<DiskUse> {
+    Ask::new(Command::RetryDelete { path })
+}
 pub fn remote_access() -> Ask<RemoteAccess> {
     Ask::new(Command::RemoteAccess)
 }

@@ -193,6 +193,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::SetBuildsAtOnce { .. }
         | Command::SetDiskSettings { .. }
         | Command::ReclaimBuildOutput { .. }
+        | Command::RetryDelete { .. }
         | Command::SetCheckIns { .. }
         | Command::SetOwnerAllowed { .. }
         | Command::SetKeeper { .. }

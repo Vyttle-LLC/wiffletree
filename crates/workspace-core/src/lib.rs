@@ -2960,11 +2960,19 @@ pub const PROJECT_BRIEF_PREFIX: &str = "project-brief:";
 pub const ASSISTANT_NOTICE_PREFIX: &str = "assistant:";
 /// The id prefix of the notice a parent's coordinator gets when its child creates a sibling.
 pub const CHILD_PROJECT_PREFIX: &str = "child-project:";
+/// The id prefix of the quiet notice that a ticket's build output was reclaimed.
+pub const RECLAIM_NOTICE_PREFIX: &str = "reclaim:";
+/// The operation prefix of the Inbox card saying builds wait under the hard floor, followed by
+/// when it began.
+pub const BUILDS_HELD_OPERATION: &str = "builds-held:";
+/// The operation prefix of the Inbox card saying a folder could not be deleted, followed by
+/// `<recorded at>:<the folder's name>`.
+pub const DELETE_FAILED_OPERATION: &str = "worktree-delete-failed:";
 /// The id prefixes of the host's other messages without a sender: verification results, kept
 /// worktrees, migration notices, publish, merge, retarget and repository request results, process
-/// notices, project briefs, child project notices, evaluator runs and the Assistant's notices.
-/// Inbox answers (`answer:`) carry the human's words.
-const HOST_NOTICE_PREFIXES: [&str; 12] = [
+/// notices, project briefs, child project notices, evaluator runs, the Assistant's notices and
+/// reclaim notices. Inbox answers (`answer:`) carry the human's words.
+const HOST_NOTICE_PREFIXES: [&str; 13] = [
     VERIFICATION_NOTICE_PREFIX,
     WORKTREE_KEPT_PREFIX,
     MIGRATION_PREFIX,
@@ -2977,6 +2985,7 @@ const HOST_NOTICE_PREFIXES: [&str; 12] = [
     CHILD_PROJECT_PREFIX,
     EVALUATION_PREFIX,
     ASSISTANT_NOTICE_PREFIX,
+    RECLAIM_NOTICE_PREFIX,
 ];
 /// A ticket's latest verification cycle: rounds of concurrent, commit-pinned verifier turns.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -4304,6 +4313,11 @@ pub enum Command {
     ReclaimBuildOutput {
         ticket_id: Option<String>,
     },
+    /// Attempts the waiting delete of the folder at `path` now instead of at its next retry.
+    /// Answered with `DiskUse`.
+    RetryDelete {
+        path: String,
+    },
     /// Validates and saves both check-in thresholds; answers with `HostSettings`.
     SetCheckIns {
         child_turns: u32,
@@ -4767,6 +4781,7 @@ impl Command {
             | Self::SetBuildsAtOnce { .. }
             | Self::SetDiskSettings { .. }
             | Self::ReclaimBuildOutput { .. }
+            | Self::RetryDelete { .. }
             | Self::SetCheckIns { .. }
             | Self::SetOwnerAllowed { .. }
             | Self::SetKeeper { .. }

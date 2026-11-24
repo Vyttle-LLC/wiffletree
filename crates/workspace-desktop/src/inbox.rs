@@ -239,24 +239,30 @@ impl Inbox {
             .session(&item.session_id)
             .map_or("Agent".to_owned(), |s| s.name.clone());
         let evaluator = evaluations::EvaluatorCard::of(item);
+        let disk_card = disk_use::DiskCard::of(&item.operation_id);
+        // The hard floor's card is red-edged and a failing delete's yellow, as the study draws them.
+        let disk_edge = disk_card.as_ref().map(|card| match card {
+            disk_use::DiskCard::BuildsHeld => p.red,
+            disk_use::DiskCard::DeleteFailed(_) => p.yellow,
+        });
         let header = div()
             .flex()
             .items_center()
             .justify_between()
             .gap_2()
             .child(hint(asker, p).text_ellipsis())
-            .child(if evaluator.is_some() {
-                pill("UI evaluators", p.focus)
-            } else if item.is_permission() {
-                pill("Approval", p.yellow)
-            } else {
-                pill("Question", p.focus)
+            .child(match (&evaluator, disk_edge) {
+                (Some(_), _) => pill("UI evaluators", p.focus),
+                (None, Some(color)) => pill("Disk", color),
+                (None, None) if item.is_permission() => pill("Approval", p.yellow),
+                (None, None) => pill("Question", p.focus),
             });
         let approval = evaluator
             .is_none()
             .then(|| self.approval_card(item))
             .flatten();
         let (body, actions) = match (approval, &item.repository_request, &evaluator) {
+            _ if let Some(disk_card) = &disk_card => self.disk_card(item, disk_card, cx),
             (_, _, Some(card)) => self.evaluator_card(item, card, p, cx),
             (Some(approval), _, _) => {
                 let findings = self.findings.get(&item.id).map_or(&[][..], Vec::as_slice);
@@ -274,7 +280,14 @@ impl Inbox {
             (None, None, None) => self.question(item, answering, max_height.is_none(), p, cx),
         };
         let body = body.flex().flex_col().gap_2();
-        let entry = card(p).child(header);
+        let edge = |color| {
+            let strip = div().absolute().left_0().top_0().bottom_0().w(px(3.));
+            strip.rounded_l_lg().bg(color)
+        };
+        let entry = card(p)
+            .relative()
+            .children(disk_edge.map(edge))
+            .child(header);
         match max_height {
             // Keyed by item, so stepping to another decision starts at its top.
             Some(height) => entry.max_h(height).child(
@@ -455,6 +468,62 @@ impl Inbox {
                 v.allow_choices.insert(id.clone(), permission);
                 c.notify();
             }))
+    }
+    /// A card the disk work raised: its notice, then `disk_use::card_actions`' buttons, the
+    /// last one primary.
+    fn disk_card(
+        &self,
+        item: &Attention,
+        card: &disk_use::DiskCard,
+        cx: &mut Context<Self>,
+    ) -> (Div, Div) {
+        use disk_use::CardAction;
+        let body = div().children(self.prompts.get(&item.id).map(Linked::view));
+        let on_this_mac = self.bridge.remote().is_none();
+        let offered = disk_use::card_actions(card, disk_use::current(cx), on_this_mac);
+        let last = offered.len() - 1;
+        // Wrapped, so the hard floor's two long buttons fit the Inbox panel.
+        let mut actions = div().flex().flex_wrap().justify_end().gap_2();
+        for (at, action) in offered.into_iter().enumerate() {
+            let label = match &action {
+                CardAction::OpenSettings => "Open Settings › Disk",
+                CardAction::ReclaimAll => "Reclaim all but running builds",
+                CardAction::Dismiss => "Dismiss",
+                CardAction::ShowInFinder(_) => "Show in Finder",
+                CardAction::RetryNow(_) => "Retry now",
+            };
+            let id = item.id.clone();
+            let drawn = button(SharedString::from(format!("disk-{at}-{id}")))
+                .label(label)
+                .map(|b| if at == last { b.primary() } else { b.ghost() });
+            let drawn = match action {
+                CardAction::OpenSettings => {
+                    drawn.on_click(|_, _, cx| settings::Settings::open_at_disk(cx))
+                }
+                CardAction::ShowInFinder(path) => {
+                    drawn.on_click(move |_, _, cx| cx.reveal_path(std::path::Path::new(&path)))
+                }
+                CardAction::ReclaimAll => {
+                    ui::gated(drawn, &self.shared.host).on_click(move |_, window, cx| {
+                        let ask = ask::reclaim_build_output(None);
+                        disk_use::ask(ask, Some(window.window_handle()), cx)
+                    })
+                }
+                CardAction::RetryNow(path) => {
+                    ui::gated(drawn, &self.shared.host).on_click(move |_, window, cx| {
+                        let ask = ask::retry_delete(path.clone());
+                        disk_use::ask(ask, Some(window.window_handle()), cx)
+                    })
+                }
+                CardAction::Dismiss => {
+                    ui::gated(drawn, &self.shared.host).on_click(cx.listener(move |v, _, w, c| {
+                        v.request(Command::DismissAttention { id: id.clone() }, w, c)
+                    }))
+                }
+            };
+            actions = actions.child(drawn);
+        }
+        (body, actions)
     }
     /// A permission request's operation, then Deny and Approve once.
     fn permission(&self, item: &Attention, p: Palette, cx: &mut Context<Self>) -> (Div, Div) {
