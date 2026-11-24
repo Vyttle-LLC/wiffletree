@@ -68,11 +68,11 @@ The full explanation of everything below is in **[docs/FEATURES.md](docs/FEATURE
   </tr>
   <tr>
     <td><img src="docs/images/issues.png" alt="The Issues page as a board, with demo issues in Triage, Backlog, Todo and In progress columns"></td>
-    <td><img src="docs/images/assistant.png" alt="The Assistant as an earlier release showed it, answering a status question in the Tidepool Space and saving two outputs to Boards"></td>
+    <td><img src="docs/images/assistant.png" alt="The Assistant's one conversation: it answers a contrast question, starts work in the Celadon Space with a work card, brings up a decision from that work, and the rail lists Needs you, Running, Loops and Done recently"></td>
   </tr>
   <tr>
     <td align="center"><sub>Issues are plain files in your repository.</sub></td>
-    <td align="center"><sub>The Assistant answers and saves outputs to Boards (earlier release shown).</sub></td>
+    <td align="center"><sub>The Assistant answers, runs work for you and asks only what needs you.</sub></td>
   </tr>
   <tr>
     <td><img src="docs/images/models.png" alt="The Models page's Who runs what table, with a first choice, a next choice, a small-work line and a Right now column for each job"></td>
