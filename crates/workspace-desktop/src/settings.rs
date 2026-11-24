@@ -5,6 +5,7 @@
 //! computers it is paired with, and the host the window drives, with its workspace folder, builds
 //! at once and, on This Mac, its remote access. A setting belongs to the Mac whose agents it runs.
 mod appearance;
+mod disk;
 mod remote_access;
 mod repository;
 mod screen_control;
@@ -55,6 +56,7 @@ pub(super) struct Settings {
     screen: screen_control::Reading,
     /// Request access waits for the human to answer macOS.
     requesting: bool,
+    disk: disk::DiskForm,
 }
 
 /// A check-in threshold's presets, the unit they count and how a choice sets it.
@@ -82,11 +84,15 @@ const COORDINATOR_TURNS: Threshold = Threshold {
 impl Settings {
     /// Focuses the Settings window, opening it first if none is open.
     pub(super) fn open(cx: &mut App) {
-        Self::open_at(false, cx);
+        Self::open_at(None, cx);
     }
     /// Opens Settings scrolled to the Settings repository section, as the sync mark does.
     pub(super) fn open_at_repository(cx: &mut App) {
-        Self::open_at(true, cx);
+        Self::open_at(Some(Block::Repository), cx);
+    }
+    /// Opens Settings scrolled to the Disk section, as the Inbox's hard-floor card does.
+    pub(super) fn open_at_disk(cx: &mut App) {
+        Self::open_at(Some(Block::Disk), cx);
     }
     /// The switcher selected another host: an open Settings window shows that host's settings.
     pub(super) fn host_selected(cx: &mut App) {
@@ -131,20 +137,20 @@ impl Settings {
             self.ask_remote(ask::remote_access(), cx);
         }
     }
-    fn open_at(at_repository: bool, cx: &mut App) {
+    fn open_at(at: Option<Block>, cx: &mut App) {
         if let Some(SettingsWindow(handle, view)) = cx.try_global::<SettingsWindow>().cloned()
             && handle
                 .update(cx, |_, window, _| window.activate_window())
                 .is_ok()
         {
-            if at_repository {
-                let _ = view.update(cx, |view, cx| view.show_repository(cx));
+            if let Some(block) = at {
+                let _ = view.update(cx, |view, cx| view.scroll_to(block, cx));
             }
             return;
         }
         let hosts = cx.global::<Hosts>();
         let (bridge, driving) = (hosts.bridge(), hosts.view());
-        let bounds = Bounds::centered(None, size(px(760.), px(820.)), cx);
+        let bounds = Bounds::centered(None, size(px(900.), px(820.)), cx);
         let mut settings = None;
         let opened = cx.open_window(
             WindowOptions {
@@ -192,6 +198,7 @@ impl Settings {
                         assistant_error: None,
                         screen: screen_control::Reading::Checking,
                         requesting: false,
+                        disk: disk::DiskForm::new(window, cx),
                     };
                     view.ask_host(ask::settings(), cx);
                     view.check_grants(cx);
@@ -210,8 +217,8 @@ impl Settings {
                         }
                     })
                     .detach();
-                    if at_repository {
-                        view.show_repository(cx);
+                    if let Some(block) = at {
+                        view.scroll_to(block, cx);
                     }
                     view
                 });
@@ -226,9 +233,6 @@ impl Settings {
         }
     }
 
-    fn show_repository(&mut self, cx: &mut Context<Self>) {
-        self.scroll_to(Block::Repository, cx);
-    }
     fn scroll_to(&mut self, block: Block, cx: &mut Context<Self>) {
         self.scroll.scroll_to_top_of_item(block.index());
         cx.notify();
@@ -290,7 +294,7 @@ impl Settings {
         side
     }
     /// One block of the scrolled body, with a rule above each section that follows another.
-    fn block(&self, block: Block, p: Palette, cx: &mut Context<Self>) -> Div {
+    fn block(&self, block: Block, p: Palette, window: &Window, cx: &mut Context<Self>) -> Div {
         let rule = || div().h(px(1.)).bg(p.edge.opacity(edge::HAIRLINE));
         let section = match block {
             Block::Shared => {
@@ -314,7 +318,7 @@ impl Settings {
                 };
                 return part(
                     &title,
-                    "Workspace folder · builds at once · screen control · remote access. Who runs what, repositories and their checks, and allowed owners open in the main window.",
+                    "Workspace folder · builds at once · screen control · disk · remote access. Who runs what, repositories and their checks, and allowed owners open in the main window.",
                     p,
                 )
                 .children(self.driving.changes_refused().map(|reason| hint(reason, p)));
@@ -329,6 +333,7 @@ impl Settings {
             Block::Folder => self.folder_section(p, cx),
             Block::Builds => self.builds_section(p, cx),
             Block::ScreenControl => self.screen_control_section(p, cx),
+            Block::Disk => self.disk_section(p, window, cx),
             Block::RemoteAccess => match self.driving.name() {
                 None => self.remote_access_section(p, cx),
                 Some(host) => hint(
@@ -408,6 +413,7 @@ impl Settings {
                         view.folder_error = None;
                         view.check_in_error = None;
                         view.builds_error = None;
+                        view.disk.error = None;
                     }
                     Err(error) => view.show_error(&command, error),
                 }
@@ -423,6 +429,7 @@ impl Settings {
         let shown = match command {
             Command::SetCheckIns { .. } => &mut self.check_in_error,
             Command::SetBuildsAtOnce { .. } => &mut self.builds_error,
+            Command::SetDiskSettings { .. } => &mut self.disk.error,
             _ => &mut self.folder_error,
         };
         *shown = Some(error);
@@ -748,9 +755,10 @@ enum Block {
     Folder,
     Builds,
     ScreenControl,
+    Disk,
     RemoteAccess,
 }
-const BLOCKS: [Block; 14] = [
+const BLOCKS: [Block; 15] = [
     Block::Shared,
     Block::Assistant,
     Block::CheckIns,
@@ -764,6 +772,7 @@ const BLOCKS: [Block; 14] = [
     Block::Folder,
     Block::Builds,
     Block::ScreenControl,
+    Block::Disk,
     Block::RemoteAccess,
 ];
 impl Block {
@@ -829,6 +838,7 @@ fn sidebar_groups(spaces: &[(SpaceId, String)]) -> Vec<(&'static str, Vec<(Strin
                 entry("Workspace folder", Go::Section(Block::Folder)),
                 entry("Builds & remote access", Go::Section(Block::Builds)),
                 entry("Screen control", Go::Section(Block::ScreenControl)),
+                entry("Disk", Go::Section(Block::Disk)),
                 entry("Appearance", Go::Section(Block::Appearance)),
             ],
         ),
@@ -912,8 +922,11 @@ fn threshold_selector(
 }
 
 impl Render for Settings {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx.theme().is_dark());
+        if let Some(host) = &self.host {
+            self.disk.fill(host.disk, window, cx);
+        }
         div()
             .size_full()
             .bg(p.base)
@@ -943,7 +956,7 @@ impl Render for Settings {
                     .flex_col()
                     .gap_4();
                 for block in BLOCKS {
-                    body = body.child(self.block(block, p, cx));
+                    body = body.child(self.block(block, p, window, cx));
                 }
                 let body = div()
                     .size_full()

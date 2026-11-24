@@ -114,7 +114,10 @@ pub(crate) fn panel_line(ticket: &TicketDiskUse) -> String {
 pub(crate) fn budget_line(disk: &DiskUse, settings: &DiskSettings) -> (String, bool) {
     let budget = settings.budget();
     if disk.build_output <= budget {
-        return (format!("{} left in the budget", size(budget - disk.build_output)), false);
+        return (
+            format!("{} left in the budget", size(budget - disk.build_output)),
+            false,
+        );
     }
     let over = format!("{} over", size(disk.build_output - budget));
     let reclaiming = (disk.tickets.iter())
@@ -172,7 +175,8 @@ pub(crate) fn where_line(ticket: &TicketDiskUse, worktree: &str) -> Option<Strin
     let found = parts
         .into_iter()
         .map(|part| format!("{} {}", name(&part.path), size(part.size)));
-    let left = (ticket.left_alone.iter()).map(|part| format!("{} · {}", name(&part.path), part.note));
+    let left =
+        (ticket.left_alone.iter()).map(|part| format!("{} · {}", name(&part.path), part.note));
     Some(found.chain(left).collect::<Vec<_>>().join(" · "))
 }
 
@@ -187,13 +191,19 @@ pub(crate) struct Group<'a> {
 pub(crate) fn groups(disk: &DiskUse) -> Vec<Group<'_>> {
     let mut by_project: HashMap<&str, Vec<&TicketDiskUse>> = HashMap::new();
     for ticket in &disk.tickets {
-        by_project.entry(&ticket.project_id).or_default().push(ticket);
+        by_project
+            .entry(&ticket.project_id)
+            .or_default()
+            .push(ticket);
     }
     let largest_first = |t: &&TicketDiskUse| std::cmp::Reverse((t.build_output, t.source));
     let mut groups: Vec<Group> = (by_project.into_iter())
         .map(|(project_id, mut tickets)| {
             tickets.sort_by_key(largest_first);
-            Group { project_id, tickets }
+            Group {
+                project_id,
+                tickets,
+            }
         })
         .collect();
     let total = |g: &Group| g.tickets.iter().map(|t| t.build_output).sum::<u64>();
@@ -203,12 +213,21 @@ pub(crate) fn groups(disk: &DiskUse) -> Vec<Group<'_>> {
 
 /// A waiting delete's small line: "Permission denied · 4 attempts · next in 2m".
 pub(crate) fn delete_line(delete: &PendingDelete) -> String {
-    let error = delete.last_error.as_deref().unwrap_or("Waiting to be deleted");
+    let error = delete
+        .last_error
+        .as_deref()
+        .unwrap_or("Waiting to be deleted");
     let mut line = error.to_owned();
     if delete.attempts > 0 {
-        line += &format!(" · {}", wording::counted(delete.attempts as usize, "attempt"));
+        line += &format!(
+            " · {}",
+            wording::counted(delete.attempts as usize, "attempt")
+        );
     }
-    format!("{line} · next {}", wording::from_now(delete.next_attempt_at))
+    format!(
+        "{line} · next {}",
+        wording::from_now(delete.next_attempt_at)
+    )
 }
 
 /// An Inbox card the disk work raises, from its operation.
@@ -294,7 +313,12 @@ mod tests {
         };
         let groups = groups(&disk);
         let drawn: Vec<(&str, Vec<&str>)> = (groups.iter())
-            .map(|g| (g.project_id, g.tickets.iter().map(|t| t.title.as_str()).collect()))
+            .map(|g| {
+                (
+                    g.project_id,
+                    g.tickets.iter().map(|t| t.title.as_str()).collect(),
+                )
+            })
             .collect();
         assert_eq!(
             drawn,
@@ -354,7 +378,11 @@ mod tests {
             where_line(&t, "/w").as_deref(),
             Some("scratch 7.2 GB · target/ 4.8 GB")
         );
-        t.parts = vec![part("/Library/Developer/Xcode/DerivedData/app-a1b2", 3_100_000_000, "")];
+        t.parts = vec![part(
+            "/Library/Developer/Xcode/DerivedData/app-a1b2",
+            3_100_000_000,
+            "",
+        )];
         assert_eq!(
             where_line(&t, "/w").as_deref(),
             Some("DerivedData/app-a1b2 3.1 GB")
@@ -371,7 +399,10 @@ mod tests {
     fn disk_cards_are_known_by_their_operation_and_find_their_folder() {
         assert_eq!(DiskCard::of("builds-held:17"), Some(DiskCard::BuildsHeld));
         let failed = DiskCard::of("worktree-delete-failed:17:.removing-cf62");
-        assert_eq!(failed, Some(DiskCard::DeleteFailed(".removing-cf62".into())));
+        assert_eq!(
+            failed,
+            Some(DiskCard::DeleteFailed(".removing-cf62".into()))
+        );
         assert_eq!(DiskCard::of("permission:1"), None);
         let disk = DiskUse {
             deletes: vec![PendingDelete {
