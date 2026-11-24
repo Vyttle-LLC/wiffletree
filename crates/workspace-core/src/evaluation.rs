@@ -2,6 +2,7 @@
 //! coordinator starts with a prompt and a run folder, and the human allows per project.
 use crate::ModelProfile;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// How a run drives the screen: only the app under test, or the whole desktop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +81,28 @@ impl EvaluationState {
     }
 }
 
+/// The copy of the app under test that an app run drives. The host starts it for each of the
+/// run's turns, on a socket of the run's own, and stops it and all it started when the turn
+/// ends.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvaluationTarget {
+    /// Absolute.
+    pub executable: String,
+    /// They name its data folder with `--data-dir`; the host adds `--automation-socket`.
+    #[serde(default)]
+    pub arguments: Vec<String>,
+    /// Added to an otherwise clean environment. A `PATH` given here goes before the host's.
+    #[serde(default)]
+    pub environment: BTreeMap<String, String>,
+}
+impl EvaluationTarget {
+    /// The folder given to `--data-dir`, as given.
+    pub fn data_folder(&self) -> Option<&str> {
+        let at = self.arguments.iter().position(|arg| arg == "--data-dir")?;
+        self.arguments.get(at + 1).map(String::as_str)
+    }
+}
+
 /// One evaluator run. Its transcript is its session's, which only the human reads.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Evaluation {
@@ -99,6 +122,9 @@ pub struct Evaluation {
     pub mode: EvaluationMode,
     /// Absolute and canonical; it holds `prompt.md`.
     pub folder: String,
+    /// What an app run drives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<EvaluationTarget>,
     pub state: EvaluationState,
     /// Why it waits, failed or stopped, for the human. A failure's reason never reaches the
     /// coordinator: a provider's error can quote the model.

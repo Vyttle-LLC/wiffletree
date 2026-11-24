@@ -1,7 +1,9 @@
 //! The launch of a UI evaluator run (OpenSpec change `ui-evaluators`): blind, on the model it
-//! was started with, with no shell, web, MCP server or workspace tool, and none of the human's
-//! provider instructions, settings or skills. The provider holds it to its run folder.
+//! was started with, with no shell, web or workspace tool, no MCP server but an app run's
+//! driver, and none of the human's provider instructions, settings or skills. The provider
+//! holds it to its run folder.
 use super::*;
+use crate::app_driver;
 
 /// The built-in Claude tools an evaluator has: reading and writing files, which its rules hold
 /// to the run folder.
@@ -27,6 +29,8 @@ pub struct EvaluatorLaunch {
     /// Codex's home for evaluators, which holds only a link to the human's `auth.json`, so the
     /// human's `AGENTS.md`, config, skills and history do not reach the run.
     pub codex_home: PathBuf,
+    /// An app run's test copy, which its turn starts, and the driver server that reaches it.
+    pub app: Option<AppLaunch>,
 }
 impl EvaluatorLaunch {
     /// The empty folder an evaluator's Codex runs with as `HOME`, beside its Codex home: Codex
@@ -36,24 +40,53 @@ impl EvaluatorLaunch {
     }
     /// `Read`, `Glob` and `Grep` of the folder and `Write`, `Edit` and `MultiEdit` in it;
     /// everything else is denied without asking.
+    /// An app run's driver tools too.
     pub(crate) fn claude_allowed(&self) -> Vec<String> {
         // `//` makes a rule's path absolute.
         let folder = format!("/{}/**", self.folder.display());
-        ["Read", "Glob", "Grep", "Write", "Edit", "MultiEdit"]
-            .map(|tool| format!("{tool}({folder})"))
-            .into()
+        let files = ["Read", "Glob", "Grep", "Write", "Edit", "MultiEdit"]
+            .map(|tool| format!("{tool}({folder})"));
+        files.into_iter().chain(self.driver_tools()).collect()
+    }
+    /// The driver's tools as Claude names them; none for a run without a test copy.
+    fn driver_tools(&self) -> Vec<String> {
+        match self.app {
+            Some(_) => (app_driver::TOOLS.iter())
+                .map(|tool| format!("mcp__{}__{tool}", app_driver::SERVER))
+                .collect(),
+            None => vec![],
+        }
+    }
+    /// The run's MCP servers: an app run's driver, connected to its copy's socket, alone.
+    fn servers(&self, helper: &Path) -> Value {
+        match &self.app {
+            Some(app) => json!({app_driver::SERVER: {
+                "command": helper,
+                "args": ["app-driver-mcp", app.socket, self.folder],
+            }}),
+            None => json!({}),
+        }
     }
     /// Refuses a Claude run that started with anything an evaluator is not given.
     pub(crate) fn check_claude_start(&self, init: &Value) -> Result<()> {
-        let servers = init["mcp_servers"].as_array().map_or(0, Vec::len);
+        let servers: Vec<(&Value, &Value)> = (init["mcp_servers"].as_array().into_iter())
+            .flatten()
+            .map(|server| (&server["name"], &server["status"]))
+            .collect();
+        let (name, connected) = (json!(app_driver::SERVER), json!("connected"));
+        let expected: Vec<(&Value, &Value)> = match self.app {
+            Some(_) => vec![(&name, &connected)],
+            None => vec![],
+        };
         ensure!(
-            servers == 0,
-            "Stopped: the evaluator was offered an MCP server ({})",
+            servers == expected,
+            "Stopped: the evaluator was offered other MCP servers than its driver, or its driver did not connect ({})",
             init["mcp_servers"]
         );
+        let driver = self.driver_tools();
         let unexpected: Vec<&str> = (init["tools"].as_array().into_iter().flatten())
             .filter_map(Value::as_str)
-            .filter(|tool| !CLAUDE_TOOLS.contains(tool))
+            .filter(|tool| !CLAUDE_TOOLS.contains(tool) && !driver.iter().any(|d| d == tool))
             .collect();
         ensure!(
             unexpected.is_empty(),
@@ -71,10 +104,13 @@ impl EvaluatorLaunch {
         );
         Ok(())
     }
-    /// Refuses any MCP call: an evaluator has no server, so one means something reached it.
+    /// Refuses any MCP call but to an app run's driver: anything else reached the run.
     pub(crate) fn check_codex_item(&self, item: &Value) -> Result<()> {
+        let to_driver = self.app.is_some()
+            && item["server"] == app_driver::SERVER
+            && (item["tool"].as_str()).is_some_and(|tool| app_driver::TOOLS.contains(&tool));
         ensure!(
-            item["type"] != "mcp_tool_call",
+            item["type"] != "mcp_tool_call" || to_driver,
             "Stopped: the evaluator called an MCP tool it was not given ({} {})",
             item["server"].as_str().unwrap_or_default(),
             item["tool"].as_str().unwrap_or_default()
@@ -132,7 +168,7 @@ fn rollout(folder: &Path, suffix: &str) -> Option<PathBuf> {
 }
 
 /// Clears the environment the host inherited and passes on only `ENVIRONMENT` and the locale.
-fn clear_environment(cmd: &mut ProcessCommand) {
+pub(super) fn clear_environment(cmd: &mut ProcessCommand) {
     cmd.env_clear();
     for (name, value) in std::env::vars_os() {
         let name_text = name.to_string_lossy();
@@ -142,8 +178,8 @@ fn clear_environment(cmd: &mut ProcessCommand) {
     }
 }
 
-/// Claude in `dontAsk` mode with no settings, instructions, memory or MCP server of anyone's;
-/// its first message is the prompt alone.
+/// Claude in `dontAsk` mode with no settings, instructions, memory or MCP server of anyone's
+/// but an app run's driver; its first message is the prompt alone.
 pub(super) fn configure_claude(cmd: &mut ProcessCommand, turn: &Turn, launch: &EvaluatorLaunch) {
     clear_environment(cmd);
     cmd.args([
@@ -174,15 +210,18 @@ pub(super) fn configure_claude(cmd: &mut ProcessCommand, turn: &Turn, launch: &E
         "--disallowedTools",
         &restricted::claude_home_denied().join(","),
     ])
-    .args(["--mcp-config", &json!({"mcpServers": {}}).to_string()]);
+    .args([
+        "--mcp-config",
+        &json!({"mcpServers": launch.servers(&turn.helper)}).to_string(),
+    ]);
     if let Some(id) = &turn.provider_session {
         cmd.args(["--resume", id]);
     }
 }
 
 /// Codex's workspace-write sandbox rooted at the run folder, with no network, temporary
-/// folder, web search, shell or MCP server, in a home that holds only the human's sign-in and
-/// with an empty `HOME`, so none of the human's skills reach it.
+/// folder, web search, shell or MCP server but an app run's driver, in a home that holds only
+/// the human's sign-in and with an empty `HOME`, so none of the human's skills reach it.
 pub(super) fn configure_codex(cmd: &mut ProcessCommand, turn: &Turn, launch: &EvaluatorLaunch) {
     clear_environment(cmd);
     cmd.env("CODEX_HOME", &launch.codex_home)
@@ -209,6 +248,18 @@ pub(super) fn configure_codex(cmd: &mut ProcessCommand, turn: &Turn, launch: &Ev
         format!("model_reasoning_effort={}", json!(turn.profile.effort)),
     ] {
         cmd.arg("-c").arg(setting);
+    }
+    if let Some(app) = &launch.app {
+        let server = app_driver::SERVER;
+        cmd.arg("-c").arg(format!(
+            "mcp_servers.{server}={{required=true, default_tools_approval_mode=\"approve\", command={}, args={}}}",
+            json!(turn.helper),
+            json!(["app-driver-mcp", app.socket, launch.folder])
+        ));
+        cmd.arg("-c").arg(format!(
+            "mcp_servers.{server}.enabled_tools={}",
+            json!(app_driver::TOOLS)
+        ));
     }
     for feature in restricted::CODEX_FEATURES_OFF
         .iter()
@@ -249,12 +300,32 @@ mod tests {
         EvaluatorLaunch {
             folder: "/eval/runs/run-1".into(),
             codex_home: "/data/evaluators/codex-home".into(),
+            app: None,
+        }
+    }
+    /// An app run's launch, with its test copy.
+    fn app_launch() -> EvaluatorLaunch {
+        EvaluatorLaunch {
+            app: Some(AppLaunch {
+                target: EvaluationTarget {
+                    executable: "/build/workspace-desktop".into(),
+                    arguments: vec!["--data-dir".into(), "/tmp/ux".into()],
+                    environment: Default::default(),
+                },
+                socket: "/tmp/wiffletree-run-1.sock".into(),
+                log: "/data/evaluators/logs/run-1.log".into(),
+            }),
+            ..launch()
         }
     }
     fn arguments(provider: Provider) -> (Vec<String>, ProcessCommand) {
+        arguments_for(provider, launch())
+    }
+    fn arguments_for(provider: Provider, launch: EvaluatorLaunch) -> (Vec<String>, ProcessCommand) {
         let mut turn = super::super::tests::turn(provider, None, vec![]);
         turn.instructions = "SECRET LOOP GOALS".into();
-        turn.evaluator = Some(launch());
+        turn.helper = "/app/wiffletree-host".into();
+        turn.evaluator = Some(launch);
         let mut cmd = ProcessCommand::new("provider");
         configure(&mut cmd, &turn);
         let args = (cmd.get_args())
@@ -452,6 +523,86 @@ mod tests {
         fs::write(day.join("rollout-2026-11-04T06-25-43-t1.jsonl"), record).unwrap();
         assert_eq!(launch.codex_model("t1").as_deref(), Some("gpt-6-luna"));
         assert_eq!(launch.codex_model("t2"), None);
+    }
+
+    #[test]
+    fn an_app_runs_claude_gets_the_driver_server_and_its_tools_alone() {
+        let (args, _) = arguments_for(Provider::Claude, app_launch());
+        let config: Value = serde_json::from_str(after(&args, "--mcp-config")).unwrap();
+        assert_eq!(
+            config,
+            json!({"mcpServers":{"app":{"command":"/app/wiffletree-host","args":["app-driver-mcp","/tmp/wiffletree-run-1.sock","/eval/runs/run-1"]}}})
+        );
+        assert_eq!(after(&args, "--tools"), "Read,Glob,Grep,Write,Edit");
+        let allowed: Vec<&str> = after(&args, "--allowedTools").split(',').collect();
+        let driver: Vec<&str> = (allowed.iter().copied())
+            .filter(|tool| tool.starts_with("mcp__"))
+            .collect();
+        assert_eq!(
+            driver,
+            app_driver::TOOLS.map(|tool| format!("mcp__app__{tool}"))
+        );
+    }
+
+    #[test]
+    fn an_app_runs_claude_start_needs_its_driver_and_nothing_else() {
+        let app = app_launch();
+        let init = |servers: Value, tools: Value| json!({"mcp_servers":servers,"tools":tools,"permissionMode":"dontAsk","memory_paths":null});
+        let tools = json!(["Read", "Write", "mcp__app__screenshot", "mcp__app__click"]);
+        let driver = json!([{"name":"app","status":"connected"}]);
+        app.check_claude_start(&init(driver.clone(), tools.clone()))
+            .unwrap();
+        for servers in [
+            json!([]),
+            json!([{"name":"app","status":"failed"}]),
+            json!([{"name":"app","status":"connected"},{"name":"agent_workspace","status":"connected"}]),
+        ] {
+            assert!(
+                app.check_claude_start(&init(servers.clone(), tools.clone()))
+                    .is_err(),
+                "{servers}"
+            );
+        }
+        for tool in ["mcp__app__drop", "mcp__agent_workspace__report", "Bash"] {
+            assert!(
+                app.check_claude_start(&init(driver.clone(), json!([tool])))
+                    .is_err(),
+                "{tool}"
+            );
+        }
+        // A run without a test copy has no driver to connect.
+        assert!(launch().check_claude_start(&init(driver, tools)).is_err());
+    }
+
+    #[test]
+    fn an_app_runs_codex_gets_the_driver_server_and_its_tools_alone() {
+        let (args, _) = arguments_for(Provider::Codex, app_launch());
+        let settings: Vec<&str> = (args.windows(2))
+            .filter(|pair| pair[0] == "-c")
+            .map(|pair| pair[1].as_str())
+            .filter(|setting| setting.starts_with("mcp_servers"))
+            .collect();
+        assert_eq!(
+            settings,
+            [
+                r#"mcp_servers.app={required=true, default_tools_approval_mode="approve", command="/app/wiffletree-host", args=["app-driver-mcp","/tmp/wiffletree-run-1.sock","/eval/runs/run-1"]}"#,
+                r#"mcp_servers.app.enabled_tools=["screenshot","click","double_click","right_click","move","type_text","key","scroll","drag","resize_window","window"]"#,
+            ]
+        );
+        let call =
+            |server: &str, tool: &str| json!({"type":"mcp_tool_call","server":server,"tool":tool});
+        let app = app_launch();
+        app.check_codex_item(&call("app", "screenshot")).unwrap();
+        assert!(app.check_codex_item(&call("app", "drop")).is_err());
+        assert!(
+            app.check_codex_item(&call("agent_workspace", "report"))
+                .is_err()
+        );
+        assert!(
+            launch()
+                .check_codex_item(&call("app", "screenshot"))
+                .is_err()
+        );
     }
 
     #[test]

@@ -10,6 +10,7 @@
 #![allow(unexpected_cfgs)]
 use anyhow::Context as _;
 use async_channel::{Receiver, Sender};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use gpui::{
     App, ExternalPaths, FileDropEvent, Keystroke, Modifiers, PlatformInput, Window, point, px,
 };
@@ -74,8 +75,22 @@ pub(crate) enum Step {
         y: f64,
         paths: Vec<PathBuf>,
     },
-    /// Reports the window's number and size so a caller can capture it.
+    /// Reports the window's number, size in points, scale and the largest size its display
+    /// allows.
     Window,
+    /// The window's own pixels as a PNG, at one pixel per point or at the display's scale. The
+    /// app may capture its own windows without Screen Recording permission.
+    Capture {
+        #[serde(default)]
+        native: bool,
+    },
+    /// Resizes the window's content to a size in points, kept within its minimum and its
+    /// display, and moved to stay on that display. The new size shows in `window` once AppKit
+    /// has applied it.
+    Resize {
+        width: f64,
+        height: f64,
+    },
 }
 
 #[derive(Clone, Copy, Default, Deserialize)]
@@ -114,8 +129,40 @@ struct NsPoint {
     y: f64,
 }
 
+/// An `NSRect` or `CGRect`; `size` holds the width in `x` and the height in `y`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NsRect {
+    origin: NsPoint,
+    size: NsPoint,
+}
+
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
+    static kCGColorSpaceSRGB: *const std::ffi::c_void;
+    fn CGWindowListCreateImage(
+        bounds: NsRect,
+        list_option: u32,
+        window: u32,
+        image_option: u32,
+    ) -> *mut std::ffi::c_void;
+    fn CGImageGetWidth(image: *const std::ffi::c_void) -> usize;
+    fn CGImageGetHeight(image: *const std::ffi::c_void) -> usize;
+    fn CGColorSpaceCreateWithName(name: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn CGBitmapContextCreate(
+        data: *mut std::ffi::c_void,
+        width: usize,
+        height: usize,
+        bits_per_component: usize,
+        bytes_per_row: usize,
+        space: *const std::ffi::c_void,
+        bitmap_info: u32,
+    ) -> *mut std::ffi::c_void;
+    fn CGContextDrawImage(
+        context: *mut std::ffi::c_void,
+        rect: NsRect,
+        image: *const std::ffi::c_void,
+    );
     fn CGEventCreateScrollWheelEvent2(
         source: *const std::ffi::c_void,
         units: u32,
@@ -188,6 +235,51 @@ const RIGHT_MOUSE_UP: usize = 4;
 const MOUSE_MOVED: usize = 5;
 const LEFT_MOUSE_DRAGGED: usize = 6;
 const SCROLL_UNIT_PIXEL: u32 = 0;
+const LIST_INCLUDING_WINDOW: u32 = 1 << 3;
+const IMAGE_IGNORE_FRAMING: u32 = 1 << 0;
+const IMAGE_OPAQUE: u32 = 1 << 1;
+const IMAGE_BEST_RESOLUTION: u32 = 1 << 3;
+const IMAGE_NOMINAL_RESOLUTION: u32 = 1 << 4;
+/// `kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big`: RGBA bytes in memory order.
+const RGBA: u32 = 1 | 4 << 12;
+
+/// Where a window may go: its frame, how much larger the frame is than the content, the
+/// visible part of its display and its smallest content size.
+struct Geometry {
+    frame: NsRect,
+    chrome: NsPoint,
+    visible: NsRect,
+    min: NsPoint,
+}
+impl Geometry {
+    /// The largest content size the window's display allows.
+    fn max(&self) -> NsPoint {
+        NsPoint {
+            x: self.visible.size.x - self.chrome.x,
+            y: self.visible.size.y - self.chrome.y,
+        }
+    }
+    /// The frame for content of `width` by `height` points, within the minimum and the display,
+    /// keeping the top-left corner where it can and moved onto the display where it cannot.
+    fn frame_for(&self, width: f64, height: f64) -> NsRect {
+        let max = self.max();
+        let size = NsPoint {
+            x: width.clamp(self.min.x, max.x.max(self.min.x)) + self.chrome.x,
+            y: height.clamp(self.min.y, max.y.max(self.min.y)) + self.chrome.y,
+        };
+        let top = self.frame.origin.y + self.frame.size.y;
+        let (left, bottom) = (self.visible.origin.x, self.visible.origin.y);
+        let right = left + self.visible.size.x - size.x;
+        let top_limit = bottom + self.visible.size.y - size.y;
+        NsRect {
+            origin: NsPoint {
+                x: self.frame.origin.x.min(right).max(left),
+                y: (top - size.y).min(top_limit).max(bottom),
+            },
+            size,
+        }
+    }
+}
 
 /// The application's one visible, main-capable window.
 pub(crate) struct NativeWindow {
@@ -227,6 +319,123 @@ impl NativeWindow {
             let _: () = msg_send![native.window, setCollectionBehavior: STATIONARY | IGNORES_CYCLE];
         }
         Ok(())
+    }
+
+    fn geometry(&self) -> Geometry {
+        // SAFETY: main thread; the window and its screen are live AppKit objects, and these
+        // getters only read them.
+        unsafe {
+            let frame: NsRect = msg_send![self.window, frame];
+            let content: NsRect = msg_send![self.window, contentRectForFrameRect: frame];
+            let mut screen: *mut Object = msg_send![self.window, screen];
+            if screen.is_null() {
+                screen = msg_send![class!(NSScreen), mainScreen];
+            }
+            let visible: NsRect = msg_send![screen, visibleFrame];
+            let min: NsPoint = msg_send![self.window, contentMinSize];
+            Geometry {
+                frame,
+                chrome: NsPoint {
+                    x: frame.size.x - content.size.x,
+                    y: frame.size.y - content.size.y,
+                },
+                visible,
+                min,
+            }
+        }
+    }
+
+    /// The window's last composited frame as RGBA rows in sRGB, without its shadow, at one
+    /// pixel per point or at the display's scale. Like any app's own windows, it needs no
+    /// Screen Recording permission.
+    fn capture(&self, native: bool) -> Result<image::RgbaImage, String> {
+        let resolution = if native {
+            IMAGE_BEST_RESOLUTION
+        } else {
+            IMAGE_NOMINAL_RESOLUTION
+        };
+        let null_rect = NsRect {
+            origin: NsPoint {
+                x: f64::INFINITY,
+                y: f64::INFINITY,
+            },
+            size: NsPoint { x: 0., y: 0. },
+        };
+        // SAFETY: each Core Graphics object created here is checked for null and released
+        // here; the bitmap context draws into `pixels`, which outlives it.
+        unsafe {
+            let image = CGWindowListCreateImage(
+                null_rect,
+                LIST_INCLUDING_WINDOW,
+                self.number as u32,
+                IMAGE_IGNORE_FRAMING | IMAGE_OPAQUE | resolution,
+            );
+            if image.is_null() {
+                return Err("macOS gave no image of the window".into());
+            }
+            let (width, height) = (CGImageGetWidth(image), CGImageGetHeight(image));
+            let mut pixels = vec![0u8; width * height * 4];
+            let space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+            let context = CGBitmapContextCreate(
+                pixels.as_mut_ptr().cast(),
+                width,
+                height,
+                8,
+                width * 4,
+                space,
+                RGBA,
+            );
+            if !context.is_null() {
+                let bounds = NsRect {
+                    origin: NsPoint { x: 0., y: 0. },
+                    size: NsPoint {
+                        x: width as f64,
+                        y: height as f64,
+                    },
+                };
+                CGContextDrawImage(context, bounds, image);
+                CFRelease(context);
+            }
+            CFRelease(space);
+            CFRelease(image);
+            if context.is_null() {
+                return Err("Could not read the window's image".into());
+            }
+            image::RgbaImage::from_raw(width as u32, height as u32, pixels)
+                .ok_or_else(|| "The window's image has no pixels".into())
+        }
+    }
+
+    /// Moves and resizes the window to `frame` once the current GPUI update has finished, as
+    /// GPUI applies its own resizes.
+    fn set_frame_later(&self, frame: NsRect) {
+        struct Move {
+            window: *mut Object,
+            frame: NsRect,
+        }
+        extern "C" fn apply(context: *mut std::ffi::c_void) {
+            // SAFETY: `context` is the box leaked below and the window was retained there;
+            // this runs once on the main thread.
+            unsafe {
+                let change = Box::from_raw(context.cast::<Move>());
+                let _: () =
+                    msg_send![change.window, setFrame: change.frame display: objc::runtime::YES];
+                let _: () = msg_send![change.window, release];
+            }
+        }
+        // SAFETY: the window is retained until `apply` releases it on the main queue.
+        unsafe {
+            let _: *mut Object = msg_send![self.window, retain];
+            let change = Box::new(Move {
+                window: self.window,
+                frame,
+            });
+            dispatch_async_f(
+                &raw const _dispatch_main_q,
+                Box::into_raw(change).cast(),
+                apply,
+            );
+        }
     }
 
     /// Draws a frame once the current GPUI update has finished.
@@ -287,11 +496,6 @@ impl NativeWindow {
 
     /// Sends a scroll at a point given in window coordinates with a top-left origin.
     fn scroll(&self, x: f64, y: f64, height: f64, dy: i32) {
-        #[repr(C)]
-        struct NsRect {
-            origin: NsPoint,
-            size: NsPoint,
-        }
         // SAFETY: the CGEvent is created, converted to an NSEvent that retains what it needs,
         // and released here; all calls happen on the main thread.
         unsafe {
@@ -389,11 +593,33 @@ impl Step {
                 }
             }
             Self::Window => {
+                let native = NativeWindow::find()?;
+                let max = native.geometry().max();
                 return Ok(json!({
-                    "number": NativeWindow::find()?.number,
+                    "number": native.number,
                     "width": f32::from(size.width),
                     "height": f32::from(size.height),
+                    "scale": window.scale_factor(),
+                    "max_width": max.x,
+                    "max_height": max.y,
                 }));
+            }
+            Self::Capture { native } => {
+                let image = NativeWindow::find()?.capture(native)?;
+                let mut png = std::io::Cursor::new(Vec::new());
+                image
+                    .write_to(&mut png, image::ImageFormat::Png)
+                    .map_err(|e| e.to_string())?;
+                return Ok(json!({
+                    "png": BASE64.encode(png.into_inner()),
+                    "width": image.width(),
+                    "height": image.height(),
+                }));
+            }
+            Self::Resize { width, height } => {
+                let native = NativeWindow::find()?;
+                let frame = native.geometry().frame_for(width, height);
+                native.set_frame_later(frame);
             }
         }
         Ok(Value::Null)
