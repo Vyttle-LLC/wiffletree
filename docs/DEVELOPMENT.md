@@ -485,6 +485,8 @@ In a Space stored on GitHub, a job is shared in one of two ways (`Recipe::sharin
 
 A Claude job run with a CLI source also starts with a `PreToolUse` hook on `Bash`, `wiffletree-host job-bash-check` (`provider::shell_text_refused`), which refuses any command holding redirection, chaining, a pipe, substitution, a variable, grouping, an escape or a second line. Claude's own prefix rules deny chaining and pipes but let a redirection to a writable path through.
 
+The Assistant's act on an MCP source reached by URL runs through `provider::act_run`: a `claude -p` run with built-in tools off, only that server configured, only `mcp__<server>__<tool>` allowed, and a `PreToolUse` hook on every tool, `wiffletree-host act-check <folder>` (`provider::act_call_refused`), which exits 2 for any call but the action card's exact tool and arguments, and for a second call. The host also stops the run at the first such call in its stream and keeps only the tool's result.
+
 The ignored tests in `tests/thread_authority.rs` also check that a Claude job run runs its listed command and is denied another, that none of those shell forms after an allowed `gh pr list` writes a file in scratch or through a link out of it, and that Codex's command rules still cannot hold a CLI to its listed commands; when that test fails, revisit the restriction. They passed on October 30, 2026, with Claude Code 2.1.310 and codex-cli 0.160.0.
 
 ### Boards

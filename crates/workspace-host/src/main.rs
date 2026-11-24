@@ -44,6 +44,21 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
+    // Claude's hook before every call of a host-started act run, refusing as job-bash-check
+    // does: exit 2 for anything but the action card's call, made once.
+    if let [first, folder] = &args[..]
+        && first == "act-check"
+    {
+        let mut input = vec![];
+        if io::stdin().read_to_end(&mut input).is_err() {
+            input.clear();
+        }
+        if let Some(why) = workspace_host::provider::act_call_refused(folder.as_ref(), &input) {
+            let _ = writeln!(io::stderr(), "{why}");
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
     if args.first().map(String::as_str) == Some("job-mcp") {
         return workspace_host::mcp::serve_stdio(workspace_host::mcp::job_run_tools());
     }
