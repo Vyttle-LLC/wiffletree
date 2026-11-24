@@ -52,6 +52,11 @@ impl Host {
             "Cannot restore worktrees: {}",
             missing.join("; ")
         );
+        // No cleanup of a removed ticket moves anything while its worktree comes back.
+        let moving = self.build_output.moving.clone();
+        let _moving = moving
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         for ticket in tickets {
             let repository = self.ticket_repository(ticket)?;
             ensure_worktree(

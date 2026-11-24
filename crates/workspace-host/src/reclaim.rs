@@ -15,15 +15,17 @@
 //!
 //! Nothing that uses the build output has it moved from under it, as far as can be seen. The
 //! scan, at most a few seconds old, is followed on the host thread by a look at the ticket's
-//! turns; the deletes are recorded and held; then a worker, just before it renames, looks for
-//! processes with a file in the folders, for builds the gate admitted or queued that run in the
-//! worktree, and through its own connection to the store for an agent turn that started. Once
-//! the folders moved it looks for processes again, and moves them all back if one uses them.
-//! What remains is the time between that last look and the renames, a few milliseconds: a
-//! process that is neither an agent's turn nor a gated build, and that opens its first file in
-//! the folders then, has them moved from under it. Removing a ticket's worktree deletes its
-//! build output outside the worktree the same way, by a cleanup recorded before the worktree
-//! moves, which is dropped if the worktree is back at its path when it runs.
+//! turns; the deletes are recorded and held; then a worker looks for processes with a file in
+//! the folders. It then takes the build gate's lock, so the gate admits no build until the
+//! renames are done, and the lock restores take; under both it looks for builds the gate
+//! admitted or queued that run in the worktree and, through its own connection to the store,
+//! for an agent turn that started, then renames. Once the folders moved it looks for processes
+//! again, and moves them all back if one uses them. What remains is a process that is neither
+//! an agent's turn nor a build through the gate, and that opens its first file in the folders
+//! after the first look for processes and closes it before the second: it has them moved from
+//! under it. Removing a ticket's worktree deletes its build output outside the worktree the
+//! same way, by a cleanup recorded before the worktree moves, which is dropped if the worktree
+//! is back at its path, and kept until every folder of it has moved.
 use crate::*;
 use std::{
     collections::{HashMap, HashSet},
@@ -143,6 +145,9 @@ pub(crate) struct Watch {
     cleaning: HashSet<String>,
     /// A removal recorded such a cleanup since the store was last read for them.
     cleanups_due: bool,
+    /// Held while a move takes its last look and renames, and while worktrees are restored, so
+    /// a removed ticket's cleanup never moves what a restore just gave back to it.
+    pub(crate) moving: Arc<Mutex<()>>,
     /// Free space is under the hard floor; whether the human's inbox says so.
     held: Option<bool>,
     finished: Arc<Mutex<Vec<Finished>>>,
@@ -167,6 +172,7 @@ impl Default for Watch {
             inspecting: HashSet::new(),
             cleaning: HashSet::new(),
             cleanups_due: false,
+            moving: Arc::default(),
             held: None,
             finished: Arc::default(),
             notify: None,
@@ -319,6 +325,8 @@ struct Move {
     folders: Vec<(PathBuf, PathBuf, u64)>,
     /// The host's data folder, holding its store and the build gate's state.
     home: PathBuf,
+    /// Held for the last look and the renames; see `Watch::moving`.
+    moving: Arc<Mutex<()>>,
 }
 
 /// What a move did.
@@ -329,8 +337,8 @@ enum Moved {
     /// A process used a folder once it moved, so every folder was moved back, and why. Lists
     /// where each that could not go back waits.
     PutBack(String, Vec<PathBuf>),
-    /// Where each folder that moved waits, with its size.
-    Done(Vec<(PathBuf, u64)>),
+    /// Where each folder that moved waits, with its size, and why each that could not move.
+    Done(Vec<(PathBuf, u64)>, Vec<String>),
 }
 
 /// Renames the folders aside unless something uses them. Everything that would stop it is
@@ -339,12 +347,36 @@ enum Moved {
 /// store, an agent of the ticket that started a turn. Once moved, the folders are looked at for
 /// processes again, and moved back if one uses them. Off the host thread.
 fn run_move(job: &Move) -> Moved {
-    if let Some(reason) = in_use(job) {
+    let folders: Vec<PathBuf> = (job.folders.iter())
+        .filter_map(|(folder, _, _)| fs::canonicalize(folder).ok())
+        .collect();
+    if let Some(reason) = holders_of(&folders) {
         return Moved::Kept(reason);
     }
-    let moved: Vec<_> = (job.folders.iter())
-        .filter(|(folder, aside, _)| fs::rename(folder, aside).is_ok())
-        .collect();
+    // The last look and the renames happen while no restore runs and the gate admits no build.
+    let restoring = job
+        .moving
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let renamed = build_gate::while_admitting_none(&job.home, |builds| {
+        if let Some(reason) = last_look(job, builds) {
+            return Err(reason);
+        }
+        let (mut moved, mut failed) = (vec![], vec![]);
+        for (folder, aside, size) in &job.folders {
+            match fs::rename(folder, aside) {
+                Ok(()) => moved.push((folder, aside, *size)),
+                Err(error) => failed.push(format!("{}: {error}", folder.display())),
+            }
+        }
+        Ok((moved, failed))
+    });
+    drop(restoring);
+    let (moved, failed) = match renamed {
+        Ok(Ok(renamed)) => renamed,
+        Ok(Err(reason)) => return Moved::Kept(reason),
+        Err(error) => return Moved::Kept(format!("could not lock the build gate: {error}")),
+    };
     let asides: Vec<PathBuf> = (moved.iter())
         .filter_map(|(_, aside, _)| fs::canonicalize(aside).ok())
         .collect();
@@ -356,22 +388,20 @@ fn run_move(job: &Move) -> Moved {
         return Moved::PutBack(reason, stuck);
     }
     let moved = (moved.into_iter())
-        .map(|(_, aside, size)| (aside.clone(), *size))
+        .map(|(_, aside, size)| (aside.clone(), size))
         .collect();
-    Moved::Done(moved)
+    Moved::Done(moved, failed)
 }
 
-/// Why the move's folders must stay where they are now, if anything says so.
-fn in_use(job: &Move) -> Option<String> {
-    let folders: Vec<PathBuf> = (job.folders.iter())
-        .filter_map(|(folder, _, _)| fs::canonicalize(folder).ok())
-        .collect();
-    if let Some(reason) = holders_of(&folders) {
-        return Some(reason);
+/// Why the move's folders must stay where they are now, if anything says so, given the
+/// `builds` the gate admitted or queued: a removed ticket's worktree that is back, a gated
+/// build that runs in the worktree, or an agent turn that started.
+fn last_look(job: &Move, builds: &[u32]) -> Option<String> {
+    if matches!(job.purpose, Purpose::Outside) && fs::symlink_metadata(&job.worktree).is_ok() {
+        return Some("its worktree is back".into());
     }
     let worktree = fs::canonicalize(&job.worktree).unwrap_or_else(|_| job.worktree.clone());
-    let builds = build_gate::gated_builds(&job.home);
-    if working_folders(&builds)
+    if working_folders(builds)
         .iter()
         .any(|folder| folder.starts_with(&worktree))
     {
@@ -761,6 +791,7 @@ impl Host {
             worktree,
             folders: planned,
             home: self.home.clone(),
+            moving: self.build_output.moving.clone(),
         };
         self.build_output.spawn(move || {
             let moved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_move(&job)))
@@ -770,16 +801,24 @@ impl Host {
         Ok(())
     }
     /// Lets the deletes of what moved start and drops those of what stayed. A reclaim that moved
-    /// something is recorded and told to the ticket's project; a removed ticket's cleanup that
-    /// ran is done, and one kept waits for the next start.
+    /// something is recorded and told to the ticket's project. A removed ticket's cleanup is done
+    /// once every folder moved; otherwise it stays recorded, and the next start looks again for
+    /// what is left.
     fn finish_move_aside(&mut self, job: Move, moved: Moved, at: i64) -> Result<()> {
         let id = &job.ticket;
         match job.purpose {
             Purpose::Reclaim(_) => self.build_output.inspecting.remove(id),
             Purpose::Outside => self.build_output.cleaning.remove(id),
         };
+        let mut complete = false;
         let (moved, stuck) = match moved {
-            Moved::Done(moved) => (moved, vec![]),
+            Moved::Done(moved, failed) => {
+                for failure in &failed {
+                    eprintln!("Move build output of {id} aside: could not move {failure}");
+                }
+                complete = failed.is_empty();
+                (moved, vec![])
+            }
             Moved::Kept(reason) => {
                 eprintln!("Move build output of {id} aside: kept, {reason}");
                 (vec![], vec![])
@@ -798,9 +837,7 @@ impl Host {
         }
         let freed: u64 = moved.iter().map(|(_, size)| size).sum();
         match job.purpose {
-            Purpose::Outside if !moved.is_empty() || job.folders.is_empty() => {
-                self.forget_outside_cleanup(id)
-            }
+            Purpose::Outside if complete => self.forget_outside_cleanup(id),
             Purpose::Reclaim(why) if freed > 0 => self.record_reclaim(id, why, freed, at),
             _ => Ok(()),
         }
@@ -1512,6 +1549,93 @@ mod tests {
         assert!(f.host.scratch_folder(&ticket.id).exists());
         assert_eq!(f.host.pending_deletes().unwrap(), []);
         assert!(f.notices().is_empty());
+    }
+
+    #[test]
+    fn a_build_the_gate_admits_while_a_move_waits_for_its_lock_keeps_its_build_output() {
+        let mut f = Fixture::new();
+        let ticket = f.ticket("Toolbar", 4096);
+        let gate = f.host.home.join("build-gate");
+        fs::create_dir_all(gate.join("held")).unwrap();
+        // The gate is admitting a build: it holds its lock.
+        let lock = fs::File::create(gate.join("gate.lock")).unwrap();
+        lock.lock().unwrap();
+        f.host.reclaim_build_output(Some(&ticket.id)).unwrap();
+        while f.host.pending_deletes().unwrap().is_empty() {
+            f.host.settle_build_output(now());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // The move waits for the lock; the build is admitted, then the lock released.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(f.has_build_output(&ticket));
+        let mut build = std::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(&ticket.worktree)
+            .spawn()
+            .unwrap();
+        fs::write(gate.join("held").join(build.id().to_string()), "cargo").unwrap();
+        drop(lock);
+        f.settle(now());
+        build.kill().unwrap();
+        build.wait().unwrap();
+
+        assert!(f.has_build_output(&ticket));
+        assert_eq!(f.host.pending_deletes().unwrap(), []);
+    }
+
+    #[test]
+    fn a_cleanup_whose_worktree_is_restored_while_it_waits_to_move_moves_nothing() {
+        let mut f = Fixture::new();
+        let ticket = f.ticket("Toolbar", 0);
+        let worktree = Path::new(&ticket.worktree);
+        let derived = f.derived_data("App-a1", &worktree.join("App.xcworkspace"));
+        let scratch = f.host.scratch_folder(&ticket.id);
+        let away = worktree.with_file_name("away");
+        f.host.record_outside_cleanup(&ticket).unwrap();
+        fs::rename(worktree, &away).unwrap();
+        // A restore is under way: the move waits for it.
+        let moving = f.host.build_output.moving.clone();
+        let restoring = moving.lock().unwrap();
+        f.host.outside_cleanups_due();
+        while f.host.pending_deletes().unwrap().is_empty() {
+            f.host.settle_build_output(now());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        fs::rename(&away, worktree).unwrap();
+        drop(restoring);
+        f.settle(now());
+
+        assert!(derived.exists() && scratch.exists());
+        assert_eq!(f.host.pending_deletes().unwrap(), []);
+    }
+
+    #[test]
+    fn a_cleanup_with_a_folder_that_cannot_move_stays_recorded_for_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut f = Fixture::new();
+        let ticket = f.ticket("Toolbar", 0);
+        fs::remove_dir_all(Path::new(&ticket.worktree).join("target")).unwrap();
+        let worktree = Path::new(&ticket.worktree);
+        let derived = f.derived_data("App-a1", &worktree.join("App.xcworkspace"));
+        let scratch = f.host.scratch_folder(&ticket.id);
+        let root = derived.parent().unwrap().to_path_buf();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
+
+        f.host
+            .with_worktrees_removed(std::slice::from_ref(&ticket), |_| Ok(()))
+            .unwrap();
+        f.settle(now());
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(derived.exists() && !scratch.exists());
+        let recorded: i64 = (f.host.db)
+            .query_row("SELECT COUNT(*) FROM outside_cleanups", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1);
+        // The next start finds what is left and moves it.
+        f.reopen();
+        f.settle(now());
+        assert!(!derived.exists());
     }
 
     #[test]

@@ -351,13 +351,20 @@ impl State {
     }
 }
 
-/// The builds holding or waiting for a slot of `data`'s gate, by process id. Some may have ended.
-pub(crate) fn gated_builds(data: &Path) -> Vec<u32> {
-    ["held", "waiting"]
+/// Runs `look` with the builds holding or waiting for a slot of `data`'s gate, by process id,
+/// while the gate admits none: a build it admits next starts once `look` has returned. Some
+/// builds listed may have ended.
+pub(crate) fn while_admitting_none<T>(
+    data: &Path,
+    look: impl FnOnce(&[u32]) -> T,
+) -> io::Result<T> {
+    let state = State::open(data)?;
+    let builds: Vec<u32> = ["held", "waiting"]
         .iter()
-        .flat_map(|part| entries(&data.join(STATE).join(part)).unwrap_or_default())
+        .flat_map(|part| entries(&state.folder.join(part)).unwrap_or_default())
         .map(|(build, _)| build)
-        .collect()
+        .collect();
+    Ok(look(&builds))
 }
 
 /// The files in `folder` named by a process id.
