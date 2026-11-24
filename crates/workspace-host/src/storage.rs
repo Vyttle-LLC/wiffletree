@@ -118,7 +118,7 @@ fn read_space(content: &[u8], storage: SpaceStorage) -> Result<Space> {
         !file.extra.contains_key("storage"),
         "space.yaml names a storage, which a Space's file cannot"
     );
-    let space = Space {
+    let mut space = Space {
         id: file.id,
         name: file.name,
         color: file.color,
@@ -137,6 +137,7 @@ fn read_space(content: &[u8], storage: SpaceStorage) -> Result<Space> {
         sources: file.sources,
         extra: file.extra,
     };
+    spaces::drop_stray_tags(&mut space);
     spaces::validate(&space)?;
     Ok(space)
 }
@@ -2775,15 +2776,20 @@ sources:
     }
 
     #[test]
-    fn a_tag_outside_the_spaces_values_is_refused() {
+    fn a_tag_outside_the_spaces_values_reads_as_untagged() {
         let storage = SpaceStorage {
             repository: super::github(NAME),
             folder: "celadon".into(),
             root: String::new(),
         };
-        let stray = "format: 1\nid: c\nname: Celadon\nrepositories: [celadon-theme/nvim]\nlayers: [frontend]\nrepository_tags:\n  celadon-theme/nvim: {layer: backend}\n";
-        let error = read_space(stray.as_bytes(), storage).unwrap_err();
-        assert!(format!("{error:#}").contains("backend is not one of Celadon's"));
+        let stray = "format: 1\nid: c\nname: Celadon\nrepositories: [celadon-theme/nvim, celadon-theme/website]\napps: [nvim]\nlayers: [frontend]\nrepository_tags:\n  celadon-theme/nvim: {app: nvim, layer: backend}\n  celadon-theme/website: {layer: web}\n";
+        let space = read_space(stray.as_bytes(), storage).unwrap();
+        let nvim = space.tags_of("celadon-theme/nvim").unwrap();
+        assert_eq!(
+            (nvim.app.as_deref(), nvim.layer.as_deref()),
+            (Some("nvim"), None)
+        );
+        assert_eq!(space.tags_of("celadon-theme/website"), None);
     }
 
     #[test]

@@ -337,7 +337,6 @@ pub(crate) fn validate(space: &Space) -> Result<()> {
             "{identity} is listed twice"
         );
     }
-    validate_tags(space)?;
     if let Some(brain) = &space.brain {
         if let BrainRepository::GitHub { owner, name, .. } = &brain.repository {
             validate_repository_identity(&format!("{owner}/{name}"))?;
@@ -364,6 +363,17 @@ pub(crate) fn validate(space: &Space) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Drops each repository tag that is not one of the Space's values, as a sync or a hand edit of
+/// `space.yaml` can leave, so that repository reads as untagged for it.
+pub(crate) fn drop_stray_tags(space: &mut Space) {
+    let (apps, layers) = (space.apps.clone(), space.layers.clone());
+    for tags in space.repository_tags.values_mut() {
+        tags.app.take_if(|app| !apps.contains(app));
+        tags.layer.take_if(|layer| !layers.contains(layer));
+    }
+    space.repository_tags.retain(|_, tags| !tags.is_empty());
 }
 
 /// The Space's apps and layers are short, distinct names, and each repository's tags are among
@@ -575,6 +585,8 @@ impl Host {
             "A Space's storage cannot be changed here"
         );
         validate(&space)?;
+        // Strict only here: a file read with a stray tag reads it as untagged instead.
+        validate_tags(&space)?;
         self.check_space_behaviors(&current.space, &space)?;
         self.check_space_models(&current.space, &space)?;
         self.ensure_unused_name(&space.name, Some(&space.id))?;
