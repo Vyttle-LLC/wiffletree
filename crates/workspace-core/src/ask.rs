@@ -540,6 +540,9 @@ pub fn discard_proposal(thread_id: String, proposal_id: String) -> Ask<assistant
 pub fn set_assistant_name(name: String) -> Ask<String> {
     Ask::new(Command::SetAssistantName { name })
 }
+pub fn conversation_cards() -> Ask<assistant::conversation::ConversationRead> {
+    Ask::new(Command::ConversationCards)
+}
 pub fn answer_decision(card_id: String, answer: String) -> Ask<ConversationCard> {
     Ask::new(Command::AnswerDecision { card_id, answer })
 }

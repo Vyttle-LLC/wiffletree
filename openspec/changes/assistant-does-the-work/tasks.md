@@ -21,12 +21,12 @@ Four stages, each one reviewable ticket, stacked on a feature branch that the hu
 
 ## 3. Desktop: the chat, cards and rail
 
-- [ ] 3.1 `assistant_view`: one chat with no tabs; composer chips Space · auto and Goes to · auto; the "Can act on this Mac · repositories change through work" line; long-turn note with Stop; History.
-- [ ] 3.2 Cards: work (title, Space, stage, PRs, Stop, Open details), decision (options, recommendation, free answer), approval (settles the Inbox item), loop (what changed, schedule in words, sources, Undo, Edit, Run now), issue written; the routing tag with Change.
-- [ ] 3.3 The rail: Needs you, Running, Loops, Done recently; the Loops page replacing the Jobs list.
-- [ ] 3.4 Sidebar: hide Assistant work from Projects and Space sections; the assistant row's working mark and Needs you count; Open details opens the project view with Back to chat; Inbox selection of Assistant work opens it from the Assistant.
-- [ ] 3.5 Action cards (target, exact content, what others' text the turn read, Run, Decline, result) and done cards; Add source on the Space's page (configured MCP servers and CLIs, tools with suggested read or act kinds, Do without asking, the server's own sign-in instructions and Try again).
-- [ ] 3.6 Models page without the Router row; Settings without the router threshold.
+- [x] 3.1 `assistant_view`: one chat with no tabs; composer chips Space · auto and Goes to · auto; the "Can act on this Mac · repositories change through work" line; long-turn note with Stop; History.
+- [x] 3.2 Cards: work (title, Space, stage, PRs, Stop, Open details), decision (options, recommendation, free answer), approval (settles the Inbox item), loop (what changed, schedule in words, sources, Undo, Edit, Run now), issue written; the routing tag with Change.
+- [x] 3.3 The rail: Needs you, Running, Loops, Done recently; the Loops page replacing the Jobs list.
+- [x] 3.4 Sidebar: hide Assistant work from Projects and Space sections; the assistant row's working mark and Needs you count; Open details opens the project view with Back to chat; Inbox selection of Assistant work opens it from the Assistant.
+- [x] 3.5 Action cards (target, exact content, what others' text the turn read, Run, Decline, result) and done cards; Add source on the Space's page (configured MCP servers and CLIs, tools with suggested read or act kinds, Do without asking, the server's own sign-in instructions and Try again).
+- [x] 3.6 Models page without the Router row; Settings without the router threshold.
 
 ## 4. Skill and docs
 

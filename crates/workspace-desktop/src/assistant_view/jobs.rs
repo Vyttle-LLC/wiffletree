@@ -1,16 +1,15 @@
-//! Scheduled jobs in the assistant (stage 3, screen 3 of the mockup): the recipe card a thread
-//! shows, the Jobs list with "Start Wiffletree at login", a job's page with its runs, and the
-//! form that edits a recipe. Only the user's Save makes or changes a job.
+//! Loops, the jobs the app calls loops (OpenSpec change `assistant-does-the-work`, task 3.3):
+//! the Loops page the rail opens, with "Start Wiffletree at login", a loop's page with its
+//! runs, and the form that edits its recipe. The Assistant saves a loop at the human's word;
+//! the human changes one here.
 use super::*;
-use gpui_component::button::ButtonVariant;
+use gpui_component::{button::ButtonVariant, checkbox::Checkbox};
 use ui::{needs_you_badge, pill};
 use workspace_core::job::{
-    JobKey, JobRun, JobState, Recipe, RecipePreview, RunOutcome, Runner, Sharing, SourceCheck,
+    JobKey, JobRun, JobState, Recipe, RunOutcome, Runner, Sharing, SourceCheck,
 };
 
-/// What the recipe card says a job may do, as the mockup words it.
-const ONLY_READ: &str = "Jobs only read. Each run is a fresh read-only thread; it never sends, posts or changes anything in these apps. Runs need Wiffletree running; missed runs come back as one catch-up run.";
-const WHILE_RUNNING: &str = "Jobs run only while Wiffletree runs on this Mac, and never wake it. Missed runs come back as one catch-up run when it runs again.";
+const WHILE_RUNNING: &str = "Loops run only while Wiffletree runs on this Mac, and never wake it. Missed runs come back as one catch-up run when it runs again. Loops only read from other apps.";
 
 /// What the assistant shows in place of a thread.
 pub(super) enum JobsView {
@@ -22,22 +21,11 @@ pub(super) enum JobsView {
 /// A recipe while the user edits it, before Save.
 pub(super) struct JobForm {
     recipe: Recipe,
-    /// The recipe card it was opened from, which saving dismisses; `None` for a saved job.
-    card: Option<String>,
     name: Entity<InputState>,
     prompt: Entity<TextareaState>,
     cron: Entity<InputState>,
     timezone: Entity<InputState>,
     busy: bool,
-}
-
-/// How many runs count on the assistant's row, and the job of the newest of them.
-pub(crate) fn attention(jobs: &[JobState]) -> (usize, Option<JobKey>) {
-    let count = jobs.iter().map(|job| job.attention).sum();
-    let newest = (jobs.iter())
-        .filter(|job| job.attention > 0)
-        .max_by_key(|job| job.attention_at);
-    (count, newest.map(|job| job.recipe.key()))
 }
 
 /// Each run that has run 30 minutes or more: its job's name, its id and its minutes.
@@ -55,7 +43,7 @@ pub(crate) fn long_run_text(name: &str, minutes: i64) -> String {
 }
 
 /// "45 min", "2 h" or "1 h 30 min".
-fn elapsed(minutes: i64) -> String {
+pub(crate) fn elapsed(minutes: i64) -> String {
     match minutes {
         0..60 => format!("{minutes} min"),
         _ if minutes % 60 == 0 => format!("{} h", minutes / 60),
@@ -65,11 +53,11 @@ fn elapsed(minutes: i64) -> String {
 
 /// A check older than this no longer reads as current.
 const CHECK_FRESH_MS: i64 = 24 * 60 * 60 * 1000;
-const PAST_30_MINUTES: &str = "This run has gone past 30 minutes. While it runs, the job's scheduled times are skipped; Stop ends it.";
+const PAST_30_MINUTES: &str = "This run has gone past 30 minutes. While it runs, the loop's scheduled times are skipped; Stop ends it.";
 const PAUSED: &str = "Scheduled times are skipped until you resume it; Resume starts from the next time. Run now still works.";
 
 /// "HTML", "Markdown", or the type in capitals.
-fn file_type_label(file_type: &str) -> String {
+pub(super) fn file_type_label(file_type: &str) -> String {
     match file_type.to_ascii_lowercase().as_str() {
         "md" | "markdown" => "Markdown".into(),
         other => other.to_uppercase(),
@@ -110,9 +98,9 @@ fn run_line(run: &JobRun) -> String {
     parts.join(" · ")
 }
 
-/// The Jobs list's "Last run" line: how this Mac's newest run ended, since a running one is in
+/// The Loops page's "Last run" line: how this Mac's newest run ended, since a running one is in
 /// the pills, or, with no run here, when the Mac that runs it last saved an output.
-fn last_run_line(job: &JobState) -> Option<String> {
+pub(super) fn last_run_line(job: &JobState) -> Option<String> {
     match job.runs.first() {
         Some(run) if run.outcome == RunOutcome::Running => None,
         Some(run) => Some(format!(
@@ -241,27 +229,17 @@ impl AssistantPage {
         }
         cx.notify();
     }
-    /// Saves `recipe`; from a `card`, as a new job, which the host refuses when its name is
-    /// taken, and then the card goes.
-    fn save_recipe(
-        &mut self,
-        recipe: Recipe,
-        card: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Saves the human's edit of a loop on its page.
+    fn save_recipe(&mut self, recipe: Recipe, window: &mut Window, cx: &mut Context<Self>) {
         let name = recipe.name.clone();
         self.ask(
-            ask::save_job(recipe, card.is_some()),
+            ask::save_job(recipe, false),
             window,
             cx,
             move |view, saved, window, cx| {
                 match saved {
                     Ok(state) => {
-                        if let Some(card) = card.clone() {
-                            view.dismiss(card, window, cx);
-                        }
-                        toast(format!("Saved the job {name}"), window, cx);
+                        toast(format!("Saved the loop {name}"), window, cx);
                         view.open_job(Some(state.recipe.key()), window, cx);
                     }
                     Err(error) => {
@@ -275,13 +253,7 @@ impl AssistantPage {
             },
         );
     }
-    fn edit_recipe(
-        &mut self,
-        recipe: Recipe,
-        card: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn edit_recipe(&mut self, recipe: Recipe, window: &mut Window, cx: &mut Context<Self>) {
         let input = |text: &str, cx: &mut Context<Self>, window: &mut Window| {
             let text = text.to_owned();
             cx.new(|cx| InputState::new(window, cx).default_value(text))
@@ -297,7 +269,6 @@ impl AssistantPage {
         });
         self.jobs_view = Some(JobsView::Edit(Box::new(JobForm {
             recipe,
-            card,
             name,
             prompt,
             cron,
@@ -316,8 +287,7 @@ impl AssistantPage {
         recipe.prompt = form.prompt.read(cx).value().trim().to_owned();
         recipe.schedule.cron = form.cron.read(cx).value().trim().to_owned();
         recipe.schedule.timezone = form.timezone.read(cx).value().trim().to_owned();
-        let card = form.card.clone();
-        self.save_recipe(recipe, card, window, cx);
+        self.save_recipe(recipe, window, cx);
     }
     fn set_enabled(
         &mut self,
@@ -406,7 +376,7 @@ impl AssistantPage {
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let (weak, space, id) = (weak.clone(), space.clone(), id.clone());
             dialog
-                .title(format!("Delete the job {name}?"))
+                .title(format!("Delete the loop {name}?"))
                 .confirm()
                 .ok_text("Delete")
                 .ok_variant(ButtonVariant::Danger)
@@ -429,114 +399,6 @@ impl AssistantPage {
             Err(error) => toast_error(format!("{error:#}"), window, cx),
         }
         cx.notify();
-    }
-
-    /// The card `propose_job` shows: every field of the recipe, its schedule in words with its
-    /// next runs, and each source as checked now. Nothing is saved until Save job.
-    pub(super) fn recipe_card(
-        &self,
-        card_id: &str,
-        recipe: &Recipe,
-        preview: &RecipePreview,
-        p: Palette,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let spaces = self.spaces().to_vec();
-        let space = self.space_named(&recipe.space_id);
-        let shared = self.shared_space(&recipe.space_id);
-        let space_line = div()
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .child(space_mark(space_color(&spaces, &recipe.space_id, p)))
-            .child(match (space, shared) {
-                (Some(space), true) => format!("{} · shared", space.name),
-                (Some(space), false) => space.name.clone(),
-                (None, _) => String::new(),
-            });
-        let schedule = div()
-            .flex()
-            .flex_col()
-            .child(preview.schedule.clone())
-            .when(!preview.next_runs.is_empty(), |d| {
-                d.child(hint(format!("Next: {}", preview.next_runs.join(" · ")), p))
-            });
-        let mut sources = div().flex().flex_col().gap(px(2.));
-        if preview.sources.is_empty() {
-            sources = sources.child(hint("None: the run reads only local files and the web.", p));
-        }
-        for check in &preview.sources {
-            let (ok, text) = source_line(check);
-            sources = sources.child(
-                div()
-                    .flex()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .text_color(if ok { p.green } else { p.red })
-                            .child("●"),
-                    )
-                    .child(text),
-            );
-        }
-        let output = recipe
-            .output
-            .as_ref()
-            .map_or("Whatever the run saves".to_owned(), |o| {
-                format!("“{}” · {}", o.title, file_type_label(&o.file_type))
-            });
-        let (card_id, edited, saved) = (card_id.to_owned(), recipe.clone(), recipe.clone());
-        let (cancel, from_card) = (card_id.clone(), card_id.clone());
-        card(p)
-            .gap_2()
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(format!("New job · {}", recipe.name)),
-            )
-            .child(row("Space", space_line, p))
-            .child(row("Schedule", schedule, p))
-            .child(row("Prompt", recipe.prompt.clone(), p))
-            .child(row("Model", preview.model.clone(), p))
-            .child(row("Output", output, p))
-            .when(shared, |d| {
-                d.child(row("Sharing", recipe.sharing.label(), p))
-            })
-            .child(row("Sources", sources, p))
-            .child(hint(ONLY_READ, p))
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .justify_end()
-                    .child(
-                        button(SharedString::from(format!("edit-recipe-{card_id}")))
-                            .ghost()
-                            .xsmall()
-                            .label("Edit")
-                            .on_click(cx.listener(move |v, _, w, c| {
-                                v.edit_recipe(edited.clone(), Some(from_card.clone()), w, c)
-                            })),
-                    )
-                    .child(
-                        button(SharedString::from(format!("cancel-recipe-{card_id}")))
-                            .ghost()
-                            .xsmall()
-                            .label("Cancel")
-                            .on_click(
-                                cx.listener(move |v, _, w, c| v.dismiss(cancel.clone(), w, c)),
-                            ),
-                    )
-                    .child(
-                        button(SharedString::from(format!("save-recipe-{card_id}")))
-                            .primary()
-                            .xsmall()
-                            .label("Save job")
-                            .on_click(cx.listener(move |v, _, w, c| {
-                                v.save_recipe(saved.clone(), Some(card_id.clone()), w, c)
-                            })),
-                    ),
-            )
     }
 
     pub(super) fn jobs_body(
@@ -572,7 +434,7 @@ impl AssistantPage {
                 div()
                     .text_size(px(font::TITLE))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("Jobs"),
+                    .child("Loops"),
             )
             .child(hint(WHILE_RUNNING, p))
             .child(
@@ -583,7 +445,7 @@ impl AssistantPage {
             );
         if self.jobs().is_empty() {
             return list.child(hint(
-                "No jobs yet. Ask the assistant for recurring work, such as a brief every weekday at 7, and save the recipe it shows.",
+                "No loops yet. Ask the Assistant for recurring work, such as a brief every weekday at 7.",
                 p,
             ));
         }
@@ -646,7 +508,7 @@ impl AssistantPage {
                 button("jobs-back")
                     .ghost()
                     .xsmall()
-                    .label("‹ All jobs")
+                    .label("‹ All loops")
                     .on_click(cx.listener(|v, _, w, c| v.open_job(None, w, c))),
             )
             .child(div().flex_1())
@@ -658,9 +520,11 @@ impl AssistantPage {
                     .on_click(cx.listener(move |v, _, w, c| v.set_enabled(&toggled, paused, w, c))),
             )
             .child(
-                button("job-edit").ghost().xsmall().label("Edit").on_click(
-                    cx.listener(move |v, _, w, c| v.edit_recipe(edited.clone(), None, w, c)),
-                ),
+                button("job-edit")
+                    .ghost()
+                    .xsmall()
+                    .label("Edit")
+                    .on_click(cx.listener(move |v, _, w, c| v.edit_recipe(edited.clone(), w, c))),
             )
             .child(
                 button("job-delete")
@@ -880,7 +744,7 @@ impl AssistantPage {
                     })
                     .child(row("Sources", sources, p))
                     .child(hint(
-                        "Jobs only read, through the commands and tools listed here.",
+                        "Loops only read, through the commands and tools listed here.",
                         p,
                     )),
             )
@@ -890,7 +754,6 @@ impl AssistantPage {
 
     fn job_form(&self, form: &JobForm, p: Palette, cx: &mut Context<Self>) -> Div {
         let key = form.recipe.key();
-        let saved = form.card.is_none();
         let field = |label: &'static str, input: AnyElement| {
             div()
                 .flex()
@@ -901,10 +764,11 @@ impl AssistantPage {
         };
         card(p)
             .gap_3()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(match saved {
-                true => format!("Edit {}", form.recipe.name),
-                false => format!("New job · {}", form.recipe.name),
-            }))
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(format!("Edit {}", form.recipe.name)),
+            )
             .child(field("Name", Input::new(&form.name).small().into_any_element()))
             .child(field("Prompt", Textarea::new(&form.prompt).w_full().into_any_element()))
             .child(field(
@@ -929,22 +793,15 @@ impl AssistantPage {
                             .ghost()
                             .xsmall()
                             .label("Cancel")
-                            .on_click(cx.listener(move |v, _, w, c| {
-                                let back = saved.then(|| key.clone());
-                                match back {
-                                    Some(key) => v.open_job(Some(key), w, c),
-                                    None => {
-                                        v.jobs_view = None;
-                                        c.notify();
-                                    }
-                                }
-                            })),
+                            .on_click(
+                                cx.listener(move |v, _, w, c| v.open_job(Some(key.clone()), w, c)),
+                            ),
                     )
                     .child(
                         button("save-job-form")
                             .primary()
                             .xsmall()
-                            .label("Save job")
+                            .label("Save loop")
                             .disabled(form.busy)
                             .on_click(cx.listener(|v, _, w, c| v.save_form(w, c))),
                     ),
@@ -955,8 +812,8 @@ impl AssistantPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHECK_FRESH_MS, PAUSED, Stop, attention, checked_note, file_type_label, last_run_line,
-        long_run_text, long_runs, run_line, run_model, schedule_note, stale_source_line, stops,
+        CHECK_FRESH_MS, PAUSED, Stop, checked_note, file_type_label, last_run_line, long_run_text,
+        long_runs, run_line, run_model, schedule_note, stale_source_line, stops,
     };
     use workspace_core::job::{
         JobKey, JobRun, JobState, Recipe, RunOutcome, Schedule, SourceCheck,
@@ -1012,22 +869,6 @@ mod tests {
             not_here: None,
             last_run_at: None,
         }
-    }
-
-    #[test]
-    fn the_row_counts_every_jobs_unseen_runs_and_opens_the_newest() {
-        let mut old = job(vec![]);
-        (old.attention, old.attention_at) = (21, Some(1));
-        let mut newer = job(vec![]);
-        newer.recipe.id = "dashboard".into();
-        (newer.attention, newer.attention_at) = (1, Some(5));
-        let (count, open) = attention(&[old, newer]);
-        assert_eq!(count, 22);
-        assert_eq!(
-            open,
-            Some(JobKey::recipe(&SpaceId("sage".into()), "dashboard"))
-        );
-        assert_eq!(attention(&[job(vec![])]), (0, None));
     }
 
     #[test]

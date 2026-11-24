@@ -563,6 +563,9 @@ impl Workspace {
             Intent::StopJobRun(run) => self.assistant.update(cx, |assistant, cx| {
                 assistant.stop_run(run.clone(), window, cx)
             }),
+            Intent::StopAssistantTurn => self
+                .assistant
+                .update(cx, |assistant, cx| assistant.stop_turn(window, cx)),
             Intent::AskAssistant { attached, space } => {
                 self.assistant.update(cx, |assistant, cx| {
                     assistant.ask_about(attached.clone(), space.clone(), window, cx)

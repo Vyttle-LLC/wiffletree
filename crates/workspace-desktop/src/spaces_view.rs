@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 use ui::{banner, card, hint, icon, mono, section};
 use wording::{age, counted, counted_as};
 
+mod add_source;
 mod repository_box;
 mod setup;
 
@@ -110,6 +111,8 @@ pub(super) struct SpacesPage {
     refused_by: Option<SpaceId>,
     /// Import from Linear…, open in the Space it was opened for.
     linear: Option<(SpaceId, Entity<LinearImportPanel>)>,
+    /// Add source, open under the shown Space's Sources.
+    adding: Option<add_source::AddSource>,
 }
 impl EventEmitter<Intent> for SpacesPage {}
 impl SpacesPage {
@@ -169,6 +172,7 @@ impl SpacesPage {
             error: None,
             refused_by: None,
             linear: None,
+            adding: None,
         }
     }
 
@@ -340,6 +344,7 @@ impl SpacesPage {
         self.editing_prefix = false;
         self.bringing_in = None;
         self.protect_refused = None;
+        self.adding = None;
         if matches!(shown, Shown::New | Shown::FromRepository) {
             self.loaded = None;
             self.joining = None;
@@ -657,6 +662,48 @@ impl SpacesPage {
         )
     }
 
+    /// The Sources field, each source's act list with what is done without asking, and Add
+    /// source.
+    fn sources_field(&self, space: &Space, p: Palette, cx: &mut Context<Self>) -> Div {
+        let acts = (space.sources.iter())
+            .filter(|source| !source.acts().is_empty())
+            .map(|source| {
+                let acts: Vec<String> = (source.acts().iter())
+                    .map(|act| match source.without_asking(act) {
+                        true => format!("{act} (without asking)"),
+                        false => act.clone(),
+                    })
+                    .collect();
+                hint(
+                    format!(
+                        "{} acts, through a card: {}",
+                        source.name(),
+                        acts.join(", ")
+                    ),
+                    p,
+                )
+            });
+        let id = space.id.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(Textarea::new(&self.sources).w_full())
+            .children(acts)
+            .when(self.adding.is_none(), |d| {
+                d.child(
+                    div().flex().child(
+                        button("add-source")
+                            .xsmall()
+                            .icon(icon("plus"))
+                            .label("Add source")
+                            .on_click(
+                                cx.listener(move |v, _, w, c| v.open_add_source(id.clone(), w, c)),
+                            ),
+                    ),
+                )
+            })
+    }
     fn space_page(&self, space: &Space, p: Palette, cx: &mut Context<Self>) -> Div {
         let local = self.local(&space.id);
         let status = self.storage_of(&space.id);
@@ -703,13 +750,14 @@ impl SpacesPage {
             ))
             .child(row(
                 "Sources",
-                Textarea::new(&self.sources).w_full(),
+                self.sources_field(space, p, cx),
                 Some(format!(
-                    "Threads in {} may use these. Jobs list their own. {SOURCES_FORMAT}",
+                    "The Assistant and loops in {} may read these; only the Assistant asks to act, through a card. {SOURCES_FORMAT}",
                     space.name
                 )),
                 p,
             ))
+            .children(self.add_source_form(p, cx))
             .child(self.cascade_links(space, local, p, cx))
             .children(self.moved_banner(space, p, cx))
             .child(self.repository_box(space, status, p, cx));

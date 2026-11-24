@@ -1678,11 +1678,11 @@ fn job_label(job: &Job, verifiers: &[VerifierConfig]) -> (String, String) {
         Job::Keeper => ("PR keeper".into(), "Fixes conflicts, sorts comments".into()),
         Job::Assistant => (
             "Assistant".into(),
-            "Your conversation and issue threads".into(),
+            "Your conversation, issue threads and loops".into(),
         ),
         // Never in a table the page shows: this Mac's drops it, and a Space's is only named.
         Job::RetiredRouter => ("Router".into(), "No longer runs".into()),
-        Job::Job => ("Job".into(), "Runs your scheduled jobs".into()),
+        Job::Job => ("Job".into(), "Runs your loops".into()),
         Job::Compiler => (
             "Brain compiler".into(),
             "Compiles brains this Mac compiles".into(),

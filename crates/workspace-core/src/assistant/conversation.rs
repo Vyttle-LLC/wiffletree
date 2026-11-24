@@ -5,6 +5,21 @@ use crate::{ModelProfile, SpaceId, Status};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// What `conversation_cards` answers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationRead {
+    #[serde(default)]
+    pub session: Option<crate::Session>,
+    #[serde(default)]
+    pub cards: Vec<ConversationCard>,
+    #[serde(default)]
+    pub routes: Vec<Route>,
+    /// The human's unsent text, such as what an earlier release's router held at the upgrade;
+    /// their next message clears it.
+    #[serde(default)]
+    pub draft: Option<String>,
+}
+
 /// The conversation as the app draws it, once its first message started its session: whether
 /// it is in a turn and since when, its messages' revision, its cards and its routing tags.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
