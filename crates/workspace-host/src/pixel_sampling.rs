@@ -259,7 +259,8 @@ fn open_inside(folder: &Path, path: &Path) -> Result<std::fs::File> {
     }
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        // Not blocking, so a pipe with no writer is opened and refused, not waited on.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
     ensure!(file.metadata()?.is_file(), "it is not a file");
     Ok(file)
@@ -438,6 +439,10 @@ pub(crate) mod tests {
         assert!(refusal(&folder, at("shots/real")).contains("not a .png file"));
         assert!(refusal(&folder, at("fake.png")).contains("not a PNG image"));
         assert!(refusal(&folder, at("shots")).contains("not a .png file"));
+        // A pipe with no writer is refused at once, not waited on.
+        let pipe = std::ffi::CString::new(folder.join("stalled.png").to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(pipe.as_ptr(), 0o600) }, 0);
+        assert!(refusal(&folder, at("stalled.png")).contains("it is not a file"));
         assert!(refusal(&folder, at("missing.png")).contains("Could not read"));
         measured(&folder, at("shots/real.png"));
     }
