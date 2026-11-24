@@ -24,6 +24,8 @@ pub(crate) const REMOVING_PREFIX: &str = ".removing-";
 const REPORT_AFTER: i64 = 3;
 /// The inbox operation of a delete's failure notice, followed by what tells it apart.
 const FAILED_NOTICE: &str = "worktree-delete-failed:";
+/// The next attempt of a delete held until `release_deletion`; a start releases it.
+const HELD: i64 = i64::MAX;
 /// The wait after the first failed attempt; it doubles with each further one.
 const FIRST_RETRY_MS: i64 = 15_000;
 const LONGEST_RETRY_MS: i64 = 10 * 60_000;
@@ -235,13 +237,15 @@ impl Host {
     }
     /// Deletes `folder`, a folder of `ticket`, durably: records it, then renames it aside into
     /// `beside`, which must be on its filesystem and outside any worktree it should leave
-    /// clean. Refuses anything but a real folder, never following a symbolic link.
+    /// clean. Refuses anything but a real folder, never following a symbolic link. Returns
+    /// where the folder waits. With `held`, the delete waits for `release_deletion`.
     pub(crate) fn delete_durably(
         &mut self,
         folder: &Path,
         beside: &Path,
         ticket: &str,
-    ) -> Result<()> {
+        held: bool,
+    ) -> Result<PathBuf> {
         ensure!(
             fs::symlink_metadata(folder).is_ok_and(|m| m.is_dir()),
             "{} is not a folder",
@@ -249,10 +253,25 @@ impl Host {
         );
         let aside = aside(beside, ticket);
         self.record_worktree_deletion(&aside, Some(ticket))?;
+        if held {
+            self.db.execute(
+                "UPDATE worktree_deletions SET next_attempt_at=?2 WHERE path=?1",
+                params![aside.to_string_lossy(), HELD],
+            )?;
+        }
         if let Err(error) = fs::rename(folder, &aside) {
             self.forget_worktree_deletion(&aside)?;
             bail!("Move {} aside: {error}", folder.display());
         }
+        Ok(aside)
+    }
+    /// Lets a held delete start now.
+    pub(crate) fn release_deletion(&mut self, folder: &Path) -> Result<()> {
+        self.db.execute(
+            "UPDATE worktree_deletions SET next_attempt_at=?2 WHERE path=?1",
+            params![folder.to_string_lossy(), now()],
+        )?;
+        self.worktree_deletions.due_at = 0;
         Ok(())
     }
     /// The folders waiting to be deleted, oldest first.
@@ -464,6 +483,9 @@ impl Host {
             }
             if is_gone(&folder) {
                 self.forget_worktree_deletion(&folder)?;
+                continue;
+            }
+            if next == HELD {
                 continue;
             }
             if next > at {

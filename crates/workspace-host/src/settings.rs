@@ -13,7 +13,7 @@ const MOVED_FIELDS: [&str; 4] = [
 const SLUG_LIMIT: usize = 48;
 
 /// `~/wiffletree`, or `~/wiffletree-beta` for a beta build so the two never share folders.
-fn default_workspaces_dir() -> String {
+pub(crate) fn default_workspaces_dir() -> String {
     let name = if option_env!("WIFFLETREE_CHANNEL") == Some("beta") {
         "wiffletree-beta"
     } else {

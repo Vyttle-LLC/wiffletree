@@ -65,9 +65,16 @@ struct Survey {
 /// nothing may be reclaimed now.
 type Inspected = Result<Vec<(PathBuf, u64)>, String>;
 
+/// A folder moved aside to reclaim: where it was, where it waits, and its size.
+type Moved = (PathBuf, PathBuf, u64);
+
 enum Finished {
     Survey(Survey),
     Inspected(String, Why, Inspected),
+    /// The folders moved aside, and whether a process uses one of them since.
+    Moved(String, Why, Vec<Moved>, Result<(), String>),
+    /// A removed ticket's build output outside its worktree.
+    Outside(String, Vec<PathBuf>),
 }
 
 /// A ticket's folders, as the threads off the host thread look at them.
@@ -92,8 +99,12 @@ pub(crate) struct Watch {
     check_at: i64,
     survey: Option<Survey>,
     surveying: bool,
-    /// The tickets whose build output is being scanned to reclaim it.
+    /// The tickets whose build output is being scanned to reclaim it, or checked once moved.
     inspecting: HashSet<String>,
+    /// The removed tickets whose build output outside their worktree is being found.
+    cleaning: HashSet<String>,
+    /// A removal recorded such a cleanup since the store was last read for them.
+    cleanups_due: bool,
     /// Free space is under the hard floor; whether the human's inbox says so.
     held: Option<bool>,
     finished: Arc<Mutex<Vec<Finished>>>,
@@ -119,6 +130,8 @@ impl Default for Watch {
             survey: None,
             surveying: false,
             inspecting: HashSet::new(),
+            cleaning: HashSet::new(),
+            cleanups_due: false,
             held: None,
             finished: Arc::default(),
             notify: None,
@@ -151,7 +164,10 @@ pub(crate) fn migrate(db: &Connection) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS build_output_reclaims (
             ticket_id TEXT PRIMARY KEY,
             reclaimed_at INTEGER NOT NULL,
-            bytes INTEGER NOT NULL)",
+            bytes INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS outside_cleanups (
+            ticket_id TEXT PRIMARY KEY,
+            worktree TEXT NOT NULL)",
     )?;
     Ok(())
 }
@@ -309,6 +325,8 @@ impl Host {
         watch.notify = Some(Arc::new(notify));
         watch.started = true;
         watch.check_at = 0;
+        // Resumes the cleanups of removals a stop cut off.
+        watch.cleanups_due = true;
     }
     /// The scratch folder of `ticket`'s agents, under the watch's scratch root.
     fn scratch_folder(&self, ticket: &str) -> PathBuf {
@@ -384,12 +402,26 @@ impl Host {
                 }
                 Finished::Inspected(ticket, why, inspected) => {
                     self.build_output.inspecting.remove(&ticket);
-                    self.finish_reclaim(&ticket, why, inspected, at)
+                    self.move_reclaimed(&ticket, why, inspected)
+                }
+                Finished::Moved(ticket, why, moved, used) => {
+                    self.build_output.inspecting.remove(&ticket);
+                    self.finish_reclaim(&ticket, why, moved, used, at)
+                }
+                Finished::Outside(ticket, folders) => {
+                    self.build_output.cleaning.remove(&ticket);
+                    self.delete_outside(&ticket, folders)
                 }
             };
             if let Err(error) = settled {
                 eprintln!("Reclaim build output: {error:#}");
             }
+        }
+        if std::mem::take(&mut self.build_output.cleanups_due)
+            && let Err(error) = self.start_outside_cleanups()
+        {
+            eprintln!("Delete removed tickets' build output: {error:#}");
+            self.build_output.cleanups_due = true;
         }
         if at >= self.build_output.check_at {
             self.build_output.check_at = at + CHECK_MS;
@@ -502,9 +534,10 @@ impl Host {
         Ok(())
     }
 
-    /// Moves aside and records the delete of each folder a scan found to reclaim, unless an
-    /// agent of the ticket started a turn meanwhile, and tells the ticket's project.
-    fn finish_reclaim(&mut self, id: &str, why: Why, inspected: Inspected, at: i64) -> Result<()> {
+    /// Moves aside each folder a scan found to reclaim, with its delete recorded and held,
+    /// unless an agent of the ticket started a turn meanwhile. Whether a process started using
+    /// one since the scan is then checked off the host thread; see `finish_reclaim`.
+    fn move_reclaimed(&mut self, id: &str, why: Why, inspected: Inspected) -> Result<()> {
         let ticket = self.ticket(id)?;
         let folders = match inspected {
             Ok(folders) => folders,
@@ -521,7 +554,7 @@ impl Host {
             return Ok(());
         }
         let worktree = Path::new(&ticket.worktree);
-        let mut freed = 0;
+        let mut moved = vec![];
         for (folder, size) in folders {
             // Build output in the worktree waits beside the worktree, never in it.
             let beside = match folder.starts_with(worktree) {
@@ -529,14 +562,55 @@ impl Host {
                 false => folder.parent(),
             };
             let Some(beside) = beside else { continue };
-            match self.delete_durably(&folder, beside, id) {
-                Ok(()) => freed += size,
+            match self.delete_durably(&folder, beside, id, true) {
+                Ok(aside) => moved.push((folder, aside, size)),
                 Err(error) => eprintln!("Reclaim build output of {id}: {error:#}"),
             }
         }
-        if freed == 0 {
+        if moved.is_empty() {
             return Ok(());
         }
+        self.build_output.inspecting.insert(id.to_owned());
+        let id = id.to_owned();
+        self.build_output.spawn(move || {
+            let asides: Vec<PathBuf> = (moved.iter())
+                .filter_map(|(_, aside, _)| fs::canonicalize(aside).ok())
+                .collect();
+            let used = worktree_deletions::holders(&asides).and_then(|holders| match holders[..] {
+                [] => Ok(()),
+                _ => Err(format!("processes use files in it: {}", holders.join(", "))),
+            });
+            Finished::Moved(id, why, moved, used)
+        });
+        Ok(())
+    }
+    /// Lets the moved folders' deletes start, records the reclaim and tells the ticket's project.
+    /// If a process uses one of them, every folder is moved back instead.
+    fn finish_reclaim(
+        &mut self,
+        id: &str,
+        why: Why,
+        moved: Vec<Moved>,
+        used: Result<(), String>,
+        at: i64,
+    ) -> Result<()> {
+        if let Err(reason) = used {
+            eprintln!("Reclaim build output of {id}: moved back, {reason}");
+            for (folder, aside, _) in moved {
+                match fs::rename(&aside, &folder) {
+                    Ok(()) => self.forget_worktree_deletion(&aside)?,
+                    // Its place was taken: the delete waits out the process instead.
+                    Err(_) => self.release_deletion(&aside)?,
+                }
+            }
+            return Ok(());
+        }
+        let mut freed = 0;
+        for (_, aside, size) in moved {
+            self.release_deletion(&aside)?;
+            freed += size;
+        }
+        let ticket = self.ticket(id)?;
         self.db.execute(
             "INSERT INTO build_output_reclaims VALUES (?1,?2,?3)
              ON CONFLICT(ticket_id) DO UPDATE SET reclaimed_at=excluded.reclaimed_at,bytes=excluded.bytes",
@@ -675,32 +749,66 @@ impl Host {
         })
     }
 
-    /// Deletes the ticket's build output outside its worktree, as its worktree is removed:
-    /// Xcode's DerivedData folders for its path, listed by `derived_data`, and its scratch
-    /// folder. Each folder waits beside itself. Failures are logged; the removal goes on.
-    pub(crate) fn delete_outside_build_output(
-        &mut self,
-        ticket: &Ticket,
-        derived_data: Vec<PathBuf>,
-    ) {
-        let scratch = self.scratch_folder(&ticket.id);
-        for folder in derived_data.into_iter().chain([scratch]) {
-            if !is_real_folder(&folder) {
+    /// Records that the ticket's build output outside its worktree, Xcode's DerivedData folders
+    /// for its path and its scratch folder, is to be deleted as its worktree is removed. Recorded
+    /// before the worktree moves, so a stop at any point leaves the cleanup to resume.
+    pub(crate) fn record_outside_cleanup(&mut self, ticket: &Ticket) -> Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO outside_cleanups VALUES (?1,?2)",
+            params![ticket.id, ticket.worktree],
+        )?;
+        Ok(())
+    }
+    /// Drops the cleanup of a removal that left the worktree in place.
+    pub(crate) fn forget_outside_cleanup(&self, ticket: &str) -> Result<()> {
+        self.db
+            .execute("DELETE FROM outside_cleanups WHERE ticket_id=?1", [ticket])?;
+        Ok(())
+    }
+    /// Has the next settle start the cleanups recorded for removed worktrees.
+    pub(crate) fn outside_cleanups_due(&mut self) {
+        self.build_output.cleanups_due = true;
+    }
+    /// Finds each recorded cleanup's folders off the host thread, as `scan` would find them.
+    fn start_outside_cleanups(&mut self) -> Result<()> {
+        let recorded: Vec<(String, String)> = self
+            .db
+            .prepare("SELECT ticket_id,worktree FROM outside_cleanups")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (ticket, worktree) in recorded {
+            if !self.build_output.cleaning.insert(ticket.clone()) {
                 continue;
             }
+            let (scratch, root) = (
+                self.scratch_folder(&ticket),
+                self.build_output.derived_data.clone(),
+            );
+            self.build_output.spawn(move || {
+                let found =
+                    root.map(|root| build_output::derived_data(Path::new(&worktree), &root));
+                let mut folders: Vec<PathBuf> = (found.into_iter().flat_map(|output| output.found))
+                    .map(|f| f.path)
+                    .collect();
+                if is_real_folder(&scratch) {
+                    folders.push(scratch);
+                }
+                Finished::Outside(ticket, folders)
+            });
+        }
+        Ok(())
+    }
+    /// Deletes a removed ticket's folders outside its worktree, each waiting beside itself.
+    fn delete_outside(&mut self, ticket: &str, folders: Vec<PathBuf>) -> Result<()> {
+        for folder in folders {
             let Some(beside) = folder.parent() else {
                 continue;
             };
-            if let Err(error) = self.delete_durably(&folder, beside, &ticket.id) {
-                eprintln!("Remove {} of {}: {error:#}", folder.display(), ticket.id);
+            if let Err(error) = self.delete_durably(&folder, beside, ticket, false) {
+                eprintln!("Delete {} of {ticket}: {error:#}", folder.display());
             }
         }
-    }
-    /// Xcode's DerivedData folders for the ticket's worktree, read before the worktree moves.
-    pub(crate) fn derived_data_of(&self, ticket: &Ticket) -> Vec<PathBuf> {
-        (self.build_output.derived_data.as_deref())
-            .map(|root| build_output::derived_data_for(Path::new(&ticket.worktree), root))
-            .unwrap_or_default()
+        self.forget_outside_cleanup(ticket)
     }
 }
 
@@ -743,20 +851,43 @@ mod tests {
                 .attach_repository(&project.id, main.to_str().unwrap(), "HEAD")
                 .unwrap()
                 .id;
-            let free = Arc::new(AtomicU64::new(400 * GB));
-            let reading = free.clone();
-            let watch = &mut host.build_output;
-            watch.derived_data = Some(folder.path().join("DerivedData"));
-            watch.scratch_root = folder.path().join("scratch");
-            watch.space = Arc::new(move |_| Some((reading.load(Ordering::SeqCst), 500 * GB)));
-            watch.started = true;
-            Self {
+            let mut f = Self {
                 folder,
                 host,
                 coordinator,
                 repository,
-                free,
-            }
+                free: Arc::new(AtomicU64::new(400 * GB)),
+            };
+            f.watch();
+            f
+        }
+        /// Starts the watch on the test's own folders and free space, as the service starts it.
+        fn watch(&mut self) {
+            let reading = self.free.clone();
+            self.host.watch_build_output(|| {});
+            let watch = &mut self.host.build_output;
+            watch.derived_data = Some(self.folder.path().join("DerivedData"));
+            watch.scratch_root = self.folder.path().join("scratch");
+            watch.space = Arc::new(move |_| Some((reading.load(Ordering::SeqCst), 500 * GB)));
+        }
+        /// The host as a new start opens it.
+        fn reopen(&mut self) {
+            let home = self.host.home.clone();
+            // The store lock is released before the next open takes it.
+            self.host = Host::open_set_up(self.folder.path().join("unused")).unwrap();
+            self.host = Host::open_set_up(home).unwrap();
+            self.watch();
+        }
+        /// A DerivedData folder whose project is `project`.
+        fn derived_data(&self, name: &str, project: &Path) -> PathBuf {
+            let folder = self.folder.path().join("DerivedData").join(name);
+            fs::create_dir_all(folder.join("Build")).unwrap();
+            let plist = format!(
+                "<key>WorkspacePath</key>\n<string>{}</string>",
+                project.display()
+            );
+            fs::write(folder.join("info.plist"), plist).unwrap();
+            folder
         }
         /// A ticket whose worktree has `size` bytes in `target/` and a file in its scratch folder.
         fn ticket(&mut self, title: &str, size: usize) -> Ticket {
@@ -797,6 +928,8 @@ mod tests {
                 if !finished
                     && !watch.surveying
                     && watch.inspecting.is_empty()
+                    && watch.cleaning.is_empty()
+                    && !watch.cleanups_due
                     && !self.host.worktree_deletions_running()
                 {
                     break;
@@ -1077,17 +1210,12 @@ mod tests {
         let mut f = Fixture::new();
         let ticket = f.ticket("Toolbar", 4096);
         fs::remove_dir_all(Path::new(&ticket.worktree).join("target")).unwrap();
-        let derived = f.folder.path().join("DerivedData/App-a1");
-        fs::create_dir_all(derived.join("Build")).unwrap();
-        let project = Path::new(&ticket.worktree).join("App.xcworkspace");
-        fs::write(
-            derived.join("info.plist"),
-            format!(
-                "<key>WorkspacePath</key>\n<string>{}</string>",
-                project.display()
-            ),
-        )
-        .unwrap();
+        let worktree = Path::new(&ticket.worktree);
+        let derived = f.derived_data("App-a1", &worktree.join("App.xcworkspace"));
+        // DerivedData holding a Git repository is ambiguous, as `scan` says, and is kept.
+        let cloned = f.derived_data("Cloned-b2", &worktree.join("Cloned.xcodeproj"));
+        git(&cloned, &["init", "-q", "clone"]);
+        fs::write(cloned.join("clone/unsaved.txt"), "mine").unwrap();
         let scratch = f.host.scratch_folder(&ticket.id);
 
         f.host
@@ -1095,12 +1223,55 @@ mod tests {
             .unwrap();
         f.settle(now());
 
-        assert!(!Path::new(&ticket.worktree).exists());
+        assert!(!worktree.exists());
         assert!(!derived.exists() && !scratch.exists());
-        assert!(f.host.pending_deletes().unwrap().is_empty());
+        assert!(cloned.join("clone/unsaved.txt").exists());
+        assert_eq!(f.host.pending_deletes().unwrap(), []);
         // Nothing else in DerivedData or beside the scratch folder.
-        assert_eq!(fs::read_dir(derived.parent().unwrap()).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(derived.parent().unwrap()).unwrap().count(), 1);
         assert_eq!(fs::read_dir(scratch.parent().unwrap()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_removal_cut_off_after_its_worktree_moved_still_deletes_what_is_outside() {
+        let mut f = Fixture::new();
+        let ticket = f.ticket("Toolbar", 0);
+        let worktree = Path::new(&ticket.worktree);
+        let derived = f.derived_data("App-a1", &worktree.join("App.xcworkspace"));
+        let scratch = f.host.scratch_folder(&ticket.id);
+        // What a removal records before it moves the worktree, then the move, then a stop.
+        f.host.record_outside_cleanup(&ticket).unwrap();
+        fs::rename(worktree, worktree.with_file_name(".removing-cut-off")).unwrap();
+
+        f.reopen();
+        f.settle(now());
+
+        assert!(!derived.exists() && !scratch.exists());
+        assert_eq!(f.host.pending_deletes().unwrap(), []);
+    }
+
+    #[test]
+    fn build_output_a_process_starts_using_while_it_is_moved_is_moved_back() {
+        let mut f = Fixture::new();
+        let ticket = f.ticket("Toolbar", 4096);
+        let target = Path::new(&ticket.worktree).join("target");
+        f.host.reclaim_build_output(Some(&ticket.id)).unwrap();
+        // The scan has found nothing using it; then a build starts there.
+        while f.host.build_output.finished.lock().unwrap().is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let mut build = std::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(&target)
+            .spawn()
+            .unwrap();
+        f.settle(now());
+        build.kill().unwrap();
+        build.wait().unwrap();
+
+        assert!(target.join("debug/app").exists());
+        assert_eq!(f.host.pending_deletes().unwrap(), []);
+        assert!(f.notices().is_empty());
     }
 
     #[test]

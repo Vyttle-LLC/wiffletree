@@ -198,22 +198,24 @@ impl Host {
     /// delete is recorded before the rename, so it resumes after a stop (see
     /// `worktree_deletions`). If Git fails, the folder is renamed back only when the worktree is
     /// as clean there as it was checked to be; otherwise the removal completes, losing nothing
-    /// because the folder was clean, and the next start prunes. Once the worktree is aside, its
-    /// Xcode DerivedData folders and its scratch folder are deleted the same way.
+    /// because the folder was clean, and the next start prunes. Its Xcode DerivedData folders
+    /// and its scratch folder are deleted too, by a cleanup recorded before the worktree moves
+    /// (see `reclaim`), including when an earlier removal already took the worktree.
     fn remove_worktree(&mut self, ticket: &Ticket) -> Result<bool> {
         let repository = self.ticket_repository(ticket)?;
         let repository = Path::new(&repository.path);
         let worktree = Path::new(&ticket.worktree);
+        self.outside_cleanups_due();
         if !worktree.exists() {
+            self.record_outside_cleanup(ticket)?;
             runtime::git_output(repository, &["worktree", "prune"])?;
             return Ok(false);
         }
         let context = || format!("Remove \"{}\" ({})", ticket.title, ticket.id);
-        // Read while the worktree is at its path, which Xcode keyed its folders by.
-        let derived_data = self.derived_data_of(ticket);
         let aside = removal_folder(ticket);
         self.record_worktree_deletion(&aside, Some(&ticket.id))
             .with_context(context)?;
+        self.record_outside_cleanup(ticket)?;
         let moved = (|| -> Result<()> {
             fs::rename(worktree, &aside).with_context(context)?;
             let forgotten = runtime::git_output(repository, &["worktree", "prune"]);
@@ -229,10 +231,10 @@ impl Host {
         if let Err(error) = moved {
             if !aside.exists() {
                 self.forget_worktree_deletion(&aside)?;
+                self.forget_outside_cleanup(&ticket.id)?;
             }
             return Err(error);
         }
-        self.delete_outside_build_output(ticket, derived_data);
         self.settle_worktree_deletions(now());
         Ok(true)
     }

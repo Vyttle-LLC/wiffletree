@@ -223,19 +223,31 @@ fn limit(data: &Path) -> usize {
 }
 
 /// The workspaces folder and the hard floor from `data`'s `settings.json`, read on every look so
-/// a change applies to builds already waiting. `None` when the file names no workspaces folder.
-fn hard_floor(data: &Path) -> Option<(PathBuf, u64)> {
-    let settings: serde_json::Value =
-        serde_json::from_slice(&fs::read(data.join(crate::settings::FILE)).ok()?).ok()?;
-    let folder = PathBuf::from(settings["workspaces_dir"].as_str()?);
+/// a change applies to builds already waiting. A missing or unreadable file, or a field it
+/// lacks, means the default, as the host reads it.
+fn hard_floor(data: &Path) -> (PathBuf, u64) {
+    let settings: serde_json::Value = fs::read(data.join(crate::settings::FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let folder = (settings["workspaces_dir"].as_str())
+        .map_or_else(crate::settings::default_workspaces_dir, str::to_owned);
     let floor_gb = (settings["disk"]["hard_floor_gb"].as_u64())
         .unwrap_or(workspace_core::DiskSettings::default().hard_floor_gb.into());
-    Some((folder, floor_gb.saturating_mul(workspace_core::GB)))
+    (folder.into(), floor_gb.saturating_mul(workspace_core::GB))
 }
 
-/// Waits while the workspaces disk has less free space than the hard floor, saying once on
-/// `say` why, so a build waits instead of failing partway with "no space left". `free` reads a
-/// disk's free bytes and `pause` waits between looks. A disk it cannot read never holds a build.
+/// The free space and the hard floor while the workspaces disk has less free space than the
+/// floor. `free` reads a disk's free bytes; a disk it cannot read never holds a build.
+fn short_of_space(data: &Path, free: impl Fn(&Path) -> Option<u64>) -> Option<(u64, u64)> {
+    let (folder, floor) = hard_floor(data);
+    free(&folder)
+        .filter(|available| *available < floor)
+        .map(|available| (available, floor))
+}
+
+/// Waits while the workspaces disk is short of space, saying once on `say` why, so a build
+/// waits instead of failing partway with "no space left". `pause` waits between looks.
 fn wait_for_space(
     data: &Path,
     free: impl Fn(&Path) -> Option<u64>,
@@ -243,10 +255,7 @@ fn wait_for_space(
     mut pause: impl FnMut(),
 ) {
     let mut told = false;
-    while let Some((folder, floor)) = hard_floor(data)
-        && let Some(available) = free(&folder)
-        && available < floor
-    {
+    while let Some((available, floor)) = short_of_space(data, &free) {
         if !told {
             let gb = |bytes: u64| bytes as f64 / workspace_core::GB as f64;
             let _ = writeln!(
@@ -365,18 +374,21 @@ fn claim(data: &Path, say: &mut impl Write) -> io::Result<Option<File>> {
             std::process::exit(1);
         }
     };
-    if !State::open(data)?.holders()?.contains(&build.pid) {
-        wait_for_space(data, crate::disk::free, say, || {
-            std::thread::sleep(SPACE_POLL);
-            check_parent();
-        });
-    }
     let mut told = false;
     loop {
         let state = State::open(data)?;
         let holders = state.holders()?;
         let waiting = state.waiting(build.pid);
         let mut holds = holders.contains(&build.pid);
+        // Looked at before every admission, so a build queued for a slot waits too.
+        if !holds && short_of_space(data, crate::disk::free).is_some() {
+            drop(state);
+            wait_for_space(data, crate::disk::free, say, || {
+                std::thread::sleep(SPACE_POLL);
+                check_parent();
+            });
+            continue;
+        }
         if !holds {
             // Only the build's first call to wait says so.
             let first = !waiting.exists() && File::create_new(&waiting).is_ok();
@@ -702,8 +714,7 @@ mod tests {
             let mut said = vec![];
             wait_for_space(
                 data.path(),
-                |folder| {
-                    assert_eq!(folder, Path::new("/w"));
+                |_| {
                     looked.set(looked.get() + 1);
                     readings.borrow_mut().next()
                 },
@@ -712,7 +723,12 @@ mod tests {
             );
             (looked.get(), String::from_utf8(said).unwrap())
         };
+        // With no settings file, as on a new install, the host's defaults hold builds too.
+        let default = PathBuf::from(crate::settings::default_workspaces_dir());
+        assert_eq!(hard_floor(data.path()), (default, 5 * gb));
+        assert_eq!(run(vec![gb, 6 * gb]).0, 2);
         settings("");
+        assert_eq!(hard_floor(data.path()).0, Path::new("/w"));
         let (looks, said) = run(vec![gb, 4 * gb, 6 * gb]);
         assert_eq!(looks, 3);
         assert_eq!(said.lines().count(), 1);
