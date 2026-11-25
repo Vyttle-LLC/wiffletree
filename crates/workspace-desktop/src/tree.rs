@@ -1,46 +1,38 @@
-//! The sidebar's shape: a section for each Space, with its projects in the host's order gathered
-//! into groups by first word, each one row for its coordinator. Tickets and their agents are
-//! listed in the Agents panel.
+//! The sidebar's shape in the Outcome lens: a section for each Space, listing its loose projects
+//! and parents in the host's order with each parent's children under it, each project one row
+//! for its coordinator. Tickets and their agents are listed in the Agents panel.
 use crate::agents_panel::Roster;
 use crate::progress::ProgressBoard;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use workspace_core::*;
 
 pub(crate) enum Row<'a> {
     Space {
         space: SpaceId,
         name: String,
-        /// Its shown projects' coordinators, in the host's order.
+        /// Its shown projects' coordinators, parents' children included.
         projects: Vec<&'a Session>,
     },
-    Group(Group<'a>),
-    Project {
+    /// A loose project, or a child under its parent's row.
+    Project { root: &'a Session, child: bool },
+    /// A parent; its children's rows follow unless it is collapsed.
+    Parent {
         root: &'a Session,
-        /// Its name; inside a group, without the first word the group already shows.
-        label: String,
-        grouped: bool,
+        /// Its shown children's coordinators, in the host's order.
+        children: Vec<&'a Session>,
     },
 }
 
-/// What a group's projects share: their section's Space and their first word in lowercase.
-pub(crate) type GroupKey = (SpaceId, String);
-
-/// Projects of one Space whose names share a first word, drawn under one row while grouping is
-/// on.
+/// A top-level row of a Space's section: a loose project, or a parent with its children.
 #[derive(Debug)]
-pub(crate) struct Group<'a> {
-    pub key: GroupKey,
-    /// The first word as the topmost member writes it.
-    pub label: String,
-    /// Their coordinators, in the host's order.
-    pub members: Vec<&'a Session>,
-}
-
-/// A top-level row of a Space's section.
-#[derive(Debug)]
-pub(crate) enum Entry<'a> {
-    Project(&'a Session),
-    Group(Group<'a>),
+pub(crate) struct Entry<'a> {
+    pub root: &'a Session,
+    /// Its shown children's coordinators, in the host's order.
+    pub children: Vec<&'a Session>,
+    /// It may be filed under another project: it has no parent and no children, shown or not.
+    fileable: bool,
+    /// Projects may be filed under it: it has no parent and is not archived.
+    adopts: bool,
 }
 
 /// One Space's shown projects, under its section row.
@@ -50,35 +42,6 @@ pub(crate) struct Section<'a> {
     pub space: SpaceId,
     pub name: String,
     pub entries: Vec<Entry<'a>>,
-}
-
-/// A name's first word without trailing punctuation: "wiffletree" in "wiffletree: Sidebar".
-fn first_word(name: &str) -> &str {
-    let word = name.split_whitespace().next().unwrap_or_default();
-    word.trim_end_matches(|c: char| !c.is_alphanumeric())
-}
-
-/// What projects in one group share: their first word, whatever its case.
-pub(crate) fn group_key(name: &str) -> String {
-    first_word(name).to_lowercase()
-}
-
-/// A grouped project's name without the first word and the separator after it, or the full
-/// name when nothing else remains.
-fn member_label(name: &str) -> &str {
-    let rest = name
-        .trim_start()
-        .split_once(char::is_whitespace)
-        .map_or("", |(_, rest)| rest.trim_start());
-    // A separator standing on its own, as in "watch - Relay".
-    let (word, after) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-    let separator = |c: char| c.is_ascii_punctuation() || matches!(c, '–' | '—' | '·');
-    let rest = if word.chars().all(separator) {
-        after.trim_start()
-    } else {
-        rest
-    };
-    if rest.is_empty() { name } else { rest }
 }
 
 /// The section a project is listed in: its Space's, or the one for projects in no listed Space,
@@ -94,18 +57,17 @@ pub(crate) fn section_of(index: &WorkspaceIndex, project: &Project) -> SpaceId {
 
 /// A section for each Space with a shown project, in the Spaces' order, then No Space with the
 /// projects in none. Archived projects count only when `show_archived`.
-pub(crate) fn sections(
-    index: &WorkspaceIndex,
-    show_archived: bool,
-    grouped: bool,
-) -> Vec<Section<'_>> {
-    let spaces = index.snapshot().spaces.iter();
-    let listed = spaces.map(|space| (space.id.clone(), space.name.clone()));
+pub(crate) fn sections(index: &WorkspaceIndex, show_archived: bool) -> Vec<Section<'_>> {
+    let snapshot = index.snapshot();
+    let parents: BTreeSet<&str> = (snapshot.projects.iter())
+        .filter_map(|project| project.parent_id.as_deref())
+        .collect();
+    let listed = (snapshot.spaces.iter()).map(|space| (space.id.clone(), space.name.clone()));
     let none = (SpaceId::default(), "No Space".to_owned());
     listed
         .chain([none])
         .map(|(space, name)| Section {
-            entries: entries(index, &space, show_archived, grouped),
+            entries: entries(index, &space, show_archived, &parents),
             space,
             name,
         })
@@ -113,46 +75,107 @@ pub(crate) fn sections(
         .collect()
 }
 
-/// The shown projects of the section for `space` in the host's order. With `grouped`, two or
-/// more that share a first word, whatever its case, gather where the topmost of them is.
+/// The section for `space`: its loose projects and parents in the host's order, and each
+/// parent's children in the host's order under it, wherever they are stored. A child whose
+/// parent is not shown is listed where it is stored.
 fn entries<'a>(
     index: &'a WorkspaceIndex,
     space: &SpaceId,
     show_archived: bool,
-    grouped: bool,
+    parents: &BTreeSet<&str>,
 ) -> Vec<Entry<'a>> {
-    let mut groups: Vec<Group> = vec![];
-    for project in &index.snapshot().projects {
+    let shown: Vec<(&Project, &Session)> = (index.snapshot().projects.iter())
         // The Assistant's work is listed in its rail, never as a project row.
-        if project.assistant_work.is_some() || section_of(index, project) != *space {
-            continue;
-        }
-        let Some(root) = (index.roots(&project.id)).find(|s| show_archived || !s.archived) else {
-            continue;
-        };
-        let key = (space.clone(), group_key(&root.name));
-        match groups
-            .iter_mut()
-            .find(|group| grouped && !key.1.is_empty() && group.key == key)
-        {
-            Some(group) => group.members.push(root),
-            None => groups.push(Group {
-                key,
-                label: first_word(&root.name).into(),
-                members: vec![root],
+        .filter(|project| project.assistant_work.is_none() && section_of(index, project) == *space)
+        .filter_map(|project| {
+            let root = index
+                .roots(&project.id)
+                .find(|s| show_archived || !s.archived)?;
+            Some((project, root))
+        })
+        .collect();
+    let top_level: BTreeSet<&str> = (shown.iter())
+        .filter(|(project, _)| project.parent_id.is_none())
+        .map(|(project, _)| project.id.as_str())
+        .collect();
+    let mut entries = vec![];
+    let mut children = vec![];
+    for (project, root) in shown {
+        match project.parent_id.as_deref() {
+            Some(parent) if top_level.contains(parent) => children.push((parent, root)),
+            _ => entries.push(Entry {
+                root,
+                children: vec![],
+                fileable: project.parent_id.is_none() && !parents.contains(project.id.as_str()),
+                adopts: project.parent_id.is_none() && !root.archived,
             }),
         }
     }
-    groups
-        .into_iter()
-        .map(|group| match group.members[..] {
-            [root] => Entry::Project(root),
-            _ => Entry::Group(group),
-        })
-        .collect()
+    let at: BTreeMap<String, usize> = (entries.iter().enumerate())
+        .map(|(at, entry)| (entry.root.project_id.clone(), at))
+        .collect();
+    for (parent, root) in children {
+        entries[at[parent]].children.push(root);
+    }
+    entries
 }
 
-/// The most urgent state inside a collapsed group or Space.
+impl Entry<'_> {
+    fn id(&self) -> String {
+        self.root.project_id.clone()
+    }
+}
+
+impl<'a> Section<'a> {
+    /// Its projects' coordinators, parents' children included.
+    fn projects(&self) -> Vec<&'a Session> {
+        let entries = self.entries.iter();
+        let all = entries.flat_map(|entry| [entry.root].into_iter().chain(entry.children.clone()));
+        all.collect()
+    }
+}
+
+/// Projects under their Space's row, and children under their parent's row; a collapsed Space
+/// or parent hides what is under it. Archived projects appear only when `show_archived`.
+pub(crate) fn rows<'a>(
+    index: &'a WorkspaceIndex,
+    show_archived: bool,
+    collapsed_spaces: &BTreeSet<SpaceId>,
+    collapsed_parents: &BTreeSet<String>,
+) -> Vec<Row<'a>> {
+    let mut rows = vec![];
+    for section in sections(index, show_archived) {
+        let collapsed = collapsed_spaces.contains(&section.space);
+        rows.push(Row::Space {
+            projects: section.projects(),
+            space: section.space,
+            name: section.name,
+        });
+        if collapsed {
+            continue;
+        }
+        for Entry { root, children, .. } in section.entries {
+            if children.is_empty() {
+                rows.push(Row::Project { root, child: false });
+                continue;
+            }
+            let under = if collapsed_parents.contains(&root.project_id) {
+                vec![]
+            } else {
+                children.clone()
+            };
+            rows.push(Row::Parent { root, children });
+            rows.extend(
+                under
+                    .into_iter()
+                    .map(|root| Row::Project { root, child: true }),
+            );
+        }
+    }
+    rows
+}
+
+/// The most urgent state inside a collapsed parent or Space.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Rollup {
     NeedsYou(usize),
@@ -161,8 +184,9 @@ pub(crate) enum Rollup {
     Working,
 }
 
-/// A collapsed group's or Space's state, from the items in it that need the human, its stuck
-/// agents and the status each project's row shows.
+/// A collapsed parent's or Space's state, from the items in it that need the human, its stuck
+/// agents and the status each project's row shows. Questions with a parent are not the human's,
+/// so they never count here.
 pub(crate) fn rollup(needs_you: usize, stuck: usize, shown: &[Status]) -> Option<Rollup> {
     if needs_you > 0 {
         Some(Rollup::NeedsYou(needs_you))
@@ -196,183 +220,318 @@ pub(crate) fn agent_counts(
     }
 }
 
-/// What a drag moves as one: a project by its id, or a group, by its key, with all its members.
+/// What a drag moves: a project by its id, with its shown children when it is a parent.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Movable {
-    Project(String),
-    Group(GroupKey),
-}
+pub(crate) struct Movable(pub String);
 
-/// Where a dragged row lands among the rows it can be reordered with.
+/// Where a dragged row lands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Drop {
-    Before(Movable),
-    /// After the last member of the group with this key.
-    EndOfGroup(GroupKey),
-    /// After the last top-level row of the section for this Space.
+    /// Above this project's row, among the rows listed with it.
+    Before(String),
+    /// Below the last shown child of this parent.
+    EndOfChildren(String),
+    /// Below the last row of the section for this Space.
     End(SpaceId),
+    /// Onto this loose project or parent, filing the dragged one under it.
+    Under(String),
 }
 
-/// The host command's arguments for one drop.
+/// Where a dragged row lands when released over the top, the middle and the bottom of a row;
+/// none where it may not land.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Aims {
+    pub above: Option<Drop>,
+    pub onto: Option<Drop>,
+    pub below: Option<Drop>,
+}
+
+impl Aims {
+    /// Both halves of a row land at `drop`.
+    fn only(drop: Drop) -> Self {
+        Self {
+            above: Some(drop.clone()),
+            onto: None,
+            below: Some(drop),
+        }
+    }
+    /// Where a release lands `fraction` of the way down the row: its top and bottom quarters, or
+    /// its middle, where nothing lands when the dragged row may not drop onto it.
+    pub(crate) fn at(&self, fraction: f32) -> Option<Drop> {
+        if fraction < 0.25 {
+            self.above.clone()
+        } else if fraction > 0.75 {
+            self.below.clone()
+        } else {
+            self.onto.clone()
+        }
+    }
+}
+
+/// Where a project's row is in its section: the top-level row `entry`, or that row's child
+/// `child`.
+struct Spot<'s, 'a> {
+    section: &'s Section<'a>,
+    entry: usize,
+    child: Option<usize>,
+}
+
+impl<'s, 'a> Spot<'s, 'a> {
+    fn find(sections: &'s [Section<'a>], id: &str) -> Option<Self> {
+        sections.iter().find_map(|section| {
+            (section.entries.iter().enumerate()).find_map(|(entry, listed)| {
+                let child = if listed.root.project_id == id {
+                    None
+                } else {
+                    Some(listed.children.iter().position(|c| c.project_id == id)?)
+                };
+                Some(Spot {
+                    section,
+                    entry,
+                    child,
+                })
+            })
+        })
+    }
+    fn entry(&self) -> &'s Entry<'a> {
+        &self.section.entries[self.entry]
+    }
+    /// Below this top-level row and its children: above the next one, or at the section's end.
+    fn after_block(&self) -> Drop {
+        match self.section.entries.get(self.entry + 1) {
+            Some(next) => Drop::Before(next.id()),
+            None => Drop::End(self.section.space.clone()),
+        }
+    }
+    /// Below the child `at` of this row: above the next child, or below the last.
+    fn after_child(&self, at: usize) -> Drop {
+        match self.entry().children.get(at + 1) {
+            Some(next) => Drop::Before(next.project_id.clone()),
+            None => Drop::EndOfChildren(self.entry().id()),
+        }
+    }
+    /// The top-level row this one is, or is a child of, may be filed under `parent`.
+    fn may_file_under(&self, parent: &Entry) -> bool {
+        self.child.is_none() && self.entry().fileable && parent.adopts
+    }
+}
+
+/// The Space whose section lists `row`.
+pub(crate) fn space_of<'a>(sections: &'a [Section], row: &Movable) -> Option<&'a SpaceId> {
+    Some(&Spot::find(sections, &row.0)?.section.space)
+}
+
+/// Where `dragged` lands when released over the row of `over`, none when nowhere on it. Nothing
+/// leaves its Space's section. Loose projects and parents land among the top-level rows, a
+/// parent's children with it; a child lands among its siblings or, made loose, among the
+/// top-level rows. A loose project with no children may also land on a loose project or parent,
+/// or among a parent's children, to be filed under it. Over rows where it may not land, it lands
+/// below their parent's block.
+pub(crate) fn aims(
+    sections: &[Section],
+    dragged: &Movable,
+    over: &Movable,
+    collapsed_parents: &BTreeSet<String>,
+) -> Option<Aims> {
+    let from = Spot::find(sections, &dragged.0)?;
+    let to = Spot::find(sections, &over.0)?;
+    if from.section.space != to.section.space {
+        return None;
+    }
+    let target = to.entry();
+    let own_parent = from.child.is_some() && from.entry == to.entry;
+    let joins = own_parent || from.may_file_under(target);
+    let aims = match to.child {
+        None => {
+            let expanded =
+                !target.children.is_empty() && !collapsed_parents.contains(&target.root.project_id);
+            let below = if expanded && joins {
+                Drop::Before(target.children[0].project_id.clone())
+            } else {
+                to.after_block()
+            };
+            let onto = (from.may_file_under(target) && from.entry != to.entry)
+                .then(|| Drop::Under(target.id()));
+            Aims {
+                above: Some(Drop::Before(target.id())),
+                onto,
+                below: Some(below),
+            }
+        }
+        Some(child) if joins => Aims {
+            above: Some(Drop::Before(over.0.clone())),
+            onto: None,
+            below: Some(to.after_child(child)),
+        },
+        Some(_) => Aims::only(to.after_block()),
+    };
+    Some(aims)
+}
+
+/// The host command's arguments for one reorder.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ProjectMove {
     pub project_ids: Vec<String>,
     pub before: Option<String>,
 }
 
-impl Entry<'_> {
-    pub(crate) fn movable(&self) -> Movable {
-        match self {
-            Entry::Project(root) => Movable::Project(root.project_id.clone()),
-            Entry::Group(group) => Movable::Group(group.key.clone()),
-        }
-    }
-    fn project_ids(&self) -> Vec<String> {
-        match self {
-            Entry::Project(root) => vec![root.project_id.clone()],
-            Entry::Group(group) => group.project_ids(),
-        }
-    }
-}
-impl Group<'_> {
-    fn project_ids(&self) -> Vec<String> {
-        let ids = self.members.iter().map(|root| root.project_id.clone());
-        ids.collect()
-    }
-}
-impl<'a> Section<'a> {
-    /// Its projects' coordinators, in the host's order.
-    fn projects(&self) -> Vec<&'a Session> {
-        let entries = self.entries.iter();
-        let members = entries.flat_map(|entry| match entry {
-            Entry::Project(root) => vec![*root],
-            Entry::Group(group) => group.members.clone(),
-        });
-        members.collect()
-    }
+/// What a drop asks of the host.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Landing {
+    Move(ProjectMove),
+    /// Files `project` under `parent`, or makes it loose with none, once the human confirms;
+    /// then `then` places it where it was dropped.
+    Refile {
+        project: String,
+        parent: Option<String>,
+        then: Option<ProjectMove>,
+    },
 }
 
-/// The rows one row is reordered among: a section's top-level rows, or the members of one
-/// group.
-struct Siblings<'a> {
-    /// The section's Space.
-    space: &'a SpaceId,
-    /// The group's key, when they are its members.
-    group: Option<&'a GroupKey>,
-    /// Each row with the projects it moves.
-    rows: Vec<(Movable, Vec<String>)>,
-}
-
-impl<'a> Siblings<'a> {
-    fn of(section: &'a Section, row: &Movable) -> Option<Self> {
-        let (space, entries) = (&section.space, &section.entries);
-        if entries.iter().any(|entry| entry.movable() == *row) {
-            let rows = entries
-                .iter()
-                .map(|entry| (entry.movable(), entry.project_ids()));
-            return Some(Self {
-                space,
-                group: None,
-                rows: rows.collect(),
-            });
-        }
-        let Movable::Project(id) = row else {
-            return None;
-        };
-        let group = entries.iter().find_map(|entry| match entry {
-            Entry::Group(group) if group.members.iter().any(|m| m.project_id == *id) => Some(group),
-            _ => None,
-        })?;
-        let rows = group
-            .project_ids()
-            .into_iter()
-            .map(|id| (Movable::Project(id.clone()), vec![id]));
-        Some(Self {
-            space,
-            group: Some(&group.key),
-            rows: rows.collect(),
-        })
-    }
-    /// The rows `row` is reordered among, in whichever section lists it.
-    fn find(sections: &'a [Section], row: &Movable) -> Option<(&'a Section<'a>, Self)> {
-        sections.iter().find_map(|s| Some((s, Self::of(s, row)?)))
-    }
-    fn position(&self, row: &Movable) -> Option<usize> {
-        self.rows.iter().position(|(sibling, _)| sibling == row)
-    }
-}
-
-/// The Space whose section lists `row`.
-pub(crate) fn space_of<'a>(sections: &'a [Section], row: &Movable) -> Option<&'a SpaceId> {
-    Some(&Siblings::find(sections, row)?.0.space)
-}
-
-/// Where a drop below `row` lands: before the row after it, or at the end of the rows it is
-/// reordered among.
-fn after(section: &Section, row: &Movable) -> Option<Drop> {
-    let siblings = Siblings::of(section, row)?;
-    let next = siblings.rows.get(siblings.position(row)? + 1);
-    Some(match (next, siblings.group) {
-        (Some((next, _)), _) => Drop::Before(next.clone()),
-        (None, Some(key)) => Drop::EndOfGroup(key.clone()),
-        (None, None) => Drop::End(siblings.space.clone()),
-    })
-}
-
-/// Where `dragged` lands when released over the upper and the lower half of the row `over`;
-/// none when it may not land there. Nothing leaves its Space's section. A grouped project stays
-/// among its group's members. A group or an ungrouped project stays among the section's
-/// top-level rows, and over a group's member it lands below that group.
-pub(crate) fn drops(
-    sections: &[Section],
-    dragged: &Movable,
-    over: &Movable,
-) -> Option<(Drop, Drop)> {
-    let (section, siblings) = Siblings::find(sections, dragged)?;
-    if siblings.position(over).is_some() {
-        return Some((Drop::Before(over.clone()), after(section, over)?));
-    }
-    let group = Movable::Group(Siblings::of(section, over)?.group?.clone());
-    siblings.position(&group)?;
-    let below = after(section, &group)?;
-    Some((below.clone(), below))
-}
-
-/// The move that puts `dragged` at `drop`; none when it is already there or may not land there.
-/// The host keeps one order for every Space, and the move changes only where `dragged` sits
-/// among its own Space's projects.
-pub(crate) fn project_move(
+/// What dropping `dragged` at `drop` does; none when it is already there or may not land there.
+/// The host keeps one order for every Space, and only a project's place among its own section's
+/// rows, or among its siblings, matters to the tree.
+pub(crate) fn landing(
+    index: &WorkspaceIndex,
     sections: &[Section],
     dragged: &Movable,
     drop: &Drop,
-) -> Option<ProjectMove> {
-    let (_, siblings) = Siblings::find(sections, dragged)?;
-    let (group, rows) = (siblings.group, &siblings.rows);
-    let from = siblings.position(dragged)?;
-    let to = match drop {
-        Drop::Before(target) => siblings.position(target)?,
-        Drop::EndOfGroup(key) if group == Some(key) => rows.len(),
-        Drop::End(space) if group.is_none() && space == siblings.space => rows.len(),
-        _ => return None,
+) -> Option<Landing> {
+    let from = Spot::find(sections, &dragged.0)?;
+    let (section, own) = (from.section, from.entry());
+    let target = match drop {
+        Drop::Before(id) | Drop::EndOfChildren(id) | Drop::Under(id) => {
+            Some(Spot::find(sections, id)?).filter(|spot| spot.section.space == section.space)
+        }
+        Drop::End(space) if *space == section.space => None,
+        Drop::End(_) => return None,
     };
+    let refile = |parent: Option<&Entry>, then| {
+        Some(Landing::Refile {
+            project: dragged.0.clone(),
+            parent: parent.map(Entry::id),
+            then,
+        })
+    };
+    let placed_before = |id: &String| {
+        Some(ProjectMove {
+            project_ids: vec![dragged.0.clone()],
+            before: Some(id.clone()),
+        })
+    };
+    match (from.child, drop, target) {
+        // A loose project or a parent among the top-level rows.
+        (
+            None,
+            Drop::Before(_),
+            Some(Spot {
+                child: None, entry, ..
+            }),
+        ) => reorder_top(section, from.entry, entry).map(Landing::Move),
+        (None, Drop::End(_), None) => {
+            reorder_top(section, from.entry, section.entries.len()).map(Landing::Move)
+        }
+        // A loose project filed by a drop on a project or among a parent's children.
+        (None, Drop::Under(_), Some(spot)) if spot.child.is_none() && spot.entry != from.entry => {
+            let parent = spot.entry();
+            if !from.may_file_under(parent) {
+                return None;
+            }
+            refile(Some(parent), after_children(index, parent, &dragged.0))
+        }
+        (None, Drop::EndOfChildren(_), Some(spot)) if spot.child.is_none() => {
+            let parent = spot.entry();
+            if !from.may_file_under(parent) || parent.children.is_empty() {
+                return None;
+            }
+            refile(Some(parent), after_children(index, parent, &dragged.0))
+        }
+        (None, Drop::Before(id), Some(spot))
+            if spot.child.is_some() && from.may_file_under(spot.entry()) =>
+        {
+            refile(Some(spot.entry()), placed_before(id))
+        }
+        // A child among its siblings.
+        (
+            Some(at),
+            Drop::Before(_),
+            Some(Spot {
+                child: Some(to),
+                entry,
+                ..
+            }),
+        ) if entry == from.entry => reorder_children(own, at, to).map(Landing::Move),
+        (
+            Some(at),
+            Drop::EndOfChildren(_),
+            Some(Spot {
+                child: None, entry, ..
+            }),
+        ) if entry == from.entry => {
+            reorder_children(own, at, own.children.len()).map(Landing::Move)
+        }
+        // A child made loose among the top-level rows.
+        (Some(_), Drop::Before(id), Some(Spot { child: None, .. })) => {
+            refile(None, placed_before(id))
+        }
+        (Some(_), Drop::End(_), None) => refile(
+            None,
+            Some(ProjectMove {
+                project_ids: vec![dragged.0.clone()],
+                before: None,
+            }),
+        ),
+        _ => None,
+    }
+}
+
+/// Moves the top-level row `from`, with its children, to just above the row `to`, or to the end
+/// of the order past the last one, which is still below every other project of its Space.
+fn reorder_top(section: &Section, from: usize, to: usize) -> Option<ProjectMove> {
     if to == from || to == from + 1 {
         return None;
     }
-    let topmost = |at: usize| Some(rows.get(at)?.1[0].clone());
-    if group.is_some() && to > from {
-        // A group sits where its topmost member is, so that member moving down would take the
-        // group with it. The members it passes move up instead, and the group stays put.
-        let passed = rows[from + 1..to].iter().flat_map(|(_, ids)| ids.clone());
+    let block = &section.entries[from];
+    let ids = [block.root]
+        .into_iter()
+        .chain(block.children.iter().copied());
+    Some(ProjectMove {
+        project_ids: ids.map(|root| root.project_id.clone()).collect(),
+        before: section.entries.get(to).map(Entry::id),
+    })
+}
+
+/// Moves child `from` of `parent` to just above child `to`, or below the last past it.
+fn reorder_children(parent: &Entry, from: usize, to: usize) -> Option<ProjectMove> {
+    if to == from || to == from + 1 {
+        return None;
+    }
+    let ids: Vec<String> = (parent.children.iter())
+        .map(|child| child.project_id.clone())
+        .collect();
+    if to > from {
+        // The siblings it passes move up above it, so nothing lands outside the siblings' span.
         return Some(ProjectMove {
-            project_ids: passed.collect(),
-            before: topmost(from),
+            project_ids: ids[from + 1..to].to_vec(),
+            before: Some(ids[from].clone()),
         });
     }
-    // At the end of its Space it goes to the end of the whole order, which is still below
-    // every other project of its Space.
     Some(ProjectMove {
-        project_ids: rows[from].1.clone(),
-        before: topmost(to),
+        project_ids: vec![ids[from].clone()],
+        before: Some(ids[to].clone()),
+    })
+}
+
+/// The move that puts `project` just after `parent`'s last shown child in the host's order;
+/// none when it has no children or `project` already follows the last.
+fn after_children(index: &WorkspaceIndex, parent: &Entry, project: &str) -> Option<ProjectMove> {
+    let last = &parent.children.last()?.project_id;
+    let order = &index.snapshot().projects;
+    let at = order.iter().position(|p| &p.id == last)?;
+    let next = order.get(at + 1).map(|p| p.id.clone());
+    (next.as_deref() != Some(project)).then(|| ProjectMove {
+        project_ids: vec![project.to_owned()],
+        before: next,
     })
 }
 
@@ -418,64 +577,6 @@ pub(crate) fn own_release(left_row: bool, click_count: usize) -> OwnRelease {
         OwnRelease::Click
     }
 }
-
-/// Projects under their Space's row in the host's order, and under their group's row while
-/// `grouped`; a collapsed Space or group hides its projects. Archived projects appear only when
-/// `show_archived`.
-pub(crate) fn rows<'a>(
-    index: &'a WorkspaceIndex,
-    show_archived: bool,
-    grouped: bool,
-    collapsed_spaces: &BTreeSet<SpaceId>,
-    collapsed_groups: &BTreeSet<GroupKey>,
-) -> Vec<Row<'a>> {
-    let mut rows = vec![];
-    for section in sections(index, show_archived, grouped) {
-        let collapsed = collapsed_spaces.contains(&section.space);
-        rows.push(Row::Space {
-            projects: section.projects(),
-            space: section.space,
-            name: section.name,
-        });
-        if !collapsed {
-            group_rows(&mut rows, section.entries, collapsed_groups);
-        }
-    }
-    rows
-}
-
-/// A section's rows: its projects, with each group's under the group's row.
-fn group_rows<'a>(
-    rows: &mut Vec<Row<'a>>,
-    entries: Vec<Entry<'a>>,
-    collapsed_groups: &BTreeSet<GroupKey>,
-) {
-    for entry in entries {
-        let projects = match entry {
-            Entry::Project(root) => vec![(root, root.name.clone(), false)],
-            Entry::Group(group) => {
-                let members = if collapsed_groups.contains(&group.key) {
-                    vec![]
-                } else {
-                    let labelled = |root: &&'a Session| {
-                        let label = member_label(&root.name);
-                        (*root, label.to_owned(), true)
-                    };
-                    group.members.iter().map(labelled).collect()
-                };
-                rows.push(Row::Group(group));
-                members
-            }
-        };
-        for (root, label, grouped) in projects {
-            rows.push(Row::Project {
-                root,
-                label,
-                grouped,
-            });
-        }
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,10 +617,7 @@ mod tests {
 
         // Open, archived and legacy agents alike are listed in the Agents panel instead.
         for show_archived in [false, true] {
-            assert_eq!(
-                drawn(&snapshot, show_archived, true),
-                ["PERSONAL (1)", "Calls"]
-            );
+            assert_eq!(drawn(&snapshot, show_archived), ["PERSONAL (1)", "Calls"]);
         }
     }
 
@@ -533,7 +631,7 @@ mod tests {
             ended_at: None,
         });
         let index = WorkspaceIndex::new(snapshot, Default::default());
-        assert!(drawn(&index, true, true).is_empty());
+        assert!(drawn(&index, true).is_empty());
     }
 
     /// The store's index with `agent` in `status`, and its last turn failed when `failed`.
@@ -601,6 +699,19 @@ mod tests {
         (directory, host)
     }
 
+    fn id(host: &Host, name: &str) -> String {
+        let projects = host.projects().unwrap();
+        projects.into_iter().find(|p| p.name == name).unwrap().id
+    }
+
+    /// Files each `(child, parent)` pair, by name.
+    fn file(host: &mut Host, pairs: &[(&str, &str)]) {
+        for (child, parent) in pairs {
+            let (child, parent) = (id(host, child), id(host, parent));
+            host.set_project_parent(&child, Some(&parent)).unwrap();
+        }
+    }
+
     /// Times what the desktop does with a store's workspace: decoding the snapshot and the
     /// archive, joining them, and the sidebar's rows. Run it on a copy of a store, such as the
     /// benchmark's kept fixture: `WIFFLETREE_BENCH_DIR=<folder> cargo test --release -p
@@ -641,26 +752,24 @@ mod tests {
             std::hint::black_box(index);
         });
         let index = WorkspaceIndex::new(snapshot, archive);
-        let (spaces, groups) = (BTreeSet::new(), BTreeSet::new());
+        let (spaces, parents) = (BTreeSet::new(), BTreeSet::new());
         for show_archived in [false, true] {
             timed(
                 &format!("tree rows, show archived {show_archived}"),
                 &mut || {
-                    std::hint::black_box(rows(&index, show_archived, true, &spaces, &groups));
+                    std::hint::black_box(rows(&index, show_archived, &spaces, &parents));
                 },
             );
         }
     }
 
-    /// The project list as drawn: Space rows in capitals and group rows, each with their count,
-    /// and a group's projects indented.
-    fn drawn(index: &WorkspaceIndex, show_archived: bool, grouped: bool) -> Vec<String> {
-        let none = BTreeSet::new();
+    /// The project list as drawn: Space rows in capitals with their count, parents with their
+    /// shown children's count, and children indented.
+    fn drawn(index: &WorkspaceIndex, show_archived: bool) -> Vec<String> {
         labels(&rows(
             index,
             show_archived,
-            grouped,
-            &none,
+            &BTreeSet::new(),
             &BTreeSet::new(),
         ))
     }
@@ -671,136 +780,84 @@ mod tests {
                 Row::Space { name, projects, .. } => {
                     format!("{} ({})", name.to_uppercase(), projects.len())
                 }
-                Row::Group(group) => format!("{} ({})", group.label, group.members.len()),
-                Row::Project {
-                    label,
-                    grouped: true,
-                    ..
-                } => format!("  {label}"),
-                Row::Project { label, .. } => label.clone(),
+                Row::Parent { root, children } => format!("{} +{}", root.name, children.len()),
+                Row::Project { root, child: true } => format!("  {}", root.name),
+                Row::Project { root, .. } => root.name.clone(),
             })
             .collect()
     }
 
-    const MOCKUP: [&str; 9] = [
-        "Trial reminder copy",
-        "wiffletree: Need to reorder projects",
-        "infra: Terraform state split",
-        "watch: Call relay reconnect",
-        "wiffletree: Repository owners",
-        "ci-runners: Autoscaling",
-        "Watch complications refresh",
-        "infra: Neptune upgrade",
-        "wiffletree: Compact context",
+    const CELADON: [&str; 4] = [
+        "Accessible contrast",
+        "Contrast warnings",
+        "Light themes",
+        "Recipes",
     ];
 
     #[test]
-    fn projects_sharing_a_first_word_gather_where_the_topmost_of_them_is() {
-        let (_directory, host) = listed(&MOCKUP);
-        let snapshot = joined(&host);
+    fn children_are_drawn_under_their_parent_wherever_they_are_stored() {
+        let (_directory, mut host) = listed(&CELADON);
+        file(&mut host, &[("Contrast warnings", "Accessible contrast")]);
+        let expected = [
+            "PERSONAL (4)",
+            "Accessible contrast +1",
+            "  Contrast warnings",
+            "Light themes",
+            "Recipes",
+        ];
+        assert_eq!(drawn(&joined(&host), false), expected);
 
-        // Case and the colon do not matter, a lone first word stays an ordinary row, and
-        // members keep the host's order under the word as their topmost member writes it.
-        assert_eq!(
-            drawn(&snapshot, false, true),
-            [
-                "PERSONAL (9)",
-                "Trial reminder copy",
-                "wiffletree (3)",
-                "  Need to reorder projects",
-                "  Repository owners",
-                "  Compact context",
-                "infra (2)",
-                "  Terraform state split",
-                "  Neptune upgrade",
-                "watch (2)",
-                "  Call relay reconnect",
-                "  complications refresh",
-                "ci-runners: Autoscaling",
-            ]
-        );
-        assert_eq!(
-            drawn(&snapshot, false, false),
-            [&["PERSONAL (9)"][..], &MOCKUP].concat(),
-            "grouping off"
-        );
+        // Stored above its parent, the child is still drawn under it, where the parent sits.
+        let child = id(&host, "Contrast warnings");
+        let light = id(&host, "Light themes");
+        host.move_projects(&[id(&host, "Accessible contrast")], Some(&light))
+            .unwrap();
+        assert_eq!(host.projects().unwrap()[0].id, child);
+        assert_eq!(drawn(&joined(&host), false), expected);
     }
 
     #[test]
-    fn a_first_word_ignores_case_and_trailing_punctuation() {
-        let key = group_key;
-        assert_eq!(key("Wiffletree: a"), key("wiffletree b"));
-        assert_eq!(key("WATCH — relay"), key("watch, relay"));
-        assert_eq!(first_word("ci-runners: Autoscaling"), "ci-runners");
-        assert_ne!(key("wiffletree: a"), key("wiffle tree"));
-        // Only whitespace ends the word, and a name with no word in front never groups.
-        assert_eq!(first_word("infra:Neptune upgrade"), "infra:Neptune");
-        assert_eq!(first_word("— untitled"), "");
-        let (_directory, host) = listed(&["— one", "— two", "Wiffletree: a", "wiffletree b"]);
+    fn names_sharing_a_first_word_are_ordinary_rows() {
+        let (_directory, host) = listed(&[
+            "Pickers: restore highlights",
+            "Pickers: generated palette check",
+        ]);
         assert_eq!(
-            drawn(&joined(&host), false, true),
+            drawn(&joined(&host), false),
             [
-                "PERSONAL (4)",
-                "— one",
-                "— two",
-                "Wiffletree (2)",
-                "  a",
-                "  b"
+                "PERSONAL (2)",
+                "Pickers: restore highlights",
+                "Pickers: generated palette check"
             ]
         );
     }
 
     #[test]
-    fn a_grouped_row_drops_the_word_and_its_separator_unless_nothing_remains() {
-        assert_eq!(
-            member_label("wiffletree: Repository owners"),
-            "Repository owners"
+    fn archived_children_show_only_with_the_archived() {
+        let (_directory, mut host) = listed(&["Light themes", "Daylight", "Palette check"]);
+        file(
+            &mut host,
+            &[
+                ("Daylight", "Light themes"),
+                ("Palette check", "Light themes"),
+            ],
         );
-        assert_eq!(
-            member_label("Watch complications refresh"),
-            "complications refresh"
-        );
-        assert_eq!(member_label("watch - Relay (beta)"), "Relay (beta)");
-        assert_eq!(member_label("watch — Relay"), "Relay");
-        assert_eq!(member_label("infra #48 state"), "#48 state");
-        // Only punctuation separates: what follows the word is kept, letters or not.
-        assert_eq!(member_label("watch: 🚀"), "🚀");
-        assert_eq!(member_label("watch 🚀 launch"), "🚀 launch");
-        assert_eq!(member_label("infra: 2026"), "2026");
-        for bare in ["wiffletree", "wiffletree:", "wiffletree -"] {
-            assert_eq!(member_label(bare), bare);
-        }
-    }
-
-    #[test]
-    fn groups_form_over_the_projects_shown_so_archived_ones_join_only_when_shown() {
-        let (_directory, mut host) = listed(&["infra: State split", "Billing", "infra: Neptune"]);
-        let neptune = host.sessions().unwrap().remove(0);
-        assert_eq!(neptune.name, "infra: Neptune");
-        host.set_archived(&neptune.id, true).unwrap();
+        let daylight = host.sessions().unwrap();
+        let daylight = daylight.iter().find(|s| s.name == "Daylight").unwrap();
+        host.set_archived(&daylight.id, true).unwrap();
         let snapshot = joined(&host);
 
         assert_eq!(
-            drawn(&snapshot, false, true),
-            ["PERSONAL (2)", "infra: State split", "Billing"]
+            drawn(&snapshot, false),
+            ["PERSONAL (2)", "Light themes +1", "  Palette check"]
         );
         assert_eq!(
-            drawn(&snapshot, true, true),
+            drawn(&snapshot, true),
             [
                 "PERSONAL (3)",
-                "infra (2)",
-                "  State split",
-                "  Neptune",
-                "Billing"
-            ]
-        );
-        assert_eq!(
-            drawn(&snapshot, true, false),
-            [
-                "PERSONAL (3)",
-                "infra: State split",
-                "Billing",
-                "infra: Neptune"
+                "Light themes +2",
+                "  Daylight",
+                "  Palette check"
             ]
         );
     }
@@ -823,93 +880,66 @@ mod tests {
 
     const SPACED: [(&str, &str); 6] = [
         ("Sage", "Trial reminder copy"),
-        ("Vyttle", "wiffletree: Organize the list"),
-        ("Personal", "wiffletree: Garden planner"),
-        ("Vyttle", "wiffletree: Repository owners"),
-        ("Personal", "wiffletree: Reading list"),
-        ("Vyttle", "Celadon: Sky contrast"),
+        ("Vyttle", "Organize the list"),
+        ("Personal", "Garden planner"),
+        ("Vyttle", "Repository owners"),
+        ("Personal", "Reading list"),
+        ("Vyttle", "Sky contrast"),
     ];
 
     #[test]
     fn each_space_with_a_shown_project_is_a_section_in_the_spaces_order() {
-        let (_directory, host) = in_spaces(&SPACED);
-        let snapshot = joined(&host);
+        let (_directory, mut host) = in_spaces(&SPACED);
+        file(&mut host, &[("Sky contrast", "Organize the list")]);
 
-        // Work has no project, so no section; the same first word in two Spaces makes two
-        // groups.
+        // Work has no project, so no section.
         assert_eq!(
-            drawn(&snapshot, false, true),
+            drawn(&joined(&host), false),
             [
                 "PERSONAL (2)",
-                "wiffletree (2)",
-                "  Garden planner",
-                "  Reading list",
+                "Garden planner",
+                "Reading list",
                 "VYTTLE (3)",
-                "wiffletree (2)",
-                "  Organize the list",
-                "  Repository owners",
-                "Celadon: Sky contrast",
+                "Organize the list +1",
+                "  Sky contrast",
+                "Repository owners",
                 "SAGE (1)",
                 "Trial reminder copy",
             ]
         );
-        assert_eq!(
-            drawn(&snapshot, false, false),
-            [
-                "PERSONAL (2)",
-                "wiffletree: Garden planner",
-                "wiffletree: Reading list",
-                "VYTTLE (3)",
-                "wiffletree: Organize the list",
-                "wiffletree: Repository owners",
-                "Celadon: Sky contrast",
-                "SAGE (1)",
-                "Trial reminder copy",
-            ],
-            "grouping off"
-        );
     }
 
     #[test]
-    fn a_collapsed_space_shows_only_its_row_which_holds_every_project_for_the_rollup() {
-        let (_directory, host) = in_spaces(&SPACED);
+    fn a_collapsed_space_or_parent_hides_what_is_under_it_but_keeps_it_for_the_rollup() {
+        let (_directory, mut host) = in_spaces(&SPACED);
+        file(&mut host, &[("Sky contrast", "Organize the list")]);
         let snapshot = joined(&host);
-        let vyttle = host.spaces().unwrap()[1].space.id.clone();
-        let wiffletree = BTreeSet::from([(vyttle.clone(), "wiffletree".to_owned())]);
+        let personal = host.spaces().unwrap()[0].space.id.clone();
+        let organize = BTreeSet::from([id(&host, "Organize the list")]);
 
-        let collapsed = rows(
-            &snapshot,
-            false,
-            true,
-            &BTreeSet::from([vyttle]),
-            &wiffletree,
-        );
+        let collapsed = rows(&snapshot, false, &BTreeSet::from([personal]), &organize);
 
         assert_eq!(
             labels(&collapsed),
             [
                 "PERSONAL (2)",
-                "wiffletree (2)",
-                "  Garden planner",
-                "  Reading list",
                 "VYTTLE (3)",
+                "Organize the list +1",
+                "Repository owners",
                 "SAGE (1)",
                 "Trial reminder copy",
             ]
         );
-        // Its rollup counts the projects in its collapsed group too.
-        let Row::Space { projects, .. } = &collapsed[4] else {
-            panic!("Vyttle's row");
+        // A collapsed parent keeps its children, and its Space's row every project, for their
+        // rollups.
+        let Row::Parent { children, .. } = &collapsed[2] else {
+            panic!("the parent's row");
         };
-        let names: Vec<&str> = projects.iter().map(|root| root.name.as_str()).collect();
-        assert_eq!(
-            names,
-            [
-                "wiffletree: Organize the list",
-                "wiffletree: Repository owners",
-                "Celadon: Sky contrast"
-            ]
-        );
+        assert_eq!(children[0].name, "Sky contrast");
+        let Row::Space { projects, .. } = &collapsed[0] else {
+            panic!("Personal's row");
+        };
+        assert_eq!(projects.len(), 2);
     }
 
     #[test]
@@ -919,14 +949,10 @@ mod tests {
         snapshot.projects[0].space = SpaceId::default();
 
         assert_eq!(
-            drawn(
-                &WorkspaceIndex::new(snapshot, Default::default()),
-                false,
-                true
-            ),
+            drawn(&WorkspaceIndex::new(snapshot, Default::default()), false),
             [
                 "VYTTLE (1)",
-                "wiffletree: Organize the list",
+                "Organize the list",
                 "NO SPACE (1)",
                 "Trial reminder copy"
             ]
@@ -934,14 +960,7 @@ mod tests {
     }
 
     #[test]
-    fn a_collapsed_group_hides_its_projects_and_rolls_up_the_most_urgent_state() {
-        let (_directory, host) = listed(&["infra: a", "Billing", "infra: b"]);
-        let snapshot = joined(&host);
-        let infra = BTreeSet::from([(home(&host), "infra".to_owned())]);
-
-        let collapsed = rows(&snapshot, false, true, &BTreeSet::new(), &infra);
-
-        assert_eq!(labels(&collapsed), ["PERSONAL (3)", "infra (2)", "Billing"]);
+    fn a_rollup_shows_the_most_urgent_state() {
         use Status::*;
         assert_eq!(
             rollup(2, 1, &[Blocked, Working]),
@@ -964,233 +983,417 @@ mod tests {
         assert_eq!(rollup(0, 0, &[Ready, Done, Paused, Disconnected]), None);
     }
 
-    /// The order the host would hold after `dragged` is dropped at `drop`.
-    fn dropped(host: &mut Host, grouped: bool, dragged: &Movable, drop: &Drop) -> Option<String> {
-        let snapshot = joined(host);
-        let sections = sections(&snapshot, false, grouped);
-        let moved = project_move(&sections, dragged, drop)?;
-        let order = host
-            .move_projects(&moved.project_ids, moved.before.as_deref())
-            .unwrap();
-        Some(order.iter().map(|p| p.name.as_str()).collect())
-    }
-
-    fn project(host: &Host, name: &str) -> Movable {
-        let projects = host.projects().unwrap();
-        Movable::Project(projects.into_iter().find(|p| p.name == name).unwrap().id)
-    }
-
     /// The Space `listed` puts every project in.
     fn home(host: &Host) -> SpaceId {
         host.default_space().unwrap()
     }
 
-    fn end(host: &Host) -> Drop {
-        Drop::End(home(host))
+    fn project(host: &Host, name: &str) -> Movable {
+        Movable(id(host, name))
     }
 
-    fn group(host: &Host, word: &str) -> Movable {
-        Movable::Group((home(host), word.into()))
+    fn before(host: &Host, name: &str) -> Drop {
+        Drop::Before(id(host, name))
     }
 
-    #[test]
-    fn with_grouping_off_any_project_drops_anywhere_in_the_flat_list() {
-        let (_directory, mut host) = listed(&["a", "b", "c", "d"]);
-        let [a, b, d] = ["a", "b", "d"].map(|name| project(&host, name));
-        let end = end(&host);
-
-        assert_eq!(
-            dropped(&mut host, false, &d, &Drop::Before(a.clone())).as_deref(),
-            Some("dabc")
-        );
-        assert_eq!(dropped(&mut host, false, &d, &end).as_deref(), Some("abcd"));
-        // Onto itself or the place it already has: nothing to send.
-        assert_eq!(dropped(&mut host, false, &d, &end), None);
-        assert_eq!(
-            dropped(&mut host, false, &a, &Drop::Before(a.clone())),
-            None
-        );
-        assert_eq!(
-            dropped(&mut host, false, &a, &Drop::Before(b.clone())),
-            None
-        );
-        // The upper half of a row means before it; the lower half, before the next one, or
-        // the end below the last.
-        let snapshot = joined(&host);
-        let flat = sections(&snapshot, false, false);
-        let before = |row: &Movable| Drop::Before(row.clone());
-        assert_eq!(drops(&flat, &d, &a), Some((before(&a), before(&b))));
-        assert_eq!(drops(&flat, &a, &d), Some((before(&d), end)));
+    /// What dropping `dragged` at `drop` asks of the host, from the rows shown.
+    fn landed(host: &Host, dragged: &str, drop: &Drop) -> Option<Landing> {
+        let snapshot = joined(host);
+        let sections = sections(&snapshot, false);
+        landing(&snapshot, &sections, &project(host, dragged), drop)
     }
 
-    #[test]
-    fn a_grouped_project_reorders_inside_its_group_and_the_group_stays_put() {
-        let (_directory, mut host) = listed(&["w: 1", "x", "w: 2", "y", "w: 3"]);
-        let [first, third, x] = ["w: 1", "w: 3", "x"].map(|name| project(&host, name));
-        let end = Drop::EndOfGroup((home(&host), "w".into()));
-
-        // Up: it lands before the member it was dropped above.
-        assert_eq!(
-            dropped(&mut host, true, &third, &Drop::Before(first.clone())).as_deref(),
-            Some("w: 3w: 1xw: 2y")
-        );
-        // Down from the top: the members it passes move up, so the group stays above "x".
-        assert_eq!(
-            dropped(&mut host, true, &third, &end).as_deref(),
-            Some("w: 1w: 2w: 3xy")
-        );
-        assert_eq!(
-            dropped(&mut host, true, &first, &Drop::Before(third.clone())).as_deref(),
-            Some("w: 2w: 1w: 3xy")
-        );
-        assert_eq!(dropped(&mut host, true, &third, &end), None, "already last");
-
-        // It cannot leave its group, and nothing from outside can land inside: over a member,
-        // a top-level row lands below the whole group.
-        let snapshot = joined(&host);
-        let grouped = sections(&snapshot, false, true);
-        let (group, before) = (group(&host, "w"), |row: &Movable| Drop::Before(row.clone()));
-        assert_eq!(
-            drops(&grouped, &third, &first),
-            Some((before(&first), before(&third)))
-        );
-        assert_eq!(
-            drops(&grouped, &first, &third),
-            Some((before(&third), end.clone()))
-        );
-        assert_eq!(drops(&grouped, &third, &x), None);
-        assert_eq!(drops(&grouped, &third, &group), None);
-        assert_eq!(
-            drops(&grouped, &x, &group),
-            Some((before(&group), before(&x)))
-        );
-        assert_eq!(drops(&grouped, &x, &first), Some((before(&x), before(&x))));
-        assert_eq!(project_move(&grouped, &third, &before(&x)), None);
-        assert_eq!(
-            project_move(&grouped, &third, &Drop::End(home(&host))),
-            None
-        );
-        assert_eq!(project_move(&grouped, &x, &before(&first)), None);
-        assert_eq!(project_move(&grouped, &x, &end), None);
-    }
-
-    #[test]
-    fn drops_reckon_with_the_rows_shown_while_archived_projects_keep_their_place() {
-        let (_directory, mut host) = listed(&["x", "w: 1", "old", "w: 2", "y", "gone"]);
-        for session in host.sessions().unwrap() {
-            if ["old", "gone"].contains(&session.name.as_str()) {
-                host.set_archived(&session.id, true).unwrap();
+    /// The tree after `dragged` is dropped at `drop` and any confirmation is accepted; none when
+    /// the drop does nothing.
+    fn dropped(host: &mut Host, dragged: &str, drop: &Drop) -> Option<Vec<String>> {
+        let landing = landed(host, dragged, drop)?;
+        let moved = match landing {
+            Landing::Move(moved) => Some(moved),
+            Landing::Refile {
+                project,
+                parent,
+                then,
+            } => {
+                host.set_project_parent(&project, parent.as_deref())
+                    .unwrap();
+                then
             }
+        };
+        if let Some(moved) = moved {
+            host.move_projects(&moved.project_ids, moved.before.as_deref())
+                .unwrap();
         }
-        let [x, y] = ["x", "y"].map(|name| project(&host, name));
-        let (group, hidden, end) = (group(&host, "w"), project(&host, "old"), end(&host));
-        let snapshot = joined(&host);
-        let shown = sections(&snapshot, false, true);
-        // A hidden project is no row: nothing lands beside it, and it is not dragged.
-        assert_eq!(drops(&shown, &x, &hidden), None);
-        assert_eq!(project_move(&shown, &hidden, &end), None);
-        assert_eq!(
-            drops(&shown, &y, &x),
-            Some((Drop::Before(x.clone()), Drop::Before(group.clone())))
-        );
+        Some(drawn(&joined(host), false)[1..].to_vec())
+    }
 
-        // A top-level drop gathers the group above "x"; the archived project between its
-        // members stays where it was.
+    #[test]
+    fn loose_projects_reorder_among_themselves() {
+        let (_directory, mut host) = listed(&["a", "b", "c", "d"]);
+        let end = Drop::End(home(&host));
+
+        let above_a = before(&host, "a");
         assert_eq!(
-            dropped(&mut host, true, &group, &Drop::Before(x.clone())).as_deref(),
-            Some("w: 1w: 2xoldygone")
+            dropped(&mut host, "d", &above_a).unwrap(),
+            ["d", "a", "b", "c"]
+        );
+        assert_eq!(dropped(&mut host, "d", &end).unwrap(), ["a", "b", "c", "d"]);
+        // Onto the place it already has: nothing to send.
+        assert_eq!(landed(&host, "d", &end), None);
+        assert_eq!(landed(&host, "a", &before(&host, "a")), None);
+        assert_eq!(landed(&host, "a", &before(&host, "b")), None);
+    }
+
+    #[test]
+    fn a_child_moves_among_its_siblings_and_its_parent_stays() {
+        let names = [
+            "Accessible contrast",
+            "Dimmed inactive panes",
+            "Colour-blind palettes",
+            "Contrast warnings",
+            "Recipes",
+        ];
+        let (_directory, mut host) = listed(&names);
+        let pairs: Vec<_> = (names[1..4].iter())
+            .map(|child| (*child, "Accessible contrast"))
+            .collect();
+        file(&mut host, &pairs);
+        let parent = id(&host, "Accessible contrast");
+
+        let above_dimmed = before(&host, "Dimmed inactive panes");
+        assert_eq!(
+            dropped(&mut host, "Contrast warnings", &above_dimmed).unwrap(),
+            [
+                "Accessible contrast +3",
+                "  Contrast warnings",
+                "  Dimmed inactive panes",
+                "  Colour-blind palettes",
+                "Recipes"
+            ]
+        );
+        // Down to the end of its siblings, the ones it passes move up instead.
+        assert_eq!(
+            dropped(
+                &mut host,
+                "Contrast warnings",
+                &Drop::EndOfChildren(parent.clone())
+            )
+            .unwrap(),
+            [
+                "Accessible contrast +3",
+                "  Dimmed inactive panes",
+                "  Colour-blind palettes",
+                "  Contrast warnings",
+                "Recipes"
+            ]
         );
         assert_eq!(
-            dropped(&mut host, true, &y, &Drop::Before(group)).as_deref(),
-            Some("yw: 1w: 2xoldgone")
-        );
-        // The very end is the end of the stored order, below the hidden project too.
-        assert_eq!(
-            dropped(&mut host, true, &y, &end).as_deref(),
-            Some("w: 1w: 2xoldgoney")
-        );
-        assert_eq!(
-            dropped(&mut host, false, &x, &end).as_deref(),
-            Some("w: 1w: 2oldgoneyx")
+            landed(&host, "Contrast warnings", &Drop::EndOfChildren(parent)),
+            None,
+            "already last"
         );
     }
 
     #[test]
-    fn a_dragged_group_takes_all_its_members_as_one_block() {
-        let (_directory, mut host) = listed(&["x", "w: 1", "y", "w: 2", "z"]);
-        let (group, end) = (group(&host, "w"), end(&host));
+    fn a_parent_moves_as_a_block_with_its_children() {
+        let names = [
+            "Accessible contrast",
+            "Recipes",
+            "Light themes",
+            "Daylight",
+            "Palette",
+        ];
+        let (_directory, mut host) = listed(&names);
+        file(
+            &mut host,
+            &[("Daylight", "Light themes"), ("Palette", "Light themes")],
+        );
 
-        let x = project(&host, "x");
+        let above_accessible = before(&host, "Accessible contrast");
+        let moved = dropped(&mut host, "Light themes", &above_accessible);
         assert_eq!(
-            dropped(&mut host, true, &group, &Drop::Before(x)).as_deref(),
-            Some("w: 1w: 2xyz")
+            moved.unwrap(),
+            [
+                "Light themes +2",
+                "  Daylight",
+                "  Palette",
+                "Accessible contrast",
+                "Recipes"
+            ]
+        );
+        let order: Vec<String> = host
+            .projects()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(
+            order[..3],
+            ["Light themes", "Daylight", "Palette"],
+            "the host's order keeps the block together"
+        );
+    }
+
+    #[test]
+    fn a_loose_project_dropped_on_a_project_is_filed_under_it_as_its_last_child() {
+        let names = [
+            "Sponsorships",
+            "Sponsor tiers",
+            "Recipes",
+            "Redo sponsor page",
+        ];
+        let (_directory, mut host) = listed(&names);
+        file(&mut host, &[("Sponsor tiers", "Sponsorships")]);
+        let sponsorships = id(&host, "Sponsorships");
+
+        assert_eq!(
+            landed(
+                &host,
+                "Redo sponsor page",
+                &Drop::Under(sponsorships.clone())
+            ),
+            Some(Landing::Refile {
+                project: id(&host, "Redo sponsor page"),
+                parent: Some(sponsorships.clone()),
+                then: Some(ProjectMove {
+                    project_ids: vec![id(&host, "Redo sponsor page")],
+                    before: Some(id(&host, "Recipes")),
+                }),
+            })
         );
         assert_eq!(
-            dropped(&mut host, true, &group, &end).as_deref(),
-            Some("xyzw: 1w: 2")
+            dropped(&mut host, "Redo sponsor page", &Drop::Under(sponsorships)).unwrap(),
+            [
+                "Sponsorships +2",
+                "  Sponsor tiers",
+                "  Redo sponsor page",
+                "Recipes"
+            ]
         );
-        // An ungrouped project lands above the group's topmost member.
-        let y = project(&host, "y");
+        // A loose project with no children becomes a parent the same way.
+        let onto_sponsorships = Drop::Under(id(&host, "Sponsorships"));
         assert_eq!(
-            dropped(&mut host, true, &y, &Drop::Before(group.clone())).as_deref(),
-            Some("xzyw: 1w: 2")
+            dropped(&mut host, "Recipes", &onto_sponsorships).unwrap(),
+            [
+                "Sponsorships +3",
+                "  Sponsor tiers",
+                "  Redo sponsor page",
+                "  Recipes"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_loose_project_dropped_among_a_parents_children_is_filed_there() {
+        let names = ["Sponsorships", "Tiers", "Thanks page", "Redo sponsor page"];
+        let (_directory, mut host) = listed(&names);
+        file(
+            &mut host,
+            &[("Tiers", "Sponsorships"), ("Thanks page", "Sponsorships")],
+        );
+
+        let above_thanks = before(&host, "Thanks page");
+        assert_eq!(
+            dropped(&mut host, "Redo sponsor page", &above_thanks).unwrap(),
+            [
+                "Sponsorships +3",
+                "  Tiers",
+                "  Redo sponsor page",
+                "  Thanks page"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_child_dropped_among_loose_projects_becomes_loose_there() {
+        let names = [
+            "Light themes",
+            "Generated palette check",
+            "Recipes",
+            "Billing",
+        ];
+        let (_directory, mut host) = listed(&names);
+        file(&mut host, &[("Generated palette check", "Light themes")]);
+
+        assert_eq!(
+            landed(&host, "Generated palette check", &before(&host, "Billing")),
+            Some(Landing::Refile {
+                project: id(&host, "Generated palette check"),
+                parent: None,
+                then: Some(ProjectMove {
+                    project_ids: vec![id(&host, "Generated palette check")],
+                    before: Some(id(&host, "Billing")),
+                }),
+            })
+        );
+        let above_billing = before(&host, "Billing");
+        assert_eq!(
+            dropped(&mut host, "Generated palette check", &above_billing).unwrap(),
+            [
+                "Light themes",
+                "Recipes",
+                "Generated palette check",
+                "Billing"
+            ]
+        );
+    }
+
+    #[test]
+    fn no_target_shows_where_the_host_would_refuse() {
+        let names = [
+            "Accessible contrast",
+            "Contrast warnings",
+            "Sponsorships",
+            "Recipes",
+        ];
+        let (_directory, mut host) = listed(&names);
+        file(&mut host, &[("Contrast warnings", "Accessible contrast")]);
+        let snapshot = joined(&host);
+        let sections = sections(&snapshot, false);
+        let none = BTreeSet::new();
+        let aims = |dragged: &str, over: &str| {
+            aims(
+                &sections,
+                &project(&host, dragged),
+                &project(&host, over),
+                &none,
+            )
+        };
+
+        // A parent never lands on another project, only beside it.
+        let parent_over_loose = aims("Accessible contrast", "Sponsorships").unwrap();
+        assert_eq!(parent_over_loose.onto, None);
+        let sponsorships = id(&host, "Sponsorships");
+        assert_eq!(
+            landed(
+                &host,
+                "Accessible contrast",
+                &Drop::Under(sponsorships.clone())
+            ),
+            None
+        );
+        // Over a child, a parent lands only below the whole block.
+        assert_eq!(
+            aims("Sponsorships", "Contrast warnings").map(|a| a.onto),
+            Some(None),
+            "nothing lands on a child"
+        );
+        let below_block = Aims::only(before(&host, "Sponsorships"));
+        let accessible = id(&host, "Accessible contrast");
+        assert_eq!(
+            aims("Accessible contrast", "Contrast warnings"),
+            Some(below_block)
+        );
+        // A child lands on no project, and a loose project never on itself.
+        assert_eq!(
+            aims("Contrast warnings", "Sponsorships").unwrap().onto,
+            None
         );
         assert_eq!(
-            dropped(&mut host, true, &group, &Drop::Before(y)).as_deref(),
-            Some("xzw: 1w: 2y")
+            landed(
+                &host,
+                "Contrast warnings",
+                &Drop::Under(sponsorships.clone())
+            ),
+            None
         );
+        assert_eq!(aims("Recipes", "Recipes").unwrap().onto, None);
+        assert_eq!(
+            aims("Recipes", "Accessible contrast").unwrap().onto,
+            Some(Drop::Under(accessible))
+        );
+    }
+
+    #[test]
+    fn a_release_lands_by_where_on_the_row_it_is() {
+        let drop = |name: &str| Some(Drop::Before(name.into()));
+        let refused = Aims {
+            above: drop("a"),
+            onto: None,
+            below: drop("b"),
+        };
+        assert_eq!(refused.at(0.2), drop("a"));
+        assert_eq!(refused.at(0.8), drop("b"));
+        // A middle it may not drop onto lands nowhere, rather than beside the row.
+        assert_eq!(refused.at(0.4), None);
+        assert_eq!(refused.at(0.6), None);
+        let filing = Aims {
+            onto: Some(Drop::Under("a".into())),
+            ..refused
+        };
+        assert_eq!(filing.at(0.5), Some(Drop::Under("a".into())));
     }
 
     #[test]
     fn nothing_dragged_lands_in_another_space() {
         let (_directory, host) = in_spaces(&SPACED);
         let snapshot = joined(&host);
-        let sections = sections(&snapshot, false, true);
-        let [celadon, trial, garden] = [
-            "Celadon: Sky contrast",
-            "Trial reminder copy",
-            "wiffletree: Garden planner",
-        ]
-        .map(|name| project(&host, name));
+        let sections = sections(&snapshot, false);
+        let [sky, trial, garden] =
+            ["Sky contrast", "Trial reminder copy", "Garden planner"].map(|n| project(&host, n));
         let sage = host.spaces().unwrap()[2].space.id.clone();
-        let personal = Movable::Group((home(&host), "wiffletree".into()));
+        let none = BTreeSet::new();
 
-        assert_eq!(drops(&sections, &celadon, &trial), None);
-        assert_eq!(drops(&sections, &celadon, &garden), None);
-        assert_eq!(drops(&sections, &trial, &personal), None);
-        assert_eq!(
-            project_move(&sections, &celadon, &Drop::Before(trial)),
-            None
-        );
-        assert_eq!(project_move(&sections, &celadon, &Drop::End(sage)), None);
-        assert_eq!(
-            project_move(&sections, &personal, &Drop::Before(celadon)),
-            None
-        );
+        assert_eq!(aims(&sections, &sky, &trial, &none), None);
+        assert_eq!(aims(&sections, &sky, &garden, &none), None);
+        let land = |drop: Drop| landing(&snapshot, &sections, &sky, &drop);
+        assert_eq!(land(Drop::Before(trial.0.clone())), None);
+        assert_eq!(land(Drop::Under(trial.0.clone())), None);
+        assert_eq!(land(Drop::End(sage)), None);
     }
 
     #[test]
     fn a_move_within_a_space_leaves_the_other_spaces_order_alone() {
         let (_directory, mut host) = in_spaces(&SPACED);
-        let celadon = project(&host, "Celadon: Sky contrast");
-        let vyttle = Movable::Group((
-            host.spaces().unwrap()[1].space.id.clone(),
-            "wiffletree".into(),
-        ));
+        let organize = before(&host, "Organize the list");
 
-        // Dropped above its Space's group, it lands just above the group's topmost member, and
-        // Sage's and Personal's projects keep their order.
+        dropped(&mut host, "Sky contrast", &organize).unwrap();
+
+        let order: Vec<String> = host
+            .projects()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
         assert_eq!(
-            dropped(&mut host, true, &celadon, &Drop::Before(vyttle)).as_deref(),
-            Some(
-                "Trial reminder copy\
-                 Celadon: Sky contrast\
-                 wiffletree: Organize the list\
-                 wiffletree: Garden planner\
-                 wiffletree: Repository owners\
-                 wiffletree: Reading list"
-            )
+            order,
+            [
+                "Trial reminder copy",
+                "Sky contrast",
+                "Organize the list",
+                "Garden planner",
+                "Repository owners",
+                "Reading list"
+            ]
         );
+    }
+
+    #[test]
+    fn drops_reckon_with_the_rows_shown_while_archived_projects_keep_their_place() {
+        let (_directory, mut host) = listed(&["x", "old", "y", "gone"]);
+        for session in host.sessions().unwrap() {
+            if ["old", "gone"].contains(&session.name.as_str()) {
+                host.set_archived(&session.id, true).unwrap();
+            }
+        }
+        let snapshot = joined(&host);
+        let shown = sections(&snapshot, false);
+        let (x, hidden) = (project(&host, "x"), project(&host, "old"));
+        // A hidden project is no row: nothing lands beside it, and it is not dragged.
+        assert_eq!(aims(&shown, &x, &hidden, &BTreeSet::new()), None);
+        assert_eq!(
+            landing(&snapshot, &shown, &hidden, &Drop::End(home(&host))),
+            None
+        );
+        // The very end is the end of the stored order, below the hidden projects too.
+        let end = Drop::End(home(&host));
+        dropped(&mut host, "x", &end).unwrap();
+        let order: Vec<String> = host
+            .projects()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(order, ["old", "y", "gone", "x"]);
     }
 
     #[test]
