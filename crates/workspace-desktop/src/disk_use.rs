@@ -13,7 +13,7 @@ const FOLLOW_RECLAIM: Duration = Duration::from_secs(5);
 
 /// The last disk use the selected host answered.
 #[derive(Default)]
-pub(crate) struct DiskReading {
+struct DiskReading {
     /// The paired host it came from, or `None` for This Mac's.
     host: Option<String>,
     disk: Option<DiskUse>,
@@ -235,7 +235,8 @@ pub(crate) fn groups(disk: &DiskUse) -> Vec<Group<'_>> {
     groups
 }
 
-/// A waiting delete's small line: "Permission denied · 4 attempts · next in 2m".
+/// A waiting delete's small line: "Permission denied · 4 attempts · next in 2m", or for one
+/// whose folder is being moved aside, "Waiting to be deleted · held".
 pub(crate) fn delete_line(delete: &PendingDelete) -> String {
     let error = delete
         .last_error
@@ -248,38 +249,95 @@ pub(crate) fn delete_line(delete: &PendingDelete) -> String {
             wording::counted(delete.attempts as usize, "attempt")
         );
     }
-    format!(
-        "{line} · next {}",
-        wording::from_now(delete.next_attempt_at)
-    )
+    match delete.is_held() {
+        true => format!("{line} · held"),
+        false => format!(
+            "{line} · next {}",
+            wording::from_now(delete.next_attempt_at)
+        ),
+    }
 }
 
 /// An Inbox card the disk work raises, from its operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DiskCard {
-    /// Free space is under the hard floor, so builds wait.
-    BuildsHeld,
-    /// A folder could not be deleted; the folder's name. A name the host shortened matches no
-    /// waiting folder, so its card offers only Dismiss.
+    /// Free space is under the hard floor, so builds wait; since when.
+    BuildsHeld(i64),
+    /// A folder could not be deleted; the `folder_key` of its path. A key that matches no
+    /// waiting folder, such as an older card's folder name, offers only Dismiss.
     DeleteFailed(String),
 }
 impl DiskCard {
     pub(crate) fn of(operation_id: &str) -> Option<Self> {
-        if operation_id.starts_with(BUILDS_HELD_OPERATION) {
-            return Some(Self::BuildsHeld);
+        if let Some(since) = operation_id.strip_prefix(BUILDS_HELD_OPERATION) {
+            return Some(Self::BuildsHeld(since.parse().ok()?));
         }
         let rest = operation_id.strip_prefix(DELETE_FAILED_OPERATION)?;
-        let (_, name) = rest.split_once(':')?;
-        Some(Self::DeleteFailed(name.to_owned()))
+        let (_, key) = rest.split_once(':')?;
+        Some(Self::DeleteFailed(key.to_owned()))
     }
 }
 
 /// The waiting delete a failing-delete card names, while it still waits.
-fn failing_delete<'a>(disk: &'a DiskUse, name: &str) -> Option<&'a PendingDelete> {
-    (disk.deletes.iter()).find(|delete| {
-        let folder = std::path::Path::new(&delete.path).file_name();
-        folder.is_some_and(|folder| folder.to_string_lossy() == name)
-    })
+fn failing_delete<'a>(disk: &'a DiskUse, key: &str) -> Option<&'a PendingDelete> {
+    (disk.deletes.iter()).find(|delete| folder_key(&delete.path) == key)
+}
+
+/// A disk card as the study draws it: a bold ask, then labelled rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CardText {
+    pub(crate) ask: String,
+    pub(crate) rows: Vec<(&'static str, String)>,
+}
+
+/// What a disk card says, from the selected host's reading, with `home` shortened to "~". `None`
+/// before the host answered, and once a failing delete no longer waits; the card then shows
+/// the host's notice as written.
+pub(crate) fn card_text(
+    card: &DiskCard,
+    disk: Option<&DiskUse>,
+    home: Option<&str>,
+) -> Option<CardText> {
+    let disk = disk?;
+    match card {
+        DiskCard::BuildsHeld(since) => {
+            // Set in whole gigabytes.
+            let floor = format!("{} GB", disk.hard_floor / GB);
+            let reclaimed: u64 = (disk.tickets.iter())
+                .filter(|t| t.reclaimed_at.is_some_and(|at| at >= *since))
+                .map(|t| t.reclaimed)
+                .sum();
+            let left = format!("{} of build output is left", size(disk.build_output));
+            let reclaimed = match reclaimed {
+                0 => format!("Nothing yet; {left}"),
+                bytes => format!("{} since builds began waiting; {left}", size(bytes)),
+            };
+            Some(CardText {
+                ask: format!("Builds are waiting: only {} is free.", size(disk.free)),
+                rows: vec![
+                    ("Hard floor", floor.clone()),
+                    ("Waiting", format!("New builds, until {floor} is free")),
+                    ("Reclaimed", reclaimed),
+                ],
+            })
+        }
+        DiskCard::DeleteFailed(key) => {
+            let delete = failing_delete(disk, key)?;
+            let error = delete.last_error.as_deref().unwrap_or("Not deleted yet");
+            let why = match delete.attempts {
+                0 => error.to_owned(),
+                n => format!("{error}, {}", wording::counted(n as usize, "attempt")),
+            };
+            Some(CardText {
+                ask: "A folder could not be deleted.".into(),
+                rows: vec![
+                    ("Folder", repository_tree::shown_path(&delete.path, home)),
+                    ("Size", delete.size.map_or("—".into(), size)),
+                    ("Why", why),
+                ],
+            })
+        }
+    }
 }
 
 /// A button on a disk card, in the order drawn; the last is the primary one.
@@ -301,12 +359,12 @@ pub(crate) fn card_actions(
     disk: Option<&DiskUse>,
     on_this_mac: bool,
 ) -> Vec<CardAction> {
-    let name = match card {
-        DiskCard::BuildsHeld => return vec![CardAction::OpenSettings, CardAction::ReclaimAll],
-        DiskCard::DeleteFailed(name) => name,
+    let key = match card {
+        DiskCard::BuildsHeld(_) => return vec![CardAction::OpenSettings, CardAction::ReclaimAll],
+        DiskCard::DeleteFailed(key) => key,
     };
     let mut actions = vec![CardAction::Dismiss];
-    if let Some(waiting) = disk.and_then(|disk| failing_delete(disk, name)) {
+    if let Some(waiting) = disk.and_then(|disk| failing_delete(disk, key)) {
         if on_this_mac {
             actions.push(CardAction::ShowInFinder(waiting.path.clone()));
         }
@@ -319,11 +377,12 @@ pub(crate) fn card_actions(
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
     use super::{
-        CardAction, DiskCard, budget_line, can_reclaim, card_actions, delete_line, groups,
-        panel_line, size, where_line,
+        CardAction, DiskCard, budget_line, can_reclaim, card_actions, card_text, delete_line,
+        groups, panel_line, size, where_line,
     };
     use workspace_core::{
         DiskPart, DiskSettings, DiskUse, GB, PendingDelete, TicketDiskState, TicketDiskUse,
+        delete_failed_operation,
     };
 
     fn ticket(id: &str, project: &str, build_output: u64, state: TicketDiskState) -> TicketDiskUse {
@@ -453,29 +512,37 @@ mod tests {
         );
     }
 
-    #[test]
-    fn disk_cards_are_known_by_their_operation_and_offer_their_actions() {
-        use CardAction::*;
-        let held = DiskCard::of("builds-held:17").unwrap();
-        assert_eq!(held, DiskCard::BuildsHeld);
-        assert_eq!(card_actions(&held, None, true), [OpenSettings, ReclaimAll]);
-        let failed = DiskCard::of("worktree-delete-failed:17:.removing-t").unwrap();
-        assert_eq!(failed, DiskCard::DeleteFailed(".removing-t".into()));
-        assert_eq!(DiskCard::of("permission:1"), None);
-        let pending = |path: &str| PendingDelete {
+    fn pending(path: &str) -> PendingDelete {
+        PendingDelete {
             path: path.into(),
             ticket_id: None,
             attempts: 4,
             last_error: Some("Permission denied".into()),
             next_attempt_at: 0,
             failing: true,
-        };
-        // An older reclaim of the same ticket waits first, under a longer name.
-        let folder = "/w/tasks/p/r/.removing-t".to_owned();
+            size: Some(16 * GB),
+        }
+    }
+
+    #[test]
+    fn disk_cards_are_known_by_their_operation_and_offer_their_actions() {
+        use CardAction::*;
+        let held = DiskCard::of("builds-held:17").unwrap();
+        assert_eq!(held, DiskCard::BuildsHeld(17));
+        assert_eq!(card_actions(&held, None, true), [OpenSettings, ReclaimAll]);
+        assert_eq!(DiskCard::of("permission:1"), None);
+        // Two folders reclaimed in the same millisecond under different parents share a name;
+        // the card names one by its whole path.
+        let (first, folder) = (
+            "/w/tasks/p/a/.removing-t-16-0",
+            "/w/tasks/p/b/.removing-t-16-0",
+        );
+        let failed = DiskCard::of(&delete_failed_operation(16, folder)).unwrap();
         let disk = DiskUse {
-            deletes: vec![pending("/w/tasks/p/r/.removing-t-16-0"), pending(&folder)],
+            deletes: vec![pending(first), pending(folder)],
             ..DiskUse::default()
         };
+        let folder = folder.to_owned();
         assert_eq!(
             card_actions(&failed, Some(&disk), true),
             [
@@ -489,10 +556,66 @@ mod tests {
             card_actions(&failed, Some(&disk), false),
             [Dismiss, RetryNow(folder)]
         );
-        // Once the folder is gone, or before the host answered, there is nothing to retry.
-        let other = DiskCard::DeleteFailed(".removing-other".into());
+        // Once the folder is gone, before the host answered, or on an older card naming the
+        // folder, there is nothing to retry.
+        let other = DiskCard::of(&delete_failed_operation(16, "/w/.removing-other")).unwrap();
         assert_eq!(card_actions(&other, Some(&disk), true), [Dismiss]);
         assert_eq!(card_actions(&failed, None, true), [Dismiss]);
-        assert!(delete_line(&disk.deletes[0]).starts_with("Permission denied · 4 attempts · next"));
+        let older = DiskCard::of("worktree-delete-failed:16:.removing-t-16-0").unwrap();
+        assert_eq!(card_actions(&older, Some(&disk), true), [Dismiss]);
+    }
+
+    #[test]
+    fn disk_cards_say_their_ask_and_rows_from_the_hosts_reading() {
+        let held = DiskCard::BuildsHeld(100);
+        let mut reclaimed = ticket("r", "p", 0, TicketDiskState::Reclaimed);
+        (reclaimed.reclaimed_at, reclaimed.reclaimed) = (Some(120), 12 * GB);
+        let mut earlier = ticket("e", "p", 0, TicketDiskState::Reclaimed);
+        (earlier.reclaimed_at, earlier.reclaimed) = (Some(90), 30 * GB);
+        let mut disk = DiskUse {
+            free: 4_600_000_000,
+            build_output: 46 * GB,
+            hard_floor: 5 * GB,
+            tickets: vec![reclaimed, earlier],
+            deletes: vec![pending("/Users/me/w/tasks/p/r/.removing-cf6255af")],
+            ..DiskUse::default()
+        };
+        let text = card_text(&held, Some(&disk), None).unwrap();
+        assert_eq!(text.ask, "Builds are waiting: only 4.6 GB is free.");
+        assert_eq!(
+            text.rows,
+            [
+                ("Hard floor", "5 GB".into()),
+                ("Waiting", "New builds, until 5 GB is free".into()),
+                (
+                    "Reclaimed",
+                    "12 GB since builds began waiting; 46 GB of build output is left".into()
+                ),
+            ]
+        );
+        let path = "/Users/me/w/tasks/p/r/.removing-cf6255af";
+        let failed = DiskCard::of(&delete_failed_operation(1, path)).unwrap();
+        let text = card_text(&failed, Some(&disk), Some("/Users/me")).unwrap();
+        assert_eq!(text.ask, "A folder could not be deleted.");
+        assert_eq!(
+            text.rows,
+            [
+                ("Folder", "~/w/tasks/p/r/.removing-cf6255af".into()),
+                ("Size", "16 GB".into()),
+                ("Why", "Permission denied, 4 attempts".into()),
+            ]
+        );
+        // Before the host answered, or once the folder is gone, the card keeps its notice.
+        assert_eq!(card_text(&held, None, None), None);
+        disk.deletes.clear();
+        assert_eq!(card_text(&failed, Some(&disk), None), None);
+    }
+
+    #[test]
+    fn a_delete_line_says_when_it_is_next_tried_or_that_it_is_held() {
+        let mut delete = pending("/w/.removing-t");
+        assert!(delete_line(&delete).starts_with("Permission denied · 4 attempts · next"));
+        (delete.attempts, delete.last_error, delete.next_attempt_at) = (0, None, i64::MAX);
+        assert_eq!(delete_line(&delete), "Waiting to be deleted · held");
     }
 }

@@ -141,12 +141,15 @@ impl Settings {
         let disk = disk_use::current(cx).cloned();
         let settings = self.host.as_ref().map(|h| h.disk);
         match (&disk, settings) {
-            (Some(disk), Some(settings)) => body = body.child(tiles(disk, &settings, p)),
+            (Some(disk), Some(settings)) => {
+                body = body.child(tiles(disk, &settings, self.driving.name(), p))
+            }
             _ => body = body.child(hint("Measuring disk use…", p)),
         }
         body = body.child(self.disk_fields(p));
         if let Some(disk) = &disk {
-            body = body.child(self.disk_table(disk, p, window, cx));
+            let index = main_window_index(cx);
+            body = body.child(disk_table(disk, index.as_deref(), &self.driving, handle, p));
         }
         body
     }
@@ -180,99 +183,106 @@ impl Settings {
             .child(fields)
             .children((self.disk.error.clone()).map(|error| hint(error, p).text_color(p.red)))
     }
-
-    /// Each project's tickets, largest first, then the deletes still waiting.
-    fn disk_table(&self, disk: &DiskUse, p: Palette, window: &Window, cx: &App) -> Div {
-        let index = main_window_index(cx);
-        let largest = (disk.tickets.iter()).map(|t| t.build_output).max();
-        let mut table = div().flex().flex_col().child(header_row(p));
-        for group in disk_use::groups(disk) {
-            let label = group_label(index.as_deref(), group.project_id, &group.tickets);
-            table = table.child(group_row(label, p));
-            for ticket in group.tickets {
-                let row = self.ticket_row(index.as_deref(), ticket, largest, p, window);
-                table = table.child(row);
-            }
-        }
-        if !disk.deletes.is_empty() {
-            table = table.child(group_row("Removed worktrees still being deleted".into(), p));
-            let on_this_mac = self.bridge.remote().is_none();
-            for delete in &disk.deletes {
-                table = table.child(delete_row(delete, on_this_mac, p));
-            }
-        }
-        table
-    }
-
-    fn ticket_row(
-        &self,
-        index: Option<&WorkspaceIndex>,
-        disk: &TicketDiskUse,
-        largest: Option<u64>,
-        p: Palette,
-        window: &Window,
-    ) -> Div {
-        let ticket = index.and_then(|index| index.ticket(&disk.ticket_id));
-        let worktree = ticket.map_or("", |t| t.worktree.as_str());
-        let pr_open = ticket
-            .and_then(|t| t.pull_request.as_ref())
-            .is_some_and(|pr| pr.state == PrState::Open);
-        let (state, tone) = match disk_use::state_label(disk) {
-            (_, Tone::Quiet) if pr_open => ("PR open".to_owned(), Tone::Quiet),
-            label => label,
-        };
-        let bar = largest
-            .filter(|largest| *largest > 0)
-            .map_or(0., |largest| {
-                disk.build_output as f32 / largest as f32 * BAR_WIDTH
-            });
-        let handle = window.window_handle();
-        let ticket_id = disk.ticket_id.clone();
-        let action = disk_use::can_reclaim(disk).then(|| {
-            button(SharedString::from(format!("reclaim-{ticket_id}")))
-                .xsmall()
-                .outline()
-                .label("Reclaim")
-                .map(|b| ui::gated(b, &self.driving))
-                .on_click(move |_, _, cx| {
-                    let ask = ask::reclaim_build_output(Some(ticket_id.clone()));
-                    disk_use::ask(ask, Some(handle), cx)
-                })
-        });
-        let title = div()
-            .flex_1()
-            .min_w_0()
-            .child(div().text_ellipsis().child(disk.title.clone()))
-            .children(
-                disk_use::where_line(disk, worktree)
-                    .map(|line| hint(line, p).text_size(px(font::META)).text_ellipsis()),
-            );
-        let output = div()
-            .flex()
-            .items_center()
-            .justify_end()
-            .gap_1p5()
-            .child(
-                div()
-                    .w(px(bar))
-                    .h(px(6.))
-                    .rounded_full()
-                    .bg(p.accent.opacity(0.8)),
-            )
-            .child(disk_use::size(disk.build_output));
-        row(p)
-            .child(title)
-            .child(number(SOURCE_WIDTH).child(disk_use::size(disk.source)))
-            .child(number(OUTPUT_WIDTH).child(output))
-            .child(column(TURN_WIDTH).child(disk.last_turn_at.map_or("—".into(), wording::age)))
-            .child(column(STATE_WIDTH).child(pill(state, tone_color(tone, p))))
-            .child(cell(ACTION_WIDTH).children(action))
-    }
 }
 
-/// The three tiles: free space with the floors marked, build output against the budget, and
-/// source.
-fn tiles(disk: &DiskUse, settings: &DiskSettings, p: Palette) -> Div {
+/// Each project's tickets, largest first, then the deletes still waiting. `driving` is the host
+/// the window drives; its buttons act through `handle`.
+fn disk_table(
+    disk: &DiskUse,
+    index: Option<&WorkspaceIndex>,
+    driving: &HostView,
+    handle: AnyWindowHandle,
+    p: Palette,
+) -> Div {
+    let largest = (disk.tickets.iter()).map(|t| t.build_output).max();
+    let mut table = div().flex().flex_col().child(header_row(p));
+    for group in disk_use::groups(disk) {
+        let label = group_label(index, group.project_id, &group.tickets);
+        table = table.child(group_row(label, p));
+        for ticket in group.tickets {
+            table = table.child(ticket_row(index, ticket, largest, driving, handle, p));
+        }
+    }
+    if !disk.deletes.is_empty() {
+        let group = group_row("Removed worktrees still being deleted".into(), p);
+        table = table.child(group.debug_selector(|| "disk-deletes".into()));
+        let on_this_mac = driving.remote.is_none();
+        for delete in &disk.deletes {
+            table = table.child(delete_row(delete, on_this_mac, p));
+        }
+    }
+    table
+}
+
+fn ticket_row(
+    index: Option<&WorkspaceIndex>,
+    disk: &TicketDiskUse,
+    largest: Option<u64>,
+    driving: &HostView,
+    handle: AnyWindowHandle,
+    p: Palette,
+) -> Div {
+    let ticket = index.and_then(|index| index.ticket(&disk.ticket_id));
+    let worktree = ticket.map_or("", |t| t.worktree.as_str());
+    let pr_open = ticket
+        .and_then(|t| t.pull_request.as_ref())
+        .is_some_and(|pr| pr.state == PrState::Open);
+    let (state, tone) = match disk_use::state_label(disk) {
+        (_, Tone::Quiet) if pr_open => ("PR open".to_owned(), Tone::Quiet),
+        label => label,
+    };
+    let bar = largest
+        .filter(|largest| *largest > 0)
+        .map_or(0., |largest| {
+            disk.build_output as f32 / largest as f32 * BAR_WIDTH
+        });
+    let ticket_id = disk.ticket_id.clone();
+    let action = disk_use::can_reclaim(disk).then(|| {
+        button(SharedString::from(format!("reclaim-{ticket_id}")))
+            .xsmall()
+            .outline()
+            .label("Reclaim")
+            .debug_selector(|| "disk-row-reclaim".into())
+            .map(|b| ui::gated(b, driving))
+            .on_click(move |_, _, cx| {
+                let ask = ask::reclaim_build_output(Some(ticket_id.clone()));
+                disk_use::ask(ask, Some(handle), cx)
+            })
+    });
+    let title = div()
+        .flex_1()
+        .min_w_0()
+        .child(div().text_ellipsis().child(disk.title.clone()))
+        .children(
+            disk_use::where_line(disk, worktree)
+                .map(|line| hint(line, p).text_size(px(font::META)).text_ellipsis()),
+        );
+    let output = div()
+        .flex()
+        .items_center()
+        .justify_end()
+        .gap_1p5()
+        .child(
+            div()
+                .w(px(bar))
+                .h(px(6.))
+                .rounded_full()
+                .bg(p.accent.opacity(0.8)),
+        )
+        .child(disk_use::size(disk.build_output));
+    row(p)
+        .debug_selector(|| "disk-row".into())
+        .child(title)
+        .child(number(SOURCE_WIDTH).child(disk_use::size(disk.source)))
+        .child(number(OUTPUT_WIDTH).child(output))
+        .child(column(TURN_WIDTH).child(disk.last_turn_at.map_or("—".into(), wording::age)))
+        .child(column(STATE_WIDTH).child(pill(state, tone_color(tone, p))))
+        .child(cell(ACTION_WIDTH).children(action))
+}
+
+/// The three tiles: free space on `host`'s disk, or This Mac's, with the floors marked, build
+/// output against the budget, and source.
+fn tiles(disk: &DiskUse, settings: &DiskSettings, host: Option<&str>, p: Palette) -> Div {
     let share = |part: u64, whole: u64| match whole {
         0 => 0.,
         whole => (part as f32 / whole as f32).min(1.),
@@ -285,7 +295,7 @@ fn tiles(disk: &DiskUse, settings: &DiskSettings, p: Palette) -> Div {
         p.green
     };
     let free = tile(
-        "Free on this Mac's disk",
+        free_label(host),
         disk_use::size(disk.free),
         format!("of {}", disk_use::size(disk.total)),
         meter(share(disk.free, disk.total), free_color, p)
@@ -321,8 +331,15 @@ fn tiles(disk: &DiskUse, settings: &DiskSettings, p: Palette) -> Div {
     div().flex().gap_3().child(free).child(output).child(source)
 }
 
+fn free_label(host: Option<&str>) -> String {
+    match host {
+        Some(host) => format!("Free on {host}'s disk"),
+        None => "Free on this Mac's disk".into(),
+    }
+}
+
 fn tile(
-    label: &'static str,
+    label: impl Into<SharedString>,
     figure: String,
     of: String,
     meter: Div,
@@ -346,7 +363,6 @@ fn tile(
         .child(legend.text_size(px(font::META)))
 }
 
-/// A track filled to `share` in `color`; marks are its children.
 fn meter(share: f32, color: Hsla, p: Palette) -> Div {
     div()
         .relative()
@@ -366,7 +382,6 @@ fn meter(share: f32, color: Hsla, p: Palette) -> Div {
         )
 }
 
-/// A floor's mark on a meter, at `share` of its width.
 fn mark(share: f32, color: Hsla) -> Div {
     div()
         .absolute()
@@ -401,7 +416,6 @@ fn row(p: Palette) -> Div {
 fn column(width: f32) -> Div {
     div().w(px(width)).flex_none().flex()
 }
-/// A right-aligned column.
 fn cell(width: f32) -> Div {
     column(width).justify_end()
 }
@@ -467,6 +481,7 @@ fn delete_row(delete: &PendingDelete, on_this_mac: bool, p: Palette) -> Div {
             .xsmall()
             .outline()
             .label("Show in Finder")
+            .debug_selector(|| "disk-delete-finder".into())
             .on_click(move |_, _, cx| cx.reveal_path(&path))
     });
     row(p)
@@ -495,6 +510,8 @@ fn main_window_index(cx: &App) -> Option<Rc<WorkspaceIndex>> {
 #[cfg(test)]
 mod tests {
     use super::parse;
+    use crate::hosts::{HostView, Link};
+    use workspace_core::{AccessLevel, DiskUse, GB, PendingDelete, TicketDiskState, TicketDiskUse};
 
     #[test]
     fn the_fields_save_only_whole_numbers_the_host_would_accept() {
@@ -517,5 +534,80 @@ mod tests {
             "The soft floor must be above the hard floor"
         );
         assert!(parse(["100", "0", "25", "5"]).is_err());
+    }
+
+    /// The disk table as Settings draws it, for a reading and the host the window drives.
+    struct Table(DiskUse, HostView);
+    impl gpui::Render for Table {
+        fn render(
+            &mut self,
+            window: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{ParentElement as _, Styled as _};
+            let p = crate::palette::palette(false);
+            let handle = window.window_handle();
+            gpui::div()
+                .w(gpui::px(860.))
+                .child(super::disk_table(&self.0, None, &self.1, handle, p))
+        }
+    }
+
+    #[gpui::test]
+    fn the_table_draws_each_ticket_and_the_deletes_still_waiting(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let ticket = TicketDiskUse {
+            ticket_id: "t".into(),
+            project_id: "p".into(),
+            repository_id: "r".into(),
+            title: "Toolbar".into(),
+            source: 150_000_000,
+            build_output: 12 * GB,
+            parts: vec![],
+            left_alone: vec![],
+            last_turn_at: None,
+            state: TicketDiskState::Idle,
+            reclaimed_at: None,
+            reclaimed: 0,
+        };
+        let delete = PendingDelete {
+            path: "/w/.removing-t".into(),
+            ticket_id: Some("t".into()),
+            attempts: 0,
+            last_error: None,
+            next_attempt_at: i64::MAX,
+            failing: false,
+            size: None,
+        };
+        let drawn = |disk: DiskUse, host: HostView, cx: &mut gpui::TestAppContext| {
+            let (_, cx) = cx.add_window_view(|_, _| Table(disk, host));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            [
+                "disk-row",
+                "disk-row-reclaim",
+                "disk-deletes",
+                "disk-delete-finder",
+            ]
+            .map(|selector| cx.debug_bounds(selector).is_some())
+        };
+        let disk = DiskUse {
+            tickets: vec![ticket.clone()],
+            deletes: vec![delete],
+            ..DiskUse::default()
+        };
+        assert_eq!(drawn(disk.clone(), HostView::default(), cx), [true; 4]);
+        // A paired host's folder is not on this Mac to show.
+        let paired = HostView::remote("Studio Mac", Link::Connected(AccessLevel::Control), None);
+        assert_eq!(drawn(disk, paired, cx), [true, true, true, false]);
+        // Nothing waits to be deleted, and a building ticket offers no Reclaim.
+        let building = DiskUse {
+            tickets: vec![TicketDiskUse {
+                state: TicketDiskState::Building,
+                ..ticket
+            }],
+            ..DiskUse::default()
+        };
+        let quiet = [true, false, false, false];
+        assert_eq!(drawn(building, HostView::default(), cx), quiet);
     }
 }

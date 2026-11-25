@@ -1042,6 +1042,7 @@ impl Host {
             source: tickets.iter().map(|t| t.source).sum(),
             measured_at: self.build_output.survey.as_ref().map(|s| s.at),
             builds_held: free < disk.hard_floor() && total > 0,
+            hard_floor: disk.hard_floor(),
             tickets,
             deletes,
         })

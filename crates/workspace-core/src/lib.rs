@@ -1738,6 +1738,9 @@ pub struct DiskUse {
     pub measured_at: Option<i64>,
     /// Free space is under the hard floor, so new builds wait.
     pub builds_held: bool,
+    /// The hard floor in bytes, as `HostSettings::disk` sets it.
+    #[serde(default)]
+    pub hard_floor: u64,
     pub tickets: Vec<TicketDiskUse>,
     pub deletes: Vec<PendingDelete>,
 }
