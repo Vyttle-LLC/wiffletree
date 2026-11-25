@@ -171,12 +171,14 @@ impl Advertisement {
     }
 
     fn process(&self, wait: Duration) {
-        process(&self.handle, wait);
+        let _ = process(&self.handle, wait);
     }
 
     /// Keeps reading the daemon's later answers, such as a rename after a conflict, so its
     /// socket never fills. It waits for an answer without the lock, which it would otherwise
-    /// take back at once each time and keep `update` waiting for seconds.
+    /// take back at once each time and keep `update` waiting for seconds. It stops once the
+    /// daemon's connection fails, as when mDNSResponder restarts, instead of polling a closed
+    /// socket in a tight loop.
     fn start_worker(&mut self) {
         let (handle, stopping) = (self.handle.clone(), self.stopping.clone());
         // SAFETY: the reference is live under the lock; its socket stays open until it is
@@ -184,8 +186,11 @@ impl Advertisement {
         let fd = unsafe { DNSServiceRefSockFD(handle.lock().unwrap_or_else(|e| e.into_inner()).0) };
         self.worker = Some(std::thread::spawn(move || {
             while !stopping.load(Ordering::Relaxed) {
-                if readable(fd, Duration::from_millis(200)) {
-                    process(&handle, Duration::ZERO);
+                if readable(fd, Duration::from_millis(200))
+                    && let Err(error) = process(&handle, Duration::ZERO)
+                {
+                    eprintln!("Bonjour stopped answering the advertisement: {error}");
+                    break;
                 }
             }
         }));
@@ -203,14 +208,19 @@ impl Drop for Advertisement {
     }
 }
 
-/// Processes one answer if the daemon sends one within `wait`.
-fn process(handle: &Mutex<Handle>, wait: Duration) {
+/// Processes one answer if the daemon sends one within `wait`; fails with the daemon's error
+/// when its connection does.
+fn process(handle: &Mutex<Handle>, wait: Duration) -> std::result::Result<(), i32> {
     let handle = handle.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: the reference is live under the lock.
     let fd = unsafe { DNSServiceRefSockFD(handle.0) };
-    if readable(fd, wait) {
-        // SAFETY: data is waiting, so this does not block; the reference is live under the lock.
-        unsafe { DNSServiceProcessResult(handle.0) };
+    if !readable(fd, wait) {
+        return Ok(());
+    }
+    // SAFETY: data is waiting, so this does not block; the reference is live under the lock.
+    match unsafe { DNSServiceProcessResult(handle.0) } {
+        0 => Ok(()),
+        error => Err(error),
     }
 }
 

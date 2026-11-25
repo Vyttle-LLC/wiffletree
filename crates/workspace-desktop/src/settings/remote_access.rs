@@ -22,7 +22,6 @@ fn time_left(expires_at: i64, now: i64) -> String {
 /// A run of a step's text, bold when `true`.
 type Run<'a> = (&'a str, bool);
 
-/// The steps before a code shows: how pairing goes from either Mac.
 fn steps_before_code() -> [Vec<Run<'static>>; 3] {
     [
         vec![
@@ -46,7 +45,6 @@ fn steps_before_code() -> [Vec<Run<'static>>; 3] {
     ]
 }
 
-/// The steps once `code` shows: this Mac by `name`, and by `address` when it has one.
 fn steps_with_code<'a>(
     name: &'a str,
     address: Option<&'a str>,
