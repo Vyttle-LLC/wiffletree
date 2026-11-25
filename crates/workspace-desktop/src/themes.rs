@@ -1,7 +1,8 @@
-//! Theme files: the look chosen for light and for dark, read from `<data dir>/themes/*.json`
-//! over the built-in Tidal. A file has Tidal's shape, so any color or font it leaves out is
-//! Tidal's, and a file that cannot be used shows Tidal's variant on its side while Settings ›
-//! Appearance says why. Nothing in a user's file can panic the app.
+//! Theme files: the look chosen for light and for dark, a built-in theme (Tidal, Celadon or
+//! Celadon Sky) or one read from `<data dir>/themes/*.json` over Tidal. A file has Tidal's shape,
+//! so any color or font it leaves out is Tidal's, and a file that cannot be used shows Tidal's
+//! variant on its side while Settings › Appearance says why. Nothing in a user's file can panic
+//! the app.
 use crate::palette::{self, Fonts, Look, Palette};
 use crate::preferences::Preferences;
 use gpui::{App, Global, Hsla, SharedString, rgb};
@@ -58,14 +59,62 @@ impl Side {
     }
 }
 
-/// The theme a side shows: the built-in Tidal or a file in the themes folder.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Choice {
-    #[default]
+/// A theme compiled into the app, listed before the files on each side it has a variant for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BuiltIn {
     Tidal,
+    Celadon,
+    CeladonSky,
+}
+impl BuiltIn {
+    /// In menu order, Tidal first.
+    pub(crate) const ALL: [BuiltIn; 3] = [BuiltIn::Tidal, BuiltIn::Celadon, BuiltIn::CeladonSky];
+
+    /// The value saved in preferences; never a `.json` file name, so never a file choice.
+    fn key(self) -> &'static str {
+        match self {
+            BuiltIn::Tidal => "tidal",
+            BuiltIn::Celadon => "celadon",
+            BuiltIn::CeladonSky => "celadon-sky",
+        }
+    }
+    fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|built_in| built_in.key() == key)
+    }
+    /// Read by the same parser as any theme file.
+    fn theme(self) -> &'static ThemeFile {
+        static THEMES: [OnceLock<ThemeFile>; 3] = [const { OnceLock::new() }; 3];
+        THEMES[self as usize].get_or_init(|| {
+            let text = match self {
+                BuiltIn::Tidal => include_str!("../../../design/themes/wiffletree-tidal.json"),
+                BuiltIn::Celadon => include_str!("../themes/celadon.json"),
+                BuiltIn::CeladonSky => include_str!("../themes/celadon-sky.json"),
+            };
+            parse(text).unwrap_or_else(|_| panic!("Valid built-in theme {}", self.key()))
+        })
+    }
+    pub(crate) fn name(self) -> &'static str {
+        &self.theme().name
+    }
+    pub(crate) fn has(self, side: Side) -> bool {
+        self.theme().variant(side).is_some()
+    }
+}
+
+/// The theme a side shows: a built-in theme or a file in the themes folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Choice {
+    BuiltIn(BuiltIn),
     File(String),
 }
+impl Default for Choice {
+    fn default() -> Self {
+        Self::TIDAL
+    }
+}
 impl Choice {
+    pub(crate) const TIDAL: Self = Choice::BuiltIn(BuiltIn::Tidal);
+
     /// A bare `.json` file name, never a path, so a choice cannot reach outside the folder.
     fn file(name: &str) -> Option<Self> {
         let bare = name.ends_with(".json") && !name.starts_with('.') && !name.contains('/');
@@ -75,7 +124,7 @@ impl Choice {
 impl Serialize for Choice {
     fn serialize<S: Serializer>(&self, out: S) -> Result<S::Ok, S::Error> {
         match self {
-            Choice::Tidal => out.serialize_str("tidal"),
+            Choice::BuiltIn(built_in) => out.serialize_str(built_in.key()),
             Choice::File(file) => out.serialize_str(file),
         }
     }
@@ -85,7 +134,12 @@ impl Serialize for Choice {
 impl<'de> Deserialize<'de> for Choice {
     fn deserialize<D: Deserializer<'de>>(input: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(input)?;
-        Ok(value.as_str().and_then(Choice::file).unwrap_or_default())
+        let read = |text: &str| {
+            BuiltIn::from_key(text)
+                .map(Choice::BuiltIn)
+                .or_else(|| Choice::file(text))
+        };
+        Ok(value.as_str().and_then(read).unwrap_or_default())
     }
 }
 
@@ -207,17 +261,9 @@ fn read_file(path: &Path) -> Result<ThemeFile, Fault> {
     }
 }
 
-/// The compiled-in Tidal, read by the same parser as any theme file.
-fn tidal() -> &'static ThemeFile {
-    static TIDAL: OnceLock<ThemeFile> = OnceLock::new();
-    TIDAL.get_or_init(|| {
-        parse(include_str!("../../../design/themes/wiffletree-tidal.json"))
-            .unwrap_or_else(|_| panic!("Valid canonical Tidal tokens"))
-    })
-}
-
 fn tidal_colors(side: Side) -> &'static Colors {
-    tidal()
+    BuiltIn::Tidal
+        .theme()
         .variant(side)
         .expect("Tidal has a light and a dark variant")
 }
@@ -371,31 +417,35 @@ fn show(
     side: Side,
     installed: &mut dyn FnMut(&str) -> bool,
 ) -> Shown {
-    let read = match choice {
-        Choice::Tidal => Ok(None),
-        Choice::File(file) => read_file(&folder.join(file))
-            .and_then(|theme| match theme.variant(side) {
-                Some(_) => Ok(Some(theme)),
-                None => Err(Fault::NoVariant(side)),
-            })
-            .map_err(|fault| (file.clone(), fault)),
+    let mut file_theme = None;
+    let (source, read) = match choice {
+        Choice::BuiltIn(built_in) => (built_in.name().to_string(), Ok(built_in.theme())),
+        Choice::File(file) => match read_file(&folder.join(file)) {
+            Ok(theme) => (file.clone(), Ok(&*file_theme.insert(theme))),
+            Err(fault) => (file.clone(), Err(fault)),
+        },
     };
+    let read = read
+        .and_then(|theme| match theme.variant(side) {
+            Some(colors) => Ok((theme, colors)),
+            None => Err(Fault::NoVariant(side)),
+        })
+        .map_err(|fault| (source, fault));
     match read {
-        Ok(Some(theme)) => {
-            let colors = theme.variant(side).cloned().unwrap_or_default();
-            let (look, missing_fonts) = look(&colors, &theme.fonts, side, installed);
+        Ok((theme, colors)) => {
+            let (look, missing_fonts) = look(colors, &theme.fonts, side, installed);
             Shown {
                 look,
-                name: theme.name,
+                name: theme.name.clone(),
                 fault: None,
                 missing_fonts,
-                named_fonts: theme.fonts,
+                named_fonts: theme.fonts.clone(),
             }
         }
-        Ok(None) | Err(_) => Shown {
+        Err(fault) => Shown {
             look: tidal_look(side),
             name: "Tidal".into(),
-            fault: read.err(),
+            fault: Some(fault),
             missing_fonts: vec![],
             named_fonts: FontNames::default(),
         },
@@ -607,15 +657,41 @@ impl Themes {
             sought_fonts: BTreeSet::new(),
         }
     }
-    /// The name a menu shows for `choice`: the file's own, or its file name while unreadable.
+    /// The name a menu shows for `choice`: the theme's own, or its file name while unreadable.
     pub(crate) fn label(&self, choice: &Choice) -> String {
         match choice {
-            Choice::Tidal => "Tidal".into(),
+            Choice::BuiltIn(built_in) => built_in.name().into(),
             Choice::File(file) => (self.listed.iter())
                 .find(|listed| &listed.file == file)
                 .map_or_else(|| file.clone(), |listed| listed.name.clone()),
         }
     }
+    /// A side's menu: the built-ins with that variant, Tidal first, then its files by name.
+    pub(crate) fn menu(&self, side: Side) -> Vec<MenuItem> {
+        let built_ins = (BuiltIn::ALL.into_iter())
+            .filter(|built_in| built_in.has(side))
+            .map(|built_in| MenuItem {
+                choice: Choice::BuiltIn(built_in),
+                name: built_in.name().into(),
+                detail: "built in".into(),
+            });
+        let files = (self.listed.iter())
+            .filter(|listed| listed.has(side))
+            .map(|listed| MenuItem {
+                choice: Choice::File(listed.file.clone()),
+                name: listed.name.clone(),
+                detail: listed.file.clone(),
+            });
+        built_ins.chain(files).collect()
+    }
+}
+
+/// One theme in a Light theme or Dark theme menu, with its file name or "built in" on the right.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MenuItem {
+    pub choice: Choice,
+    pub name: String,
+    pub detail: String,
 }
 
 /// Reads the folder and both chosen files again, applying the looks and redrawing what changed.
@@ -759,11 +835,79 @@ mod tests {
     }
 
     #[test]
+    fn the_built_in_celadon_pair_shows_on_its_sides_and_warns_of_missing_fonts() {
+        let sides = |built_in: BuiltIn| (built_in.has(Side::Light), built_in.has(Side::Dark));
+        assert_eq!(sides(BuiltIn::Tidal), (true, true));
+        assert_eq!(sides(BuiltIn::Celadon), (false, true));
+        assert_eq!(sides(BuiltIn::CeladonSky), (true, false));
+
+        let empty = folder(&[]);
+        let chosen = choose(
+            empty.path(),
+            &Choice::BuiltIn(BuiltIn::CeladonSky),
+            &Choice::BuiltIn(BuiltIn::Celadon),
+            &mut |_| false,
+        );
+        assert_eq!(chosen.light.palette.base, hex("#eaf6e8"));
+        assert_eq!(chosen.dark.palette.base, hex("#131b11"));
+        assert_eq!(chosen.dark.fonts.ui.as_ref(), SYSTEM_UI_FONT);
+        assert_eq!(
+            chosen.notices,
+            [Notice {
+                tone: Tone::Warning,
+                head: "Figtree and JetBrains Mono aren't installed.".into(),
+                body: "Celadon Sky's and Celadon's colors are in use; the UI text and code use \
+                       the system fonts."
+                    .into(),
+                use_tidal: vec![],
+            }]
+        );
+    }
+
+    #[test]
+    fn each_menu_lists_its_side_s_built_ins_after_tidal_and_then_the_files() {
+        let names = |page: &Themes, side| -> Vec<(String, String)> {
+            (page.menu(side).into_iter())
+                .map(|item| (item.name, item.detail))
+                .collect()
+        };
+        let built_in = |name: &str| (name.to_string(), "built in".to_string());
+        let empty = folder(&[]);
+        let page = Themes::new(empty.path().into());
+        assert_eq!(
+            names(&page, Side::Dark),
+            [built_in("Tidal"), built_in("Celadon")]
+        );
+        assert_eq!(
+            names(&page, Side::Light),
+            [built_in("Tidal"), built_in("Celadon Sky")]
+        );
+
+        // An installed copy of the port stays listed under its file name.
+        let port = include_str!("../themes/celadon.json");
+        let themes = folder(&[("celadon.json", port), ("celadon-jade.json", JADE)]);
+        let page = Themes {
+            listed: list(themes.path()),
+            ..Themes::new(themes.path().into())
+        };
+        let file = |name: &str, file: &str| (name.to_string(), file.to_string());
+        assert_eq!(
+            names(&page, Side::Dark),
+            [
+                built_in("Tidal"),
+                built_in("Celadon"),
+                file("Celadon", "celadon.json"),
+                file("Celadon Jade", "celadon-jade.json"),
+            ]
+        );
+    }
+
+    #[test]
     fn a_complete_dark_only_theme_shows_on_dark_with_its_fonts() {
         let themes = folder(&[("celadon-jade.json", JADE)]);
         let chosen = choose(
             themes.path(),
-            &Choice::Tidal,
+            &Choice::TIDAL,
             &file("celadon-jade.json"),
             &mut every_font,
         );
@@ -782,7 +926,7 @@ mod tests {
         let chosen = choose(
             themes.path(),
             &file("celadon-sky.json"),
-            &Choice::Tidal,
+            &Choice::TIDAL,
             &mut every_font,
         );
         let tidal = tidal_look(Side::Light);
@@ -798,7 +942,7 @@ mod tests {
         let themes = folder(&[("rust-accent.json", partial)]);
         let chosen = choose(
             themes.path(),
-            &Choice::Tidal,
+            &Choice::TIDAL,
             &file("rust-accent.json"),
             &mut every_font,
         );
@@ -974,7 +1118,7 @@ mod tests {
         let themes = folder(&[("celadon-jade.json", JADE)]);
         let chosen = choose(
             themes.path(),
-            &Choice::Tidal,
+            &Choice::TIDAL,
             &file("celadon-jade.json"),
             &mut |name| name == "JetBrains Mono",
         );
@@ -1059,10 +1203,15 @@ mod tests {
     }
 
     #[test]
-    fn a_choice_is_a_bare_json_file_name_or_tidal() {
+    fn a_choice_is_a_built_in_or_a_bare_json_file_name_and_otherwise_tidal() {
         let read = |json: &str| serde_json::from_str::<Choice>(json).unwrap();
         assert_eq!(read(r#""celadon.json""#), file("celadon.json"));
+        for built_in in BuiltIn::ALL {
+            let saved = serde_json::to_string(&Choice::BuiltIn(built_in)).unwrap();
+            assert_eq!(read(&saved), Choice::BuiltIn(built_in), "{saved}");
+        }
         for other in [
+            r#""Celadon""#,
             r#""tidal""#,
             r#""../x.json""#,
             r#""a/b.json""#,
@@ -1070,8 +1219,8 @@ mod tests {
             "null",
             r#""x.txt""#,
         ] {
-            assert_eq!(read(other), Choice::Tidal, "{other}");
+            assert_eq!(read(other), Choice::TIDAL, "{other}");
         }
-        assert_eq!(serde_json::to_string(&Choice::Tidal).unwrap(), r#""tidal""#);
+        assert_eq!(serde_json::to_string(&Choice::TIDAL).unwrap(), r#""tidal""#);
     }
 }
