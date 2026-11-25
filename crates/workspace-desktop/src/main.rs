@@ -502,6 +502,13 @@ impl Workspace {
                 self.shared.show_archived = *shown;
                 self.sync_archive(window, cx);
             }
+            Intent::OpenLensBucket {
+                lens,
+                space,
+                bucket,
+            } => self.sidebar.update(cx, |sidebar, cx| {
+                sidebar.open_lens_bucket(*lens, space.clone(), bucket.clone(), cx)
+            }),
             // Only the archive may know who sent them.
             Intent::MessagesShown | Intent::DoneTicketsShown => {
                 return self.sync_archive(window, cx);

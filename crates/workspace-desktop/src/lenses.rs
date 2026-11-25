@@ -6,7 +6,6 @@ use crate::tree;
 use std::collections::{BTreeMap, BTreeSet};
 use workspace_core::*;
 
-/// A bucket of a lens's Space section.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Bucket {
     /// An app or a layer of the Space's vocabulary.
@@ -44,7 +43,6 @@ impl Bucket {
     }
 }
 
-/// The kind of tag the App or Layer lens buckets by.
 pub(crate) fn tag_kind(lens: Lens) -> Option<TagKind> {
     match lens {
         Lens::App => Some(TagKind::App),
@@ -53,10 +51,11 @@ pub(crate) fn tag_kind(lens: Lens) -> Option<TagKind> {
     }
 }
 
-/// A project's row in a bucket.
+/// A project's row in a bucket. It owns its coordinator, so the sidebar can keep the Me lens's
+/// rows from one snapshot to the next.
 #[derive(Debug)]
-pub(crate) struct Listed<'a> {
-    pub root: &'a Session,
+pub(crate) struct Listed {
+    pub root: Session,
     /// It is filed under a parent, so it has the branch icon.
     pub child: bool,
     /// The muted line beneath it: its parent's name, or why the Me lens lists it.
@@ -64,29 +63,29 @@ pub(crate) struct Listed<'a> {
 }
 
 #[derive(Debug)]
-pub(crate) struct Group<'a> {
+pub(crate) struct Group {
     pub bucket: Bucket,
-    pub projects: Vec<Listed<'a>>,
+    pub projects: Vec<Listed>,
 }
 
 /// One Space's buckets, each only when it holds a project.
 #[derive(Debug)]
-pub(crate) struct LensSection<'a> {
+pub(crate) struct LensSection {
     pub space: SpaceId,
     pub name: String,
-    pub groups: Vec<Group<'a>>,
+    pub groups: Vec<Group>,
 }
 
-impl<'a> LensSection<'a> {
+impl LensSection {
     /// Its rows, a project once for each bucket it is in.
     pub(crate) fn entries(&self) -> usize {
         self.groups.iter().map(|group| group.projects.len()).sum()
     }
     /// Its projects' coordinators, each once, for a collapsed section's state.
-    pub(crate) fn projects(&self) -> Vec<&'a Session> {
+    pub(crate) fn projects(&self) -> Vec<&Session> {
         let mut seen = BTreeSet::new();
         (self.groups.iter())
-            .flat_map(|group| group.projects.iter().map(|listed| listed.root))
+            .flat_map(|group| group.projects.iter().map(|listed| &listed.root))
             .filter(|root| seen.insert(root.project_id.as_str()))
             .collect()
     }
@@ -100,7 +99,7 @@ pub(crate) fn tag_sections(
     index: &WorkspaceIndex,
     kind: TagKind,
     show_archived: bool,
-) -> Vec<LensSection<'_>> {
+) -> Vec<LensSection> {
     let snapshot = index.snapshot();
     let sections = tree::spaces(index).into_iter().map(|(space, name)| {
         let shown = tree::shown(index, &space, show_archived);
@@ -113,7 +112,7 @@ pub(crate) fn tag_sections(
             let projects = (shown.iter())
                 .filter(|(project, _)| holds(snapshot.project_tags.get(&project.id), kind, &bucket))
                 .map(|&(project, root)| Listed {
-                    root,
+                    root: root.clone(),
                     child: project.parent_id.is_some(),
                     line: (project.parent_id.as_deref())
                         .and_then(|parent| Some(index.project(parent)?.name.clone())),
@@ -149,16 +148,16 @@ const QUIET_DAYS: i64 = 5;
 
 /// The Me lens at `now`, in milliseconds: in each Space's section, its unarchived projects under
 /// Questions, Merge on GitHub, Going quiet and Ready to close, each with its reason.
-pub(crate) fn me_sections(index: &WorkspaceIndex, now: i64) -> Vec<LensSection<'_>> {
-    let latest_turns = latest_turns(index);
+pub(crate) fn me_sections(index: &WorkspaceIndex, now: i64) -> Vec<LensSection> {
+    let family_turns = family_turns(index);
     let sections = tree::spaces(index).into_iter().map(|(space, name)| {
         let shown = tree::shown(index, &space, false);
         let groups = Bucket::ME.into_iter().map(|bucket| {
             let projects = (shown.iter())
                 .filter_map(|&(project, root)| {
-                    let reason = reason(index, project, &bucket, &latest_turns, now)?;
+                    let reason = reason(index, project, &bucket, &family_turns, now)?;
                     Some(Listed {
-                        root,
+                        root: root.clone(),
                         child: project.parent_id.is_some(),
                         line: Some(reason),
                     })
@@ -182,12 +181,23 @@ pub(crate) fn me_count(sections: &[LensSection]) -> usize {
     sections.iter().map(LensSection::entries).sum()
 }
 
-/// By project, when one of its sessions last started a turn, archived workers included, as only
-/// the host knows without the archive.
-fn latest_turns(index: &WorkspaceIndex) -> BTreeMap<&str, i64> {
-    (index.snapshot().me_facts.iter())
-        .filter_map(|(project, facts)| Some((project.as_str(), facts.last_turn_started?)))
-        .collect()
+/// By project, when a session of it or of its children last started a turn, archived workers
+/// included, as only the host knows without the archive.
+fn family_turns(index: &WorkspaceIndex) -> BTreeMap<&str, i64> {
+    let snapshot = index.snapshot();
+    let mut latest = BTreeMap::new();
+    for project in &snapshot.projects {
+        let Some(turn) = (snapshot.me_facts.get(&project.id)).and_then(|f| f.last_turn_started)
+        else {
+            continue;
+        };
+        let family = std::iter::once(&project.id).chain(&project.parent_id);
+        for id in family {
+            let entry = latest.entry(id.as_str()).or_insert(turn);
+            *entry = (*entry).max(turn);
+        }
+    }
+    latest
 }
 
 /// Why the Me lens lists `project` under `bucket`; none when it does not.
@@ -195,7 +205,7 @@ fn reason(
     index: &WorkspaceIndex,
     project: &Project,
     bucket: &Bucket,
-    latest_turns: &BTreeMap<&str, i64>,
+    family_turns: &BTreeMap<&str, i64>,
     now: i64,
 ) -> Option<String> {
     let snapshot = index.snapshot();
@@ -209,11 +219,7 @@ fn reason(
             if ready_to_close {
                 return None;
             }
-            let family = (snapshot.projects.iter())
-                .filter(|p| p.id == project.id || p.parent_id.as_ref() == Some(&project.id));
-            let latest = family
-                .filter_map(|p| latest_turns.get(p.id.as_str()))
-                .max()?;
+            let latest = family_turns.get(project.id.as_str())?;
             let days = (now - latest) / DAY;
             let started = (index.roots(&project.id))
                 .any(|root| snapshot.tickets_owned.get(&root.id).is_some_and(|&n| n > 0));
@@ -259,9 +265,8 @@ pub(crate) struct Folds {
 
 impl Folds {
     /// The Me lens's folds at its start: every section collapsed but the selected project's.
-    /// With nothing selected, none is.
-    pub(crate) fn me(index: &WorkspaceIndex, selected_project: Option<&str>) -> Self {
-        let Some(project) = selected_project.and_then(|id| index.project(id)) else {
+    pub(crate) fn me(index: &WorkspaceIndex, selected_project: &str) -> Self {
+        let Some(project) = index.project(selected_project) else {
             return Self::default();
         };
         let open = tree::section_of(index, project);
@@ -281,14 +286,12 @@ impl Folds {
         }
         self.spaces.remove(&tree::section_of(index, project));
     }
-    /// Opens `space`'s section and its `bucket`.
     pub(crate) fn open_bucket(&mut self, space: &SpaceId, bucket: Bucket) {
         self.spaces.remove(space);
         self.buckets.remove(&(space.clone(), bucket));
     }
 }
 
-/// Collapses what is open, or opens what is collapsed.
 pub(crate) fn toggle<T: Ord>(folded: &mut BTreeSet<T>, item: T) {
     if !folded.remove(&item) {
         folded.insert(item);
@@ -661,14 +664,13 @@ mod tests {
         me.snapshot.projects[0].space = vyttle.clone();
         let index = index(me.snapshot.clone());
 
-        let folds = Folds::me(&index, Some(&me.id("Recipes")));
+        let folds = Folds::me(&index, &me.id("Recipes"));
         assert_eq!(
             folds.spaces,
             BTreeSet::from([vyttle.clone(), SpaceId::default()])
         );
-        let folds = Folds::me(&index, Some(&me.id("Contrast warnings")));
+        let folds = Folds::me(&index, &me.id("Contrast warnings"));
         assert!(folds.spaces.contains(&personal.id) && !folds.spaces.contains(&vyttle));
-        assert!(Folds::me(&index, None).spaces.is_empty());
     }
 
     #[test]

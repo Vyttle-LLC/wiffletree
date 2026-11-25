@@ -26,6 +26,54 @@ fn parent_link<'a>(
     Some((parent, index.roots(&parent.id).next()?))
 }
 
+/// A header's breadcrumb: a link back to a coordinator, by its session id and the name shown,
+/// then what follows the link; or the plain text above a coordinator with nothing above it.
+#[derive(Debug, PartialEq)]
+enum Breadcrumb {
+    Back {
+        id: String,
+        name: String,
+        rest: Option<String>,
+    },
+    Plain(String),
+}
+
+/// Where the session sits: the project and role for its coordinator, or for a child's
+/// coordinator a link back to the parent's, then the child; and for any other agent a link back
+/// to the coordinator, then the agent's ticket.
+fn breadcrumb(shared: &Shared, session: &Session) -> Breadcrumb {
+    let project = shared.project_name();
+    if let Some(coordinator) = shared.coordinator().filter(|c| c.id != session.id) {
+        let ticket = (shared.ticket_of(&session.id).zip(shared.snapshot()))
+            .map(|(ticket, snapshot)| wording::ticket_label(snapshot, ticket));
+        return Breadcrumb::Back {
+            id: coordinator.id.clone(),
+            name: project,
+            rest: ticket,
+        };
+    }
+    let index = shared.index.as_deref();
+    match index.and_then(|index| parent_link(index, &session.project_id)) {
+        Some((parent, coordinator)) => Breadcrumb::Back {
+            id: coordinator.id.clone(),
+            name: parent.name.clone(),
+            rest: Some(project),
+        },
+        None => Breadcrumb::Plain(
+            shared
+                .host
+                .breadcrumb([project.as_str(), session.role.label()]),
+        ),
+    }
+}
+
+/// A child coordinator's strip line, which says where its questions go; none for any other
+/// project.
+fn child_strip_line(index: &WorkspaceIndex, project_id: &str) -> Option<String> {
+    let (parent, _) = parent_link(index, project_id)?;
+    Some(wording::child_strip(&parent.name))
+}
+
 /// The project's apps, then its layers, for the coordinator's header; none before it has a
 /// ticket.
 fn tag_chips(snapshot: &Snapshot, project_id: &str) -> Vec<(TagKind, String)> {
@@ -38,6 +86,24 @@ fn tag_chips(snapshot: &Snapshot, project_id: &str) -> Vec<(TagKind, String)> {
         .iter()
         .map(|layer| (TagKind::Layer, layer.clone()));
     apps.chain(layers).collect()
+}
+
+/// What a chip opens: its tag's bucket in the App or Layer lens, in the project's Space.
+pub(super) fn chip_opens(
+    index: &WorkspaceIndex,
+    project_id: &str,
+    kind: TagKind,
+    value: String,
+) -> Option<Intent> {
+    let project = index.project(project_id)?;
+    Some(Intent::OpenLensBucket {
+        lens: match kind {
+            TagKind::App => Lens::App,
+            TagKind::Layer => Lens::Layer,
+        },
+        space: tree::section_of(index, project),
+        bucket: lenses::Bucket::Tag(value),
+    })
 }
 
 pub(super) struct ConversationHeader {
@@ -94,32 +160,12 @@ impl ConversationHeader {
             .flat_map(|index| index.sessions())
             .any(|s| s.project_id == session.project_id && s.status == Status::Working)
     }
-    /// Where the session sits: the project and role for its coordinator, or for a child's
-    /// coordinator a link back to the parent's, then the child; and for any other agent a link
-    /// back to the coordinator, then the agent's ticket.
     fn breadcrumb(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {
-        let project = self.shared.project_name();
-        let index = self.shared.index.as_deref();
-        let (back, rest) = match (self.shared.coordinator()).filter(|c| c.id != session.id) {
-            Some(coordinator) => {
-                let snapshot = self.shared.snapshot();
-                let ticket = (self.shared.ticket_of(&session.id).zip(snapshot))
-                    .map(|(ticket, snapshot)| wording::ticket_label(snapshot, ticket));
-                ((coordinator.id.clone(), project), ticket)
-            }
-            None => match index.and_then(|index| parent_link(index, &session.project_id)) {
-                Some((parent, coordinator)) => {
-                    ((coordinator.id.clone(), parent.name.clone()), Some(project))
-                }
-                None => {
-                    let parts = [project.as_str(), session.role.label()];
-                    return div()
-                        .text_ellipsis()
-                        .child(self.shared.host.breadcrumb(parts));
-                }
-            },
+        let (id, name, rest) = match breadcrumb(&self.shared, session) {
+            Breadcrumb::Back { id, name, rest } => (id, name, rest),
+            Breadcrumb::Plain(text) => return div().text_ellipsis().child(text),
         };
-        let ((id, name), host) = (back, self.shared.host.breadcrumb([]));
+        let host = self.shared.host.breadcrumb([]);
         div()
             .min_w_0()
             .flex()
@@ -212,7 +258,21 @@ impl ConversationHeader {
                 .items_center()
                 .gap_2()
                 .child(div().min_w_0().text_ellipsis().child(title))
-                .children(chips.into_iter().map(|(_, value)| pill(value, p.subtle))),
+                .children(chips.into_iter().enumerate().map(|(at, (kind, value))| {
+                    let project = session.project_id.clone();
+                    pill(value.clone(), p.subtle)
+                        .id(("tag-chip", at))
+                        .cursor_pointer()
+                        .hover(|d| d.text_color(p.text))
+                        .on_click(cx.listener(move |v, _, _, c| {
+                            let index = v.shared.index.as_deref();
+                            let opens = index
+                                .and_then(|index| chip_opens(index, &project, kind, value.clone()));
+                            if let Some(opens) = opens {
+                                c.emit(opens);
+                            }
+                        }))
+                })),
             p,
         )
         .px_6()
@@ -337,12 +397,9 @@ impl ConversationHeader {
             segmented_bar(&segments, STRIP_BAR, p)
         };
         // A child's strip says where its questions go instead of its phase.
-        let parent = (self.shared.index.as_deref())
-            .and_then(|index| parent_link(index, &project.project_id));
-        let label = match parent {
-            Some((parent, _)) => wording::child_strip(&parent.name),
-            None => project.phase.label().into(),
-        };
+        let label = (self.shared.index.as_deref())
+            .and_then(|index| child_strip_line(index, &project.project_id))
+            .unwrap_or_else(|| project.phase.label().into());
         (label, bar, wording::project_summary(project))
     }
     /// An agent's own label and bar, or its ticket's stage and bar when it has nothing of
@@ -406,10 +463,44 @@ impl Render for ConversationHeader {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{parent_link, tag_chips};
-    use crate::test_support::ticket_store;
+    use super::{Breadcrumb, breadcrumb, child_strip_line, parent_link, tag_chips};
+    use crate::{shared::Shared, test_support::ticket_store};
     use std::rc::Rc;
     use workspace_core::*;
+
+    #[test]
+    fn a_child_s_breadcrumb_and_strip_name_its_parent() {
+        let (_directory, mut host, root, _) = ticket_store();
+        let child = host.create_project("Contrast warnings").unwrap();
+        host.set_project_parent(&child.id, Some(&root.project_id))
+            .unwrap();
+        let index = Rc::new(WorkspaceIndex::new(host.snapshot().unwrap(), Rc::default()));
+        let coordinator = |project: &str| index.roots(project).next().unwrap().clone();
+        let selecting = |session: &Session| Shared {
+            index: Some(index.clone()),
+            selected: Some(session.id.clone()),
+            ..Default::default()
+        };
+
+        let child_coordinator = coordinator(&child.id);
+        assert_eq!(
+            breadcrumb(&selecting(&child_coordinator), &child_coordinator),
+            Breadcrumb::Back {
+                id: root.id.clone(),
+                name: "Calls".into(),
+                rest: Some("Contrast warnings".into()),
+            }
+        );
+        assert_eq!(
+            breadcrumb(&selecting(&root), &root),
+            Breadcrumb::Plain("Calls  ›  Coordinator".into())
+        );
+        assert_eq!(
+            child_strip_line(&index, &child.id).as_deref(),
+            Some("Child of Calls · questions go to Calls first")
+        );
+        assert!(child_strip_line(&index, &root.project_id).is_none());
+    }
 
     #[test]
     fn a_child_s_header_links_back_to_its_parent_s_coordinator() {

@@ -58,7 +58,7 @@ Six slices, one ticket each. Dependencies:
 - [x] 5.2 Me: Questions, Merge on GitHub, Going quiet and Ready to close with their reasons, the selected Space expanded and others collapsed with counts; ⌘4.
 - [x] 5.3 The Me badge across Spaces, shown in every lens.
 - [x] 5.4 Tests: a project in two buckets, each Me bucket's rule including a standing project and a parent with an open child, the badge count, keyboard switching while a composer has focus.
-- [ ] 5.5 The header's tag chips (drawn by slice f) open their lens with the bucket expanded and in view (6.4b), with the test: a chip switching lens without changing the conversation.
+- [x] 5.5 The header's tag chips (drawn by slice f) open their lens with the bucket expanded and in view (6.4b), with the test: a chip switching lens without changing the conversation.
 
 ## 6. Slice (f) — Desktop: Agents in the rail, breadcrumb and chips
 
@@ -66,7 +66,7 @@ Six slices, one ticket each. Dependencies:
 - [x] 6.2 A parent's panel: "Child projects" with a folded card per child; activating one selects the child's coordinator.
 - [x] 6.3 The child's header "← Parent / Child" and its strip line.
 - [x] 6.4 Tag chips after the title.
-- [ ] 6.4b Each chip opens its lens with the bucket expanded and in view (click lands with slice e).
+- [x] 6.4b Each chip opens its lens with the bucket expanded and in view (click lands with slice e).
 - [x] 6.5 Tests: the rail's order, the badge counting a child's agents, a child card selecting the child, the breadcrumb, the chips' order (the chip-switches-lens test moves to 5.5).
 
 ## 7. Docs
