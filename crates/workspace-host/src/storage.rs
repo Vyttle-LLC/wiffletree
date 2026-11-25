@@ -1051,6 +1051,7 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
     let _running = running
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    repos::remove_stale_index_lock(&clone, &repos::key(&repository.name));
     input.read_claim(&clone, &repository.push_url, &tools.git);
     let remote = || Remote {
         url: &repository.push_url,

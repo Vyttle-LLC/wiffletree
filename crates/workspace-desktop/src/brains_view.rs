@@ -322,6 +322,10 @@ impl BrainsPage {
             head = head.child(self.run_now(compile, cx));
         }
         let mut card = card(p).child(head).child(hint(brain.repository.clone(), p));
+        if let Some(problem) = &brain.problem {
+            let why = format!("The last sync failed: {problem}");
+            card = card.child(banner(p.red).child(div().flex_1().min_w_0().child(why)));
+        }
         let Some(compile) = compile else {
             return card.child(ui::property("Last run", last_compile(None), p));
         };

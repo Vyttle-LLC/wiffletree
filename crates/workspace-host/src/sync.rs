@@ -805,6 +805,7 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
     if shared::lock(&settings.writes).touched("", since) {
         return Ok(settings.passed);
     }
+    repos::remove_stale_index_lock(&clone, &repos::key(&repository.name));
     let (input, scanner) = storage.unzip();
     let mut stored = input.map(|mut input| {
         input.read_claim(&clone, &repository.push_url, &tools.git);
