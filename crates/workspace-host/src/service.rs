@@ -1900,6 +1900,7 @@ impl Actor {
         if let Some(due) = self.host.settle_build_output(now()) {
             self.wake(due);
         }
+        let inbox_changed = self.host.take_inbox_changed();
         self.refresh_overlaps(now());
         self.refresh_pull_requests(now(), dirty);
         self.watch_gh_account(spaces::gh_account_stamp());
@@ -1910,7 +1911,7 @@ impl Actor {
         self.start_skill_merges();
         self.start_source_checks();
         self.start_compile_preparations();
-        self.signal(dirty || syncing);
+        self.signal(dirty || syncing || inbox_changed);
         if !self.checkout_deferred.is_empty()
             && self
                 .checkout_deferred

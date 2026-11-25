@@ -1008,11 +1008,16 @@ fn approval_row(label: &'static str, value: AnyElement, p: Palette) -> Div {
         .child(div().flex_1().min_w_0().child(value))
 }
 
-/// A disk card's bold ask over its rows; the folder reads in monospace.
+/// A disk card's bold ask over its rows; the folder reads in monospace, wrapped so its name
+/// shows in a narrow Inbox.
 fn disk_card_text(text: disk_use::CardText, p: Palette) -> Div {
     let rows = text.rows.into_iter().map(|(label, value)| {
         let value = match label {
-            "Folder" => mono(value, p).text_size(px(font::SMALL)).into_any_element(),
+            "Folder" => div()
+                .font_family(palette::mono_font())
+                .text_color(p.subtle)
+                .child(value)
+                .into_any_element(),
             _ => value.into_any_element(),
         };
         approval_row(label, value, p)

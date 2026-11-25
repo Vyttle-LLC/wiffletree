@@ -971,6 +971,7 @@ impl Host {
             self.build_output.held = None;
             for id in open {
                 self.resolve_attention(&id, "Disk space returned")?;
+                self.worktree_deletions.inbox_changed = true;
             }
             return Ok(());
         }

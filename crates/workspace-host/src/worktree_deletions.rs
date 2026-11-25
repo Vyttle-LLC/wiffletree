@@ -44,6 +44,8 @@ pub(crate) struct Running {
     notify: Option<Arc<dyn Fn() + Send + Sync>>,
     /// When a waiting delete next comes due; nothing is read before then unless one finished.
     due_at: i64,
+    /// The disk work raised or answered an inbox item since the service last told clients.
+    pub(crate) inbox_changed: bool,
 }
 
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
@@ -475,7 +477,13 @@ impl Host {
         // Attention prompts allow 4096 bytes; cut on a character boundary within that.
         let notice = &notice[..steps::floor_boundary(notice, notice.len().min(4096))];
         self.request_attention(&session.id, "local", operation, notice, &[])?;
+        self.worktree_deletions.inbox_changed = true;
         Ok(true)
+    }
+    /// Whether the disk work raised or answered an inbox item since this was last asked, so
+    /// the service tells clients.
+    pub(crate) fn take_inbox_changed(&mut self) -> bool {
+        std::mem::take(&mut self.worktree_deletions.inbox_changed)
     }
     /// Starts each recorded delete due at `at` that is not already running, and returns when
     /// the earliest of the rest comes due.
@@ -639,6 +647,10 @@ mod tests {
         };
         assert_eq!(told(&host, Some(&first)), Some(first.clone()));
         assert_eq!(told(&host, None), Some(second.clone()));
+        // Raised outside an event's handling, so the service tells clients once.
+        assert!(host.tell_inbox(Some(&first), "notice:0", "Told").unwrap());
+        assert!(host.take_inbox_changed());
+        assert!(!host.take_inbox_changed());
         let archive = |host: &Host, project: &str| {
             host.db
                 .execute(
