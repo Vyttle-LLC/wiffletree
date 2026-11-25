@@ -297,121 +297,6 @@ The sidebar SHALL list projects in the order the host returns them, and SHALL NO
 - **WHEN** the host's order changes from A, B, C to C, A, B
 - **THEN** the sidebar lists C, A, B
 
-### Requirement: Projects sharing a first word are shown as a group
-A project's first word SHALL be the leading run of its name up to the first whitespace, with trailing characters that are neither letters nor digits removed, compared without regard to case. While grouping is on, two or more shown projects of one Space's section with the same first word SHALL appear under one group row in that section, and every other project SHALL remain an ordinary row with its full name. Projects in different sections SHALL NOT share a group. Groups SHALL be computed over the projects currently shown, so archived projects count only while Archived is on. A group SHALL sit where its topmost member is in the stored order, its members SHALL keep their stored order, and its label SHALL be the first word as written in its topmost member. Groups SHALL exist only in the desktop's drawing of the list: the host stores none, and a person SHALL NOT be able to create, rename or delete one. While grouping is off each section SHALL list its projects as ordinary rows, with full names, in the same stored order.
-
-#### Scenario: Case and a colon do not matter
-- **WHEN** grouping is on and the shown projects of one Space are "Wiffletree: a" and "wiffletree b"
-- **THEN** both appear under one group labelled "Wiffletree"
-
-#### Scenario: The same word in two Spaces
-- **WHEN** grouping is on, "wiffletree: a" and "wiffletree: c" are in Vyttle, and "wiffletree: b" and "wiffletree: d" are in Personal
-- **THEN** each section has its own group "wiffletree" holding its own two projects
-
-#### Scenario: A single project stays an ordinary row
-- **WHEN** grouping is on and only "ci-runners: Autoscaling" starts with "ci-runners"
-- **THEN** it is an ordinary row reading "ci-runners: Autoscaling"
-
-#### Scenario: A group sits at its topmost member
-- **WHEN** the stored order of one Space's projects is "Trial copy", "infra: State split", "watch: Relay", "infra: Neptune"
-- **THEN** its section reads "Trial copy", the group "infra" holding "State split" then "Neptune", then "watch: Relay"
-
-#### Scenario: Archived projects join only while shown
-- **WHEN** "infra: Neptune" is archived and "infra: State split" is not
-- **THEN** with Archived off "infra: State split" is an ordinary row, and with Archived on both sit under the group "infra"
-
-#### Scenario: Grouping off
-- **WHEN** grouping is turned off
-- **THEN** every project is an ordinary row with its full name under its Space's section, in the stored order
-
-#### Scenario: Renaming moves a project between groups
-- **WHEN** "infra: Neptune" is renamed "watch: Neptune" while "watch: Relay" is shown in the same Space
-- **THEN** it appears under the group "watch"
-
-### Requirement: Rows inside a group drop the repeated word
-A project row inside a group SHALL show its name without the first word and the separator that follows it, and SHALL show the full name when nothing else remains. Its tooltip, the conversation's title and the name being edited in an inline rename SHALL keep the full name.
-
-#### Scenario: The word and its colon are dropped
-- **WHEN** "wiffletree: Repository owners" sits in the group "wiffletree"
-- **THEN** its row reads "Repository owners" and its tooltip begins "wiffletree: Repository owners"
-
-#### Scenario: Nothing remains
-- **WHEN** a project named "wiffletree" sits in the group "wiffletree"
-- **THEN** its row reads "wiffletree"
-
-### Requirement: A group row collapses and rolls up what is inside
-A group row SHALL show a chevron, a folder icon, the group's label and how many projects it holds, and activating it SHALL collapse or expand the group. A collapsed group SHALL show the most urgent state among its shown members: the number of items that need the human when there are any, otherwise the number of its members' stuck agents as the stuck pill when there are any, otherwise blocked when a member's row would show blocked, otherwise working when a member's row would show working, and otherwise nothing.
-
-#### Scenario: Needs-you outranks blocked and working
-- **WHEN** a collapsed group holds one project with one item needing the human, one blocked project and one working project
-- **THEN** the group row shows the needs-you count "1"
-
-#### Scenario: Stuck agents outrank blocked and working
-- **WHEN** a collapsed group holds a project with one stuck agent, a blocked project and a working project, and nothing needs the human
-- **THEN** the group row shows the "1 agent stuck" pill
-
-#### Scenario: Blocked outranks working
-- **WHEN** a collapsed group holds a blocked project and a working project, nothing needs the human and no agent is stuck
-- **THEN** the group row shows the blocked mark
-
-#### Scenario: A quiet group
-- **WHEN** every project in a collapsed group is ready, done or paused
-- **THEN** the group row shows its count and no state
-
-### Requirement: A Group button turns grouping on and off
-The PROJECTS header SHALL carry a button labelled "Group" with a folder icon, to the left of Archived, drawn pressed while grouping is on, with the tooltip "Group projects by first word". Grouping SHALL be on by default. The choice SHALL be saved with the desktop's other view choices in `desktop-preferences.json`, a file without the choice SHALL read as on, and changing it SHALL NOT change the stored order or the Space sections.
-
-#### Scenario: The choice survives a relaunch
-- **WHEN** grouping is turned off and the app is relaunched
-- **THEN** each section lists its projects as ordinary rows and the button is not pressed
-
-#### Scenario: An older preferences file
-- **WHEN** `desktop-preferences.json` was saved before the choice existed
-- **THEN** grouping is on and the file's other choices are kept
-
-### Requirement: Projects are reordered by dragging
-A person SHALL be able to drag project rows to reorder them, and each drop SHALL be sent to the host as one move, with the list redrawn from the order the host returns. A dragged row SHALL be droppable only within its own Space's section: over another Space's rows no insertion line SHALL show and a drop there SHALL move nothing, and over another Space's section row a hint SHALL read "Projects move between Spaces from their Overview." while the pointer is there. A move SHALL place the dragged projects among their own Space's projects and SHALL NOT change the relative order of any other Space's projects. While grouping is off, any project row SHALL be droppable at any place in its section. While grouping is on, a project inside a group SHALL be droppable only within that group, and a group row or an ungrouped project row SHALL be droppable only among the other groups and ungrouped projects of its section; dragging a group SHALL move all its shown members as one block, and reordering inside a group SHALL NOT move the group. While a row is dragged, an insertion line SHALL show where it would land and the dragged row SHALL be dimmed. While a row is dragged and the pointer is near the top or bottom edge of the list, the list SHALL scroll in that direction, also while the pointer rests there, until it reaches its end; it SHALL stop scrolling when the pointer leaves that edge or the list, or the drag ends, and the insertion line SHALL keep to the row under the pointer as the list scrolls. A project row whose name is being edited SHALL NOT start a drag. A drag that left its row and is released back on it SHALL change nothing. Dragging SHALL NOT change what a click, a double-click or the actions menu does, including when the pointer moves a little between press and release without leaving the row.
-
-#### Scenario: A project moves within the flat list
-- **WHEN** grouping is off, a Space's section lists A, B, C and C is dropped above A
-- **THEN** the section lists C, A, B, and every other Space's projects keep their order
-
-#### Scenario: A drop over another Space does nothing
-- **WHEN** a Vyttle project is dragged over the Sage section's row and released there
-- **THEN** no insertion line shows, the hint "Projects move between Spaces from their Overview." shows under the Sage row while the pointer is on it, and nothing moves
-
-#### Scenario: A project moves within its group
-- **WHEN** the group "wiffletree" holds "Reorder", "Owners", "Compact" and "Compact" is dropped above "Reorder"
-- **THEN** the group holds "Compact", "Reorder", "Owners" and stays where it was among the other rows
-
-#### Scenario: The top project of a group moves down
-- **WHEN** the group "wiffletree" sits above "ci-runners: Autoscaling" and its topmost project is dropped at the bottom of the group
-- **THEN** the group still sits above "ci-runners: Autoscaling"
-
-#### Scenario: A whole group moves
-- **WHEN** the group "watch", holding two projects, is dropped above the group "wiffletree" in the same section
-- **THEN** both of its projects sit directly above the topmost "wiffletree" project in the host's order, in the order they had
-
-#### Scenario: A grouped project cannot leave its group
-- **WHEN** a project inside the group "wiffletree" is dragged over a row outside that group
-- **THEN** no insertion line appears there and dropping it there moves nothing
-
-#### Scenario: A row is dropped at a place that was off-screen
-- **WHEN** the list is taller than the sidebar and a row is dragged to its bottom edge and held there
-- **THEN** the list scrolls down to its end, and the row can be dropped beside a row of its section that was not visible when the drag began
-
-#### Scenario: A drag returned to its row is cancelled
-- **WHEN** a group row is dragged past other rows, brought back and released on itself
-- **THEN** nothing moves and the group stays expanded or collapsed as it was
-
-#### Scenario: A click still selects
-- **WHEN** a project row is clicked without moving the pointer
-- **THEN** its conversation opens and nothing is moved
-
-#### Scenario: A click that moves is still a click
-- **WHEN** the pointer moves a few pixels between press and release without leaving the row
-- **THEN** a project row is selected, a group row is collapsed or expanded, and the second click of a double-click opens rename, as each does without moving
-
 ### Requirement: The decision card can be minimized
 The decision card above the project coordinator's composer SHALL have a Minimize button, tooltip "Minimize", at the right end of the row above the card, after Open inbox. Minimized, the card SHALL become one row with the card's yellow edge, a small yellow dot, the current decision's prompt on one line with an ellipsis, "N of M" only when there are several open decisions, and an Expand button, tooltip "Expand". Clicking anywhere on the row SHALL restore the full card on the same decision. Questions and approvals SHALL minimize alike. The minimized state SHALL be kept for each project, in memory only: it SHALL survive reading, typing, sending and switching to another conversation and back, and an app restart SHALL start expanded. A decision arriving SHALL NOT expand it; the row's count SHALL update. When a project has no open decision, its minimized state SHALL be cleared, so the next decision starts expanded. Answering, choices, Dismiss, Open inbox and the Inbox panel SHALL behave as before.
 
@@ -528,7 +413,7 @@ When files are dropped on a conversation, the desktop SHALL copy each one into i
 - **THEN** those staged copies are deleted
 
 ### Requirement: The sidebar lists projects only
-Above the PROJECTS header, the sidebar SHALL show two pinned rows: the assistant, by the name the user gave it, and Boards. The assistant row SHALL show a working mark while the Assistant, any of its work items, an issue thread or a job run is in a turn, and a count of the items its rail lists under Needs you (see assistant); selecting it SHALL open the Assistant's conversation with its rail. Selecting Boards SHALL open the Boards library. The sidebar tree below SHALL list group rows and project rows only, one project row for each coordinator whose project is not an Assistant work item. It SHALL NOT list tickets, agents, threads or Assistant work, archived, legacy or retired ones included; the Agents panel lists agents (see work-progress) and the Assistant's rail lists its work. A project row SHALL have no chevron and SHALL NOT collapse. Its last line SHALL read "N agents working", counting the agents the Agents panel lists for the project that are in a turn, and SHALL be left out when none is. When the stuck rule (see work-progress) flags any of the project's unarchived agents, that line SHALL also show a yellow pill reading "1 agent stuck" or "N agents stuck", and the row's tooltip SHALL say the same. The row SHALL keep its glyph, figure, progress track and needs-you badge. While the coordinator's or any of the project's agents' conversation is selected, the project row SHALL show as selected; while an Assistant work item's project view is open, the assistant row SHALL show as selected.
+Above the PROJECTS header, the sidebar SHALL show two pinned rows: the assistant, by the name the user gave it, and Boards. The assistant row SHALL show a working mark while the Assistant, any of its work items, an issue thread or a job run is in a turn, and a count of the items its rail lists under Needs you (see assistant); selecting it SHALL open the Assistant's conversation with its rail. Selecting Boards SHALL open the Boards library. The sidebar tree below SHALL list Space sections, the rows each lens draws (see sidebar-lenses) and project rows only, one project row for each coordinator whose project is not an Assistant work item, in each place the lens lists it. It SHALL NOT list tickets, agents, threads or Assistant work, archived, legacy or retired ones included; the Agents panel lists agents (see work-progress) and the Assistant's rail lists its work. A loose project's or a child's row SHALL have no chevron and SHALL NOT collapse; a parent's row SHALL collapse its children. Its last line SHALL read "N agents working", counting the agents the Agents panel lists for the project's own tickets that are in a turn, and SHALL be left out when none is. When the stuck rule (see work-progress) flags any of the project's unarchived agents, that line SHALL also show a yellow pill reading "1 agent stuck" or "N agents stuck", and the row's tooltip SHALL say the same. The row SHALL keep its glyph, figure, progress track and needs-you badge, and a child's row its hollow badge for questions with its parent. While the coordinator's or any of the project's agents' conversation is selected, the project row SHALL show as selected; while an Assistant work item's project view is open, the assistant row SHALL show as selected.
 
 #### Scenario: Only projects
 - **WHEN** a project has an open ticket with an implementer, an archived reviewer, a closed ticket and a worker from before tickets existed, and archived sessions are shown
@@ -550,6 +435,10 @@ Above the PROJECTS header, the sidebar SHALL show two pinned rows: the assistant
 - **WHEN** the human selects one of a project's agents from the Agents panel
 - **THEN** that project's row shows as selected
 
+#### Scenario: A parent counts only its own agents on its row
+- **WHEN** a parent has one agent working on its own ticket and its child has two
+- **THEN** the parent's row reads "1 agent working" and the child's "2 agents working"
+
 #### Scenario: The assistant is pinned
 - **WHEN** the user named the assistant "Wren" and has nine projects
 - **THEN** the sidebar shows "Wren" and "Boards" above the PROJECTS header, and dragging projects never moves them
@@ -563,11 +452,11 @@ Above the PROJECTS header, the sidebar SHALL show two pinned rows: the assistant
 - **THEN** the work's project view opens with Back to chat, and the assistant row shows as selected
 
 ### Requirement: Projects are listed in a section for each Space
-The project list SHALL show a section for each Space that has a shown project, in the order of Settings › Spaces, followed by a section named "No Space" for shown projects whose Space is not listed, such as those from a host older than Spaces. A shown project SHALL be one the sidebar lists, so an Assistant work item is never shown. A Space with no shown project SHALL have no section. Sections SHALL show whether grouping is on or off. Each section SHALL begin with a row showing a chevron, the Space's name in uppercase and how many shown projects it holds, and SHALL list its projects in the stored order, filtered to that Space. Activating the row SHALL collapse or expand the section, hiding or showing its projects and groups. A collapsed section SHALL show the most urgent state among its shown projects by the rule a collapsed group uses. Which sections are collapsed SHALL be kept in memory only, so an app restart starts them expanded. Selecting a project inside a collapsed section or group, such as from the Inbox or a notification, SHALL expand them so its row shows; selecting an Assistant work item from the Inbox SHALL open its project view from the Assistant instead. Sections SHALL exist only in the desktop's drawing of the list: the host stores nothing new for them.
+The project list SHALL show, in every lens, a section for each Space that has something to show in that lens, in the order of Settings › Spaces, followed by a section named "No Space" for shown projects whose Space is not listed, such as those from a host older than Spaces. A shown project SHALL be one the sidebar lists, so an Assistant work item is never shown, in any lens. A Space with nothing to show SHALL have no section. Each section SHALL begin with a row showing a chevron, the Space's name in uppercase and how many shown projects it holds, and SHALL list its projects as the lens draws them, filtered to that Space. Activating the row SHALL collapse or expand the section, hiding or showing everything in it. A collapsed section SHALL show the most urgent state among its shown projects by the rule a collapsed parent row uses (see sidebar-lenses). Which sections are collapsed SHALL be kept in memory only, so an app restart starts them as the lens defines. Selecting a project inside a collapsed section or parent, such as from the Inbox or a notification, SHALL expand them so its row shows; selecting an Assistant work item from the Inbox SHALL open its project view from the Assistant instead. Sections SHALL exist only in the desktop's drawing of the list: the host stores nothing new for them.
 
 #### Scenario: Sections follow the Spaces' order
-- **WHEN** Settings › Spaces lists Personal, Vyttle, Sage and Work, and Work has no project
-- **THEN** the list shows the sections PERSONAL, VYTTLE and SAGE in that order, and no section for Work
+- **WHEN** Settings › Spaces lists Personal, Vyttle, Celadon and Work, and Work has no project
+- **THEN** the list shows the sections PERSONAL, VYTTLE and CELADON in that order, and no section for Work
 
 #### Scenario: Projects in no Space
 - **WHEN** a project's Space is not among the listed Spaces
@@ -578,8 +467,8 @@ The project list SHALL show a section for each Space that has a shown project, i
 - **THEN** its row shows the count of its projects and the needs-you count "1", and none of its projects are listed
 
 #### Scenario: Selecting reveals
-- **WHEN** a project inside a collapsed group of a collapsed section is selected from the Inbox
-- **THEN** the section and the group expand and the project's row shows selected
+- **WHEN** a child of a collapsed parent in a collapsed section is selected from the Inbox
+- **THEN** the section and the parent expand and the child's row shows selected
 
 #### Scenario: Only Assistant work in a Space
 - **WHEN** Celadon's only projects are Assistant work items
@@ -628,3 +517,38 @@ A chosen file that is missing, cannot be read or parsed, or lacks the variant it
 #### Scenario: A font that is not installed
 - **WHEN** the theme on show names Figtree, which this Mac lacks, and JetBrains Mono, which it has
 - **THEN** UI text uses the system font, code uses JetBrains Mono, the colours apply, and a warning says "Figtree isn't installed."
+
+### Requirement: Projects are reordered by dragging in the Outcome lens
+In the Outcome lens (see sidebar-lenses), a person SHALL be able to drag project rows to reorder them, and each drop SHALL be sent to the host as one move, with the list redrawn from the order the host returns. A dragged row SHALL be droppable only within its own Space's section: over another Space's rows no insertion line SHALL show and a drop there SHALL move nothing, and over another Space's section row a hint SHALL read "Projects move between Spaces from their Overview." while the pointer is there. A move SHALL place the dragged projects among their own Space's projects and SHALL NOT change the relative order of any other Space's projects. A loose project or a parent row SHALL be droppable among the loose projects and parents of its section; dragging a parent SHALL move all its shown children with it as one block, and reordering children SHALL NOT move their parent. A child SHALL be droppable among its siblings, and drops that file or unfile a project SHALL follow sidebar-lenses. While a row is dragged, an insertion line SHALL show where it would land and the dragged row SHALL be dimmed. While a row is dragged and the pointer is near the top or bottom edge of the list, the list SHALL scroll in that direction, also while the pointer rests there, until it reaches its end; it SHALL stop scrolling when the pointer leaves that edge or the list, or the drag ends, and the insertion line SHALL keep to the row under the pointer as the list scrolls. A project row whose name is being edited SHALL NOT start a drag. A drag that left its row and is released back on it SHALL change nothing. Dragging SHALL NOT change what a click, a double-click or the actions menu does, including when the pointer moves a little between press and release without leaving the row.
+
+#### Scenario: A loose project moves
+- **WHEN** a Space's section lists loose projects A, B, C and C is dropped above A
+- **THEN** the section lists C, A, B, and every other Space's projects keep their order
+
+#### Scenario: A drop over another Space does nothing
+- **WHEN** a Vyttle project is dragged over the Celadon section's row and released there
+- **THEN** no insertion line shows, the hint "Projects move between Spaces from their Overview." shows under the Celadon row while the pointer is on it, and nothing moves
+
+#### Scenario: A child moves among its siblings
+- **WHEN** "Accessible contrast" has children "Dimmed inactive panes", "Colour-blind palettes", "Contrast warnings" and "Contrast warnings" is dropped above "Dimmed inactive panes"
+- **THEN** the children read "Contrast warnings", "Dimmed inactive panes", "Colour-blind palettes" and "Accessible contrast" stays where it was
+
+#### Scenario: A whole parent moves
+- **WHEN** "Light themes", with two children, is dropped above "Accessible contrast" in the same section
+- **THEN** "Light themes" and its children sit directly above "Accessible contrast" in the host's order, in the order they had
+
+#### Scenario: A row is dropped at a place that was off-screen
+- **WHEN** the list is taller than the sidebar and a row is dragged to its bottom edge and held there
+- **THEN** the list scrolls down to its end, and the row can be dropped beside a row of its section that was not visible when the drag began
+
+#### Scenario: A drag returned to its row is cancelled
+- **WHEN** a parent row is dragged past other rows, brought back and released on itself
+- **THEN** nothing moves and the parent stays expanded or collapsed as it was
+
+#### Scenario: A click still selects
+- **WHEN** a project row is clicked without moving the pointer
+- **THEN** its conversation opens and nothing is moved
+
+#### Scenario: A click that moves is still a click
+- **WHEN** the pointer moves a few pixels between press and release without leaving the row
+- **THEN** a project row is selected, a parent's chevron collapses or expands it, and the second click of a double-click opens rename, as each does without moving
