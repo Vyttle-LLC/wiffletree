@@ -102,7 +102,7 @@ The App lens SHALL list, in each Space's section, one bucket for each app of the
 The Me lens SHALL list, in each Space's section, up to four buckets in this order, each only when it holds an entry, and each entry SHALL be a project row with a muted reason line beneath it:
 - **Questions:** projects with an Inbox item with the human. The reason SHALL be the item's prompt, or "N questions" for several, followed by " · via <parent>" when a parent escalated them.
 - **Merge on GitHub:** projects with a ticket whose pull request is open, whose latest review passed, and whose base is a protected branch the coordinator cannot merge into. The reason SHALL read "PR #N into <base> passed review".
-- **Going quiet:** unarchived projects, not ready to close, where no session of the project, nor of its children, has started a turn for 5 days or more. Standing projects and projects with no tickets SHALL be included. The reason SHALL read "No turn for N days", or "No turn for N days, not started" for a project with no tickets.
+- **Going quiet:** unarchived projects, not ready to close, where no session of the project, nor of its unarchived children, has started a turn for 5 days or more. An archived child's turns SHALL NOT count toward its parent's latest turn. A project none of whose sessions has ever started a turn SHALL NOT be listed. Standing projects and projects with no tickets SHALL be included. The reason SHALL read "No turn for N days", or "No turn for N days, not started" for a project with no tickets.
 - **Ready to close:** unarchived projects that are not standing, have at least one ticket, every ticket accepted or closed, every pull request of its tickets merged, and every child archived. A ticket with no pull request SHALL not prevent it; a pull request open or closed without merging SHALL. The reason SHALL read "Every ticket accepted or closed, PRs merged".
 
 A project MAY be an entry in several buckets. The section of the selected project's Space SHALL start expanded and the others collapsed, each collapsed section showing its entry count. Selecting an entry SHALL open the project's coordinator. The Me lens SHALL be built from the host's records with no agent behind it, and there SHALL be no separate Needs you page.
@@ -126,6 +126,14 @@ A project MAY be an entry in several buckets. The section of the selected projec
 #### Scenario: Quiet before it started
 - **WHEN** "Recipes" has no tickets and its coordinator has not started a turn for seven days
 - **THEN** it is listed under Going quiet with "No turn for 7 days, not started"
+
+#### Scenario: An archived child's turns do not count
+- **WHEN** "Light themes" has not started a turn for six days, and its archived child "Generated palette check" started one yesterday
+- **THEN** "Light themes" is listed under Going quiet with "No turn for 6 days"
+
+#### Scenario: Never started a turn
+- **WHEN** none of the sessions of "Recipes" has ever started a turn
+- **THEN** "Recipes" is not under Going quiet
 
 #### Scenario: Ready to close
 - **WHEN** every ticket of "CI runners" is accepted, its PRs are merged and it is not standing

@@ -84,7 +84,8 @@ impl Host {
         Self::event(&self.db, &parent.id, None, MOVED_UNDER, &project.name)
     }
     /// Makes `project` loose, if it has a parent, and records it on both. Its questions still
-    /// with the old parent go to the human in the same change.
+    /// with the old parent go to the human in the same change, and the old parent's wakes for
+    /// them that have not reached a turn are cancelled.
     pub(crate) fn leave_parent(&self, project: &mut Project) -> Result<()> {
         let Some(old) = project.parent_id.take() else {
             return Ok(());
@@ -93,6 +94,10 @@ impl Host {
         for mut item in self.questions_with_parent_of(&project.id)? {
             item.route = QuestionRoute::Human;
             self.save_attention(&item)?;
+            self.db.execute(
+                "UPDATE messages SET receipt='cancelled' WHERE id=?1 AND receipt IN ('queued','held')",
+                [format!("{CHILD_QUESTION_PREFIX}{}", item.id)],
+            )?;
         }
         let old = self.project(&old)?;
         Self::event(&self.db, &project.id, None, MOVED_OUT, &old.name)?;
@@ -284,8 +289,20 @@ impl Host {
     }
     /// Tells the parent's coordinator, without starting its turn, that the human answered or
     /// messaged `child`, a session, with `words`; `id`, the answered item's or the message's,
-    /// keeps it to one notice per contact.
+    /// keeps it to one notice per contact. Best-effort: the human's answer or message is
+    /// already saved, and a failed notice must not stop it from reaching the child.
     pub(crate) fn tell_parent_of_human(
+        &mut self,
+        child: &str,
+        contact: HumanContact,
+        id: &str,
+        words: &str,
+    ) {
+        if let Err(error) = self.queue_parent_notice(child, contact, id, words) {
+            eprintln!("Parent notice for {child}: {error:#}");
+        }
+    }
+    fn queue_parent_notice(
         &mut self,
         child: &str,
         contact: HumanContact,
@@ -303,8 +320,7 @@ impl Host {
             HumanContact::Answered => "answered a question of",
             HumanContact::Messaged => "messaged",
         };
-        // Past the cap: the human's answer is already saved, and a refused notice would stop
-        // the answer from reaching the child. Human clicks bound these.
+        // Past the cap, so a full queue does not drop it. Human clicks bound these.
         self.queue(
             &format!("{CHILD_HEARD_PREFIX}{id}"),
             None,

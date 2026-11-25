@@ -499,7 +499,7 @@ impl Host {
         marked_at: i64,
         reason: &anyhow::Error,
     ) -> Result<()> {
-        let id = format!("worktree-kept:{}:{marked_at}", ticket.id);
+        let id = format!("{WORKTREE_KEPT}{}:{marked_at}", ticket.id);
         let reported: bool = self.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM messages WHERE id=?1)
              OR EXISTS(SELECT 1 FROM attention WHERE operation_id=?1)",

@@ -296,6 +296,9 @@ pub(crate) const LEFTOVER_PROCESS: &str = "leftover-process:";
 /// Prefix of the brain's Inbox items, such as the card for held log entries. Reserved like
 /// `CHECK_IN`.
 pub(crate) const BRAIN_NOTICE_PREFIX: &str = "brain:";
+/// Prefix of the notice that a ticket's worktree was kept rather than removed. Reserved like
+/// `CHECK_IN`.
+pub(crate) const WORKTREE_KEPT: &str = "worktree-kept:";
 /// SQL condition for a `provider_runs` row that is a turn. A compaction's row has a `kind`
 /// and must not count as the session's turn: not for check-ins, not as its latest turn.
 pub(crate) const IS_TURN_RUN: &str =
@@ -310,14 +313,17 @@ pub(crate) fn is_check_in(operation: &str) -> bool {
 pub(crate) fn is_question(operation: &str) -> bool {
     ensure_unreserved(operation).is_ok()
 }
-/// Refuses an Inbox id only the host may use: its check-ins, and the approvals it draws with
-/// Approve and Deny, which an agent could otherwise raise in its own words.
+/// Refuses an Inbox id only the host may use: its check-ins and notices, and the approvals it
+/// draws with Approve and Deny, which an agent could otherwise raise in its own words.
 fn ensure_unreserved(operation: &str) -> Result<()> {
     for prefix in [
         CHECK_IN,
         TURN_COUNT,
         LEFTOVER_PROCESS,
         BRAIN_NOTICE_PREFIX,
+        WORKTREE_KEPT,
+        DELETE_FAILED_OPERATION,
+        BUILDS_HELD_OPERATION,
         PUBLISH_PREFIX,
         MERGE_PREFIX,
         RETARGET_PREFIX,
@@ -2096,7 +2102,7 @@ impl Host {
                 self.uploads_used(&uploads, now());
                 if sender.is_none() {
                     self.record_human_message(&recipient)?;
-                    self.tell_parent_of_human(&recipient, HumanContact::Messaged, &id, &body)?;
+                    self.tell_parent_of_human(&recipient, HumanContact::Messaged, &id, &body);
                 }
                 serde_json::to_value(message)?
             }
@@ -2114,7 +2120,7 @@ impl Host {
                 let item = self.answer_attention(&id, &answer)?;
                 if is_question(&item.operation_id) {
                     let contact = HumanContact::Answered;
-                    self.tell_parent_of_human(&item.session_id, contact, &item.id, &answer)?;
+                    self.tell_parent_of_human(&item.session_id, contact, &item.id, &answer);
                 }
                 serde_json::to_value(item)?
             }

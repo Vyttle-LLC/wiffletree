@@ -327,6 +327,56 @@ fn the_humans_answer_is_kept_when_the_parents_queue_is_full() {
 }
 
 #[test]
+fn a_failed_notice_to_the_parent_does_not_fail_the_humans_message() {
+    let mut f = Fixture::new();
+    let family = f.family();
+    // The longest message id the human may use leaves no room for the notice's prefix.
+    let id = "m".repeat(128);
+    f.host
+        .execute(Command::Send {
+            id: id.clone(),
+            sender: None,
+            recipient: family.child_coordinator.id.clone(),
+            body: "Keep it short.".into(),
+            attachments: vec![],
+            uploads: vec![],
+        })
+        .unwrap();
+
+    assert_eq!(f.received(&family.child_coordinator, &id).len(), 1);
+    assert!(
+        f.received(&family.parent_coordinator, "child-heard:")
+            .is_empty()
+    );
+}
+
+#[test]
+fn the_parent_hears_only_of_answers_to_its_childs_own_questions() {
+    let mut f = Fixture::new();
+    let family = f.family();
+    let notice = f
+        .host
+        .request_attention(
+            &family.child_coordinator.id,
+            "local",
+            "worktree-kept:t:1",
+            "Wiffletree kept the worktree",
+            &[],
+        )
+        .unwrap();
+    f.human_answers(&notice, "Done").unwrap();
+    assert!(
+        f.received(&family.parent_coordinator, "child-heard:")
+            .is_empty()
+    );
+
+    // Nor may a coordinator ask in a host notice's name.
+    let args = json!({"request_id": "worktree-kept:t:2", "question": "Remove it?"});
+    let refused = refusal(f.tool(&family.child_coordinator, "ask_user", args));
+    assert!(refused.contains("reserved"), "{refused}");
+}
+
+#[test]
 fn an_approval_skips_the_parent() {
     let mut f = Fixture::new();
     let family = f.family();
@@ -353,12 +403,18 @@ fn unfiling_a_child_sends_its_waiting_questions_to_the_human() {
     let mut f = Fixture::new();
     let family = f.family();
     let item = f.ask(&family.child_coordinator, "warn-comments");
+    assert_eq!(f.waking(&family.parent_coordinator), 1);
     f.file(&family.child, None);
 
     assert_eq!(f.inbox(), std::slice::from_ref(&item.id));
     assert_eq!(f.item(&item.id).route, QuestionRoute::Human);
     assert_eq!(f.with_parent(&family.child), 0);
     assert!(f.answer(&family.parent_coordinator, &item, "Yes").is_err());
+    assert_eq!(
+        f.waking(&family.parent_coordinator),
+        0,
+        "its wake is dropped"
+    );
 }
 
 #[test]
@@ -372,6 +428,11 @@ fn refiling_a_child_sends_its_waiting_questions_to_the_human_not_the_new_parent(
 
     assert_eq!(f.inbox(), std::slice::from_ref(&item.id));
     assert!(f.answer(&family.parent_coordinator, &item, "Yes").is_err());
+    assert_eq!(
+        f.waking(&family.parent_coordinator),
+        0,
+        "its wake is dropped"
+    );
     assert!(f.answer(&light_coordinator, &item, "Yes").is_err());
     assert!(f.received(&light_coordinator, "child-question:").is_empty());
 
@@ -390,7 +451,15 @@ fn moving_a_child_to_another_space_sends_its_waiting_questions_to_the_human() {
     f.host
         .move_project_to_space(&family.child.id, &vyttle.id)
         .unwrap();
-    assert_eq!(f.inbox(), [item.id]);
+
+    assert_eq!(f.inbox(), std::slice::from_ref(&item.id));
+    assert_eq!(f.item(&item.id).route, QuestionRoute::Human);
+    assert_eq!(f.with_parent(&family.child), 0);
+    let refused = refusal(f.answer(&family.parent_coordinator, &item, "Yes"));
+    assert!(
+        refused.contains("not one of your child projects"),
+        "{refused}"
+    );
 }
 
 #[test]
@@ -494,4 +563,29 @@ fn a_question_with_the_parent_keeps_its_route_across_a_restart() {
     assert_eq!(f.with_parent(&family.child), 1);
     f.answer(&family.parent_coordinator, &item, "Yes").unwrap();
     assert_eq!(f.with_parent(&family.child), 0);
+}
+
+#[test]
+fn an_item_stored_without_a_route_is_with_the_human() {
+    let mut f = Fixture::new();
+    let family = f.family();
+    let item = f.ask(&family.child_coordinator, "warn-comments");
+
+    let Fixture { home, host } = f;
+    drop(host);
+    // A store older than parent projects has no route on its items.
+    rusqlite::Connection::open(home.path().join("home/workspace.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE attention SET data=json_remove(data,'$.route') WHERE id=?1",
+            [&item.id],
+        )
+        .unwrap();
+    let host = Host::open_set_up(home.path().join("home")).unwrap();
+    let mut f = Fixture { home, host };
+
+    assert_eq!(f.item(&item.id).route, QuestionRoute::Human);
+    assert_eq!(f.inbox(), std::slice::from_ref(&item.id));
+    assert_eq!(f.with_parent(&family.child), 0);
+    f.human_answers(&item, "Yes").unwrap();
 }
