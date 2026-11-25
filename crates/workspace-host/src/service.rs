@@ -796,23 +796,41 @@ struct Handle {
 struct Inbound {
     commands: Receiver<Event>,
     events: Receiver<Event>,
+    /// The last one taken was a command.
+    after_command: std::cell::Cell<bool>,
 }
 impl Inbound {
+    fn new(commands: Receiver<Event>, events: Receiver<Event>) -> Self {
+        Self {
+            commands,
+            events,
+            after_command: Default::default(),
+        }
+    }
     /// The oldest waiting command, or else the oldest event, waiting for one; `None` once the
     /// events' queue has closed. A command overtakes the events queued before it: the human
     /// acts on state the host already published, never on what a queued event is about to
     /// change, so a click waits only for the event being handled, not for a backlog of agent
-    /// output. Commands keep their own order.
+    /// output. Commands keep their own order. After a command, an event waiting goes next, so
+    /// a stream of commands never starves events such as Shutdown or agents' tool calls.
     fn next(&self) -> Option<Event> {
+        if self.after_command.replace(false)
+            && let Ok(event) = self.events.try_recv()
+        {
+            return Some(event);
+        }
         let command = async {
             match self.commands.recv().await {
-                Ok(command) => Some(command),
+                Ok(command) => Some((command, true)),
                 // Requests outlive the actor's own handle on them; this never ends the loop.
                 Err(_) => std::future::pending().await,
             }
         };
-        let event = async { self.events.recv().await.ok() };
-        futures_lite::future::block_on(futures_lite::future::or(command, event))
+        let event = async { Some((self.events.recv().await.ok()?, false)) };
+        let (next, command) =
+            futures_lite::future::block_on(futures_lite::future::or(command, event))?;
+        self.after_command.set(command);
+        Some(next)
     }
 }
 impl Handle {
@@ -1254,12 +1272,7 @@ impl Service {
                 actor.signal(false);
                 // Answered once the shutdown has stopped every turn.
                 let mut quit = None;
-                let inbound = Inbound {
-                    commands: command_receiver,
-                    events: receiver,
-                };
-                // Commands overtake queued events, as the human acts only on state the host
-                // already published; see `Inbound::next`.
+                let inbound = Inbound::new(command_receiver, receiver);
                 while let Some(event) = inbound.next() {
                     match event {
                         Event::Shutdown => break,
@@ -9551,10 +9564,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
             host_id: String::new(),
             working: Arc::default(),
         };
-        let inbound = Inbound {
-            commands: command_receiver,
-            events,
-        };
+        let inbound = Inbound::new(command_receiver, events);
 
         let answer = Command::ResolveAttention {
             id: question.id.clone(),
@@ -9570,6 +9580,44 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
             serde_json::from_value(reply.try_recv().unwrap().unwrap()).unwrap();
         assert_eq!(answered.answer.as_deref(), Some("Yes"));
         assert!(inbound.events.is_full());
+    }
+
+    #[test]
+    fn commands_go_first_but_never_two_in_a_row_while_an_event_waits() {
+        let (commands, command_receiver) = async_channel::unbounded();
+        let (events, event_receiver) = async_channel::unbounded();
+        for at in 1..=2 {
+            let (reply, _) = async_channel::bounded(1);
+            commands
+                .try_send(Event::Command(Command::Ping, reply))
+                .unwrap();
+            events.try_send(Event::Wake(at)).unwrap();
+        }
+        let inbound = Inbound::new(command_receiver, event_receiver);
+        let order: Vec<&str> = std::iter::from_fn(|| {
+            let next = inbound.events.len() + inbound.commands.len() > 0;
+            next.then(|| match inbound.next().unwrap() {
+                Event::Command(..) => "command",
+                Event::Wake(_) => "event",
+                _ => unreachable!(),
+            })
+        })
+        .collect();
+        assert_eq!(order, ["command", "event", "command", "event"]);
+        // A Shutdown behind a stream of commands is taken after one of them.
+        let (reply, _) = async_channel::bounded(1);
+        commands
+            .try_send(Event::Command(Command::Ping, reply))
+            .unwrap();
+        events.try_send(Event::Shutdown).unwrap();
+        for _ in 0..3 {
+            let (reply, _) = async_channel::bounded(1);
+            commands
+                .try_send(Event::Command(Command::Ping, reply))
+                .unwrap();
+        }
+        assert!(matches!(inbound.next(), Some(Event::Command(..))));
+        assert!(matches!(inbound.next(), Some(Event::Shutdown)));
     }
 
     #[test]
