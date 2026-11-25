@@ -39,6 +39,7 @@ impl Settings {
             Ok(answer) => answer,
             Err(error) => {
                 self.remote_error = Some(error);
+                cx.notify();
                 return;
             }
         };

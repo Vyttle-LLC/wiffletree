@@ -175,12 +175,18 @@ impl Advertisement {
     }
 
     /// Keeps reading the daemon's later answers, such as a rename after a conflict, so its
-    /// socket never fills.
+    /// socket never fills. It waits for an answer without the lock, which it would otherwise
+    /// take back at once each time and keep `update` waiting for seconds.
     fn start_worker(&mut self) {
         let (handle, stopping) = (self.handle.clone(), self.stopping.clone());
+        // SAFETY: the reference is live under the lock; its socket stays open until it is
+        // deallocated, after the worker stops.
+        let fd = unsafe { DNSServiceRefSockFD(handle.lock().unwrap_or_else(|e| e.into_inner()).0) };
         self.worker = Some(std::thread::spawn(move || {
             while !stopping.load(Ordering::Relaxed) {
-                process(&handle, Duration::from_millis(200));
+                if readable(fd, Duration::from_millis(200)) {
+                    process(&handle, Duration::ZERO);
+                }
             }
         }));
     }
@@ -202,17 +208,21 @@ fn process(handle: &Mutex<Handle>, wait: Duration) {
     let handle = handle.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: the reference is live under the lock.
     let fd = unsafe { DNSServiceRefSockFD(handle.0) };
+    if readable(fd, wait) {
+        // SAFETY: data is waiting, so this does not block; the reference is live under the lock.
+        unsafe { DNSServiceProcessResult(handle.0) };
+    }
+}
+
+/// Whether `fd` has data to read within `wait`.
+fn readable(fd: i32, wait: Duration) -> bool {
     let mut poll = libc::pollfd {
         fd,
         events: libc::POLLIN,
         revents: 0,
     };
     // SAFETY: one valid `pollfd`.
-    let ready = unsafe { libc::poll(&mut poll, 1, wait.as_millis() as i32) };
-    if ready > 0 {
-        // SAFETY: data is waiting, so this does not block; the reference is live under the lock.
-        unsafe { DNSServiceProcessResult(handle.0) };
-    }
+    unsafe { libc::poll(&mut poll, 1, wait.as_millis() as i32) > 0 }
 }
 
 #[cfg(test)]
@@ -226,5 +236,20 @@ mod tests {
             b"\x05id=ab\x09pairing=0"
         );
         assert!(txt_record(&[("name", &"x".repeat(300))]).is_err());
+    }
+
+    /// Opening pairing updates the TXT record on the actor's thread, so the worker reading the
+    /// daemon's answers must not keep the update waiting.
+    #[test]
+    fn updates_do_not_wait_on_the_worker() {
+        let record = |pairing| txt_record(&[("pairing", pairing)]).unwrap();
+        let advertisement =
+            Advertisement::register("Wiffletree update test", 47_899, &record("0")).unwrap();
+        for pairing in ["1", "0", "1", "0", "1"] {
+            let started = std::time::Instant::now();
+            advertisement.update(&record(pairing)).unwrap();
+            let took = started.elapsed();
+            assert!(took < Duration::from_millis(500), "update took {took:?}");
+        }
     }
 }
