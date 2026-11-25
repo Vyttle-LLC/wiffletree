@@ -39,6 +39,7 @@ mod inspector;
 mod issue_view;
 mod issues_view;
 mod leftovers;
+mod lenses;
 mod linear_import_view;
 mod live_work;
 mod login_item;
@@ -1443,9 +1444,29 @@ actions!(
         CheckForUpdates,
         OpenModels,
         OpenRepositories,
-        ShowOutcomeLens
+        ShowOutcomeLens,
+        ShowAppLens,
+        ShowLayerLens,
+        ShowMeLens
     ]
 );
+
+/// ⌘1 to ⌘4 select the lenses in the control's order, whatever has focus in the main window.
+fn lens_bindings() -> [KeyBinding; 4] {
+    [
+        KeyBinding::new("cmd-1", ShowOutcomeLens, None),
+        KeyBinding::new("cmd-2", ShowAppLens, None),
+        KeyBinding::new("cmd-3", ShowLayerLens, None),
+        KeyBinding::new("cmd-4", ShowMeLens, None),
+    ]
+}
+
+fn register_lens_actions(cx: &mut App) {
+    cx.on_action(|_: &ShowOutcomeLens, cx| set_lens(Lens::Outcome, cx));
+    cx.on_action(|_: &ShowAppLens, cx| set_lens(Lens::App, cx));
+    cx.on_action(|_: &ShowLayerLens, cx| set_lens(Lens::Layer, cx));
+    cx.on_action(|_: &ShowMeLens, cx| set_lens(Lens::Me, cx));
+}
 
 /// The release version, or the crate version marked as a local build.
 fn version_label() -> String {
@@ -1600,7 +1621,7 @@ fn register_window_actions(cx: &mut App) {
     cx.on_action(|_: &NewProject, cx| {
         with_workspace(cx, |view, window, cx| view.new_project(window, cx))
     });
-    cx.on_action(|_: &ShowOutcomeLens, cx| set_lens(Lens::Outcome, cx));
+    register_lens_actions(cx);
     cx.on_action(|_: &brain_search::OpenBrainSearch, cx| {
         with_workspace(cx, |view, window, cx| view.search_brain(None, window, cx))
     });
@@ -1722,10 +1743,10 @@ fn main() -> anyhow::Result<()> {
             KeyBinding::new("enter", SendMessage, Some("ChatComposer > Input")),
             KeyBinding::new("cmd-enter", SendMessage, Some("ChatComposer > Input")),
             KeyBinding::new("cmd-n", NewProject, None),
-            KeyBinding::new("cmd-1", ShowOutcomeLens, None),
             KeyBinding::new("cmd-,", OpenSettings, None),
             KeyBinding::new("cmd-q", Quit, None),
         ]);
+        cx.bind_keys(lens_bindings());
         cx.bind_keys(brain_search::bindings());
         cx.intercept_keystrokes(|event, window, cx| {
             let main = cx
@@ -1955,6 +1976,58 @@ mod tests {
         };
         let asked = WorkspaceIndex::new(snapshot, index.archive().clone());
         assert!(!wants_archive(&asked, &shown("live")), "a question is not");
+    }
+
+    use gpui::{AppContext as _, Focusable as _};
+
+    /// A window whose only element is a text field.
+    struct Composer(gpui::Entity<gpui_component::input::InputState>);
+    impl gpui::Render for Composer {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            gpui_component::input::Input::new(&self.0)
+        }
+    }
+
+    #[gpui::test]
+    fn the_lens_keys_work_while_a_composer_has_focus_and_leave_its_draft(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let home = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(super::Preferences::load(home.path()));
+            cx.bind_keys(super::lens_bindings());
+            super::register_lens_actions(cx);
+        });
+        let (composer, cx) = cx.add_window_view(|window, cx| {
+            Composer(cx.new(|cx| gpui_component::input::InputState::new(window, cx)))
+        });
+        cx.update(|window, cx| {
+            let field = composer.read(cx).0.read(cx).focus_handle(cx);
+            window.focus(&field, cx);
+            window.draw(cx).clear(cx);
+        });
+        cx.simulate_input("Draft");
+
+        for (keys, lens) in [
+            ("cmd-3", super::Lens::Layer),
+            ("cmd-2", super::Lens::App),
+            ("cmd-4", super::Lens::Me),
+            ("cmd-1", super::Lens::Outcome),
+        ] {
+            cx.simulate_keystrokes(keys);
+            cx.update(|_, cx| assert_eq!(cx.global::<super::Preferences>().lens, lens, "{keys}"));
+        }
+        let draft = cx.update(|_, cx| composer.read(cx).0.read(cx).value());
+        assert_eq!(draft, "Draft");
+        assert_eq!(
+            super::Preferences::load(home.path()).lens,
+            super::Lens::Outcome
+        );
     }
 
     #[test]

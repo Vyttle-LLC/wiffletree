@@ -1126,6 +1126,34 @@ pub struct Snapshot {
     /// Older hosts leave it out.
     #[serde(default)]
     pub project_tags: BTreeMap<String, ProjectTags>,
+    /// By project id, what the Me lens needs from tickets the snapshot may leave out, for each
+    /// unarchived project with something to say. Older hosts leave it out.
+    #[serde(default)]
+    pub me_facts: BTreeMap<String, MeFacts>,
+}
+/// What the Me lens needs to know of a project's tickets, all of them, which are mostly only in
+/// the archive once accepted or closed. Derived on every read.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeFacts {
+    /// Not standing, with at least one ticket, every ticket accepted or closed with its pull
+    /// request merged or none, and every child project archived.
+    #[serde(default)]
+    pub ready_to_close: bool,
+    /// Its tickets' open pull requests that passed their latest review and merge into a
+    /// protected branch, which only the human merges into, in the tickets' order.
+    #[serde(default)]
+    pub merges: Vec<HumanMerge>,
+    /// When one of its sessions, archived or not, last started a turn, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_started: Option<i64>,
+}
+/// An open pull request only the human can merge.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HumanMerge {
+    pub ticket_id: String,
+    pub number: u64,
+    /// The protected branch it merges into.
+    pub base: String,
 }
 /// How many of a project's runs a snapshot lists, the ended ones as room allows.
 pub const RECENT_EVALUATIONS: usize = 20;
