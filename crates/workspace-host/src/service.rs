@@ -792,6 +792,29 @@ struct Handle {
     sender: Sender<Event>,
     worker: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
+/// What the actor takes in: clients' and devices' commands, and every other event.
+struct Inbound {
+    commands: Receiver<Event>,
+    events: Receiver<Event>,
+}
+impl Inbound {
+    /// The oldest waiting command, or else the oldest event, waiting for one; `None` once the
+    /// events' queue has closed. A command overtakes the events queued before it: the human
+    /// acts on state the host already published, never on what a queued event is about to
+    /// change, so a click waits only for the event being handled, not for a backlog of agent
+    /// output. Commands keep their own order.
+    fn next(&self) -> Option<Event> {
+        let command = async {
+            match self.commands.recv().await {
+                Ok(command) => Some(command),
+                // Requests outlive the actor's own handle on them; this never ends the loop.
+                Err(_) => std::future::pending().await,
+            }
+        };
+        let event = async { self.events.recv().await.ok() };
+        futures_lite::future::block_on(futures_lite::future::or(command, event))
+    }
+}
 impl Handle {
     /// Stops the host thread and waits for it, which waits for running turns to stop.
     fn shutdown(&self) {
@@ -821,6 +844,8 @@ pub struct Service {
 #[derive(Clone)]
 pub struct Requests {
     sender: Sender<Event>,
+    /// The actor's queue of clients' and devices' commands, which it takes before other events.
+    commands: Sender<Event>,
     events: EventLog,
     host_id: String,
     /// How many agents are in a turn, as of the actor's last event.
@@ -832,9 +857,9 @@ impl Requests {
         command: Command,
     ) -> std::result::Result<Receiver<std::result::Result<Value, String>>, String> {
         let (reply, receive) = async_channel::bounded(1);
-        self.sender
+        self.commands
             .try_send(Event::Command(command, reply))
-            .map_err(|_| "Host queue is full or disconnected".to_string())?;
+            .map_err(|_| "The host has stopped".to_string())?;
         Ok(receive)
     }
     /// A command from the paired device `device`, which the host checks against the device's
@@ -850,9 +875,9 @@ impl Requests {
             command,
             reply,
         };
-        self.sender
+        self.commands
             .try_send(Event::Remote(request))
-            .map_err(|_| "Host queue is full or disconnected".to_string())?;
+            .map_err(|_| "The host has stopped".to_string())?;
         Ok(receive)
     }
     /// Sends the actor something a remote connection learned, waiting for room.
@@ -1049,6 +1074,9 @@ impl Service {
             "wiffletree-host helper is missing; rebuild the app bundle"
         );
         let (sender, receiver) = async_channel::bounded(256);
+        // Unbounded, as each connection already limits the requests it has waiting.
+        let (commands, command_receiver) = async_channel::unbounded();
+        let worker_commands = commands.clone();
         let events = EventLog::default();
         let pings = events.pings();
         let working = Arc::new(AtomicUsize::new(0));
@@ -1087,6 +1115,7 @@ impl Service {
                         let _ = ready.send(Ok(host_id.clone()));
                         let requests = Requests {
                             sender: worker.clone(),
+                            commands: worker_commands,
                             events: actor_events.clone(),
                             host_id,
                             working: actor_working.clone(),
@@ -1225,7 +1254,13 @@ impl Service {
                 actor.signal(false);
                 // Answered once the shutdown has stopped every turn.
                 let mut quit = None;
-                while let Ok(event) = receiver.recv_blocking() {
+                let inbound = Inbound {
+                    commands: command_receiver,
+                    events: receiver,
+                };
+                // Commands overtake queued events, as the human acts only on state the host
+                // already published; see `Inbound::next`.
+                while let Some(event) = inbound.next() {
                     match event {
                         Event::Shutdown => break,
                         Event::Command(
@@ -1256,7 +1291,10 @@ impl Service {
                         break;
                     }
                 }
-                actor.stop(&receiver);
+                // A stopping host answers no more commands: those waiting fail at once.
+                inbound.commands.close();
+                while inbound.commands.try_recv().is_ok() {}
+                actor.stop(&inbound.events);
                 if let Some(reply) = quit {
                     let _ = reply.try_send(Ok(Value::Null));
                 }
@@ -1271,6 +1309,7 @@ impl Service {
         Ok(Self {
             requests: Requests {
                 sender: sender.clone(),
+                commands,
                 events,
                 host_id,
                 working,
@@ -6235,6 +6274,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
             .collect();
         let requests = Requests {
             sender: sender.clone(),
+            commands: sender.clone(),
             events: events.clone(),
             host_id: String::new(),
             working: Arc::default(),
@@ -9491,6 +9531,45 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
 
         recover_unfinished_turns(&mut actor.host).unwrap();
         assert!(actor.host.open_attention(&project).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_humans_answer_overtakes_a_full_queue_of_events() {
+        let (_home, mut actor, session, _) = actor_with_turn();
+        let project = actor.host.session(&session).unwrap().project_id;
+        let ask = json!({"request_id":"deploy","question":"Deploy?"});
+        actor.host.agent_tool(&session, "ask_user", ask).unwrap();
+        let question = actor.host.open_attention(&project).unwrap().remove(0);
+        // Agents' output, tool calls and results fill the actor's queue, as on a busy host.
+        let (sender, events) = async_channel::bounded(256);
+        while sender.try_send(Event::Wake(0)).is_ok() {}
+        let (commands, command_receiver) = async_channel::unbounded();
+        let requests = Requests {
+            sender,
+            commands,
+            events: EventLog::default(),
+            host_id: String::new(),
+            working: Arc::default(),
+        };
+        let inbound = Inbound {
+            commands: command_receiver,
+            events,
+        };
+
+        let answer = Command::ResolveAttention {
+            id: question.id.clone(),
+            answer: "Yes".into(),
+        };
+        let reply = requests
+            .request(answer)
+            .expect("a full queue refuses no command");
+        actor.process(inbound.next().unwrap());
+
+        // Answered after the one event handled, with every queued event still waiting.
+        let answered: Attention =
+            serde_json::from_value(reply.try_recv().unwrap().unwrap()).unwrap();
+        assert_eq!(answered.answer.as_deref(), Some("Yes"));
+        assert!(inbound.events.is_full());
     }
 
     #[test]
