@@ -21,7 +21,7 @@ use std::{
 /// The name a folder waiting to be deleted takes, followed by its ticket's id.
 pub(crate) const REMOVING_PREFIX: &str = ".removing-";
 /// Failed attempts after which the human is told.
-const REPORT_AFTER: i64 = 3;
+pub(crate) const REPORT_AFTER: i64 = 3;
 /// The next attempt of a held delete; see `hold_deletion`.
 const HELD: i64 = i64::MAX;
 /// The wait after the first failed attempt; it doubles with each further one.
@@ -55,13 +55,22 @@ pub(crate) fn migrate(db: &Connection) -> Result<()> {
             attempts INTEGER NOT NULL DEFAULT 0,
             last_error TEXT,
             next_attempt_at INTEGER NOT NULL,
-            reported_at INTEGER)",
+            reported_at INTEGER,
+            size INTEGER)",
     )?;
+    let sized: i64 = db.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('worktree_deletions') WHERE name='size'",
+        [],
+        |r| r.get(0),
+    )?;
+    if sized == 0 {
+        db.execute_batch("ALTER TABLE worktree_deletions ADD COLUMN size INTEGER")?;
+    }
     Ok(())
 }
 
 /// The wait before the next attempt after `attempts` failed ones.
-fn backoff(attempts: i64) -> i64 {
+pub(crate) fn backoff(attempts: i64) -> i64 {
     let doublings = u32::try_from(attempts.saturating_sub(1)).unwrap_or(u32::MAX);
     FIRST_RETRY_MS
         .saturating_mul(2_i64.saturating_pow(doublings))
@@ -281,7 +290,7 @@ impl Host {
         Ok(self
             .db
             .prepare(
-                "SELECT path,ticket_id,attempts,last_error,next_attempt_at,reported_at IS NOT NULL
+                "SELECT path,ticket_id,attempts,last_error,next_attempt_at,reported_at IS NOT NULL,size
                  FROM worktree_deletions ORDER BY recorded_at",
             )?
             .query_map([], |r| {
@@ -292,6 +301,7 @@ impl Host {
                     last_error: r.get(3)?,
                     next_attempt_at: r.get(4)?,
                     failing: r.get(5)?,
+                    size: r.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?)
@@ -406,8 +416,8 @@ impl Host {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )?;
         self.db.execute(
-            "UPDATE worktree_deletions SET attempts=?2,last_error=?3,next_attempt_at=?4 WHERE path=?1",
-            params![path, attempts, error, at + backoff(attempts)],
+            "UPDATE worktree_deletions SET attempts=?2,last_error=?3,next_attempt_at=?4,size=?5 WHERE path=?1",
+            params![path, attempts, error, at + backoff(attempts), size],
         )?;
         eprintln!("Delete {} (attempt {attempts}): {error}", folder.display());
         if attempts < REPORT_AFTER || reported {
@@ -418,9 +428,7 @@ impl Host {
             folder.display(),
             size_label(size)
         );
-        let name = folder.file_name().unwrap_or_default().to_string_lossy();
-        let name = &name[..steps::floor_boundary(&name, name.len().min(80))];
-        let id = format!("{DELETE_FAILED_OPERATION}{recorded_at}:{name}");
+        let id = delete_failed_operation(recorded_at, &path);
         let project = ticket
             .and_then(|id| self.ticket(&id).ok())
             .and_then(|ticket| self.session(&ticket.coordinator_id).ok())

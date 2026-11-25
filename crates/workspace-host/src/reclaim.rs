@@ -25,7 +25,9 @@
 //! after the first look for processes and closes it before the second: it has them moved from
 //! under it. Removing a ticket's worktree deletes its build output outside the worktree the
 //! same way, by a cleanup recorded before the worktree moves, which is dropped if the worktree
-//! is back at its path, and kept until every folder of it has moved.
+//! is back at its path, and kept until every folder of it has moved: a failed attempt is
+//! retried with a delete's backoff, told to the human's inbox as a delete's is, and retried
+//! again at every start.
 use crate::*;
 use std::{
     collections::{HashMap, HashSet},
@@ -143,6 +145,8 @@ pub(crate) struct Watch {
     cleaning: HashSet<String>,
     /// A removal recorded such a cleanup since the store was last read for them.
     cleanups_due: bool,
+    /// When the earliest cleanup waiting after a failed attempt comes due.
+    cleanup_retry_at: Option<i64>,
     /// Held while a move takes its last look and renames, and while worktrees are restored, so
     /// a removed ticket's cleanup never moves what a restore just gave back to it.
     pub(crate) moving: Arc<Mutex<()>>,
@@ -170,6 +174,7 @@ impl Default for Watch {
             inspecting: HashSet::new(),
             cleaning: HashSet::new(),
             cleanups_due: false,
+            cleanup_retry_at: None,
             moving: Arc::default(),
             held: None,
             finished: Arc::default(),
@@ -208,6 +213,24 @@ pub(crate) fn migrate(db: &Connection) -> Result<()> {
             ticket_id TEXT PRIMARY KEY,
             worktree TEXT NOT NULL)",
     )?;
+    // A cleanup's failed attempts, retried and told as a delete's are.
+    for (column, kind) in [
+        ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_error", "TEXT"),
+        ("next_attempt_at", "INTEGER NOT NULL DEFAULT 0"),
+        ("reported_at", "INTEGER"),
+    ] {
+        let present: i64 = db.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('outside_cleanups') WHERE name=?1",
+            [column],
+            |r| r.get(0),
+        )?;
+        if present == 0 {
+            db.execute_batch(&format!(
+                "ALTER TABLE outside_cleanups ADD COLUMN {column} {kind}"
+            ))?;
+        }
+    }
     Ok(())
 }
 
@@ -375,20 +398,27 @@ fn run_move(job: &Move) -> Moved {
         Ok(Err(reason)) => return Moved::Kept(reason),
         Err(error) => return Moved::Kept(format!("could not lock the build gate: {error}")),
     };
-    let asides: Vec<PathBuf> = (moved.iter())
-        .filter_map(|(_, aside, _)| fs::canonicalize(aside).ok())
-        .collect();
-    if let Some(reason) = holders_of(&asides) {
-        let stuck = (moved.iter())
-            .filter(|(folder, aside, _)| fs::rename(aside, folder).is_err())
-            .map(|(_, aside, _)| aside.to_path_buf())
-            .collect();
-        return Moved::PutBack(reason, stuck);
+    if let Some(put_back) = put_back_if_used(&moved) {
+        return put_back;
     }
     let moved = (moved.into_iter())
         .map(|(_, aside, size)| (aside.clone(), size))
         .collect();
     Moved::Done(moved, failed)
+}
+
+/// Moves every folder back from where it waits if a process uses one there now. Each `moved`
+/// is a folder, where it waits, and its size.
+fn put_back_if_used(moved: &[(&PathBuf, &PathBuf, u64)]) -> Option<Moved> {
+    let asides: Vec<PathBuf> = (moved.iter())
+        .filter_map(|(_, aside, _)| fs::canonicalize(aside).ok())
+        .collect();
+    let reason = holders_of(&asides)?;
+    let stuck = (moved.iter())
+        .filter(|(folder, aside, _)| fs::rename(aside, folder).is_err())
+        .map(|(_, aside, _)| aside.to_path_buf())
+        .collect();
+    Some(Moved::PutBack(reason, stuck))
 }
 
 /// Why the move's folders must stay where they are now, if anything says so, given the
@@ -515,8 +545,11 @@ impl Host {
         watch.notify = Some(Arc::new(notify));
         watch.started = true;
         watch.check_at = 0;
-        // Resumes the cleanups of removals a stop cut off.
+        // Resumes the cleanups of removals a stop cut off, and retries the failed ones now.
         watch.cleanups_due = true;
+        if let Err(error) = (self.db).execute("UPDATE outside_cleanups SET next_attempt_at=0", []) {
+            eprintln!("Retry removed tickets' cleanups: {error:#}");
+        }
     }
     /// The scratch folder of `ticket`'s agents, under the watch's scratch root.
     fn scratch_folder(&self, ticket: &str) -> PathBuf {
@@ -602,15 +635,22 @@ impl Host {
                     self.build_output.inspecting.remove(&ticket);
                     self.move_reclaimed(&ticket, why, inspected, scanned_at)
                 }
-                Finished::Outside(ticket, folders) => self.move_outside(&ticket, folders),
+                Finished::Outside(ticket, folders) => self.move_outside(&ticket, folders, at),
                 Finished::Moved(job, moved) => self.finish_move_aside(job, moved, at),
             };
             if let Err(error) = settled {
                 eprintln!("Reclaim build output: {error:#}");
             }
         }
+        if self
+            .build_output
+            .cleanup_retry_at
+            .is_some_and(|due| at >= due)
+        {
+            self.build_output.cleanups_due = true;
+        }
         if std::mem::take(&mut self.build_output.cleanups_due)
-            && let Err(error) = self.start_outside_cleanups()
+            && let Err(error) = self.start_outside_cleanups(at)
         {
             eprintln!("Delete removed tickets' build output: {error:#}");
             self.build_output.cleanups_due = true;
@@ -621,7 +661,8 @@ impl Host {
                 eprintln!("Check disk space: {error:#}");
             }
         }
-        Some(self.build_output.check_at)
+        let check_at = self.build_output.check_at;
+        Some((self.build_output.cleanup_retry_at).map_or(check_at, |due| due.min(check_at)))
     }
 
     /// Looks at free space: raises or clears the hard-floor card, reclaims from the measurement
@@ -760,16 +801,18 @@ impl Host {
             return Ok(());
         }
         self.build_output.inspecting.insert(id.to_owned());
-        self.move_aside(&ticket, Purpose::Reclaim(why), folders)
+        self.move_aside(&ticket, Purpose::Reclaim(why), folders, now())
     }
     /// Records and holds the delete of each folder, then renames them aside off the host
     /// thread; see `run_move`. Build output in the worktree waits beside the worktree, never in
-    /// it; any other folder waits beside itself.
+    /// it; any other folder waits beside itself. If a delete cannot be recorded, nothing moves
+    /// and the ticket is no longer being reclaimed or cleaned up.
     fn move_aside(
         &mut self,
         ticket: &Ticket,
         purpose: Purpose,
         folders: Vec<(PathBuf, u64)>,
+        at: i64,
     ) -> Result<()> {
         let worktree = PathBuf::from(&ticket.worktree);
         let mut planned = vec![];
@@ -778,9 +821,18 @@ impl Host {
                 true => worktree.parent(),
                 false => folder.parent(),
             };
-            if let Some(beside) = beside {
-                let aside = self.hold_deletion(beside, &ticket.id)?;
-                planned.push((folder, aside, size));
+            let Some(beside) = beside else { continue };
+            match self.hold_deletion(beside, &ticket.id) {
+                Ok(aside) => planned.push((folder, aside, size)),
+                Err(error) => {
+                    for (_, aside, _) in &planned {
+                        if let Err(error) = self.forget_worktree_deletion(aside) {
+                            eprintln!("Forget the delete of {}: {error:#}", aside.display());
+                        }
+                    }
+                    self.stop_moving(&ticket.id, purpose, &format!("{error:#}"), at);
+                    return Err(error);
+                }
             }
         }
         let job = Move {
@@ -798,32 +850,45 @@ impl Host {
         });
         Ok(())
     }
+    /// Ends a ticket's move before it ran: it is no longer being reclaimed, and a removed
+    /// ticket's cleanup counts the attempt as failed for `error`.
+    fn stop_moving(&mut self, id: &str, purpose: Purpose, error: &str, at: i64) {
+        match purpose {
+            Purpose::Reclaim(_) => {
+                self.build_output.inspecting.remove(id);
+            }
+            Purpose::Outside => {
+                self.build_output.cleaning.remove(id);
+                if let Err(error) = self.outside_cleanup_failed(id, error, at) {
+                    eprintln!("Record the cleanup of {id}: {error:#}");
+                }
+            }
+        }
+    }
     /// Lets the deletes of what moved start and drops those of what stayed. A reclaim that moved
     /// something is recorded and told to the ticket's project. A removed ticket's cleanup is done
-    /// once every folder moved; otherwise it stays recorded, and the next start looks again for
-    /// what is left.
+    /// once every folder moved; otherwise it stays recorded and is retried, as a delete is.
     fn finish_move_aside(&mut self, job: Move, moved: Moved, at: i64) -> Result<()> {
         let id = &job.ticket;
         match job.purpose {
             Purpose::Reclaim(_) => self.build_output.inspecting.remove(id),
             Purpose::Outside => self.build_output.cleaning.remove(id),
         };
-        let mut complete = false;
-        let (moved, stuck) = match moved {
+        let (moved, stuck, incomplete) = match moved {
             Moved::Done(moved, failed) => {
                 for failure in &failed {
                     eprintln!("Move build output of {id} aside: could not move {failure}");
                 }
-                complete = failed.is_empty();
-                (moved, vec![])
+                let incomplete = (!failed.is_empty()).then(|| failed.join("; "));
+                (moved, vec![], incomplete)
             }
             Moved::Kept(reason) => {
                 eprintln!("Move build output of {id} aside: kept, {reason}");
-                (vec![], vec![])
+                (vec![], vec![], Some(reason))
             }
             Moved::PutBack(reason, stuck) => {
                 eprintln!("Move build output of {id} aside: moved back, {reason}");
-                (vec![], stuck)
+                (vec![], stuck, Some(reason))
             }
         };
         for (_, aside, _) in &job.folders {
@@ -834,9 +899,10 @@ impl Host {
             }
         }
         let freed: u64 = moved.iter().map(|(_, size)| size).sum();
-        match job.purpose {
-            Purpose::Outside if complete => self.forget_outside_cleanup(id),
-            Purpose::Reclaim(why) if freed > 0 => self.record_reclaim(id, why, freed, at),
+        match (job.purpose, incomplete) {
+            (Purpose::Outside, None) => self.forget_outside_cleanup(id),
+            (Purpose::Outside, Some(error)) => self.outside_cleanup_failed(id, &error, at),
+            (Purpose::Reclaim(why), _) if freed > 0 => self.record_reclaim(id, why, freed, at),
             _ => Ok(()),
         }
     }
@@ -986,7 +1052,7 @@ impl Host {
     /// before the worktree moves, so a stop at any point leaves the cleanup to resume.
     pub(crate) fn record_outside_cleanup(&mut self, ticket: &Ticket) -> Result<()> {
         self.db.execute(
-            "INSERT OR REPLACE INTO outside_cleanups VALUES (?1,?2)",
+            "INSERT OR REPLACE INTO outside_cleanups(ticket_id,worktree) VALUES (?1,?2)",
             params![ticket.id, ticket.worktree],
         )?;
         Ok(())
@@ -1001,17 +1067,69 @@ impl Host {
     pub(crate) fn outside_cleanups_due(&mut self) {
         self.build_output.cleanups_due = true;
     }
-    /// Finds each recorded cleanup's folders off the host thread, as `scan` would find them.
-    fn start_outside_cleanups(&mut self) -> Result<()> {
-        let recorded: Vec<(String, String)> = self
+    /// Has the cleanups looked at again by `due`.
+    fn retry_outside_cleanups_by(&mut self, due: i64) {
+        let retry_at = &mut self.build_output.cleanup_retry_at;
+        *retry_at = Some(retry_at.map_or(due, |at| at.min(due)));
+    }
+    /// Records a cleanup's failed attempt and when it is retried, and tells the human's inbox
+    /// once it has failed as often as a delete does before it is told.
+    fn outside_cleanup_failed(&mut self, id: &str, error: &str, at: i64) -> Result<()> {
+        let Some((worktree, attempts, reported)) = self
             .db
-            .prepare("SELECT ticket_id,worktree FROM outside_cleanups")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .query_row(
+                "SELECT worktree,attempts+1,reported_at IS NOT NULL FROM outside_cleanups WHERE ticket_id=?1",
+                [id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, bool>(2)?)),
+            )
+            .optional()?
+        else {
+            return Ok(());
+        };
+        let next = at + worktree_deletions::backoff(attempts);
+        self.db.execute(
+            "UPDATE outside_cleanups SET attempts=?2,last_error=?3,next_attempt_at=?4 WHERE ticket_id=?1",
+            params![id, attempts, error, next],
+        )?;
+        self.retry_outside_cleanups_by(next);
+        if attempts < worktree_deletions::REPORT_AFTER || reported {
+            return Ok(());
+        }
+        let ticket = self.ticket(id)?;
+        let notice = format!(
+            "Wiffletree could not delete the build output of the removed ticket \"{}\" outside its worktree after {attempts} attempts: {error}. It keeps retrying, and at every start. Deleting the folder yourself frees the space.",
+            ticket.title
+        );
+        let project = self.session(&ticket.coordinator_id)?.project_id;
+        let operation = delete_failed_operation(at, &worktree);
+        if !self.tell_inbox(Some(&project), &operation, &notice)? {
+            eprintln!("{notice}");
+            return Ok(());
+        }
+        self.db.execute(
+            "UPDATE outside_cleanups SET reported_at=?2 WHERE ticket_id=?1",
+            params![id, at],
+        )?;
+        Ok(())
+    }
+    /// Finds the folders of each recorded cleanup due at `at` off the host thread, as `scan`
+    /// would find them.
+    fn start_outside_cleanups(&mut self, at: i64) -> Result<()> {
+        let recorded: Vec<(String, String, i64)> = self
+            .db
+            .prepare("SELECT ticket_id,worktree,next_attempt_at FROM outside_cleanups")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;
-        for (ticket, worktree) in recorded {
-            if self.build_output.cleaning.contains(&ticket)
-                || !self.outside_cleanup_applies(&ticket)?
-            {
+        self.build_output.cleanup_retry_at = None;
+        for (ticket, worktree, next) in recorded {
+            if self.build_output.cleaning.contains(&ticket) {
+                continue;
+            }
+            if next > at {
+                self.retry_outside_cleanups_by(next);
+                continue;
+            }
+            if !self.outside_cleanup_applies(&ticket, at)? {
                 continue;
             }
             self.build_output.cleaning.insert(ticket.clone());
@@ -1036,24 +1154,35 @@ impl Host {
     }
     /// Whether a recorded cleanup is still for a removed worktree. One whose worktree is back
     /// at its path, as a restore puts it, is dropped: its build output is the ticket's again.
-    /// One with an agent of the ticket in a turn waits for the next start.
-    fn outside_cleanup_applies(&mut self, id: &str) -> Result<bool> {
+    /// One with an agent of the ticket in a turn waits a retry's first wait, without counting
+    /// as a failed attempt.
+    fn outside_cleanup_applies(&mut self, id: &str, at: i64) -> Result<bool> {
         let ticket = self.ticket(id)?;
         if fs::symlink_metadata(&ticket.worktree).is_ok() {
             self.forget_outside_cleanup(id)?;
             return Ok(false);
         }
-        Ok(!self.building(&ticket)?)
+        if !self.building(&ticket)? {
+            return Ok(true);
+        }
+        let next = at + worktree_deletions::backoff(1);
+        self.db.execute(
+            "UPDATE outside_cleanups SET next_attempt_at=?2 WHERE ticket_id=?1",
+            params![id, next],
+        )?;
+        self.retry_outside_cleanups_by(next);
+        Ok(false)
     }
     /// Moves aside a removed ticket's folders outside its worktree, each beside itself, once the
     /// cleanup is looked at again on the host thread.
-    fn move_outside(&mut self, id: &str, folders: Vec<(PathBuf, u64)>) -> Result<()> {
-        if !self.outside_cleanup_applies(id)? {
+    fn move_outside(&mut self, id: &str, folders: Vec<(PathBuf, u64)>, at: i64) -> Result<()> {
+        let applies = self.outside_cleanup_applies(id, at);
+        if !matches!(applies, Ok(true)) {
             self.build_output.cleaning.remove(id);
-            return Ok(());
+            return applies.map(drop);
         }
         let ticket = self.ticket(id)?;
-        self.move_aside(&ticket, Purpose::Outside, folders)
+        self.move_aside(&ticket, Purpose::Outside, folders, at)
     }
 }
 
@@ -1670,6 +1799,152 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM outside_cleanups", [], |r| r.get(0))
             .unwrap();
         assert_eq!(recorded, 0);
+    }
+
+    #[test]
+    fn a_cleanup_that_cannot_move_is_retried_while_the_host_runs_and_told_after_three_attempts() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut f = Fixture::new();
+        let ticket = f.ticket("Toolbar", 0);
+        fs::remove_dir_all(Path::new(&ticket.worktree).join("target")).unwrap();
+        let worktree = Path::new(&ticket.worktree);
+        let derived = f.derived_data("App-a1", &worktree.join("App.xcworkspace"));
+        let root = derived.parent().unwrap().to_path_buf();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
+        let recorded = |host: &Host| -> Option<(i64, i64)> {
+            (host.db)
+                .query_row(
+                    "SELECT attempts,next_attempt_at FROM outside_cleanups",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .unwrap()
+        };
+        let cards = |host: &Host| -> Vec<String> {
+            let project = host.sessions().unwrap()[0].project_id.clone();
+            (host.open_attention(&project).unwrap().into_iter())
+                .filter(|a| a.operation_id.starts_with(DELETE_FAILED_OPERATION))
+                .map(|a| a.prompt)
+                .collect()
+        };
+
+        f.host
+            .with_worktrees_removed(std::slice::from_ref(&ticket), |_| Ok(()))
+            .unwrap();
+        let start = now();
+        f.settle(start);
+        let (attempts, next) = recorded(&f.host).unwrap();
+        assert_eq!(attempts, 1);
+        assert!(next > start);
+        // Not before its wait, then again at it, until the third failure is told.
+        f.settle(next - 1);
+        assert_eq!(recorded(&f.host).unwrap().0, 1);
+        f.settle(next);
+        assert!(cards(&f.host).is_empty());
+        f.settle(recorded(&f.host).unwrap().1);
+        assert_eq!(recorded(&f.host).unwrap().0, 3);
+        let told = cards(&f.host);
+        assert_eq!(told.len(), 1);
+        assert!(
+            told[0].contains("\"Toolbar\" outside its worktree after 3 attempts"),
+            "{told:?}"
+        );
+        // DerivedData becomes writable; the next retry moves it, with no restart.
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        f.settle(recorded(&f.host).unwrap().1);
+
+        assert!(!derived.exists());
+        assert_eq!(recorded(&f.host), None);
+        assert_eq!(f.host.pending_deletes().unwrap(), []);
+    }
+
+    #[test]
+    fn a_move_whose_deletes_cannot_all_be_recorded_leaves_nothing_reclaiming() {
+        let mut f = Fixture::new();
+        let ticket = f.ticket("Toolbar", 4096);
+        // The store refuses the second folder's delete, after the first was recorded and held.
+        (f.host.db)
+            .execute_batch(
+                "CREATE TEMP TRIGGER refuse BEFORE INSERT ON worktree_deletions
+                 WHEN (SELECT COUNT(*) FROM worktree_deletions) > 0
+                 BEGIN SELECT RAISE(ABORT, 'the store refused it'); END",
+            )
+            .unwrap();
+        f.host.reclaim_build_output(Some(&ticket.id)).unwrap();
+        while f.host.build_output.finished.lock().unwrap().is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        f.host.settle_build_output(now());
+
+        assert!(f.host.build_output.inspecting.is_empty());
+        assert_eq!(f.host.pending_deletes().unwrap(), []);
+        assert!(f.has_build_output(&ticket));
+        // Nothing waits for a restart: the next reclaim goes through.
+        f.host.db.execute_batch("DROP TRIGGER refuse").unwrap();
+        f.host.reclaim_build_output(Some(&ticket.id)).unwrap();
+        f.settle(now());
+        assert!(!f.has_build_output(&ticket));
+    }
+
+    #[test]
+    fn a_turn_that_starts_while_a_move_waits_for_its_last_look_keeps_its_build_output() {
+        let mut f = Fixture::new();
+        let ticket = f.ticket("Toolbar", 4096);
+        // A restore is under way, so the move waits before its last look.
+        let moving = f.host.build_output.moving.clone();
+        let restoring = moving.lock().unwrap();
+        f.host.reclaim_build_output(Some(&ticket.id)).unwrap();
+        while f.host.pending_deletes().unwrap().is_empty() {
+            f.host.settle_build_output(now());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // Only the move's own read of the store can see this turn.
+        f.turn(&ticket, now(), true);
+        drop(restoring);
+        f.settle(now());
+
+        assert!(f.has_build_output(&ticket));
+        assert!(f.host.scratch_folder(&ticket.id).exists());
+        assert_eq!(f.host.pending_deletes().unwrap(), []);
+        assert!(f.notices().is_empty());
+    }
+
+    #[test]
+    fn build_output_a_process_uses_once_it_moved_is_moved_back() {
+        let mut f = Fixture::new();
+        let ticket = f.ticket("Toolbar", 4096);
+        let worktree = PathBuf::from(&ticket.worktree);
+        let target = worktree.join("target");
+        let aside = (f.host)
+            .hold_deletion(worktree.parent().unwrap(), &ticket.id)
+            .unwrap();
+        fs::rename(&target, &aside).unwrap();
+        assert!(put_back_if_used(&[(&target, &aside, 4096)]).is_none());
+        // A build starts in the build output just after it moved.
+        let mut build = std::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(&aside)
+            .spawn()
+            .unwrap();
+        let moved = put_back_if_used(&[(&target, &aside, 4096)]);
+        build.kill().unwrap();
+        build.wait().unwrap();
+        let moved = moved.unwrap();
+        assert!(matches!(&moved, Moved::PutBack(_, stuck) if stuck.is_empty()));
+        let job = Move {
+            ticket: ticket.id.clone(),
+            purpose: Purpose::Reclaim(Why::Asked),
+            worktree,
+            folders: vec![(target.clone(), aside.clone(), 4096)],
+            home: f.host.home.clone(),
+            moving: f.host.build_output.moving.clone(),
+        };
+        f.host.finish_move_aside(job, moved, now()).unwrap();
+
+        assert!(target.join("debug/app").exists() && !aside.exists());
+        assert_eq!(f.host.pending_deletes().unwrap(), []);
+        assert!(f.notices().is_empty());
     }
 
     #[test]
