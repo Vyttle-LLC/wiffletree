@@ -41,8 +41,9 @@ pub(super) struct Inbox {
 /// Where the human's answer or dismissal of an Inbox item stands.
 #[derive(Debug, PartialEq)]
 enum Settling {
-    /// Sent; the host has not replied yet.
-    Sending,
+    /// Sent; the host has not replied yet. `shown_open` once a snapshot meanwhile still
+    /// listed the item, which may then be the one the answer leaves open.
+    Sending { shown_open: bool },
     /// The host took it; the next snapshot drops the item, or shows it still open.
     Sent,
     /// The host refused it, in its words; the item's buttons work again.
@@ -59,14 +60,25 @@ struct Settlings(HashMap<String, Settling>);
 impl Settlings {
     /// Marks `id` as sending; `false` when an answer to it is already on its way or taken.
     fn start(&mut self, id: &str) -> bool {
-        if matches!(self.0.get(id), Some(Settling::Sending | Settling::Sent)) {
+        if matches!(
+            self.0.get(id),
+            Some(Settling::Sending { .. } | Settling::Sent)
+        ) {
             return false;
         }
-        self.0.insert(id.to_owned(), Settling::Sending);
+        self.0
+            .insert(id.to_owned(), Settling::Sending { shown_open: false });
         true
     }
     fn replied(&mut self, id: &str, reply: &Result<Value, String>) {
+        let shown_open = matches!(self.0.get(id), Some(Settling::Sending { shown_open: true }));
         let settling = match reply {
+            // A snapshot may have shown the item open after the answer was taken, as Later
+            // leaves a Start card: no newer one need come, so its buttons work again now.
+            Ok(_) if shown_open => {
+                self.0.remove(id);
+                return;
+            }
             // Answered already, from another window or device: settled all the same.
             Err(error) if error.starts_with(ALREADY_RESOLVED) => Settling::Sent,
             Ok(_) => Settling::Sent,
@@ -80,6 +92,11 @@ impl Settlings {
         self.0.retain(|id, settling| {
             *settling != Settling::Sent && open.iter().any(|item| &item.id == id)
         });
+        for settling in self.0.values_mut() {
+            if let Settling::Sending { shown_open } = settling {
+                *shown_open = true;
+            }
+        }
     }
     fn get(&self, id: &str) -> Option<&Settling> {
         self.0.get(id)
@@ -353,12 +370,12 @@ impl Inbox {
             (None, None, None) => self.question(item, answering, max_height.is_none(), p, cx),
         };
         let settling = self.settlings.get(&item.id);
-        let pending = matches!(settling, Some(Settling::Sending | Settling::Sent));
+        let pending = matches!(settling, Some(Settling::Sending { .. } | Settling::Sent));
         // Dimmed while pending; its choices send nothing more until the host replies.
         let body = (body.flex().flex_col().gap_2()).when(pending, |body| body.opacity(0.6));
         let status = |text| div().flex().justify_end().child(hint(text, p));
         let actions = match settling {
-            Some(Settling::Sending) => status("Sending…"),
+            Some(Settling::Sending { .. }) => status("Sending…"),
             Some(Settling::Sent) => status("Sent"),
             Some(Settling::Failed(error)) => div()
                 .flex()
@@ -1240,7 +1257,21 @@ mod tests {
         settlings.replied("start", &Ok(json!({})));
         settlings.refresh(&[open("start"), open("waiting")]);
         assert_eq!(settlings.get("start"), None);
-        assert_eq!(settlings.get("waiting"), Some(&Settling::Sending));
+        assert!(matches!(
+            settlings.get("waiting"),
+            Some(Settling::Sending { .. })
+        ));
+    }
+
+    #[test]
+    fn an_answer_whose_snapshot_came_first_frees_a_card_it_left_open() {
+        // Later's snapshot, still listing the Start card, arrives before Later's reply.
+        let mut settlings = Settlings::default();
+        settlings.start("start");
+        settlings.refresh(&[open("start")]);
+        settlings.replied("start", &Ok(json!({})));
+        assert_eq!(settlings.get("start"), None);
+        assert!(settlings.start("start"), "Start now works after Later");
     }
 
     #[test]
