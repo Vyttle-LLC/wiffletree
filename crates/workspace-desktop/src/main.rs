@@ -1593,6 +1593,7 @@ fn select_host(choice: HostChoice, window: &mut Window, cx: &mut App) {
 /// Shows `choice`'s workspace, built anew when `fresh`, as after its connection was replaced.
 fn show_host(choice: HostChoice, fresh: bool, window: &mut Window, cx: &mut App) {
     cx.global_mut::<Hosts>().select(choice);
+    disk_use::ask(ask::disk_use(), None, cx);
     if let Some(shell) = (cx.default_global::<MainShell>().0.clone()).and_then(|s| s.upgrade()) {
         shell.update(cx, |shell, cx| shell.show(fresh, window, cx));
     }

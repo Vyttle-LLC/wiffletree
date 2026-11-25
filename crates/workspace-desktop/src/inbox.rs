@@ -246,7 +246,7 @@ impl Inbox {
         let disk_card = disk_use::DiskCard::of(&item.operation_id);
         // The hard floor's card is red-edged and a failing delete's yellow, as the study draws them.
         let disk_edge = disk_card.as_ref().map(|card| match card {
-            disk_use::DiskCard::BuildsHeld => p.red,
+            disk_use::DiskCard::BuildsHeld(_) => p.red,
             disk_use::DiskCard::DeleteFailed(_) => p.yellow,
         });
         let header = div()
@@ -266,7 +266,7 @@ impl Inbox {
             .then(|| self.approval_card(item))
             .flatten();
         let (body, actions) = match (approval, &item.repository_request, &evaluator) {
-            _ if let Some(disk_card) = &disk_card => self.disk_card(item, disk_card, cx),
+            _ if let Some(disk_card) = &disk_card => self.disk_card(item, disk_card, p, cx),
             (_, _, Some(card)) => self.evaluator_card(item, card, p, cx),
             (Some(approval), _, _) => {
                 let findings = self.findings.get(&item.id).map_or(&[][..], Vec::as_slice);
@@ -474,18 +474,24 @@ impl Inbox {
                 c.notify();
             }))
     }
-    /// A card the disk work raised: its notice, then `disk_use::card_actions`' buttons, the
-    /// last one primary.
+    /// A card the disk work raised: its ask and rows, or its notice until the host's reading
+    /// has them, then `disk_use::card_actions`' buttons, the last one primary.
     fn disk_card(
         &self,
         item: &Attention,
         card: &disk_use::DiskCard,
+        p: Palette,
         cx: &mut Context<Self>,
     ) -> (Div, Div) {
         use disk_use::CardAction;
-        let body = div().children(self.prompts.get(&item.id).map(Linked::view));
+        let disk = disk_use::current(cx);
+        let home = spaces_view::home();
+        let body = match disk_use::card_text(card, disk, home.as_deref()) {
+            Some(text) => disk_card_text(text, p),
+            None => div().children(self.prompts.get(&item.id).map(Linked::view)),
+        };
         let on_this_mac = self.bridge.remote().is_none();
-        let offered = disk_use::card_actions(card, disk_use::current(cx), on_this_mac);
+        let offered = disk_use::card_actions(card, disk, on_this_mac);
         let last = offered.len() - 1;
         // Wrapped, so the hard floor's two long buttons fit the Inbox panel.
         let mut actions = div().flex().flex_wrap().justify_end().gap_2();
@@ -1000,6 +1006,33 @@ fn approval_row(label: &'static str, value: AnyElement, p: Palette) -> Div {
                 .child(label),
         )
         .child(div().flex_1().min_w_0().child(value))
+}
+
+/// A disk card's bold ask over its rows; the folder reads in monospace, wrapped so its name
+/// shows in a narrow Inbox.
+fn disk_card_text(text: disk_use::CardText, p: Palette) -> Div {
+    let rows = text.rows.into_iter().map(|(label, value)| {
+        let value = match label {
+            "Folder" => div()
+                .font_family(palette::mono_font())
+                .text_color(p.subtle)
+                .child(value)
+                .into_any_element(),
+            _ => value.into_any_element(),
+        };
+        approval_row(label, value, p)
+    });
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .text_size(px(font::LEAD))
+                .font_weight(FontWeight::MEDIUM)
+                .child(text.ask),
+        )
+        .child(div().flex().flex_col().gap_0p5().children(rows))
 }
 
 /// A publish or merge approval: what would leave the machine or merge, then Deny and the

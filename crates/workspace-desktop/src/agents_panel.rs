@@ -2,6 +2,7 @@
 //! as the progress board lists them. Accepted and closed tickets fold into "Finished tickets",
 //! and every other agent the project has had folds into "Previous agents" at the bottom.
 use super::*;
+use gpui_component::button::ButtonVariants;
 use progress::ProgressBoard;
 use std::{collections::HashSet, time::Duration};
 use ui::{
@@ -256,25 +257,25 @@ fn waiting_line(
 }
 
 /// A ticket's quiet disk line, "12 GB build output · 151 MB source · Reclaim", once the host
-/// has measured it. Reclaim shows only while the ticket is idle with at least 1 GB.
-fn disk_line(ticket_id: &str, p: Palette, cx: &App) -> Option<Div> {
-    let disk = disk_use::current(cx)?;
-    let ticket = disk.tickets.iter().find(|t| t.ticket_id == ticket_id)?;
+/// has measured it in `disk`. Reclaim shows only while the ticket is idle with at least 1 GB,
+/// and is off while `host` refuses changes from this device.
+fn disk_line(disk: Option<&DiskUse>, ticket_id: &str, host: &HostView, p: Palette) -> Option<Div> {
+    let ticket = disk?.tickets.iter().find(|t| t.ticket_id == ticket_id)?;
     let id = ticket_id.to_owned();
     let reclaim = disk_use::can_reclaim(ticket).then(|| {
-        div()
-            .id(SharedString::from(format!("panel-reclaim-{id}")))
-            .text_color(p.focus)
-            .cursor_pointer()
-            .hover(|d| d.underline())
-            .child("Reclaim")
-            .on_click(move |_, window, cx| {
-                let ask = ask::reclaim_build_output(Some(id.clone()));
-                disk_use::ask(ask, Some(window.window_handle()), cx)
-            })
+        let link = button(SharedString::from(format!("panel-reclaim-{id}")))
+            .link()
+            .xsmall()
+            .label("Reclaim")
+            .debug_selector(|| "panel-reclaim".into());
+        ui::gated(link, host).on_click(move |_, window, cx| {
+            let ask = ask::reclaim_build_output(Some(id.clone()));
+            disk_use::ask(ask, Some(window.window_handle()), cx)
+        })
     });
     Some(
         hint(disk_use::panel_line(ticket), p)
+            .debug_selector(|| "panel-disk-line".into())
             .text_size(px(font::CAPTION))
             .flex()
             .gap_1()
@@ -418,7 +419,12 @@ impl Inspector {
                 .flatten()
                 .map(|note| hint(note, p).text_color(p.yellow).text_ellipsis()),
             )
-            .children(disk_line(&ticket.id, p, cx));
+            .children(disk_line(
+                disk_use::current(cx),
+                &ticket.id,
+                &self.shared.host,
+                p,
+            ));
         for agent in agents {
             drawn = drawn.children(self.agent_row(index, ticket, agent, p, cx));
         }
@@ -714,7 +720,12 @@ impl Inspector {
                     wording::waiver_note(ticket)
                         .map(|note| hint(note, p).text_color(p.yellow).text_ellipsis()),
                 )
-                .children(disk_line(&ticket.id, p, cx))
+                .children(disk_line(
+                    disk_use::current(cx),
+                    &ticket.id,
+                    &self.shared.host,
+                    p,
+                ))
         });
         Some(div().flex().flex_col().gap_1().child(toggle).children(rows))
     }
@@ -1266,5 +1277,61 @@ mod tests {
 
         assert_eq!((roster.working(), roster.busy_tickets()), (2, 1));
         assert_eq!(roster.stuck(&index), 0);
+    }
+
+    /// The panel's disk line for ticket "t", from a reading.
+    struct DiskLine(Option<DiskUse>);
+    impl gpui::Render for DiskLine {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{ParentElement as _, Styled as _};
+            let p = crate::palette::palette(false);
+            let host = crate::hosts::HostView::default();
+            gpui::div()
+                .w(gpui::px(400.))
+                .children(super::disk_line(self.0.as_ref(), "t", &host, p))
+        }
+    }
+
+    #[gpui::test]
+    fn the_disk_line_shows_once_measured_and_offers_reclaim_only_when_idle_with_a_gigabyte(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+        let measured = |build_output, state| DiskUse {
+            tickets: vec![TicketDiskUse {
+                ticket_id: "t".into(),
+                project_id: "p".into(),
+                repository_id: "r".into(),
+                title: "T".into(),
+                source: 150_000_000,
+                build_output,
+                parts: vec![],
+                left_alone: vec![],
+                last_turn_at: None,
+                state,
+                reclaimed_at: None,
+                reclaimed: 0,
+            }],
+            ..DiskUse::default()
+        };
+        let drawn = |reading: Option<DiskUse>, cx: &mut gpui::TestAppContext| {
+            let (_, cx) = cx.add_window_view(|_, _| DiskLine(reading));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            (
+                cx.debug_bounds("panel-disk-line").is_some(),
+                cx.debug_bounds("panel-reclaim").is_some(),
+            )
+        };
+        assert_eq!(drawn(None, cx), (false, false));
+        let idle = measured(12 * GB, TicketDiskState::Idle);
+        assert_eq!(drawn(Some(idle), cx), (true, true));
+        let building = measured(12 * GB, TicketDiskState::Building);
+        assert_eq!(drawn(Some(building), cx), (true, false));
+        let small = measured(GB / 2, TicketDiskState::Idle);
+        assert_eq!(drawn(Some(small), cx), (true, false));
     }
 }

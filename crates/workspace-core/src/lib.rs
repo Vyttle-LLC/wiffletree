@@ -1738,6 +1738,9 @@ pub struct DiskUse {
     pub measured_at: Option<i64>,
     /// Free space is under the hard floor, so new builds wait.
     pub builds_held: bool,
+    /// The hard floor in bytes, as `HostSettings::disk` sets it.
+    #[serde(default)]
+    pub hard_floor: u64,
     pub tickets: Vec<TicketDiskUse>,
     pub deletes: Vec<PendingDelete>,
 }
@@ -1791,9 +1794,33 @@ pub struct PendingDelete {
     pub ticket_id: Option<String>,
     pub attempts: u32,
     pub last_error: Option<String>,
+    /// `i64::MAX` while the delete is held for its folder to move aside; see `is_held`.
     pub next_attempt_at: i64,
     /// It failed often enough that the human was told.
     pub failing: bool,
+    /// What the folder held on disk at its last failed attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+impl PendingDelete {
+    /// Waiting for its folder to move aside, not for an attempt.
+    pub fn is_held(&self) -> bool {
+        self.next_attempt_at == i64::MAX
+    }
+}
+/// The Inbox card's operation saying the folder at `path`, recorded at `recorded_at`, could not
+/// be deleted. It carries a key of the whole path, since folders under different parents can
+/// share a name.
+pub fn delete_failed_operation(recorded_at: i64, path: &str) -> String {
+    format!(
+        "{DELETE_FAILED_OPERATION}{recorded_at}:{}",
+        folder_key(path)
+    )
+}
+/// A short key of a folder's path, the same on every host and client.
+pub fn folder_key(path: &str) -> String {
+    use sha2::{Digest, Sha256};
+    pairing::hex(&Sha256::digest(path.as_bytes())[..8])
 }
 
 /// The PR keeper's triggers and quiet period, one value for the whole workspace. Every trigger
@@ -3026,7 +3053,7 @@ pub const RECLAIM_NOTICE_PREFIX: &str = "reclaim:";
 /// when it began.
 pub const BUILDS_HELD_OPERATION: &str = "builds-held:";
 /// The operation prefix of the Inbox card saying a folder could not be deleted, followed by
-/// `<recorded at>:<the folder's name>`.
+/// `<recorded at>:<folder_key of its path>`; see `delete_failed_operation`.
 pub const DELETE_FAILED_OPERATION: &str = "worktree-delete-failed:";
 /// The id prefix of the message that brings a child project's question to its parent's
 /// coordinator.
