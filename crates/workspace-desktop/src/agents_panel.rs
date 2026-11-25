@@ -68,11 +68,11 @@ impl ChildCard<'_> {
 
 /// Everyone the panel lists for a project: a card for each open ticket, then for each finished
 /// ticket an unarchived agent still works on, such as one restored from the archive; its
-/// unarchived child projects; the other finished tickets, accepted or closed, whichever half of
-/// the snapshot holds them; then the project's previous agents. Those are the rest of the
-/// coordinator's agents: archived agents, finished verifiers among them, workers from before
-/// tickets existed and retired repository coordinators. An archived project has no board entry,
-/// so all of its agents are previous.
+/// unarchived child projects, once `with_children` adds them; the other finished tickets,
+/// accepted or closed, whichever half of the snapshot holds them; then the project's previous
+/// agents. Those are the rest of the coordinator's agents: archived agents, finished verifiers
+/// among them, workers from before tickets existed and retired repository coordinators. An
+/// archived project has no board entry, so all of its agents are previous.
 pub(crate) struct Roster<'a> {
     pub(crate) tickets: Vec<TicketCard<'a>>,
     pub(crate) children: Vec<ChildCard<'a>>,
@@ -127,10 +127,15 @@ impl<'a> Roster<'a> {
             .collect();
         Self {
             tickets,
-            children: child_cards(index, project_id),
+            children: vec![],
             finished,
             previous,
         }
+    }
+    /// Adds the project's child cards, which only the Agents panel and its rail badge show.
+    pub(crate) fn with_children(mut self, index: &'a WorkspaceIndex, project_id: &str) -> Self {
+        self.children = child_cards(index, project_id);
+        self
     }
     /// Each ticket's agents in turn.
     pub(crate) fn ticket_agents(&self) -> Vec<&'a AgentProgress> {
@@ -1222,7 +1227,8 @@ mod tests {
         });
         let index = WorkspaceIndex::new(snapshot, Default::default());
 
-        let roster = Roster::new(&board, &index, &root.project_id, &root.id);
+        let roster = Roster::new(&board, &index, &root.project_id, &root.id)
+            .with_children(&index, &root.project_id);
 
         let children: Vec<(&str, usize, u32)> = (roster.children.iter())
             .map(|c| (c.project.id.as_str(), c.agents.len(), c.with_parent))

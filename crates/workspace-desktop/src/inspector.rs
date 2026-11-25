@@ -103,7 +103,7 @@ impl Panel {
             Self::Git => "git",
             Self::Files => "folder",
             Self::Processes => "terminal",
-            Self::Agents => "team",
+            Self::Agents => "agent",
             Self::Settings => "settings",
         }
     }

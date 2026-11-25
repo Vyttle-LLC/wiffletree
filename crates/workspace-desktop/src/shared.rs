@@ -172,12 +172,8 @@ impl Shared {
         let index = self.index.as_deref()?;
         let coordinator = self.coordinator()?;
         let (project, id) = (&coordinator.project_id, &coordinator.id);
-        Some(agents_panel::Roster::new(
-            &self.progress,
-            index,
-            project,
-            id,
-        ))
+        let roster = agents_panel::Roster::new(&self.progress, index, project, id);
+        Some(roster.with_children(index, project))
     }
     /// The selected project's coordinator, the first of its sessions without a parent.
     pub(super) fn coordinator(&self) -> Option<&Session> {
@@ -252,6 +248,12 @@ pub(super) enum Intent {
     TogglePanel(Panel),
     ClosePanel,
     ShowArchived(bool),
+    /// Shows a sidebar lens with one Space's bucket expanded and in view, as a header chip does.
+    OpenLensBucket {
+        lens: Lens,
+        space: SpaceId,
+        bucket: lenses::Bucket,
+    },
     /// The transcript shows a new page of messages.
     MessagesShown,
     /// The coordinator's ticket table opened its "N done" list.

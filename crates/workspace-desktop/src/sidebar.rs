@@ -118,7 +118,6 @@ enum Place<'a> {
     Bucket(Option<String>),
 }
 
-/// What a Space's section row shows.
 struct SectionHead<'a> {
     space: SpaceId,
     name: &'a str,
@@ -211,9 +210,11 @@ pub(super) struct Sidebar {
     pub(super) project_name: Entity<InputState>,
     pub(super) project_edit: Option<project_name::NameEdit>,
     /// What each lens has collapsed. Everything starts expanded at app start, but for the Me
-    /// lens, which starts the first time it is drawn.
+    /// lens, which starts the first time it is drawn with a selection.
     folds: BTreeMap<Lens, lenses::Folds>,
     me_started: bool,
+    /// The Me lens's rows, worked out again only for a new snapshot.
+    me: Vec<lenses::LensSection>,
     /// The bucket `open_lens_bucket` opened, scrolled into view once it is drawn.
     scroll_to_bucket: Option<(SpaceId, lenses::Bucket)>,
     /// The project being dragged in the sidebar; gone once the drag ends.
@@ -260,6 +261,7 @@ impl Sidebar {
                 .map(|lens| (lens, lenses::Folds::default()))
                 .into(),
             me_started: false,
+            me: vec![],
             scroll_to_bucket: None,
             project_drag: None,
             rename_press: false,
@@ -280,6 +282,8 @@ impl Sidebar {
         let old = std::mem::replace(&mut self.shared, shared);
         let (selection, moved) = self.shared.moved_from(&old);
         if moved {
+            self.me = (self.shared.index.as_deref())
+                .map_or_else(Vec::new, |index| lenses::me_sections(index, now()));
             self.name_new_project(window, cx);
         }
         if selection {
@@ -329,25 +333,21 @@ impl Sidebar {
         self.folds.entry(lens).or_default()
     }
     /// The Me lens starts with only the selected project's Space expanded, the first time it is
-    /// drawn with the workspace.
+    /// drawn with the workspace and a selection.
     fn start_me_lens(&mut self, cx: &App) {
         if self.me_started || cx.global::<Preferences>().lens != Lens::Me {
             return;
         }
-        let Some(index) = &self.shared.index else {
+        let (Some(index), Some(selected)) = (&self.shared.index, self.shared.selected_session())
+        else {
             return;
         };
-        let selected = self
-            .shared
-            .selected_session()
-            .map(|s| s.project_id.as_str());
-        let folds = lenses::Folds::me(index, selected);
+        let folds = lenses::Folds::me(index, &selected.project_id);
         self.folds.insert(Lens::Me, folds);
         self.me_started = true;
     }
     /// Shows `lens` with `space`'s section and its `bucket` expanded and scrolled into view. The
     /// selected conversation stays open.
-    #[allow(dead_code, reason = "the project header's tag chips call it")]
     pub(super) fn open_lens_bucket(
         &mut self,
         lens: Lens,
@@ -573,8 +573,7 @@ impl Sidebar {
         let offers_new_project = self.shared.offers_new_project();
         let archived = self.shared.snapshot().map_or(0, |s| s.archived_sessions);
         let lens = cx.global::<Preferences>().lens;
-        let me = (self.shared.index.as_deref()).map(|index| lenses::me_sections(index, now()));
-        let waiting_on_me = me.as_deref().map_or(0, lenses::me_count);
+        let waiting_on_me = lenses::me_count(&self.me);
         div()
             .size_full()
             .flex()
@@ -697,10 +696,10 @@ impl Sidebar {
                                     )
                                 })
                             })
-                            .map(|list| match (lens, me) {
-                                (Lens::Outcome, _) => list.child(self.tree(p, cx)),
-                                (Lens::Me, Some(me)) => {
-                                    list.children(self.lens_rows(lens, &me, p, cx))
+                            .map(|list| match lens {
+                                Lens::Outcome => list.child(self.tree(p, cx)),
+                                Lens::Me if self.shared.index.is_some() => {
+                                    list.children(self.lens_rows(lens, &self.me, p, cx))
                                 }
                                 _ => list.children(self.tag_lens_rows(lens, p, cx)),
                             }),
@@ -1270,7 +1269,6 @@ impl Sidebar {
         tree.children(space.and_then(|space| line(tree::Drop::End(space), 0)))
     }
 
-    /// The App or Layer lens's rows.
     fn tag_lens_rows(&self, lens: Lens, p: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let (Some(index), Some(kind)) = (&self.shared.index, lenses::tag_kind(lens)) else {
             return vec![];
@@ -1338,7 +1336,7 @@ impl Sidebar {
                     // A project listed in several buckets keeps its rows apart by the bucket's id.
                     let project_rows = group.projects.iter().map(|listed| {
                         let place = Place::Bucket(listed.line.clone());
-                        self.project_row(listed.root, listed.child, None, place, p, cx)
+                        self.project_row(&listed.root, listed.child, None, place, p, cx)
                     });
                     div()
                         .flex()
@@ -2857,5 +2855,142 @@ mod tests {
         let index = with_child_working(&host, &child);
         assert_eq!(with_parent(index.snapshot(), &child.project_id), 0);
         assert_eq!(rollup(&index), Some(tree::Rollup::NeedsYou(1)));
+    }
+}
+
+#[cfg(test)]
+mod lens_tests {
+    // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
+    use super::Sidebar;
+    use crate::bridge::{Bridge, RemoteName};
+    use crate::conversation_header::chip_opens;
+    use crate::lenses::Bucket;
+    use crate::preferences::{Lens, Preferences};
+    use crate::shared::{Intent, Shared};
+    use crate::test_support::ticket_store;
+    use gpui::{AppContext as _, Entity, IntoElement, TestAppContext, VisualTestContext, Window};
+    use std::{cell::Cell, rc::Rc};
+    use workspace_core::{ProjectTags, Session, TagKind, WorkspaceIndex};
+
+    /// A window that draws nothing, so the sidebar in it needs none of the app's drawing state.
+    struct Blank;
+    impl gpui::Render for Blank {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            gpui::Empty
+        }
+    }
+
+    /// A sidebar, never drawn, with preferences kept in `home`.
+    fn open<'a>(
+        home: &tempfile::TempDir,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Sidebar>, &'a mut VisualTestContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Preferences::load(home.path()));
+        });
+        let (_, cx) = cx.add_window_view(|_, _| Blank);
+        let sidebar = cx.update(|window, cx| {
+            let unreachable = RemoteName {
+                id: "away".into(),
+                name: "Away".into(),
+            };
+            cx.new(|cx| Sidebar::new(Bridge::unreachable(unreachable), window, cx))
+        });
+        (sidebar, cx)
+    }
+
+    fn share(
+        sidebar: &Entity<Sidebar>,
+        index: &Rc<WorkspaceIndex>,
+        selected: Option<&Session>,
+        cx: &mut VisualTestContext,
+    ) {
+        let shared = Shared {
+            index: Some(index.clone()),
+            selected: selected.map(|session| session.id.clone()),
+            ..Default::default()
+        };
+        cx.update(|window, cx| sidebar.update(cx, |s, cx| s.share(shared, window, cx)));
+    }
+
+    #[gpui::test]
+    fn a_chip_switches_lens_without_changing_the_conversation(cx: &mut TestAppContext) {
+        let (_directory, host, root, _) = ticket_store();
+        let mut snapshot = host.snapshot().unwrap();
+        snapshot.project_tags.insert(
+            root.project_id.clone(),
+            ProjectTags {
+                started: true,
+                apps: vec![],
+                layers: vec!["frontend".into()],
+            },
+        );
+        let index = Rc::new(WorkspaceIndex::new(snapshot, Rc::default()));
+        let home = tempfile::tempdir().unwrap();
+        let (sidebar, cx) = open(&home, cx);
+        share(&sidebar, &index, Some(&root), cx);
+        let selects = Rc::new(Cell::new(false));
+        let heard = selects.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&sidebar, move |_, intent: &Intent, _| {
+                heard.set(heard.get() || matches!(intent, Intent::Select(_)))
+            })
+            .detach()
+        });
+
+        let chip = chip_opens(&index, &root.project_id, TagKind::Layer, "frontend".into());
+        let Some(Intent::OpenLensBucket {
+            lens,
+            space,
+            bucket,
+        }) = chip
+        else {
+            panic!("a layer chip opens a bucket");
+        };
+        assert_eq!(
+            (lens, &bucket),
+            (Lens::Layer, &Bucket::Tag("frontend".into()))
+        );
+        cx.update(|_, cx| {
+            sidebar.update(cx, |sidebar, cx| {
+                let folds = sidebar.folds_mut(lens);
+                folds.spaces.insert(space.clone());
+                folds.buckets.insert((space.clone(), bucket.clone()));
+                sidebar.open_lens_bucket(lens, space.clone(), bucket.clone(), cx);
+            })
+        });
+
+        cx.update(|_, cx| {
+            assert_eq!(cx.global::<Preferences>().lens, Lens::Layer);
+            let sidebar = sidebar.read(cx);
+            let folds = sidebar.folds(Lens::Layer);
+            assert!(folds.spaces.is_empty() && folds.buckets.is_empty());
+            assert_eq!(sidebar.scroll_to_bucket, Some((space, bucket)));
+            assert_eq!(sidebar.shared.selected.as_deref(), Some(root.id.as_str()));
+        });
+        assert!(!selects.get(), "the conversation stays selected");
+    }
+
+    #[gpui::test]
+    fn the_me_lens_starts_its_folds_once_a_project_is_selected(cx: &mut TestAppContext) {
+        let (_directory, host, root, _) = ticket_store();
+        let index = Rc::new(WorkspaceIndex::new(host.snapshot().unwrap(), Rc::default()));
+        let home = tempfile::tempdir().unwrap();
+        let (sidebar, cx) = open(&home, cx);
+        cx.update(|_, cx| cx.global_mut::<Preferences>().lens = Lens::Me);
+        let started = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                sidebar.update(cx, |sidebar, cx| {
+                    sidebar.start_me_lens(cx);
+                    sidebar.me_started
+                })
+            })
+        };
+
+        share(&sidebar, &index, None, cx);
+        assert!(!started(cx), "nothing is selected yet");
+        share(&sidebar, &index, Some(&root), cx);
+        assert!(started(cx));
     }
 }
