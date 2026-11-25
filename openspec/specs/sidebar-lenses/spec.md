@@ -1,7 +1,7 @@
 # sidebar-lenses Specification
 
 ## Purpose
-TBD - created by archiving change parent-projects-and-lenses. Update Purpose after archive.
+The sidebar groups the same projects by outcome, app, layer or what needs the human, without renaming them.
 
 ## Requirements
 

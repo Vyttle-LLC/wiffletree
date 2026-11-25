@@ -1,7 +1,7 @@
 # parent-projects Specification
 
 ## Purpose
-TBD - created by archiving change parent-projects-and-lenses. Update Purpose after archive.
+Projects can be filed under a parent; parent and child coordinators message each other, and a child's questions reach its parent first.
 
 ## Requirements
 
