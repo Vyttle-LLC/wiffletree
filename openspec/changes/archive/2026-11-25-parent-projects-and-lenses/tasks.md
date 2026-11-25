@@ -71,4 +71,4 @@ Six slices, one ticket each. Dependencies:
 
 ## 7. Docs
 
-- [ ] 7.1 `docs/host-protocol.md` for the new fields, commands and tools; `docs/FEATURES.md` as each slice lands.
+- [x] 7.1 `docs/host-protocol.md` for the new fields, commands and tools; `docs/FEATURES.md` as each slice lands.
