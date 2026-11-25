@@ -40,7 +40,7 @@ pub(super) fn section(p: Palette, cx: &App) -> Div {
                 .label("Use Tidal")
                 .on_click(move |_, _, cx| {
                     for side in &use_tidal {
-                        themes::set(*side, Choice::Tidal, cx);
+                        themes::set(*side, Choice::TIDAL, cx);
                     }
                 }),
         );
@@ -100,22 +100,12 @@ fn row(label: &'static str, control: impl IntoElement, p: Palette) -> Div {
         .child(control)
 }
 
-/// Tidal first, then each file with this side's variant by name, its file name on the right.
+/// The built-ins, then a separator and the files.
 fn theme_menu(side: Side, chosen: &Choice, themes: &Themes, p: Palette) -> impl IntoElement {
-    let options: Vec<(Choice, String, SharedString)> = std::iter::once((
-        Choice::Tidal,
-        "Tidal".to_string(),
-        SharedString::from("built in"),
-    ))
-    .chain(
-        (themes.listed.iter())
-            .filter(|listed| listed.has(side))
-            .map(|listed| {
-                let file = listed.file.clone();
-                (Choice::File(file.clone()), listed.name.clone(), file.into())
-            }),
-    )
-    .collect();
+    let options = themes.menu(side);
+    let built_ins = (options.iter())
+        .take_while(|item| matches!(item.choice, Choice::BuiltIn(_)))
+        .count();
     let chosen = chosen.clone();
     let id = match side {
         Side::Light => "light-theme",
@@ -126,11 +116,14 @@ fn theme_menu(side: Side, chosen: &Choice, themes: &Themes, p: Palette) -> impl 
         .label(themes.label(&chosen))
         .dropdown_caret(true)
         .dropdown_menu(move |mut menu, _, _| {
-            for (index, (choice, name, file)) in options.iter().enumerate() {
-                if index == 1 {
+            for (index, item) in options.iter().enumerate() {
+                if index == built_ins {
                     menu = menu.separator();
                 }
-                let (name, file, picked) = (name.clone(), file.clone(), choice.clone());
+                let choice = &item.choice;
+                let name = SharedString::from(item.name.clone());
+                let file = SharedString::from(item.detail.clone());
+                let picked = choice.clone();
                 menu = menu.item(
                     PopupMenuItem::element(move |_, _| {
                         div()

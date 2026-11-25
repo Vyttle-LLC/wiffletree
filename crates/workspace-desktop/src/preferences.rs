@@ -62,8 +62,8 @@ impl Default for Preferences {
             minimize_activity: false,
             collapse_ticket_table: false,
             appearance: Appearance::default(),
-            light_theme: Choice::Tidal,
-            dark_theme: Choice::Tidal,
+            light_theme: Choice::TIDAL,
+            dark_theme: Choice::TIDAL,
             lens: Lens::default(),
             paired_hosts: vec![],
             find_on_network: false,
@@ -135,6 +135,7 @@ impl Preferences {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::themes::BuiltIn;
 
     #[test]
     fn choices_survive_a_relaunch_and_bad_files_fall_back() {
@@ -240,7 +241,7 @@ mod tests {
         let fresh = Preferences::load(home.path());
         assert_eq!(
             (fresh.light_theme, fresh.dark_theme),
-            (Choice::Tidal, Choice::Tidal)
+            (Choice::TIDAL, Choice::TIDAL)
         );
 
         let mut preferences = Preferences::load(home.path());
@@ -251,17 +252,26 @@ mod tests {
         assert_eq!(loaded.light_theme, Choice::File("celadon-sky.json".into()));
         assert_eq!(loaded.dark_theme, Choice::File("celadon-jade.json".into()));
 
+        let mut preferences = Preferences::load(home.path());
+        preferences.light_theme = Choice::BuiltIn(BuiltIn::CeladonSky);
+        preferences.dark_theme = Choice::BuiltIn(BuiltIn::Celadon);
+        preferences.save().unwrap();
+        let loaded = Preferences::load(home.path());
+        assert_eq!(loaded.light_theme, Choice::BuiltIn(BuiltIn::CeladonSky));
+        assert_eq!(loaded.dark_theme, Choice::BuiltIn(BuiltIn::Celadon));
+
         // An older file, and values this version cannot read.
         for saved in [
             r#"{ "appearance": "dark", "minimize_activity": true }"#,
+            r#"{ "appearance": "dark", "minimize_activity": true, "light_theme": "tidal", "dark_theme": "tidal" }"#,
             r#"{ "appearance": "dark", "minimize_activity": true, "light_theme": 7, "dark_theme": "../x.json" }"#,
         ] {
             std::fs::write(&file, saved).unwrap();
             let preferences = Preferences::load(home.path());
             assert_eq!(preferences.appearance, Appearance::Dark, "{saved}");
             assert!(preferences.minimize_activity, "{saved}");
-            assert_eq!(preferences.light_theme, Choice::Tidal, "{saved}");
-            assert_eq!(preferences.dark_theme, Choice::Tidal, "{saved}");
+            assert_eq!(preferences.light_theme, Choice::TIDAL, "{saved}");
+            assert_eq!(preferences.dark_theme, Choice::TIDAL, "{saved}");
         }
     }
 
