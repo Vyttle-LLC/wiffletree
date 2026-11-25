@@ -68,6 +68,7 @@ mod revisions;
 pub mod runtime;
 mod scan;
 pub(crate) mod schedules;
+use parents::{HumanContact, WITH_PARENT, WITH_THE_HUMAN};
 pub mod scratch;
 pub use schedules::TimerPass;
 pub mod service;
@@ -304,6 +305,10 @@ pub(crate) fn is_check_in(operation: &str) -> bool {
         .iter()
         .any(|prefix| operation.starts_with(prefix))
 }
+/// Whether an Inbox item is a coordinator's own question, raised with `ask_user`.
+pub(crate) fn is_question(operation: &str) -> bool {
+    ensure_unreserved(operation).is_ok()
+}
 /// Refuses an Inbox id only the host may use: its check-ins, and the approvals it draws with
 /// Approve and Deny, which an agent could otherwise raise in its own words.
 fn ensure_unreserved(operation: &str) -> Result<()> {
@@ -333,6 +338,8 @@ enum Delivery {
     Turn,
     /// Rides along with the next turn without starting one.
     Quiet,
+    /// Like `Quiet`, and never refused for a full queue; see `tell_parent_of_human`.
+    QuietPastCap,
     /// Starts a turn and is never refused for a full queue; see `send_human_notice` and
     /// `send_publish_result`.
     PastCap,
@@ -629,11 +636,11 @@ impl Host {
             })
             .context("Repository not found")
     }
-    /// How many things need the human: unanswered attention items and workspace notes, as the
-    /// Inbox counts them.
+    /// How many things need the human: unanswered attention items with the human and workspace
+    /// notes, as the Inbox counts them.
     pub fn attention_count(&self) -> Result<usize> {
         let waiting: usize = self.db.query_row(
-            "SELECT count(*) FROM attention WHERE json_extract(data,'$.answer') IS NULL",
+            &format!("SELECT count(*) FROM attention WHERE {WITH_THE_HUMAN}"),
             [],
             |r| r.get(0),
         )?;
@@ -657,7 +664,7 @@ impl Host {
             .collect();
         let projects = self.projects()?;
         let project_tags = self.project_tags(&projects, &spaces)?;
-        Ok(Snapshot { project_tags, projects, spaces, space_locals, issue_trackers: self.issue_trackers()?, last_filed_space: self.last_filed_space()?, linear_import: self.linear.status.clone(), repositories: self.repositories()?, open_ticket_repositories: repositories::open_ticket_repositories(&self.db)?, sessions: self.live_sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} OR id IN (SELECT json_extract(data,'$.ticket_id') FROM runtimes WHERE session_id IN ({in_turn})) ORDER BY rowid", tickets_listed(true)), [&turning])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id IN (SELECT id FROM sessions WHERE {}) OR session_id IN ({in_turn}) ORDER BY rowid", sessions_where(true)), [&turning])?, archive_stamp: self.archive_stamp()?, message_revisions: self.message_revisions()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, core_instructions: provider::core_instructions(), still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held(), assistant_name: self.assistant_name(), threads: self.thread_tabs(now())?, jobs: self.job_states()?, conversation: self.conversation_state()?, evaluations: self.listed_evaluations()?, evaluator_permissions: self.evaluator_permissions()? })
+        Ok(Snapshot { project_tags, projects, spaces, space_locals, issue_trackers: self.issue_trackers()?, last_filed_space: self.last_filed_space()?, linear_import: self.linear.status.clone(), repositories: self.repositories()?, open_ticket_repositories: repositories::open_ticket_repositories(&self.db)?, sessions: self.live_sessions()?, attention: self.list_data(&format!("SELECT data FROM attention WHERE {WITH_THE_HUMAN} ORDER BY rowid"), [])?, questions_with_parent: self.questions_with_parents()?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} OR id IN (SELECT json_extract(data,'$.ticket_id') FROM runtimes WHERE session_id IN ({in_turn})) ORDER BY rowid", tickets_listed(true)), [&turning])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id IN (SELECT id FROM sessions WHERE {}) OR session_id IN ({in_turn}) ORDER BY rowid", sessions_where(true)), [&turning])?, archive_stamp: self.archive_stamp()?, message_revisions: self.message_revisions()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, core_instructions: provider::core_instructions(), still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held(), assistant_name: self.assistant_name(), threads: self.thread_tabs(now())?, jobs: self.job_states()?, conversation: self.conversation_state()?, evaluations: self.listed_evaluations()?, evaluator_permissions: self.evaluator_permissions()? })
     }
     /// The snapshot's sessions: the live ones, then archived ones still in a turn, which show as
     /// working until it ends.
@@ -705,13 +712,15 @@ impl Host {
             stamp: self.archive_stamp()?,
         })
     }
-    /// Each session's `blocked` reports to its parent with no later message from that parent
-    /// taken by one of the session's turns. Read from stored messages, so a queued answer
-    /// leaves the question waiting and a restart changes nothing. The host's own `turn-held:`
-    /// reports are not the agent's questions. The range on `id` reads only reports, through
-    /// the messages' id index.
+    /// Each session's `blocked` reports to its parent, or a child project coordinator's to its
+    /// parent project's coordinator, with no later message from that parent taken by one of
+    /// the session's turns, such as an `answer_question` answer, nor, for a child coordinator,
+    /// a human's answer to an escalated question. Read from stored messages, so
+    /// a queued answer leaves the question waiting and a restart changes nothing. The host's
+    /// own `turn-held:` reports are not the agent's questions. The range on `id` reads only
+    /// reports, through the messages' id index.
     pub(crate) fn questions_waiting(&self) -> Result<Vec<QuestionsWaiting>> {
-        Ok(self.db.prepare("SELECT r.sender,COUNT(*) FROM messages r JOIN sessions s ON s.id=r.sender AND s.parent_id=r.recipient WHERE r.id>='report:' AND r.id<'report;' AND substr(r.id,1,length(r.sender)+8)='report:'||r.sender||':' AND substr(r.id,length(r.sender)+9,10)<>'turn-held:' AND substr(r.body,1,10)='[blocked] ' AND NOT EXISTS (SELECT 1 FROM messages a WHERE a.recipient=r.sender AND a.sender=r.recipient AND a.sequence>r.sequence AND a.receipt IN ('delivered','acknowledged','completed')) GROUP BY r.sender")?.query_map([], |r| Ok(QuestionsWaiting { session_id: r.get(0)?, count: r.get(1)? }))?.collect::<rusqlite::Result<_>>()?)
+        Ok(self.db.prepare("SELECT r.sender,COUNT(*) FROM messages r JOIN sessions s ON s.id=r.sender AND (s.parent_id=r.recipient OR (s.parent_id IS NULL AND EXISTS (SELECT 1 FROM sessions c JOIN projects p ON p.id=s.project_id WHERE c.id=r.recipient AND c.project_id=json_extract(p.data,'$.parent_id')))) WHERE r.id>='report:' AND r.id<'report;' AND substr(r.id,1,length(r.sender)+8)='report:'||r.sender||':' AND substr(r.id,length(r.sender)+9,10)<>'turn-held:' AND substr(r.body,1,10)='[blocked] ' AND NOT EXISTS (SELECT 1 FROM messages a WHERE a.recipient=r.sender AND (a.sender=r.recipient OR (s.parent_id IS NULL AND a.sender IS NULL AND a.id>='answer:' AND a.id<'answer;')) AND a.sequence>r.sequence AND a.receipt IN ('delivered','acknowledged','completed')) GROUP BY r.sender")?.query_map([], |r| Ok(QuestionsWaiting { session_id: r.get(0)?, count: r.get(1)? }))?.collect::<rusqlite::Result<_>>()?)
     }
     fn undelivered(&self) -> Result<Vec<UndeliveredInput>> {
         // Through each session's outbox index rather than a scan of every message.
@@ -1355,7 +1364,7 @@ impl Host {
         uploads: &[String],
         delivery: Delivery,
     ) -> Result<Message> {
-        let quiet = delivery == Delivery::Quiet;
+        let quiet = matches!(delivery, Delivery::Quiet | Delivery::QuietPastCap);
         text(id, 128)?;
         if files.is_empty() {
             text(body, MAX_TEXT_BYTES)?;
@@ -1415,7 +1424,11 @@ impl Host {
             |r| r.get(0),
         )?;
         ensure!(
-            queued < 1024 || matches!(delivery, Delivery::PastCap | Delivery::PastArchive),
+            queued < 1024
+                || matches!(
+                    delivery,
+                    Delivery::PastCap | Delivery::PastArchive | Delivery::QuietPastCap
+                ),
             "Recipient queue is full; accepted messages are preserved"
         );
         if target.role.is_thread() {
@@ -1578,6 +1591,7 @@ impl Host {
             options: options.to_vec(),
             answer: None,
             repository_request,
+            route: QuestionRoute::Human,
         };
         // A savepoint, so a note can be raised inside another change, such as an archive.
         let tx = self.db.savepoint()?;
@@ -1661,6 +1675,10 @@ impl Host {
         ensure!(
             !evaluations::is_start_card(&attention),
             "Press Start now, Later or Skip these runs"
+        );
+        ensure!(
+            attention.answer.is_some() || attention.route.is_with_human(),
+            WITH_PARENT
         );
         self.resolve_attention(id, "Dismissed by the human")
     }
@@ -2076,6 +2094,7 @@ impl Host {
                 self.uploads_used(&uploads, now());
                 if sender.is_none() {
                     self.record_human_message(&recipient)?;
+                    self.tell_parent_of_human(&recipient, HumanContact::Messaged, &id, &body)?;
                 }
                 serde_json::to_value(message)?
             }
@@ -2090,7 +2109,12 @@ impl Host {
             } => serde_json::to_value(self.set_setup(&selection, verification)?)?,
             Command::DismissModelNotes => serde_json::to_value(self.dismiss_model_notes()?)?,
             Command::ResolveAttention { id, answer } => {
-                serde_json::to_value(self.answer_attention(&id, &answer)?)?
+                let item = self.answer_attention(&id, &answer)?;
+                if is_question(&item.operation_id) {
+                    let contact = HumanContact::Answered;
+                    self.tell_parent_of_human(&item.session_id, contact, &item.id, &answer)?;
+                }
+                serde_json::to_value(item)?
             }
             Command::DismissAttention { id } => serde_json::to_value(self.dismiss_attention(&id)?)?,
             Command::AppendLog { input } => serde_json::to_value(self.append_log(input)?)?,

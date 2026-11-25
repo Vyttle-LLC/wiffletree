@@ -195,6 +195,7 @@ fn fixture() -> Fixture {
         options: vec![],
         answer: None,
         repository_request: None,
+        route: Default::default(),
     };
     db.execute(
         "INSERT INTO attention VALUES (?1,?2,?3,?4,?5)",

@@ -587,10 +587,7 @@ impl Host {
         let warnings = self.open_branch_warnings()?;
         let mut overview = vec![];
         for ticket in self.shown_tickets()? {
-            if !self
-                .session(&ticket.coordinator_id)
-                .is_ok_and(|s| s.project_id == project)
-            {
+            if !self.ticket_in_project(&ticket, project) {
                 continue;
             }
             overview.push(if ticket.is_open() {
@@ -600,6 +597,10 @@ impl Host {
             });
         }
         Ok(overview)
+    }
+    /// Whether `ticket` belongs to `project`, through its coordinator's project.
+    pub(crate) fn ticket_in_project(&self, ticket: &Ticket, project: &str) -> bool {
+        (self.session(&ticket.coordinator_id)).is_ok_and(|s| s.project_id == project)
     }
     pub(crate) fn short_ticket(ticket: &Ticket, repositories: &[Repository]) -> Value {
         let mut short = json!({"id":ticket.id,"title":ticket.title,"state":ticket.state,
@@ -638,10 +639,7 @@ impl Host {
                 .optional()?;
             let tickets: Vec<Value> = tickets
                 .iter()
-                .filter(|t| {
-                    self.session(&t.coordinator_id)
-                        .is_ok_and(|s| s.project_id == project.id)
-                })
+                .filter(|t| self.ticket_in_project(t, &project.id))
                 .map(|t| Self::short_ticket(t, &repositories))
                 .collect();
             created.push(json!({"id":project.id,"name":project.name,"created_at":created_at,"tickets":tickets}));
@@ -1094,14 +1092,23 @@ impl Host {
                         &options,
                     );
                 }
-                Ok(serde_json::to_value(self.request_attention(
-                    id,
-                    "local",
+                Ok(serde_json::to_value(self.ask_user(
+                    &session,
                     string("request_id")?,
                     string("question")?,
                     &options,
                 )?)?)
             }
+            "answer_question" => Ok(serde_json::to_value(self.answer_question(
+                &session,
+                string("question_id")?,
+                string("answer")?,
+            )?)?),
+            "escalate_question" => Ok(serde_json::to_value(self.escalate_question(
+                &session,
+                string("question_id")?,
+                args["note"].as_str(),
+            )?)?),
             "close_question" => {
                 let request = string("request_id")?;
                 let attention = self

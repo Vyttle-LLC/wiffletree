@@ -60,6 +60,22 @@ pub(super) fn parent_branch(index: &WorkspaceIndex, ticket: &Ticket, p: Palette)
 }
 
 impl Panel {
+    /// The rail's buttons for a session of `role`, in order.
+    fn rail(role: Role) -> impl Iterator<Item = Self> {
+        [
+            Self::Overview,
+            Self::Agents,
+            Self::Team,
+            Self::Attention,
+            Self::Git,
+            Self::Files,
+            Self::Processes,
+            Self::Memory,
+            Self::Events,
+        ]
+        .into_iter()
+        .filter(move |panel| panel.available(role))
+    }
     pub(super) fn available(self, role: Role) -> bool {
         match self {
             Self::Attention => role == Role::ProjectOrchestrator,
@@ -1279,21 +1295,11 @@ impl Workspace {
         if self.shared.selected_session().is_none() {
             return rail;
         }
-        for panel in [
-            Panel::Overview,
-            Panel::Team,
-            Panel::Attention,
-            Panel::Git,
-            Panel::Files,
-            Panel::Processes,
-            Panel::Memory,
-            Panel::Events,
-        ]
-        .into_iter()
-        .filter(|panel| panel.available(role))
-        {
+        let working = (self.shared.roster()).map_or(0, |roster| roster.working_with_children());
+        for panel in Panel::rail(role) {
             let selected = self.shared.panel == Some(panel);
             let badge = match panel {
+                Panel::Agents => (working > 0).then_some((working, p.focus, p.base)),
                 Panel::Attention => (attention > 0).then_some((attention, p.accent, p.on_accent)),
                 Panel::Processes => self
                     .inspector
@@ -1370,6 +1376,14 @@ mod tests {
         // A panel the selected session does not have still gives way to Overview.
         assert!(Panel::Attention.kept_for(Role::Implementer) == Panel::Overview);
         assert!(Panel::Git.kept_for(Role::ProjectOrchestrator) == Panel::Overview);
+    }
+
+    #[test]
+    fn every_conversation_s_rail_offers_agents_right_after_overview() {
+        for role in Role::ALL {
+            let rail: Vec<Panel> = Panel::rail(role).take(2).collect();
+            assert!(rail == [Panel::Overview, Panel::Agents], "{role:?}");
+        }
     }
 
     #[test]
