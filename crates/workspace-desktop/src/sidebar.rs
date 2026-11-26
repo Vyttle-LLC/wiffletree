@@ -1003,9 +1003,10 @@ impl Sidebar {
                             .icon(icon("plus"))
                             .on_click(|_, window, cx| connect_sheet::open(window, cx)),
                     )
-                    .item(PopupMenuItem::new("Remote access settings…").on_click(
-                        |_, window, cx| window.dispatch_action(Box::new(OpenSettings), cx),
-                    ))
+                    .item(
+                        PopupMenuItem::new("Remote access settings…")
+                            .on_click(|_, _, cx| settings::Settings::open_at_remote_access(cx)),
+                    )
             })
     }
 

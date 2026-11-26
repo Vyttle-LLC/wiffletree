@@ -1,6 +1,7 @@
-//! The Settings window. Its sidebar groups every setting as the settings-brain-fixes study does:
-//! Shared with your Macs, Spaces & brains, and This Mac, opening the pages that live in the main
-//! window there, each at its own card. Its body keeps the parts of design 10 of `remote-hosts`:
+//! Settings, a modal over the main window as the settings-modal study draws it. Its sidebar groups
+//! every setting as the settings-brain-fixes study does: Shared with your Macs, Spaces & brains,
+//! and This Mac; the pages that live in the main window close Settings and open there, each at
+//! its own card. Its body keeps the parts of design 10 of `remote-hosts`:
 //! the shared settings, this Mac's app, with its appearance, layout, finding other Macs and the
 //! computers it is paired with, and the host the window drives, with its workspace folder, builds
 //! at once and, on This Mac, its remote access. A setting belongs to the Mac whose agents it runs.
@@ -12,15 +13,20 @@ mod screen_control;
 pub(super) use screen_control::DataFolder;
 
 use super::*;
-use gpui_component::{ActiveTheme, Disableable, button::ButtonVariants, switch::Switch};
+use gpui_component::{
+    ActiveTheme, Disableable, TITLE_BAR_HEIGHT, button::ButtonVariants, switch::Switch,
+};
 use repository::{Confirm, Joined};
 pub(super) use repository::{Mark, share_sync};
 use ui::{card, hint, icon, mono, over_dimmed, section, segment, setting};
 
-/// The open Settings window, so ⌘, focuses it instead of opening a second one.
-#[derive(Clone)]
-struct SettingsWindow(WindowHandle<Root>, WeakEntity<Settings>);
-impl Global for SettingsWindow {}
+/// The open Settings, so ⌘, opens no second one. It upgrades only while the dialog holds it.
+struct SettingsDialog(WeakEntity<Settings>);
+impl Global for SettingsDialog {}
+
+/// The room Settings leaves around it in the main window, on every side, below the title bar.
+const MARGIN: Pixels = px(24.);
+const MAX_WIDTH: Pixels = px(900.);
 
 pub(super) struct Settings {
     bridge: Bridge,
@@ -59,6 +65,10 @@ pub(super) struct Settings {
     /// Request access waits for the human to answer macOS.
     requesting: bool,
     disk: disk::DiskForm,
+    /// The section last chosen or linked to, whose sidebar entry is highlighted.
+    highlighted: Option<Block>,
+    /// The section kept at the top of the page until the human scrolls.
+    holding: Option<Block>,
 }
 
 /// A check-in threshold's presets, the unit they count and how a choice sets it.
@@ -84,7 +94,7 @@ const COORDINATOR_TURNS: Threshold = Threshold {
 };
 
 impl Settings {
-    /// Focuses the Settings window, opening it first if none is open.
+    /// Opens Settings at its top; while it is open, does nothing.
     pub(super) fn open(cx: &mut App) {
         Self::open_at(None, cx);
     }
@@ -96,14 +106,22 @@ impl Settings {
     pub(super) fn open_at_disk(cx: &mut App) {
         Self::open_at(Some(Block::Disk), cx);
     }
-    /// The switcher selected another host: an open Settings window shows that host's settings.
+    /// Opens Settings scrolled to Remote access, as the host menu's item does.
+    pub(super) fn open_at_remote_access(cx: &mut App) {
+        Self::open_at(Some(Block::RemoteAccess), cx);
+    }
+    /// The open Settings, if any.
+    fn shown(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<SettingsDialog>()?.0.upgrade()
+    }
+    /// The switcher selected another host: an open Settings shows that host's settings.
     pub(super) fn host_selected(cx: &mut App) {
-        let Some(SettingsWindow(_, view)) = cx.try_global::<SettingsWindow>().cloned() else {
+        let Some(view) = Self::shown(cx) else {
             return;
         };
         let hosts = cx.global::<Hosts>();
         let (bridge, driving) = (hosts.bridge(), hosts.view());
-        let _ = view.update(cx, |view, cx| {
+        view.update(cx, |view, cx| {
             view.bridge = bridge;
             view.driving = driving;
             view.host = None;
@@ -139,112 +157,135 @@ impl Settings {
             self.ask_remote(ask::remote_access(), cx);
         }
     }
+    /// Opens Settings over the main window, opening that window first if it is closed. Deferred
+    /// because a click or a shortcut arrives while the main window is mid-update.
     fn open_at(at: Option<Block>, cx: &mut App) {
-        // Disk use changes with every build, so the Disk section shows a fresh reading.
-        crate::disk_use::ask(ask::disk_use(), None, cx);
-        if let Some(SettingsWindow(handle, view)) = cx.try_global::<SettingsWindow>().cloned()
-            && handle
-                .update(cx, |_, window, _| window.activate_window())
-                .is_ok()
-        {
-            if let Some(block) = at {
-                let _ = view.update(cx, |view, cx| view.scroll_to(block, cx));
+        cx.defer(move |cx| {
+            if Self::shown(cx).is_some() {
+                return;
             }
-            return;
+            // Disk use changes with every build, so the Disk section shows a fresh reading.
+            crate::disk_use::ask(ask::disk_use(), None, cx);
+            let open = move |_, window: &mut Window, cx: &mut App| Self::open_in(at, window, cx);
+            let main = cx.default_global::<MainWindow>().0.clone();
+            if main.is_none_or(|(handle, _)| handle.update(cx, open).is_err()) {
+                // Untyped, so the window's root is free for the dialog to read.
+                let window: AnyWindowHandle = open_main_window(cx).into();
+                let _ = window.update(cx, |_, window, cx| Self::open_in(at, window, cx));
+            }
+        });
+    }
+    /// Opens Settings as a dialog over `window`, sized from the window on every frame.
+    fn open_in(at: Option<Block>, window: &mut Window, cx: &mut App) {
+        window.activate_window();
+        let view = cx.new(|cx| Self::new(window, cx));
+        if let Some(block) = at {
+            view.update(cx, |view, cx| view.scroll_to(block, cx));
         }
+        cx.set_global(SettingsDialog(view.downgrade()));
+        let guarded = view.downgrade();
+        window.open_dialog(cx, move |dialog, window, _| {
+            let viewport = window.viewport_size();
+            let (content, guarded) = (view.clone(), guarded.clone());
+            dialog
+                .p_0()
+                .close_button(false)
+                .margin_top(TITLE_BAR_HEIGHT + MARGIN)
+                .width(MAX_WIDTH.min(viewport.width - MARGIN * 2.))
+                .h(viewport.height - TITLE_BAR_HEIGHT - MARGIN * 2.)
+                .content(move |dialog, _, _| dialog.child(content.clone()))
+                // Esc and a click outside close an open confirmation, not Settings with it.
+                .on_cancel(move |_, _, cx| {
+                    let dismissed = guarded.update(cx, |view, cx| view.dismiss_confirmation(cx));
+                    !dismissed.unwrap_or(false)
+                })
+        });
+    }
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let hosts = cx.global::<Hosts>();
         let (bridge, driving) = (hosts.bridge(), hosts.view());
-        let bounds = Bounds::centered(None, size(px(900.), px(820.)), cx);
-        let mut settings = None;
-        let opened = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitleBar::title_bar_options()),
-                is_resizable: true,
-                is_minimizable: false,
-                ..Default::default()
-            },
-            |window, cx| {
-                window.set_window_title("Settings");
-                let repository_input = cx.new(|cx| {
-                    InputState::new(window, cx).placeholder("owner/name or a GitHub URL")
-                });
-                let assistant_input =
-                    cx.new(|cx| InputState::new(window, cx).placeholder("Wren, Assistant"));
-                let view = cx.new(|cx| {
-                    cx.subscribe(&assistant_input, |view: &mut Self, _, event, cx| {
-                        if matches!(event, InputEvent::PressEnter { .. }) {
-                            view.save_assistant_name(cx);
-                        }
-                    })
-                    .detach();
-                    let mut view = Self {
-                        bridge,
-                        driving,
-                        host: None,
-                        folder_error: None,
-                        check_in_error: None,
-                        builds_error: None,
-                        choosing_folder: false,
-                        scroll: ScrollHandle::new(),
-                        repository_input,
-                        checked: None,
-                        joined: None,
-                        repository_error: None,
-                        asking: false,
-                        confirming: None,
-                        compared: None,
-                        remote: None,
-                        remote_error: None,
-                        watching_remote: false,
-                        opening_pairing: false,
-                        assistant_input,
-                        renaming_assistant: false,
-                        assistant_error: None,
-                        screen: screen_control::Reading::Checking,
-                        requesting: false,
-                        disk: disk::DiskForm::new(window, cx),
-                    };
-                    view.ask_host(ask::settings(), cx);
-                    view.check_grants(cx);
-                    view.ask_remote_here(cx);
-                    view.refresh_sync(cx);
-                    cx.observe_global::<repository::SyncByHost>(|view, cx| view.sync_shown(cx))
-                        .detach();
-                    cx.spawn(async move |this, cx| {
-                        loop {
-                            cx.background_executor()
-                                .timer(std::time::Duration::from_secs(1))
-                                .await;
-                            if this.update(cx, |view, cx| view.follow_link(cx)).is_err() {
-                                break;
-                            }
-                        }
-                    })
-                    .detach();
-                    if let Some(block) = at {
-                        view.scroll_to(block, cx);
-                    }
-                    view
-                });
-                settings = Some(view.downgrade());
-                cx.new(|cx| Root::new(view, window, cx))
-            },
-        );
-        match (opened, settings) {
-            (Ok(handle), Some(view)) => cx.set_global(SettingsWindow(handle, view)),
-            (Err(error), _) => eprintln!("Opening Settings: {error:#}"),
-            (Ok(_), None) => {}
-        }
+        let repository_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("owner/name or a GitHub URL"));
+        let assistant_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Wren, Assistant"));
+        cx.subscribe(&assistant_input, |view: &mut Self, _, event, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                view.save_assistant_name(cx);
+            }
+        })
+        .detach();
+        // Every way Settings closes releases it, and a code nobody can see stops working. One
+        // still opening is cancelled too: the host takes commands in the order they were sent.
+        cx.on_release(|view, _| {
+            let showing = view.remote.as_ref().is_some_and(|r| r.pairing.is_some());
+            if showing || view.opening_pairing {
+                let _ = view.bridge.ask(ask::cancel_pairing());
+            }
+        })
+        .detach();
+        let mut view = Self {
+            bridge,
+            driving,
+            host: None,
+            folder_error: None,
+            check_in_error: None,
+            builds_error: None,
+            choosing_folder: false,
+            scroll: ScrollHandle::new(),
+            repository_input,
+            checked: None,
+            joined: None,
+            repository_error: None,
+            asking: false,
+            confirming: None,
+            compared: None,
+            remote: None,
+            remote_error: None,
+            watching_remote: false,
+            opening_pairing: false,
+            assistant_input,
+            renaming_assistant: false,
+            assistant_error: None,
+            screen: screen_control::Reading::Checking,
+            requesting: false,
+            disk: disk::DiskForm::new(window, cx),
+            highlighted: None,
+            holding: None,
+        };
+        view.ask_host(ask::settings(), cx);
+        view.check_grants(cx);
+        view.ask_remote_here(cx);
+        view.refresh_sync(cx);
+        cx.observe_global::<repository::SyncByHost>(|view, cx| view.sync_shown(cx))
+            .detach();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                if this.update(cx, |view, cx| view.follow_link(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        view
+    }
+    /// Closes an open confirmation, and says whether one was open.
+    fn dismiss_confirmation(&mut self, cx: &mut Context<Self>) -> bool {
+        let open = self.confirming.take().is_some();
+        cx.notify();
+        open
     }
 
     fn scroll_to(&mut self, block: Block, cx: &mut Context<Self>) {
-        self.scroll.scroll_to_top_of_item(block.index());
+        self.highlighted = Some(block);
+        self.holding = Some(block);
         cx.notify();
     }
-    /// Follows a sidebar entry: a section of this window, or a page of the main window, which
-    /// comes forward.
-    fn go(&mut self, to: &Go, cx: &mut Context<Self>) {
+    /// Follows a sidebar entry: a section of Settings, or a page of the main window, which
+    /// Settings closes to show.
+    fn go(&mut self, to: &Go, window: &mut Window, cx: &mut Context<Self>) {
         let intent = match to {
             Go::Section(block) => return self.scroll_to(*block, cx),
             Go::Page(page) => Intent::OpenPage(*page),
@@ -252,10 +293,8 @@ impl Settings {
             Go::Repositories(card) => Intent::OpenRepositories(*card),
             Go::Space(id) => Intent::OpenSpace(id.clone()),
         };
-        with_workspace(cx, move |view, window, cx| {
-            window.activate_window();
-            view.handle(&intent, window, cx)
-        });
+        window.close_dialog(cx);
+        with_workspace(cx, move |view, window, cx| view.handle(&intent, window, cx));
     }
     /// The sidebar: what is shared with the human's Macs, their Spaces, and what is this Mac's.
     fn sidebar(&self, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -269,6 +308,7 @@ impl Settings {
             .flex_col()
             .gap(px(1.))
             .bg(p.base)
+            .rounded_bl(cx.theme().radius_lg)
             .border_r_1()
             .border_color(p.edge.opacity(edge::LIGHT));
         for (group, entries) in sidebar_groups(&main_window_spaces(cx)) {
@@ -282,17 +322,27 @@ impl Settings {
                     .child(group.to_uppercase()),
             );
             for (at, (label, to)) in entries.into_iter().enumerate() {
+                let highlighted =
+                    matches!(to, Go::Section(block) if Some(block) == self.highlighted);
                 side = side.child(
                     div()
                         .id(SharedString::from(format!("settings-{group}-{at}")))
                         .px_2()
                         .py_1()
+                        .flex()
+                        .justify_between()
                         .rounded_md()
                         .cursor_pointer()
                         .text_size(px(font::SMALL))
                         .hover(|d| d.bg(p.overlay))
+                        .when(highlighted, |d| {
+                            d.bg(p.overlay).font_weight(FontWeight::MEDIUM)
+                        })
                         .child(label)
-                        .on_click(cx.listener(move |view, _, _, cx| view.go(&to, cx))),
+                        .when(to.opens_main_window(), |d| {
+                            d.child(div().text_color(p.subtle).child("↗"))
+                        })
+                        .on_click(cx.listener(move |view, _, window, cx| view.go(&to, window, cx))),
                 );
             }
         }
@@ -777,7 +827,7 @@ impl Block {
     }
 }
 
-/// Where a sidebar entry goes: a section of this window, or a page of the main window.
+/// Where a sidebar entry goes: a section of Settings, or a page of the main window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Go {
     Section(Block),
@@ -787,6 +837,12 @@ enum Go {
     /// A card of the Repositories page, or its top with `None`.
     Repositories(Option<RepositoriesCard>),
     Space(SpaceId),
+}
+impl Go {
+    /// The entry closes Settings to open a page of the main window, and is marked ↗.
+    fn opens_main_window(&self) -> bool {
+        !matches!(self, Self::Section(_))
+    }
 }
 
 /// The sidebar's groups, as the settings-cascade study's Settings window draws them: what
@@ -828,7 +884,8 @@ fn sidebar_groups(spaces: &[(SpaceId, String)]) -> Vec<(&'static str, Vec<(Strin
                     Go::Repositories(Some(RepositoriesCard::AllowedOwners)),
                 ),
                 entry("Workspace folder", Go::Section(Block::Folder)),
-                entry("Builds & remote access", Go::Section(Block::Builds)),
+                entry("Builds", Go::Section(Block::Builds)),
+                entry("Remote access", Go::Section(Block::RemoteAccess)),
                 entry("Screen control", Go::Section(Block::ScreenControl)),
                 entry("Disk", Go::Section(Block::Disk)),
                 entry("Appearance", Go::Section(Block::Appearance)),
@@ -837,7 +894,7 @@ fn sidebar_groups(spaces: &[(SpaceId, String)]) -> Vec<(&'static str, Vec<(Strin
     ]
 }
 
-/// The Spaces of the host the main window shows, which is the one this window drives.
+/// The Spaces of the host the main window shows, which is the one Settings drives.
 fn main_window_spaces(cx: &App) -> Vec<(SpaceId, String)> {
     let workspace = (cx.try_global::<MainWindow>())
         .and_then(|main| main.0.clone())
@@ -919,8 +976,10 @@ impl Render for Settings {
         if let Some(host) = &self.host {
             self.disk.fill(host.disk, window, cx);
         }
+        let radius = cx.theme().radius_lg;
         div()
             .size_full()
+            .rounded(radius)
             .bg(p.base)
             .text_color(p.text)
             .font_family(ui_font())
@@ -928,14 +987,30 @@ impl Render for Settings {
             .flex()
             .flex_col()
             .child(
-                TitleBar::new().child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .justify_center()
-                        .pr(px(70.))
-                        .child("Settings"),
-                ),
+                div()
+                    .h(px(40.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .pl_4()
+                    .pr(px(10.))
+                    .border_b_1()
+                    .border_color(p.edge.opacity(edge::LIGHT))
+                    .child(
+                        div()
+                            .flex_1()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Settings"),
+                    )
+                    // Closes Settings even over a confirmation, which Esc would close first.
+                    .child(
+                        button("close-settings")
+                            .ghost()
+                            .small()
+                            .icon(icon("close"))
+                            .tooltip("Close")
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    ),
             )
             .child({
                 let mut body = div()
@@ -947,6 +1022,12 @@ impl Render for Settings {
                     .flex()
                     .flex_col()
                     .gap_4();
+                // Answers arriving above the chosen section move it, so the page holds it at its
+                // top until the human scrolls.
+                if let Some(block) = self.holding {
+                    self.scroll.scroll_to_top_of_item(block.index());
+                }
+                body = body.on_scroll_wheel(cx.listener(|view, _, _, _| view.holding = None));
                 for block in BLOCKS {
                     body = body.child(self.block(block, p, window, cx));
                 }
@@ -958,7 +1039,30 @@ impl Render for Settings {
                 let dialog =
                     (self.confirming).and_then(|confirm| self.confirm_dialog(confirm, p, cx));
                 match dialog {
-                    Some(dialog) => over_dimmed(body, dialog).flex_1().min_h_0(),
+                    // A click on the dimmed page, outside the card, closes the confirmation. The
+                    // dimming occludes what is under it, so the click is taken by a layer over
+                    // all of it that places the card where `over_dimmed` would.
+                    Some(dialog) => over_dimmed(
+                        body,
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_start()
+                            .justify_center()
+                            .pt(px(120.))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|view, _, _, cx| {
+                                    view.dismiss_confirmation(cx);
+                                }),
+                            )
+                            .child(dialog.on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation()
+                            })),
+                    )
+                    .flex_1()
+                    .min_h_0(),
                     None => div().flex_1().min_h_0().relative().child(body),
                 }
             })
@@ -1028,7 +1132,7 @@ mod tests {
             );
             assert!(!labels(0).contains(&this_macs));
         }
-        // Each entry for this window scrolls to a section it draws, under its own group.
+        // Each entry for Settings scrolls to a section it draws, under its own group.
         let part_of = |block: Block| {
             let before = &BLOCKS[..block.index()];
             *before.iter().rev().find(|b| b.is_part()).unwrap()
@@ -1054,5 +1158,58 @@ mod tests {
                 ("Brains".to_owned(), Go::Page(Page::Brains)),
             ]
         );
+    }
+
+    fn sections_of(spaces: &[(SpaceId, String)]) -> Vec<(String, Go)> {
+        (sidebar_groups(spaces).into_iter())
+            .flat_map(|(_, entries)| entries)
+            .collect()
+    }
+
+    #[test]
+    fn builds_and_remote_access_are_entries_of_their_own() {
+        let entries = sections_of(&[]);
+        let to = |label: &str| entries.iter().find(|(l, _)| l == label).map(|(_, to)| to);
+        assert_eq!(to("Builds"), Some(&Go::Section(Block::Builds)));
+        assert_eq!(to("Remote access"), Some(&Go::Section(Block::RemoteAccess)));
+        assert_eq!(to("Builds & remote access"), None);
+    }
+
+    #[test]
+    fn only_the_main_window_pages_close_settings() {
+        let spaces = [(SpaceId("sage".into()), "Sage".to_owned())];
+        let closing: Vec<String> = (sections_of(&spaces).into_iter())
+            .filter(|(_, to)| to.opens_main_window())
+            .map(|(label, _)| label)
+            .collect();
+        assert_eq!(
+            closing,
+            [
+                "Behaviors",
+                "Reviews",
+                "PR keeper",
+                "Sage",
+                "Brains",
+                "Who runs what",
+                "Subscriptions",
+                "Repositories",
+                "Allowed owners",
+            ]
+        );
+    }
+
+    #[test]
+    fn each_deep_link_lands_on_a_section_with_an_entry_to_highlight() {
+        let entries = sections_of(&[]);
+        for (link, label) in [
+            (Block::RemoteAccess, "Remote access"),
+            (Block::Repository, "Settings repository"),
+            (Block::Disk, "Disk"),
+        ] {
+            assert!(
+                entries.contains(&(label.to_owned(), Go::Section(link))),
+                "{label}"
+            );
+        }
     }
 }

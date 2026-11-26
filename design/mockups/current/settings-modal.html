@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Settings as a modal</title>
+<!-- Static study: Settings opens as a modal over the main window instead of its own window. No script, no network, sample data. -->
+<style>
+:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.intro{max-width:900px;margin-bottom:24px}
+.intro p{color:var(--subtle);font-size:12px}
+.stack{display:grid;gap:34px}
+.caption{margin:10px 2px 0;font-size:11.5px;color:var(--subtle);max-width:960px}
+.caption b{color:var(--text);font-weight:500}
+.new{box-shadow:inset 2px 0 0 var(--accent)}
+.btn{display:inline-block;padding:4px 11px;border-radius:7px;font-size:12px;font-weight:500;border:1px solid transparent;white-space:nowrap}
+.btn.ghost{color:var(--subtle);border-color:var(--edge)}
+.btn.primary{background:var(--focus);color:var(--surface)}
+.btn.danger{color:var(--red);border-color:color-mix(in srgb,var(--red) 40%,transparent)}
+
+/* The main window, drawn small */
+.mac{position:relative;width:100%;max-width:1180px;height:640px;border:1px solid var(--edge);border-radius:12px;overflow:hidden;background:var(--base)}
+.mac.short{height:470px;max-width:760px}
+.titlebar{height:30px;display:flex;align-items:center;gap:6px;padding:0 12px;border-bottom:1px solid color-mix(in srgb,var(--edge) 50%,transparent);font-size:11px;color:var(--subtle)}
+.lights{display:flex;gap:6px;margin-right:10px}.lights i{width:10px;height:10px;border-radius:50%;background:var(--edge)}
+.app{display:flex;height:calc(100% - 30px)}
+.app .side{width:210px;border-right:1px solid color-mix(in srgb,var(--edge) 50%,transparent);padding:10px;display:flex;flex-direction:column;gap:4px;font-size:12px}
+.app .side .row{padding:3px 8px;border-radius:6px}
+.app .side .host{margin-top:auto;border:1px solid var(--edge);border-radius:7px;padding:5px 8px}
+.app .main{flex:1;padding:16px 20px;display:flex;flex-direction:column;gap:10px}
+.ph{height:12px;border-radius:4px;background:var(--overlay)}
+.ph.w60{width:60%}.ph.w40{width:40%}.ph.w80{width:80%}
+.chat{flex:1;border:1px solid color-mix(in srgb,var(--edge) 50%,transparent);border-radius:10px}
+
+/* The dimmed backdrop and the modal */
+.dim{position:absolute;inset:30px 0 0 0;background:color-mix(in srgb,#0d1418 38%,transparent)}
+.modal{position:absolute;top:54px;bottom:24px;left:50%;transform:translateX(-50%);width:min(900px,calc(100% - 48px));background:var(--base);border:1px solid var(--edge);border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.28);display:flex;flex-direction:column;overflow:hidden}
+.mhead{height:40px;flex:none;display:flex;align-items:center;padding:0 10px 0 16px;border-bottom:1px solid color-mix(in srgb,var(--edge) 50%,transparent)}
+.mhead .t{flex:1;font-weight:600}
+.x{width:24px;height:24px;border-radius:6px;display:grid;place-items:center;color:var(--subtle);font-size:15px}
+.x.hl{background:var(--overlay);color:var(--text)}
+.mbody{flex:1;min-height:0;display:flex}
+.nav{width:190px;flex:none;padding:6px 8px 12px;border-right:1px solid color-mix(in srgb,var(--edge) 50%,transparent);overflow:hidden;font-size:12px}
+.nav .g{padding:12px 8px 3px;font-size:10px;letter-spacing:.06em;color:var(--muted);text-transform:uppercase}
+.nav .e{padding:2px 8px;border-radius:6px;display:flex;justify-content:space-between;align-items:center}
+.nav .e .out{color:var(--muted);font-size:10px}
+.nav .e.on{background:var(--overlay);font-weight:500}
+.nav .e.new{box-shadow:inset 2px 0 0 var(--accent)}
+.content{flex:1;min-width:0;overflow:hidden;padding:16px 20px;display:flex;flex-direction:column;gap:12px;position:relative}
+.part{font-weight:600}
+.hint{font-size:11px;color:var(--subtle)}
+.card{background:var(--surface);border:1px solid color-mix(in srgb,var(--edge) 60%,transparent);border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;gap:8px}
+.card .sec{font-size:10px;letter-spacing:.08em;color:var(--subtle)}
+.switchrow{display:flex;justify-content:space-between;align-items:center}
+.sw{width:30px;height:17px;border-radius:9px;background:var(--focus);position:relative}.sw::after{content:"";position:absolute;right:2px;top:2px;width:13px;height:13px;border-radius:50%;background:var(--surface)}
+.code{font:600 30px/1.1 ui-monospace,SFMono-Regular,monospace;letter-spacing:.3em;padding:6px 0}
+.scrollbar{position:absolute;right:3px;top:40px;width:4px;height:70px;border-radius:2px;background:var(--edge)}
+
+/* Callouts */
+.tag{position:absolute;font-size:10.5px;background:var(--accent);color:#fff;border-radius:10px;padding:1px 8px;white-space:nowrap;z-index:5}
+.confirm{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:360px;background:var(--surface);border:1px solid var(--edge);border-radius:12px;box-shadow:0 14px 40px rgba(0,0,0,.3);padding:16px;display:flex;flex-direction:column;gap:10px;z-index:4}
+.dim2{position:absolute;inset:0;background:color-mix(in srgb,#0d1418 30%,transparent);z-index:3}
+
+.rules{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;max-width:1180px}
+.rule{background:var(--surface);border:1px solid var(--edge);border-radius:12px;padding:14px 16px}
+.rule h3{margin:0 0 6px;font-size:13px;font-weight:600}
+.rule ul{margin:0;padding-left:18px;font-size:12px;color:var(--subtle)}
+.rule li{margin:4px 0}
+.rule b{color:var(--text);font-weight:500}
+.ask{display:inline-block;font-size:10.5px;color:var(--accent);font-weight:500}
+@media(max-width:980px){.rules{grid-template-columns:minmax(0,1fr)}body{padding:16px}}
+</style>
+</head>
+<body>
+
+<header class="intro">
+  <div class="eyebrow">Design study · Settings as a modal</div>
+  <h1>Settings opens over the main window, so nothing it shows can hide behind it.</h1>
+  <p>Today Settings is its own window (900 × 820). Pairing a device from Settings › Remote access let the main window cover it, so the code was never seen. This study moves the same Settings, with the same sidebar and sections, into a modal over the main window, as Connect a computer already is. New or changed parts have a red edge. Items marked <span class="ask">Decide</span> are the choices to approve.</p>
+</header>
+
+<div class="stack">
+
+<!-- (a) Opened with ⌘, -->
+<section>
+  <div class="mac">
+    <div class="titlebar"><span class="lights"><i></i><i></i><i></i></span>Wiffletree</div>
+    <div class="app">
+      <div class="side"><div class="row">Inbox</div><div class="row">Projects</div><div class="row">Agents</div><div class="host">This Mac ▴</div></div>
+      <div class="main"><div class="ph w40"></div><div class="ph w80"></div><div class="chat"></div></div>
+    </div>
+    <div class="dim"></div>
+    <div class="modal new">
+      <div class="mhead"><span class="t">Settings</span><span class="x" title="Close">✕</span></div>
+      <div class="mbody">
+        <div class="nav">
+          <div class="g">Shared with your Macs</div>
+          <div class="e">Behaviors <span class="out">↗</span></div>
+          <div class="e">Reviews <span class="out">↗</span></div>
+          <div class="e">PR keeper <span class="out">↗</span></div>
+          <div class="e">Check-ins</div>
+          <div class="e on">Assistant</div>
+          <div class="e">Settings repository</div>
+          <div class="g">Spaces &amp; brains</div>
+          <div class="e">Sage <span class="out">↗</span></div>
+          <div class="e">Vyttle <span class="out">↗</span></div>
+          <div class="e">Brains <span class="out">↗</span></div>
+          <div class="g">This Mac</div>
+          <div class="e">Who runs what <span class="out">↗</span></div>
+          <div class="e">Subscriptions <span class="out">↗</span></div>
+          <div class="e">Repositories <span class="out">↗</span></div>
+          <div class="e">Allowed owners <span class="out">↗</span></div>
+          <div class="e">Workspace folder</div>
+          <div class="e">Builds</div>
+          <div class="e new">Remote access</div>
+          <div class="e">Screen control</div>
+          <div class="e">Disk</div>
+          <div class="e">Appearance</div>
+        </div>
+        <div class="content">
+          <div class="part">Shared with your Macs</div>
+          <div class="hint">Assistant · check-ins · settings repository. Behaviors, reviews and the PR keeper open in the main window.</div>
+          <div class="card"><div class="sec">ASSISTANT</div><div class="switchrow"><span>Name</span><span class="btn ghost">Wren · Rename</span></div></div>
+          <div class="card"><div class="sec">CHECK-INS</div><div class="hint">Check in on an agent every 25 turns · with you every 100 coordinator turns</div></div>
+          <div class="card"><div class="sec">SETTINGS REPOSITORY</div><div class="hint">Vyttle-LLC/wiffletree-storage · synced 2 min ago</div></div>
+          <div class="scrollbar"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>Size and placement.</b> Centered over the main window, 900 points wide (narrower windows leave a 24-point margin each side), and as tall as the window less 24 points top and bottom. The main window behind is dimmed and takes no clicks. <b>Inside</b> it is today's Settings: the same sidebar on the left and the same single scrolling page on the right; a sidebar entry scrolls to its section and highlights it. Entries marked ↗ open a page of the main window (see c). <b>Changed:</b> "Builds &amp; remote access" becomes two entries, Builds and Remote access, so a link can land on Remote access itself.</p>
+</section>
+
+<!-- (b) Deep link from the host menu, pairing -->
+<section>
+  <div class="mac">
+    <div class="titlebar"><span class="lights"><i></i><i></i><i></i></span>Wiffletree</div>
+    <div class="app">
+      <div class="side"><div class="row">Inbox</div><div class="row">Projects</div><div class="row">Agents</div><div class="host">This Mac ▴</div></div>
+      <div class="main"><div class="ph w40"></div><div class="ph w80"></div><div class="chat"></div></div>
+    </div>
+    <div class="dim"></div>
+    <span class="tag" style="left:20px;bottom:44px">Host menu › Remote access settings…</span>
+    <div class="modal new">
+      <div class="mhead"><span class="t">Settings</span><span class="x">✕</span></div>
+      <div class="mbody">
+        <div class="nav">
+          <div class="g">Shared with your Macs</div>
+          <div class="e">Behaviors <span class="out">↗</span></div>
+          <div class="e">Reviews <span class="out">↗</span></div>
+          <div class="e">Check-ins</div>
+          <div class="e">Assistant</div>
+          <div class="g">This Mac</div>
+          <div class="e">Workspace folder</div>
+          <div class="e">Builds</div>
+          <div class="e on new">Remote access</div>
+          <div class="e">Screen control</div>
+          <div class="e">Disk</div>
+        </div>
+        <div class="content">
+          <div class="card"><div class="sec">REMOTE ACCESS</div>
+            <div class="switchrow"><span>Let other devices use this Mac's Wiffletree</span><span class="sw"></span></div>
+            <div class="hint">This Mac is called Studio · reachable as studio.tail4c2e.ts.net</div>
+          </div>
+          <div class="card new"><div class="sec">PAIR A DEVICE</div>
+            <div class="hint">Type this code on the other Mac or iPhone. It works once, for 2 minutes.</div>
+            <div class="code">4 8 1 7</div>
+            <div class="switchrow"><span class="hint">Waiting for a device… · 1:52 left</span><span class="btn ghost">Cancel</span></div>
+          </div>
+          <div class="card"><div class="sec">PAIRED DEVICES</div><div class="hint">Michael's iPhone · Connected now</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>Deep links land on their section.</b> "Remote access settings…" in the host menu opens Settings scrolled to Remote access with that entry highlighted (today it opens Settings at the top). The sync mark still opens it at Settings repository, and the Inbox's disk card at Disk. <b>The pairing code shows inside the modal</b>, in front of everything, so it can't end up behind the main window. The pairing card's own content comes from the sibling ticket in "Clicking pair device does nothing"; this study only moves where it is drawn.</p>
+</section>
+
+<!-- (c) Main-window pages -->
+<section>
+  <div class="mac short">
+    <div class="titlebar"><span class="lights"><i></i><i></i><i></i></span>Wiffletree</div>
+    <div class="app">
+      <div class="side"><div class="row">Inbox</div><div class="row">Projects</div><div class="row" style="background:var(--overlay)">Models</div><div class="host">This Mac ▴</div></div>
+      <div class="main new" style="padding-left:24px">
+        <div class="eyebrow">Models · Who runs what</div>
+        <div class="ph w80"></div><div class="ph w60"></div><div class="ph w80"></div><div class="ph w40"></div>
+        <div class="chat" style="border-style:dashed"></div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>Entries marked ↗ close Settings and open that page in the main window</b> (Who runs what, Repositories, Behaviors, a Space, Brains and the rest), because those pages are the main window's and would otherwise sit hidden under the modal. <span class="ask">Decide</span> Close Settings, as drawn, or keep it open and stack the page inside the modal. Closing is recommended: it is one page at a time, and ⌘, brings Settings back.</p>
+</section>
+
+<!-- (d) Confirm over Settings -->
+<section>
+  <div class="mac short">
+    <div class="titlebar"><span class="lights"><i></i><i></i><i></i></span>Wiffletree</div>
+    <div class="app"><div class="side"><div class="host">This Mac ▴</div></div><div class="main"><div class="chat"></div></div></div>
+    <div class="dim"></div>
+    <div class="modal" style="top:44px;bottom:16px">
+      <div class="mhead"><span class="t">Settings</span><span class="x">✕</span></div>
+      <div class="mbody">
+        <div class="nav"><div class="g">Shared with your Macs</div><div class="e on">Settings repository</div><div class="e">Check-ins</div></div>
+        <div class="content">
+          <div class="card"><div class="sec">SETTINGS REPOSITORY</div><div class="hint">Vyttle-LLC/wiffletree-storage</div></div>
+          <div class="dim2"></div>
+          <div class="confirm">
+            <div style="font-weight:600">Stop syncing with Vyttle-LLC/wiffletree-storage?</div>
+            <div class="hint">Sample body text; the real confirmation is unchanged.</div>
+            <div style="display:flex;justify-content:flex-end;gap:8px"><span class="btn ghost">Cancel</span><span class="btn danger">Stop syncing</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="caption"><b>Confirmations stay inside Settings</b>, over its body as they are today. Esc or clicking outside the confirmation closes only the confirmation, never Settings with it.</p>
+</section>
+
+<!-- Rules -->
+<section class="rules">
+  <div class="rule new">
+    <h3>How it closes</h3>
+    <ul>
+      <li><b>✕</b> in the modal's header.</li>
+      <li><b>Esc</b>, unless a confirmation or menu is open on top: then Esc closes only that.</li>
+      <li><b>Clicking the dimmed main window.</b> <span class="ask">Decide</span> Recommended yes, like Connect a computer. The risk is losing a half-typed field, such as a repository name; settings save as you change them, so nothing saved is lost.</li>
+      <li><b>⌘,</b> while Settings is open does nothing (it is already in front). <span class="ask">Decide</span> or toggle it closed.</li>
+    </ul>
+  </div>
+  <div class="rule new">
+    <h3>Pairing when Settings closes</h3>
+    <ul>
+      <li>Closing Settings while a code is showing <b>cancels that pairing</b>, so no code stays live that nobody can see. <span class="ask">Decide</span> or leave it valid until its 2 minutes run out.</li>
+      <li>Remote access keeps looking for changes only while Settings is open, as today.</li>
+    </ul>
+  </div>
+  <div class="rule new">
+    <h3>When the main window is closed</h3>
+    <ul>
+      <li>Settings needs a window to sit over. ⌘, or Wiffletree › Settings… with no main window <b>opens the main window first</b>, then Settings over it.</li>
+      <li>There is never a second Settings: one per main window, and ⌘, focuses the open one.</li>
+    </ul>
+  </div>
+  <div class="rule">
+    <h3>Unchanged</h3>
+    <ul>
+      <li>Every section, setting and wording; the sidebar's groups and order (except Builds and Remote access split in two).</li>
+      <li>Settings follows the host the switcher selected. The switcher sits behind the modal, so to change host you close Settings first.</li>
+      <li>Light and dark follow the app's theme.</li>
+    </ul>
+  </div>
+</section>
+
+</div>
+</body>
+</html>
