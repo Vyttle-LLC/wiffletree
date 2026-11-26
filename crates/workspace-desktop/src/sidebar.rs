@@ -8,8 +8,8 @@ use gpui_component::{
     tooltip::Tooltip,
 };
 use ui::{
-    bar_color, brand_image, card, eyebrow, hint, hollow_badge, icon, needs_you_badge, now, pill,
-    progress_bar, status_glyph,
+    badge_ring, bar_color, brand_image, card, eyebrow, hint, hollow_badge, icon, needs_you_badge,
+    now, pill, progress_bar, sent_on_badge, status_glyph,
 };
 use wording::{counted, plural, status_label};
 
@@ -1882,17 +1882,21 @@ impl Sidebar {
             .shared
             .snapshot()
             .is_some_and(|s| s.live_projects.contains(&project_id));
-        let attention = self.shared.snapshot().map_or(0, |s| {
-            needs_you(&s.attention, &s.workspace_notes, &project_id)
-        });
+        let badge = (self.shared.snapshot())
+            .and_then(|s| badge(&s.attention, &s.workspace_notes, &project_id));
         let detail = format!(
             "{} · {}{}{}{}{}",
             root.name,
             self.status_detail(root),
             if live { " · Running" } else { " · Stopped" },
-            match attention {
-                0 => String::new(),
-                n => format!(" · {n} {} you", plural(n, "item needs", "items need")),
+            match &badge {
+                None => String::new(),
+                Some(Badge::Answer { count: n, .. }) => {
+                    format!(" · {n} {} you", plural(*n, "item needs", "items need"))
+                }
+                Some(Badge::InParent(n)) => {
+                    format!(" · {} for you in {parent_name}", counted(*n, "question"))
+                }
             },
             match with_parent {
                 0 => String::new(),
@@ -2130,14 +2134,30 @@ impl Sidebar {
             })
             // Needs you outranks every other state, so it takes the status slot; a collapsed
             // parent's slot holds the most urgent state among it and its children.
-            .child(match (collapsed, attention) {
+            .child(match (collapsed, badge) {
                 (Some((_, rollup)), _) => div().flex_none().children(rollup),
-                (None, 0) => {
+                (None, None) => {
                     div()
                         .flex_none()
                         .child(status_glyph(self.shared.shown_status(root), 12., p))
                 }
-                (None, attention) => needs_you_badge(attention, p),
+                (
+                    None,
+                    Some(Badge::Answer {
+                        count,
+                        from_children,
+                    }),
+                ) => needs_you_badge(count, p).when(from_children, |badge| badge_ring(badge, p)),
+                // Grayed out: the parent sent these on, so the human answers them there.
+                (None, Some(Badge::InParent(count))) => {
+                    let answer_there = format!("Answer in {parent_name}");
+                    div().flex_none().child(
+                        div()
+                            .id(SharedString::from(format!("in-parent-{project_id}")))
+                            .child(sent_on_badge(count, p))
+                            .tooltip(move |w, c| Tooltip::new(answer_there.clone()).build(w, c)),
+                    )
+                }
             })
             .children(beneath.map(|line| {
                 div()
@@ -2561,19 +2581,47 @@ fn switcher_row(row: &hosts::SwitcherRow, p: Palette) -> Stateful<Div> {
         })
 }
 
-/// What a project's badge counts: its attention items, and the workspace notes, as the Inbox rail does.
-pub(super) fn needs_you(
+/// A project's needs-you badge.
+#[derive(Debug, PartialEq)]
+pub(super) enum Badge {
+    /// Items the human answers here, `from_children` when sub-projects' questions this project
+    /// sent on are among them.
+    Answer { count: usize, from_children: bool },
+    /// Only its own questions its parent sent on, which the human answers there.
+    InParent(usize),
+}
+impl Badge {
+    pub(super) fn count(&self) -> usize {
+        match *self {
+            Self::Answer { count, .. } | Self::InParent(count) => count,
+        }
+    }
+}
+
+/// What a project's badge counts, as its Inbox lists them: its attention items, the
+/// sub-projects' questions it sent on, and the workspace notes. None when nothing needs you.
+pub(super) fn badge(
     attention: &[Attention],
     notes: &[WorkspaceNote],
     project_id: &str,
-) -> usize {
-    attention
-        .iter()
+) -> Option<Badge> {
+    let (sent_on, asked_here): (Vec<&Attention>, Vec<&Attention>) = (attention.iter())
         .filter(|a| a.project_id == project_id)
-        .count()
-        + (notes.iter())
-            .filter(|note| note.is_for(project_id) && note.needs_you())
-            .count()
+        .partition(|a| matches!(a.route, QuestionRoute::Escalated { .. }));
+    let from_children = (attention.iter())
+        .filter(|a| inbox::escalated_via(a, project_id))
+        .count();
+    let notes = (notes.iter())
+        .filter(|note| note.is_for(project_id) && note.needs_you())
+        .count();
+    match (asked_here.len() + from_children + notes, sent_on.len()) {
+        (0, 0) => None,
+        (0, sent_on) => Some(Badge::InParent(sent_on)),
+        (here, sent_on) => Some(Badge::Answer {
+            count: here + sent_on,
+            from_children: from_children > 0,
+        }),
+    }
 }
 
 /// What a child's hollow badge counts: its questions waiting with its parent.
@@ -2646,12 +2694,18 @@ fn assistant_marks(snapshot: Option<&Snapshot>, now: i64) -> (usize, Option<Stri
 #[cfg(test)]
 mod tests {
     use super::{
-        assistant_marks, family_needs_you, family_state, needs_you, shown_status, with_parent,
+        Badge, assistant_marks, badge, family_needs_you, family_state, shown_status, with_parent,
     };
     use crate::{progress::ProgressBoard, tree};
     use workspace_core::{
-        Attention, Paused, Provider, Role, Session, Snapshot, Status, WorkspaceIndex, WorkspaceNote,
+        Attention, Paused, Provider, QuestionRoute, Role, Session, Snapshot, Status,
+        WorkspaceIndex, WorkspaceNote,
     };
+
+    /// What a project's badge counts.
+    fn needs_you(attention: &[Attention], notes: &[WorkspaceNote], project_id: &str) -> usize {
+        badge(attention, notes, project_id).map_or(0, |badge| badge.count())
+    }
 
     fn index(sessions: &[Session]) -> WorkspaceIndex {
         let sessions = sessions.to_vec();
@@ -2705,6 +2759,51 @@ mod tests {
         sessions[0].status = Status::Ready;
         sessions[1].archived = true;
         assert_eq!(shown_status(&sessions[0], &index(&sessions)), Status::Ready);
+    }
+
+    #[test]
+    fn a_question_sent_on_counts_in_the_parents_badge_and_grays_the_childs() {
+        let asked = |id: &str, route: QuestionRoute| Attention {
+            id: id.into(),
+            project_id: "child".into(),
+            session_id: "s".into(),
+            host: "claude".into(),
+            operation_id: "o".into(),
+            prompt: "Q".into(),
+            options: Vec::new(),
+            answer: None,
+            repository_request: None,
+            route,
+        };
+        let sent_on = asked(
+            "sent-on",
+            QuestionRoute::Escalated {
+                parent_id: "parent".into(),
+                note: None,
+            },
+        );
+        let items = [sent_on.clone()];
+        assert_eq!(
+            badge(&items, &[], "parent"),
+            Some(Badge::Answer {
+                count: 1,
+                from_children: true
+            })
+        );
+        assert_eq!(badge(&items, &[], "child"), Some(Badge::InParent(1)));
+        // A collapsed parent counts the question once.
+        assert_eq!(family_needs_you(&items, &[], &["parent", "child"]), 1);
+
+        // A question of the child's own keeps its badge normal.
+        let items = [sent_on, asked("own", QuestionRoute::Human)];
+        assert_eq!(
+            badge(&items, &[], "child"),
+            Some(Badge::Answer {
+                count: 2,
+                from_children: false
+            })
+        );
+        assert_eq!(badge(&items, &[], "parent").map(|b| b.count()), Some(1));
     }
 
     #[test]
@@ -2876,6 +2975,9 @@ mod tests {
         let index = with_child_working(&host, &child);
         assert_eq!(with_parent(index.snapshot(), &child.project_id), 0);
         assert_eq!(rollup(&index), Some(tree::Rollup::NeedsYou(1)));
+        let badge = |project: &str| badge(&index.snapshot().attention, &[], project);
+        assert_eq!(badge(&child.project_id), Some(Badge::InParent(1)));
+        assert_eq!(badge(&parent.project_id).map(|b| b.count()), Some(1));
     }
 }
 

@@ -519,11 +519,12 @@ impl Inspector {
         let parent = self.shared.project_name();
         let cards = children.iter().map(|child| {
             let coordinator = child.coordinator();
-            let needs_you = sidebar::needs_you(
+            let needs_you = sidebar::badge(
                 &snapshot.attention,
                 &snapshot.workspace_notes,
                 &child.project.id,
-            );
+            )
+            .map_or(0, |badge| badge.count());
             let stuck = Roster::new(
                 &self.shared.progress,
                 index,

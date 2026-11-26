@@ -721,7 +721,7 @@ impl Conversation {
                     (self.inbox)
                         .update(cx, |inbox, cx| {
                             let max_height = window.viewport_size().height / 2.;
-                            inbox.attention_card(item, true, Some(max_height), p, cx)
+                            inbox.attention_card(item, true, Some(max_height), None, p, cx)
                         })
                         .border_color(p.yellow.opacity(0.45)),
                 ),

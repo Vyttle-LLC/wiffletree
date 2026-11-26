@@ -233,11 +233,13 @@ fn reason(
     }
 }
 
-/// The project's Inbox items with the human: one's prompt, or how many, and the parent that
-/// escalated them.
+/// The project's Inbox items with the human, its sub-projects' questions it sent on among them:
+/// one's prompt, or how many, and the parent that escalated its own.
 fn questions(index: &WorkspaceIndex, project: &Project) -> Option<String> {
     let items: Vec<&Attention> = (index.snapshot().attention.iter())
-        .filter(|item| item.project_id == project.id)
+        .filter(|item| {
+            item.project_id == project.id || crate::inbox::escalated_via(item, &project.id)
+        })
         .collect();
     let asked = match items[..] {
         [] => return None,
@@ -245,7 +247,9 @@ fn questions(index: &WorkspaceIndex, project: &Project) -> Option<String> {
         _ => format!("{} questions", items.len()),
     };
     let escalated_by = items.iter().find_map(|item| match &item.route {
-        QuestionRoute::Escalated { parent_id, .. } => index.project(parent_id),
+        QuestionRoute::Escalated { parent_id, .. } if *parent_id != project.id => {
+            index.project(parent_id)
+        }
         _ => None,
     });
     Some(match escalated_by {
@@ -538,10 +542,12 @@ mod tests {
             "Keep the old format?\nIt is still read.",
             QuestionRoute::Human,
         );
+        // The parent lists them too, as the place to answer them.
         assert_eq!(
             me.drawn(),
             [
-                "[Questions] 2",
+                "[Questions] 3",
+                "  Accessible contrast — 2 questions",
                 "  Contrast warnings — 2 questions · via Accessible contrast",
                 "  Recipes — Keep the old format?",
             ]

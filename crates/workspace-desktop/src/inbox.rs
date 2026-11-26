@@ -10,6 +10,8 @@ use ui::{card, hint, mono, pill};
 
 /// Opens the issue an Inbox note names.
 pub(super) type OpenIssue = Rc<dyn Fn(&mut Window, &mut App)>;
+/// Opens the sub-project that asked a question its parent sent on.
+pub(super) type OpenChild = Rc<dyn Fn(&mut Window, &mut App)>;
 
 pub(super) struct Inbox {
     bridge: Bridge,
@@ -317,6 +319,7 @@ impl Inbox {
         item: &Attention,
         answering: bool,
         max_height: Option<Pixels>,
+        open_child: Option<OpenChild>,
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -340,7 +343,13 @@ impl Inbox {
             .items_center()
             .justify_between()
             .gap_2()
-            .child(hint(asker, p).text_ellipsis())
+            .child(hint(asker, p).flex_1().min_w_0().text_ellipsis())
+            .children(open_child.map(|open| {
+                button(SharedString::from(format!("open-child-{}", item.id)))
+                    .link()
+                    .label("Open ›")
+                    .on_click(move |_, window, cx| open(window, cx))
+            }))
             .child(match (&evaluator, disk_edge) {
                 (Some(_), _) => pill("UI evaluators", p.focus),
                 (None, Some(color)) => pill("Disk", color),
@@ -1073,6 +1082,12 @@ fn escalated_from(item: &Attention, projects: &[Project]) -> Option<Escalated> {
     })
 }
 
+/// Whether `item` is a sub-project's question that `project_id`'s coordinator sent on to the
+/// human.
+pub(super) fn escalated_via(item: &Attention, project_id: &str) -> bool {
+    matches!(&item.route, QuestionRoute::Escalated { parent_id, .. } if parent_id == project_id)
+}
+
 /// A repository or folder in full, wrapping rather than cut off: this is what approving adds.
 fn code(text: String, p: Palette) -> Div {
     div().flex().child(
@@ -1205,9 +1220,26 @@ fn approval_actions(
 
 #[cfg(test)]
 mod tests {
-    use super::{Settling, Settlings, escalated_from};
+    use super::{Settling, Settlings, escalated_from, escalated_via};
     use serde_json::json;
     use workspace_core::{Attention, Project, QuestionRoute};
+
+    #[test]
+    fn a_parent_lists_only_the_questions_it_sent_on_to_the_human() {
+        let mut item = open("q");
+        let parent = "parent".to_owned();
+        assert!(!escalated_via(&item, &parent), "the child's own");
+        item.route = QuestionRoute::Parent {
+            parent_id: parent.clone(),
+        };
+        assert!(!escalated_via(&item, &parent), "still with the parent");
+        item.route = QuestionRoute::Escalated {
+            parent_id: parent.clone(),
+            note: None,
+        };
+        assert!(escalated_via(&item, &parent));
+        assert!(!escalated_via(&item, "another"));
+    }
 
     fn open(id: &str) -> Attention {
         serde_json::from_value(json!({

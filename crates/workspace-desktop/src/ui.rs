@@ -568,6 +568,22 @@ pub(super) fn needs_you_badge(count: usize, p: Palette) -> Div {
         .child(icon("attention").size(px(12.)))
         .child(count.to_string())
 }
+/// A needs-you badge's ring, when it counts sub-projects' questions sent on to its project.
+pub(super) fn badge_ring(badge: Div, p: Palette) -> Div {
+    badge.shadow(vec![BoxShadow {
+        color: p.yellow.opacity(0.35),
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(2.),
+        inset: false,
+    }])
+}
+/// The needs-you badge grayed out: questions the parent sent on, which the human answers there.
+pub(super) fn sent_on_badge(count: usize, p: Palette) -> Div {
+    needs_you_badge(count, p)
+        .bg(p.edge.opacity(edge::HALF))
+        .text_color(p.subtle)
+}
 /// The needs-you badge's outline: questions waiting with someone other than the human.
 pub(super) fn hollow_badge(count: usize, p: Palette) -> Div {
     div()
