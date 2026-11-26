@@ -1796,8 +1796,10 @@ impl Sidebar {
         }
     }
 
-    /// A single-line tree row.
+    /// A single-line tree row. The selected one has an accent bar on its left edge and a fill
+    /// tinted past the faint overlay that hover uses.
     fn row(&self, id: SharedString, selected: bool, p: Palette) -> Stateful<Div> {
+        let selected_fill = p.overlay.blend(p.accent.opacity(0.14));
         div()
             .id(id)
             .min_h(px(30.))
@@ -1808,10 +1810,27 @@ impl Sidebar {
             .pr_2()
             .rounded_md()
             .text_size(px(font::MESSAGE))
-            .when(selected, |d| d.bg(p.overlay))
+            .when(selected, |d| {
+                d.bg(selected_fill).child(
+                    div()
+                        .absolute()
+                        .left(px(2.))
+                        .top(px(7.))
+                        .bottom(px(7.))
+                        .w(px(3.))
+                        .rounded_full()
+                        .bg(p.accent),
+                )
+            })
             .text_color(p.text)
             .cursor_pointer()
-            .hover(move |d| d.bg(p.overlay.opacity(if selected { 1. } else { 0.6 })))
+            .hover(move |d| {
+                d.bg(if selected {
+                    selected_fill
+                } else {
+                    p.overlay.opacity(0.6)
+                })
+            })
     }
 
     /// A project's row, indented with a branch icon for a `child`. A parent's row, which is given
@@ -1990,6 +2009,7 @@ impl Sidebar {
                             .min_w_0()
                             .text_ellipsis()
                             .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(if selected { p.text } else { p.subtle })
                             .child(label.clone()),
                     )
                     .when(standing, |d| d.child(pill("standing", p.subtle)))
