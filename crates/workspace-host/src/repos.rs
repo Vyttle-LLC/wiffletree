@@ -8,6 +8,7 @@ use github_access::{remote_head, run, run_at};
 use publish::GitTool;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 pub(crate) const FOLDER: &str = "repos";
 /// The folder of `repos/` that holds GitHub clones, one folder per owner. It has a dot, which no
@@ -193,6 +194,36 @@ pub(crate) fn name_origin(clone: &Path, name: &str) -> Result<()> {
     let origin = format!("https://github.com/{name}.git");
     runtime::git_output(clone, &["remote", "set-url", "origin", &origin])?;
     Ok(())
+}
+
+/// How old an `index.lock` in one of Wiffletree's clones must be before a pass takes it for one
+/// that a Git command killed at its deadline left behind. Wiffletree's own commands that take the
+/// lock run for seconds, so one this old is none of theirs.
+pub(crate) const STALE_LOCK_AGE: Duration = Duration::from_secs(10 * 60);
+
+/// Removes the `index.lock` a Git command killed at its deadline left in the clone at `clone`,
+/// which would fail every later pass: only one older than `STALE_LOCK_AGE` while no process has
+/// the lock or the clone's folder open, as Git and its hooks have it for their working directory.
+/// Only for Wiffletree's own clones under `repos/`, never a checkout people or agents work in.
+pub(crate) fn remove_stale_index_lock(clone: &Path, key: &str) {
+    let lock = clone.join(".git/index.lock");
+    let age = (fs::metadata(&lock).and_then(|m| m.modified()).ok())
+        .and_then(|modified| modified.elapsed().ok());
+    if !age.is_some_and(|age| age > STALE_LOCK_AGE) || in_use(clone, &lock) {
+        return;
+    }
+    if fs::remove_file(&lock).is_ok() {
+        eprintln!("Syncing {key}: removed a stale index.lock");
+    }
+}
+
+/// Whether any process has the clone's folder or `lock` open; one that cannot be checked is.
+fn in_use(clone: &Path, lock: &Path) -> bool {
+    let mut lsof = std::process::Command::new("lsof");
+    lsof.arg("-t").arg("+d").arg(clone).arg("--").arg(lock);
+    // lsof exits 1 both when nothing is open and on a mere warning, so only what it lists counts.
+    runtime::bounded_output(lsof, runtime::GIT_TIMEOUT, None)
+        .map_or(true, |(_, listed, _)| !listed.is_empty())
 }
 
 /// The URL `origin` fetches, as the clone's `.git/config` holds it.

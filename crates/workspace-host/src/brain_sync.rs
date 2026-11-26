@@ -1532,4 +1532,91 @@ pub(crate) mod tests {
         );
         assert_eq!(fs::read_dir(elsewhere.path()).unwrap().count(), 0);
     }
+
+    /// A `git commit -a` in `clone` whose pre-commit hook, which Git runs while it holds the
+    /// clone's `index.lock`, waits while Git lives until `hooks/release` exists, then writes
+    /// `hooks/ended`.
+    fn commit_holding_the_lock(clone: &Path, hooks: &Path) -> std::process::Command {
+        use std::os::unix::fs::PermissionsExt;
+        let (release, ended) = (hooks.join("release"), hooks.join("ended"));
+        let hook = hooks.join("pre-commit");
+        let script = format!(
+            "#!/bin/sh\nwhile kill -0 $PPID 2>/dev/null && [ ! -e '{}' ]; do sleep 0.05; done\ntouch '{}'\n",
+            release.display(),
+            ended.display()
+        );
+        fs::write(&hook, script).unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut git = std::process::Command::new("git");
+        git.arg("-C").arg(clone);
+        git.arg("-c")
+            .arg(format!("core.hooksPath={}", hooks.display()));
+        git.args(["-c", "user.name=Test", "-c", "user.email=test@example.com"]);
+        git.args(["commit", "--quiet", "--all", "--allow-empty", "-m", "Held"]);
+        git
+    }
+
+    fn wait_for(path: &Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !path.exists() {
+            assert!(std::time::Instant::now() < deadline, "{path:?} never came");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// Dates `lock` a minute past the age a pass takes for stale.
+    fn make_stale(lock: &Path) {
+        let at = SystemTime::now() - repos::STALE_LOCK_AGE - std::time::Duration::from_secs(60);
+        let file = fs::File::options().write(true).open(lock).unwrap();
+        file.set_modified(at).unwrap();
+    }
+
+    #[test]
+    fn a_lock_left_by_git_killed_at_its_deadline_fails_passes_until_stale_then_is_removed() {
+        let mut s = stored();
+        let clone = s.clone_folder();
+        let lock = clone.join(".git/index.lock");
+        let hooks = tempfile::tempdir().unwrap();
+        let commit = commit_holding_the_lock(&clone, hooks.path());
+        let deadline = std::time::Duration::from_millis(500);
+        let killed = runtime::bounded_output(commit, deadline, None)
+            .err()
+            .unwrap();
+        assert_eq!(
+            format!("{killed:#}"),
+            "Git query timed out: timed out waiting on channel"
+        );
+        wait_for(&hooks.path().join("ended"));
+        assert!(lock.exists(), "Git killed holding the lock leaves it");
+        let path = Stored::path_of(&s.log("Retry once."));
+        let failed = s.sync_answering().unwrap_err();
+        assert!(format!("{failed:#}").contains("index.lock"), "{failed:#}");
+        assert!(lock.exists(), "a lock younger than the stale age stays");
+        let problem = s.f.host.brain(REPO).unwrap().problem.unwrap();
+        assert!(problem.contains("index.lock"), "{problem}");
+        make_stale(&lock);
+        s.sync_answering().unwrap();
+        assert!(!lock.exists());
+        assert!(s.github.show(&path).is_some());
+        assert_eq!(s.f.host.brain(REPO).unwrap().problem, None);
+    }
+
+    #[test]
+    fn a_lock_a_running_git_command_holds_is_never_removed_however_old() {
+        let mut s = stored();
+        let clone = s.clone_folder();
+        let lock = clone.join(".git/index.lock");
+        let hooks = tempfile::tempdir().unwrap();
+        let mut running = (commit_holding_the_lock(&clone, hooks.path()))
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        wait_for(&lock);
+        make_stale(&lock);
+        assert!(s.sync_answering().is_err());
+        assert!(lock.exists(), "the running commit's lock stays");
+        fs::write(hooks.path().join("release"), "").unwrap();
+        assert!(running.wait().unwrap().success());
+        assert!(!lock.exists());
+    }
 }
