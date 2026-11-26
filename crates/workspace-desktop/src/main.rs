@@ -1762,7 +1762,9 @@ fn main() -> anyhow::Result<()> {
                 .0
                 .as_ref()
                 .map(|(h, _)| *h);
+            // A dialog such as Settings covers the page the search would open on.
             if main == Some(window.window_handle())
+                && !window.has_active_dialog(cx)
                 && brain_search::slash_outside_any_field(&event.keystroke, &window.context_stack())
             {
                 cx.stop_propagation();
@@ -1771,11 +1773,9 @@ fn main() -> anyhow::Result<()> {
         })
         .detach();
         cx.on_action(|_: &About, _| show_about());
-        // Settings needs no main window, so it opens even after that one is closed.
-        // Deferred so ⌘, pressed inside Settings can still focus that window.
-        cx.on_action(move |_: &OpenSettings, cx| {
-            cx.defer(settings::Settings::open);
-        });
+        // Settings opens over the main window, which opens first if it was closed. While
+        // Settings is open, this does nothing.
+        cx.on_action(|_: &OpenSettings, cx| settings::Settings::open(cx));
         cx.set_menus(vec![
             Menu::new("Wiffletree").items([
                 MenuItem::action("About Wiffletree", About),
