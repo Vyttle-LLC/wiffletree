@@ -959,6 +959,59 @@ impl Inbox {
                     .map(|kept| hint(kept, p).text_size(px(font::CAPTION))),
             )
     }
+    /// A phone paired by QR code, which anyone who photographed the code could have done. Its
+    /// buttons are the host's alone, so a Mac driving the host shows only the note.
+    pub(super) fn paired_card(
+        &self,
+        notice: &PairedNotice,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let device_id = notice.device_id.clone();
+        let on_this_mac = self.bridge.remote().is_none();
+        card(p)
+            .bg(p.surface)
+            .border_color(p.yellow.opacity(0.55))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(hint("Workspace · Remote access", p))
+                    .child(pill("New device", p.yellow)),
+            )
+            .child(
+                div()
+                    .text_size(px(font::TEXT))
+                    .line_height(relative(1.5))
+                    .child(paired_text(&notice.device_name)),
+            )
+            .when(on_this_mac, |card| {
+                card.child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            button(SharedString::from(format!("remote-{}", notice.device_id)))
+                                .small()
+                                .label("Remote access")
+                                .on_click(|_, _, cx| settings::Settings::open_at_remote_access(cx)),
+                        )
+                        .child(
+                            button(SharedString::from(format!("seen-{}", notice.device_id)))
+                                .ghost()
+                                .small()
+                                .label("Dismiss")
+                                .on_click(cx.listener(move |inbox, _, window, cx| {
+                                    let device_id = device_id.clone();
+                                    let command = Command::DismissPairedNotice { device_id };
+                                    inbox.request(command, window, cx);
+                                })),
+                        ),
+                )
+            })
+    }
     /// A storage repository's file a scan held back from a push: which file, the check and its
     /// rule, never what matched.
     pub(super) fn held_card(&self, held: &HeldFile, p: Palette) -> Div {
@@ -1086,6 +1139,10 @@ fn escalated_from(item: &Attention, projects: &[Project]) -> Option<Escalated> {
 /// human.
 pub(super) fn escalated_via(item: &Attention, project_id: &str) -> bool {
     matches!(&item.route, QuestionRoute::Escalated { parent_id, .. } if parent_id == project_id)
+}
+
+fn paired_text(device_name: &str) -> String {
+    format!("A phone was paired: {device_name}. Not you? Remove it in Remote access.")
 }
 
 /// A repository or folder in full, wrapping rather than cut off: this is what approving adds.

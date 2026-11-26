@@ -12,17 +12,21 @@ mod websocket;
 
 use crate::service::Requests;
 use anyhow::{Context, Result};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use std::{
     collections::{HashMap, HashSet},
     io::Read,
-    net::{Shutdown, TcpStream},
-    path::PathBuf,
+    net::{Ipv4Addr, Shutdown, TcpStream},
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
-use workspace_core::{AccessLevel, Command, PAIRING_MS, Pairing, pairing::KeyPair};
+use workspace_core::{
+    AccessLevel, Command, PAIRING_MS, Pairing, PairingQr, QR_SECRET_BYTES, QrPayload,
+    pairing::KeyPair,
+};
 
 type Reply = async_channel::Sender<std::result::Result<serde_json::Value, String>>;
 /// Milliseconds since the epoch, as the host's clock or a test's says.
@@ -111,10 +115,12 @@ pub(crate) enum ToActor {
         signature: Vec<u8>,
         reply: async_channel::Sender<Option<AccessLevel>>,
     },
-    /// A pairing exchange confirmed: store the device with Control and close pairing mode.
+    /// A pairing exchange confirmed: store the device with Control, and note in the Inbox that
+    /// it paired when it did so by QR code.
     Paired {
         key: Vec<u8>,
         name: String,
+        by_qr: bool,
         reply: async_channel::Sender<std::result::Result<(), String>>,
     },
     /// Pairing mode or the open connections changed on their own.
@@ -130,6 +136,8 @@ struct Mode {
     /// complete under it.
     generation: u64,
     code: String,
+    /// The QR code's one-time secret.
+    secret: Vec<u8>,
     expires_at: i64,
     wrong: u32,
     /// An exchange is running; another device is told to wait.
@@ -225,6 +233,7 @@ pub(crate) struct Remote {
     error: Option<String>,
     /// The `pairing` TXT field last advertised.
     advertised_pairing: Option<bool>,
+    tailscale: TailscaleName,
 }
 impl Remote {
     pub(crate) fn new(options: Options, requests: Requests) -> Self {
@@ -246,6 +255,7 @@ impl Remote {
             listening: None,
             error: None,
             advertised_pairing: None,
+            tailscale: TailscaleName::default(),
         }
     }
     pub(crate) fn name(&self) -> &str {
@@ -278,6 +288,7 @@ impl Remote {
         });
         let listening = listener::listen(self.options.port, identity, self.shared.clone())?;
         self.listening = Some(listening);
+        self.tailscale.refresh();
         self.advertise();
         Ok(())
     }
@@ -306,7 +317,7 @@ impl Remote {
             Err(error) => eprintln!("Remote access advertising: {error:#}"),
         }
     }
-    /// Opens pairing mode with a new code, replacing one already open.
+    /// Opens pairing mode with a new code and QR secret, replacing one already open.
     pub(crate) fn open_pairing(&mut self) -> Result<()> {
         anyhow::ensure!(
             self.listening.is_some(),
@@ -316,10 +327,12 @@ impl Remote {
         *self.shared.pairing() = Some(Mode {
             generation: self.shared.next.fetch_add(1, Ordering::Relaxed),
             code: new_code()?,
+            secret: random_bytes(QR_SECRET_BYTES)?,
             expires_at,
             wrong: 0,
             busy: false,
         });
+        self.tailscale.refresh();
         // The advertisement says pairing is off again once the time is up.
         let requests = self.shared.requests.clone();
         std::thread::spawn(move || {
@@ -347,6 +360,27 @@ impl Remote {
         self.shared.open_pairing().as_ref().map(|mode| Pairing {
             code: mode.code.clone(),
             expires_at: mode.expires_at,
+        })
+    }
+    /// The QR code of the open pairing mode, with the Tailscale name as last read.
+    pub(crate) fn pairing_qr(&self) -> Result<PairingQr> {
+        let (secret, expires_at) = {
+            let pairing = self.shared.open_pairing();
+            let mode = pairing.as_ref().context("Pairing is not open")?;
+            (mode.secret.clone(), mode.expires_at)
+        };
+        let (Some(key), Some(port)) = (&self.key, self.port()) else {
+            anyhow::bail!("Turn on remote access before pairing a device");
+        };
+        Ok(PairingQr {
+            payload: QrPayload {
+                host_key: BASE64.encode(key.public_key()),
+                host_name: self.name.clone(),
+                addresses: qr_addresses(&ipv4_addresses(), self.tailscale.get()),
+                port,
+                secret: BASE64.encode(secret),
+            },
+            expires_at,
         })
     }
     pub(crate) fn connected(&self) -> HashSet<String> {
@@ -386,6 +420,12 @@ fn new_code() -> Result<String> {
     }
 }
 
+fn random_bytes(count: usize) -> Result<Vec<u8>> {
+    let mut bytes = vec![0u8; count];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
 /// This Mac's name as the Sharing settings give it, or its host name.
 fn computer_name() -> String {
     let named = |program: &str, args: &[&str]| {
@@ -416,6 +456,82 @@ pub(crate) fn addresses() -> Vec<String> {
             addresses.push(format!("{name}.local"));
         }
     }
+    addresses.extend(ipv4_addresses().iter().map(Ipv4Addr::to_string));
+    addresses
+}
+
+/// What a QR code lists, best first: private LAN addresses, then Tailscale's, then the Tailscale
+/// name. Others are left out, and so are IPv6 addresses, which the listener does not serve.
+fn qr_addresses(ips: &[Ipv4Addr], tailscale_name: Option<String>) -> Vec<String> {
+    let private = ips.iter().filter(|ip| ip.is_private());
+    let tailscale = ips.iter().filter(|ip| is_tailscale(ip));
+    (private.chain(tailscale).map(Ipv4Addr::to_string))
+        .chain(tailscale_name)
+        .collect()
+}
+
+/// Whether `ip` is in Tailscale's range, 100.64.0.0/10.
+fn is_tailscale(ip: &Ipv4Addr) -> bool {
+    let [first, second, ..] = ip.octets();
+    first == 100 && second & 0xc0 == 64
+}
+
+/// This Mac's MagicDNS name as last read, which the QR code lists. The Tailscale CLI can be slow
+/// or hang, so it is read on a thread of its own, never on the actor's.
+#[derive(Clone, Default)]
+struct TailscaleName {
+    name: Arc<Mutex<Option<String>>>,
+    reading: Arc<AtomicBool>,
+}
+impl TailscaleName {
+    /// Reads the name again, unless a read is still running; the last name stays meanwhile.
+    fn refresh(&self) {
+        if self.reading.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let this = self.clone();
+        std::thread::spawn(move || {
+            let name = tailscale_name();
+            *this.name.lock().unwrap_or_else(|e| e.into_inner()) = name;
+            this.reading.store(false, Ordering::Release);
+        });
+    }
+    fn get(&self) -> Option<String> {
+        self.name.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+/// This Mac's MagicDNS name, when the Tailscale CLI is installed and connected.
+fn tailscale_name() -> Option<String> {
+    // The App Store and standalone apps, Homebrew, and nix-darwin.
+    const CLIS: [&str; 4] = [
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        "/opt/homebrew/bin/tailscale",
+        "/usr/local/bin/tailscale",
+        "/run/current-system/sw/bin/tailscale",
+    ];
+    let cli = CLIS.into_iter().find(|cli| Path::new(cli).exists())?;
+    let output = std::process::Command::new(cli)
+        .args(["status", "--json"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    magic_dns_name(&output.stdout)
+}
+
+/// `Self.DNSName` of `tailscale status --json`, without its final dot, while connected.
+fn magic_dns_name(status: &[u8]) -> Option<String> {
+    let status: serde_json::Value = serde_json::from_slice(status).ok()?;
+    if status["BackendState"] != "Running" {
+        return None;
+    }
+    let name = status["Self"]["DNSName"].as_str()?.trim_end_matches('.');
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+/// This Mac's IPv4 addresses, other than loopback and link-local ones.
+fn ipv4_addresses() -> Vec<Ipv4Addr> {
+    let mut addresses = vec![];
     let mut interfaces: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: getifaddrs fills the pointer with a list freed below.
     if unsafe { libc::getifaddrs(&mut interfaces) } == 0 {
@@ -428,9 +544,9 @@ pub(crate) fn addresses() -> Vec<String> {
             {
                 // SAFETY: an AF_INET address is a `sockaddr_in`.
                 let address = unsafe { &*(node.ifa_addr as *const libc::sockaddr_in) };
-                let ip = std::net::Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr));
+                let ip = Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr));
                 if !ip.is_loopback() && !ip.is_link_local() {
-                    addresses.push(ip.to_string());
+                    addresses.push(ip);
                 }
             }
             interface = node.ifa_next;
@@ -450,5 +566,42 @@ mod tests {
         for _ in 0..50 {
             assert!(workspace_core::pairing::is_code(&new_code().unwrap()));
         }
+    }
+
+    #[test]
+    fn a_qr_code_lists_lan_addresses_then_tailscale_then_its_name() {
+        let ips = [
+            "100.101.7.9",
+            "203.0.113.4",
+            "192.168.1.20",
+            "100.128.0.1",
+            "10.0.0.5",
+        ]
+        .map(|ip| ip.parse().unwrap());
+        assert_eq!(
+            qr_addresses(&ips, Some("studio.tail4c2e.ts.net".into())),
+            [
+                "192.168.1.20",
+                "10.0.0.5",
+                "100.101.7.9",
+                "studio.tail4c2e.ts.net"
+            ]
+        );
+        assert_eq!(qr_addresses(&ips[..1], None), ["100.101.7.9"]);
+    }
+
+    #[test]
+    fn the_tailscale_name_is_read_only_while_connected() {
+        let status = |state: &str| {
+            format!(
+                r#"{{"BackendState": "{state}", "Self": {{"DNSName": "studio.tail4c2e.ts.net."}}}}"#
+            )
+        };
+        assert_eq!(
+            magic_dns_name(status("Running").as_bytes()).as_deref(),
+            Some("studio.tail4c2e.ts.net")
+        );
+        assert_eq!(magic_dns_name(status("Stopped").as_bytes()), None);
+        assert_eq!(magic_dns_name(b"not json"), None);
     }
 }

@@ -31,6 +31,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 chrono-tz = "0.10"
 objc = "0.2"
 sha2 = "0.11"
+# The QR code an iPhone scans to pair; the page draws its modules itself.
+qrcode = { version = "0.15", default-features = false, features = ["std"] }
 # HTML boards (board_web_view.rs): wry places a WKWebView over a GPUI element, and the objc2
 # crates (the versions wry and GPUI already use) reach the WebKit and AppKit calls wry does not
 # wrap: the content rule list, the data store, the UI delegate, snapshots and first responder.

@@ -131,6 +131,18 @@ impl Studio {
             serde_json::from_value(self.host(Command::OpenPairing).unwrap()).unwrap();
         state.pairing.unwrap().code
     }
+    /// Opens pairing mode and reads its QR code, pointed at this Mac's loopback address: the
+    /// listener serves it as it serves the LAN addresses the code lists.
+    pub fn open_qr(&self) -> PairingQr {
+        self.open_pairing();
+        self.qr()
+    }
+    pub fn qr(&self) -> PairingQr {
+        let mut qr: PairingQr =
+            serde_json::from_value(self.host(Command::PairingQr).unwrap()).unwrap();
+        qr.payload.addresses = vec!["127.0.0.1".into()];
+        qr
+    }
     /// Pairs `device` through pairing mode opened at the host.
     pub fn pair(&self, device: &KeyPair, name: &str) -> PairedHost {
         let code = self.open_pairing();

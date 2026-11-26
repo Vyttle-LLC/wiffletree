@@ -224,6 +224,8 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::SetRemoteAccess { .. }
         | Command::OpenPairing
         | Command::CancelPairing
+        | Command::PairingQr
+        | Command::DismissPairedNotice { .. }
         | Command::SetDeviceLevel { .. }
         | Command::RemoveDevice { .. } => Row::RemoteAccess,
         Command::StopAgentsAndQuit | Command::RestartHost { .. } => Row::HostProcess,

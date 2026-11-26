@@ -1314,7 +1314,8 @@ impl Snapshot {
             | WorkspaceNote::HeldEntry(_)
             | WorkspaceNote::Alert(_)
             | WorkspaceNote::ScanStopped(_)
-            | WorkspaceNote::Conflict(_) => None,
+            | WorkspaceNote::Conflict(_)
+            | WorkspaceNote::DevicePaired(_) => None,
         })
     }
 
@@ -1519,6 +1520,17 @@ pub enum WorkspaceNote {
     Issue(IssueNote),
     /// A brain conflict, listed only in the Inbox of each project the card names.
     Conflict(Box<ConflictCard>),
+    /// A device paired by QR code, until the human dismisses the note or removes the device:
+    /// a photographed QR code pairs a stranger's phone too.
+    DevicePaired(PairedNotice),
+}
+/// A device that paired by QR code.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairedNotice {
+    pub device_id: String,
+    pub device_name: String,
+    /// In milliseconds since the epoch.
+    pub paired_at: i64,
 }
 impl WorkspaceNote {
     /// Whether `project`'s Inbox lists it: a conflict only in its projects', a held entry only
@@ -4711,6 +4723,12 @@ pub enum Command {
     OpenPairing,
     /// Closes pairing mode; answered with `RemoteAccess`.
     CancelPairing,
+    /// The QR code of the open pairing mode, for the `qr` method; answered with `PairingQr`.
+    PairingQr,
+    /// Closes the Inbox note that a device paired by QR code; answered with `RemoteAccess`.
+    DismissPairedNotice {
+        device_id: String,
+    },
     /// Changes what a paired device may do and closes its connections; answered with
     /// `RemoteAccess`.
     SetDeviceLevel {
@@ -4804,7 +4822,8 @@ impl Command {
             | Self::BoardVersions { .. }
             | Self::BoardVersionFolder { .. }
             | Self::HeldEntryText { .. }
-            | Self::RemoteAccess => true,
+            | Self::RemoteAccess
+            | Self::PairingQr => true,
             Self::ImportRepositories { .. }
             | Self::RefreshRepositories
             | Self::RemoveRepositoryRoot { .. }
@@ -4937,6 +4956,7 @@ impl Command {
             | Self::SetRemoteAccess { .. }
             | Self::OpenPairing
             | Self::CancelPairing
+            | Self::DismissPairedNotice { .. }
             | Self::SetDeviceLevel { .. }
             | Self::RemoveDevice { .. }
             | Self::UploadAttachment { .. } => false,
@@ -4956,9 +4976,10 @@ impl Command {
     /// reading, editing, marking or discarding one a scan held, and bringing a brain in.
     /// Every write to a tracker is the human's, settling a paused issue file, following an issue
     /// and every step of a Linear import too; reading issues is not. Remote access is the human's
-    /// too: its state carries the pairing code. The assistant is the human's: its threads, their
-    /// text and its name. So are jobs: only the user saves, pauses, runs or deletes one. So are
-    /// Boards, the outputs threads and jobs saved, and only the user shares one into a Space.
+    /// too: its state carries the pairing code, and its QR code the secret. The assistant is the
+    /// human's: its threads, their text and its name. So are jobs: only the user saves, pauses,
+    /// runs or deletes one. So are Boards, the outputs threads and jobs saved, and only the user
+    /// shares one into a Space.
     /// So are issue threads' proposals: only the human applies or discards one. So are UI
     /// evaluators: what a project allows, stopping a run, and reading runs, whose reasons can
     /// quote what the evaluator said.
@@ -5063,6 +5084,8 @@ impl Command {
                 | Self::SetRemoteAccess { .. }
                 | Self::OpenPairing
                 | Self::CancelPairing
+                | Self::PairingQr
+                | Self::DismissPairedNotice { .. }
                 | Self::SetDeviceLevel { .. }
                 | Self::RemoveDevice { .. }
         ) || matches!(
@@ -5080,6 +5103,8 @@ impl Command {
                 | Self::SetRemoteAccess { .. }
                 | Self::OpenPairing
                 | Self::CancelPairing
+                | Self::PairingQr
+                | Self::DismissPairedNotice { .. }
                 | Self::SetDeviceLevel { .. }
                 | Self::RemoveDevice { .. }
         )
