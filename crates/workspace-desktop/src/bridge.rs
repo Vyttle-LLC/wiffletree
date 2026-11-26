@@ -260,6 +260,12 @@ impl Bridge {
     pub(crate) fn host_version(&self) -> Option<String> {
         self.client.as_ref().ok()?.host_version()
     }
+    /// Whether the host last connected to offers `capability`.
+    pub(crate) fn offers(&self, capability: &str) -> bool {
+        self.client
+            .as_ref()
+            .is_ok_and(|client| client.offers(capability))
+    }
     /// When the host last sent anything, in Unix milliseconds.
     pub(crate) fn heard_at(&self) -> Option<i64> {
         let heard = self.client.as_ref().ok()?.link().heard_at?;

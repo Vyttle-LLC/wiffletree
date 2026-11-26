@@ -1433,6 +1433,7 @@ fn archiving_a_worker_while_it_compacts_lets_it_finish_and_runs_no_turn_after() 
         world.request(Command::SetArchived {
             session_id: worker.into(),
             archived: true,
+            discard_uncommitted: None,
         });
     });
     let sessions = world.snapshot().sessions.into_iter();

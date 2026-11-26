@@ -228,6 +228,7 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
         Command::SetArchived {
             session_id: text(),
             archived: true,
+            discard_uncommitted: None,
         },
         Command::Send {
             id: text(),

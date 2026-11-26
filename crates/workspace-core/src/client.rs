@@ -280,6 +280,10 @@ impl HostClient {
     pub fn host_version(&self) -> Option<String> {
         self.0.state().host_version.clone()
     }
+    /// Whether the host last connected to offers `capability`.
+    pub fn offers(&self, capability: &str) -> bool {
+        self.0.state().capabilities.iter().any(|c| c == capability)
+    }
     /// Asks the host to restart, waiting for its answer, which `Now` gives once its turns have
     /// stopped. A host that refused the client is asked on a connection of its own, as the
     /// handshake allows after a refusal.

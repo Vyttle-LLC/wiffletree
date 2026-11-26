@@ -2,9 +2,11 @@ mod common;
 use common::git_output as git;
 use serde_json::json;
 use std::{fs, path::Path, process::Command};
+use workspace_core::{
+    ArchiveOutcome, Provider, Receipt, Role, Session, Status, Ticket, TicketState, UncommittedWork,
+};
 #[cfg(target_os = "macos")]
 use workspace_core::{Job, PROCESS_NOTICE_PREFIX};
-use workspace_core::{Provider, Receipt, Role, Session, Status, Ticket, TicketState};
 use workspace_host::Host;
 
 fn succeed(path: &Path, args: &[&str]) {
@@ -224,6 +226,157 @@ fn unsaved_work_blocks_the_whole_archive() {
         assert!(Path::new(&ticket.worktree).exists());
     }
     assert!(host.sessions().unwrap().iter().all(|s| !s.archived));
+}
+
+#[test]
+fn archiving_answers_unsaved_work_with_its_tickets_and_changes_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
+    let (root, coordinator) = team(&mut host, directory.path());
+    let db = store(directory.path());
+    let clean = worked_ticket(&mut host, &coordinator, "Clean");
+    let modified = worked_ticket(&mut host, &coordinator, "Modified");
+    let untracked = worked_ticket(&mut host, &coordinator, "Untracked");
+    fs::write(Path::new(&modified.worktree).join("style.css"), "edited").unwrap();
+    // Each file in an untracked folder counts; the ignored build output does not.
+    let notes = Path::new(&untracked.worktree).join("notes");
+    fs::create_dir_all(&notes).unwrap();
+    fs::write(notes.join("a.md"), "draft").unwrap();
+    fs::write(notes.join("b.md"), "draft").unwrap();
+    let agent = host
+        .assign_ticket(
+            &modified.id,
+            Role::Implementer,
+            Provider::Claude,
+            "Do",
+            None,
+        )
+        .unwrap();
+    start_turn(&db, &agent);
+    host.set_status(&agent.id, Status::Working).unwrap();
+
+    let outcome = host.archive_session(&root.id, false).unwrap();
+
+    let work = |ticket: &Ticket, changed_files| UncommittedWork {
+        ticket_id: ticket.id.clone(),
+        title: ticket.title.clone(),
+        repository: "web".into(),
+        changed_files,
+    };
+    assert_eq!(
+        outcome,
+        ArchiveOutcome::UncommittedWork {
+            tickets: vec![work(&modified, 1), work(&untracked, 2)]
+        }
+    );
+    for ticket in [&clean, &modified, &untracked] {
+        assert!(Path::new(&ticket.worktree).exists());
+    }
+    assert!(host.sessions().unwrap().iter().all(|s| !s.archived));
+    assert_eq!(host.session(&agent.id).unwrap().status, Status::Working);
+    assert!(host.pending_worktree_removals().unwrap().is_empty());
+}
+
+#[test]
+fn discarding_unsaved_work_removes_the_worktrees_keeps_the_branches_and_archives() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
+    let (root, coordinator) = team(&mut host, directory.path());
+    let clean = worked_ticket(&mut host, &coordinator, "Clean");
+    let modified = worked_ticket(&mut host, &coordinator, "Modified");
+    fs::write(Path::new(&modified.worktree).join("style.css"), "edited").unwrap();
+    fs::write(Path::new(&modified.worktree).join("notes.md"), "draft").unwrap();
+
+    let outcome = host.archive_session(&root.id, true).unwrap();
+
+    let ArchiveOutcome::Archived {
+        affected,
+        discarded,
+    } = outcome
+    else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(affected[0].id, root.id);
+    assert_eq!(discarded.len(), 1);
+    assert_eq!(discarded[0].ticket_id, modified.id);
+    assert_eq!(discarded[0].changed_files, 2);
+    assert!(host.session(&coordinator.id).unwrap().archived);
+    for ticket in [&clean, &modified] {
+        assert!(!Path::new(&ticket.worktree).exists());
+        assert!(branch_exists(directory.path(), ticket));
+    }
+
+    // Restoring brings back the committed work only.
+    host.set_archived(&coordinator.id, false).unwrap();
+    let restored = Path::new(&modified.worktree);
+    assert_eq!(
+        fs::read_to_string(restored.join("style.css")).unwrap(),
+        "body {}\n"
+    );
+    assert!(!restored.join("notes.md").exists());
+}
+
+#[test]
+fn a_locked_worktree_refuses_the_archive_even_with_a_discard() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let modified = worked_ticket(&mut host, &coordinator, "Modified");
+    let locked = worked_ticket(&mut host, &coordinator, "Locked");
+    fs::write(Path::new(&modified.worktree).join("style.css"), "edited").unwrap();
+    succeed(
+        &directory.path().join("web"),
+        &["worktree", "lock", &locked.worktree],
+    );
+
+    for discard in [false, true] {
+        let refused = host
+            .archive_session(&coordinator.id, discard)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains(&locked.id) && refused.contains("locked"),
+            "{refused}"
+        );
+    }
+
+    assert!(Path::new(&modified.worktree).join("style.css").exists());
+    assert!(!host.session(&coordinator.id).unwrap().archived);
+}
+
+#[test]
+fn a_discard_completes_a_removal_deferred_by_a_turn_after_a_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
+    let (root, coordinator) = team(&mut host, directory.path());
+    let db = store(directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
+    fs::write(Path::new(&ticket.worktree).join("notes.md"), "draft").unwrap();
+    let agent = host
+        .assign_ticket(&ticket.id, Role::Implementer, Provider::Claude, "Do", None)
+        .unwrap();
+    start_turn(&db, &agent);
+    host.set_status(&agent.id, Status::Working).unwrap();
+
+    let outcome = host.archive_session(&root.id, true).unwrap();
+    assert!(
+        matches!(outcome, ArchiveOutcome::Archived { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        host.pending_worktree_removals().unwrap(),
+        std::slice::from_ref(&ticket.id)
+    );
+    // The turn writes more before it ends, and the host restarts meanwhile.
+    fs::write(Path::new(&ticket.worktree).join("partial.rs"), "fn").unwrap();
+    drop(host);
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
+    finish_turn(&db, &mut host, &agent);
+
+    assert!(!Path::new(&ticket.worktree).exists());
+    assert!(branch_exists(directory.path(), &ticket));
+    assert!(host.pending_worktree_removals().unwrap().is_empty());
+    assert!(host.open_attention(&root.project_id).unwrap().is_empty());
 }
 
 #[test]

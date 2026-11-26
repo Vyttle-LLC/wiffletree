@@ -1614,7 +1614,7 @@ mod tests {
         let scratch = f.host.scratch_folder(&ticket.id);
 
         f.host
-            .with_worktrees_removed(std::slice::from_ref(&ticket), |_| Ok(()))
+            .with_worktrees_removed(std::slice::from_ref(&ticket), false, |_| Ok(()))
             .unwrap();
         f.settle(now());
 
@@ -1765,7 +1765,7 @@ mod tests {
         fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
 
         f.host
-            .with_worktrees_removed(std::slice::from_ref(&ticket), |_| Ok(()))
+            .with_worktrees_removed(std::slice::from_ref(&ticket), false, |_| Ok(()))
             .unwrap();
         f.settle(now());
         fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
@@ -1832,7 +1832,7 @@ mod tests {
         };
 
         f.host
-            .with_worktrees_removed(std::slice::from_ref(&ticket), |_| Ok(()))
+            .with_worktrees_removed(std::slice::from_ref(&ticket), false, |_| Ok(()))
             .unwrap();
         let start = now();
         f.settle(start);

@@ -473,10 +473,10 @@ impl Host {
     ) -> Result<Ticket> {
         // The agents' processes are stopped before the worktree goes, and not at all when the
         // worktree cannot be removed.
-        self.check_removable(std::slice::from_ref(&ticket))?;
+        self.check_removable(std::slice::from_ref(&ticket), false)?;
         let agents = self.ticket_agents(&ticket.id)?;
         let stopped = self.stop_started_by(agents.iter().map(|agent| &agent.id))?;
-        let finished = self.with_worktrees_removed(&[ticket.clone()], |host| {
+        let finished = self.with_worktrees_removed(&[ticket.clone()], false, |host| {
             // Before its caller is archived, so the caller still gets the request's one message.
             host.withdraw_request(&mut ticket, &format!("the ticket was {state}"))?;
             host.withdraw_merge(&mut ticket, &format!("the ticket was {state}"))?;

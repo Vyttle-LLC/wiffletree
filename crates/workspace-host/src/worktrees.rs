@@ -72,17 +72,20 @@ impl Host {
         Ok(())
     }
     /// Removes the tickets' worktrees, keeping their branches, then applies `change`. Refuses
-    /// without removing anything while a worktree is locked or holds uncommitted or untracked
-    /// work. Ignored files such as build output do not count, and missing worktrees are already
-    /// done. A worktree whose agent is still in its turn is marked for removal when the turn
-    /// ends instead. `change` and the marks run in one savepoint; if a removal or `change` fails,
-    /// its writes roll back and the removed worktrees, proven clean, are re-created.
+    /// without removing anything while a worktree is locked or, unless `discard_uncommitted`,
+    /// holds uncommitted or untracked work. Ignored files such as build output do not count,
+    /// and missing worktrees are already done. A worktree whose agent is still in its turn is
+    /// marked for removal when the turn ends instead, the mark keeping `discard_uncommitted`.
+    /// `change` and the marks run in one savepoint; if a removal or `change` fails, its writes
+    /// roll back and the removed worktrees are re-created from their branches, which loses
+    /// nothing unless the human chose to discard their uncommitted work.
     pub(crate) fn with_worktrees_removed<T>(
         &mut self,
         tickets: &[Ticket],
+        discard_uncommitted: bool,
         change: impl FnOnce(&mut Self) -> Result<T>,
     ) -> Result<T> {
-        self.check_removable(tickets)?;
+        self.check_removable(tickets, discard_uncommitted)?;
         let mut removed = vec![];
         let mut deferred = vec![];
         let mut result = Ok(());
@@ -98,7 +101,7 @@ impl Host {
                     break;
                 }
             }
-            match self.remove_worktree(ticket) {
+            match self.remove_worktree(ticket, discard_uncommitted) {
                 Ok(true) => removed.push(ticket),
                 Ok(false) => {}
                 Err(error) => {
@@ -112,9 +115,12 @@ impl Host {
             let changed = deferred
                 .iter()
                 .try_for_each(|ticket| {
+                    // A discard joins a removal already pending, which keeps its mark's time.
                     self.db.execute(
-                        "INSERT OR IGNORE INTO pending_worktree_removals VALUES (?1,?2)",
-                        params![ticket.id, now()],
+                        "INSERT INTO pending_worktree_removals (ticket_id,marked_at,discard_uncommitted)
+                         VALUES (?1,?2,?3) ON CONFLICT(ticket_id) DO UPDATE
+                         SET discard_uncommitted=discard_uncommitted OR excluded.discard_uncommitted",
+                        params![ticket.id, now(), discard_uncommitted],
                     )?;
                     Ok(())
                 })
@@ -165,7 +171,13 @@ impl Host {
         }
         Ok(undone?)
     }
-    pub(crate) fn check_removable(&self, tickets: &[Ticket]) -> Result<()> {
+    /// Refuses while a worktree is locked or, unless `discard_uncommitted`, holds uncommitted or
+    /// untracked files. A refusal for uncommitted work alone is an `UncommittedRefusal`.
+    pub(crate) fn check_removable(
+        &self,
+        tickets: &[Ticket],
+        discard_uncommitted: bool,
+    ) -> Result<()> {
         let mut blockers = vec![];
         for ticket in tickets {
             let path = Path::new(&ticket.worktree);
@@ -183,32 +195,54 @@ impl Host {
                     ticket.title, ticket.id, ticket.worktree
                 ));
             }
-            if !is_clean(path)
-                .with_context(|| format!("Check \"{}\" ({})", ticket.title, ticket.id))?
-            {
-                blockers.push(format!(
-                    "ticket \"{}\" ({}) has uncommitted or untracked changes in {}",
-                    ticket.title, ticket.id, ticket.worktree
-                ));
+        }
+        let uncommitted = match discard_uncommitted {
+            true => UncommittedRefusal(vec![]),
+            false => UncommittedRefusal(self.uncommitted_work(tickets)?),
+        };
+        if !blockers.is_empty() {
+            blockers.extend(uncommitted.reasons());
+            bail!("Cannot remove ticket worktrees: {}", blockers.join("; "));
+        }
+        match uncommitted.0.is_empty() {
+            true => Ok(()),
+            false => Err(uncommitted.into()),
+        }
+    }
+    /// The tickets among these whose worktrees hold uncommitted or untracked files; ignored
+    /// files such as build output do not count.
+    pub(crate) fn uncommitted_work(&self, tickets: &[Ticket]) -> Result<Vec<UncommittedWork>> {
+        let mut work = vec![];
+        for ticket in tickets {
+            let path = Path::new(&ticket.worktree);
+            if !path.exists() {
+                continue;
+            }
+            let changed_files = changed_files(path)
+                .with_context(|| format!("Check \"{}\" ({})", ticket.title, ticket.id))?;
+            if changed_files > 0 {
+                work.push(UncommittedWork {
+                    ticket_id: ticket.id.clone(),
+                    title: ticket.title.clone(),
+                    repository: self.ticket_repository(ticket)?.name,
+                    changed_files,
+                });
             }
         }
-        ensure!(
-            blockers.is_empty(),
-            "Cannot remove ticket worktrees: {}",
-            blockers.join("; ")
-        );
-        Ok(())
+        Ok(work)
     }
     /// Whether a worktree was removed; a missing one only has its stale registration pruned.
     /// Removal is whole whatever the folder's size: the folder is renamed aside, Git forgets it
     /// within its usual time limit, and the folder is then deleted off the host thread. The
     /// delete is recorded before the rename, so it resumes after a stop (see
     /// `worktree_deletions`). If Git fails, the folder is renamed back only when the worktree is
-    /// as clean there as it was checked to be; otherwise the removal completes, losing nothing
-    /// because the folder was clean, and the next start prunes. Its Xcode DerivedData folders
-    /// and its scratch folder are deleted too, by a cleanup recorded before the worktree moves
-    /// (see `reclaim`), including when an earlier removal already took the worktree.
-    fn remove_worktree(&mut self, ticket: &Ticket) -> Result<bool> {
+    /// as clean there as it was checked to be, or with `discard_uncommitted` still readable by
+    /// Git; otherwise the removal completes and the next start prunes. That loses nothing the
+    /// check did not allow: the folder was clean, or the human chose to discard its uncommitted
+    /// work. Its Xcode DerivedData folders and its scratch folder are deleted too, by a cleanup
+    /// recorded before the worktree moves (see `reclaim`), including when an earlier removal
+    /// already took the worktree.
+    fn remove_worktree(&mut self, ticket: &Ticket, discard_uncommitted: bool) -> Result<bool> {
         let repository = self.ticket_repository(ticket)?;
         let repository = Path::new(&repository.path);
         let worktree = Path::new(&ticket.worktree);
@@ -228,7 +262,8 @@ impl Host {
             let forgotten = runtime::git_output(repository, &["worktree", "prune"]);
             if forgotten.is_err() {
                 fs::rename(&aside, worktree).with_context(context)?;
-                if is_clean(worktree).unwrap_or(false) {
+                let intact = is_clean(worktree).map(|clean| clean || discard_uncommitted);
+                if intact.unwrap_or(false) {
                     forgotten.with_context(context)?;
                 }
                 fs::rename(worktree, &aside).with_context(context)?;
@@ -338,7 +373,7 @@ impl Host {
                 );
                 let class = self.classify(&ticket)?;
                 ensure!(class.is_removable(), "{}", class.label());
-                self.remove_worktree(&ticket)?;
+                self.remove_worktree(&ticket, false)?;
                 Ok(())
             })();
             let coordinator = self.session(&ticket.coordinator_id)?;
@@ -438,22 +473,27 @@ impl Host {
     }
     /// Performs pending removals whose tickets no longer have an agent in its turn. The service
     /// calls this when a provider process ends and at startup. A worktree that gained unsaved
-    /// work, or that Git cannot remove, is kept and someone told; the mark is cleared either way.
-    /// Failures are logged per ticket and retried at the next settlement, never propagated.
+    /// work, unless its mark discards it, or that Git cannot remove, is kept and someone told;
+    /// the mark is cleared either way. Failures are logged per ticket and retried at the next
+    /// settlement, never propagated.
     pub fn settle_pending_worktrees(&mut self) {
-        let pending: Result<Vec<(String, i64)>> = self
+        let pending: Result<Vec<(String, i64, bool)>> = self
             .db
-            .prepare("SELECT ticket_id,marked_at FROM pending_worktree_removals ORDER BY rowid")
+            .prepare(
+                "SELECT ticket_id,marked_at,discard_uncommitted FROM pending_worktree_removals
+                 ORDER BY rowid",
+            )
             .and_then(|mut query| {
                 query
-                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                     .collect()
             })
             .map_err(Into::into);
         match pending {
             Ok(pending) => {
-                for (id, marked_at) in pending {
-                    if let Err(error) = self.settle_pending_worktree(&id, marked_at) {
+                for (id, marked_at, discard_uncommitted) in pending {
+                    let settled = self.settle_pending_worktree(&id, marked_at, discard_uncommitted);
+                    if let Err(error) = settled {
                         eprintln!("Pending worktree removal for ticket {id}: {error:#}");
                     }
                 }
@@ -461,14 +501,19 @@ impl Host {
             Err(error) => eprintln!("Pending worktree removals: {error:#}"),
         }
     }
-    fn settle_pending_worktree(&mut self, id: &str, marked_at: i64) -> Result<()> {
+    fn settle_pending_worktree(
+        &mut self,
+        id: &str,
+        marked_at: i64,
+        discard_uncommitted: bool,
+    ) -> Result<()> {
         let ticket = self.ticket(id)?;
         if self.agent_in_turn(&ticket)? {
             return Ok(());
         }
         let outcome = match self
-            .check_removable(std::slice::from_ref(&ticket))
-            .and_then(|()| self.remove_worktree(&ticket))
+            .check_removable(std::slice::from_ref(&ticket), discard_uncommitted)
+            .and_then(|()| self.remove_worktree(&ticket, discard_uncommitted))
         {
             Ok(_) => "worktree_removed",
             Err(reason) => {
@@ -556,7 +601,20 @@ pub(crate) fn ticket_run_open(db: &Connection, ticket: &str) -> rusqlite::Result
 
 /// Adds provider runs' process group and its leader's start time, which an earlier version
 /// recorded when the provider started; `agent_processes::migrate` carries them into the record.
+/// Pending worktree removals also record whether the human chose to discard uncommitted work.
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
+    let present: i64 = db.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('pending_worktree_removals')
+         WHERE name='discard_uncommitted'",
+        [],
+        |r| r.get(0),
+    )?;
+    if present == 0 {
+        db.execute_batch(
+            "ALTER TABLE pending_worktree_removals
+             ADD COLUMN discard_uncommitted INTEGER NOT NULL DEFAULT 0",
+        )?;
+    }
     for column in ["process_group", "process_started"] {
         let present: i64 = db.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('provider_runs') WHERE name=?1",
@@ -585,6 +643,42 @@ pub(crate) fn is_clean(worktree: &Path) -> Result<bool> {
     let status = ["status", "--porcelain", "--untracked-files=normal"];
     Ok(runtime::git_output(worktree, &status)?.is_empty())
 }
+
+/// How many files are uncommitted or untracked, each file in an untracked folder counted, by
+/// the same rule as `is_clean`: zero exactly when it is clean.
+fn changed_files(worktree: &Path) -> Result<usize> {
+    let status = ["status", "--porcelain", "--untracked-files=all"];
+    Ok(runtime::git_output(worktree, &status)?.lines().count())
+}
+
+/// Uncommitted or untracked files refuse removing these tickets' worktrees. Archiving answers
+/// it with the tickets, so the human can choose to discard the work (see `Host::archive_session`).
+#[derive(Debug)]
+pub(crate) struct UncommittedRefusal(pub(crate) Vec<UncommittedWork>);
+impl UncommittedRefusal {
+    fn reasons(&self) -> impl Iterator<Item = String> + '_ {
+        self.0.iter().map(|work| {
+            format!(
+                "ticket \"{}\" ({}) has uncommitted or untracked changes in {} {}",
+                work.title,
+                work.ticket_id,
+                work.changed_files,
+                if work.changed_files == 1 {
+                    "file"
+                } else {
+                    "files"
+                }
+            )
+        })
+    }
+}
+impl std::fmt::Display for UncommittedRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reasons: Vec<String> = self.reasons().collect();
+        write!(f, "Cannot remove ticket worktrees: {}", reasons.join("; "))
+    }
+}
+impl std::error::Error for UncommittedRefusal {}
 
 /// Where `commit`'s history meets `base`, the repository's base such as `origin/main`.
 pub(crate) fn merge_base(worktree: &Path, base: &str, commit: &str) -> Result<String> {

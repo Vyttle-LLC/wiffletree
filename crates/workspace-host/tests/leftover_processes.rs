@@ -749,6 +749,7 @@ fn what_a_turn_starts_keeps_running_is_announced_once_and_is_stopped_when_its_ag
         Command::SetArchived {
             session_id: main.id.clone(),
             archived: true,
+            discard_uncommitted: None,
         },
     );
 
@@ -827,6 +828,7 @@ fn an_agent_archived_in_its_turn_has_a_tool_started_a_moment_ago_stopped_when_th
         Command::SetArchived {
             session_id: main.id.clone(),
             archived: true,
+            discard_uncommitted: None,
         },
     );
 
@@ -888,6 +890,7 @@ fn archiving_stops_orphans_whose_group_leader_exited_before_the_turn_ended() {
         Command::SetArchived {
             session_id: main.id.clone(),
             archived: true,
+            discard_uncommitted: None,
         },
     );
 
@@ -1298,6 +1301,7 @@ fn a_recorded_group_whose_members_are_gone_is_never_signalled_and_is_noted_only_
         Command::SetArchived {
             session_id: main.id.clone(),
             archived: true,
+            discard_uncommitted: None,
         },
     );
 
