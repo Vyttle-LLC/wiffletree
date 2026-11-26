@@ -1127,7 +1127,6 @@ impl Inspector {
                 inbox.attention_card(item, open, None, None, p, cx)
             }));
         }
-        // Then the sub-projects' questions this project sent on, each opening its sub-project.
         if !escalated.is_empty() {
             body = body.child(section("FROM SUB-PROJECTS", p));
         }

@@ -1661,12 +1661,15 @@ impl Sidebar {
         });
     }
 
-    /// The most urgent state among `projects`, for a collapsed parent or Space.
-    fn rollup(&self, projects: &[&Session], p: Palette) -> Option<AnyElement> {
+    /// The most urgent state among `projects`, for a collapsed parent or Space, its needs-you
+    /// badge `ringed` as a parent's is for its sub-projects' questions.
+    fn rollup(&self, projects: &[&Session], ringed: bool, p: Palette) -> Option<AnyElement> {
         let index = self.shared.index.as_deref()?;
         Some(
             match family_state(index, &self.shared.progress, projects)? {
-                tree::Rollup::NeedsYou(count) => needs_you_badge(count, p).into_any_element(),
+                tree::Rollup::NeedsYou(count) => needs_you_badge(count, p)
+                    .when(ringed, |badge| badge_ring(badge, p))
+                    .into_any_element(),
                 tree::Rollup::Stuck(count) => stuck_pill(count, p).into_any_element(),
                 tree::Rollup::Blocked => status_glyph(Status::Blocked, 12., p),
                 tree::Rollup::Working => status_glyph(Status::Working, 12., p),
@@ -1691,7 +1694,7 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> Div {
         let collapsed = self.folds(lens).spaces.contains(&space);
-        let state = collapsed.then(|| self.rollup(projects, p)).flatten();
+        let state = collapsed.then(|| self.rollup(projects, false, p)).flatten();
         let row = self
             .row(SharedString::from(format!("space-{space}")), false, p)
             .pl(inset(0) - px(4.))
@@ -2215,7 +2218,10 @@ impl Sidebar {
             .into_iter()
             .chain(children.iter().copied())
             .collect();
-        self.rollup(&family, p)
+        let snapshot = self.shared.snapshot()?;
+        let ringed =
+            (snapshot.attention.iter()).any(|a| inbox::escalated_via(a, &parent.project_id));
+        self.rollup(&family, ringed, p)
     }
 
     fn agent_counts(&self, coordinator: &Session) -> tree::AgentCounts {
