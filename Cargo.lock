@@ -9814,6 +9814,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "core-foundation 0.10.1",
+ "futures-lite",
  "libc",
  "png 0.18.1",
  "rcgen",

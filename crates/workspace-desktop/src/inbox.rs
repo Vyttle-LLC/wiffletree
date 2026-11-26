@@ -34,6 +34,81 @@ pub(super) struct Inbox {
     /// The choice selected on each open "Allow UI evaluators" card, by item id; App only until
     /// the human picks another.
     allow_choices: HashMap<String, EvaluatorPermission>,
+    /// The items answered or dismissed here, from the click until a newer snapshot.
+    settlings: Settlings,
+}
+
+/// Where the human's answer or dismissal of an Inbox item stands.
+#[derive(Debug, PartialEq)]
+enum Settling {
+    /// Sent; the host has not replied yet. `shown_open` once a snapshot meanwhile still
+    /// listed the item, which may then be the one the answer leaves open.
+    Sending { shown_open: bool },
+    /// The host took it; the next snapshot drops the item, or shows it still open.
+    Sent,
+    /// The host refused it, in its words; the item's buttons work again.
+    Failed(String),
+}
+
+/// How the host begins its refusal of an answer to an item already answered.
+const ALREADY_RESOLVED: &str = "Request already resolved";
+
+/// Each item's `Settling`, by item id. One click sends one answer: further clicks on the item
+/// wait until the host's reply.
+#[derive(Default)]
+struct Settlings(HashMap<String, Settling>);
+impl Settlings {
+    /// Marks `id` as sending; `false` when an answer to it is already on its way or taken.
+    fn start(&mut self, id: &str) -> bool {
+        if matches!(
+            self.0.get(id),
+            Some(Settling::Sending { .. } | Settling::Sent)
+        ) {
+            return false;
+        }
+        self.0
+            .insert(id.to_owned(), Settling::Sending { shown_open: false });
+        true
+    }
+    fn replied(&mut self, id: &str, reply: &Result<Value, String>) {
+        let shown_open = matches!(self.0.get(id), Some(Settling::Sending { shown_open: true }));
+        let settling = match reply {
+            // A snapshot may have shown the item open after the answer was taken, as Later
+            // leaves a Start card: no newer one need come, so its buttons work again now.
+            Ok(_) if shown_open => {
+                self.0.remove(id);
+                return;
+            }
+            // Answered already, from another window or device: settled all the same.
+            Err(error) if error.starts_with(ALREADY_RESOLVED) => Settling::Sent,
+            Ok(_) => Settling::Sent,
+            Err(error) => Settling::Failed(error.clone()),
+        };
+        self.0.insert(id.to_owned(), settling);
+    }
+    /// After a newer snapshot: a sent item is settled either way, and only a refusal of an
+    /// item still open stays, or a reply still awaited.
+    fn refresh(&mut self, open: &[Attention]) {
+        self.0.retain(|id, settling| {
+            *settling != Settling::Sent && open.iter().any(|item| &item.id == id)
+        });
+        for settling in self.0.values_mut() {
+            if let Settling::Sending { shown_open } = settling {
+                *shown_open = true;
+            }
+        }
+    }
+    fn get(&self, id: &str) -> Option<&Settling> {
+        self.0.get(id)
+    }
+}
+
+/// The item a command answers or dismisses.
+fn settled_item(command: &Command) -> Option<&str> {
+    match command {
+        Command::ResolveAttention { id, .. } | Command::DismissAttention { id } => Some(id),
+        _ => None,
+    }
 }
 impl Inbox {
     pub(super) fn new(bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -55,6 +130,7 @@ impl Inbox {
             held: held_entry::HeldForm::new(window, cx),
             alert: scan_alert::AlertForm::new(window, cx),
             allow_choices: HashMap::new(),
+            settlings: Settlings::default(),
         }
     }
     /// A held log entry's card.
@@ -137,6 +213,7 @@ impl Inbox {
             return;
         };
         if moved {
+            self.settlings.refresh(&snapshot.attention);
             // Linked here, as the items arrive, so drawing them asks the host nothing.
             let link = |item: &Attention| {
                 let bases = self.shared.link_bases(&item.session_id).into();
@@ -196,14 +273,23 @@ impl Inbox {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.request(
-            Command::ResolveAttention {
-                id: id.into(),
-                answer: answer.into(),
-            },
-            window,
-            cx,
-        );
+        let command = Command::ResolveAttention {
+            id: id.into(),
+            answer: answer.into(),
+        };
+        self.settle(id, command, window, cx);
+    }
+    fn dismiss_attention(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let command = Command::DismissAttention { id: id.clone() };
+        self.settle(&id, command, window, cx);
+    }
+    /// Sends `command`, which answers or dismisses the item `id`, unless an answer to it is
+    /// already on its way. The card shows it is sending in this frame.
+    fn settle(&mut self, id: &str, command: Command, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settlings.start(id) {
+            cx.notify();
+            self.request(command, window, cx);
+        }
     }
     fn note_action(
         &mut self,
@@ -283,7 +369,22 @@ impl Inbox {
             (None, None, None) if item.is_permission() => self.permission(item, p, cx),
             (None, None, None) => self.question(item, answering, max_height.is_none(), p, cx),
         };
-        let body = body.flex().flex_col().gap_2();
+        let settling = self.settlings.get(&item.id);
+        let pending = matches!(settling, Some(Settling::Sending { .. } | Settling::Sent));
+        // Dimmed while pending; its choices send nothing more until the host replies.
+        let body = (body.flex().flex_col().gap_2()).when(pending, |body| body.opacity(0.6));
+        let status = |text| div().flex().justify_end().child(hint(text, p));
+        let actions = match settling {
+            Some(Settling::Sending { .. }) => status("Sending…"),
+            Some(Settling::Sent) => status("Sent"),
+            Some(Settling::Failed(error)) => div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(hint(error.clone(), p).text_color(p.red))
+                .child(actions),
+            None => actions,
+        };
         let edge = |color| {
             let strip = div().absolute().left_0().top_0().bottom_0().w(px(3.));
             strip.rounded_l_lg().bg(color)
@@ -349,8 +450,7 @@ impl Inbox {
                             .label("Ask me later")
                             .map(|b| ui::gated(b, &self.shared.host))
                             .on_click(cx.listener(move |v, _, w, c| {
-                                let id = later.clone();
-                                v.request(Command::DismissAttention { id }, w, c)
+                                v.dismiss_attention(later.clone(), w, c)
                             })),
                     )
                     .child(
@@ -526,11 +626,8 @@ impl Inbox {
                         disk_use::ask(ask, Some(window.window_handle()), cx)
                     })
                 }
-                CardAction::Dismiss => {
-                    ui::gated(drawn, &self.shared.host).on_click(cx.listener(move |v, _, w, c| {
-                        v.request(Command::DismissAttention { id: id.clone() }, w, c)
-                    }))
-                }
+                CardAction::Dismiss => ui::gated(drawn, &self.shared.host)
+                    .on_click(cx.listener(move |v, _, w, c| v.dismiss_attention(id.clone(), w, c))),
             };
             actions = actions.child(drawn);
         }
@@ -679,15 +776,9 @@ impl Inbox {
                 .ghost()
                 .label("Dismiss")
                 .map(|b| ui::gated(b, &self.shared.host))
-                .on_click(cx.listener(move |v, _, w, c| {
-                    v.request(
-                        Command::DismissAttention {
-                            id: dismiss.clone(),
-                        },
-                        w,
-                        c,
-                    )
-                })),
+                .on_click(
+                    cx.listener(move |v, _, w, c| v.dismiss_attention(dismiss.clone(), w, c)),
+                ),
         );
         let prompt = div().children(self.prompts.get(&id).map(Linked::view));
         let body = div()
@@ -923,8 +1014,13 @@ impl Requests for Inbox {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // An item's refusal shows on its card, beside the buttons that try again.
+        if let Some(id) = settled_item(&command) {
+            self.settlings.replied(id, &reply);
+        }
         let value = match reply {
             Ok(value) => value,
+            Err(_) if settled_item(&command).is_some() => return,
             Err(error) => {
                 workspace_notes::compare_failed(&mut self.compared, &command);
                 return toast_error(error, window, cx);
@@ -1109,9 +1205,74 @@ fn approval_actions(
 
 #[cfg(test)]
 mod tests {
-    use super::escalated_from;
+    use super::{Settling, Settlings, escalated_from};
     use serde_json::json;
     use workspace_core::{Attention, Project, QuestionRoute};
+
+    fn open(id: &str) -> Attention {
+        serde_json::from_value(json!({
+            "id": id, "project_id": "p", "session_id": "s", "host": "local",
+            "operation_id": "copy", "prompt": "Which wording?", "answer": null,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_second_click_sends_nothing_until_the_host_replies() {
+        let mut settlings = Settlings::default();
+        assert!(settlings.start("q"));
+        assert!(!settlings.start("q"), "still sending");
+        settlings.replied("q", &Ok(json!({})));
+        assert!(!settlings.start("q"), "taken, the card not yet gone");
+    }
+
+    #[test]
+    fn a_refusal_stays_on_its_open_card_and_allows_another_try() {
+        let mut settlings = Settlings::default();
+        settlings.start("q");
+        settlings.replied("q", &Err("The host has stopped".into()));
+        settlings.refresh(&[open("q")]);
+        assert_eq!(
+            settlings.get("q"),
+            Some(&Settling::Failed("The host has stopped".into()))
+        );
+        assert!(settlings.start("q"));
+    }
+
+    #[test]
+    fn an_answer_already_taken_is_no_error() {
+        let mut settlings = Settlings::default();
+        settlings.start("q");
+        let stale = "Request already resolved; stale answer rejected";
+        settlings.replied("q", &Err(stale.into()));
+        assert_eq!(settlings.get("q"), Some(&Settling::Sent));
+    }
+
+    #[test]
+    fn a_newer_snapshot_frees_a_card_the_answer_left_open() {
+        // Later on a Start card is taken, but the card stays.
+        let mut settlings = Settlings::default();
+        settlings.start("start");
+        settlings.start("waiting");
+        settlings.replied("start", &Ok(json!({})));
+        settlings.refresh(&[open("start"), open("waiting")]);
+        assert_eq!(settlings.get("start"), None);
+        assert!(matches!(
+            settlings.get("waiting"),
+            Some(Settling::Sending { .. })
+        ));
+    }
+
+    #[test]
+    fn an_answer_whose_snapshot_came_first_frees_a_card_it_left_open() {
+        // Later's snapshot, still listing the Start card, arrives before Later's reply.
+        let mut settlings = Settlings::default();
+        settlings.start("start");
+        settlings.refresh(&[open("start")]);
+        settlings.replied("start", &Ok(json!({})));
+        assert_eq!(settlings.get("start"), None);
+        assert!(settlings.start("start"), "Start now works after Later");
+    }
 
     #[test]
     fn an_escalated_question_names_its_child_via_its_parent_with_the_note() {
