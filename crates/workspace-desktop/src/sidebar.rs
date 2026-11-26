@@ -2662,7 +2662,10 @@ fn family_state(
 
 /// What the badges of `projects` count together, each item once however many of them it is for.
 fn family_needs_you(attention: &[Attention], notes: &[WorkspaceNote], projects: &[&str]) -> usize {
-    let attention = (attention.iter()).filter(|a| projects.contains(&a.project_id.as_str()));
+    let attention = (attention.iter()).filter(|a| {
+        (projects.iter())
+            .any(|project| a.project_id == *project || inbox::escalated_via(a, project))
+    });
     let notes = (notes.iter())
         .filter(|note| note.needs_you() && projects.iter().any(|project| note.is_for(project)));
     attention.count() + notes.count()
@@ -2802,8 +2805,10 @@ mod tests {
             })
         );
         assert_eq!(child(&items, Some("parent")), Some(Badge::InParent(1)));
-        // A collapsed parent counts the question once.
+        // A collapsed parent counts the question once, as does a Space whose Me lens lists only
+        // the parent.
         assert_eq!(family_needs_you(&items, &[], &["parent", "child"]), 1);
+        assert_eq!(family_needs_you(&items, &[], &["parent"]), 1);
         // Moved under another parent, or made loose, the child answers it itself.
         let normal = Some(Badge::Answer {
             count: 1,
