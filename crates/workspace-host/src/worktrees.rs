@@ -197,14 +197,15 @@ impl Host {
             }
         }
         let uncommitted = match discard_uncommitted {
-            true => UncommittedRefusal(vec![]),
-            false => UncommittedRefusal(self.uncommitted_work(tickets)?),
+            true => vec![],
+            false => self.uncommitted_work(tickets)?,
         };
+        let uncommitted = UncommittedRefusal::new(uncommitted, tickets);
         if !blockers.is_empty() {
-            blockers.extend(uncommitted.reasons());
+            blockers.extend(uncommitted.reasons);
             bail!("Cannot remove ticket worktrees: {}", blockers.join("; "));
         }
-        match uncommitted.0.is_empty() {
+        match uncommitted.tickets.is_empty() {
             true => Ok(()),
             false => Err(uncommitted.into()),
         }
@@ -654,28 +655,35 @@ fn changed_files(worktree: &Path) -> Result<usize> {
 /// Uncommitted or untracked files refuse removing these tickets' worktrees. Archiving answers
 /// it with the tickets, so the human can choose to discard the work (see `Host::archive_session`).
 #[derive(Debug)]
-pub(crate) struct UncommittedRefusal(pub(crate) Vec<UncommittedWork>);
+pub(crate) struct UncommittedRefusal {
+    pub(crate) tickets: Vec<UncommittedWork>,
+    /// Each ticket's line, naming its worktree.
+    reasons: Vec<String>,
+}
 impl UncommittedRefusal {
-    fn reasons(&self) -> impl Iterator<Item = String> + '_ {
-        self.0.iter().map(|work| {
-            format!(
-                "ticket \"{}\" ({}) has uncommitted or untracked changes in {} {}",
-                work.title,
-                work.ticket_id,
-                work.changed_files,
-                if work.changed_files == 1 {
-                    "file"
-                } else {
-                    "files"
-                }
-            )
-        })
+    fn new(work: Vec<UncommittedWork>, tickets: &[Ticket]) -> Self {
+        let reasons = (tickets.iter())
+            .filter(|ticket| work.iter().any(|w| w.ticket_id == ticket.id))
+            .map(|ticket| {
+                format!(
+                    "ticket \"{}\" ({}) has uncommitted or untracked changes in {}",
+                    ticket.title, ticket.id, ticket.worktree
+                )
+            })
+            .collect();
+        Self {
+            tickets: work,
+            reasons,
+        }
     }
 }
 impl std::fmt::Display for UncommittedRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let reasons: Vec<String> = self.reasons().collect();
-        write!(f, "Cannot remove ticket worktrees: {}", reasons.join("; "))
+        write!(
+            f,
+            "Cannot remove ticket worktrees: {}",
+            self.reasons.join("; ")
+        )
     }
 }
 impl std::error::Error for UncommittedRefusal {}

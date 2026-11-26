@@ -1317,8 +1317,6 @@ impl Requests for Workspace {
     }
 }
 
-/// What the toast says once `name` is archived, with uncommitted work discarded in `discarded`
-/// tickets, or restored.
 fn archived_toast(name: &str, archived: bool, discarded: usize) -> String {
     match (archived, discarded) {
         (false, _) => format!("Restored {name}"),

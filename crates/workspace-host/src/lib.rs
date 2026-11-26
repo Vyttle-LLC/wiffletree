@@ -1089,7 +1089,9 @@ impl Host {
                 discarded,
             }),
             Err(error) => match error.downcast::<worktrees::UncommittedRefusal>() {
-                Ok(refusal) => Ok(ArchiveOutcome::UncommittedWork { tickets: refusal.0 }),
+                Ok(refusal) => Ok(ArchiveOutcome::UncommittedWork {
+                    tickets: refusal.tickets,
+                }),
                 Err(error) => Err(error),
             },
         }
