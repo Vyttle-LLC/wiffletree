@@ -105,6 +105,17 @@ impl Shared {
             .filter(|a| Some(&a.project_id) == project.as_ref())
             .collect()
     }
+    /// The sub-projects' questions the selected project's coordinator sent on to the human.
+    pub(super) fn escalated_attention(&self) -> Vec<&Attention> {
+        let Some(project) = self.project_id() else {
+            return Vec::new();
+        };
+        self.index
+            .iter()
+            .flat_map(|index| &index.snapshot().attention)
+            .filter(|a| inbox::escalated_via(a, &project))
+            .collect()
+    }
     /// Every project's UI evaluator runs the snapshot lists, newest first.
     pub(super) fn evaluations(&self) -> &[Evaluation] {
         self.snapshot().map_or(&[], |s| &s.evaluations)

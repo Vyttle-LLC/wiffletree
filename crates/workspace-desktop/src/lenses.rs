@@ -233,11 +233,16 @@ fn reason(
     }
 }
 
-/// The project's Inbox items with the human: one's prompt, or how many, and the parent that
-/// escalated them.
+/// The project's Inbox items with the human, each listed once where the human answers it: a
+/// question its parent sent on is the parent's, with the sub-projects' questions it sent on.
+/// One's prompt, or how many, and a former parent that escalated its own.
 fn questions(index: &WorkspaceIndex, project: &Project) -> Option<String> {
+    use crate::inbox::escalated_via;
+    let sent_on = |item| (project.parent_id.as_deref()).is_some_and(|p| escalated_via(item, p));
     let items: Vec<&Attention> = (index.snapshot().attention.iter())
-        .filter(|item| item.project_id == project.id)
+        .filter(|item| {
+            (item.project_id == project.id && !sent_on(item)) || escalated_via(item, &project.id)
+        })
         .collect();
     let asked = match items[..] {
         [] => return None,
@@ -245,7 +250,9 @@ fn questions(index: &WorkspaceIndex, project: &Project) -> Option<String> {
         _ => format!("{} questions", items.len()),
     };
     let escalated_by = items.iter().find_map(|item| match &item.route {
-        QuestionRoute::Escalated { parent_id, .. } => index.project(parent_id),
+        QuestionRoute::Escalated { parent_id, .. } if *parent_id != project.id => {
+            index.project(parent_id)
+        }
         _ => None,
     });
     Some(match escalated_by {
@@ -524,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn questions_list_the_prompt_or_how_many_and_the_parent_that_escalated_them() {
+    fn questions_list_the_prompt_or_how_many_once_where_the_human_answers_them() {
         let mut me = Me::new(&["Accessible contrast", "Contrast warnings", "Recipes"]);
         me.file("Contrast warnings", "Accessible contrast");
         let escalated = QuestionRoute::Escalated {
@@ -538,11 +545,28 @@ mod tests {
             "Keep the old format?\nIt is still read.",
             QuestionRoute::Human,
         );
+        // The questions its parent sent on are answered in the parent, so only it lists them.
         assert_eq!(
             me.drawn(),
             [
                 "[Questions] 2",
-                "  Contrast warnings — 2 questions · via Accessible contrast",
+                "  Accessible contrast — 2 questions",
+                "  Recipes — Keep the old format?",
+            ]
+        );
+
+        // The child lists a question of its own.
+        me.ask(
+            "Contrast warnings",
+            "Rename the setting?",
+            QuestionRoute::Human,
+        );
+        assert_eq!(
+            me.drawn(),
+            [
+                "[Questions] 3",
+                "  Accessible contrast — 2 questions",
+                "  Contrast warnings — Rename the setting?",
                 "  Recipes — Keep the old format?",
             ]
         );

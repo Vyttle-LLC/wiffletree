@@ -1089,11 +1089,12 @@ impl Inspector {
 
     fn attention_panel(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let items = self.shared.project_attention();
+        let escalated = self.shared.escalated_attention();
         let project = self.shared.project_id().unwrap_or_default();
         let notes: Vec<&WorkspaceNote> = (self.shared.workspace_notes().iter())
             .filter(|note| note.is_for(&project))
             .collect();
-        if items.is_empty() && notes.is_empty() {
+        if items.is_empty() && escalated.is_empty() && notes.is_empty() {
             return empty_state(
                 "check",
                 "You’re all caught up",
@@ -1102,8 +1103,7 @@ impl Inspector {
             );
         }
         let answering = self.inbox.read(cx).answering.clone().or_else(|| {
-            items
-                .iter()
+            (items.iter().chain(&escalated))
                 .find(|item| !item.is_permission())
                 .map(|item| item.id.clone())
         });
@@ -1124,10 +1124,30 @@ impl Inspector {
         for item in items {
             let open = answering.as_ref() == Some(&item.id);
             body = body.child(self.inbox.update(cx, |inbox, cx| {
-                inbox.attention_card(item, open, None, p, cx)
+                inbox.attention_card(item, open, None, None, p, cx)
+            }));
+        }
+        if !escalated.is_empty() {
+            body = body.child(section("FROM SUB-PROJECTS", p));
+        }
+        for item in escalated {
+            let open = answering.as_ref() == Some(&item.id);
+            let open_child = self.open_project(&item.project_id, cx);
+            body = body.child(self.inbox.update(cx, |inbox, cx| {
+                inbox.attention_card(item, open, None, open_child, p, cx)
             }));
         }
         body
+    }
+
+    /// Selects `project_id`'s coordinator; none when the project has none.
+    fn open_project(&self, project_id: &str, cx: &mut Context<Self>) -> Option<inbox::OpenChild> {
+        let index = self.shared.index.as_deref()?;
+        let coordinator = index.roots(project_id).next()?.id.clone();
+        let inspector = cx.entity().downgrade();
+        Some(Rc::new(move |_, cx| {
+            let _ = inspector.update(cx, |_, cx| cx.emit(Intent::Select(coordinator.clone())));
+        }))
     }
 
     fn note_card(&self, note: &WorkspaceNote, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -1279,7 +1299,8 @@ impl Workspace {
         let notes = (self.shared.workspace_notes().iter())
             .filter(|note| note.is_for(&project) && note.needs_you())
             .count();
-        let attention = notes + self.shared.project_attention().len();
+        let attention =
+            notes + self.shared.project_attention().len() + self.shared.escalated_attention().len();
         let mut rail = div()
             .w(px(64.))
             .h_full()
