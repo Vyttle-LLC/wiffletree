@@ -1,10 +1,60 @@
 //! Settings › Remote access, at the host itself: the switch, this Mac's name and addresses,
-//! pairing a device with its code and the time left, and the paired devices with what each can
-//! do and Remove. Only the host's own app shows it; remote devices are refused these commands.
+//! pairing a device with its code or a phone with a QR code and the time left, and the paired
+//! devices with what each can do and Remove. Only the host's own app shows it; remote devices are
+//! refused these commands.
 use super::*;
 use chrono::{Local, TimeZone};
 use gpui_component::{button::ButtonVariants, switch::Switch};
 use std::time::Duration;
+use workspace_core::PairingQr;
+
+/// The QR code of the pairing mode it was read for, as dark and light modules.
+pub(super) struct PhoneQr {
+    /// When that pairing mode closes; another one has another secret.
+    expires_at: i64,
+    width: usize,
+    dark: Rc<Vec<bool>>,
+}
+impl PhoneQr {
+    fn new(qr: &PairingQr) -> Result<Self, String> {
+        let text = serde_json::to_string(&qr.payload).map_err(|e| e.to_string())?;
+        let code = qrcode::QrCode::new(text).map_err(|e| e.to_string())?;
+        let dark = code.to_colors().into_iter();
+        Ok(Self {
+            expires_at: qr.expires_at,
+            width: code.width(),
+            dark: Rc::new(dark.map(|color| color == qrcode::Color::Dark).collect()),
+        })
+    }
+}
+
+/// A module's side, and the light border scanners need, in modules.
+const QR_MODULE: f32 = 4.;
+const QR_QUIET: usize = 4;
+
+/// Dark modules on white whatever the theme, as cameras read best.
+fn qr_image(qr: &PhoneQr) -> Div {
+    let side = (qr.width + 2 * QR_QUIET) as f32 * QR_MODULE;
+    let (width, dark) = (qr.width, qr.dark.clone());
+    let modules = canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let module = size(px(QR_MODULE), px(QR_MODULE));
+            for at in (0..dark.len()).filter(|at| dark[*at]) {
+                let (x, y) = (at % width + QR_QUIET, at / width + QR_QUIET);
+                let offset = point(px(x as f32 * QR_MODULE), px(y as f32 * QR_MODULE));
+                window.paint_quad(fill(Bounds::new(bounds.origin + offset, module), black()));
+            }
+        },
+    )
+    .size_full();
+    div()
+        .size(px(side))
+        .flex_none()
+        .rounded_md()
+        .bg(white())
+        .child(modules)
+}
 
 /// How often the page looks again while pairing mode counts down, and otherwise while remote
 /// access is on, so a device that pairs or connects shows up.
@@ -67,6 +117,24 @@ fn steps_with_code<'a>(
             (code, true),
             (". It works once, for 2 minutes.", false),
         ],
+    ]
+}
+
+fn steps_with_qr() -> [Vec<Run<'static>>; 3] {
+    [
+        vec![
+            ("On the iPhone, open Wiffletree and tap ", false),
+            ("Scan QR code", true),
+            (".", false),
+        ],
+        vec![(
+            "Point it at this code. It works once, for 2 minutes.",
+            false,
+        )],
+        vec![(
+            "Away from home, the iPhone reaches this Mac over Tailscale or a VPN you already use.",
+            false,
+        )],
     ]
 }
 
@@ -138,6 +206,44 @@ impl Settings {
                 match answer {
                     Ok(remote) => {
                         view.remote = Some(remote);
+                        view.remote_error = None;
+                    }
+                    Err(error) => view.remote_error = Some(error),
+                }
+                view.watch_remote(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Opens pairing mode, a new one when one is open, and shows its QR code.
+    fn connect_phone(&mut self, cx: &mut Context<Self>) {
+        let opened = match self.bridge.ask(ask::open_pairing()) {
+            Ok(opened) => opened,
+            Err(error) => {
+                self.remote_error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        // The host takes commands in the order they were sent, so this reads the new mode's code.
+        let qr = self.bridge.ask(ask::pairing_qr());
+        self.opening_qr = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let opened = opened.await;
+            let qr = match qr {
+                Ok(qr) => qr.await,
+                Err(error) => Err(error),
+            };
+            let _ = this.update(cx, |view, cx| {
+                view.opening_qr = false;
+                let shown = opened.and_then(|remote| Ok((remote, PhoneQr::new(&qr?)?)));
+                match shown {
+                    Ok((remote, qr)) => {
+                        view.remote = Some(remote);
+                        view.phone_qr = Some(qr);
                         view.remote_error = None;
                     }
                     Err(error) => view.remote_error = Some(error),
@@ -251,24 +357,78 @@ impl Settings {
                 .font_weight(FontWeight::SEMIBOLD)
                 .child("Pair a device"),
         );
+        let opening = |id: &'static str| {
+            button(id)
+                .disabled(true)
+                .child(ui::Spinner::new().small())
+                .child("Opening pairing…")
+        };
         let Some(pairing) = &remote.pairing else {
-            let open = button("open-pairing").primary();
-            let open = if self.opening_pairing {
-                open.disabled(true)
-                    .child(ui::Spinner::new().small())
-                    .child("Opening pairing…")
-            } else {
-                open.label("Pair a device")
+            let open = match self.opening_pairing {
+                true => opening("open-pairing"),
+                false => button("open-pairing")
+                    .label("Pair a device")
+                    .disabled(self.opening_qr)
                     .on_click(cx.listener(|view, _, _, cx| {
                         view.opening_pairing = true;
                         view.ask_remote(ask::open_pairing(), cx);
                         cx.notify();
-                    }))
+                    })),
+            };
+            let phone = match self.opening_qr {
+                true => opening("connect-phone"),
+                false => button("connect-phone")
+                    .label("Connect a phone")
+                    .disabled(self.opening_pairing)
+                    .on_click(cx.listener(|view, _, _, cx| view.connect_phone(cx))),
             };
             return card
                 .child(steps(&steps_before_code(), p))
-                .child(div().flex().child(open));
+                .child(hint(
+                    "For an iPhone, click Connect a phone and scan its QR code with Wiffletree on the iPhone.",
+                    p,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(open.primary())
+                        .child(phone.outline()),
+                );
         };
+        let waiting = div().flex().items_center().gap_1().child(hint(
+            format!(
+                "Waiting for a device… · {} ·",
+                time_left(pairing.expires_at, ui::now())
+            ),
+            p,
+        ));
+        let cancel = button("cancel-pairing")
+            .ghost()
+            .xsmall()
+            .label("Cancel")
+            .on_click(cx.listener(|view, _, _, cx| {
+                view.ask_remote(ask::cancel_pairing(), cx);
+            }));
+        let shown_qr = (self.phone_qr.as_ref()).filter(|qr| qr.expires_at == pairing.expires_at);
+        if let Some(qr) = shown_qr {
+            let new_code = match self.opening_qr {
+                true => opening("new-qr").ghost().xsmall(),
+                false => button("new-qr")
+                    .ghost()
+                    .xsmall()
+                    .label("New code")
+                    .on_click(cx.listener(|view, _, _, cx| view.connect_phone(cx))),
+            };
+            return card
+                .child(div().flex().justify_center().child(qr_image(qr)))
+                .child(steps(&steps_with_qr(), p))
+                .child(waiting.child(new_code).child(cancel));
+        }
+        // The new pairing mode can show before its QR code arrives.
+        if self.opening_qr {
+            return card.child(hint("Opening pairing…", p));
+        }
         let address = remote.addresses.first().map(String::as_str);
         let digits = pairing.code.chars().map(|digit| {
             div()
@@ -290,28 +450,7 @@ impl Settings {
                 &steps_with_code(&remote.host_name, address, &pairing.code),
                 p,
             ))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(hint(
-                        format!(
-                            "Waiting for a device… · {} ·",
-                            time_left(pairing.expires_at, ui::now())
-                        ),
-                        p,
-                    ))
-                    .child(
-                        button("cancel-pairing")
-                            .ghost()
-                            .xsmall()
-                            .label("Cancel")
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.ask_remote(ask::cancel_pairing(), cx);
-                            })),
-                    ),
-            )
+            .child(waiting.child(cancel))
     }
 
     fn devices_card(&self, devices: &[PairedDevice], p: Palette, cx: &mut Context<Self>) -> Div {
@@ -375,7 +514,30 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{steps_with_code, time_left};
+    use super::{PhoneQr, steps_with_code, time_left};
+    use workspace_core::{PairingQr, QrPayload};
+
+    #[test]
+    fn a_qr_code_with_every_kind_of_address_stays_small_enough_to_scan() {
+        let qr = PairingQr {
+            payload: QrPayload {
+                host_key: "B".repeat(88),
+                host_name: "Michael's Studio Mac Pro".into(),
+                addresses: ["192.168.1.20", "10.0.0.5", "100.101.7.9"]
+                    .map(String::from)
+                    .into_iter()
+                    .chain(["michaels-studio-mac-pro.tail4c2e.ts.net".to_string()])
+                    .collect(),
+                port: 47821,
+                secret: "A".repeat(24),
+            },
+            expires_at: 120_000,
+        };
+        let shown = PhoneQr::new(&qr).unwrap();
+        assert_eq!(shown.dark.len(), shown.width * shown.width);
+        // Version 13 or lower: 69 modules, drawn 4 points each.
+        assert!(shown.width <= 69, "{}", shown.width);
+    }
 
     #[test]
     fn time_left_counts_whole_seconds_up() {

@@ -1,10 +1,11 @@
 //! The host's side of a pairing exchange on `/pair`. The code is checked only through SPAKE2
-//! key confirmation; each failed confirmation is a wrong try, and the third closes pairing mode.
+//! key confirmation, and the QR code's secret only through the device's proof; each failed
+//! check is a wrong try, and the third closes pairing mode.
 use super::{Identity, Shared, ToActor, listener::ServerSocket, websocket};
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use workspace_core::{
-    PAIR_METHOD_CODE, PAIRING_TRIES, PairConfirm, PairReply, PairStart,
+    PAIR_METHOD_CODE, PAIR_METHOD_QR, PAIRING_TRIES, PairConfirm, PairReply, PairStart,
     pairing::{self, CodeExchange, Side},
 };
 
@@ -30,11 +31,11 @@ fn exchange(
     shared: &Shared,
 ) -> Result<PairReply> {
     let host = &identity.name;
-    anyhow::ensure!(
-        start.method == PAIR_METHOD_CODE,
-        "{host} does not offer pairing by {}",
-        start.method
-    );
+    let by_qr = match start.method.as_str() {
+        PAIR_METHOD_CODE => false,
+        PAIR_METHOD_QR => true,
+        method => anyhow::bail!("{host} does not offer pairing by {method}"),
+    };
     let device_name = pairing::device_name(&start.device_name);
     anyhow::ensure!(!device_name.is_empty(), "Name this device");
     let device_key = BASE64
@@ -44,10 +45,12 @@ fn exchange(
         pairing::is_public_key(&device_key),
         "The device key is not a P-256 key"
     );
+    // The SPAKE2 message for `code`, the proof for `qr`.
+    let theirs = if by_qr { &start.proof } else { &start.spake };
     let theirs = BASE64
-        .decode(start.spake.as_deref().unwrap_or_default())
+        .decode(theirs.as_deref().unwrap_or_default())
         .context("Malformed pairing message")?;
-    let (code, generation) = {
+    let (code, secret, generation) = {
         let mut pairing = shared.open_pairing();
         let mode = pairing
             .as_mut()
@@ -57,27 +60,36 @@ fn exchange(
             "Another device is pairing with {host}. Try again in a moment."
         );
         mode.busy = true;
-        (mode.code.clone(), mode.generation)
+        (mode.code.clone(), mode.secret.clone(), mode.generation)
     };
     let _release = Release(shared, generation);
-    let (spake, ours) = CodeExchange::start(Side::Host, &code)?;
-    let key = spake.finish(&theirs)?;
-    websocket::send(
-        socket,
-        &PairReply::Spake {
-            spake: BASE64.encode(ours),
-            host_name: host.clone(),
-        },
-    )?;
-    let confirm: PairConfirm = websocket::receive(socket)?;
     let transcript =
         pairing::transcript(&identity.key.public_key(), &device_key, &device_name, host);
-    let given = BASE64.decode(&confirm.confirm).unwrap_or_default();
+    let (key, given) = match by_qr {
+        true => (secret, theirs),
+        false => {
+            let (spake, ours) = CodeExchange::start(Side::Host, &code)?;
+            let key = spake.finish(&theirs)?;
+            websocket::send(
+                socket,
+                &PairReply::Spake {
+                    spake: BASE64.encode(ours),
+                    host_name: host.clone(),
+                },
+            )?;
+            let confirm: PairConfirm = websocket::receive(socket)?;
+            (key, BASE64.decode(&confirm.confirm).unwrap_or_default())
+        }
+    };
     if !pairing::confirms(&key, Side::Device, &transcript, &given) {
         wrong_try(shared, generation);
-        anyhow::bail!("The code did not match");
+        match by_qr {
+            true => anyhow::bail!("The QR code did not match"),
+            false => anyhow::bail!("The code did not match"),
+        }
     }
-    // The code works once: this exchange takes its own pairing mode, still open, or fails.
+    // The code and QR code work once: this exchange takes its own pairing mode, still open, or
+    // fails.
     {
         let mut pairing = shared.open_pairing();
         anyhow::ensure!(
@@ -92,6 +104,7 @@ fn exchange(
     shared.requests.tell(ToActor::Paired {
         key: device_key,
         name: device_name,
+        by_qr,
         reply,
     })?;
     stored

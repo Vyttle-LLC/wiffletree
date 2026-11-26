@@ -1381,7 +1381,9 @@ impl Host {
             eprintln!("Brain conflicts: {error:#}");
             vec![]
         });
-        Ok((self.issue_notes()?.into_iter())
+        let paired = self.paired_notices()?.into_iter();
+        Ok((paired.map(WorkspaceNote::DevicePaired))
+            .chain(self.issue_notes()?)
             .chain(notes)
             .chain(self.held_notes()?)
             .chain(self.alert_notes()?)
