@@ -169,9 +169,9 @@ impl Settings {
             let open = move |_, window: &mut Window, cx: &mut App| Self::open_in(at, window, cx);
             let main = cx.default_global::<MainWindow>().0.clone();
             if main.is_none_or(|(handle, _)| handle.update(cx, open).is_err()) {
-                let _ = open_main_window(cx).update(cx, |_, window, cx| {
-                    Self::open_in(at, window, cx);
-                });
+                // Untyped, so the window's root is free for the dialog to read.
+                let window: AnyWindowHandle = open_main_window(cx).into();
+                let _ = window.update(cx, |_, window, cx| Self::open_in(at, window, cx));
             }
         });
     }
@@ -1039,7 +1039,30 @@ impl Render for Settings {
                 let dialog =
                     (self.confirming).and_then(|confirm| self.confirm_dialog(confirm, p, cx));
                 match dialog {
-                    Some(dialog) => over_dimmed(body, dialog).flex_1().min_h_0(),
+                    // A click on the dimmed page, outside the card, closes the confirmation. The
+                    // dimming occludes what is under it, so the click is taken by a layer over
+                    // all of it that places the card where `over_dimmed` would.
+                    Some(dialog) => over_dimmed(
+                        body,
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_start()
+                            .justify_center()
+                            .pt(px(120.))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|view, _, _, cx| {
+                                    view.dismiss_confirmation(cx);
+                                }),
+                            )
+                            .child(dialog.on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation()
+                            })),
+                    )
+                    .flex_1()
+                    .min_h_0(),
                     None => div().flex_1().min_h_0().relative().child(body),
                 }
             })
