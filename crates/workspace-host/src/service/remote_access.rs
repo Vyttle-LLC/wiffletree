@@ -18,6 +18,10 @@ impl Actor {
             }
             Command::OpenPairing => self.remote.open_pairing()?,
             Command::CancelPairing => self.remote.close_pairing(),
+            Command::PairingQr => return Ok(serde_json::to_value(self.remote.pairing_qr()?)?),
+            Command::DismissPairedNotice { device_id } => {
+                self.host.dismiss_paired_notice(device_id)?
+            }
             Command::SetDeviceLevel { device_id, level } => {
                 self.host.set_device_level(device_id, *level)?;
                 self.remote.close_device(device_id);
@@ -83,9 +87,19 @@ impl Actor {
                 let _ = reply.try_send(level);
                 None
             }
-            ToActor::Paired { key, name, reply } => {
+            ToActor::Paired {
+                key,
+                name,
+                by_qr,
+                reply,
+            } => {
                 // The exchange has taken its pairing mode already; one opened since stays open.
-                let stored = self.host.add_device(&key, &name, now());
+                let stored = (self.host.add_device(&key, &name, now())).and_then(|device| {
+                    if by_qr {
+                        self.host.note_paired(&device.id)?;
+                    }
+                    Ok(device)
+                });
                 self.remote.refresh();
                 self.state_changed();
                 let _ = reply.try_send(stored.map(|_| ()).map_err(|e| format!("{e:#}")));

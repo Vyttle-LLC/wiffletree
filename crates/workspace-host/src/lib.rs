@@ -2703,6 +2703,8 @@ impl Host {
             | Command::SetRemoteAccess { .. }
             | Command::OpenPairing
             | Command::CancelPairing
+            | Command::PairingQr
+            | Command::DismissPairedNotice { .. }
             | Command::SetDeviceLevel { .. }
             | Command::RemoveDevice { .. } => {
                 bail!("Remote access runs only in the host's service")

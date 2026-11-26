@@ -89,8 +89,8 @@ pub struct Uploaded {
     pub stored: u64,
 }
 
-/// The first message on `/pair`, naming its method. `code` sends its SPAKE2 message; the host
-/// refuses a method it does not offer without counting a wrong try.
+/// The first message on `/pair`, naming its method. `code` sends its SPAKE2 message and `qr` its
+/// proof; the host refuses a method it does not offer without counting a wrong try.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairStart {
     pub method: String,
@@ -100,11 +100,38 @@ pub struct PairStart {
     /// The device's SPAKE2 message, base64, for `code`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spake: Option<String>,
+    /// The device's confirmation keyed with the QR code's secret, base64, for `qr`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<String>,
 }
-/// The pairing method this host offers.
+/// The Mac's method: a 4-digit code and SPAKE2.
 pub const PAIR_METHOD_CODE: &str = "code";
-/// The iPhone's method, specified but not yet offered.
+/// The iPhone's method: a QR code holding the host's key and a one-time secret.
 pub const PAIR_METHOD_QR: &str = "qr";
+/// The length of a QR code's one-time secret.
+pub const QR_SECRET_BYTES: usize = 16;
+
+/// What the QR code of pairing mode holds, as one JSON value.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QrPayload {
+    /// The host's P-256 public key, SEC1 uncompressed, base64; the device pins it from the start.
+    pub host_key: String,
+    pub host_name: String,
+    /// Where to reach the host, best first: private LAN addresses, then Tailscale addresses,
+    /// then the host's Tailscale name.
+    pub addresses: Vec<String>,
+    pub port: u16,
+    /// The one-time secret, base64.
+    pub secret: String,
+}
+
+/// `PairingQr`'s reply: the QR code's payload while pairing mode is open, and when it closes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairingQr {
+    pub payload: QrPayload,
+    /// In milliseconds since the epoch.
+    pub expires_at: i64,
+}
 
 /// The host's messages on `/pair`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

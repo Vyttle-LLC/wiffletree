@@ -44,11 +44,19 @@ Only the host itself SHALL open pairing mode, from Settings â€º Remote access â€
 - **THEN** pairing fails because pairing mode is closed
 
 ### Requirement: Pairing methods are pluggable
-The first message of a pairing exchange SHALL name its method, and the host SHALL refuse a method it does not offer without counting a wrong try. Every method SHALL end with both sides holding each other's long-term public key and the device stored with Control. This change SHALL build the `code` method for Macs. The protocol SHALL also define the `qr` method for an iPhone, built later with the iPhone client and its QR screen: a QR code at the host holding the host's public key, its addresses and port, and a one-time secret of at least 128 random bits that works once, for 2 minutes; a device that pins TLS to that key and proves the secret with HMAC-SHA256 over both public keys and both names; and a host that answers with its own HMAC. It SHALL need nothing beyond CryptoKit on the device.
+The first message of a pairing exchange SHALL name its method, and the host SHALL refuse a method it does not offer without counting a wrong try. Every method SHALL end with both sides holding each other's long-term public key and the device stored with Control. The host SHALL offer the `code` method for Macs and the `qr` method for an iPhone, both while pairing mode is open. For `qr`, Remote access's Connect a phone SHALL show a QR code holding the host's public key, its addresses and port, and a one-time secret of at least 128 random bits that works once, for 2 minutes, with New code for a fresh one; the device SHALL pin TLS to that key and prove the secret with HMAC-SHA256 over both public keys and both names, and the host SHALL answer with its own HMAC. A wrong proof SHALL count as a wrong try. It SHALL need nothing beyond CryptoKit on the device. Since anyone who photographs the QR code can pair with it, each device paired by `qr` SHALL raise a note in every project's Inbox until the human dismisses it or removes the device.
 
 #### Scenario: A method the host does not offer
-- **WHEN** a device starts pairing with the method `qr` on a host of this change
+- **WHEN** a device starts pairing with a method the host does not know
 - **THEN** the host refuses it, counts no wrong try and leaves pairing mode open
+
+#### Scenario: A phone pairs by QR code
+- **WHEN** an iPhone scans the QR code within 2 minutes and proves its secret
+- **THEN** the host stores the iPhone with Control, closes pairing mode, and every Inbox shows "A phone was paired: Michael's iPhone. Not you? Remove it in Remote access."
+
+#### Scenario: A spent QR code
+- **WHEN** a second device uses a QR code another device has already paired with
+- **THEN** the host refuses it because pairing mode is closed
 
 #### Scenario: The QR method's test vectors
 - **WHEN** the documented `qr` test vectors are checked with CryptoKit's HMAC-SHA256

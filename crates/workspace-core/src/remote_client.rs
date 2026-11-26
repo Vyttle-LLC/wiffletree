@@ -1,6 +1,6 @@
 //! A device's side of the network transport: TLS 1.3 to a host, pinned to the host's key once
-//! paired, a WebSocket over it, the `code` pairing exchange on `/pair`, and the challenge on
-//! `/v1` that opens a connection for the host protocol.
+//! paired, a WebSocket over it, the `code` and `qr` pairing exchanges on `/pair`, and the
+//! challenge on `/v1` that opens a connection for the host protocol.
 use crate::pairing::{self, CodeExchange, KeyPair, Side};
 use crate::*;
 use anyhow::{Context, anyhow};
@@ -109,6 +109,7 @@ pub fn pair(
             device_name: device_name.into(),
             device_key: BASE64.encode(device.public_key()),
             spake: Some(BASE64.encode(message)),
+            proof: None,
         },
     )?;
     let (spake, host_name) = match receive(&mut socket)? {
@@ -141,6 +142,72 @@ pub fn pair(
         PairReply::Refused { reason } => Err(RemoteError::Refused(reason)),
         PairReply::Spake { .. } => Err(anyhow!("The host answered out of turn").into()),
     }
+}
+
+/// Pairs with the host a QR code describes, pinned to its key from the start: at the first of its
+/// addresses that answers with that key, with the proof keyed with its secret.
+pub fn pair_qr(
+    qr: &QrPayload,
+    device: &KeyPair,
+    device_name: &str,
+) -> Result<PairedHost, RemoteError> {
+    let device_name = &pairing::device_name(device_name);
+    let host_key = BASE64
+        .decode(&qr.host_key)
+        .context("The QR code's key is malformed")?;
+    let secret = BASE64
+        .decode(&qr.secret)
+        .context("The QR code's secret is malformed")?;
+    let mut socket = open_any(&qr.addresses, qr.port, &host_key)?;
+    let transcript =
+        pairing::transcript(&host_key, &device.public_key(), device_name, &qr.host_name);
+    let proof = pairing::confirmation(&secret, Side::Device, &transcript);
+    send(
+        &mut socket,
+        &PairStart {
+            method: PAIR_METHOD_QR.into(),
+            device_name: device_name.into(),
+            device_key: BASE64.encode(device.public_key()),
+            spake: None,
+            proof: Some(BASE64.encode(proof)),
+        },
+    )?;
+    match receive(&mut socket)? {
+        PairReply::Paired { confirm, host_id }
+            if pairing::confirms(&secret, Side::Host, &transcript, &decode(&confirm)?)
+                && host_id == pairing::key_id(&host_key) =>
+        {
+            let _ = socket.close(None);
+            Ok(PairedHost {
+                id: host_id,
+                public_key: host_key,
+                name: qr.host_name.clone(),
+            })
+        }
+        PairReply::Paired { .. } => Err(RemoteError::Confirmation),
+        PairReply::Refused { reason } => Err(RemoteError::Refused(reason)),
+        PairReply::Spake { .. } => Err(anyhow!("The host answered out of turn").into()),
+    }
+}
+
+/// `/pair` at the first of `addresses` whose certificate carries `host_key`, or the last failure.
+fn open_any(
+    addresses: &[String],
+    port: u16,
+    host_key: &[u8],
+) -> Result<RemoteWebSocket, RemoteError> {
+    let mut last = None;
+    for address in addresses {
+        let address = match address.contains(':') {
+            true => format!("[{address}]:{port}"),
+            false => format!("{address}:{port}"),
+        };
+        match open(&address, Some(host_key), PAIR_PATH) {
+            Ok((socket, _)) => return Ok(socket),
+            Err(error) => last = Some(error),
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow!("The QR code names no address").into()))
 }
 
 /// Connects to a paired host at `address`, refusing a certificate without `host_key`, and
