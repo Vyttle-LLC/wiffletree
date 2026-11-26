@@ -2,7 +2,7 @@
 //! access level, and which devices that paired by QR code the Inbox still notes.
 use crate::*;
 
-/// Adds the device table and sets schema 8, after `uploads::migrate`.
+/// Adds the device and paired-notice tables and sets schema 8, after `uploads::migrate`.
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS devices (

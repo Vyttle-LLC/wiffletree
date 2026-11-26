@@ -20,7 +20,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
 use workspace_core::{
@@ -233,6 +233,7 @@ pub(crate) struct Remote {
     error: Option<String>,
     /// The `pairing` TXT field last advertised.
     advertised_pairing: Option<bool>,
+    tailscale: TailscaleName,
 }
 impl Remote {
     pub(crate) fn new(options: Options, requests: Requests) -> Self {
@@ -254,6 +255,7 @@ impl Remote {
             listening: None,
             error: None,
             advertised_pairing: None,
+            tailscale: TailscaleName::default(),
         }
     }
     pub(crate) fn name(&self) -> &str {
@@ -286,6 +288,7 @@ impl Remote {
         });
         let listening = listener::listen(self.options.port, identity, self.shared.clone())?;
         self.listening = Some(listening);
+        self.tailscale.refresh();
         self.advertise();
         Ok(())
     }
@@ -329,6 +332,7 @@ impl Remote {
             wrong: 0,
             busy: false,
         });
+        self.tailscale.refresh();
         // The advertisement says pairing is off again once the time is up.
         let requests = self.shared.requests.clone();
         std::thread::spawn(move || {
@@ -358,7 +362,7 @@ impl Remote {
             expires_at: mode.expires_at,
         })
     }
-    /// The QR code of the open pairing mode. Reads the Tailscale name, which can take a moment.
+    /// The QR code of the open pairing mode, with the Tailscale name as last read.
     pub(crate) fn pairing_qr(&self) -> Result<PairingQr> {
         let (secret, expires_at) = {
             let pairing = self.shared.open_pairing();
@@ -372,7 +376,7 @@ impl Remote {
             payload: QrPayload {
                 host_key: BASE64.encode(key.public_key()),
                 host_name: self.name.clone(),
-                addresses: qr_addresses(&ipv4_addresses(), tailscale_name()),
+                addresses: qr_addresses(&ipv4_addresses(), self.tailscale.get()),
                 port,
                 secret: BASE64.encode(secret),
             },
@@ -472,8 +476,32 @@ fn is_tailscale(ip: &Ipv4Addr) -> bool {
     first == 100 && second & 0xc0 == 64
 }
 
-/// This Mac's MagicDNS name, when the Tailscale CLI is installed and connected and answers
-/// within 2 seconds.
+/// This Mac's MagicDNS name as last read, which the QR code lists. The Tailscale CLI can be slow
+/// or hang, so it is read on a thread of its own, never on the actor's.
+#[derive(Clone, Default)]
+struct TailscaleName {
+    name: Arc<Mutex<Option<String>>>,
+    reading: Arc<AtomicBool>,
+}
+impl TailscaleName {
+    /// Reads the name again, unless a read is still running; the last name stays meanwhile.
+    fn refresh(&self) {
+        if self.reading.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let this = self.clone();
+        std::thread::spawn(move || {
+            let name = tailscale_name();
+            *this.name.lock().unwrap_or_else(|e| e.into_inner()) = name;
+            this.reading.store(false, Ordering::Release);
+        });
+    }
+    fn get(&self) -> Option<String> {
+        self.name.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+/// This Mac's MagicDNS name, when the Tailscale CLI is installed and connected.
 fn tailscale_name() -> Option<String> {
     // The App Store and standalone apps, Homebrew, and nix-darwin.
     const CLIS: [&str; 4] = [
@@ -483,17 +511,10 @@ fn tailscale_name() -> Option<String> {
         "/run/current-system/sw/bin/tailscale",
     ];
     let cli = CLIS.into_iter().find(|cli| Path::new(cli).exists())?;
-    let (sender, status) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let output = std::process::Command::new(cli)
-            .args(["status", "--json"])
-            .stdin(std::process::Stdio::null())
-            .output();
-        let _ = sender.send(output);
-    });
-    let output = status
-        .recv_timeout(std::time::Duration::from_secs(2))
-        .ok()?
+    let output = std::process::Command::new(cli)
+        .args(["status", "--json"])
+        .stdin(std::process::Stdio::null())
+        .output()
         .ok()?;
     magic_dns_name(&output.stdout)
 }

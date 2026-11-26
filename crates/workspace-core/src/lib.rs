@@ -4948,9 +4948,10 @@ impl Command {
     /// reading, editing, marking or discarding one a scan held, and bringing a brain in.
     /// Every write to a tracker is the human's, settling a paused issue file, following an issue
     /// and every step of a Linear import too; reading issues is not. Remote access is the human's
-    /// too: its state carries the pairing code, and its QR code the secret. The assistant is the human's: its threads, their
-    /// text and its name. So are jobs: only the user saves, pauses, runs or deletes one. So are
-    /// Boards, the outputs threads and jobs saved, and only the user shares one into a Space.
+    /// too: its state carries the pairing code, and its QR code the secret. The assistant is the
+    /// human's: its threads, their text and its name. So are jobs: only the user saves, pauses,
+    /// runs or deletes one. So are Boards, the outputs threads and jobs saved, and only the user
+    /// shares one into a Space.
     /// So are issue threads' proposals: only the human applies or discards one. So are UI
     /// evaluators: what a project allows, stopping a run, and reading runs, whose reasons can
     /// quote what the evaluator said.

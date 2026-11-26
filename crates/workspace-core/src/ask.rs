@@ -441,9 +441,6 @@ pub fn cancel_pairing() -> Ask<RemoteAccess> {
 pub fn pairing_qr() -> Ask<PairingQr> {
     Ask::new(Command::PairingQr)
 }
-pub fn dismiss_paired_notice(device_id: String) -> Ask<RemoteAccess> {
-    Ask::new(Command::DismissPairedNotice { device_id })
-}
 pub fn set_device_level(device_id: String, level: AccessLevel) -> Ask<RemoteAccess> {
     Ask::new(Command::SetDeviceLevel { device_id, level })
 }
