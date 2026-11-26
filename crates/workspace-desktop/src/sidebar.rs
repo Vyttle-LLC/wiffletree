@@ -1882,8 +1882,9 @@ impl Sidebar {
             .shared
             .snapshot()
             .is_some_and(|s| s.live_projects.contains(&project_id));
+        let parent = own.and_then(|project| project.parent_id.as_deref());
         let badge = (self.shared.snapshot())
-            .and_then(|s| badge(&s.attention, &s.workspace_notes, &project_id));
+            .and_then(|s| badge(&s.attention, &s.workspace_notes, &project_id, parent));
         let detail = format!(
             "{} · {}{}{}{}{}",
             root.name,
@@ -2600,14 +2601,17 @@ impl Badge {
 
 /// What a project's badge counts, as its Inbox lists them: its attention items, the
 /// sub-projects' questions it sent on, and the workspace notes. None when nothing needs you.
+/// Its own questions count as answered in `parent` only when that parent sent them on: one a
+/// former parent escalated is still answered here.
 pub(super) fn badge(
     attention: &[Attention],
     notes: &[WorkspaceNote],
     project_id: &str,
+    parent: Option<&str>,
 ) -> Option<Badge> {
     let (sent_on, asked_here): (Vec<&Attention>, Vec<&Attention>) = (attention.iter())
         .filter(|a| a.project_id == project_id)
-        .partition(|a| matches!(a.route, QuestionRoute::Escalated { .. }));
+        .partition(|a| parent.is_some_and(|parent| inbox::escalated_via(a, parent)));
     let from_children = (attention.iter())
         .filter(|a| inbox::escalated_via(a, project_id))
         .count();
@@ -2704,7 +2708,7 @@ mod tests {
 
     /// What a project's badge counts.
     fn needs_you(attention: &[Attention], notes: &[WorkspaceNote], project_id: &str) -> usize {
-        badge(attention, notes, project_id).map_or(0, |badge| badge.count())
+        badge(attention, notes, project_id, None).map_or(0, |badge| badge.count())
     }
 
     fn index(sessions: &[Session]) -> WorkspaceIndex {
@@ -2783,27 +2787,38 @@ mod tests {
             },
         );
         let items = [sent_on.clone()];
+        let child = |items: &[Attention], parent| badge(items, &[], "child", parent);
         assert_eq!(
-            badge(&items, &[], "parent"),
+            badge(&items, &[], "parent", None),
             Some(Badge::Answer {
                 count: 1,
                 from_children: true
             })
         );
-        assert_eq!(badge(&items, &[], "child"), Some(Badge::InParent(1)));
+        assert_eq!(child(&items, Some("parent")), Some(Badge::InParent(1)));
         // A collapsed parent counts the question once.
         assert_eq!(family_needs_you(&items, &[], &["parent", "child"]), 1);
+        // Moved under another parent, or made loose, the child answers it itself.
+        let normal = Some(Badge::Answer {
+            count: 1,
+            from_children: false,
+        });
+        assert_eq!(child(&items, Some("another")), normal);
+        assert_eq!(child(&items, None), normal);
 
         // A question of the child's own keeps its badge normal.
         let items = [sent_on, asked("own", QuestionRoute::Human)];
         assert_eq!(
-            badge(&items, &[], "child"),
+            child(&items, Some("parent")),
             Some(Badge::Answer {
                 count: 2,
                 from_children: false
             })
         );
-        assert_eq!(badge(&items, &[], "parent").map(|b| b.count()), Some(1));
+        assert_eq!(
+            badge(&items, &[], "parent", None).map(|b| b.count()),
+            Some(1)
+        );
     }
 
     #[test]
@@ -2975,9 +2990,13 @@ mod tests {
         let index = with_child_working(&host, &child);
         assert_eq!(with_parent(index.snapshot(), &child.project_id), 0);
         assert_eq!(rollup(&index), Some(tree::Rollup::NeedsYou(1)));
-        let badge = |project: &str| badge(&index.snapshot().attention, &[], project);
-        assert_eq!(badge(&child.project_id), Some(Badge::InParent(1)));
-        assert_eq!(badge(&parent.project_id).map(|b| b.count()), Some(1));
+        let attention = &index.snapshot().attention;
+        assert_eq!(
+            badge(attention, &[], &child.project_id, Some(&parent.project_id)),
+            Some(Badge::InParent(1))
+        );
+        let parents = badge(attention, &[], &parent.project_id, None);
+        assert_eq!(parents.map(|b| b.count()), Some(1));
     }
 }
 

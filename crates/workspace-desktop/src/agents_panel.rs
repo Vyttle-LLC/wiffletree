@@ -523,6 +523,7 @@ impl Inspector {
                 &snapshot.attention,
                 &snapshot.workspace_notes,
                 &child.project.id,
+                child.project.parent_id.as_deref(),
             )
             .map_or(0, |badge| badge.count());
             let stuck = Roster::new(
