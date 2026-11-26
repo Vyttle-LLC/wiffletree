@@ -56,6 +56,10 @@ pub(super) struct Settings {
     watching_remote: bool,
     /// Pair a device was clicked and the host has not answered yet.
     opening_pairing: bool,
+    /// Connect a phone or New code was clicked and the QR code has not arrived yet.
+    opening_qr: bool,
+    /// The QR code last read, shown while its pairing mode is open.
+    phone_qr: Option<remote_access::PhoneQr>,
     /// The assistant's name while the user renames it.
     assistant_input: Entity<InputState>,
     renaming_assistant: bool,
@@ -218,7 +222,7 @@ impl Settings {
         // still opening is cancelled too: the host takes commands in the order they were sent.
         cx.on_release(|view, _| {
             let showing = view.remote.as_ref().is_some_and(|r| r.pairing.is_some());
-            if showing || view.opening_pairing {
+            if showing || view.opening_pairing || view.opening_qr {
                 let _ = view.bridge.ask(ask::cancel_pairing());
             }
         })
@@ -243,6 +247,8 @@ impl Settings {
             remote_error: None,
             watching_remote: false,
             opening_pairing: false,
+            opening_qr: false,
+            phone_qr: None,
             assistant_input,
             renaming_assistant: false,
             assistant_error: None,

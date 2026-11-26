@@ -1107,10 +1107,15 @@ impl Inspector {
                 .find(|item| !item.is_permission())
                 .map(|item| item.id.clone())
         });
-        // Alerts at the very top, then issue notes under their own label, as every project's
-        // Inbox shows them.
-        let (alerts, notes): (Vec<&WorkspaceNote>, Vec<&WorkspaceNote>) =
-            (notes.into_iter()).partition(|note| matches!(note, WorkspaceNote::Alert(_)));
+        // Alerts and newly paired phones at the very top, then issue notes under their own
+        // label, as every project's Inbox shows them.
+        let (alerts, notes): (Vec<&WorkspaceNote>, Vec<&WorkspaceNote>) = (notes.into_iter())
+            .partition(|note| {
+                matches!(
+                    note,
+                    WorkspaceNote::Alert(_) | WorkspaceNote::DevicePaired(_)
+                )
+            });
         let (issues, others): (Vec<&WorkspaceNote>, Vec<&WorkspaceNote>) =
             (notes.into_iter()).partition(|note| matches!(note, WorkspaceNote::Issue(_)));
         let mut body = div()
@@ -1146,6 +1151,9 @@ impl Inspector {
                 .inbox
                 .update(cx, |inbox, cx| inbox.alert_card(alert, p, cx)),
             WorkspaceNote::ScanStopped(stopped) => scan_alert::stopped_card(stopped, p),
+            WorkspaceNote::DevicePaired(notice) => self
+                .inbox
+                .update(cx, |inbox, cx| inbox.paired_card(notice, p, cx)),
             WorkspaceNote::Issue(note) => {
                 let (inspector, id) = (cx.entity().downgrade(), note.id.clone());
                 let open: inbox::OpenIssue = Rc::new(move |_, cx| {

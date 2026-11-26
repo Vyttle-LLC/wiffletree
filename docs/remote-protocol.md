@@ -19,7 +19,7 @@ Binary values are standard base64 with padding in JSON, unless this page says he
 ## TLS and pinning
 
 - TLS 1.3 only. The host's certificate is self-signed for the name `wiffletree-host` and carries the host's long-term key. Send `wiffletree-host` as the server name; no certificate authority is involved.
-- **While pairing**, the device accepts any certificate but notes its public key, which goes into the pairing transcript. A machine in the middle shows another key, so the confirmations fail.
+- **While pairing by code**, the device accepts any certificate but notes its public key, which goes into the pairing transcript. A machine in the middle shows another key, so the confirmations fail. **While pairing by QR code**, the device accepts only the key the QR code holds.
 - **Once paired**, the device accepts the certificate only if its public key is the one stored at pairing. Another key is refused before anything is sent: "Studio Mac's key has changed. Wiffletree won't connect until you pair again." The client never replaces a stored key on its own.
 - The handshake signature is checked against the certificate's key as usual, so only the holder of that key can complete it.
 
@@ -33,7 +33,7 @@ Binary values are standard base64 with padding in JSON, unless this page says he
 
 ## Pairing
 
-The human opens pairing mode at the host: Settings › Remote access › Pair a device. It stays open for 2 minutes. The first message on `/pair` is `PairStart`, naming a method; a method the host does not offer is refused without counting a wrong try:
+The human opens pairing mode at the host: Settings › Remote access › Pair a device, which shows the code, or Connect a phone, which shows the QR code. It stays open for 2 minutes, and either method works while it is open. The first message on `/pair` is `PairStart`, naming a method; a method the host does not offer is refused without counting a wrong try:
 
 ```json
 {"method": "code", "device_name": "Michael's MacBook Air", "device_key": "BCLPdewVJEdcQR628…", "spake": "Qe7h3aCbmDx3IQJG…"}
@@ -74,13 +74,17 @@ The code is never checked any other way. It is safe at 4 digits only because SPA
 
 ### The `qr` method
 
-For the iPhone, which has no SPAKE2 in CryptoKit. It is specified here and built with the iPhone client; until then a host refuses it with "Studio Mac does not offer pairing by qr", counting no wrong try.
+For the iPhone, which has no SPAKE2 in CryptoKit.
 
-1. The host's Remote access page shows a QR code holding one JSON value: `{"host_key": "…", "host_name": "Studio Mac", "addresses": ["192.168.1.20", "studio.tail4c2e.ts.net"], "port": 47821, "secret": "…"}`. `secret` is a new one-time secret of 16 random bytes, valid once and for 2 minutes.
-2. The device opens TLS pinned to `host_key` from the QR code, so no machine in the middle can answer, and connects to `/pair`.
-3. The device sends `PairStart` with `method: "qr"`, its name and key, and `proof`: its confirmation keyed with the secret.
-4. The host checks the proof. A wrong one counts as a wrong try. Otherwise it stores the device and answers `{"paired": {"confirm": "…", "host_id": "…"}}`, where `confirm` is the host's confirmation keyed with the secret.
-5. The device checks the host's confirmation, then stores the host.
+1. The host's Remote access page shows a QR code holding one JSON value: `{"host_key": "…", "host_name": "Studio Mac", "addresses": ["192.168.1.20", "100.101.7.9", "studio.tail4c2e.ts.net"], "port": 47821, "secret": "…"}`. `host_key` and `secret` are base64. `secret` is a new one-time secret of 16 random bytes, valid once and for 2 minutes: each new pairing mode, and New code, makes a new one. The host command `pairing_qr` answers with the same value.
+2. The device opens TLS pinned to `host_key` from the QR code, so no machine in the middle can answer, and connects to `/pair`. It tries `addresses` in order, each at `port`, and pairs at the first that shows that key.
+3. The device sends `PairStart` with `method: "qr"`, its name and key, and `proof`: its confirmation keyed with the secret, base64.
+4. The host checks the proof. A wrong one counts as a wrong try and is refused with "The QR code did not match", as is a QR code from a pairing mode since replaced. A spent or expired QR code finds pairing mode closed. Otherwise it stores the device and answers `{"paired": {"confirm": "…", "host_id": "…"}}`, where `confirm` is the host's confirmation keyed with the secret.
+5. The device checks the host's confirmation and that `host_id` is the id of `host_key`, then stores the host.
+
+`addresses` lists the host's private LAN IPv4 addresses first, then its Tailscale IPv4 addresses (`100.64.0.0/10`), then its Tailscale MagicDNS name when the Tailscale CLI is installed and connected. Away from home the device reaches the host over Tailscale or another VPN the human already uses; nothing is relayed. Tailscale's IPv6 addresses are left out, since the host listens on IPv4 only; the MagicDNS name resolves to both.
+
+Anyone who photographs the QR code within its 2 minutes can pair with it, so a device paired by QR code raises a note in every project's Inbox until the human dismisses it or removes the device: "A phone was paired: Michael's iPhone. Not you? Remove it in Remote access."
 
 ### Test vectors
 

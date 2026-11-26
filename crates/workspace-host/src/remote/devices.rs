@@ -1,5 +1,5 @@
 //! Paired devices in the store (schema 8, with `message_uploads`): each device's key, name and
-//! access level.
+//! access level, and which devices that paired by QR code the Inbox still notes.
 use crate::*;
 
 /// Adds the device table and sets schema 8, after `uploads::migrate`.
@@ -12,6 +12,9 @@ pub(crate) fn migrate(db: &Connection) -> Result<()> {
              level TEXT NOT NULL,
              paired_at INTEGER NOT NULL,
              last_connected_at INTEGER
+         );
+         CREATE TABLE IF NOT EXISTS paired_notices (
+             device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE
          );
          PRAGMA user_version = 8;",
     )?;
@@ -103,6 +106,34 @@ impl Host {
         )?;
         Ok(())
     }
+    /// Notes in the Inbox that the device paired, until dismissed or the device is removed.
+    pub(crate) fn note_paired(&self, id: &str) -> Result<()> {
+        self.db.execute(
+            "INSERT OR IGNORE INTO paired_notices (device_id) VALUES (?1)",
+            [id],
+        )?;
+        Ok(())
+    }
+    pub(crate) fn dismiss_paired_notice(&self, id: &str) -> Result<()> {
+        self.db
+            .execute("DELETE FROM paired_notices WHERE device_id = ?1", [id])?;
+        Ok(())
+    }
+    /// The devices noted as paired, the earliest first.
+    pub(crate) fn paired_notices(&self) -> Result<Vec<PairedNotice>> {
+        let mut statement = self.db.prepare(
+            "SELECT d.id, d.name, d.paired_at FROM paired_notices n
+             JOIN devices d ON d.id = n.device_id ORDER BY d.paired_at, d.id",
+        )?;
+        let notices = statement.query_map([], |row| {
+            Ok(PairedNotice {
+                device_id: row.get(0)?,
+                device_name: row.get(1)?,
+                paired_at: row.get(2)?,
+            })
+        })?;
+        Ok(notices.collect::<Result<_, _>>()?)
+    }
 }
 
 #[cfg(test)]
@@ -128,5 +159,21 @@ mod tests {
         host.remove_device(&stored.id).unwrap();
         assert!(host.devices().unwrap().is_empty());
         assert!(host.remove_device(&stored.id).is_err());
+    }
+
+    #[test]
+    fn a_paired_notice_lasts_until_dismissed_or_the_device_is_removed() {
+        let home = tempfile::tempdir().unwrap();
+        let host = Host::open(home.path()).unwrap();
+        let [phone, other] = [(); 2].map(|_| {
+            let key = workspace_core::pairing::KeyPair::generate().unwrap();
+            host.add_device(&key.public_key(), "iPhone", 10).unwrap().id
+        });
+        host.note_paired(&phone).unwrap();
+        host.note_paired(&other).unwrap();
+        assert_eq!(host.paired_notices().unwrap().len(), 2);
+        host.dismiss_paired_notice(&phone).unwrap();
+        host.remove_device(&other).unwrap();
+        assert!(host.paired_notices().unwrap().is_empty());
     }
 }

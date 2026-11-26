@@ -112,15 +112,17 @@ fn pairing_with_the_code_stores_the_device_with_control_and_closes_pairing() {
 }
 
 #[test]
-fn the_third_wrong_code_closes_pairing_and_qr_counts_no_try() {
+fn the_third_wrong_code_closes_pairing_and_an_unoffered_method_counts_no_try() {
     let studio = Studio::start(0);
     studio.on();
     let device = KeyPair::generate().unwrap();
     let code = studio.open_pairing();
     let wrong = format!("{:04}", (code.parse::<u32>().unwrap() + 1) % 10_000);
     // A method the host does not offer is refused without counting a wrong try.
-    let qr = qr_start(&studio.address(), &device);
-    assert!(qr.contains("does not offer pairing by qr"), "{qr}");
+    for _ in 0..3 {
+        let nfc = unoffered_start(&studio.address(), &device);
+        assert!(nfc.contains("does not offer pairing by nfc"), "{nfc}");
+    }
     for _ in 0..2 {
         let failed = remote_client::pair(&studio.address(), &wrong, &device, "MacBook");
         assert!(matches!(failed, Err(RemoteError::Refused(_))), "{failed:?}");
@@ -140,14 +142,15 @@ fn the_third_wrong_code_closes_pairing_and_qr_counts_no_try() {
     assert!(studio.devices().is_empty());
 }
 
-/// Starts pairing by `qr` and returns the host's refusal.
-fn qr_start(address: &str, device: &KeyPair) -> String {
+/// Starts pairing by a method no host offers and returns the host's refusal.
+fn unoffered_start(address: &str, device: &KeyPair) -> String {
     let mut socket = raw_pair_socket(address);
     let start = PairStart {
-        method: PAIR_METHOD_QR.into(),
+        method: "nfc".into(),
         device_name: "iPhone".into(),
         device_key: base64(&device.public_key()),
         spake: None,
+        proof: None,
     };
     socket
         .send(tungstenite::Message::text(
@@ -248,6 +251,157 @@ fn a_code_typed_after_two_minutes_finds_pairing_closed() {
     }
     assert!(studio.state().pairing.is_none());
     assert!(studio.devices().is_empty());
+}
+
+#[test]
+fn pairing_by_qr_stores_the_device_with_control_and_notes_it_in_the_inbox() {
+    let studio = Studio::start(0);
+    let port = studio.on();
+    let qr = studio.open_qr();
+    let state = studio.state();
+    assert_eq!(qr.expires_at, state.pairing.unwrap().expires_at);
+    assert_eq!(
+        (qr.payload.host_key.as_str(), qr.payload.host_name.as_str()),
+        (base64(&studio.key.public_key()).as_str(), "Studio Mac")
+    );
+    assert_eq!(qr.payload.port, port);
+    assert_eq!(decode(&qr.payload.secret).len(), QR_SECRET_BYTES);
+    let device = KeyPair::generate().unwrap();
+
+    let host = remote_client::pair_qr(&qr.payload, &device, "Michael's iPhone").unwrap();
+
+    assert_eq!(
+        (host.id.as_str(), host.name.as_str()),
+        (studio.key.id().as_str(), "Studio Mac")
+    );
+    let state = studio.state();
+    assert!(state.pairing.is_none(), "pairing mode closes");
+    let [paired] = &state.devices[..] else {
+        panic!("{:?}", state.devices)
+    };
+    assert_eq!(
+        (paired.name.as_str(), paired.level, paired.id.as_str()),
+        (
+            "Michael's iPhone",
+            AccessLevel::Control,
+            device.id().as_str()
+        )
+    );
+    let mut client = studio.connect(&device).unwrap();
+    client.call(Command::Snapshot).unwrap();
+    let notices = || paired_notices(&studio);
+    assert_eq!(notices(), [("Michael's iPhone".to_string(), device.id())]);
+    studio
+        .host(Command::DismissPairedNotice {
+            device_id: device.id(),
+        })
+        .unwrap();
+    assert!(notices().is_empty());
+}
+
+#[test]
+fn pairing_by_code_notes_nothing_in_the_inbox() {
+    let studio = Studio::start(0);
+    studio.on();
+    studio.pair(&KeyPair::generate().unwrap(), "MacBook");
+    assert!(paired_notices(&studio).is_empty());
+}
+
+/// The devices the Inbox notes as paired by QR code: name and id.
+fn paired_notices(studio: &Studio) -> Vec<(String, String)> {
+    let snapshot: Snapshot =
+        serde_json::from_value(studio.host(Command::Snapshot).unwrap()).unwrap();
+    let notices = snapshot
+        .workspace_notes
+        .into_iter()
+        .filter_map(|note| match note {
+            WorkspaceNote::DevicePaired(notice) => Some((notice.device_name, notice.device_id)),
+            _ => None,
+        });
+    notices.collect()
+}
+
+fn decode(text: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(text)
+        .unwrap()
+}
+
+#[test]
+fn a_spent_qr_code_is_refused_and_after_pairing_reopens_counts_a_wrong_try() {
+    let studio = Studio::start(0);
+    studio.on();
+    let qr = studio.open_qr();
+    remote_client::pair_qr(&qr.payload, &KeyPair::generate().unwrap(), "iPhone").unwrap();
+
+    let second = KeyPair::generate().unwrap();
+    match remote_client::pair_qr(&qr.payload, &second, "Stranger's iPhone") {
+        Err(RemoteError::Refused(reason)) => assert!(reason.contains("not open"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+    studio.open_pairing();
+    match remote_client::pair_qr(&qr.payload, &second, "Stranger's iPhone") {
+        Err(RemoteError::Refused(reason)) => assert_eq!(reason, "The QR code did not match"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(studio.devices().len(), 1, "only the first phone paired");
+    assert!(studio.state().pairing.is_some(), "one wrong try of three");
+}
+
+#[test]
+fn the_third_wrong_proof_closes_pairing_and_the_right_one_no_longer_works() {
+    let studio = Studio::start(0);
+    studio.on();
+    let qr = studio.open_qr();
+    let mut wrong = qr.payload.clone();
+    wrong.secret = base64(&[7; QR_SECRET_BYTES]);
+    let device = KeyPair::generate().unwrap();
+    for left_open in [true, true, false] {
+        match remote_client::pair_qr(&wrong, &device, "iPhone") {
+            Err(RemoteError::Refused(reason)) => {
+                assert_eq!(reason, "The QR code did not match")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(studio.state().pairing.is_some(), left_open);
+    }
+    assert!(remote_client::pair_qr(&qr.payload, &device, "iPhone").is_err());
+    assert!(studio.devices().is_empty());
+    assert!(
+        studio.host(Command::PairingQr).is_err(),
+        "no QR code to show"
+    );
+}
+
+#[test]
+fn a_qr_code_scanned_after_two_minutes_finds_pairing_closed() {
+    let studio = Studio::start(0);
+    studio.on();
+    let qr = studio.open_qr();
+    studio
+        .clock
+        .fetch_add(PAIRING_MS + 1_000, Ordering::Relaxed);
+    let device = KeyPair::generate().unwrap();
+    match remote_client::pair_qr(&qr.payload, &device, "iPhone") {
+        Err(RemoteError::Refused(reason)) => assert!(reason.contains("not open"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(studio.devices().is_empty());
+    assert!(studio.host(Command::PairingQr).is_err());
+}
+
+#[test]
+fn a_qr_code_pins_the_host_key_so_another_machine_gets_nothing() {
+    let studio = Studio::start(0);
+    studio.on();
+    let mut qr = studio.open_qr().payload;
+    qr.host_key = base64(&KeyPair::generate().unwrap().public_key());
+    let device = KeyPair::generate().unwrap();
+    let pinned = remote_client::pair_qr(&qr, &device, "iPhone");
+    assert!(matches!(pinned, Err(RemoteError::KeyChanged)), "{pinned:?}");
+    assert!(studio.devices().is_empty());
+    assert!(studio.state().pairing.is_some(), "nothing reached /pair");
 }
 
 #[test]
@@ -844,6 +998,7 @@ fn an_exchange_begun_before_pairing_reopened_cannot_complete() {
             device_name: "MacBook".into(),
             device_key: base64(&device.public_key()),
             spake: Some(base64(&message)),
+            proof: None,
         },
     );
     let PairReply::Spake { spake, host_name } = take(&mut socket) else {

@@ -952,6 +952,55 @@ impl Inbox {
     }
     /// A storage repository's file a scan held back from a push: which file, the check and its
     /// rule, never what matched.
+    /// A phone paired by QR code, which anyone who photographed the code could have done.
+    pub(super) fn paired_card(
+        &self,
+        notice: &PairedNotice,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let device_id = notice.device_id.clone();
+        card(p)
+            .bg(p.surface)
+            .border_color(p.yellow.opacity(0.55))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(hint("Workspace · Remote access", p))
+                    .child(pill("New device", p.yellow)),
+            )
+            .child(
+                div()
+                    .text_size(px(font::TEXT))
+                    .line_height(relative(1.5))
+                    .child(paired_text(&notice.device_name)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        button(SharedString::from(format!("remote-{}", notice.device_id)))
+                            .small()
+                            .label("Remote access")
+                            .on_click(|_, _, cx| settings::Settings::open_at_remote_access(cx)),
+                    )
+                    .child(
+                        button(SharedString::from(format!("seen-{}", notice.device_id)))
+                            .ghost()
+                            .small()
+                            .label("Dismiss")
+                            .on_click(cx.listener(move |inbox, _, window, cx| {
+                                let device_id = device_id.clone();
+                                let command = Command::DismissPairedNotice { device_id };
+                                inbox.request(command, window, cx);
+                            })),
+                    ),
+            )
+    }
     pub(super) fn held_card(&self, held: &HeldFile, p: Palette) -> Div {
         card(p)
             .bg(p.surface)
@@ -1071,6 +1120,10 @@ fn escalated_from(item: &Attention, projects: &[Project]) -> Option<Escalated> {
         label: format!("{} · via {}", name(&item.project_id)?, name(parent_id)?),
         note: note.clone(),
     })
+}
+
+fn paired_text(device_name: &str) -> String {
+    format!("A phone was paired: {device_name}. Not you? Remove it in Remote access.")
 }
 
 /// A repository or folder in full, wrapping rather than cut off: this is what approving adds.
