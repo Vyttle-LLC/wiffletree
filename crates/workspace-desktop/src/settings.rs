@@ -48,6 +48,8 @@ pub(super) struct Settings {
     remote_error: Option<String>,
     /// The page is looking again on a timer.
     watching_remote: bool,
+    /// Pair a device was clicked and the host has not answered yet.
+    opening_pairing: bool,
     /// The assistant's name while the user renames it.
     assistant_input: Entity<InputState>,
     renaming_assistant: bool,
@@ -195,6 +197,7 @@ impl Settings {
                         remote: None,
                         remote_error: None,
                         watching_remote: false,
+                        opening_pairing: false,
                         assistant_input,
                         renaming_assistant: false,
                         assistant_error: None,

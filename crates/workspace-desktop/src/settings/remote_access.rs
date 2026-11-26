@@ -19,6 +19,93 @@ fn time_left(expires_at: i64, now: i64) -> String {
     format!("{}:{:02} left", seconds / 60, seconds % 60)
 }
 
+/// A run of a step's text, bold when `true`.
+type Run<'a> = (&'a str, bool);
+
+fn steps_before_code() -> [Vec<Run<'static>>; 3] {
+    [
+        vec![
+            ("Click ", false),
+            ("Pair a device", true),
+            (" here. This Mac shows a 4-digit code.", false),
+        ],
+        vec![
+            ("On the other Mac, open Wiffletree and choose ", false),
+            ("Connect a computer…", true),
+            (" from the sidebar's host menu.", false),
+        ],
+        vec![
+            ("Pick ", false),
+            ("this Mac", true),
+            (
+                " from the list, or type its name or address, and enter the code.",
+                false,
+            ),
+        ],
+    ]
+}
+
+fn steps_with_code<'a>(
+    name: &'a str,
+    address: Option<&'a str>,
+    code: &'a str,
+) -> [Vec<Run<'a>>; 3] {
+    let mut pick = vec![("Pick ", false), (name, true)];
+    if let Some(address) = address {
+        pick.extend([(", or type ", false), (address, true)]);
+    }
+    pick.push((".", false));
+    [
+        vec![
+            ("On the other Mac, open Wiffletree › ", false),
+            ("Connect a computer…", true),
+            (" in the sidebar's host menu.", false),
+        ],
+        pick,
+        vec![
+            ("Enter ", false),
+            (code, true),
+            (". It works once, for 2 minutes.", false),
+        ],
+    ]
+}
+
+/// Numbered steps in hint text, their bold runs in the text color.
+fn steps(steps: &[Vec<Run>], p: Palette) -> Div {
+    let bold = HighlightStyle {
+        font_weight: Some(FontWeight::SEMIBOLD),
+        color: Some(p.text),
+        ..Default::default()
+    };
+    let rows = steps.iter().enumerate().map(|(at, runs)| {
+        let (mut text, mut highlights) = (String::new(), vec![]);
+        for (run, is_bold) in runs {
+            if *is_bold {
+                highlights.push((text.len()..text.len() + run.len(), bold));
+            }
+            text.push_str(run);
+        }
+        div()
+            .flex()
+            .gap_2()
+            .child(div().flex_none().child(format!("{}.", at + 1)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(StyledText::new(text).with_highlights(highlights)),
+            )
+    });
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .text_size(px(font::SMALL))
+        .line_height(relative(1.5))
+        .text_color(p.subtle)
+        .children(rows)
+}
+
 /// "Connected now", when it last connected, or "Never".
 fn last_connected(device: &PairedDevice) -> String {
     if device.connected {
@@ -39,12 +126,15 @@ impl Settings {
             Ok(answer) => answer,
             Err(error) => {
                 self.remote_error = Some(error);
+                self.opening_pairing = false;
+                cx.notify();
                 return;
             }
         };
         cx.spawn(async move |this, cx| {
             let answer = answer.await;
             let _ = this.update(cx, |view, cx| {
+                view.opening_pairing = false;
                 match answer {
                     Ok(remote) => {
                         view.remote = Some(remote);
@@ -156,20 +246,30 @@ impl Settings {
     }
 
     fn pairing_card(&self, remote: &RemoteAccess, p: Palette, cx: &mut Context<Self>) -> Div {
-        let Some(pairing) = &remote.pairing else {
-            return card(p).items_center().child(
-                button("open-pairing")
-                    .label("Pair a device")
-                    .on_click(cx.listener(|view, _, _, cx| {
-                        view.ask_remote(ask::open_pairing(), cx);
-                    })),
-            );
-        };
-        let card = card(p).items_center().child(
+        let card = card(p).child(
             div()
                 .font_weight(FontWeight::SEMIBOLD)
                 .child("Pair a device"),
         );
+        let Some(pairing) = &remote.pairing else {
+            let open = button("open-pairing").primary();
+            let open = if self.opening_pairing {
+                open.disabled(true)
+                    .child(ui::Spinner::new().small())
+                    .child("Opening pairing…")
+            } else {
+                open.label("Pair a device")
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        view.opening_pairing = true;
+                        view.ask_remote(ask::open_pairing(), cx);
+                        cx.notify();
+                    }))
+            };
+            return card
+                .child(steps(&steps_before_code(), p))
+                .child(div().flex().child(open));
+        };
+        let address = remote.addresses.first().map(String::as_str);
         let digits = pairing.code.chars().map(|digit| {
             div()
                 .w(px(36.))
@@ -185,33 +285,33 @@ impl Settings {
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(digit.to_string())
         });
-        card.child(hint(
-            "Type this code on the other Mac or iPhone. It works once, for 2 minutes.",
-            p,
-        ))
-        .child(div().flex().gap_2().children(digits))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(hint(
-                    format!(
-                        "Waiting for a device… · {} ·",
-                        time_left(pairing.expires_at, ui::now())
+        card.child(div().flex().justify_center().gap_2().children(digits))
+            .child(steps(
+                &steps_with_code(&remote.host_name, address, &pairing.code),
+                p,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(hint(
+                        format!(
+                            "Waiting for a device… · {} ·",
+                            time_left(pairing.expires_at, ui::now())
+                        ),
+                        p,
+                    ))
+                    .child(
+                        button("cancel-pairing")
+                            .ghost()
+                            .xsmall()
+                            .label("Cancel")
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.ask_remote(ask::cancel_pairing(), cx);
+                            })),
                     ),
-                    p,
-                ))
-                .child(
-                    button("cancel-pairing")
-                        .ghost()
-                        .xsmall()
-                        .label("Cancel")
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.ask_remote(ask::cancel_pairing(), cx);
-                        })),
-                ),
-        )
+            )
     }
 
     fn devices_card(&self, devices: &[PairedDevice], p: Palette, cx: &mut Context<Self>) -> Div {
@@ -275,12 +375,29 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::time_left;
+    use super::{steps_with_code, time_left};
 
     #[test]
     fn time_left_counts_whole_seconds_up() {
         assert_eq!(time_left(102_000, 0), "1:42 left");
         assert_eq!(time_left(1_500, 1_000), "0:01 left");
         assert_eq!(time_left(0, 1_000), "0:00 left");
+    }
+
+    #[test]
+    fn the_code_steps_name_an_address_only_when_there_is_one() {
+        let text = |address| -> Vec<String> {
+            let steps = steps_with_code("Studio Mac", address, "4719");
+            let joined = steps
+                .iter()
+                .map(|runs| runs.iter().map(|(run, _)| *run).collect());
+            joined.collect()
+        };
+        assert_eq!(
+            text(Some("studio.local"))[1],
+            "Pick Studio Mac, or type studio.local."
+        );
+        assert_eq!(text(None)[1], "Pick Studio Mac.");
+        assert_eq!(text(None)[2], "Enter 4719. It works once, for 2 minutes.");
     }
 }
