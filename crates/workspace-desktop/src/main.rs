@@ -514,9 +514,11 @@ impl Workspace {
                 return self.sync_archive(window, cx);
             }
             Intent::RefreshQuotas => self.refresh_quota(window, cx),
-            Intent::Archived { archived, affected } => {
-                self.archived(*archived, affected, window, cx)
-            }
+            Intent::Archived {
+                archived,
+                affected,
+                discarded,
+            } => self.archived(*archived, affected, *discarded, window, cx),
             Intent::OpenSkill(skill) => {
                 self.open_page(Page::Behaviors, window, cx);
                 self.behaviors.update(cx, |behaviors, cx| {
@@ -656,19 +658,12 @@ impl Workspace {
         &mut self,
         archived: bool,
         affected: &[Session],
+        discarded: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let name = affected.first().map_or("Session", |s| s.name.as_str());
-        toast(
-            if archived {
-                format!("Archived {name}. Nothing was deleted.")
-            } else {
-                format!("Restored {name}")
-            },
-            window,
-            cx,
-        );
+        toast(archived_toast(name, archived, discarded), window, cx);
         let hidden = archived
             && !self.shared.show_archived
             && affected
@@ -1322,6 +1317,19 @@ impl Requests for Workspace {
     }
 }
 
+fn archived_toast(name: &str, archived: bool, discarded: usize) -> String {
+    match (archived, discarded) {
+        (false, _) => format!("Restored {name}"),
+        (true, 0) => format!("Archived {name}. Nothing was deleted."),
+        (true, 1) => {
+            format!("Archived {name}. Discarded uncommitted work in 1 ticket. Its branch is kept.")
+        }
+        (true, n) => format!(
+            "Archived {name}. Discarded uncommitted work in {n} tickets. Their branches are kept."
+        ),
+    }
+}
+
 /// Whether this client draws dark, following macOS when the choice is System.
 fn is_dark(cx: &App) -> bool {
     match cx.global::<Preferences>().appearance {
@@ -1830,12 +1838,29 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArchiveDemand, ChangedSteps, Coalesced, Page, Panel, Shared, keep_quotas, shows_files_of,
-        shows_steps_of_selected, wants_archive,
+        ArchiveDemand, ChangedSteps, Coalesced, Page, Panel, Shared, archived_toast, keep_quotas,
+        shows_files_of, shows_steps_of_selected, wants_archive,
     };
     use serde_json::json;
     use std::rc::Rc;
     use workspace_core::*;
+
+    #[test]
+    fn the_archive_toast_says_how_many_tickets_lost_uncommitted_work() {
+        assert_eq!(
+            archived_toast("chat-logs", true, 0),
+            "Archived chat-logs. Nothing was deleted."
+        );
+        assert_eq!(
+            archived_toast("chat-logs", true, 2),
+            "Archived chat-logs. Discarded uncommitted work in 2 tickets. Their branches are kept."
+        );
+        assert_eq!(
+            archived_toast("chat-logs", true, 1),
+            "Archived chat-logs. Discarded uncommitted work in 1 ticket. Its branch is kept."
+        );
+        assert_eq!(archived_toast("chat-logs", false, 0), "Restored chat-logs");
+    }
 
     fn session(id: &str, archived: bool) -> Session {
         serde_json::from_value(json!({

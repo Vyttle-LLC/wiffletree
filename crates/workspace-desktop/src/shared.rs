@@ -270,10 +270,12 @@ pub(super) enum Intent {
     /// The coordinator's ticket table opened its "N done" list.
     DoneTicketsShown,
     RefreshQuotas,
-    /// The host archived or restored these sessions.
+    /// The host archived or restored these sessions, discarding uncommitted work in
+    /// `discarded` tickets.
     Archived {
         archived: bool,
         affected: Vec<Session>,
+        discarded: usize,
     },
     /// Opens the Behaviors page on one skill.
     OpenSkill(Skill),
@@ -361,13 +363,67 @@ pub(super) trait Requests: Sized + 'static {
     ) where
         Self: EventEmitter<Intent>,
     {
+        if archived && self.bridge().offers(capability::DISCARD_UNCOMMITTED) {
+            return self.archive(session_id, false, window, cx);
+        }
         let ask = ask::set_archived(session_id, archived);
         self.ask(
             ask,
             window,
             cx,
             move |_, affected, window, cx| match affected {
-                Ok(affected) => cx.emit(Intent::Archived { archived, affected }),
+                Ok(affected) => cx.emit(Intent::Archived {
+                    archived,
+                    affected,
+                    discarded: 0,
+                }),
+                Err(error) => toast_error(error, window, cx),
+            },
+        );
+    }
+    /// Archives a session. When its tickets' worktrees hold uncommitted work, the host archives
+    /// nothing and the human is asked first, listing those tickets; only their answer discards.
+    fn archive(
+        &mut self,
+        session_id: String,
+        discard_uncommitted: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) where
+        Self: EventEmitter<Intent>,
+    {
+        let ask = ask::archive_session(session_id.clone(), discard_uncommitted);
+        self.ask(
+            ask,
+            window,
+            cx,
+            move |_, outcome, window, cx| match outcome {
+                Ok(ArchiveOutcome::Archived {
+                    affected,
+                    discarded,
+                }) => cx.emit(Intent::Archived {
+                    archived: true,
+                    affected,
+                    discarded: discarded.len(),
+                }),
+                Ok(ArchiveOutcome::UncommittedWork { tickets }) => {
+                    let weak = cx.weak_entity();
+                    window.open_alert_dialog(cx, move |dialog, _, cx| {
+                        let (weak, session_id) = (weak.clone(), session_id.clone());
+                        dialog
+                            .title("Discard uncommitted work?")
+                            .confirm()
+                            .ok_text("Discard and archive")
+                            .ok_variant(gpui_component::button::ButtonVariant::Danger)
+                            .child(discard_question(&tickets, palette(is_dark(cx))))
+                            .on_ok(move |_, window, cx| {
+                                let _ = weak.update(cx, |view, cx| {
+                                    view.archive(session_id.clone(), true, window, cx)
+                                });
+                                true
+                            })
+                    });
+                }
                 Err(error) => toast_error(error, window, cx),
             },
         );
@@ -425,6 +481,59 @@ pub(super) trait Requests: Sized + 'static {
             then(view, reply, window, cx)
         });
     }
+}
+
+/// The body of the dialog that asks before archiving discards uncommitted work: what is lost,
+/// what is kept, and each ticket with its repository and changed files.
+fn discard_question(tickets: &[UncommittedWork], p: Palette) -> Div {
+    let mut list = div()
+        .flex()
+        .flex_col()
+        .py_1()
+        .rounded_lg()
+        .border_1()
+        .border_color(p.edge)
+        .bg(p.base);
+    for (at, ticket) in tickets.iter().enumerate() {
+        let files = match ticket.changed_files {
+            1 => "1 file".to_owned(),
+            n => format!("{n} files"),
+        };
+        list = list.child(
+            div()
+                .px_3()
+                .py(px(7.))
+                .flex()
+                .justify_between()
+                .gap_3()
+                .when(at > 0, |row| row.border_t_1().border_color(p.edge))
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(ticket.title.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(p.subtle)
+                        .child(format!("{} · {files}", ticket.repository)),
+                ),
+        );
+    }
+    div()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(
+            div().text_color(p.subtle).child(
+                "Archiving deletes these tickets' worktrees. Their uncommitted and untracked changes will be lost. Committed work stays on each branch and comes back if you restore the project.",
+            ),
+        )
+        .child(list)
 }
 
 /// Sends `command` to the host and hands its reply to `then`; the view redraws after it.
@@ -510,6 +619,7 @@ mod tests {
             Command::SetArchived {
                 session_id: session_id(),
                 archived: true,
+                discard_uncommitted: None,
             },
             Command::StopProcesses {
                 session_id: session_id(),

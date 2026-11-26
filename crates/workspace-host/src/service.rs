@@ -3098,11 +3098,14 @@ impl Actor {
                             eprintln!("Recording the human's stop of {id}: {error:#}");
                         }
                     }
-                    // Stop turns only once the archive succeeded; a refusal leaves them running.
+                    // Stop turns only once the archive succeeded; a refusal leaves them running,
+                    // as does an answer that uncommitted work kept the archive from being made.
                     if let Command::SetArchived {
                         session_id,
                         archived: true,
+                        ..
                     } = &command
+                        && response["outcome"] != "uncommitted_work"
                     {
                         for session in self.host.session_tree(session_id)? {
                             if let Some(active) = self.active.get(&session.id) {
@@ -6155,6 +6158,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
             Command::SetArchived {
                 session_id: implementer.id.clone(),
                 archived: true,
+                discard_uncommitted: None,
             },
             reply,
         ));
@@ -10357,6 +10361,39 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
         let reply = replies.try_recv().unwrap().unwrap();
         assert_eq!(reply["agents"][0]["result"], "stopped");
         assert!(actor.active[&tester.id].cancel.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn an_archive_answered_with_uncommitted_work_stops_no_turn_and_a_discard_does() {
+        let (_home, mut actor, ticket, tester, coordinator) = ticket_in_turn();
+        actor.active.insert(
+            tester.id.clone(),
+            Active::new(
+                "run".into(),
+                String::new(),
+                Arc::new(AtomicBool::new(false)),
+                vec![],
+                now(),
+            ),
+        );
+        fs::write(Path::new(&ticket.worktree).join("notes.md"), "draft").unwrap();
+        let mut archive = |discard| {
+            let (reply, replies) = async_channel::bounded(1);
+            actor.handle(Event::Command(
+                Command::SetArchived {
+                    session_id: coordinator.id.clone(),
+                    archived: true,
+                    discard_uncommitted: Some(discard),
+                },
+                reply,
+            ));
+            let outcome = replies.try_recv().unwrap().unwrap();
+            let stopped = actor.active[&tester.id].cancel.load(Ordering::Relaxed);
+            (outcome["outcome"].clone(), stopped)
+        };
+
+        assert_eq!(archive(false), (json!("uncommitted_work"), false));
+        assert_eq!(archive(true), (json!("archived"), true));
     }
 
     #[test]

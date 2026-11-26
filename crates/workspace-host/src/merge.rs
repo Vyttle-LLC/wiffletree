@@ -592,7 +592,7 @@ impl Host {
         // the request can reach the human.
         let waived = waived.or(blocked.then_some(APPROVED_WAIVER));
         let accepted = self.acceptance(ticket, waived)?;
-        self.check_removable(std::slice::from_ref(ticket))?;
+        self.check_removable(std::slice::from_ref(ticket), false)?;
         let repository = self.ticket_repository(ticket)?;
         ensure!(
             is_allowed(&repository, &self.settings().allowed_owners),

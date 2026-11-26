@@ -23,7 +23,7 @@ use workspace_core::*;
 const MAX_CONNECTIONS: usize = 64;
 /// Requests one connection may have waiting for a reply.
 const MAX_IN_FLIGHT: usize = 64;
-const CAPABILITIES: [&str; 7] = [
+const CAPABILITIES: [&str; 8] = [
     capability::EVENTS,
     capability::FILES,
     capability::FOLDERS,
@@ -31,6 +31,7 @@ const CAPABILITIES: [&str; 7] = [
     capability::UPLOADS,
     capability::ATTENTION,
     capability::RESUBSCRIBE,
+    capability::DISCARD_UNCOMMITTED,
 ];
 /// How long a stopping listener waits for the replies still being written, such as the answer
 /// to the `StopAgentsAndQuit` that stopped the host.

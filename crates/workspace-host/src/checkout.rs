@@ -1438,7 +1438,8 @@ mod tests {
             &f.host,
             &Command::SetArchived {
                 session_id: f.coordinator.id.clone(),
-                archived: true
+                archived: true,
+                discard_uncommitted: None,
             }
         ));
         let calls = Arc::new(Mutex::new(Vec::new()));

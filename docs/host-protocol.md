@@ -87,7 +87,7 @@ A client never sends a command for a capability the host did not list.
 | `attention` | `subscribe`'s `kinds`, and the `attention` event |
 | `resubscribe` | `subscribe` again on a subscribed connection, to change its `kinds` |
 
-This host lists `events`, `files`, `folders`, `restart-when-idle`, `uploads`, `attention` and `resubscribe`, and refuses a command whose capability it does not list.
+This host lists `events`, `files`, `folders`, `restart-when-idle`, `uploads`, `attention`, `resubscribe` and `discard-uncommitted`, and refuses a command whose capability it does not list.
 
 ### Ending the host
 
@@ -191,7 +191,7 @@ Every `Command`, by `type`. A read changes nothing in the store, so no event fol
 | `attach_repository` | `project_id: Option<String>`, `path: String`, `base: String` | change | Adds one repository with an explicit base, updating the base if it is already known. |
 | `create_session` | `project_id: String`, `parent_id: String`, `repository_id: Option<String>`, `name: String`, `role: Role`, `profile: ModelProfile` | change |  |
 | `set_status` | `session_id: String`, `status: Status` | change |  |
-| `set_archived` | `session_id: String`, `archived: bool` | change | Archives or restores a session together with the sessions it owns. Archiving a project's coordinator closes the project, and is refused while any of its child projects is unarchived, naming them; restoring a child's coordinator is refused while its parent is archived, naming the parent. |
+| `set_archived` | `session_id: String`, `archived: bool`, `discard_uncommitted?: bool` | change | Archives or restores a session together with the sessions it owns. Archiving a project's coordinator closes the project, and is refused while any of its child projects is unarchived, naming them; restoring a child's coordinator is refused while its parent is archived, naming the parent. Without `discard_uncommitted`, as an older client sends it, the reply is the affected sessions, and uncommitted or untracked files in a ticket's worktree refuse the archive. With it, which needs the `discard-uncommitted` capability and `archived: true`, the reply is an `ArchiveOutcome`: `{"outcome":"uncommitted_work","tickets":[…]}`, each `UncommittedWork` with `ticket_id`, `title`, `repository` and `changed_files`, when `false` met such files, having archived and stopped nothing; otherwise `{"outcome":"archived","affected":[…],"discarded":[…]}`, `true` having removed those worktrees with their changes, branches kept. A locked worktree refuses either way. |
 | `send` | `id: String`, `sender: Option<String>`, `recipient: String`, `body: String`, `attachments?: Vec<PathBuf>`, `uploads?: Vec<String>` | change, human only | Human only with no `sender`, which is a message from the human; an agent's message names its sender. Sent again with the same `id`, it is stored once. `uploads` names files a remote device sent with `upload_attachment`, attached as `attachments` are. |
 | `messages` | `session_id: String`, `before: Option<i64>`, `limit: usize` | read |  |
 | `steps` | `session_id: String`, `run_id: Option<String>`, `after: u64` | read | One run's steps changed after `after`: `run_id` names the run, or `None` for the session's latest. Answered with a `StepPage`. |

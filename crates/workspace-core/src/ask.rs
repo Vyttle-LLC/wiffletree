@@ -67,6 +67,16 @@ pub fn set_archived(session_id: String, archived: bool) -> Ask<Vec<Session>> {
     Ask::new(Command::SetArchived {
         session_id,
         archived,
+        discard_uncommitted: None,
+    })
+}
+/// Archives a session, answering uncommitted work in its tickets' worktrees with the tickets
+/// unless `discard_uncommitted`.
+pub fn archive_session(session_id: String, discard_uncommitted: bool) -> Ask<ArchiveOutcome> {
+    Ask::new(Command::SetArchived {
+        session_id,
+        archived: true,
+        discard_uncommitted: Some(discard_uncommitted),
     })
 }
 pub fn messages(session_id: String, before: Option<i64>, limit: usize) -> Ask<Vec<Message>> {

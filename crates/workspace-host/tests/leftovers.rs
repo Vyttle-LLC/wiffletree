@@ -174,7 +174,7 @@ fn fixture() -> Fixture {
     )
     .unwrap();
     db.execute(
-        "INSERT INTO pending_worktree_removals VALUES (?1,1)",
+        "INSERT INTO pending_worktree_removals (ticket_id,marked_at) VALUES (?1,1)",
         [&tickets[9].1.id],
     )
     .unwrap();

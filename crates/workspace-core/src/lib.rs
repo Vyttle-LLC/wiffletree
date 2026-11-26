@@ -3443,6 +3443,28 @@ impl LeftoverClass {
         }
     }
 }
+/// What archiving with `discard_uncommitted` did.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum ArchiveOutcome {
+    /// Archived or restored. `discarded` lists the tickets whose uncommitted work was discarded.
+    Archived {
+        affected: Vec<Session>,
+        discarded: Vec<UncommittedWork>,
+    },
+    /// Nothing was archived or stopped: these tickets' worktrees hold uncommitted or untracked
+    /// files, which archiving would discard.
+    UncommittedWork { tickets: Vec<UncommittedWork> },
+}
+/// A ticket whose worktree holds uncommitted or untracked files; ignored files do not count.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UncommittedWork {
+    pub ticket_id: String,
+    pub title: String,
+    /// The repository's name.
+    pub repository: String,
+    pub changed_files: usize,
+}
 /// A worktree left by a ticket finished before worktrees were removed on close and accept, or
 /// a Wiffletree-made worktree no ticket records (`ticket_id` is then `None`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3713,10 +3735,16 @@ pub enum Command {
         session_id: String,
         status: Status,
     },
-    /// Archives or restores a session together with the sessions it owns.
+    /// Archives or restores a session together with the sessions it owns. With
+    /// `discard_uncommitted` set the reply is an `ArchiveOutcome`: `Some(false)` answers
+    /// uncommitted work with the tickets that hold it, and `Some(true)` discards that work.
+    /// Without it, as from an older client, the reply is the affected sessions and uncommitted
+    /// work refuses the archive.
     SetArchived {
         session_id: String,
         archived: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        discard_uncommitted: Option<bool>,
     },
     Send {
         id: String,
@@ -5066,6 +5094,10 @@ impl Command {
                 when: RestartWhen::Idle,
             } => Some(capability::RESTART_WHEN_IDLE),
             Self::UploadAttachment { .. } => Some(capability::UPLOADS),
+            Self::SetArchived {
+                discard_uncommitted: Some(_),
+                ..
+            } => Some(capability::DISCARD_UNCOMMITTED),
             _ => None,
         }
     }

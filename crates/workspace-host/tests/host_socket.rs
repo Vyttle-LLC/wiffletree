@@ -239,7 +239,8 @@ fn the_handshake_chooses_the_newest_common_protocol() {
             "restart-when-idle",
             "uploads",
             "attention",
-            "resubscribe"
+            "resubscribe",
+            "discard-uncommitted"
         ]
     );
     assert_eq!(welcome.host_version, env!("CARGO_PKG_VERSION"));

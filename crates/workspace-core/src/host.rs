@@ -39,6 +39,8 @@ pub mod capability {
     pub const ATTENTION: &str = "attention";
     /// `Subscribe` again on a subscribed connection, which changes its kinds in place.
     pub const RESUBSCRIBE: &str = "resubscribe";
+    /// `SetArchived`'s `discard_uncommitted` and its `ArchiveOutcome` reply.
+    pub const DISCARD_UNCOMMITTED: &str = "discard-uncommitted";
 }
 
 /// The newest protocol both ranges, each `[oldest, newest]`, include.

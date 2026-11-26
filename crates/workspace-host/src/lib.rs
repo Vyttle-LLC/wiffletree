@@ -1069,6 +1069,33 @@ impl Host {
     pub fn set_archived(&mut self, id: &str, archived: bool) -> Result<Vec<Session>> {
         self.change_archived(id, archived, None)
     }
+    /// Archives like set_archived, answering uncommitted or untracked work in the tickets'
+    /// worktrees with the tickets that hold it, having archived and stopped nothing. With
+    /// `discard_uncommitted`, that work is removed with the worktrees instead; a locked worktree
+    /// still refuses.
+    pub fn archive_session(
+        &mut self,
+        id: &str,
+        discard_uncommitted: bool,
+    ) -> Result<ArchiveOutcome> {
+        let tickets = self.tickets_owned_by(&self.session_tree(id)?)?;
+        let discarded = match discard_uncommitted {
+            true => self.uncommitted_work(&tickets)?,
+            false => vec![],
+        };
+        match self.archive_change(id, true, None, true, discard_uncommitted) {
+            Ok(affected) => Ok(ArchiveOutcome::Archived {
+                affected,
+                discarded,
+            }),
+            Err(error) => match error.downcast::<worktrees::UncommittedRefusal>() {
+                Ok(refusal) => Ok(ArchiveOutcome::UncommittedWork {
+                    tickets: refusal.tickets,
+                }),
+                Err(error) => Err(error),
+            },
+        }
+    }
     /// Like set_archived, also recording `milestone` for the session itself in the same
     /// transaction when its flag changes, so the event and the transition are never split.
     pub(crate) fn change_archived(
@@ -1077,7 +1104,7 @@ impl Host {
         archived: bool,
         milestone: Option<&str>,
     ) -> Result<Vec<Session>> {
-        self.archive_change(id, archived, milestone, true)
+        self.archive_change(id, archived, milestone, true, false)
     }
     /// Archives `id` as one step of a larger change, recording `milestone`, and leaves what the
     /// archived sessions started running: a stop cannot be rolled back with the change. Once the
@@ -1087,7 +1114,7 @@ impl Host {
         id: &str,
         milestone: Option<&str>,
     ) -> Result<Vec<Session>> {
-        self.archive_change(id, true, milestone, false)
+        self.archive_change(id, true, milestone, false, false)
     }
     /// Stops what these archived sessions started, once the change that archived them has
     /// committed. The change stands whatever the stop meets, so a failure is only logged.
@@ -1103,6 +1130,7 @@ impl Host {
         archived: bool,
         milestone: Option<&str>,
         stop_now: bool,
+        discard_uncommitted: bool,
     ) -> Result<Vec<Session>> {
         let mut affected = self.session_tree(id)?;
         ensure!(
@@ -1123,11 +1151,8 @@ impl Host {
             .filter(|s| s.archived != archived)
             .collect();
         self.check_close(&closing, archived)?;
-        let owners: Vec<&str> = affected.iter().map(|s| s.id.as_str()).collect();
-        let tickets: Vec<Ticket> = self
-            .tickets()?
-            .into_iter()
-            .filter(|t| owners.contains(&t.coordinator_id.as_str()) && (archived || t.is_open()))
+        let tickets: Vec<Ticket> = (self.tickets_owned_by(&affected)?.into_iter())
+            .filter(|t| archived || t.is_open())
             .collect();
         let restored: Vec<String> = match archived {
             true => vec![],
@@ -1136,7 +1161,7 @@ impl Host {
         let stopped = match archived {
             // A refused archive stops nothing, and no worktree is removed under a live process.
             true => {
-                self.check_removable(&tickets)?;
+                self.check_removable(&tickets, discard_uncommitted)?;
                 match stop_now {
                     true => self.stop_started_by(affected.iter().map(|s| &s.id))?,
                     false => vec![],
@@ -1200,10 +1225,17 @@ impl Host {
             self.restore_worktrees(&tickets)?;
             return save(self);
         }
-        let saved = self.with_worktrees_removed(&tickets, save);
+        let saved = self.with_worktrees_removed(&tickets, discard_uncommitted, save);
         // The stop cannot be undone, so what it says depends on whether the archive was made.
         self.archive_settled(&stopped, saved.is_ok());
         saved
+    }
+    /// Every ticket these sessions coordinate, in any state.
+    fn tickets_owned_by(&self, sessions: &[Session]) -> Result<Vec<Ticket>> {
+        let owners: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        Ok((self.tickets()?.into_iter())
+            .filter(|t| owners.contains(&t.coordinator_id.as_str()))
+            .collect())
     }
     /// Stops what these sessions started, as they are about to be archived, and returns what
     /// it stopped for `archive_settled` to say once the archive is made or has failed. One
@@ -2062,7 +2094,14 @@ impl Host {
             Command::SetArchived {
                 session_id,
                 archived,
-            } => serde_json::to_value(self.set_archived(&session_id, archived)?)?,
+                discard_uncommitted,
+            } => match (archived, discard_uncommitted) {
+                (true, Some(discard)) => {
+                    serde_json::to_value(self.archive_session(&session_id, discard)?)?
+                }
+                (false, Some(_)) => bail!("Only an archive can discard uncommitted work"),
+                (_, None) => serde_json::to_value(self.set_archived(&session_id, archived)?)?,
+            },
             Command::Send {
                 id,
                 sender,
