@@ -579,7 +579,7 @@ Settings SHALL close with the ✕ in its header, with Esc, or with a click on th
 - **THEN** the confirmation closes and Settings stays open; a second Esc closes Settings
 
 ### Requirement: There is at most one Settings
-While Settings is open, ⌘, and Wiffletree › Settings… SHALL do nothing. With no main window open, they SHALL open the main window first and then Settings over it. A link to a section while Settings is open SHALL scroll the open Settings to that section.
+While Settings is open, ⌘, and Wiffletree › Settings… SHALL do nothing. With no main window open, they SHALL open the main window first and then Settings over it.
 
 #### Scenario: No main window
 - **WHEN** the main window is closed and the human presses ⌘,
