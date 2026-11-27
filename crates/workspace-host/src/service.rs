@@ -904,6 +904,13 @@ impl Requests {
             .send_blocking(Event::Remote(message))
             .map_err(|_| anyhow::anyhow!("Workspace stopped"))
     }
+    /// Sends the actor a step a device waits on, such as its challenge answer, on the commands'
+    /// lane, so it overtakes agents' queued output as a human's command does.
+    pub(crate) fn tell_first(&self, message: remote::ToActor) -> Result<()> {
+        self.commands
+            .try_send(Event::Remote(message))
+            .map_err(|_| anyhow::anyhow!("Workspace stopped"))
+    }
     /// Subscribes to the host's events; see `EventLog::subscribe`.
     pub fn subscribe(&self, after: Option<&Cursor>) -> Subscription {
         self.events.subscribe(after)
@@ -9584,6 +9591,36 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
             serde_json::from_value(reply.try_recv().unwrap().unwrap()).unwrap();
         assert_eq!(answered.answer.as_deref(), Some("Yes"));
         assert!(inbound.events.is_full());
+    }
+
+    #[test]
+    fn a_device_challenge_answer_is_taken_before_a_full_queue_of_agent_output() {
+        let (sender, events) = async_channel::bounded(256);
+        while sender.try_send(Event::Wake(0)).is_ok() {}
+        let (commands, command_receiver) = async_channel::unbounded();
+        let requests = Requests {
+            sender,
+            commands,
+            events: EventLog::default(),
+            host_id: String::new(),
+            working: Arc::default(),
+        };
+        let inbound = Inbound::new(command_receiver, events);
+
+        let (reply, _verdict) = async_channel::bounded(1);
+        // Returns at once: `tell` would wait here for room in the full queue.
+        requests
+            .tell_first(remote::ToActor::Authenticate {
+                device: "phone".into(),
+                signed: vec![],
+                signature: vec![],
+                reply,
+            })
+            .unwrap();
+        assert!(matches!(
+            inbound.next(),
+            Some(Event::Remote(remote::ToActor::Authenticate { .. }))
+        ));
     }
 
     #[test]

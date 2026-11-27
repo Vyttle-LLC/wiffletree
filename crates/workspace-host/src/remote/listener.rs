@@ -103,12 +103,16 @@ fn tls_config(identity: &Identity) -> Result<ServerConfig> {
         )?)
 }
 
-/// The WebSocket limits: requests are bounded as on the socket, replies are not.
+/// The most a connection buffers for the device: more than the largest reply, a `ReadFile` of
+/// `MAX_ATTACHMENT_BYTES` in base64 (about 67 MiB), and the most a device accepts in one message.
+const MAX_WRITE_BUFFER: usize = 96 << 20;
+
+/// The WebSocket limits: requests are bounded as on the socket, replies only by the buffer.
 fn websocket_config() -> WebSocketConfig {
     WebSocketConfig::default()
         .max_message_size(Some(MAX_LINE_BYTES))
         .max_frame_size(Some(MAX_LINE_BYTES))
-        .max_write_buffer_size(4 << 20)
+        .max_write_buffer_size(MAX_WRITE_BUFFER)
 }
 
 fn serve(

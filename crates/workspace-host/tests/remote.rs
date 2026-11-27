@@ -1091,6 +1091,35 @@ fn a_burst_of_pings_sent_at_once_is_answered_in_full() {
 }
 
 #[test]
+fn a_reply_over_4_mib_reaches_the_device_and_later_replies_follow_it() {
+    let studio = Studio::start(0);
+    studio.on();
+    let device = KeyPair::generate().unwrap();
+    studio.pair(&device, "MacBook");
+    let mut client = studio.connect(&device).unwrap();
+    let snapshot: Snapshot =
+        serde_json::from_value(studio.host(Command::Snapshot).unwrap()).unwrap();
+    let project = &snapshot.projects[0];
+    let home = (project.home.clone().map(Into::into))
+        .unwrap_or_else(|| studio.data.path().join("projects").join(&project.id));
+    std::fs::create_dir_all(&home).unwrap();
+    let image = home.join("screenshot.png");
+    std::fs::write(&image, vec![7u8; 6 << 20]).unwrap();
+
+    let read: FileContents = serde_json::from_value(
+        client
+            .call(Command::ReadFile {
+                path: image,
+                max_bytes: 8 << 20,
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(decode(&read.data).len(), 6 << 20);
+    client.call(Command::Ping).unwrap();
+}
+
+#[test]
 fn an_unused_upload_is_deleted_after_an_hour_with_nothing_else_happening() {
     let studio = Studio::start(0);
     studio.on();

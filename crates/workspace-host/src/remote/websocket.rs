@@ -64,7 +64,7 @@ pub(super) fn serve(
             let (reply, verdict) = async_channel::bounded(1);
             shared
                 .requests
-                .tell(ToActor::Authenticate {
+                .tell_first(ToActor::Authenticate {
                     device: answer.device_id.clone(),
                     signed,
                     signature,
@@ -153,6 +153,8 @@ fn pump(mut socket: ServerSocket, device: String, shared: &Arc<Shared>) -> Resul
     socket.get_mut().sock.set_nonblocking(true)?;
     let served = (|| -> Result<()> {
         let mut waiting: Option<Message> = None;
+        // The write buffer was just emptied with `waiting` still to write.
+        let mut drained = false;
         loop {
             loop {
                 match socket.read() {
@@ -162,39 +164,35 @@ fn pump(mut socket: ServerSocket, device: String, shared: &Arc<Shared>) -> Resul
                     Err(tungstenite::Error::Io(error)) if error.kind() == ErrorKind::WouldBlock => {
                         break;
                     }
-                    Err(
-                        tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed,
-                    ) => return Ok(()),
-                    // A device that goes away without closing TLS, or one the host shut down.
-                    Err(tungstenite::Error::Io(error))
-                        if matches!(
-                            error.kind(),
-                            ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset
-                        ) =>
-                    {
-                        return Ok(());
-                    }
-                    Err(error) => return Err(error.into()),
+                    Err(error) => return closed_or_failed(error),
                 }
             }
             while let Some(message) = waiting.take().or_else(|| outbox.next(&queued).map(text)) {
                 match socket.write(message) {
                     Ok(()) => {}
                     Err(tungstenite::Error::WriteBufferFull(message)) => {
+                        // Waiting would never make room for it, and every later frame would
+                        // wait behind it.
+                        anyhow::ensure!(
+                            !drained,
+                            "A message of {} bytes is larger than the connection can send",
+                            message.len()
+                        );
                         waiting = Some(*message);
                         break;
                     }
                     Err(tungstenite::Error::Io(error)) if error.kind() == ErrorKind::WouldBlock => {
                     }
-                    Err(error) => return Err(error.into()),
+                    Err(error) => return closed_or_failed(error),
                 }
             }
             let blocked = match socket.flush() {
                 Ok(()) => false,
                 Err(tungstenite::Error::Io(error)) if error.kind() == ErrorKind::WouldBlock => true,
-                Err(error) => return Err(error.into()),
+                Err(error) => return closed_or_failed(error),
             };
-            if waiting.is_some() && !blocked {
+            drained = waiting.is_some() && !blocked;
+            if drained {
                 continue;
             }
             wait(socket.get_ref().sock.as_raw_fd(), blocked, &wake_read);
@@ -202,6 +200,24 @@ fn pump(mut socket: ServerSocket, device: String, shared: &Arc<Shared>) -> Resul
     })();
     queued.close();
     served
+}
+
+/// `Ok` when `error` means the device has gone, so only real failures are logged.
+fn closed_or_failed(error: tungstenite::Error) -> Result<()> {
+    match error {
+        tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed => Ok(()),
+        // A device that goes away without closing TLS, one the host shut down, or one gone
+        // before a write reached it.
+        tungstenite::Error::Io(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset | ErrorKind::BrokenPipe
+            ) =>
+        {
+            Ok(())
+        }
+        error => Err(error.into()),
+    }
 }
 
 fn text(message: Vec<u8>) -> Message {
@@ -249,4 +265,17 @@ fn pipe() -> Result<(File, File)> {
     }
     // SAFETY: each descriptor is owned by exactly one `File`.
     Ok(unsafe { (File::from_raw_fd(ends[0]), File::from_raw_fd(ends[1])) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_write_to_a_device_already_gone_is_a_close_not_a_failure() {
+        let io = |kind| tungstenite::Error::Io(std::io::Error::from(kind));
+        assert!(closed_or_failed(io(ErrorKind::BrokenPipe)).is_ok());
+        assert!(closed_or_failed(io(ErrorKind::ConnectionReset)).is_ok());
+        assert!(closed_or_failed(io(ErrorKind::PermissionDenied)).is_err());
+    }
 }
