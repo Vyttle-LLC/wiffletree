@@ -3,7 +3,8 @@
 
 Each turn streams `BUSY_STEPS` narrated commands, `BUSY_STEP_SECONDS` apart, records a checklist
 every few steps and reports progress. A worker then reports itself blocked, which wakes its
-coordinator; a coordinator messages each of its idle workers, which wakes them again. So the
+coordinator; a coordinator asks the human a question and messages each of its idle workers, which
+wakes them again. So the
 host keeps emitting state, step and progress events for as long as it runs. No inference.
 """
 import json
@@ -66,6 +67,8 @@ try:
         if n == steps // 2:
             tool('report', message_id=str(uuid.uuid4()), kind='progress', body=f'Halfway through {steps} steps')
     if me.get('role') == 'project_orchestrator':
+        # A question for the human's Inbox, for `many_agents latency` to answer or dismiss.
+        tool('ask_user', request_id=str(uuid.uuid4()), question='Which part next?', options=['Carry on'])
         for session in tool('workspace_context').get('team', []):
             if session.get('parent_id') == me.get('id') and session.get('status') != 'working' and not session.get('archived'):
                 tool('send_message', recipient=session['id'], message_id=str(uuid.uuid4()), body='Carry on with the next part.')
