@@ -122,6 +122,10 @@ impl World {
         let ticket = self.board().tickets.remove(0);
         (ticket.stage, ticket.state, percent(ticket.position))
     }
+    /// The ticket's stage as the desktop names it, "In review" included.
+    fn stage_label(&self) -> &'static str {
+        self.board().tickets[0].stage_label()
+    }
     fn project(&self) -> ProjectProgress {
         self.board().projects.remove(0)
     }
@@ -468,7 +472,7 @@ fn blocked_review() -> World {
 
 #[test]
 fn a_blocked_review_published_with_a_healthy_pr_is_in_review() {
-    let in_review = (Stage::InReview, InProgress, 90);
+    let in_review = (Stage::AwaitingAcceptance, InProgress, 90);
     for (checks, merge_state) in [
         ("success", "clean"),
         ("pending", "blocked"),
@@ -476,6 +480,7 @@ fn a_blocked_review_published_with_a_healthy_pr_is_in_review() {
     ] {
         let world = blocked_review().open_pr(checks, merge_state);
         assert_eq!(world.ticket_progress(), in_review, "{checks} {merge_state}");
+        assert_eq!(world.stage_label(), "In review");
     }
 }
 
@@ -513,6 +518,7 @@ fn a_worker_blocked_after_a_passed_review_stays_blocked() {
         world.ticket_progress(),
         (Stage::AwaitingAcceptance, Blocked, 90)
     );
+    assert_eq!(world.stage_label(), "Awaiting acceptance");
 }
 
 #[test]
@@ -530,7 +536,14 @@ fn a_passed_ticket_with_an_open_pr_is_in_review() {
     let world = World::new()
         .verified("passed", cycle(Outcome::Passed, &[&[("a", Passed)]]))
         .open_pr("success", "clean");
-    assert_eq!(world.ticket_progress(), (Stage::InReview, InProgress, 90));
+    assert_eq!(
+        world.ticket_progress(),
+        (Stage::AwaitingAcceptance, InProgress, 90)
+    );
+    assert_eq!(world.stage_label(), "In review");
+    // Before it is published, the same pass still awaits acceptance.
+    let unpublished = World::new().verified("passed", cycle(Outcome::Passed, &[&[("a", Passed)]]));
+    assert_eq!(unpublished.stage_label(), "Awaiting acceptance");
 }
 
 #[test]
@@ -755,12 +768,16 @@ fn the_phase_reads_in_review_while_every_open_ticket_waits_on_its_pr() {
     let project = published.project();
     assert_eq!(
         (project.phase, project.state, project.position.map(percent)),
-        (Phase::InReview, InProgress, Some(95))
+        (Phase::AwaitingAcceptance, InProgress, Some(95))
     );
-    assert_eq!(Phase::InReview.label(), "In review");
+    assert_eq!(project.phase_label(), "In review");
+    // A passed ticket not yet published also awaits acceptance, without a PR to review.
+    let passed = cycle(Outcome::Passed, &[&[("c", Passed)]]);
+    let unpublished = published.ticket_named("three", "passed", Some(passed));
+    assert_eq!(unpublished.project().phase_label(), "Awaiting acceptance");
     // A ticket still implementing is less advanced, so it names the phase.
-    let implementing = published.ticket_named("three", "assigned", None).project();
-    assert_eq!(implementing.phase, Phase::Implementing);
+    let implementing = unpublished.ticket_named("four", "assigned", None).project();
+    assert_eq!(implementing.phase_label(), "Implementing");
     // Failing checks leave nothing moving, so the project is blocked again.
     let failing = World::new()
         .ticket_named("one", "accepted", None)
@@ -802,6 +819,27 @@ fn the_board_round_trips_through_json() {
     let decoded: ProgressPage =
         serde_json::from_str(&serde_json::to_string(&page).unwrap()).unwrap();
     assert_eq!(decoded, page);
+}
+
+#[test]
+fn in_review_travels_as_a_flag_beside_stages_an_older_app_knows() {
+    let board = blocked_review().open_pr("success", "clean").board();
+    let mut value = serde_json::to_value(&board).unwrap();
+    assert_eq!(value["tickets"][0]["stage"], "awaiting_acceptance");
+    assert_eq!(value["tickets"][0]["in_review"], true);
+    assert_eq!(value["projects"][0]["phase"], "awaiting_acceptance");
+    assert_eq!(value["projects"][0]["in_review"], true);
+    // A board from a host before the flag decodes as not in review.
+    value["tickets"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("in_review");
+    value["projects"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("in_review");
+    let older: Board = serde_json::from_value(value).unwrap();
+    assert!(!older.tickets[0].in_review && !older.projects[0].in_review);
 }
 
 #[test]

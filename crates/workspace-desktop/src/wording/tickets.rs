@@ -778,7 +778,7 @@ pub(crate) fn strip_figure(
         .and_then(AgentProgress::position)
         .map(|position| format!("{}%", percent(position)));
     let ticket = ticket.map(|ticket| {
-        let figure = ticket_figure(ticket).unwrap_or_else(|| ticket.stage.label().to_lowercase());
+        let figure = ticket_figure(ticket).unwrap_or_else(|| ticket.stage_label().to_lowercase());
         format!("ticket {figure}")
     });
     own.into_iter()
@@ -789,7 +789,7 @@ pub(crate) fn strip_figure(
 
 /// A ticket card's heading figure, such as "Verifying · 70%" or "Verifying · 80% · blocked".
 pub(crate) fn stage_figure(ticket: &TicketProgress) -> String {
-    let stage = ticket.stage.label();
+    let stage = ticket.stage_label();
     let position = percent(ticket.position);
     match ticket.state {
         BarState::Indeterminate => stage.into(),
@@ -844,6 +844,7 @@ mod tests {
             stage,
             state,
             position,
+            in_review: false,
             agents: vec![],
         }
     }
@@ -859,6 +860,7 @@ mod tests {
             state,
             position,
             accepted,
+            in_review: false,
             tickets: (0..tickets).map(|n| n.to_string()).collect(),
             coordinator_id: "coordinator".into(),
         }
@@ -1134,10 +1136,10 @@ mod tests {
             figure(Stage::Verifying, Blocked, 8_000),
             "Verifying · 80% · blocked"
         );
-        assert_eq!(
-            figure(Stage::InReview, InProgress, 9_000),
-            "In review · 90%"
-        );
+        let mut in_review = ticket_at(Stage::AwaitingAcceptance, InProgress, 9_000);
+        assert_eq!(stage_figure(&in_review), "Awaiting acceptance · 90%");
+        in_review.in_review = true;
+        assert_eq!(stage_figure(&in_review), "In review · 90%");
         assert_eq!(
             figure(Stage::Implementing, Indeterminate, 0),
             "Implementing"

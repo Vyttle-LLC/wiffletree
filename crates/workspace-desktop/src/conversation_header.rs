@@ -399,7 +399,7 @@ impl ConversationHeader {
         // A child's strip says where its questions go instead of its phase.
         let label = (self.shared.index.as_deref())
             .and_then(|index| child_strip_line(index, &project.project_id))
-            .unwrap_or_else(|| project.phase.label().into());
+            .unwrap_or_else(|| project.phase_label().into());
         (label, bar, wording::project_summary(project))
     }
     /// An agent's own label and bar, or its ticket's stage and bar when it has nothing of
@@ -419,7 +419,7 @@ impl ConversationHeader {
             }
             (None, Some(ticket)) => {
                 let bar = progress_bar(Some(ticket.position), ticket.state, STRIP_BAR, p);
-                (ticket.stage.label().into(), bar, figure)
+                (ticket.stage_label().into(), bar, figure)
             }
             (None, None) => {
                 let empty = progress_bar(None, BarState::InProgress, STRIP_BAR, p);

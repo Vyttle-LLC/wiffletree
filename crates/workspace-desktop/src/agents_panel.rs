@@ -953,6 +953,7 @@ mod tests {
             stage: Stage::Implementing,
             state: BarState::InProgress,
             position: 3_000,
+            in_review: false,
             agents: vec![agent.into()],
         };
         let project = |id: &str, ticket: &str| ProjectProgress {
@@ -961,6 +962,7 @@ mod tests {
             state: BarState::InProgress,
             position: Some(3_000),
             accepted: 0,
+            in_review: false,
             tickets: vec![ticket.into()],
             coordinator_id: format!("{id}-coordinator"),
         };
