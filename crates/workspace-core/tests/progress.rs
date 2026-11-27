@@ -84,6 +84,29 @@ impl World {
         self.tickets.push(ticket);
         self
     }
+    /// Gives ticket `id` a pull request in `state` with these checks and merge state.
+    fn pull_request(mut self, id: &str, state: &str, checks: &str, merge_state: &str) -> Self {
+        let ticket = self.tickets.iter_mut().find(|t| t.id == id).unwrap();
+        ticket.pull_request = Some(
+            serde_json::from_value(json!({
+                "number": 7, "url": "u", "state": state, "draft": false, "base": "main",
+                "head": "h", "merge_state": merge_state, "checks": checks,
+                "unresolved_threads": 0, "comments": {}
+            }))
+            .unwrap(),
+        );
+        self
+    }
+    /// Records a publish of ticket `id`'s latest cycle, which pushed its commit `abc`.
+    fn published(mut self, id: &str) -> Self {
+        let ticket = self.tickets.iter_mut().find(|t| t.id == id).unwrap();
+        ticket.pushed = Some("abc".into());
+        ticket.published_cycle = ticket.verification.as_ref().map(|cycle| cycle.cycle);
+        self
+    }
+    fn open_pr(self, checks: &str, merge_state: &str) -> Self {
+        self.pull_request(TICKET, "open", checks, merge_state)
+    }
     fn board(&self) -> Board {
         derive(&self.sessions, &self.runtimes, &self.tickets, &self.plans)
     }
@@ -99,6 +122,10 @@ impl World {
     fn ticket_progress(&self) -> (Stage, BarState, u16) {
         let ticket = self.board().tickets.remove(0);
         (ticket.stage, ticket.state, percent(ticket.position))
+    }
+    /// The ticket's stage as the desktop names it, "In review" included.
+    fn stage_label(&self) -> &'static str {
+        self.board().tickets[0].stage_label()
     }
     fn project(&self) -> ProjectProgress {
         self.board().projects.remove(0)
@@ -436,6 +463,118 @@ fn blocked_at_the_round_cap_keeps_the_passes() {
     assert_eq!(world.ticket_progress(), (Stage::Verifying, Blocked, 80));
 }
 
+/// A blocked review of three verifiers, one failed, whose commit was then published.
+fn blocked_review() -> World {
+    let round: &[_] = &[("a", Passed), ("b", Passed), ("c", Failed)];
+    World::new()
+        .verified("blocked", cycle(Outcome::Blocked, &[round]))
+        .published(TICKET)
+}
+
+#[test]
+fn a_blocked_review_published_with_a_healthy_pr_is_in_review() {
+    let in_review = (Stage::AwaitingAcceptance, InProgress, 90);
+    for (checks, merge_state) in [
+        ("success", "clean"),
+        ("pending", "blocked"),
+        ("none", "behind"),
+    ] {
+        let world = blocked_review().open_pr(checks, merge_state);
+        assert_eq!(world.ticket_progress(), in_review, "{checks} {merge_state}");
+        assert_eq!(world.stage_label(), "In review");
+    }
+}
+
+#[test]
+fn a_blocked_review_stays_blocked_without_an_open_pr_or_with_a_broken_one() {
+    let blocked = (Stage::Verifying, Blocked, 80);
+    assert_eq!(blocked_review().ticket_progress(), blocked);
+    let failing = blocked_review().open_pr("failure", "unstable");
+    assert_eq!(failing.ticket_progress(), blocked);
+    let conflicting = blocked_review().open_pr("success", "dirty");
+    assert_eq!(conflicting.ticket_progress(), blocked);
+    for finished in ["closed", "merged"] {
+        let world = blocked_review().pull_request(TICKET, finished, "success", "clean");
+        assert_eq!(world.ticket_progress(), blocked, "{finished}");
+    }
+}
+
+#[test]
+fn a_blocked_review_not_published_since_it_ended_stays_blocked() {
+    let blocked = (Stage::Verifying, Blocked, 80);
+    // Cycle 1 was published; cycle 2 reviewed the same pushed commit, ended blocked and was
+    // not published.
+    let mut world = blocked_review().open_pr("success", "clean");
+    world.tickets[0].verification.as_mut().unwrap().cycle = 2;
+    assert_eq!(world.ticket_progress(), blocked);
+    // Never published at all, under a PR opened earlier.
+    world.tickets[0].published_cycle = None;
+    assert_eq!(world.ticket_progress(), blocked);
+}
+
+#[test]
+fn a_published_blocked_review_stays_in_review_after_the_keeper_pushes_a_rebase() {
+    let mut world = blocked_review().open_pr("success", "clean");
+    world.tickets[0].pushed = Some("rebased".into());
+    assert_eq!(
+        world.ticket_progress(),
+        (Stage::AwaitingAcceptance, InProgress, 90)
+    );
+    assert_eq!(world.stage_label(), "In review");
+}
+
+#[test]
+fn a_worker_blocked_after_a_passed_review_stays_blocked() {
+    let world = World::new()
+        .verified("blocked", cycle(Outcome::Passed, &[&[("a", Passed)]]))
+        .published(TICKET)
+        .open_pr("success", "clean");
+    assert_eq!(
+        world.ticket_progress(),
+        (Stage::AwaitingAcceptance, Blocked, 90)
+    );
+    assert_eq!(world.stage_label(), "Awaiting acceptance");
+}
+
+#[test]
+fn a_running_review_is_never_in_review() {
+    let first: &[_] = &[("a", Passed), ("b", Passed), ("c", Failed)];
+    let rechecking = cycle(Outcome::Running, &[first, &[("c", Pending)]]);
+    let world = World::new()
+        .verified("blocked", rechecking)
+        .open_pr("success", "clean");
+    assert_eq!(world.ticket_progress(), (Stage::Verifying, Blocked, 80));
+}
+
+#[test]
+fn a_passed_ticket_with_an_open_pr_is_in_review() {
+    let world = World::new()
+        .verified("passed", cycle(Outcome::Passed, &[&[("a", Passed)]]))
+        .open_pr("success", "clean");
+    assert_eq!(
+        world.ticket_progress(),
+        (Stage::AwaitingAcceptance, InProgress, 90)
+    );
+    assert_eq!(world.stage_label(), "In review");
+    // Before it is published, the same pass still awaits acceptance.
+    let unpublished = World::new().verified("passed", cycle(Outcome::Passed, &[&[("a", Passed)]]));
+    assert_eq!(unpublished.stage_label(), "Awaiting acceptance");
+    // A `completed` report after the pass reads the same.
+    let completed = World::new()
+        .verified("completed", cycle(Outcome::Passed, &[&[("a", Passed)]]))
+        .open_pr("success", "clean");
+    assert_eq!(
+        completed.ticket_progress(),
+        (Stage::AwaitingAcceptance, InProgress, 90)
+    );
+    assert_eq!(completed.stage_label(), "In review");
+    // Re-assigned for a fix, it is implementing again.
+    let fixing = World::new()
+        .verified("assigned", cycle(Outcome::Passed, &[&[("a", Passed)]]))
+        .open_pr("success", "clean");
+    assert_eq!(fixing.stage_label(), "Implementing");
+}
+
 #[test]
 fn a_second_cycle_starts_again_at_sixty_and_never_exceeds_ninety() {
     let first: &[_] = &[("a", Passed), ("b", Passed), ("c", Failed)];
@@ -648,6 +787,37 @@ fn the_phase_is_the_least_advanced_stage_still_moving() {
 }
 
 #[test]
+fn the_phase_reads_in_review_while_every_open_ticket_waits_on_its_pr() {
+    let blocked = cycle(Outcome::Blocked, &[&[("a", Passed), ("b", Failed)]]);
+    let published = World::new()
+        .ticket_named("one", "accepted", None)
+        .ticket_named("two", "blocked", Some(blocked.clone()))
+        .published("two")
+        .pull_request("two", "open", "success", "clean");
+    let project = published.project();
+    assert_eq!(
+        (project.phase, project.state, project.position.map(percent)),
+        (Phase::AwaitingAcceptance, InProgress, Some(95))
+    );
+    assert_eq!(project.phase_label(), "In review");
+    // A passed ticket not yet published also awaits acceptance, without a PR to review.
+    let passed = cycle(Outcome::Passed, &[&[("c", Passed)]]);
+    let unpublished = published.ticket_named("three", "passed", Some(passed));
+    assert_eq!(unpublished.project().phase_label(), "Awaiting acceptance");
+    // A ticket still implementing is less advanced, so it names the phase.
+    let implementing = unpublished.ticket_named("four", "assigned", None).project();
+    assert_eq!(implementing.phase_label(), "Implementing");
+    // Failing checks leave nothing moving, so the project is blocked again.
+    let failing = World::new()
+        .ticket_named("one", "accepted", None)
+        .ticket_named("two", "blocked", Some(blocked))
+        .published("two")
+        .pull_request("two", "open", "failure", "unstable")
+        .project();
+    assert_eq!((failing.phase, failing.state), (Phase::Blocked, Blocked));
+}
+
+#[test]
 fn a_ticket_counts_only_toward_its_own_project() {
     let mut world = World::new().ticket("accepted");
     world.session("other", Role::ProjectOrchestrator, Status::Ready, None);
@@ -678,6 +848,27 @@ fn the_board_round_trips_through_json() {
     let decoded: ProgressPage =
         serde_json::from_str(&serde_json::to_string(&page).unwrap()).unwrap();
     assert_eq!(decoded, page);
+}
+
+#[test]
+fn in_review_travels_as_a_flag_beside_stages_an_older_app_knows() {
+    let board = blocked_review().open_pr("success", "clean").board();
+    let mut value = serde_json::to_value(&board).unwrap();
+    assert_eq!(value["tickets"][0]["stage"], "awaiting_acceptance");
+    assert_eq!(value["tickets"][0]["in_review"], true);
+    assert_eq!(value["projects"][0]["phase"], "awaiting_acceptance");
+    assert_eq!(value["projects"][0]["in_review"], true);
+    // A board from a host before the flag decodes as not in review.
+    value["tickets"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("in_review");
+    value["projects"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("in_review");
+    let older: Board = serde_json::from_value(value).unwrap();
+    assert!(!older.tickets[0].in_review && !older.projects[0].in_review);
 }
 
 #[test]

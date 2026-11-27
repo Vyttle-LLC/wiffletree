@@ -105,6 +105,8 @@ A ticket's progress SHALL be a stage and a position in percent. Only the states 
 
 A ticket in state `blocked` SHALL keep the position rules 4, 5 or 6 give it and SHALL be shown as blocked. A ticket under rule 2 or 6 whose implementer is working without a plan SHALL be indeterminate: it shows its stage and no percentage, and counts as 0%. Blocked wins over indeterminate: a `blocked` ticket SHALL be shown as blocked, never striped, at the position its rule gives, until its state changes. Under rule 6 that position follows the implementer's current checklist, so it is 0% while a new run has written no plan. A ticket under rule 3 SHALL stay at 60% whatever its implementer is doing. Rule 2 applies to every `assigned` ticket, including one re-assigned for a fix after a cycle: it follows the checklist of the implementer's fix run. A ticket's position SHALL NOT exceed 90% before it is accepted. A position is derived from the current records only, so it MAY move backwards.
 
+A ticket SHALL be **in review** when its pull request is open, its checks are not failing and it has no conflicts with its base, and either it falls under rule 4 (its latest cycle passed, and its state is none of those read by name), or its state is `blocked`, its latest cycle ended blocked and a `publish_ticket` push carried that cycle (the ticket's `published_cycle` is the latest cycle's number). A ticket in review SHALL be Awaiting acceptance at 90%, shown as in progress, never as blocked, and SHALL be labelled "In review". It travels as the progress record's `in_review` flag beside the Awaiting acceptance stage, so an app that does not know the flag shows "Awaiting acceptance". The PR keeper's pushes SHALL NOT change `published_cycle`, so a keeper rebase keeps a ticket in review, and a new cycle SHALL end it until a publish carries that cycle. Only the display reads it: the ticket's state and every rule that reads it stay `blocked`. The Tickets inspector SHALL show "Review blocked · published with your approval", or "… published with a waiver" when the coordinator waived the review, under a `blocked` ticket in review.
+
 #### Scenario: Implementing
 - **WHEN** a ticket is `assigned` and its implementer's checklist is 3 of 6
 - **THEN** the ticket is Implementing at 30%
@@ -136,6 +138,20 @@ A ticket in state `blocked` SHALL keep the position rules 4, 5 or 6 give it and 
 #### Scenario: Another report kind after a pass
 - **WHEN** the latest cycle passed and the implementer then reports `completed`, so the ticket's state is `completed`
 - **THEN** the ticket is still Awaiting acceptance at 90%, not Verifying
+
+#### Scenario: A blocked review published with the human's approval
+- **WHEN** a cycle ends blocked, the human approves the publish of that cycle in the Inbox, and its pull request opens with checks passing
+- **THEN** the ticket reads "In review" at 90% in the in-progress color, and its inspector reads "Review blocked · published with your approval"
+- **AND** after the PR keeper pushes a rebase of the same changes, it still reads "In review"
+- **AND** when the pull request's checks fail or it conflicts with its base, it is blocked at 80% again
+
+#### Scenario: A new blocked cycle after a publish
+- **WHEN** a ticket's pull request is open from an earlier publish, and a new cycle on the same commit ends blocked with no publish since
+- **THEN** the ticket is blocked at 80%, with no inspector line about a publish
+
+#### Scenario: A passed review with an open pull request
+- **WHEN** the latest cycle passed and the ticket's pull request is open
+- **THEN** the ticket reads "In review" at 90%
 
 #### Scenario: Re-assigned for a fix after a pass
 - **WHEN** a ticket Awaiting acceptance at 90% is assigned again for a fix, so its state is `assigned`, and the implementer's fix run has no plan yet
@@ -173,7 +189,7 @@ A ticket in state `blocked` SHALL keep the position rules 4, 5 or 6 give it and 
 - **THEN** the ticket is Implementing at 60%
 
 ### Requirement: Project progress
-A project's progress SHALL be the equal-weight average of its tickets' positions, leaving out tickets in state `closed`. It SHALL be drawn as one bar with a segment of equal width per counted ticket, in the order the tickets were created, each segment filled to its ticket's position in its ticket's state. It SHALL show a phase label and the figure "N of M tickets accepted", where M is the number of counted tickets. The phase label SHALL be "Done" when every counted ticket is accepted, "Blocked" when every unaccepted ticket is blocked, and otherwise the least advanced stage among the tickets that are neither accepted nor blocked: Implementing, then Verifying, then Awaiting acceptance. When the project has no counted ticket, the label SHALL be "Planning" and the bar SHALL be the project coordinator's own agent progress, with a percentage only when the coordinator has a checklist.
+A project's progress SHALL be the equal-weight average of its tickets' positions, leaving out tickets in state `closed`. It SHALL be drawn as one bar with a segment of equal width per counted ticket, in the order the tickets were created, each segment filled to its ticket's position in its ticket's state. It SHALL show a phase label and the figure "N of M tickets accepted", where M is the number of counted tickets. The phase label SHALL be "Done" when every counted ticket is accepted, "Blocked" when every unaccepted ticket is blocked, and otherwise the least advanced stage among the tickets that are neither accepted nor blocked: Implementing, then Verifying, then Awaiting acceptance. A ticket in review counts as neither blocked nor accepted, and when the phase is Awaiting acceptance and every such ticket is in review, the label SHALL be "In review". When the project has no counted ticket, the label SHALL be "Planning" and the bar SHALL be the project coordinator's own agent progress, with a percentage only when the coordinator has a checklist.
 
 #### Scenario: Average of four tickets
 - **WHEN** a project's tickets are Accepted at 100%, Verifying at 70%, Implementing at 30% and blocked at 24%
@@ -198,6 +214,10 @@ A project's progress SHALL be the equal-weight average of its tickets' positions
 #### Scenario: Everything left is blocked
 - **WHEN** a project has one accepted ticket and two blocked tickets
 - **THEN** its phase label is "Blocked"
+
+#### Scenario: Waiting on the human's pull request review
+- **WHEN** a project has one accepted ticket and one blocked ticket in review
+- **THEN** its phase label is "In review", in progress
 
 #### Scenario: All accepted
 - **WHEN** every counted ticket is accepted

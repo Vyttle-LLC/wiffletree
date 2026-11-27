@@ -139,8 +139,8 @@ impl Inspector {
             let (state, state_color) = match wording::waiver_note(ticket) {
                 Some(_) => ("Accepted with waiver".to_owned(), p.yellow),
                 None => (
-                    humanize(ticket.state.name()),
-                    ticket_state_color(ticket.state, p),
+                    wording::ticket_state_label(ticket),
+                    ticket_state_color(ticket, p),
                 ),
             };
             let mut entry =
@@ -160,6 +160,7 @@ impl Inspector {
                             .children(warning_badge(snapshot, ticket, p))
                             .child(pill(state, state_color)),
                     )
+                    .children(wording::blocked_review_note(ticket).map(|note| hint(note, p)))
                     .child(hint(ticket.brief.clone(), p).line_clamp(4))
                     .child(copyable("Branch", &ticket.branch, p))
                     .children(parent_branch(index, ticket, p))

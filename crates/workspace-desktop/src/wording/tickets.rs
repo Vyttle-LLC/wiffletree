@@ -70,6 +70,25 @@ pub(crate) fn publish_waiting(ticket: &Ticket) -> Option<String> {
         .map(|_| format!("{} waits for your approval", request.step.label()))
 }
 
+/// A ticket's state as the Tickets inspector and table name it: "In review" while its open PR
+/// waits on the human's review, otherwise its stored state, such as "Ready for testing".
+pub(crate) fn ticket_state_label(ticket: &Ticket) -> String {
+    match ticket.in_review() {
+        true => "In review".into(),
+        false => super::humanize(ticket.state.name()),
+    }
+}
+
+/// The inspector's line for a blocked review that was published anyway, so reading "In review"
+/// never hides it.
+pub(crate) fn blocked_review_note(ticket: &Ticket) -> Option<String> {
+    let published = ticket.state == TicketState::Blocked && ticket.in_review();
+    published.then(|| match ticket.waiver {
+        Some(_) => "Review blocked · published with a waiver".into(),
+        None => "Review blocked · published with your approval".into(),
+    })
+}
+
 /// A ticket accepted with a waiver: the Agents panel says this under its card's bar, or under
 /// its line among the finished tickets.
 pub(crate) fn waiver_note(ticket: &Ticket) -> Option<String> {
@@ -759,7 +778,7 @@ pub(crate) fn strip_figure(
         .and_then(AgentProgress::position)
         .map(|position| format!("{}%", percent(position)));
     let ticket = ticket.map(|ticket| {
-        let figure = ticket_figure(ticket).unwrap_or_else(|| ticket.stage.label().to_lowercase());
+        let figure = ticket_figure(ticket).unwrap_or_else(|| ticket.stage_label().to_lowercase());
         format!("ticket {figure}")
     });
     own.into_iter()
@@ -770,7 +789,7 @@ pub(crate) fn strip_figure(
 
 /// A ticket card's heading figure, such as "Verifying · 70%" or "Verifying · 80% · blocked".
 pub(crate) fn stage_figure(ticket: &TicketProgress) -> String {
-    let stage = ticket.stage.label();
+    let stage = ticket.stage_label();
     let position = percent(ticket.position);
     match ticket.state {
         BarState::Indeterminate => stage.into(),
@@ -825,6 +844,7 @@ mod tests {
             stage,
             state,
             position,
+            in_review: false,
             agents: vec![],
         }
     }
@@ -840,6 +860,7 @@ mod tests {
             state,
             position,
             accepted,
+            in_review: false,
             tickets: (0..tickets).map(|n| n.to_string()).collect(),
             coordinator_id: "coordinator".into(),
         }
@@ -1115,6 +1136,10 @@ mod tests {
             figure(Stage::Verifying, Blocked, 8_000),
             "Verifying · 80% · blocked"
         );
+        let mut in_review = ticket_at(Stage::AwaitingAcceptance, InProgress, 9_000);
+        assert_eq!(stage_figure(&in_review), "Awaiting acceptance · 90%");
+        in_review.in_review = true;
+        assert_eq!(stage_figure(&in_review), "In review · 90%");
         assert_eq!(
             figure(Stage::Implementing, Indeterminate, 0),
             "Implementing"
@@ -1359,6 +1384,45 @@ mod tests {
         );
         ticket.state = TicketState::Blocked;
         assert_eq!(waiver_note(&ticket), None);
+    }
+
+    #[test]
+    fn a_published_blocked_review_reads_in_review_and_keeps_a_note_of_the_block() {
+        let (_directory, _host, _root, mut ticket) = store();
+        ticket.state = TicketState::Blocked;
+        ticket.verification = Some(verification(2, VerificationOutcome::Blocked, 3));
+        assert_eq!(ticket_state_label(&ticket), "Blocked");
+        assert_eq!(blocked_review_note(&ticket), None);
+        // A PR published for cycle 1 does not publish cycle 2's blocked review.
+        ticket.pull_request = Some(pr(PrState::Open, CheckState::Success, MergeState::Clean));
+        ticket.published_cycle = Some(1);
+        assert_eq!(ticket_state_label(&ticket), "Blocked");
+        assert_eq!(blocked_review_note(&ticket), None);
+        ticket.published_cycle = Some(2);
+        assert_eq!(ticket_state_label(&ticket), "In review");
+        assert_eq!(
+            blocked_review_note(&ticket).as_deref(),
+            Some("Review blocked · published with your approval")
+        );
+        ticket.waiver = Some("F3 needs a fetched base".into());
+        assert_eq!(
+            blocked_review_note(&ticket).as_deref(),
+            Some("Review blocked · published with a waiver")
+        );
+        // Failing checks put the block back in front of the human.
+        ticket.pull_request = Some(pr(PrState::Open, CheckState::Failure, MergeState::Clean));
+        assert_eq!(ticket_state_label(&ticket), "Blocked");
+        assert_eq!(blocked_review_note(&ticket), None);
+        // A passed review with an open PR reads the same, with nothing blocked to note.
+        ticket.state = TicketState::Passed;
+        ticket.verification = Some(verification(1, VerificationOutcome::Passed, 1));
+        ticket.pull_request = Some(pr(PrState::Open, CheckState::Pending, MergeState::Blocked));
+        assert_eq!(ticket_state_label(&ticket), "In review");
+        assert_eq!(blocked_review_note(&ticket), None);
+        // A worker that reports blocked after the pass stays red, with no claim of a publish.
+        ticket.state = TicketState::Blocked;
+        assert_eq!(ticket_state_label(&ticket), "Blocked");
+        assert_eq!(blocked_review_note(&ticket), None);
     }
 
     fn pr(state: PrState, checks: CheckState, merge_state: MergeState) -> PullRequest {

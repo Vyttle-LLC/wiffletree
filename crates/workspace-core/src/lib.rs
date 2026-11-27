@@ -2304,6 +2304,10 @@ pub struct Ticket {
     /// The commit the host last pushed to the ticket's branch on GitHub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pushed: Option<String>,
+    /// The verification cycle whose review a `publish_ticket` push last carried to GitHub. The
+    /// PR keeper's pushes leave it alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_cycle: Option<u32>,
     /// What the PR keeper did to the ticket's branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keeper: Option<Keeper>,
@@ -2775,6 +2779,36 @@ impl Ticket {
         self.pull_request
             .as_ref()
             .filter(|pr| pr.state == PrState::Open)
+    }
+    /// Whether the ticket waits only on the human's review of its pull request: its review
+    /// passed, or ended blocked and was then published, and its PR is open with no failing
+    /// checks or conflicts. Only the display reads it; a blocked ticket stays blocked to every
+    /// rule.
+    pub fn in_review(&self) -> bool {
+        let Some(cycle) = &self.verification else {
+            return false;
+        };
+        // Progress reads only these states by name; any other report kind, such as
+        // `completed` after a pass, leaves the verification record to decide.
+        let named = matches!(
+            self.state,
+            TicketState::Accepted
+                | TicketState::Assigned
+                | TicketState::ReadyForTesting
+                | TicketState::Blocked
+                | TicketState::Closed
+        );
+        let review_ended = match (self.state, cycle.outcome) {
+            (TicketState::Blocked, VerificationOutcome::Blocked) => {
+                self.published_cycle == Some(cycle.cycle)
+            }
+            (_, VerificationOutcome::Passed) => !named,
+            _ => false,
+        };
+        review_ended
+            && self.open_pull_request().is_some_and(|pr| {
+                pr.checks != CheckState::Failure && pr.merge_state != MergeState::Dirty
+            })
     }
     /// Whether the ticket's open pull request is in a merge queue, as the PR watcher last read it.
     pub fn in_merge_queue(&self) -> bool {

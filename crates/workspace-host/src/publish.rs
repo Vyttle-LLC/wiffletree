@@ -939,6 +939,9 @@ impl Host {
         let result = match outcome.result {
             StepResult::Pushed { already } => {
                 ticket.pushed = Some(request.commit.clone());
+                if !request.keeper {
+                    ticket.published_cycle = Some(request.cycle);
+                }
                 if !already {
                     let detail = format!("{}: {sent}", ticket.id);
                     Self::event(
@@ -3945,6 +3948,8 @@ pub(crate) mod tests {
         assert_eq!(remote.github.lock().unwrap().created.len(), 1);
         assert!(f.open_items().is_empty());
         assert_eq!(f.ticket().waiver.as_deref(), Some(waiver));
+        let cycle = f.ticket().verification.map(|v| v.cycle);
+        assert_eq!(f.ticket().published_cycle, cycle);
 
         // The recorded waiver covers a later publish of the same review, by either agent.
         watch_open_pr(&mut f, 45);
@@ -4337,11 +4342,16 @@ pub(crate) mod tests {
         ticket.waiver = Some("F4 is acceptable".into());
         f.host.save_ticket(&ticket).unwrap();
         assert!(f.host.may_change_branch(&f.ticket()));
+        // The coordinator's publish of the passed review before it.
+        let published = f.ticket().published_cycle;
         let step = f.host.keeper_move(&f.ticket.clone()).unwrap();
         drive(&mut f, &remote, step);
         assert_eq!(remote.branch(BRANCH), Some(f.head()));
         assert!(f.open_items().is_empty());
         assert!(f.ticket().publishing.is_none());
+        // Only a publish_ticket push says the blocked review was published.
+        assert_eq!(f.ticket().published_cycle, published);
+        assert_ne!(published, f.ticket().verification.map(|v| v.cycle));
     }
 
     #[test]

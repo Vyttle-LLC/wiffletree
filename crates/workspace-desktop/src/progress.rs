@@ -137,6 +137,7 @@ mod tests {
             stage: Stage::Implementing,
             state: BarState::InProgress,
             position: 3_000,
+            in_review: false,
             agents: agents.iter().map(|id| id.to_string()).collect(),
         }
     }
@@ -147,6 +148,7 @@ mod tests {
             state: BarState::InProgress,
             position: Some(3_000),
             accepted: 0,
+            in_review: false,
             tickets: tickets.iter().map(|id| id.to_string()).collect(),
             coordinator_id: "coordinator".into(),
         }

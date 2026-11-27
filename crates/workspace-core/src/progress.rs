@@ -131,10 +131,26 @@ pub struct TicketProgress {
     pub stage: Stage,
     pub state: BarState,
     pub position: u16,
+    /// Its review ended and its open pull request waits on the human's review; the stage is
+    /// then AwaitingAcceptance. A flag, not a stage, so an app one release behind still decodes
+    /// the board.
+    #[serde(default)]
+    pub in_review: bool,
     /// The agents the Agents panel can list under the ticket, in order; none once the ticket
     /// is accepted.
     pub agents: Vec<String>,
 }
+impl TicketProgress {
+    /// "In review" while its pull request waits on the human, otherwise its stage's label.
+    pub fn stage_label(&self) -> &'static str {
+        match self.in_review {
+            true => IN_REVIEW,
+            false => self.stage.label(),
+        }
+    }
+}
+
+const IN_REVIEW: &str = "In review";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectProgress {
@@ -144,10 +160,24 @@ pub struct ProjectProgress {
     /// `None` while the rules define no percentage: planning with no checklist to count.
     pub position: Option<u16>,
     pub accepted: u32,
+    /// The phase is AwaitingAcceptance and every open ticket still moving waits on its pull
+    /// request, as `TicketProgress::in_review` says.
+    #[serde(default)]
+    pub in_review: bool,
     /// Counted tickets in creation order; one bar segment each.
     pub tickets: Vec<String>,
     /// The project coordinator, whose checklist is the bar while `tickets` is empty.
     pub coordinator_id: String,
+}
+impl ProjectProgress {
+    /// "In review" while every moving ticket waits on its pull request, otherwise the phase's
+    /// label.
+    pub fn phase_label(&self) -> &'static str {
+        match self.in_review {
+            true => IN_REVIEW,
+            false => self.phase.label(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,6 +342,7 @@ impl Records<'_> {
 
     fn ticket(&self, ticket: &Ticket) -> TicketProgress {
         use BarState::{Finished, InProgress};
+        let in_review = ticket.in_review();
         let (stage, state, position) = match (ticket.state, &ticket.verification) {
             (TicketState::Accepted, _) => (Stage::Accepted, Finished, FULL_POSITION),
             (TicketState::ReadyForTesting, _) => (Stage::Implementing, InProgress, IMPLEMENTED),
@@ -319,6 +350,8 @@ impl Records<'_> {
                 let (state, position) = self.implementing(ticket);
                 (Stage::Implementing, state, position)
             }
+            // A blocked review published anyway waits on its PR at the stage a pass reaches.
+            _ if in_review => (Stage::AwaitingAcceptance, InProgress, VERIFIED),
             (_, Some(cycle)) if cycle.outcome == VerificationOutcome::Passed => {
                 (Stage::AwaitingAcceptance, InProgress, VERIFIED)
             }
@@ -333,7 +366,7 @@ impl Records<'_> {
             }
         };
         // Blocked wins over stripes: a bar is in exactly one state.
-        let state = if ticket.state == TicketState::Blocked {
+        let state = if ticket.state == TicketState::Blocked && !in_review {
             BarState::Blocked
         } else {
             state
@@ -343,6 +376,7 @@ impl Records<'_> {
             stage,
             state,
             position,
+            in_review,
             agents: self.crew(ticket, stage),
         }
     }
@@ -404,27 +438,30 @@ impl Records<'_> {
             .iter()
             .filter(|ticket| ticket.stage != Stage::Accepted)
             .collect();
-        let moving = open
+        let moving: Vec<_> = open
             .iter()
             .filter(|ticket| ticket.state != BarState::Blocked)
-            .map(|ticket| ticket.stage)
-            .min();
+            .collect();
+        let least = moving.iter().map(|ticket| ticket.stage).min();
         let (phase, state, position) = if tickets.is_empty() {
             let own = self.agent(coordinator);
             (Phase::Planning, own.state, own.position())
         } else if open.is_empty() {
             (Phase::Done, BarState::Finished, Some(FULL_POSITION))
-        } else if let Some(stage) = moving {
+        } else if let Some(stage) = least {
             (stage.into(), BarState::InProgress, Some(mean(tickets)))
         } else {
             (Phase::Blocked, BarState::Blocked, Some(mean(tickets)))
         };
+        // The least advanced stage is AwaitingAcceptance, so every moving ticket is at it.
+        let in_review = phase == Phase::AwaitingAcceptance && moving.iter().all(|t| t.in_review);
         ProjectProgress {
             project_id: coordinator.project_id.clone(),
             phase,
             state,
             position,
             accepted: (tickets.len() - open.len()) as u32,
+            in_review,
             tickets: tickets.iter().map(|t| t.ticket_id.clone()).collect(),
             coordinator_id: coordinator.id.clone(),
         }
