@@ -226,8 +226,8 @@ impl Host {
 
     /// Acts on the human's answer to a retarget item, and only for the item a ticket's waiting
     /// request names. Approval returns the job that moves the pull request, even of a ticket
-    /// accepted meanwhile, unless the pull request is no longer open; any other answer ends the
-    /// request with nothing changed.
+    /// accepted or closed meanwhile, unless the pull request is no longer open; any other answer
+    /// ends the request with nothing changed.
     pub(crate) fn answer_retarget(&mut self, item: &str, approved: bool) -> Result<Option<Job>> {
         let waiting = self.tickets()?.into_iter().find(|ticket| {
             (ticket.retargeting.as_ref()).is_some_and(|r| r.waiting.as_deref() == Some(item))
@@ -645,20 +645,22 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn approving_moves_the_pr_even_once_its_ticket_was_accepted() {
-        let mut f = fixture();
-        let item = asked_to_main(&mut f);
-        let mut ticket = f.ticket();
-        ticket.state = TicketState::Accepted;
-        f.host.save_ticket(&ticket).unwrap();
+    fn approving_moves_the_pr_even_once_its_ticket_was_accepted_or_closed() {
+        for state in [TicketState::Accepted, TicketState::Closed] {
+            let mut f = fixture();
+            let item = asked_to_main(&mut f);
+            let mut ticket = f.ticket();
+            ticket.state = state;
+            f.host.save_ticket(&ticket).unwrap();
 
-        let job = f.host.answer_retarget(&item, true).unwrap();
-        let (tools, edited) = offline();
-        f.host.record_retarget(run(&job.unwrap(), &tools)).unwrap();
-        assert_eq!(*edited.lock().unwrap(), [moved_to("main")]);
-        assert_eq!(f.ticket().pull_request.unwrap().base, "main");
-        assert!(f.ticket().retargeting.is_none());
-        assert!(results(&f)[0].contains("PR #45 now opens into main"));
+            let job = f.host.answer_retarget(&item, true).unwrap();
+            let (tools, edited) = offline();
+            f.host.record_retarget(run(&job.unwrap(), &tools)).unwrap();
+            assert_eq!(*edited.lock().unwrap(), [moved_to("main")], "{state}");
+            assert_eq!(f.ticket().pull_request.unwrap().base, "main");
+            assert!(f.ticket().retargeting.is_none());
+            assert!(results(&f)[0].contains("PR #45 now opens into main"));
+        }
     }
 
     #[test]
@@ -703,5 +705,33 @@ pub(crate) mod tests {
         );
         // An answer to the withdrawn item changes nothing.
         assert!(f.host.answer_retarget(&item, true).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_withdrawal_that_fails_still_lets_the_watcher_record_the_merge() {
+        let mut f = fixture();
+        asked_to_main(&mut f);
+        // Its result cannot be sent to a caller that does not exist, so the withdrawal fails.
+        let mut ticket = f.ticket();
+        (ticket.retargeting.as_mut().unwrap()).caller = "gone".into();
+        f.host.save_ticket(&ticket).unwrap();
+        let merged = PullRequest {
+            state: PrState::Merged,
+            ..ticket.pull_request.clone().unwrap()
+        };
+        let read = crate::pr_watch::tests::found(&ticket, merged);
+
+        let recorded = f
+            .host
+            .record_pull_requests(&ticket.repository_id, &read, 0, 0);
+        assert!(recorded.unwrap(), "the pass records the merge");
+        let ticket = f.ticket();
+        assert_eq!(ticket.pull_request.unwrap().state, PrState::Merged);
+        assert!(
+            ticket.retargeting.is_some(),
+            "kept for the next pass to withdraw"
+        );
+        let merged_notice = format!("{PR_NOTICE_PREFIX}{}:merged:45", f.ticket);
+        assert!(f.host.message_exists(&merged_notice).unwrap());
     }
 }
