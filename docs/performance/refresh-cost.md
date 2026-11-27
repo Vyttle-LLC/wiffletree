@@ -36,6 +36,11 @@ With `WIFFLETREE_RENDER_COUNTS` set, the desktop prints once a second:
 - main-thread CPU time;
 - the longest main-thread stall, measured as how late a 5 ms timer fires.
 
+The stall watch has since changed: it now times each wake of the main run loop, with the main
+thread's CPU time beside it (`desktop-under-load.md`). macOS coalesces timers, so the timer
+measured here read 17–22 ms on an idle thread. The stall figures below predate the change and
+are not comparable with newer ones.
+
 Each run seeds a fresh store, opens the app on it with the coordinator of the first project
 selected, waits 20 s and measures 60 s:
 

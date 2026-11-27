@@ -1415,29 +1415,25 @@ mod tests {
         }
     }
 
-    /// Clicks the change-of-base card's button `from_right` places from its bottom right, with
-    /// the host out of reach, and says whether the click sent the card's answer: the bridge
-    /// refuses it at once, and the card shows that refusal.
-    fn sends_an_answer(cx: &mut gpui::TestAppContext, from_right: f32) -> bool {
+    /// A window showing `item`'s card from `snapshot`, drawn once, and the card's bounds.
+    fn show_card(
+        cx: &mut gpui::TestAppContext,
+        bridge: crate::bridge::Bridge,
+        snapshot: workspace_core::Snapshot,
+        item: Attention,
+    ) -> (
+        gpui::Entity<Shown>,
+        &mut gpui::VisualTestContext,
+        gpui::Bounds<gpui::Pixels>,
+    ) {
         use gpui::AppContext as _;
-        let mut item = open("r");
-        item.operation_id = "retarget:r1".into();
-        item.prompt = "Move PR #12 for ticket \"Chat\" (t) in o/r from stacked to main?".into();
-        assert!(item.is_retarget() && item.is_permission());
-        let snapshot = workspace_core::Snapshot {
-            attention: vec![item.clone()],
-            ..Default::default()
-        };
         cx.update(gpui_component::init);
-        let bridge = crate::bridge::Bridge::unavailable("The host is out of reach".into());
         let (view, cx) = cx.add_window_view(|window, cx| {
             let inbox = cx.new(|cx| {
                 let mut inbox = super::Inbox::new(bridge, window, cx);
+                let index = crate::WorkspaceIndex::new(snapshot, Default::default());
                 inbox.shared = crate::Shared {
-                    index: Some(std::rc::Rc::new(crate::WorkspaceIndex::new(
-                        snapshot,
-                        Default::default(),
-                    ))),
+                    index: Some(std::rc::Rc::new(index)),
                     ..Default::default()
                 };
                 inbox
@@ -1446,10 +1442,79 @@ mod tests {
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let card = cx.debug_bounds("card").unwrap();
+        (view, cx, card)
+    }
+
+    /// Clicks the change-of-base card's button `from_right` places from its bottom right, with
+    /// the host out of reach, and says whether the click sent the card's answer: the bridge
+    /// refuses it at once, and the card shows that refusal.
+    fn sends_an_answer(cx: &mut gpui::TestAppContext, from_right: f32) -> bool {
+        let mut item = open("r");
+        item.operation_id = "retarget:r1".into();
+        item.prompt = "Move PR #12 for ticket \"Chat\" (t) in o/r from stacked to main?".into();
+        assert!(item.is_retarget() && item.is_permission());
+        let snapshot = workspace_core::Snapshot {
+            attention: vec![item.clone()],
+            ..Default::default()
+        };
+        let bridge = crate::bridge::Bridge::unavailable("The host is out of reach".into());
+        let (view, cx, card) = show_card(cx, bridge, snapshot, item);
         let button = card.bottom_right() - gpui::point(gpui::px(from_right), gpui::px(24.));
         cx.simulate_click(button, gpui::Modifiers::default());
         let refused = Settling::Failed("The host is out of reach".into());
         cx.update(|_, cx| view.read(cx).0.read(cx).settlings.get("r") == Some(&refused))
+    }
+
+    /// While a busy host holds every request, a click on Dismiss shows the card sending in the
+    /// frame it draws, before any reply; the reply, once the host answers, settles it.
+    #[gpui::test]
+    fn a_dismissed_card_shows_it_is_sending_at_once_while_a_busy_host_holds_the_reply(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::sync::atomic::Ordering;
+        let served = crate::bridge::tests::serve(|host| {
+            let project = host.create_project("Busy project").unwrap();
+            let coordinator = (host.sessions().unwrap().into_iter())
+                .find(|s| s.project_id == project.id)
+                .unwrap();
+            let ask = json!({"request_id": "ship", "question": "Ship it?"});
+            host.agent_tool(&coordinator.id, "ask_user", ask).unwrap();
+        });
+        let snapshot = (served.bridge)
+            .ask_now(workspace_core::ask::snapshot())
+            .unwrap();
+        let item = snapshot.attention[0].clone();
+        let id = item.id.clone();
+        let (bridge, held) = served.busy();
+        held.store(true, Ordering::Relaxed);
+        // The host's replies wake the app from its client's thread.
+        cx.executor().allow_parking();
+        let (view, cx, card) = show_card(cx, bridge, snapshot, item);
+        let settling_is = |expected: Settling, cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, cx| view.read(cx).0.read(cx).settlings.get(&id) == Some(&expected))
+        };
+
+        // Dismiss sits left of Answer.
+        let dismiss = card.bottom_right() - gpui::point(gpui::px(110.), gpui::px(24.));
+        cx.simulate_click(dismiss, gpui::Modifiers::default());
+        let sending = || Settling::Sending { shown_open: false };
+        assert!(
+            settling_is(sending(), cx),
+            "sending in the frame of the click"
+        );
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(settling_is(sending(), cx), "the host holds the reply");
+
+        held.store(false, Ordering::Relaxed);
+        let answered = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !settling_is(Settling::Sent, cx) {
+            assert!(
+                std::time::Instant::now() < answered,
+                "the host never answered"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            cx.run_until_parked();
+        }
     }
 
     #[gpui::test]
