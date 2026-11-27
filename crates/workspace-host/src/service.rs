@@ -9697,6 +9697,31 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
     }
 
     #[test]
+    fn a_device_command_is_taken_before_a_full_queue_of_agent_output() {
+        let (sender, events) = async_channel::bounded(256);
+        while sender.try_send(Event::Wake(0)).is_ok() {}
+        let (commands, command_receiver) = async_channel::unbounded();
+        let requests = Requests {
+            sender,
+            commands,
+            events: EventLog::default(),
+            host_id: String::new(),
+            working: Arc::default(),
+        };
+        let inbound = Inbound::new(command_receiver, events);
+
+        let dismiss = Command::DismissAttention { id: "q".into() };
+        let _reply = requests
+            .request_from("phone", dismiss)
+            .expect("a full queue refuses no command");
+        assert!(matches!(
+            inbound.next(),
+            Some(Event::Remote(remote::ToActor::Command { .. }))
+        ));
+        assert!(inbound.events.is_full());
+    }
+
+    #[test]
     fn commands_go_first_but_never_two_in_a_row_while_an_event_waits() {
         let (commands, command_receiver) = async_channel::unbounded();
         let (events, event_receiver) = async_channel::unbounded();

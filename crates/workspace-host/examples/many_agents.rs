@@ -8,8 +8,12 @@
 //!
 //! `many_agents probe <dir> [seconds]` joins that store's running host as a script client, and
 //! reports the events it sends per second and how long a snapshot takes over `host.sock`.
+//!
+//! `many_agents latency <dir> [seconds]` issues the human's commands to that host in turn, four
+//! a second: Snapshot, Send, answering and dismissing Inbox questions, and settling notes. It
+//! reports how long each waits for its reply (see `docs/performance/command-latency.md`).
 use anyhow::{Context, Result, ensure};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -30,7 +34,12 @@ fn main() -> Result<()> {
         ["seed", dir] => seed(Path::new(dir)),
         ["probe", dir] => probe(Path::new(dir), 30),
         ["probe", dir, seconds] => probe(Path::new(dir), seconds.parse()?),
-        _ => anyhow::bail!("Usage: many_agents seed <new folder> | probe <folder> [seconds]"),
+        ["latency", dir] => latency(Path::new(dir), 60, false),
+        ["latency", dir, seconds] => latency(Path::new(dir), seconds.parse()?, false),
+        ["latency", dir, seconds, "join"] => latency(Path::new(dir), seconds.parse()?, true),
+        _ => anyhow::bail!(
+            "Usage: many_agents seed <new folder> | probe <folder> [seconds] | latency <folder> [seconds] [join]"
+        ),
     }
 }
 
@@ -111,13 +120,14 @@ fn seed(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The socket of a host already running for a data folder, joined without the app's credential.
+/// The socket of a host already running for a data folder, joined with the app's credential
+/// only when `WIFFLETREE_CREDENTIAL` gives it.
 struct Running(PathBuf);
 impl Launch for Running {
     fn endpoint(&mut self, _: &AtomicBool) -> std::io::Result<Endpoint> {
         Ok(Endpoint {
             socket: self.0.join(SOCKET_FILE),
-            credential: None,
+            credential: std::env::var("WIFFLETREE_CREDENTIAL").ok(),
         })
     }
 }
@@ -196,5 +206,123 @@ fn probe(dir: &Path, seconds: u64) -> Result<()> {
             },
         }))?
     );
+    Ok(())
+}
+
+/// Times the human's commands to the fixture's host over `host.sock`, four a second, after a
+/// 20 s warm-up. It starts the host built beside this example as the app's child, so it holds the
+/// app's credential; `join` instead joins a host already running, such as a launchd job, and
+/// skips the commands only the app may give unless `WIFFLETREE_CREDENTIAL` gives the credential.
+fn latency(dir: &Path, seconds: u64, join: bool) -> Result<()> {
+    let human = !join || std::env::var_os("WIFFLETREE_CREDENTIAL").is_some();
+    let home = dir.join("home");
+    let launch: Box<dyn Launch> = if join {
+        Box::new(Running(home))
+    } else {
+        let binary = std::env::current_exe()?
+            .parent()
+            .and_then(Path::parent)
+            .context("examples folder")?
+            .join("wiffletree-host");
+        ensure!(binary.is_file(), "Build {} first", binary.display());
+        ensure!(
+            std::env::var_os("WORKSPACE_CLAUDE_BIN").is_some(),
+            "Set WORKSPACE_CLAUDE_BIN to busy_provider.py"
+        );
+        Box::new(ChildLaunch::new(&binary, &home).env("WORKSPACE_CODEX_BIN", "/nonexistent/codex"))
+    };
+    let client = Client {
+        name: "many-agents latency".into(),
+        kind: "script".into(),
+    };
+    let client = HostClient::connect(launch, client, Box::new(|_| {}))?;
+    let ask = |command: Command| -> Result<(f64, Option<Value>)> {
+        let asked = Instant::now();
+        let reply = client.request(command).map_err(anyhow::Error::msg)?;
+        let value = reply.recv_blocking()?;
+        Ok((asked.elapsed().as_secs_f64() * 1000., value.ok()))
+    };
+    std::thread::sleep(Duration::from_secs(20));
+
+    const NAMES: [&str; 6] = [
+        "Snapshot",
+        "Send",
+        "ResolveAttention",
+        "DismissAttention",
+        "SettlePausedFile",
+        "DismissPairedNotice",
+    ];
+    let mut times: [Vec<f64>; 6] = Default::default();
+    let mut failed = [0usize; 6];
+    let (mut questions, mut coordinators) = (Vec::<String>::new(), Vec::<String>::new());
+    let started = Instant::now();
+    let mut tick = 0;
+    while started.elapsed() < Duration::from_secs(seconds) {
+        let slot = tick % NAMES.len();
+        tick += 1;
+        let command = match slot {
+            0 => Some(Command::Snapshot),
+            1 => coordinators
+                .get(tick % coordinators.len().max(1))
+                .map(|recipient| Command::Send {
+                    id: new_id(),
+                    sender: None,
+                    recipient: recipient.clone(),
+                    body: "Carry on.".into(),
+                    attachments: vec![],
+                    uploads: vec![],
+                }),
+            2 => questions.pop().map(|id| Command::ResolveAttention {
+                id,
+                answer: "Carry on".into(),
+            }),
+            3 => questions.pop().map(|id| Command::DismissAttention { id }),
+            4 => Some(Command::SettlePausedFile {
+                path: "fixture/none.md".into(),
+                settle: Settle::KeepThisMachines,
+                repository: None,
+            }),
+            _ => Some(Command::DismissPairedNotice {
+                device_id: "fixture-none".into(),
+            }),
+        };
+        if let Some(command) = command.filter(|c| human || !c.is_human_only()) {
+            let (ms, value) = ask(command)?;
+            times[slot].push(ms);
+            match (slot, value) {
+                (0, Some(value)) => {
+                    let snapshot: Snapshot = serde_json::from_value(value)?;
+                    questions = (snapshot.attention.into_iter())
+                        .filter(|a| a.answer.is_none())
+                        .map(|a| a.id)
+                        .collect();
+                    coordinators = (snapshot.sessions.into_iter())
+                        .filter(|s| s.parent_id.is_none() && s.role == Role::ProjectOrchestrator)
+                        .map(|s| s.id)
+                        .collect();
+                }
+                (_, None) => failed[slot] += 1,
+                _ => {}
+            }
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    client.stop();
+    let report: serde_json::Map<String, Value> = (NAMES.iter().zip(times.iter_mut()).zip(failed))
+        .filter(|((_, times), _)| !times.is_empty())
+        .map(|((name, times), failed)| {
+            times.sort_by(f64::total_cmp);
+            let round = |ms: f64| (ms * 10.).round() / 10.;
+            let summary = json!({
+                "samples": times.len(),
+                "failed": failed,
+                "p50_ms": round(percentile(times, 50)),
+                "p95_ms": round(percentile(times, 95)),
+                "max_ms": round(*times.last().unwrap()),
+            });
+            (name.to_string(), summary)
+        })
+        .collect();
+    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }

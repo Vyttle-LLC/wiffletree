@@ -100,6 +100,8 @@ fn open_read(path: &Path) -> Result<Option<Connection>> {
     if !path.exists() {
         return Ok(None);
     }
+    #[cfg(test)]
+    tests::OPENED_READERS.with(|opened| opened.set(opened.get() + 1));
     let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let version: Option<String> = db
         .query_row("SELECT value FROM state WHERE key='schema'", [], |r| {
@@ -109,6 +111,63 @@ fn open_read(path: &Path) -> Result<Option<Connection>> {
         .unwrap_or(None);
     let built = state(&db, "commit").unwrap_or(None).is_some();
     Ok((version.as_deref() == Some(SCHEMA_VERSION) && built).then_some(db))
+}
+
+/// Read connections to brain indexes, each kept while its file is unchanged, so the reads the
+/// host makes at every state change, such as counting the Inbox's conflict cards, open no file.
+#[derive(Default)]
+pub(crate) struct Readers(std::cell::RefCell<HashMap<PathBuf, (Stamp, Connection)>>);
+/// A file's inode, modification time and length. A rebuild replaces the file, which changes them;
+/// a refresh commits through the WAL, which a kept connection reads.
+type Stamp = (u64, std::time::SystemTime, u64);
+
+impl Readers {
+    /// The index at `path` for reading, or `None` until a build has completed.
+    fn open(&self, path: &Path) -> Result<Option<Reader<'_>>> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = match fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let stamp = (metadata.ino(), metadata.modified()?, metadata.len());
+        let kept = self.0.borrow_mut().remove(path);
+        let db = match kept.filter(|(kept, _)| *kept == stamp) {
+            Some((_, db)) => db,
+            None => match open_read(path)? {
+                Some(db) => db,
+                None => return Ok(None),
+            },
+        };
+        Ok(Some(Reader {
+            db: Some(db),
+            path: path.to_owned(),
+            stamp,
+            readers: self,
+        }))
+    }
+}
+
+/// A brain index's read connection, handed back to its `Readers` once read.
+pub(crate) struct Reader<'a> {
+    db: Option<Connection>,
+    path: PathBuf,
+    stamp: Stamp,
+    readers: &'a Readers,
+}
+impl std::ops::Deref for Reader<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.db.as_ref().expect("held until dropped")
+    }
+}
+impl Drop for Reader<'_> {
+    fn drop(&mut self) {
+        if let Some(db) = self.db.take() {
+            let path = std::mem::take(&mut self.path);
+            self.readers.0.borrow_mut().insert(path, (self.stamp, db));
+        }
+    }
 }
 
 fn state(db: &Connection, key: &str) -> Result<Option<String>> {
@@ -1739,9 +1798,10 @@ fn local_entry(log: &WorkLog) -> BrainEntry {
 impl Host {
     /// The brain a read names, with its index; refused for a repository no Space here is in,
     /// and before its first index build.
-    fn brain_reader(&self, repository: &str) -> Result<(Brain, Connection)> {
+    fn brain_reader(&self, repository: &str) -> Result<(Brain, Reader<'_>)> {
         let brain = self.brain(repository)?;
-        let db = open_read(&index_file(&self.home, &brain.repository))?.with_context(|| {
+        let index = index_file(&self.home, &brain.repository);
+        let db = self.brain_readers.open(&index)?.with_context(|| {
             format!(
                 "{} is not indexed yet: its first sync builds the index",
                 brain.repository
@@ -2161,6 +2221,11 @@ pub(crate) mod tests {
     use super::*;
     use crate::test_support::git;
 
+    thread_local! {
+        /// How many index files this test's thread opened for reading.
+        pub(super) static OPENED_READERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
     pub(crate) const RELAY: &str = "sagechat-call-watch-relay";
     pub(crate) const APP: &str = "simpatico-sage";
 
@@ -2353,6 +2418,54 @@ pub(crate) mod tests {
         );
         let tree = note_tree(&brain.db(), None).unwrap();
         assert!(tree.not_in_index.is_empty(), "the deleted note is gone");
+    }
+
+    #[test]
+    fn a_kept_reader_reads_what_the_next_refresh_wrote_and_never_a_deleted_index() {
+        let brain = Checkout::new();
+        let readers = Readers::default();
+        let rewritten = |readers: &Readers| {
+            let db = readers.open(&brain.index()).unwrap().expect("built");
+            search(&db, None, "rewritten").unwrap().len()
+        };
+        brain.refresh(&brain.commit(&sample(), "Log batch (#81)"));
+        assert_eq!(rewritten(&readers), 0);
+        let changed = note("Kids List", "observation", &[], "Rewritten by a compile.");
+        brain.refresh(&brain.commit(&[changed], "Compile (#90)"));
+        assert_eq!(rewritten(&readers), 1);
+        remove(&brain.index());
+        assert!(readers.open(&brain.index()).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_kept_reader_is_reused_through_a_refresh_and_replaced_after_a_rebuild() {
+        let brain = Checkout::new();
+        let readers = Readers::default();
+        let opened = || OPENED_READERS.with(std::cell::Cell::get);
+        let rewritten = || {
+            let db = readers.open(&brain.index()).unwrap().expect("built");
+            search(&db, None, "rewritten").unwrap().len()
+        };
+        let first = brain.commit(&sample(), "Log batch (#81)");
+        brain.refresh(&first);
+        let before = opened();
+        assert_eq!((rewritten(), rewritten()), (0, 0));
+        assert_eq!(
+            opened(),
+            before + 1,
+            "the second read reuses the first's connection"
+        );
+        // A refresh commits through the WAL, which the kept connection reads.
+        let changed = note("Kids List", "observation", &[], "Rewritten by a compile.");
+        let second = brain.commit(&[changed], "Compile (#90)");
+        brain.refresh(&second);
+        assert_eq!(rewritten(), 1);
+        assert_eq!(opened(), before + 1, "a refresh keeps the file");
+        // A rebuild is a new file.
+        remove(&brain.index());
+        brain.refresh(&second);
+        assert_eq!(rewritten(), 1);
+        assert_eq!(opened(), before + 2, "the rebuilt index is opened again");
     }
 
     /// Every row the index holds, without its row ids, and the search results for some queries.

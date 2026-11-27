@@ -49,6 +49,7 @@ package(workspace-desktop)
     | test(=service::tests::stop_agents_stops_what_a_child_started_and_its_stopped_turns_end_stops_the_rest)
     | test(=service::tests::what_a_compaction_leaves_running_stays_when_its_agent_was_not_stopped)
     | test(=service::tests::what_an_older_version_recorded_on_a_run_is_carried_into_the_record_once)
+    | test(=runtime::model_tests::an_agents_process_does_its_disk_io_at_utility_priority)
   ))
 | (binary_id(workspace-host::archive) & (
     test(=a_close_that_fails_after_stopping_processes_says_so_and_tells_the_agent)

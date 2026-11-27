@@ -49,11 +49,12 @@ fn agent_build_settings(host_sets: impl Fn(&str) -> bool) -> Vec<(&'static str, 
 }
 
 pub(crate) trait LowPriority {
-    /// Runs the child, and so everything it starts, at `AGENT_NICENESS`, with Cargo and nextest
-    /// capped to half the cores and Cargo's debug info kept to line tables unless the host's own
-    /// environment already sets them, and with builds sent through the build gate once the host
-    /// installed it. A niceness and the environment are inherited across fork and exec, so they
-    /// reach tool commands that lead their own process group or session too.
+    /// Runs the child, and so everything it starts, at `AGENT_NICENESS` with its disk I/O at
+    /// utility priority on macOS, with Cargo and nextest capped to half the cores and Cargo's
+    /// debug info kept to line tables unless the host's own environment already sets them, and
+    /// with builds sent through the build gate once the host installed it. A niceness, an I/O
+    /// policy and the environment are inherited across fork and exec, so they reach tool commands
+    /// that lead their own process group or session too.
     fn at_low_priority(&mut self) -> &mut Self;
 }
 impl LowPriority for Command {
@@ -66,15 +67,30 @@ impl LowPriority for Command {
                 .iter()
                 .map(|(name, value)| (name, value)),
         );
-        // SAFETY: `setpriority` is async-signal-safe. Its failure is ignored: it fails only for a
-        // host already running nicer than this, which the child then inherits.
+        // SAFETY: `setpriority` and `setiopolicy_np` are single system calls, safe after fork.
+        // Their failures are ignored: the child then keeps the host's priority.
         unsafe {
             self.pre_exec(|| {
                 libc::setpriority(libc::PRIO_PROCESS as _, 0, AGENT_NICENESS);
+                // Agents' disk I/O yields to the host's writes, which the human's replies wait on.
+                #[cfg(target_os = "macos")]
+                setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_PROCESS, IOPOL_UTILITY);
                 Ok(())
             })
         }
     }
+}
+
+// From <sys/resource.h>, which the libc crate does not bind.
+#[cfg(target_os = "macos")]
+const IOPOL_TYPE_DISK: libc::c_int = 0;
+#[cfg(target_os = "macos")]
+const IOPOL_SCOPE_PROCESS: libc::c_int = 0;
+#[cfg(target_os = "macos")]
+const IOPOL_UTILITY: libc::c_int = 4;
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn setiopolicy_np(iotype: libc::c_int, scope: libc::c_int, policy: libc::c_int) -> libc::c_int;
 }
 
 pub fn git_output(path: &Path, args: &[&str]) -> Result<String> {
@@ -799,6 +815,20 @@ mod model_tests {
             ]
         );
         assert!(agent_build_settings(|_| true).is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_agents_process_does_its_disk_io_at_utility_priority() {
+        let policy = "import ctypes; print(ctypes.CDLL(None).getiopolicy_np(0, 0))";
+        let output = Command::new("python3")
+            .args(["-c", policy])
+            .at_low_priority()
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let policy = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(policy.trim(), IOPOL_UTILITY.to_string());
     }
 
     #[test]
