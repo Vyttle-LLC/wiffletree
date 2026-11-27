@@ -306,7 +306,8 @@ impl Bridge {
         if let Some(reason) = self.refuses(&command) {
             return Err(reason);
         }
-        self.client.as_ref().map_err(Clone::clone)?.request(command)
+        let client = self.client.as_ref().map_err(Clone::clone)?;
+        crate::render_counts::timed("submit", || client.request(command))
     }
     /// Why a paired host takes no change now: it does not answer, so the change would wait and
     /// apply later, or it lets this device only view. Reads, and messages, which wait with their
