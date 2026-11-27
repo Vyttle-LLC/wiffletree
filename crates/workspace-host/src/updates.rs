@@ -145,9 +145,13 @@ impl Host {
 
     fn branch_head(&self, ticket: &Ticket) -> Option<String> {
         let repository = self.ticket_repository(ticket).ok()?;
+        let repository = Path::new(&repository.path);
         let branch = format!("refs/heads/{}", ticket.branch);
+        if let Some(head) = stored_ref(repository, &branch) {
+            return head;
+        }
         let args = ["rev-parse", "--verify", "--quiet", branch.as_str()];
-        let head = runtime::git_output(Path::new(&repository.path), &args).ok()?;
+        let head = runtime::git_output(repository, &args).ok()?;
         Some(head.trim().to_owned()).filter(|head| !head.is_empty())
     }
 
@@ -198,6 +202,34 @@ impl Host {
         }
         Ok(update)
     }
+}
+
+/// The commit `name` points at, read from the files of `repository`'s `.git` folder, as the
+/// actor reads it at every coordinator's reply and a Git process per ticket is slow on a busy
+/// Mac. `Some(None)` when the ref does not exist; `None` when only Git can say: a linked
+/// worktree's `.git` file, a reftable store or a symbolic ref.
+fn stored_ref(repository: &Path, name: &str) -> Option<Option<String>> {
+    let git = repository.join(".git");
+    if !git.is_dir() || git.join("reftable").exists() {
+        return None;
+    }
+    // Loose before packed: `git pack-refs` writes the packed copy before it removes the loose.
+    match fs::read_to_string(git.join(name)) {
+        Ok(loose) if loose.starts_with("ref:") => return None,
+        Ok(loose) => return Some(Some(loose.trim().to_owned())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+    let packed = match fs::read_to_string(git.join("packed-refs")) {
+        Ok(packed) => packed,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(None),
+        Err(_) => return None,
+    };
+    let head = (packed.lines())
+        .filter_map(|line| line.split_once(' '))
+        .find(|(_, refname)| *refname == name)
+        .map(|(commit, _)| commit.to_owned());
+    Some(head)
 }
 
 /// Each difference from `old` to `new`, in words, tickets first.
@@ -352,6 +384,39 @@ mod tests {
             Some(ReplyUpdate::Changed { changes }) => changes,
             other => panic!("not changed: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_branch_head_is_read_from_loose_and_packed_refs_as_git_reads_it() {
+        let repository = tempfile::tempdir().unwrap();
+        let path = repository.path();
+        crate::test_support::git(path, &["init", "-q", "-b", "main"]);
+        crate::test_support::git(path, &["commit", "-q", "--allow-empty", "-m", "Base"]);
+        crate::test_support::git(path, &["branch", "work"]);
+        let head = Some(Some(crate::test_support::git(
+            path,
+            &["rev-parse", "refs/heads/work"],
+        )));
+
+        assert_eq!(stored_ref(path, "refs/heads/work"), head);
+        crate::test_support::git(path, &["pack-refs", "--all"]);
+        assert!(!path.join(".git/refs/heads/work").exists());
+        assert_eq!(stored_ref(path, "refs/heads/work"), head);
+        assert_eq!(stored_ref(path, "refs/heads/gone"), Some(None));
+    }
+
+    #[test]
+    fn a_coordinators_reply_reads_branch_heads_without_running_git() {
+        let mut f = baselined();
+        let title = f.ticket().title;
+        let head = f.commit("c.txt", "three\n");
+        // Every Git command in the repository now fails, so only the ref files can tell.
+        fs::write(f.repository.join(".git/config"), "[core\n").unwrap();
+        let input = check_in(&mut f);
+        assert_eq!(
+            changed(reply(&mut f, &input, false)),
+            [format!("{title} committed {}", short_sha(&head))]
+        );
     }
 
     #[test]
