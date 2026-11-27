@@ -2788,11 +2788,21 @@ impl Ticket {
         let Some(cycle) = &self.verification else {
             return false;
         };
+        // Progress reads only these states by name; any other report kind, such as
+        // `completed` after a pass, leaves the verification record to decide.
+        let named = matches!(
+            self.state,
+            TicketState::Accepted
+                | TicketState::Assigned
+                | TicketState::ReadyForTesting
+                | TicketState::Blocked
+                | TicketState::Closed
+        );
         let review_ended = match (self.state, cycle.outcome) {
-            (TicketState::Passed, VerificationOutcome::Passed) => true,
             (TicketState::Blocked, VerificationOutcome::Blocked) => {
                 self.published_cycle == Some(cycle.cycle)
             }
+            (_, VerificationOutcome::Passed) => !named,
             _ => false,
         };
         review_ended

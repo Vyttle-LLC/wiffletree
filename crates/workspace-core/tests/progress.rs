@@ -559,6 +559,20 @@ fn a_passed_ticket_with_an_open_pr_is_in_review() {
     // Before it is published, the same pass still awaits acceptance.
     let unpublished = World::new().verified("passed", cycle(Outcome::Passed, &[&[("a", Passed)]]));
     assert_eq!(unpublished.stage_label(), "Awaiting acceptance");
+    // A `completed` report after the pass reads the same.
+    let completed = World::new()
+        .verified("completed", cycle(Outcome::Passed, &[&[("a", Passed)]]))
+        .open_pr("success", "clean");
+    assert_eq!(
+        completed.ticket_progress(),
+        (Stage::AwaitingAcceptance, InProgress, 90)
+    );
+    assert_eq!(completed.stage_label(), "In review");
+    // Re-assigned for a fix, it is implementing again.
+    let fixing = World::new()
+        .verified("assigned", cycle(Outcome::Passed, &[&[("a", Passed)]]))
+        .open_pr("success", "clean");
+    assert_eq!(fixing.stage_label(), "Implementing");
 }
 
 #[test]
