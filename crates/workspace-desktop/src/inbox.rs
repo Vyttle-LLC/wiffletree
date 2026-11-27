@@ -1394,4 +1394,72 @@ mod tests {
             Some("Product call on user-facing copy")
         );
     }
+
+    /// A window showing one Inbox card as the Inbox panel draws it, 480px wide.
+    struct Shown(gpui::Entity<super::Inbox>, Attention);
+    impl gpui::Render for Shown {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
+            let item = self.1.clone();
+            let p = crate::palette::palette(false);
+            let card = (self.0).update(cx, |inbox, cx| {
+                inbox.attention_card(&item, false, None, None, p, cx)
+            });
+            gpui::div()
+                .w(gpui::px(480.))
+                .child(card.debug_selector(|| "card".into()))
+        }
+    }
+
+    /// Clicks the change-of-base card's button `from_right` places from its bottom right, with
+    /// the host out of reach, and says whether the click sent the card's answer: the bridge
+    /// refuses it at once, and the card shows that refusal.
+    fn sends_an_answer(cx: &mut gpui::TestAppContext, from_right: f32) -> bool {
+        use gpui::AppContext as _;
+        let mut item = open("r");
+        item.operation_id = "retarget:r1".into();
+        item.prompt = "Move PR #12 for ticket \"Chat\" (t) in o/r from stacked to main?".into();
+        assert!(item.is_retarget() && item.is_permission());
+        let snapshot = workspace_core::Snapshot {
+            attention: vec![item.clone()],
+            ..Default::default()
+        };
+        cx.update(gpui_component::init);
+        let bridge = crate::bridge::Bridge::unavailable("The host is out of reach".into());
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let inbox = cx.new(|cx| {
+                let mut inbox = super::Inbox::new(bridge, window, cx);
+                inbox.shared = crate::Shared {
+                    index: Some(std::rc::Rc::new(crate::WorkspaceIndex::new(
+                        snapshot,
+                        Default::default(),
+                    ))),
+                    ..Default::default()
+                };
+                inbox
+            });
+            Shown(inbox, item)
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let card = cx.debug_bounds("card").unwrap();
+        let button = card.bottom_right() - gpui::point(gpui::px(from_right), gpui::px(24.));
+        cx.simulate_click(button, gpui::Modifiers::default());
+        let refused = Settling::Failed("The host is out of reach".into());
+        cx.update(|_, cx| view.read(cx).0.read(cx).settlings.get("r") == Some(&refused))
+    }
+
+    #[gpui::test]
+    fn approve_on_a_change_of_base_card_sends_its_answer(cx: &mut gpui::TestAppContext) {
+        assert!(sends_an_answer(cx, 40.));
+    }
+
+    #[gpui::test]
+    fn deny_on_a_change_of_base_card_sends_its_answer(cx: &mut gpui::TestAppContext) {
+        // Deny sits left of Approve once.
+        assert!(sends_an_answer(cx, 150.));
+    }
 }

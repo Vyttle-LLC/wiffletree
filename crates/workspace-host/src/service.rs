@@ -7246,6 +7246,67 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
     }
 
     #[test]
+    fn approving_a_change_of_base_card_moves_the_pr_off_the_host_thread() {
+        use crate::retarget::tests::{asked_to_main, moved_to, offline};
+        let mut f = publish::tests::fixture();
+        let item = asked_to_main(&mut f);
+        let home = tempfile::tempdir().unwrap();
+        let host = std::mem::replace(&mut f.host, Host::open(home.path()).unwrap());
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(8);
+        actor.sender = sender;
+        let (tools, edited) = offline();
+        // The fetch of the base hangs until the test lets it go, as a slow network would.
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = Arc::new(std::sync::Mutex::new(released));
+        let fetch = tools.git.clone();
+        actor.publish_tools = publish::Tools {
+            git: Arc::new(move |path, args| {
+                released.lock().unwrap().recv().unwrap();
+                fetch(path, args)
+            }),
+            ..tools
+        };
+
+        // Approved as the desktop's Inbox card sends it: answered at once, with the move off
+        // the host thread, so other commands and the human's messages go on meanwhile.
+        let answer = Command::ResolveAttention {
+            id: item.clone(),
+            answer: "approved".into(),
+        };
+        let answered = command(&mut actor, answer).unwrap();
+        assert_eq!(answered["answer"], "approved");
+        command(&mut actor, Command::Snapshot).unwrap();
+        let spoken = Command::Send {
+            id: "m-while-moving".into(),
+            sender: None,
+            recipient: f.coordinator.id.clone(),
+            body: "Moved yet?".into(),
+            attachments: vec![],
+            uploads: vec![],
+        };
+        command(&mut actor, spoken).unwrap();
+        assert!(edited.lock().unwrap().is_empty(), "the fetch still hangs");
+        release.send(()).unwrap();
+        actor.handle(events.recv_blocking().unwrap());
+
+        assert_eq!(*edited.lock().unwrap(), [moved_to("main")]);
+        let ticket = actor.host.ticket(&f.ticket).unwrap();
+        assert_eq!(ticket.pull_request.unwrap().base, "main");
+        assert!(ticket.retargeting.is_none());
+        let told = messages_to(&actor, &f.coordinator.id, "retarget:");
+        assert_eq!(told.len(), 1, "the coordinator hears the result once");
+        assert!(
+            told[0].contains("PR #45 now opens into main"),
+            "{}",
+            told[0]
+        );
+        assert!(messages_to(&actor, &f.coordinator.id, "answer:").is_empty());
+        // The placeholder host's folder goes with the fixture's.
+        std::mem::forget(home);
+    }
+
+    #[test]
     fn a_publish_step_that_panics_ends_the_request_and_tells_the_caller() {
         let (f, remote, mut actor, events) = publishing_actor();
         actor.publish_tools.gh = Arc::new(|_, _| panic!("injected"));

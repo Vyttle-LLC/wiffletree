@@ -201,7 +201,7 @@ impl Bridge {
             ..Self::unavailable(format!("Not connected to {}", host.name))
         }
     }
-    fn unavailable(error: String) -> Self {
+    pub(crate) fn unavailable(error: String) -> Self {
         Self {
             client: Err(error),
             remote: None,

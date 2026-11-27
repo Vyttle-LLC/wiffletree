@@ -570,6 +570,10 @@ impl Host {
         let moved = old.is_none_or(|old| old.number != new.number || old.state != new.state);
         ticket.pull_request = Some(new);
         self.save_ticket(&ticket)?;
+        // A withdrawal that fails keeps its request for the next pass; the PR is recorded anyway.
+        if let Err(e) = self.end_finished_retarget(&mut ticket) {
+            eprintln!("Workspace PR watch: {}: {e:#}", ticket.id);
+        }
         if moved {
             self.follow_ticket_work(&ticket, true);
         }
