@@ -7246,6 +7246,45 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
     }
 
     #[test]
+    fn approving_a_change_of_base_card_moves_the_pr_off_the_host_thread() {
+        use crate::retarget::tests::{asked_to_main, moved_to, offline};
+        let mut f = publish::tests::fixture();
+        let item = asked_to_main(&mut f);
+        let home = tempfile::tempdir().unwrap();
+        let host = std::mem::replace(&mut f.host, Host::open(home.path()).unwrap());
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(8);
+        actor.sender = sender;
+        let (tools, edited) = offline();
+        actor.publish_tools = tools;
+
+        // Approved as the desktop's Inbox card sends it: the move runs off the host thread.
+        let answer = Command::ResolveAttention {
+            id: item.clone(),
+            answer: "approved".into(),
+        };
+        let answered = command(&mut actor, answer).unwrap();
+        assert_eq!(answered["answer"], "approved");
+        assert!(edited.lock().unwrap().is_empty(), "not on the host thread");
+        actor.handle(events.recv_blocking().unwrap());
+
+        assert_eq!(*edited.lock().unwrap(), [moved_to("main")]);
+        let ticket = actor.host.ticket(&f.ticket).unwrap();
+        assert_eq!(ticket.pull_request.unwrap().base, "main");
+        assert!(ticket.retargeting.is_none());
+        let told = messages_to(&actor, &f.coordinator.id, "retarget:");
+        assert_eq!(told.len(), 1, "the coordinator hears the result once");
+        assert!(
+            told[0].contains("PR #45 now opens into main"),
+            "{}",
+            told[0]
+        );
+        assert!(messages_to(&actor, &f.coordinator.id, "answer:").is_empty());
+        // The placeholder host's folder goes with the fixture's.
+        std::mem::forget(home);
+    }
+
+    #[test]
     fn a_publish_step_that_panics_ends_the_request_and_tells_the_caller() {
         let (f, remote, mut actor, events) = publishing_actor();
         actor.publish_tools.gh = Arc::new(|_, _| panic!("injected"));

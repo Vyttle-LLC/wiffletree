@@ -570,6 +570,7 @@ impl Host {
         let moved = old.is_none_or(|old| old.number != new.number || old.state != new.state);
         ticket.pull_request = Some(new);
         self.save_ticket(&ticket)?;
+        self.end_finished_retarget(&mut ticket)?;
         if moved {
             self.follow_ticket_work(&ticket, true);
         }

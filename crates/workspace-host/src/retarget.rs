@@ -225,8 +225,9 @@ impl Host {
     }
 
     /// Acts on the human's answer to a retarget item, and only for the item a ticket's waiting
-    /// request names. Approval returns the job that moves the pull request; any other answer
-    /// ends the request with nothing changed.
+    /// request names. Approval returns the job that moves the pull request, even of a ticket
+    /// accepted meanwhile, unless the pull request is no longer open; any other answer ends the
+    /// request with nothing changed.
     pub(crate) fn answer_retarget(&mut self, item: &str, approved: bool) -> Result<Option<Job>> {
         let waiting = self.tickets()?.into_iter().find(|ticket| {
             (ticket.retargeting.as_ref()).is_some_and(|r| r.waiting.as_deref() == Some(item))
@@ -235,12 +236,17 @@ impl Host {
             return Ok(None);
         };
         let request = ticket.retargeting.clone().context("No retarget request")?;
-        if !approved || !ticket.is_open() {
-            let result = format!(
-                "The human did not approve moving {} to {}. Nothing changed.",
-                named(&ticket, &request),
-                request.base
-            );
+        let (named, base) = (named(&ticket, &request), &request.base);
+        let refused = match (approved, finished_pull_request(&ticket, &request)) {
+            (false, _) => Some(format!(
+                "The human did not approve moving {named} to {base}. Nothing changed."
+            )),
+            (true, Some(finished)) => Some(format!(
+                "The human approved moving {named} to {base}, but the pull request {finished} before it moved. Nothing changed."
+            )),
+            (true, None) => None,
+        };
+        if let Some(result) = refused {
             self.end_retarget(&mut ticket, &result)?;
             return Ok(None);
         }
@@ -352,6 +358,34 @@ impl Host {
         }
         Ok(())
     }
+
+    /// Ends the ticket's request that waits for the human once its pull request merged or
+    /// closed, which leaves nothing to move, and withdraws its Inbox item.
+    pub(crate) fn end_finished_retarget(&mut self, ticket: &mut Ticket) -> Result<()> {
+        let Some(request) = ticket.retargeting.clone().filter(|r| r.waiting.is_some()) else {
+            return Ok(());
+        };
+        let Some(finished) = finished_pull_request(ticket, &request) else {
+            return Ok(());
+        };
+        let result = format!(
+            "{} {finished} while moving it to {} waited for the human, so the request ended and its Inbox item was withdrawn. Nothing changed.",
+            named(ticket, &request),
+            request.base
+        );
+        self.end_retarget(ticket, &result)
+    }
+}
+
+/// What became of the pull request `request` moves, such as "was merged into release", once
+/// the PR watcher last read it merged or closed.
+fn finished_pull_request(ticket: &Ticket, request: &RetargetRequest) -> Option<String> {
+    let pr = (ticket.pull_request.as_ref()).filter(|pr| Some(pr.number) == request.number)?;
+    match pr.state {
+        PrState::Open => None,
+        PrState::Merged => Some(format!("was merged into {}", pr.base)),
+        PrState::Closed => Some("was closed".into()),
+    }
 }
 
 /// Such as `PR #180 for ticket "Space storage" (t1)`, or the ticket alone without a PR.
@@ -376,9 +410,10 @@ fn retarget_prompt(ticket: &Ticket, request: &RetargetRequest, why: &str) -> Str
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::publish::tests::{Fixture, Remote, fixture, git, remote, watch_open_pr};
+    use std::sync::Arc;
 
     /// The fixture's ticket with its PR #45 open into main, and a `release` branch on GitHub.
     fn on_github() -> (Fixture, Remote) {
@@ -403,7 +438,7 @@ mod tests {
     fn edits(r: &Remote) -> Vec<Vec<String>> {
         r.github.lock().unwrap().edited.clone()
     }
-    fn results(f: &Fixture) -> Vec<String> {
+    pub(crate) fn results(f: &Fixture) -> Vec<String> {
         (f.host.db)
             .prepare("SELECT body FROM messages WHERE id LIKE 'retarget:%' ORDER BY sequence")
             .unwrap()
@@ -412,7 +447,7 @@ mod tests {
             .map(Result::unwrap)
             .collect()
     }
-    fn moved_to(base: &str) -> Vec<String> {
+    pub(crate) fn moved_to(base: &str) -> Vec<String> {
         let args = ["pr", "edit", "45", "--repo", "github.com/allowed-org/app"];
         (args.into_iter().chain(["--base", base]))
             .map(str::to_owned)
@@ -562,5 +597,111 @@ mod tests {
                 .contains("not an allowed owner")
         );
         assert!(job.is_none());
+    }
+
+    /// A Git whose fetch of any base succeeds and a `gh` that records each `pr edit`, so a move
+    /// runs without a remote.
+    pub(crate) fn offline() -> (Tools, Arc<std::sync::Mutex<Vec<Vec<String>>>>) {
+        use crate::publish::tests::exit;
+        let edited = Arc::new(std::sync::Mutex::new(vec![]));
+        let recorded = edited.clone();
+        let gh = move |_: &Path, args: &[&str]| {
+            assert_eq!(args[..2], ["pr", "edit"], "a move runs no other gh command");
+            (recorded.lock().unwrap()).push(args.iter().map(|a| (*a).to_owned()).collect());
+            Ok(runtime::GhAnswer {
+                status: exit(0),
+                output: String::new(),
+                error: String::new(),
+            })
+        };
+        let git = |_: &Path, args: &[&str]| {
+            assert_eq!(args[0], "fetch", "a move runs no other git command");
+            Ok(runtime::GitAnswer {
+                status: exit(0),
+                output: String::new(),
+                error: String::new(),
+            })
+        };
+        let tools = Tools {
+            gh: Arc::new(gh),
+            git: Arc::new(git),
+        };
+        (tools, edited)
+    }
+    /// The fixture's PR #45, stacked into `parent`, and the coordinator's move of it to main,
+    /// which Wiffletree protects, waiting for the human. Returns the Inbox item.
+    pub(crate) fn asked_to_main(f: &mut Fixture) -> String {
+        f.allow("allowed-org");
+        watch_open_pr(f, 45);
+        let mut ticket = f.ticket();
+        (ticket.pull_request.as_mut().unwrap()).base = "parent".into();
+        f.host.save_ticket(&ticket).unwrap();
+        let (status, job) = set(f, &ticket.id, "main").unwrap();
+        assert_eq!(status["status"], "waiting_for_human");
+        assert!(job.is_none());
+        let items = f.open_items();
+        assert!(items[0].is_retarget());
+        items[0].id.clone()
+    }
+
+    #[test]
+    fn approving_moves_the_pr_even_once_its_ticket_was_accepted() {
+        let mut f = fixture();
+        let item = asked_to_main(&mut f);
+        let mut ticket = f.ticket();
+        ticket.state = TicketState::Accepted;
+        f.host.save_ticket(&ticket).unwrap();
+
+        let job = f.host.answer_retarget(&item, true).unwrap();
+        let (tools, edited) = offline();
+        f.host.record_retarget(run(&job.unwrap(), &tools)).unwrap();
+        assert_eq!(*edited.lock().unwrap(), [moved_to("main")]);
+        assert_eq!(f.ticket().pull_request.unwrap().base, "main");
+        assert!(f.ticket().retargeting.is_none());
+        assert!(results(&f)[0].contains("PR #45 now opens into main"));
+    }
+
+    #[test]
+    fn approving_a_pr_that_merged_meanwhile_says_so_and_moves_nothing() {
+        let mut f = fixture();
+        let item = asked_to_main(&mut f);
+        let mut ticket = f.ticket();
+        (ticket.pull_request.as_mut().unwrap()).state = PrState::Merged;
+        f.host.save_ticket(&ticket).unwrap();
+
+        assert!(f.host.answer_retarget(&item, true).unwrap().is_none());
+        assert!(f.ticket().retargeting.is_none());
+        assert_eq!(
+            results(&f),
+            [format!(
+                "The human approved moving PR #45 for ticket \"Fix contrast\" ({}) to main, but the pull request was merged into parent before it moved. Nothing changed.",
+                f.ticket
+            )]
+        );
+    }
+
+    #[test]
+    fn a_pr_that_merges_while_its_move_waits_withdraws_the_inbox_item() {
+        let mut f = fixture();
+        let item = asked_to_main(&mut f);
+        let ticket = f.ticket();
+        let merged = PullRequest {
+            state: PrState::Merged,
+            ..ticket.pull_request.clone().unwrap()
+        };
+        let read = crate::pr_watch::tests::found(&ticket, merged);
+        (f.host
+            .record_pull_requests(&ticket.repository_id, &read, 0, 0))
+        .unwrap();
+
+        assert!(f.open_items().is_empty(), "the item is withdrawn");
+        assert!(f.ticket().retargeting.is_none());
+        assert!(
+            results(&f)[0].contains("was merged into parent while moving it to main waited"),
+            "{:?}",
+            results(&f)
+        );
+        // An answer to the withdrawn item changes nothing.
+        assert!(f.host.answer_retarget(&item, true).unwrap().is_none());
     }
 }
