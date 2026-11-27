@@ -251,7 +251,9 @@ impl LaunchdJob {
     }
     /// The job: `serve` for the data folder from this version's copy, trusting the app,
     /// restarted only after an unsuccessful exit (which also starts it when loaded), logging to
-    /// `logs/host.log`.
+    /// `logs/host.log`. It is Interactive: the app waits on its every reply, and a job with no
+    /// `ProcessType` is throttled, so with the Mac busy its replies took seconds
+    /// (`docs/performance/command-latency.md`). Agents still run at `AGENT_NICENESS`.
     fn plist(&self) -> String {
         let program = self.program();
         let arguments = [
@@ -281,6 +283,8 @@ impl LaunchdJob {
 		<key>SuccessfulExit</key>
 		<false/>
 	</dict>
+	<key>ProcessType</key>
+	<string>Interactive</string>
 	<key>StandardErrorPath</key>
 	<string>{log}</string>
 </dict>
@@ -439,6 +443,7 @@ mod tests {
         );
         assert!(plist.contains(&arguments), "{plist}");
         assert!(plist.contains("<key>SuccessfulExit</key>\n\t\t<false/>"));
+        assert!(plist.contains("<key>ProcessType</key>\n\t<string>Interactive</string>"));
         assert!(plist.contains("R&amp;D/logs/host.log</string>"));
         assert!(
             !plist.contains("RunAtLoad"),
