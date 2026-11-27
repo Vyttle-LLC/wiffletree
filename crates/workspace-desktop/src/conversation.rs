@@ -1299,8 +1299,14 @@ mod tests {
     ) {
         use gpui::{AppContext as _, Focusable as _};
         use std::sync::atomic::Ordering;
+        // Paused, the coordinator keeps the message without starting a turn, so the test never
+        // runs a real provider.
         let served = crate::bridge::tests::serve(|host| {
-            host.create_project("Busy project").unwrap();
+            let project = host.create_project("Busy project").unwrap();
+            let coordinator = (host.sessions().unwrap().into_iter())
+                .find(|s| s.project_id == project.id)
+                .unwrap();
+            (host.set_status(&coordinator.id, workspace_core::Status::Paused)).unwrap();
         });
         let snapshot = (served.bridge)
             .ask_now(workspace_core::ask::snapshot())
@@ -1367,5 +1373,13 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
             cx.run_until_parked();
         }
+        let snapshot = (served.bridge)
+            .ask_now(workspace_core::ask::snapshot())
+            .unwrap();
+        let runtime = (snapshot.runtimes.iter()).find(|r| r.session_id == coordinator);
+        assert!(
+            runtime.is_none_or(|r| r.last_started_at.is_none()),
+            "no turn started"
+        );
     }
 }
