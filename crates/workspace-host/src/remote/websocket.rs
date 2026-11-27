@@ -18,7 +18,9 @@ use tungstenite::{
     Message,
     protocol::{CloseFrame, frame::coding::CloseCode},
 };
-use workspace_core::{Challenge, ChallengeAnswer, ChallengeVerdict, UNPAIRED, pairing};
+use workspace_core::{
+    AccessLevel, Challenge, ChallengeAnswer, ChallengeVerdict, UNPAIRED, pairing,
+};
 
 /// How long the I/O thread sleeps with nothing to do before it looks again.
 const IDLE_POLL_MS: i32 = 15_000;
@@ -57,35 +59,60 @@ pub(super) fn serve(
     let answer: ChallengeAnswer = receive(&mut socket)?;
     // Claimed before the actor checks it, so a removal meanwhile still closes this connection.
     shared.claim(connection, &answer.device_id);
-    let level = pairing::challenge_message(&challenge, &host_id, &answer.device_id)
+    let answered = pairing::challenge_message(&challenge, &host_id, &answer.device_id)
         .ok()
-        .zip(BASE64.decode(&answer.signature).ok())
-        .and_then(|(signed, signature)| {
-            let (reply, verdict) = async_channel::bounded(1);
-            shared
-                .requests
-                .tell_first(ToActor::Authenticate {
-                    device: answer.device_id.clone(),
-                    signed,
-                    signature,
-                    reply,
-                })
-                .ok()?;
-            verdict.recv_blocking().ok().flatten()
-        });
+        .zip(BASE64.decode(&answer.signature).ok());
+    let level = match answered {
+        Some((signed, signature)) => {
+            let Ok(level) = authenticate(shared, &answer.device_id, signed, signature) else {
+                // No verdict, since the device forgets a host that says Unpaired: it closes and
+                // tries again.
+                close(
+                    &mut socket,
+                    CloseCode::Away,
+                    "The host could not check this device",
+                );
+                return Ok(());
+            };
+            level
+        }
+        None => None,
+    };
     let Some(level) = level else {
         send(&mut socket, &ChallengeVerdict::Unpaired)?;
-        let _ = socket.close(Some(CloseFrame {
-            code: CloseCode::Policy,
-            reason: UNPAIRED.into(),
-        }));
-        let _ = socket.flush();
+        close(&mut socket, CloseCode::Policy, UNPAIRED);
         return Ok(());
     };
     send(&mut socket, &ChallengeVerdict::Accepted { level })?;
     let served = pump(socket, answer.device_id, shared);
     let _ = shared.requests.tell(ToActor::Changed);
     served
+}
+
+/// The device's level once the actor has checked its signature, `None` when the host does not
+/// know it; an error when the host could not check it, as while it stops.
+fn authenticate(
+    shared: &Shared,
+    device: &str,
+    signed: Vec<u8>,
+    signature: Vec<u8>,
+) -> Result<Option<AccessLevel>> {
+    let (reply, verdict) = async_channel::bounded(1);
+    shared.requests.tell_first(ToActor::Authenticate {
+        device: device.into(),
+        signed,
+        signature,
+        reply,
+    })?;
+    Ok(verdict.recv_blocking()?)
+}
+
+fn close(socket: &mut ServerSocket, code: CloseCode, reason: &str) {
+    let _ = socket.close(Some(CloseFrame {
+        code,
+        reason: reason.into(),
+    }));
+    let _ = socket.flush();
 }
 
 /// Replies the I/O thread may hold for the device before the connection is closed as stuck: a

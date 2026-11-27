@@ -562,6 +562,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_device_answering_while_the_host_stops_is_not_told_it_is_unpaired() {
+        let key = KeyPair::generate().unwrap();
+        let options = Options {
+            port: 0,
+            key: Box::new({
+                let key = key.clone();
+                move || Ok(key.clone())
+            }),
+            name: Some("Studio Mac".into()),
+            ..Options::default()
+        };
+        let mut remote = Remote::new(options, Requests::stopped());
+        remote.apply(true);
+        let port = remote.listening.as_ref().unwrap().port;
+
+        let device = KeyPair::generate().unwrap();
+        let address = format!("127.0.0.1:{port}");
+        match workspace_core::remote_client::connect(&address, &key.public_key(), &device) {
+            Err(workspace_core::remote_client::RemoteError::Other(error)) => {
+                assert_eq!(error.to_string(), "The host closed the connection");
+            }
+            Err(error) => panic!("A device the host could not check is told {error}"),
+            Ok(_) => panic!("A host that has stopped accepted a device"),
+        }
+    }
+
+    #[test]
     fn codes_are_four_digits() {
         for _ in 0..50 {
             assert!(workspace_core::pairing::is_code(&new_code().unwrap()));

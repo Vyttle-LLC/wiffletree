@@ -77,7 +77,12 @@ impl Actor {
                 signature,
                 reply,
             } => {
-                let level = self.host.device(&device).ok().flatten().and_then(|stored| {
+                // Unanswered when the store cannot be read, so the device tries again rather
+                // than being told it is unpaired.
+                let Ok(stored) = self.host.device(&device) else {
+                    return None;
+                };
+                let level = stored.and_then(|stored| {
                     pairing::verify(&stored.public_key, &signed, &signature).then_some(stored.level)
                 });
                 if level.is_some() {

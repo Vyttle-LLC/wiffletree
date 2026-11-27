@@ -924,6 +924,18 @@ impl Requests {
     pub fn working(&self) -> usize {
         self.working.load(Ordering::Relaxed)
     }
+    /// Requests to a host that has stopped, which refuses every one.
+    #[cfg(test)]
+    pub(crate) fn stopped() -> Self {
+        let (sender, _) = async_channel::bounded(1);
+        Self {
+            sender: sender.clone(),
+            commands: sender,
+            events: EventLog::default(),
+            host_id: String::new(),
+            working: Arc::default(),
+        }
+    }
 }
 struct Active {
     run: String,
