@@ -100,6 +100,8 @@ fn open_read(path: &Path) -> Result<Option<Connection>> {
     if !path.exists() {
         return Ok(None);
     }
+    #[cfg(test)]
+    tests::OPENED_READERS.with(|opened| opened.set(opened.get() + 1));
     let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let version: Option<String> = db
         .query_row("SELECT value FROM state WHERE key='schema'", [], |r| {
@@ -115,7 +117,8 @@ fn open_read(path: &Path) -> Result<Option<Connection>> {
 /// host makes at every state change, such as counting the Inbox's conflict cards, open no file.
 #[derive(Default)]
 pub(crate) struct Readers(std::cell::RefCell<HashMap<PathBuf, (Stamp, Connection)>>);
-/// A file's inode, modification time and length: a rebuild or a write changes one of them.
+/// A file's inode, modification time and length. A rebuild replaces the file, which changes them;
+/// a refresh commits through the WAL, which a kept connection reads.
 type Stamp = (u64, std::time::SystemTime, u64);
 
 impl Readers {
@@ -2218,6 +2221,11 @@ pub(crate) mod tests {
     use super::*;
     use crate::test_support::git;
 
+    thread_local! {
+        /// How many index files this test's thread opened for reading.
+        pub(super) static OPENED_READERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
     pub(crate) const RELAY: &str = "sagechat-call-watch-relay";
     pub(crate) const APP: &str = "simpatico-sage";
 
@@ -2427,6 +2435,37 @@ pub(crate) mod tests {
         assert_eq!(rewritten(&readers), 1);
         remove(&brain.index());
         assert!(readers.open(&brain.index()).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_kept_reader_is_reused_through_a_refresh_and_replaced_after_a_rebuild() {
+        let brain = Checkout::new();
+        let readers = Readers::default();
+        let opened = || OPENED_READERS.with(std::cell::Cell::get);
+        let rewritten = || {
+            let db = readers.open(&brain.index()).unwrap().expect("built");
+            search(&db, None, "rewritten").unwrap().len()
+        };
+        let first = brain.commit(&sample(), "Log batch (#81)");
+        brain.refresh(&first);
+        let before = opened();
+        assert_eq!((rewritten(), rewritten()), (0, 0));
+        assert_eq!(
+            opened(),
+            before + 1,
+            "the second read reuses the first's connection"
+        );
+        // A refresh commits through the WAL, which the kept connection reads.
+        let changed = note("Kids List", "observation", &[], "Rewritten by a compile.");
+        let second = brain.commit(&[changed], "Compile (#90)");
+        brain.refresh(&second);
+        assert_eq!(rewritten(), 1);
+        assert_eq!(opened(), before + 1, "a refresh keeps the file");
+        // A rebuild is a new file.
+        remove(&brain.index());
+        brain.refresh(&second);
+        assert_eq!(rewritten(), 1);
+        assert_eq!(opened(), before + 2, "the rebuilt index is opened again");
     }
 
     /// Every row the index holds, without its row ids, and the search results for some queries.
