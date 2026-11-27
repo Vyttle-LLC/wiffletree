@@ -1290,4 +1290,82 @@ mod tests {
         forget_settled(&mut minimized, &[decision("b", "p2")]);
         assert_eq!(minimized, BTreeSet::from(["p2".to_owned()]));
     }
+
+    /// While a busy host holds every request, Enter in the composer shows the message sending
+    /// in the frame of the key, before any reply; the reply, once the host answers, ends it.
+    #[gpui::test]
+    fn a_sent_message_shows_it_is_sending_at_once_while_a_busy_host_holds_the_reply(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::{AppContext as _, Focusable as _};
+        use std::sync::atomic::Ordering;
+        let served = crate::bridge::tests::serve(|host| {
+            host.create_project("Busy project").unwrap();
+        });
+        let snapshot = (served.bridge)
+            .ask_now(workspace_core::ask::snapshot())
+            .unwrap();
+        let coordinator = snapshot.sessions[0].id.clone();
+        let (bridge, held) = served.busy();
+        held.store(true, Ordering::Relaxed);
+        // The host's replies wake the app from its client's thread.
+        cx.executor().allow_parking();
+        let home = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(crate::Preferences::load(home.path()));
+            cx.bind_keys([gpui::KeyBinding::new(
+                "enter",
+                crate::SendMessage,
+                Some("ChatComposer > Input"),
+            )]);
+        });
+        let mut made = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let inbox = cx.new(|cx| crate::inbox::Inbox::new(bridge.clone(), window, cx));
+            let contexts = cx.new(|_| crate::context_view::Contexts::new(bridge.clone()));
+            let conversation = cx.new(|cx| {
+                let mut conversation =
+                    super::Conversation::new(bridge, inbox, contexts, window, cx);
+                let shared = crate::Shared {
+                    index: Some(std::rc::Rc::new(crate::WorkspaceIndex::new(
+                        snapshot,
+                        Default::default(),
+                    ))),
+                    selected: Some(coordinator.clone()),
+                    ..Default::default()
+                };
+                conversation.share(shared, window, cx);
+                conversation
+            });
+            made = Some(conversation.clone());
+            gpui_component::Root::new(conversation, window, cx)
+        });
+        let conversation = made.unwrap();
+        cx.update(|window, cx| {
+            let composer = conversation.read(cx).input.focus_handle(cx);
+            window.focus(&composer, cx);
+            window.draw(cx).clear(cx);
+        });
+        let sending = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, cx| conversation.read(cx).sending.contains(&coordinator))
+        };
+
+        cx.simulate_input("Carry on with the next part.");
+        cx.simulate_keystrokes("enter");
+        assert!(sending(cx), "sending in the frame of the key");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(sending(cx), "the host holds the reply");
+
+        held.store(false, Ordering::Relaxed);
+        let answered = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while sending(cx) {
+            assert!(
+                std::time::Instant::now() < answered,
+                "the host never answered"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+    }
 }

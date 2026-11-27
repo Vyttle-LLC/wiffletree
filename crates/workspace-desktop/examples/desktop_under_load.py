@@ -11,6 +11,7 @@ Inbox, starts one busy process per core, opens the desktop on the store with
 `WIFFLETREE_RENDER_COUNTS` set and `busy_provider.py` as its Claude, and drives it through its
 automation socket. The window opens on screen; leave it uncovered, since macOS throttles a
 hidden one. Coordinates assume the window's 1280x800 layout with the first project selected.
+It exits with status 1 when any stall is longer than `--budget-ms`, 50 by default.
 See docs/performance/desktop-under-load.md.
 """
 import argparse
@@ -27,7 +28,6 @@ import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 RELEASE = os.path.join(ROOT, 'target', 'release')
-FRAME_MS = 16.7
 STALL = re.compile(r'^stall ([\d.]+)ms \(cpu ([\d.]+)ms\) ran: (.*)$')
 
 # Window points in the 1280x800 layout.
@@ -112,12 +112,13 @@ def stalls(lines):
 
 
 def summary(name, found, seconds):
-    over = [s for s in found if s[0] > FRAME_MS]
-    print(f'\n{name}: {seconds:.0f}s, {len(over)} stalls over 16 ms, '
-          f'{sum(s[0] > 50 for s in found)} over 50 ms, longest '
-          f'{max((s[0] for s in found), default=0):.1f} ms')
+    """Prints a path's stalls, each longer than a frame, and returns the longest."""
+    longest = max((s[0] for s in found), default=0)
+    print(f'\n{name}: {seconds:.0f}s, {len(found)} stalls over 16 ms, '
+          f'{sum(s[0] > 50 for s in found)} over 50 ms, longest {longest:.1f} ms')
     for wall, cpu, ran in sorted(found, reverse=True)[:8]:
         print(f'  {wall:6.1f} ms (cpu {cpu:5.1f} ms): {ran}')
+    return longest
 
 
 def app_bundle(folder, binaries):
@@ -158,6 +159,7 @@ def main():
                         help="start the app as this script's child, with its niceness, as a terminal or agent would")
     parser.add_argument('--binaries', default=RELEASE, help='where workspace-desktop and wiffletree-host are')
     parser.add_argument('--warm-up', type=float, default=20)
+    parser.add_argument('--budget-ms', type=float, default=50, help='the longest stall allowed')
     args = parser.parse_args()
     folder = os.path.abspath(args.folder)
     run(os.path.join(RELEASE, 'examples', 'many_agents'), 'seed', folder)
@@ -184,16 +186,21 @@ def main():
         window.step(do='resize', width=1280, height=800)
         time.sleep(args.warm_up)
         print(f'busy cores: {0 if busy is None else os.cpu_count()}; load average {os.getloadavg()[0]:.0f}')
+        longest = 0
         for name, drive in phases(window):
             with open(log_path) as log:
                 log.seek(0, os.SEEK_END)
                 started = time.monotonic()
                 drive()
                 time.sleep(0.5)
-                summary(name, stalls(log.readlines()), time.monotonic() - started)
+                found = stalls(log.readlines())
+                longest = max(longest, summary(name, found, time.monotonic() - started))
             shot = window.step(do='capture')
             with open(os.path.join(folder, f'{name}.png'), 'wb') as image:
                 image.write(base64.b64decode(shot['png']))
+        print(f'\nlongest stall {longest:.1f} ms; budget {args.budget_ms:g} ms')
+        if longest > args.budget_ms:
+            sys.exit(1)
     finally:
         subprocess.run(['pkill', '-f', os.path.join(app, 'Contents', 'MacOS', 'workspace-desktop')])
         if busy is not None:
