@@ -222,6 +222,7 @@ pub struct Host {
     pub(crate) listed_models: std::collections::BTreeMap<Provider, Vec<ModelOption>>,
     /// A pass or a commit moved a repository, so every brain's index refresh is due now.
     pub(crate) brains_now: bool,
+    brain_readers: brain_index::Readers,
     /// What an earlier release left waiting has all landed.
     pub(crate) carried_over: bool,
     /// The import from Linear on this Mac; see `linear_import`.
@@ -472,6 +473,7 @@ impl Host {
             uploads: Default::default(),
             gh_login: None,
             brains_now: false,
+            brain_readers: Default::default(),
             carried_over: false,
             linear: linear_import::Linear::new(linear_import::Tools::real(&home)),
             built_ins: vec![],
