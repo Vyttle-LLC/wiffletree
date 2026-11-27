@@ -7256,16 +7256,38 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"SECRET REP
         let (sender, events) = async_channel::bounded(8);
         actor.sender = sender;
         let (tools, edited) = offline();
-        actor.publish_tools = tools;
+        // The fetch of the base hangs until the test lets it go, as a slow network would.
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = Arc::new(std::sync::Mutex::new(released));
+        let fetch = tools.git.clone();
+        actor.publish_tools = publish::Tools {
+            git: Arc::new(move |path, args| {
+                released.lock().unwrap().recv().unwrap();
+                fetch(path, args)
+            }),
+            ..tools
+        };
 
-        // Approved as the desktop's Inbox card sends it: the move runs off the host thread.
+        // Approved as the desktop's Inbox card sends it: answered at once, with the move off
+        // the host thread, so other commands and the human's messages go on meanwhile.
         let answer = Command::ResolveAttention {
             id: item.clone(),
             answer: "approved".into(),
         };
         let answered = command(&mut actor, answer).unwrap();
         assert_eq!(answered["answer"], "approved");
-        assert!(edited.lock().unwrap().is_empty(), "not on the host thread");
+        command(&mut actor, Command::Snapshot).unwrap();
+        let spoken = Command::Send {
+            id: "m-while-moving".into(),
+            sender: None,
+            recipient: f.coordinator.id.clone(),
+            body: "Moved yet?".into(),
+            attachments: vec![],
+            uploads: vec![],
+        };
+        command(&mut actor, spoken).unwrap();
+        assert!(edited.lock().unwrap().is_empty(), "the fetch still hangs");
+        release.send(()).unwrap();
         actor.handle(events.recv_blocking().unwrap());
 
         assert_eq!(*edited.lock().unwrap(), [moved_to("main")]);
