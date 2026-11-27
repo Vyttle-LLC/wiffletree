@@ -1391,7 +1391,12 @@ mod tests {
         ticket.verification = Some(verification(1, VerificationOutcome::Blocked, 3));
         assert_eq!(ticket_state_label(&ticket), "Blocked");
         assert_eq!(blocked_review_note(&ticket), None);
+        // A PR opened earlier does not show this cycle's commit, which nobody has published yet.
         ticket.pull_request = Some(pr(PrState::Open, CheckState::Success, MergeState::Clean));
+        ticket.pushed = Some("2abcdef0123".into());
+        assert_eq!(ticket_state_label(&ticket), "Blocked");
+        assert_eq!(blocked_review_note(&ticket), None);
+        ticket.pushed = Some("3abcdef0123".into());
         assert_eq!(ticket_state_label(&ticket), "In review");
         assert_eq!(
             blocked_review_note(&ticket).as_deref(),
@@ -1411,6 +1416,10 @@ mod tests {
         ticket.verification = Some(verification(1, VerificationOutcome::Passed, 1));
         ticket.pull_request = Some(pr(PrState::Open, CheckState::Pending, MergeState::Blocked));
         assert_eq!(ticket_state_label(&ticket), "In review");
+        assert_eq!(blocked_review_note(&ticket), None);
+        // A worker that reports blocked after the pass stays red, with no claim of a publish.
+        ticket.state = TicketState::Blocked;
+        assert_eq!(ticket_state_label(&ticket), "Blocked");
         assert_eq!(blocked_review_note(&ticket), None);
     }
 

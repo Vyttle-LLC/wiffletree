@@ -97,6 +97,12 @@ impl World {
         );
         self
     }
+    /// Records ticket `id`'s reviewed commit, `abc`, as pushed by a publish.
+    fn published(mut self, id: &str) -> Self {
+        let ticket = self.tickets.iter_mut().find(|t| t.id == id).unwrap();
+        ticket.pushed = Some("abc".into());
+        self
+    }
     fn open_pr(self, checks: &str, merge_state: &str) -> Self {
         self.pull_request(TICKET, "open", checks, merge_state)
     }
@@ -452,10 +458,12 @@ fn blocked_at_the_round_cap_keeps_the_passes() {
     assert_eq!(world.ticket_progress(), (Stage::Verifying, Blocked, 80));
 }
 
-/// A blocked review of three verifiers, one failed.
+/// A blocked review of three verifiers, one failed, whose commit was then published.
 fn blocked_review() -> World {
     let round: &[_] = &[("a", Passed), ("b", Passed), ("c", Failed)];
-    World::new().verified("blocked", cycle(Outcome::Blocked, &[round]))
+    World::new()
+        .verified("blocked", cycle(Outcome::Blocked, &[round]))
+        .published(TICKET)
 }
 
 #[test]
@@ -483,6 +491,28 @@ fn a_blocked_review_stays_blocked_without_an_open_pr_or_with_a_broken_one() {
         let world = blocked_review().pull_request(TICKET, finished, "success", "clean");
         assert_eq!(world.ticket_progress(), blocked, "{finished}");
     }
+}
+
+#[test]
+fn a_blocked_review_whose_commit_was_not_published_stays_blocked() {
+    // The PR was opened earlier; this cycle's commit has not been pushed to it.
+    let mut world = blocked_review().open_pr("success", "clean");
+    world.tickets[0].pushed = Some("older".into());
+    assert_eq!(world.ticket_progress(), (Stage::Verifying, Blocked, 80));
+    world.tickets[0].pushed = None;
+    assert_eq!(world.ticket_progress(), (Stage::Verifying, Blocked, 80));
+}
+
+#[test]
+fn a_worker_blocked_after_a_passed_review_stays_blocked() {
+    let world = World::new()
+        .verified("blocked", cycle(Outcome::Passed, &[&[("a", Passed)]]))
+        .published(TICKET)
+        .open_pr("success", "clean");
+    assert_eq!(
+        world.ticket_progress(),
+        (Stage::AwaitingAcceptance, Blocked, 90)
+    );
 }
 
 #[test]
@@ -720,6 +750,7 @@ fn the_phase_reads_in_review_while_every_open_ticket_waits_on_its_pr() {
     let published = World::new()
         .ticket_named("one", "accepted", None)
         .ticket_named("two", "blocked", Some(blocked.clone()))
+        .published("two")
         .pull_request("two", "open", "success", "clean");
     let project = published.project();
     assert_eq!(
@@ -734,6 +765,7 @@ fn the_phase_reads_in_review_while_every_open_ticket_waits_on_its_pr() {
     let failing = World::new()
         .ticket_named("one", "accepted", None)
         .ticket_named("two", "blocked", Some(blocked))
+        .published("two")
         .pull_request("two", "open", "failure", "unstable")
         .project();
     assert_eq!((failing.phase, failing.state), (Phase::Blocked, Blocked));

@@ -2777,12 +2777,20 @@ impl Ticket {
             .filter(|pr| pr.state == PrState::Open)
     }
     /// Whether the ticket waits only on the human's review of its pull request: its review
-    /// ended, passed or blocked, and its PR is open with no failing checks or conflicts. Only
-    /// the display reads it; a blocked ticket stays blocked to every rule.
+    /// passed, or ended blocked and its commit was then published, and its PR is open with no
+    /// failing checks or conflicts. Only the display reads it; a blocked ticket stays blocked to
+    /// every rule.
     pub fn in_review(&self) -> bool {
-        let review_ended = matches!(self.state, TicketState::Passed | TicketState::Blocked)
-            && (self.verification.as_ref())
-                .is_some_and(|cycle| cycle.outcome != VerificationOutcome::Running);
+        let Some(cycle) = &self.verification else {
+            return false;
+        };
+        let review_ended = match (self.state, cycle.outcome) {
+            (TicketState::Passed, VerificationOutcome::Passed) => true,
+            (TicketState::Blocked, VerificationOutcome::Blocked) => {
+                self.pushed.is_some() && self.pushed.as_deref() == self.standing_commit()
+            }
+            _ => false,
+        };
         review_ended
             && self.open_pull_request().is_some_and(|pr| {
                 pr.checks != CheckState::Failure && pr.merge_state != MergeState::Dirty

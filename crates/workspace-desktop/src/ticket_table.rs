@@ -340,6 +340,7 @@ mod tests {
         let mut blocked = ticket("blocked", TicketState::Blocked);
         let cycle = r#"{"cycle":1,"max_rounds":3,"outcome":"blocked","rounds":[{"round":1,"commit":"a","verifiers":[]}]}"#;
         blocked.verification = Some(serde_json::from_str(cycle).unwrap());
+        blocked.pushed = Some("a".into());
         assert_eq!(status(&blocked), "Blocked");
         assert_eq!(ticket_state_color(&blocked, p), p.red);
         blocked.pull_request = Some(pull_request(315, PrState::Open));
