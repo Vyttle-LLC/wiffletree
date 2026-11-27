@@ -11,7 +11,8 @@ Inbox, starts one busy process per core, opens the desktop on the store with
 `WIFFLETREE_RENDER_COUNTS` set and `busy_provider.py` as its Claude, and drives it through its
 automation socket. The window opens on screen; leave it uncovered, since macOS throttles a
 hidden one. Coordinates assume the window's 1280x800 layout with the first project selected.
-It exits with status 1 when any stall is longer than `--budget-ms`, 50 by default.
+It exits with status 1 when any stall is longer than `--budget-ms`, 50 by default, when the
+stall watch printed nothing, or when the store shows the messages or dismissals did not land.
 See docs/performance/desktop-under-load.md.
 """
 import argparse
@@ -35,6 +36,9 @@ COMPOSER = (700, 718)
 INBOX_DISMISS = (1053, 593)
 INBOX_PANEL = (1248, 225)
 PROJECTS = [(100, 268), (100, 335), (100, 402)]
+
+# Questions each coordinator asks, and the messages and dismissals the scenario makes.
+QUESTIONS, SENDS, DISMISSES = 6, 3, 5
 
 
 class Window:
@@ -74,17 +78,22 @@ def phases(window):
         time.sleep(0.3)
         type_text('The quick brown fox jumps over the lazy dog, twice over. ' * 2)
         time.sleep(1)
+        # The Send path starts from an empty draft.
+        window.step(do='key', keystroke='cmd-a')
+        window.step(do='key', keystroke='backspace')
 
     def send():
-        for n in range(3):
+        for n in range(SENDS):
             window.click(COMPOSER)
+            # A click goes through AppKit's queue and keys do not, so let it land first.
+            time.sleep(0.3)
             type_text(f'Carry on with part {n}.')
             time.sleep(0.3)
             window.step(do='key', keystroke='enter')
             time.sleep(1.5)
 
     def inbox():
-        for _ in range(5):
+        for _ in range(DISMISSES):
             window.click(INBOX_DISMISS)
             time.sleep(1.2)
         for _ in range(3):
@@ -145,10 +154,12 @@ class BusyCores:
         with open(plist, 'wb') as written:
             plistlib.dump({'Label': self.label, 'ProgramArguments': ['/bin/sh', '-c', burn],
                            'ProcessType': 'Standard', 'Nice': 0, 'RunAtLoad': True}, written)
+        # A job an interrupted run left behind would refuse the bootstrap.
+        self.stop()
         run('launchctl', 'bootstrap', self.domain, plist)
 
     def stop(self):
-        subprocess.run(['launchctl', 'bootout', f'{self.domain}/{self.label}'])
+        subprocess.run(['launchctl', 'bootout', f'{self.domain}/{self.label}'], stderr=subprocess.DEVNULL)
 
 
 def main():
@@ -163,24 +174,28 @@ def main():
     args = parser.parse_args()
     folder = os.path.abspath(args.folder)
     run(os.path.join(RELEASE, 'examples', 'many_agents'), 'seed', folder)
-    run(os.path.join(RELEASE, 'examples', 'inbox_questions'), folder, '6')
+    run(os.path.join(RELEASE, 'examples', 'inbox_questions'), 'ask', folder, str(QUESTIONS))
     app = app_bundle(folder, args.binaries)
 
-    busy = None if args.idle_host else BusyCores(folder)
     automation = os.path.join(folder, 'ui.sock')
     log_path = os.path.join(folder, 'desktop.log')
     provider = os.path.join(ROOT, 'crates', 'workspace-host', 'examples', 'busy_provider.py')
     env = {'WIFFLETREE_RENDER_COUNTS': '1', 'WORKSPACE_CLAUDE_BIN': provider}
     app_args = ['--data-dir', os.path.join(folder, 'home'), '--automation-socket', automation]
-    if args.from_shell:
-        with open(log_path, 'w') as log:
-            subprocess.Popen([os.path.join(app, 'Contents', 'MacOS', 'workspace-desktop'), *app_args],
-                             stderr=log, env=dict(os.environ, **env))
-    else:
-        envs = [part for name, value in env.items() for part in ('--env', f'{name}={value}')]
-        run('open', '-n', *envs, '--stderr', log_path, app, '--args', *app_args)
+    busy = None
     try:
+        busy = None if args.idle_host else BusyCores(folder)
+        if args.from_shell:
+            with open(log_path, 'w') as log:
+                subprocess.Popen([os.path.join(app, 'Contents', 'MacOS', 'workspace-desktop'), *app_args],
+                                 stderr=log, env=dict(os.environ, **env))
+        else:
+            envs = [part for name, value in env.items() for part in ('--env', f'{name}={value}')]
+            run('open', '-n', *envs, '--stderr', log_path, app, '--args', *app_args)
+        opened = time.monotonic()
         while not os.path.exists(automation):
+            if time.monotonic() - opened > 60:
+                sys.exit('The app opened no automation socket within 60 s')
             time.sleep(0.2)
         window = Window(automation)
         window.step(do='resize', width=1280, height=800)
@@ -198,13 +213,42 @@ def main():
             shot = window.step(do='capture')
             with open(os.path.join(folder, f'{name}.png'), 'wb') as image:
                 image.write(base64.b64decode(shot['png']))
-        print(f'\nlongest stall {longest:.1f} ms; budget {args.budget_ms:g} ms')
-        if longest > args.budget_ms:
-            sys.exit(1)
     finally:
-        subprocess.run(['pkill', '-f', os.path.join(app, 'Contents', 'MacOS', 'workspace-desktop')])
+        stop_app(app)
         if busy is not None:
             busy.stop()
+    with open(log_path) as log:
+        if not any(line.startswith('main thread over') for line in log):
+            sys.exit('The stall watch printed nothing: was WIFFLETREE_RENDER_COUNTS passed to the app?')
+    print(f'\nlongest stall {longest:.1f} ms; budget {args.budget_ms:g} ms')
+    took_effect = clicks_took_effect(folder)
+    if longest > args.budget_ms or not took_effect:
+        sys.exit(1)
+
+
+def stop_app(app):
+    """Quits the app, whose child host stops with it, and waits until it is gone."""
+    binary = os.path.join(app, 'Contents', 'MacOS', 'workspace-desktop')
+    subprocess.run(['pkill', '-f', binary])
+    while subprocess.run(['pgrep', '-f', binary], stdout=subprocess.DEVNULL).returncode == 0:
+        time.sleep(0.2)
+
+
+def clicks_took_effect(folder):
+    """Reads the store back: the first project's coordinator got each message as typed, every
+    key of it, and five of its six questions were dismissed."""
+    checked = subprocess.run([os.path.join(RELEASE, 'examples', 'inbox_questions'), 'check', folder],
+                             check=True, capture_output=True, text=True)
+    first = json.loads(checked.stdout)['Busy project 0']
+    sent = [f'Carry on with part {n}.' for n in range(SENDS)]
+    problems = []
+    if first['human_sent'] != sent:
+        problems.append(f"the coordinator got {first['human_sent']}, not {sent}")
+    if first['open_questions'] != QUESTIONS - DISMISSES:
+        problems.append(f"{first['open_questions']} questions open, not {QUESTIONS - DISMISSES}")
+    for problem in problems:
+        print(f'Clicks: {problem}')
+    return not problems
 
 
 if __name__ == '__main__':

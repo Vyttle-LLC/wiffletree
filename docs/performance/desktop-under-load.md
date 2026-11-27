@@ -22,7 +22,8 @@ Foundation observer. Each wake longer than a 60 Hz frame (16.7 ms) prints a line
   `WorkspaceIndex::new`, `share()` and request submission.
 
 The earlier watch timed how late a 5 ms timer fired. macOS coalesces timers, so it reported
-17–22 ms "stalls" on an idle main thread.
+17–22 ms "stalls" on an idle main thread. Its numbers, including those in `refresh-cost.md`,
+are not comparable with these.
 
 ## The load scenario
 
@@ -50,14 +51,20 @@ The script:
    - Inbox: five Dismiss clicks on the conversation's decision card, then the Inbox panel
      opened and closed three times;
    - switching sessions: twelve clicks across three projects in the sidebar.
-5. Prints each path's stalls over 16 ms with their causes, and exits with status 1 when any
-   stall is longer than `--budget-ms`, 50 by default.
+5. Prints each path's stalls over 16 ms with their causes.
+6. Stops the app and reads the store back. The first project's coordinator must have the three
+   messages exactly as typed, and five of its six questions must be dismissed.
+7. Exits with status 1 when any stall is longer than `--budget-ms`, 50 by default, when the
+   stall watch printed nothing, or when the read-back finds a click that did not land.
 
 Leave the window uncovered while it runs; macOS throttles a hidden one. `--from-shell` starts
 the app as the script's child instead of through Launch Services, and `--binaries` points it at
 another build.
 
 ## Results
+
+No product code changed (see "Started from an agent's shell"), so these numbers are both the
+before and the after.
 
 Stalls over 16 ms on each path, with all twelve cores busy at niceness 0:
 
@@ -69,7 +76,8 @@ Stalls over 16 ms on each path, with all twelve cores busy at niceness 0:
 | Inbox, 14 s | 2 | 0 | 20.0 ms |
 | Switching sessions, 9 s | 0 | 0 | — |
 
-A second run gave no stall over 16 ms on any path. Across both runs, the
+A second run gave no stall over 16 ms on any path. A third, with the store read-back, ran at a load
+average of 170 and stalled longest on the Inbox path, at 22.5 ms; its read-back passed. Across both runs, the
 longest stall in each second was 7–8 ms at the median and 15–18 ms at p95. The main thread used
 about 150 ms of CPU a second.
 
@@ -89,6 +97,12 @@ paint, and under 10% in the app's own `render` functions.
 Send and Inbox actions mark their item as sending before the request goes out, in the same
 update as the click. The frame drawn next shows it. With no stall near 50 ms, that frame comes
 at once.
+
+Typing drops no keys. A key from the keyboard waits in AppKit's event queue until the main thread
+takes it, so a stall delays keys but never loses them. The scenario's keys go in through GPUI's
+keystroke dispatch on the main thread, which cannot drop them either. What typing can show is
+lag, and the typing path had no stall over 16 ms. The read-back confirms the three messages
+reached the host with every key, in order.
 
 ## Started from an agent's shell
 

@@ -588,6 +588,8 @@ pub(crate) mod tests {
                 .find(|s| s.project_id == project.id)
                 .unwrap()
                 .id;
+            // Paused, it keeps what is sent to it without starting a real provider's turn.
+            (host.set_status(&coordinator, Status::Paused)).unwrap();
             drop(host);
             let key = workspace_core::pairing::KeyPair::generate().unwrap();
             let service = Self::serve(data.path(), &key, 0);
@@ -725,6 +727,8 @@ pub(crate) mod tests {
             let main = (host.sessions().unwrap().into_iter())
                 .find(|s| s.project_id == project.id)
                 .unwrap();
+            // Paused, it keeps the message without starting a real provider's turn.
+            (host.set_status(&main.id, Status::Paused)).unwrap();
             coordinator.set(main.id).unwrap();
         });
         let coordinator = coordinator.into_inner().unwrap();
