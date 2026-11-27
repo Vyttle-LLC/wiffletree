@@ -33,6 +33,8 @@ pub enum Stage {
     Implementing,
     Verifying,
     AwaitingAcceptance,
+    /// The review ended and the open pull request waits on the human's review.
+    InReview,
     Accepted,
 }
 impl Stage {
@@ -41,6 +43,7 @@ impl Stage {
             Self::Implementing => "Implementing",
             Self::Verifying => "Verifying",
             Self::AwaitingAcceptance => "Awaiting acceptance",
+            Self::InReview => "In review",
             Self::Accepted => "Accepted",
         }
     }
@@ -53,6 +56,7 @@ pub enum Phase {
     Implementing,
     Verifying,
     AwaitingAcceptance,
+    InReview,
     Blocked,
     Done,
 }
@@ -63,6 +67,7 @@ impl Phase {
             Self::Implementing => "Implementing",
             Self::Verifying => "Verifying",
             Self::AwaitingAcceptance => "Awaiting acceptance",
+            Self::InReview => "In review",
             Self::Blocked => "Blocked",
             Self::Done => "Done",
         }
@@ -74,6 +79,7 @@ impl From<Stage> for Phase {
             Stage::Implementing => Self::Implementing,
             Stage::Verifying => Self::Verifying,
             Stage::AwaitingAcceptance => Self::AwaitingAcceptance,
+            Stage::InReview => Self::InReview,
             Stage::Accepted => Self::Done,
         }
     }
@@ -319,6 +325,7 @@ impl Records<'_> {
                 let (state, position) = self.implementing(ticket);
                 (Stage::Implementing, state, position)
             }
+            _ if ticket.in_review() => (Stage::InReview, InProgress, VERIFIED),
             (_, Some(cycle)) if cycle.outcome == VerificationOutcome::Passed => {
                 (Stage::AwaitingAcceptance, InProgress, VERIFIED)
             }
@@ -332,8 +339,9 @@ impl Records<'_> {
                 (Stage::Verifying, InProgress, IMPLEMENTED + earned)
             }
         };
-        // Blocked wins over stripes: a bar is in exactly one state.
-        let state = if ticket.state == TicketState::Blocked {
+        // Blocked wins over stripes: a bar is in exactly one state. A blocked review whose PR
+        // waits on the human reads as in review.
+        let state = if ticket.state == TicketState::Blocked && stage != Stage::InReview {
             BarState::Blocked
         } else {
             state
