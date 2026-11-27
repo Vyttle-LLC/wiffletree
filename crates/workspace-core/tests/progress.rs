@@ -85,13 +85,7 @@ impl World {
         self
     }
     /// Gives ticket `id` a pull request in `state` with these checks and merge state.
-    fn pull_request(
-        mut self,
-        id: &str,
-        state: &str,
-        checks: &str,
-        merge_state: &str,
-    ) -> Self {
+    fn pull_request(mut self, id: &str, state: &str, checks: &str, merge_state: &str) -> Self {
         let ticket = self.tickets.iter_mut().find(|t| t.id == id).unwrap();
         ticket.pull_request = Some(
             serde_json::from_value(json!({
@@ -467,8 +461,11 @@ fn blocked_review() -> World {
 #[test]
 fn a_blocked_review_published_with_a_healthy_pr_is_in_review() {
     let in_review = (Stage::InReview, InProgress, 90);
-    for (checks, merge_state) in [("success", "clean"), ("pending", "blocked"), ("none", "behind")]
-    {
+    for (checks, merge_state) in [
+        ("success", "clean"),
+        ("pending", "blocked"),
+        ("none", "behind"),
+    ] {
         let world = blocked_review().open_pr(checks, merge_state);
         assert_eq!(world.ticket_progress(), in_review, "{checks} {merge_state}");
     }

@@ -5,7 +5,7 @@ use super::*;
 use conversation::{COLUMN, Conversation};
 use gpui_component::ActiveTheme;
 use ui::{hint, icon, ticket_state_color};
-use wording::humanize;
+use wording::ticket_state_label;
 
 /// A coordinator's tickets split into the rows the table lists and the ones it counts as done.
 /// Planned tickets without an open PR are neither: their work has not started.
@@ -44,12 +44,26 @@ impl<'a> TicketTable<'a> {
     fn is_empty(&self) -> bool {
         self.in_progress.is_empty() && self.done_count == 0
     }
+    /// The heading's counts, such as "2 in progress, 1 in review, 4 done", leaving out zeros.
+    fn summary(&self) -> String {
+        let in_review = self.in_progress.iter().filter(|t| t.in_review()).count();
+        let counts = [
+            (self.in_progress.len() - in_review, "in progress"),
+            (in_review, "in review"),
+            (self.done_count, "done"),
+        ];
+        let parts = counts.iter().filter(|(count, _)| *count > 0);
+        let parts: Vec<_> = parts
+            .map(|(count, words)| format!("{count} {words}"))
+            .collect();
+        parts.join(", ")
+    }
 }
 
 /// The Tickets inspector's state wording, with the round while a review runs, such as
 /// "Verifying · round 2".
 pub(super) fn status(ticket: &Ticket) -> String {
-    let state = humanize(ticket.state.name());
+    let state = ticket_state_label(ticket);
     match &ticket.verification {
         Some(cycle)
             if cycle.outcome == VerificationOutcome::Running && !cycle.rounds.is_empty() =>
@@ -96,11 +110,7 @@ impl Conversation {
         }
         let link = cx.theme().link;
         let collapsed = cx.global::<Preferences>().collapse_ticket_table;
-        let summary = match (table.in_progress.len(), table.done_count) {
-            (0, done) => format!("{done} done"),
-            (open, 0) => format!("{open} in progress"),
-            (open, done) => format!("{open} in progress, {done} done"),
-        };
+        let summary = table.summary();
         let head = div()
             .id("ticket-table-toggle")
             .flex()
@@ -241,7 +251,7 @@ fn ticket_row(ticket: &Ticket, p: Palette, link: Hsla) -> Div {
                 .w(px(200.))
                 .flex_none()
                 .text_ellipsis()
-                .text_color(ticket_state_color(ticket.state, p))
+                .text_color(ticket_state_color(ticket, p))
                 .child(status(ticket)),
         )
         .child(pr)
@@ -249,12 +259,12 @@ fn ticket_row(ticket: &Ticket, p: Palette, link: Hsla) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{TicketTable, palette, pr_label, status, ticket_row};
+    use super::{TicketTable, palette, pr_label, status, ticket_row, ticket_state_color};
     use gpui::{
         Context, IntoElement, Modifiers, ParentElement as _, Render, Styled as _, TestAppContext,
         Window, div, point, px,
     };
-    use workspace_core::{PrState, PullRequest, Ticket, TicketState};
+    use workspace_core::{MergeState, PrState, PullRequest, Ticket, TicketState};
 
     fn ticket(id: &str, state: TicketState) -> Ticket {
         let stored = r#"{"id":"","coordinator_id":"c","title":"","brief":"","worktree":"","branch":"","state":"planned"}"#;
@@ -322,6 +332,33 @@ mod tests {
         draft.draft = true;
         accepted.pull_request = Some(draft);
         assert_eq!(pr_label(&accepted), "#12 draft");
+    }
+
+    #[test]
+    fn a_published_blocked_ticket_reads_in_review_in_the_in_progress_color() {
+        let p = palette(false);
+        let mut blocked = ticket("blocked", TicketState::Blocked);
+        let cycle = r#"{"cycle":1,"max_rounds":3,"outcome":"blocked","rounds":[{"round":1,"commit":"a","verifiers":[]}]}"#;
+        blocked.verification = Some(serde_json::from_str(cycle).unwrap());
+        assert_eq!(status(&blocked), "Blocked");
+        assert_eq!(ticket_state_color(&blocked, p), p.red);
+        blocked.pull_request = Some(pull_request(315, PrState::Open));
+        assert_eq!(status(&blocked), "In review");
+        assert_eq!(ticket_state_color(&blocked, p), p.focus);
+        let tickets = [blocked, ticket("assigned", TicketState::Assigned)];
+        assert_eq!(
+            TicketTable::of(&tickets, 3).summary(),
+            "1 in progress, 1 in review, 1 done"
+        );
+        assert_eq!(
+            TicketTable::of(&tickets[..1], 2).summary(),
+            "1 in review, 1 done"
+        );
+        // Conflicts with the base put the red Blocked back.
+        let mut conflicting = tickets[0].clone();
+        conflicting.pull_request.as_mut().unwrap().merge_state = MergeState::Dirty;
+        assert_eq!(status(&conflicting), "Blocked");
+        assert_eq!(ticket_state_color(&conflicting, p), p.red);
     }
 
     /// A window 600px wide showing one row.

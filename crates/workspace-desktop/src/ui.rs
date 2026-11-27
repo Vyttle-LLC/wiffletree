@@ -629,8 +629,13 @@ fn badge_state(own: Status, shown: Status, compacting: bool) -> (Status, &'stati
         (shown, "Team working")
     }
 }
-pub(super) fn ticket_state_color(state: TicketState, p: Palette) -> Hsla {
-    match state {
+/// The color of a ticket's state label: in progress while its open PR waits on the human's
+/// review, even after a blocked review, otherwise its stored state's.
+pub(super) fn ticket_state_color(ticket: &Ticket, p: Palette) -> Hsla {
+    if ticket.in_review() {
+        return p.focus;
+    }
+    match ticket.state {
         TicketState::Accepted | TicketState::Passed => p.green,
         TicketState::Blocked | TicketState::Failed => p.red,
         TicketState::Assigned | TicketState::ReadyForTesting | TicketState::Completed => p.focus,
