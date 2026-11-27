@@ -18,7 +18,9 @@ use tungstenite::{
     Message,
     protocol::{CloseFrame, frame::coding::CloseCode},
 };
-use workspace_core::{Challenge, ChallengeAnswer, ChallengeVerdict, UNPAIRED, pairing};
+use workspace_core::{
+    AccessLevel, Challenge, ChallengeAnswer, ChallengeVerdict, UNPAIRED, pairing,
+};
 
 /// How long the I/O thread sleeps with nothing to do before it looks again.
 const IDLE_POLL_MS: i32 = 15_000;
@@ -57,35 +59,60 @@ pub(super) fn serve(
     let answer: ChallengeAnswer = receive(&mut socket)?;
     // Claimed before the actor checks it, so a removal meanwhile still closes this connection.
     shared.claim(connection, &answer.device_id);
-    let level = pairing::challenge_message(&challenge, &host_id, &answer.device_id)
+    let answered = pairing::challenge_message(&challenge, &host_id, &answer.device_id)
         .ok()
-        .zip(BASE64.decode(&answer.signature).ok())
-        .and_then(|(signed, signature)| {
-            let (reply, verdict) = async_channel::bounded(1);
-            shared
-                .requests
-                .tell(ToActor::Authenticate {
-                    device: answer.device_id.clone(),
-                    signed,
-                    signature,
-                    reply,
-                })
-                .ok()?;
-            verdict.recv_blocking().ok().flatten()
-        });
+        .zip(BASE64.decode(&answer.signature).ok());
+    let level = match answered {
+        Some((signed, signature)) => {
+            let Ok(level) = authenticate(shared, &answer.device_id, signed, signature) else {
+                // No verdict, since the device forgets a host that says Unpaired: it closes and
+                // tries again.
+                close(
+                    &mut socket,
+                    CloseCode::Away,
+                    "The host could not check this device",
+                );
+                return Ok(());
+            };
+            level
+        }
+        None => None,
+    };
     let Some(level) = level else {
         send(&mut socket, &ChallengeVerdict::Unpaired)?;
-        let _ = socket.close(Some(CloseFrame {
-            code: CloseCode::Policy,
-            reason: UNPAIRED.into(),
-        }));
-        let _ = socket.flush();
+        close(&mut socket, CloseCode::Policy, UNPAIRED);
         return Ok(());
     };
     send(&mut socket, &ChallengeVerdict::Accepted { level })?;
     let served = pump(socket, answer.device_id, shared);
     let _ = shared.requests.tell(ToActor::Changed);
     served
+}
+
+/// The device's level once the actor has checked its signature, `None` when the host does not
+/// know it; an error when the host could not check it, as while it stops.
+fn authenticate(
+    shared: &Shared,
+    device: &str,
+    signed: Vec<u8>,
+    signature: Vec<u8>,
+) -> Result<Option<AccessLevel>> {
+    let (reply, verdict) = async_channel::bounded(1);
+    shared.requests.tell_first(ToActor::Authenticate {
+        device: device.into(),
+        signed,
+        signature,
+        reply,
+    })?;
+    Ok(verdict.recv_blocking()?)
+}
+
+fn close(socket: &mut ServerSocket, code: CloseCode, reason: &str) {
+    let _ = socket.close(Some(CloseFrame {
+        code,
+        reason: reason.into(),
+    }));
+    let _ = socket.flush();
 }
 
 /// Replies the I/O thread may hold for the device before the connection is closed as stuck: a
@@ -153,6 +180,8 @@ fn pump(mut socket: ServerSocket, device: String, shared: &Arc<Shared>) -> Resul
     socket.get_mut().sock.set_nonblocking(true)?;
     let served = (|| -> Result<()> {
         let mut waiting: Option<Message> = None;
+        // The write buffer was just emptied with `waiting` still to write.
+        let mut drained = false;
         loop {
             loop {
                 match socket.read() {
@@ -162,39 +191,37 @@ fn pump(mut socket: ServerSocket, device: String, shared: &Arc<Shared>) -> Resul
                     Err(tungstenite::Error::Io(error)) if error.kind() == ErrorKind::WouldBlock => {
                         break;
                     }
-                    Err(
-                        tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed,
-                    ) => return Ok(()),
-                    // A device that goes away without closing TLS, or one the host shut down.
-                    Err(tungstenite::Error::Io(error))
-                        if matches!(
-                            error.kind(),
-                            ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset
-                        ) =>
-                    {
-                        return Ok(());
-                    }
-                    Err(error) => return Err(error.into()),
+                    Err(error) => return closed_or_failed(error),
                 }
             }
             while let Some(message) = waiting.take().or_else(|| outbox.next(&queued).map(text)) {
+                // Only the first write after the buffer emptied meets an empty buffer.
+                let into_empty_buffer = std::mem::take(&mut drained);
                 match socket.write(message) {
                     Ok(()) => {}
                     Err(tungstenite::Error::WriteBufferFull(message)) => {
+                        // Waiting would never make room for it, and every later frame would
+                        // wait behind it.
+                        anyhow::ensure!(
+                            !into_empty_buffer,
+                            "A message of {} bytes is larger than the connection can send",
+                            message.len()
+                        );
                         waiting = Some(*message);
                         break;
                     }
                     Err(tungstenite::Error::Io(error)) if error.kind() == ErrorKind::WouldBlock => {
                     }
-                    Err(error) => return Err(error.into()),
+                    Err(error) => return closed_or_failed(error),
                 }
             }
             let blocked = match socket.flush() {
                 Ok(()) => false,
                 Err(tungstenite::Error::Io(error)) if error.kind() == ErrorKind::WouldBlock => true,
-                Err(error) => return Err(error.into()),
+                Err(error) => return closed_or_failed(error),
             };
-            if waiting.is_some() && !blocked {
+            drained = waiting.is_some() && !blocked;
+            if drained {
                 continue;
             }
             wait(socket.get_ref().sock.as_raw_fd(), blocked, &wake_read);
@@ -202,6 +229,24 @@ fn pump(mut socket: ServerSocket, device: String, shared: &Arc<Shared>) -> Resul
     })();
     queued.close();
     served
+}
+
+/// `Ok` when `error` means the device has gone, so only real failures are logged.
+fn closed_or_failed(error: tungstenite::Error) -> Result<()> {
+    match error {
+        tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed => Ok(()),
+        // A device that goes away without closing TLS, one the host shut down, or one gone
+        // before a write reached it.
+        tungstenite::Error::Io(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset | ErrorKind::BrokenPipe
+            ) =>
+        {
+            Ok(())
+        }
+        error => Err(error.into()),
+    }
 }
 
 fn text(message: Vec<u8>) -> Message {
@@ -249,4 +294,17 @@ fn pipe() -> Result<(File, File)> {
     }
     // SAFETY: each descriptor is owned by exactly one `File`.
     Ok(unsafe { (File::from_raw_fd(ends[0]), File::from_raw_fd(ends[1])) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_write_to_a_device_already_gone_is_a_close_not_a_failure() {
+        let io = |kind| tungstenite::Error::Io(std::io::Error::from(kind));
+        assert!(closed_or_failed(io(ErrorKind::BrokenPipe)).is_ok());
+        assert!(closed_or_failed(io(ErrorKind::ConnectionReset)).is_ok());
+        assert!(closed_or_failed(io(ErrorKind::PermissionDenied)).is_err());
+    }
 }

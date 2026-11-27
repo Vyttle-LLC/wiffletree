@@ -101,7 +101,7 @@ fn exchange(
         *pairing = None;
     }
     let (reply, stored) = async_channel::bounded(1);
-    shared.requests.tell(ToActor::Paired {
+    shared.requests.tell_first(ToActor::Paired {
         key: device_key,
         name: device_name,
         by_qr,
