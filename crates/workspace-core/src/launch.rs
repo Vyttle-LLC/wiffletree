@@ -253,7 +253,7 @@ impl LaunchdJob {
     /// restarted only after an unsuccessful exit (which also starts it when loaded), logging to
     /// `logs/host.log`. It is Interactive: the app waits on its every reply, and a job with no
     /// `ProcessType` is throttled, so with the Mac busy its replies took seconds
-    /// (`docs/performance/command-latency.md`). Agents still run at `AGENT_NICENESS`.
+    /// (`docs/performance/command-latency.md`). Agents still run nicer, with utility disk I/O.
     fn plist(&self) -> String {
         let program = self.program();
         let arguments = [

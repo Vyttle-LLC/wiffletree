@@ -72,7 +72,9 @@ one of these dominates.
 - A brain index's read connection stays open while the file's inode, modification time and
   length are unchanged, so counting the Inbox opens no file.
 - The launchd job is `Interactive`: the app waits on each of its replies. Agents still run at
-  `AGENT_NICENESS`.
+  `AGENT_NICENESS`, and now do their disk I/O at utility priority, so that their builds do not
+  take back the disk priority launchd's throttling used to take from them. The measurements
+  below predate that I/O policy.
 
 Ordering is unchanged. The commands lane, the bounded events queue and each session's storage
 order are as before.
