@@ -4342,13 +4342,16 @@ pub(crate) mod tests {
         ticket.waiver = Some("F4 is acceptable".into());
         f.host.save_ticket(&ticket).unwrap();
         assert!(f.host.may_change_branch(&f.ticket()));
+        // The coordinator's publish of the passed review before it.
+        let published = f.ticket().published_cycle;
         let step = f.host.keeper_move(&f.ticket.clone()).unwrap();
         drive(&mut f, &remote, step);
         assert_eq!(remote.branch(BRANCH), Some(f.head()));
         assert!(f.open_items().is_empty());
         assert!(f.ticket().publishing.is_none());
         // Only a publish_ticket push says the blocked review was published.
-        assert_eq!(f.ticket().published_cycle, None);
+        assert_eq!(f.ticket().published_cycle, published);
+        assert_ne!(published, f.ticket().verification.map(|v| v.cycle));
     }
 
     #[test]
