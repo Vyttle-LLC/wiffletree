@@ -168,13 +168,15 @@ fn pump(mut socket: ServerSocket, device: String, shared: &Arc<Shared>) -> Resul
                 }
             }
             while let Some(message) = waiting.take().or_else(|| outbox.next(&queued).map(text)) {
+                // Only the first write after the buffer emptied meets an empty buffer.
+                let into_empty_buffer = std::mem::take(&mut drained);
                 match socket.write(message) {
                     Ok(()) => {}
                     Err(tungstenite::Error::WriteBufferFull(message)) => {
                         // Waiting would never make room for it, and every later frame would
                         // wait behind it.
                         anyhow::ensure!(
-                            !drained,
+                            !into_empty_buffer,
                             "A message of {} bytes is larger than the connection can send",
                             message.len()
                         );
