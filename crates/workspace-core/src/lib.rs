@@ -2304,6 +2304,10 @@ pub struct Ticket {
     /// The commit the host last pushed to the ticket's branch on GitHub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pushed: Option<String>,
+    /// The verification cycle whose review a `publish_ticket` push last carried to GitHub. The
+    /// PR keeper's pushes leave it alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_cycle: Option<u32>,
     /// What the PR keeper did to the ticket's branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keeper: Option<Keeper>,
@@ -2777,9 +2781,9 @@ impl Ticket {
             .filter(|pr| pr.state == PrState::Open)
     }
     /// Whether the ticket waits only on the human's review of its pull request: its review
-    /// passed, or ended blocked and its commit was then published, and its PR is open with no
-    /// failing checks or conflicts. Only the display reads it; a blocked ticket stays blocked to
-    /// every rule.
+    /// passed, or ended blocked and was then published, and its PR is open with no failing
+    /// checks or conflicts. Only the display reads it; a blocked ticket stays blocked to every
+    /// rule.
     pub fn in_review(&self) -> bool {
         let Some(cycle) = &self.verification else {
             return false;
@@ -2787,7 +2791,7 @@ impl Ticket {
         let review_ended = match (self.state, cycle.outcome) {
             (TicketState::Passed, VerificationOutcome::Passed) => true,
             (TicketState::Blocked, VerificationOutcome::Blocked) => {
-                self.pushed.is_some() && self.pushed.as_deref() == self.standing_commit()
+                self.published_cycle == Some(cycle.cycle)
             }
             _ => false,
         };

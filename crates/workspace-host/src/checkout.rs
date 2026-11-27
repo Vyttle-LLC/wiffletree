@@ -405,6 +405,7 @@ impl Creation {
             merging: None,
             retargeting: None,
             pushed: None,
+            published_cycle: None,
             keeper: None,
         };
 

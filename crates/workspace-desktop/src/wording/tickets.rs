@@ -1390,15 +1390,15 @@ mod tests {
     fn a_published_blocked_review_reads_in_review_and_keeps_a_note_of_the_block() {
         let (_directory, _host, _root, mut ticket) = store();
         ticket.state = TicketState::Blocked;
-        ticket.verification = Some(verification(1, VerificationOutcome::Blocked, 3));
+        ticket.verification = Some(verification(2, VerificationOutcome::Blocked, 3));
         assert_eq!(ticket_state_label(&ticket), "Blocked");
         assert_eq!(blocked_review_note(&ticket), None);
-        // A PR opened earlier does not show this cycle's commit, which nobody has published yet.
+        // A PR published for cycle 1 does not publish cycle 2's blocked review.
         ticket.pull_request = Some(pr(PrState::Open, CheckState::Success, MergeState::Clean));
-        ticket.pushed = Some("2abcdef0123".into());
+        ticket.published_cycle = Some(1);
         assert_eq!(ticket_state_label(&ticket), "Blocked");
         assert_eq!(blocked_review_note(&ticket), None);
-        ticket.pushed = Some("3abcdef0123".into());
+        ticket.published_cycle = Some(2);
         assert_eq!(ticket_state_label(&ticket), "In review");
         assert_eq!(
             blocked_review_note(&ticket).as_deref(),

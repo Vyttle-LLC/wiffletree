@@ -97,10 +97,11 @@ impl World {
         );
         self
     }
-    /// Records ticket `id`'s reviewed commit, `abc`, as pushed by a publish.
+    /// Records a publish of ticket `id`'s latest cycle, which pushed its commit `abc`.
     fn published(mut self, id: &str) -> Self {
         let ticket = self.tickets.iter_mut().find(|t| t.id == id).unwrap();
         ticket.pushed = Some("abc".into());
+        ticket.published_cycle = ticket.verification.as_ref().map(|cycle| cycle.cycle);
         self
     }
     fn open_pr(self, checks: &str, merge_state: &str) -> Self {
@@ -499,13 +500,27 @@ fn a_blocked_review_stays_blocked_without_an_open_pr_or_with_a_broken_one() {
 }
 
 #[test]
-fn a_blocked_review_whose_commit_was_not_published_stays_blocked() {
-    // The PR was opened earlier; this cycle's commit has not been pushed to it.
+fn a_blocked_review_not_published_since_it_ended_stays_blocked() {
+    let blocked = (Stage::Verifying, Blocked, 80);
+    // Cycle 1 was published; cycle 2 reviewed the same pushed commit, ended blocked and was
+    // not published.
     let mut world = blocked_review().open_pr("success", "clean");
-    world.tickets[0].pushed = Some("older".into());
-    assert_eq!(world.ticket_progress(), (Stage::Verifying, Blocked, 80));
-    world.tickets[0].pushed = None;
-    assert_eq!(world.ticket_progress(), (Stage::Verifying, Blocked, 80));
+    world.tickets[0].verification.as_mut().unwrap().cycle = 2;
+    assert_eq!(world.ticket_progress(), blocked);
+    // Never published at all, under a PR opened earlier.
+    world.tickets[0].published_cycle = None;
+    assert_eq!(world.ticket_progress(), blocked);
+}
+
+#[test]
+fn a_published_blocked_review_stays_in_review_after_the_keeper_pushes_a_rebase() {
+    let mut world = blocked_review().open_pr("success", "clean");
+    world.tickets[0].pushed = Some("rebased".into());
+    assert_eq!(
+        world.ticket_progress(),
+        (Stage::AwaitingAcceptance, InProgress, 90)
+    );
+    assert_eq!(world.stage_label(), "In review");
 }
 
 #[test]
